@@ -79,11 +79,14 @@ LOD selection runs on a dedicated worker with its own WebGL2 context:
    and screen capacity.
 3. GPU pass 2 reconciles shared edges, canonicalizes the LOD triple, and emits
    six floats per face.
-4. The output is copied into staging, fenced, and polled without blocking the
-   worker. Only after the fence signals is the compact topology payload read
-   back into the worker. Staging buffers and mesh-sized CPU readback vectors
-   are retained and reused across jobs; the steady-state path does not create
-   or resize either resource.
+4. Pass 2 losslessly packs its three four-bit exponents, three-bit
+   permutation, one-bit visibility, and eight-bit atlas index into one `u32`
+   per face; parity is derived from the permutation. The output is copied into
+   staging, fenced, and polled without blocking the worker. Only after the
+   fence signals is this four-byte topology word read back and validated before
+   expansion to the retained six-field CPU record. Staging buffers, packed
+   scratch, and mesh-sized CPU vectors are retained and reused across jobs; the
+   steady-state path does not create or resize those resources.
 5. The WASM worker compares that snapshot with its retained previous result
    before creating any JavaScript typed array. The first coherent result after
    a model, animation, remesh, or compute-resource boundary transfers all
@@ -101,7 +104,7 @@ LOD selection runs on a dedicated worker with its own WebGL2 context:
 
 The unavoidable current synchronization boundary is step 4: WebGL2 cannot
 generate indirect draws or compact instance lists for later draws. The
-worker-side GPU readback is 24 bytes per source face per completed
+worker-side GPU readback is 4 bytes per source face per completed
 classification, not a readback of animated vertices or tessellated geometry.
 After the initial full snapshot, the worker-to-main transfer is 28 bytes per
 changed face (a four-byte face ID plus the six-float record). Current-pose

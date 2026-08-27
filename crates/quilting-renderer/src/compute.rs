@@ -5,8 +5,10 @@
 //!   Pass 2: edge coherence (via adjacency texture) + canonical sort + atlas LUT
 //!
 //! Pass 1 renders directly to a texture for pass 2 to read.
-//! Final output: 6 floats per face (canon_a, canon_b, canon_c, perm_index, parity, atlas_index),
-//! directly consumable by group_into_batches.
+//! Pass 2 emits one lossless packed `u32` per face. Rust validates and expands
+//! it to the historical six-field classification
+//! (canon_a, canon_b, canon_c, perm_index, parity, atlas_index) consumed by
+//! retained batching.
 
 use glow::HasContext;
 use quilting_core::instance_layout;
@@ -26,8 +28,96 @@ fn log_info(msg: &str) {
 /// Pass 1 FBO payload: raw LOD exponents plus conservative visibility.
 pub const FLOATS_PER_FACE_PASS1: usize = 4;
 
-/// Pass 2 final output: (canon_a, canon_b, canon_c, perm_index, parity, atlas_index) = 6 floats per face.
+/// Retained CPU output: (canon_a, canon_b, canon_c, perm_index, parity, atlas_index).
 pub const FLOATS_PER_FACE_OUTPUT: usize = 6;
+
+/// Lossless GPU readback ABI for one classifier record.
+///
+/// The three four-bit exponent fields, three-bit S3 permutation, one-bit
+/// visibility flag, and eight-bit atlas index occupy the low 24 bits. Parity
+/// is derived exactly from the permutation. This cuts the WebGL2 staging and
+/// readback payload from six `f32`s to one `u32` without changing the retained
+/// CPU classification consumed by batching.
+pub const PACKED_LOD_OUTPUT_BYTES_PER_FACE: usize = std::mem::size_of::<u32>();
+
+const PACKED_LOD_EXPONENT_MASK: u32 = 0x0f;
+const PACKED_LOD_PERMUTATION_MASK: u32 = 0x07;
+const PACKED_LOD_VISIBLE_BIT: u32 = 1 << 15;
+const PACKED_LOD_ATLAS_SHIFT: u32 = 16;
+const PACKED_LOD_USED_MASK: u32 = 0x00ff_ffff;
+
+/// Encode one shader-facing classifier record into the shared 24-bit ABI.
+/// Exponents are stored rather than their exact power-of-two `f32` values.
+pub fn pack_lod_classification(
+    exponents: [u32; 3],
+    permutation: u32,
+    atlas_index: Option<u32>,
+) -> Result<u32, String> {
+    if exponents.iter().any(|&exponent| exponent > 9) {
+        return Err("packed LOD exponent exceeds the atlas ABI".to_string());
+    }
+    if permutation > 5 {
+        return Err("packed LOD permutation exceeds S3".to_string());
+    }
+    if atlas_index.is_some_and(|atlas_index| atlas_index > u8::MAX as u32) {
+        return Err("packed LOD atlas index exceeds u8".to_string());
+    }
+    let mut packed = exponents[0]
+        | (exponents[1] << 4)
+        | (exponents[2] << 8)
+        | (permutation << 12);
+    if let Some(atlas_index) = atlas_index {
+        packed |= PACKED_LOD_VISIBLE_BIT | (atlas_index << PACKED_LOD_ATLAS_SHIFT);
+    }
+    Ok(packed)
+}
+
+/// Decode one packed GPU record to the historical six-float batch ABI.
+pub fn unpack_lod_classification(
+    packed: u32,
+) -> Result<[f32; FLOATS_PER_FACE_OUTPUT], String> {
+    if packed & !PACKED_LOD_USED_MASK != 0 {
+        return Err("packed LOD record uses reserved high bits".to_string());
+    }
+    let exponents = [
+        packed & PACKED_LOD_EXPONENT_MASK,
+        (packed >> 4) & PACKED_LOD_EXPONENT_MASK,
+        (packed >> 8) & PACKED_LOD_EXPONENT_MASK,
+    ];
+    if exponents.iter().any(|&exponent| exponent > 9) {
+        return Err("packed LOD record contains an invalid exponent".to_string());
+    }
+    let permutation = (packed >> 12) & PACKED_LOD_PERMUTATION_MASK;
+    if permutation > 5 {
+        return Err("packed LOD record contains an invalid permutation".to_string());
+    }
+    let parity = if matches!(permutation, 1 | 2 | 5) { -1.0 } else { 1.0 };
+    let atlas_index = if packed & PACKED_LOD_VISIBLE_BIT == 0 {
+        -1.0
+    } else {
+        ((packed >> PACKED_LOD_ATLAS_SHIFT) & u8::MAX as u32) as f32
+    };
+    Ok([
+        (1u32 << exponents[0]) as f32,
+        (1u32 << exponents[1]) as f32,
+        (1u32 << exponents[2]) as f32,
+        permutation as f32,
+        parity,
+        atlas_index,
+    ])
+}
+
+fn decode_packed_lod_classifications(
+    packed: &[u32],
+    decoded: &mut Vec<f32>,
+) -> Result<(), String> {
+    decoded.clear();
+    decoded.reserve(packed.len().saturating_mul(FLOATS_PER_FACE_OUTPUT));
+    for &record in packed {
+        decoded.extend_from_slice(&unpack_lod_classification(record)?);
+    }
+    Ok(())
+}
 
 /// Backend-neutral source payload consumed by one LOD classifier residency.
 ///
@@ -803,12 +893,18 @@ pub fn build_scoped_lod_adjacency(
     Ok(adjacency)
 }
 
-/// GPU-side copy of a completed LOD transform-feedback output. The worker can
+/// GPU-side copy of a completed packed LOD transform-feedback output. The worker can
 /// fence after staging one or more runs, poll without blocking, then read only
 /// once the shared fence is signaled.
 pub struct StagedLodReadback {
     buffer: ReadbackBuffer,
     num_faces: usize,
+}
+
+impl StagedLodReadback {
+    pub fn byte_len(&self) -> usize {
+        self.num_faces.saturating_mul(PACKED_LOD_OUTPUT_BYTES_PER_FACE)
+    }
 }
 
 struct ReadbackBuffer {
@@ -878,7 +974,7 @@ fn delete_transform_feedback(gl: &glow::Context, feedback: glow::TransformFeedba
 
 /// Two-pass LOD compute pipeline.
 /// Pass 1: FBO render (LOD exponents → RGBA32F texture, one pixel per face)
-/// Pass 2: Transform feedback (edge coherence + canonicalize → readback buffer)
+/// Pass 2: Transform feedback (edge coherence + canonicalize → packed readback buffer)
 pub struct LodCompute {
     // --- Pass 1: FBO render for LOD exponents ---
     program1: glow::Program,
@@ -936,7 +1032,7 @@ pub struct LodCompute {
     // --- Pass 2: TF edge coherence + canonicalize ---
     program2: glow::Program,
     vao2: glow::VertexArray,
-    output_buf2: glow::Buffer,      // TF output: 6 floats per face (final)
+    output_buf2: glow::Buffer,      // TF output: one packed u32 per face (final)
     tf2: glow::TransformFeedback,
 
     // Static adjacency texture (uploaded once per model)
@@ -959,6 +1055,7 @@ pub struct LodCompute {
     // instead of allocating mesh-sized resources every classification.
     readback_buffers: Vec<ReadbackBuffer>,
     readback_vectors: Vec<Vec<f32>>,
+    packed_readback_scratch: Vec<u32>,
     readback_buffer_creations: u64,
     readback_buffer_reallocations: u64,
     readback_vector_creations: u64,
@@ -1031,9 +1128,13 @@ impl LodCompute {
             // --- Pass 2: TF program ---
             let program2 = StagedHandle::new(
                 gl,
-                build_tf_program(gl, LOD_COHERENCE_VS, DUMMY_FS,
-                    &["out_canon_a", "out_canon_b", "out_canon_c", "out_perm_index", "out_parity", "out_atlas_index"],
-                    "LOD pass 2")?,
+                build_tf_program(
+                    gl,
+                    LOD_COHERENCE_VS,
+                    DUMMY_FS,
+                    &["out_packed"],
+                    "LOD pass 2",
+                )?,
                 delete_program,
             );
 
@@ -1050,7 +1151,7 @@ impl LodCompute {
             );
             gl.bind_buffer(glow::TRANSFORM_FEEDBACK_BUFFER, Some(output_buf2.get()));
             gl.buffer_data_size(glow::TRANSFORM_FEEDBACK_BUFFER,
-                (max_faces * FLOATS_PER_FACE_OUTPUT * 4) as i32,
+                (max_faces * PACKED_LOD_OUTPUT_BYTES_PER_FACE) as i32,
                 // Transform feedback writes this buffer every classification;
                 // staging then copies it GPU-to-GPU before the CPU-visible
                 // STREAM_READ buffer is fenced. READ here makes Chromium
@@ -1122,6 +1223,7 @@ impl LodCompute {
                 bound1: false,
                 readback_buffers: Vec::new(),
                 readback_vectors: Vec::new(),
+                packed_readback_scratch: Vec::new(),
                 readback_buffer_creations: 0,
                 readback_buffer_reallocations: 0,
                 readback_vector_creations: 0,
@@ -1714,8 +1816,7 @@ impl LodCompute {
     ) -> Result<StagedLodReadback, String> {
         let n = num_faces.min(self.max_faces);
         let byte_size = n
-            .checked_mul(FLOATS_PER_FACE_OUTPUT)
-            .and_then(|size| size.checked_mul(std::mem::size_of::<f32>()))
+            .checked_mul(PACKED_LOD_OUTPUT_BYTES_PER_FACE)
             .ok_or_else(|| "LOD staging buffer size overflow".to_string())?;
         let byte_size_i32 = i32::try_from(byte_size)
             .map_err(|_| "LOD staging buffer exceeds WebGL2 limits".to_string())?;
@@ -1751,12 +1852,12 @@ impl LodCompute {
         }
     }
 
-    /// Read and destroy a staging buffer after its fence has signaled.
+    /// Read and decode a staging buffer after its fence has signaled.
     pub fn finish_staged_readback(
         &mut self,
         gl: &glow::Context,
         staged: StagedLodReadback,
-    ) -> Vec<f32> {
+    ) -> Result<Vec<f32>, String> {
         let mut result = match self.readback_vectors.pop() {
             Some(result) => result,
             None => {
@@ -1764,18 +1865,25 @@ impl LodCompute {
                 Vec::new()
             }
         };
-        result.resize(staged.num_faces * FLOATS_PER_FACE_OUTPUT, 0.0);
+        self.packed_readback_scratch.resize(staged.num_faces, 0);
         unsafe {
             gl.bind_buffer(glow::COPY_READ_BUFFER, Some(staged.buffer.handle));
             gl.get_buffer_sub_data(
                 glow::COPY_READ_BUFFER,
                 0,
-                bytemuck_cast_slice_mut(&mut result),
+                u32_slice_as_bytes_mut(&mut self.packed_readback_scratch),
             );
             gl.bind_buffer(glow::COPY_READ_BUFFER, None);
         }
         self.readback_buffers.push(staged.buffer);
-        result
+        if let Err(error) = decode_packed_lod_classifications(
+            &self.packed_readback_scratch,
+            &mut result,
+        ) {
+            self.readback_vectors.push(result);
+            return Err(error);
+        }
+        Ok(result)
     }
 
     /// Return a staged result that will not be consumed to the retained pool.
@@ -1893,8 +2001,13 @@ fn bytemuck_cast_slice<T>(data: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * std::mem::size_of::<T>()) }
 }
 
-fn bytemuck_cast_slice_mut(data: &mut [f32]) -> &mut [u8] {
-    unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut u8, data.len() * 4) }
+fn u32_slice_as_bytes_mut(data: &mut [u32]) -> &mut [u8] {
+    unsafe {
+        std::slice::from_raw_parts_mut(
+            data.as_mut_ptr() as *mut u8,
+            std::mem::size_of_val(data),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -1957,8 +2070,9 @@ mod tests {
         assert!(LOD_COMPUTE_FS.contains("frag_color = v_lods"));
         assert!(LOD_COHERENCE_VS.contains("face.w < 0.5"));
         assert!(LOD_COMPUTE_VS.contains("min_px > 0.0 ? min(2.0, max_lod) : max_lod"));
-        assert!(LOD_COHERENCE_VS.contains("out_canon_a = exp2(face.x)"));
-        assert!(LOD_COHERENCE_VS.contains("out_atlas_index = -1.0"));
+        assert!(LOD_COHERENCE_VS.contains("int(face.x + 0.5)"));
+        assert!(LOD_COHERENCE_VS.contains("out_packed = pack_lod"));
+        assert!(LOD_COHERENCE_VS.contains("false,"));
     }
 
     #[test]
@@ -2158,6 +2272,52 @@ mod tests {
         assert_eq!(parity.examples[0].face, 0);
         assert_eq!(parity.examples[1].face, 1);
         assert!(compare_lod_classifications(&expected, &actual[..6]).is_err());
+    }
+
+    #[test]
+    fn packed_lod_readback_roundtrips_every_field_domain() {
+        for a in 0..=9 {
+            for b in 0..=9 {
+                for c in 0..=9 {
+                    for permutation in 0..=5 {
+                        for atlas_index in [None, Some(0), Some(1), Some(254), Some(255)] {
+                            let packed = pack_lod_classification(
+                                [a, b, c],
+                                permutation,
+                                atlas_index,
+                            )
+                            .unwrap();
+                            let decoded = unpack_lod_classification(packed).unwrap();
+                            assert_eq!(decoded[0], (1u32 << a) as f32);
+                            assert_eq!(decoded[1], (1u32 << b) as f32);
+                            assert_eq!(decoded[2], (1u32 << c) as f32);
+                            assert_eq!(decoded[3], permutation as f32);
+                            assert_eq!(
+                                decoded[4],
+                                if matches!(permutation, 1 | 2 | 5) { -1.0 } else { 1.0 },
+                            );
+                            assert_eq!(
+                                decoded[5],
+                                atlas_index.map_or(-1.0, |index| index as f32),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn packed_lod_readback_has_a_stable_24_bit_layout() {
+        let packed = pack_lod_classification([1, 5, 9], 4, Some(254)).unwrap();
+        assert_eq!(packed, 1 | (5 << 4) | (9 << 8) | (4 << 12) | (1 << 15) | (254 << 16));
+        assert_eq!(PACKED_LOD_OUTPUT_BYTES_PER_FACE, 4);
+        assert!(pack_lod_classification([10, 0, 0], 0, None).is_err());
+        assert!(pack_lod_classification([0, 0, 0], 6, None).is_err());
+        assert!(pack_lod_classification([0, 0, 0], 0, Some(256)).is_err());
+        assert!(unpack_lod_classification(1 << 24).is_err());
+        assert!(unpack_lod_classification(10).is_err());
+        assert!(unpack_lod_classification(6 << 12).is_err());
     }
 
     fn coincident_square() -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {

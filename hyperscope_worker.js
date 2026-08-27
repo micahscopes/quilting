@@ -372,6 +372,7 @@ self.onmessage = async function(e) {
       if (result?.lods) {
         timing.changed_faces = result.changed_faces || 0;
         timing.full_snapshot = !!result.full_snapshot;
+        timing.gpu_readback_bytes = result.gpu_readback_bytes || 0;
         const transfers = [result.lods.buffer];
         if (result.indices) transfers.push(result.indices.buffer);
         if (result.pose_matrices) transfers.push(result.pose_matrices.buffer);

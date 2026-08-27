@@ -233,6 +233,36 @@ snapshot, then resumed sparse worker publications with zero sequence or pose
 errors. An authority fence/readback/publication failure uses the same fallback
 boundary. A later matching model upload clears the failure latch.
 
+## Packed WebGL2 classifier readback
+
+Both worker and renderer-context classifiers now emit one lossless `u32` per
+face from pass-2 transform feedback instead of six `f32`s. The low 24 bits
+carry three four-bit edge exponents, the three-bit S3 permutation, a visibility
+bit, and the eight-bit atlas index. Rust validates reserved bits and field
+ranges, derives parity from the permutation, and expands the word to the
+unchanged six-field retained batch ABI. The unit oracle exhaustively roundtrips
+all 30,000 combinations of the current exponent, permutation, visibility, and
+representative atlas-index domains and freezes one exact layout golden.
+
+Live Chrome evidence after the cut:
+
+- the 4,432-face composed-scene classification read 17,728 bytes instead of
+  106,368 bytes;
+- the 984-face animated-primary prefix read 3,936 bytes instead of 23,616
+  bytes;
+- shadow mode completed 13 exact worker/renderer comparisons with zero raw,
+  pose, publication, resident, visibility, cull, batch-semantic, or batch-group
+  mismatches and zero failures;
+- a foreground 10-second Rust-authority window published 593 classifications,
+  retained one accepted-pose revision of lag, transferred zero LOD bytes
+  through JavaScript, and reported zero failures or runtime errors.
+
+This is an exact sixfold byte-volume reduction at the GPU-to-CPU boundary, not
+a claim that the corresponding wall-clock call is six times faster. Driver
+scheduling, fence cadence, validation, CPU expansion, and retained batch work
+remain separately visible in telemetry. `gpuReadbackBytes` records this GPU
+boundary while `lodTransferBytes` continues to mean WASM/JavaScript payload.
+
 ## Remaining promotion work
 
 The renderer-context implementation is now a real opt-in authority, but the
@@ -242,8 +272,8 @@ default and release promotion still require:
   views and animated horse, with frame percentiles rather than last values;
 - explicit accounting for duplicate-shadow overhead, full readback bytes,
   retained comparison memory, sparse batch updates, and skipped submissions;
-- GPU-side sparse result compaction or resident publication that reduces the
-  remaining full-prefix WebGL2 readback;
+- optional change detection that can skip an unchanged full-prefix WebGL2
+  readback without weakening the explicit WebGPU compaction target;
 - moving-camera screenshot gates for seams, permutations, and LOD grading;
 - longer all-cue, all-scale, inversion, adaptive, pause/scrub, and background
   soak before changing the default away from `js`;

@@ -1,5 +1,6 @@
 #version 300 es
 precision highp float;
+precision highp int;
 
 // Pass 2: Edge coherence + canonical sort + atlas LUT lookup.
 //
@@ -21,13 +22,22 @@ uniform highp sampler2D u_atlas_lut;
 
 uniform int u_num_faces;
 
-// Transform feedback outputs: directly consumable by group_into_batches
-out float out_canon_a;
-out float out_canon_b;
-out float out_canon_c;
-out float out_perm_index;
-out float out_parity;
-out float out_atlas_index;
+// Lossless transform-feedback readback ABI. Exponents occupy 4 bits each,
+// permutation 3 bits, visibility 1 bit, and atlas index 8 bits. Rust derives
+// parity from the permutation and expands the word to the historical six-float
+// batch ABI after reading only four bytes per face.
+flat out highp uint out_packed;
+
+uint pack_lod(int ea, int eb, int ec, int perm, bool visible, int atlas_index) {
+    uint packed = uint(ea)
+        | (uint(eb) << 4u)
+        | (uint(ec) << 8u)
+        | (uint(perm) << 12u);
+    if (visible) {
+        packed |= (1u << 15u) | (uint(atlas_index) << 16u);
+    }
+    return packed;
+}
 
 // Read pass 1 LODs for a face (tiled 4096-wide)
 vec4 read_face(int face_id) {
@@ -48,18 +58,21 @@ vec2 read_adj(int face_id, int edge) {
 void main() {
     int fi = gl_VertexID;
     if (fi >= u_num_faces) {
-        out_canon_a = 1.0; out_canon_b = 1.0; out_canon_c = 1.0;
-        out_perm_index = 0.0; out_parity = 1.0; out_atlas_index = -1.0;
+        out_packed = pack_lod(0, 0, 0, 0, false, 0);
         gl_Position = vec4(0.0);
         return;
     }
 
     vec4 face = read_face(fi);
     if (face.w < 0.5) {
-        out_canon_a = exp2(face.x);
-        out_canon_b = exp2(face.y);
-        out_canon_c = exp2(face.z);
-        out_perm_index = 0.0; out_parity = 1.0; out_atlas_index = -1.0;
+        out_packed = pack_lod(
+            int(face.x + 0.5),
+            int(face.y + 0.5),
+            int(face.z + 0.5),
+            0,
+            false,
+            0
+        );
         gl_Position = vec4(0.0);
         return;
     }
@@ -105,19 +118,8 @@ void main() {
     int key = sa + sb * 10 + sc * 100;
     int lut_x = key % 40;
     int lut_y = key / 40;
-    float atlas_index = texelFetch(u_atlas_lut, ivec2(lut_x, lut_y), 0).r * 255.0;
-
-    // Parity: even permutations (identity, cycles) = +1, odd (transpositions) = -1
-    // Perms 0,3,4 are even; 1,2,5 are odd
-    float parity = (perm == 1 || perm == 2 || perm == 5) ? -1.0 : 1.0;
-
-    // Output canonical LODs as actual values (2^exponent), not exponents
-    out_canon_a = exp2(float(sa));
-    out_canon_b = exp2(float(sb));
-    out_canon_c = exp2(float(sc));
-    out_perm_index = float(perm);
-    out_parity = parity;
-    out_atlas_index = atlas_index;
+    int atlas_index = int(texelFetch(u_atlas_lut, ivec2(lut_x, lut_y), 0).r * 255.0 + 0.5);
+    out_packed = pack_lod(sa, sb, sc, perm, true, atlas_index);
 
     gl_Position = vec4(0.0);
 }

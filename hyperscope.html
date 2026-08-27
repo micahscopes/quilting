@@ -655,7 +655,7 @@ const lodMetricNames = [
   'totalMs', 'workerMs', 'batchMs', 'batchGroupMs', 'batchUploadMs',
   'batchRetainMs', 'batchBalanceMs', 'batchBucketMs',
   'wasmMs', 'animEvalMs', 'gpuComputeMs', 'gpuWaitMs', 'gpuReadbackMs',
-  'changedFaces', 'lodTransferBytes',
+  'gpuReadbackBytes', 'changedFaces', 'lodTransferBytes',
 ];
 const lodTelemetry = {
   submitted: 0,
@@ -817,6 +817,7 @@ function scheduleSameContextLodPoll() {
           0,
           waitMs,
           readbackMs,
+          Number(snapshot.last_readback_bytes) || 0,
           Number(snapshot.last_authoritative_changed_faces) || 0,
           0,
           true,
@@ -1107,7 +1108,7 @@ function recordLodTiming(
   totalMs, workerMs, batchMs, batchGroupMs, batchUploadMs,
   batchRetainMs, batchBalanceMs, batchBucketMs,
   wasmMs, animEvalMs, gpuComputeMs, gpuWaitMs, gpuReadbackMs,
-  changedFaces, lodTransferBytes, fullSnapshot, applied, debug,
+  gpuReadbackBytes, changedFaces, lodTransferBytes, fullSnapshot, applied, debug,
 ) {
   lodTelemetry.completed += 1;
   if (applied) lodTelemetry.applied += 1;
@@ -1127,6 +1128,7 @@ function recordLodTiming(
   updateLodMetric('gpuComputeMs', gpuComputeMs);
   updateLodMetric('gpuWaitMs', gpuWaitMs);
   updateLodMetric('gpuReadbackMs', gpuReadbackMs);
+  updateLodMetric('gpuReadbackBytes', gpuReadbackBytes);
   updateLodMetric('changedFaces', changedFaces);
   updateLodMetric('lodTransferBytes', lodTransferBytes);
 
@@ -1139,7 +1141,8 @@ function recordLodTiming(
       `worker=${lodTelemetry.average.workerMs.toFixed(1)}ms ` +
       `batch=${lodTelemetry.average.batchMs.toFixed(1)}ms | ` +
       `last GPU compute/wait/readback=${lodTelemetry.last.gpuComputeMs.toFixed(1)}/` +
-      `${lodTelemetry.last.gpuWaitMs.toFixed(1)}/${lodTelemetry.last.gpuReadbackMs.toFixed(1)}ms`,
+      `${lodTelemetry.last.gpuWaitMs.toFixed(1)}/${lodTelemetry.last.gpuReadbackMs.toFixed(1)}ms ` +
+      `(${Math.round(lodTelemetry.last.gpuReadbackBytes)}B)`,
     );
   }
 }
@@ -7641,6 +7644,7 @@ async function recomputeLods() {
       workerPhases['lod-gpu-compute'],
       workerPhases['lod-gpu-wait'],
       workerPhases['lod-gpu-readback'],
+      wt.gpu_readback_bytes,
       wt.changed_faces,
       (resp.lods?.byteLength || 0) + (resp.indices?.byteLength || 0),
       !!wt.full_snapshot,

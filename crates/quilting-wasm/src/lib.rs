@@ -925,7 +925,14 @@ pub fn poll_animated_lods() -> JsValue {
         perf_mark("lod-gpu-wait-end");
         perf_measure("lod-gpu-wait", "lod-gpu-wait-start", "lod-gpu-wait-end");
         perf_mark("lod-gpu-readback-start");
-        let gpu_class = compute.finish_staged_readback(gl, readback);
+        let gpu_readback_bytes = readback.byte_len();
+        let gpu_class = match compute.finish_staged_readback(gl, readback) {
+            Ok(classification) => classification,
+            Err(error) => {
+                web_sys::console::warn_1(&format!("LOD packed readback failed: {error}").into());
+                return JsValue::NULL;
+            }
+        };
         let full_fingerprint = exact_f32_slice_fingerprint(&gpu_class);
         let full_fingerprint = format!(
             "{}:{:016x}",
@@ -1012,6 +1019,11 @@ pub fn poll_animated_lods() -> JsValue {
                 &result,
                 &"gpu_passes".into(),
                 &JsValue::from_f64(1.0),
+            ).ok();
+            js_sys::Reflect::set(
+                &result,
+                &"gpu_readback_bytes".into(),
+                &JsValue::from_f64(gpu_readback_bytes as f64),
             ).ok();
             js_sys::Reflect::set(
                 &result,

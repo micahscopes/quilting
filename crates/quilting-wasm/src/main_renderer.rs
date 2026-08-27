@@ -22,7 +22,7 @@ use quilting_renderer::compute::{
     compare_lod_classifications, exact_f32_slice_fingerprint, prepare_lod_atlas_lookup,
     prepare_lod_dispatch_state, prepare_lod_model, prepared_lod_model_fingerprint,
     LodAtlasLookup, LodCompute, LodModelResidency, StagedLodReadback,
-    FLOATS_PER_FACE_OUTPUT,
+    FLOATS_PER_FACE_OUTPUT, PACKED_LOD_OUTPUT_BYTES_PER_FACE,
 };
 use quilting_renderer::pass::{
     affine_normal_matrix, affine_orientation_sign, apply_batch_winding,
@@ -634,6 +634,8 @@ impl SameContextLod {
             last_dispatch_ms: self.diagnostics.last_dispatch_ms,
             last_fence_poll_latency_ms: self.diagnostics.last_fence_poll_latency_ms,
             last_readback_ms: self.diagnostics.last_readback_ms,
+            last_readback_bytes: self.diagnostics.last_readback_bytes,
+            packed_readback_bytes_per_face: PACKED_LOD_OUTPUT_BYTES_PER_FACE,
             last_compared_faces: self.diagnostics.last_compared_faces,
             last_mismatched_faces: self.diagnostics.last_mismatched_faces,
             last_mismatched_fields: self.diagnostics.last_mismatched_fields,
@@ -978,6 +980,7 @@ struct SameContextLodDiagnostics {
     last_dispatch_ms: f64,
     last_fence_poll_latency_ms: f64,
     last_readback_ms: f64,
+    last_readback_bytes: usize,
     last_compared_faces: usize,
     last_mismatched_faces: usize,
     last_mismatched_fields: usize,
@@ -1049,6 +1052,8 @@ struct SameContextLodShadowSnapshot {
     last_dispatch_ms: f64,
     last_fence_poll_latency_ms: f64,
     last_readback_ms: f64,
+    last_readback_bytes: usize,
+    packed_readback_bytes_per_face: usize,
     last_compared_faces: usize,
     last_mismatched_faces: usize,
     last_mismatched_fields: usize,
@@ -5477,7 +5482,15 @@ pub fn mr_poll_same_context_lod(authoritative: bool) -> Result<JsValue, JsValue>
             }
             let ready_ms = browser_now_ms();
             let readback_started_ms = ready_ms;
-            let lods = lod.compute.finish_staged_readback(gl, pending.readback);
+            let readback_bytes = pending.readback.byte_len();
+            let lods = match lod.compute.finish_staged_readback(gl, pending.readback) {
+                Ok(classification) => classification,
+                Err(error) => {
+                    lod.diagnostics.failures = lod.diagnostics.failures.saturating_add(1);
+                    lod.diagnostics.last_error = Some(error);
+                    return same_context_lod_snapshot_value(lod);
+                }
+            };
             let readback_finished_ms = browser_now_ms();
             lod.diagnostics.completions = lod.diagnostics.completions.saturating_add(1);
             // This includes browser scheduling until the first signaling poll.
@@ -5485,6 +5498,7 @@ pub fn mr_poll_same_context_lod(authoritative: bool) -> Result<JsValue, JsValue>
             // timestamp for the moment the fence became signaled.
             lod.diagnostics.last_fence_poll_latency_ms = ready_ms - pending.fence_started_ms;
             lod.diagnostics.last_readback_ms = readback_finished_ms - readback_started_ms;
+            lod.diagnostics.last_readback_bytes = readback_bytes;
             lod.completed = Some(SameContextLodCompleted {
                 stamp: pending.stamp,
                 lods,
