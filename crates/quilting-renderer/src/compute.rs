@@ -12,7 +12,11 @@
 
 use glow::HasContext;
 use quilting_core::{batch, instance_layout};
+use quilting_core::batch::RenderBatchLayer;
 use quilting_core::quaternion::{Mobius, Quat};
+use quilting_core::render::{
+    RenderGeometry, RenderSceneSnapshot, VisibilityCompactionPlan,
+};
 use quilting_mesh::HalfEdgeMesh;
 use std::collections::HashMap;
 
@@ -688,6 +692,153 @@ pub struct WgslLodModelWords {
     pub skinning: Vec<[u32; 8]>,
     pub morph_deltas: Vec<[u32; 4]>,
     pub adjacency: Vec<[u32; 4]>,
+}
+
+/// Immutable scene-side words consumed by the WebGPU visibility compactor.
+///
+/// Batch records and eligibility change only when retained render extraction
+/// changes. Current-pose visibility remains a separate one-word-per-source
+/// stream so a WebGPU classifier can feed compaction without a CPU readback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WgslVisibilityCompactionSceneWords {
+    /// Exact 16-byte `VisibilityCompactionUniforms` block.
+    pub uniform: [u32; 4],
+    /// One 16-byte `VisibilityBatchRecord` per canonical render batch.
+    pub batches: Vec<[u32; 4]>,
+    /// One validated 0/1 word per source instance.
+    pub source_eligibility: Vec<u32>,
+}
+
+/// Exact output words produced by the deterministic CPU compaction oracle.
+/// These arrays are fixtures for native/browser WebGPU execution; they are
+/// never required by the live same-device path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WgslVisibilityCompactionOracleWords {
+    pub compacted_source_instances: Vec<u32>,
+    pub compacted_ranges: Vec<[u32; 5]>,
+    pub indirect_arguments: Vec<[u32; 5]>,
+}
+
+/// Pack retained batch shape, draw geometry, and static eligibility into the
+/// exact WGSL storage ABI. Suppressed roots and disabled batches stay resident
+/// but carry zero eligibility, preserving stable source-instance identities.
+pub fn pack_wgsl_visibility_compaction_scene_words(
+    scene: &RenderSceneSnapshot,
+    geometry: RenderGeometry,
+) -> Result<WgslVisibilityCompactionSceneWords, String> {
+    scene.validate().map_err(|error| error.to_string())?;
+    let batch_count = u32::try_from(scene.batches.len())
+        .map_err(|_| "visibility batch count exceeds the WGSL ABI".to_string())?;
+    let source_count = scene.batches.iter().try_fold(0u32, |total, batch| {
+        let count = u32::try_from(batch.members.len())
+            .map_err(|_| "visibility source count exceeds the WGSL ABI".to_string())?;
+        total
+            .checked_add(count)
+            .ok_or_else(|| "visibility source count exceeds the WGSL ABI".to_string())
+    })?;
+
+    let mut batches = Vec::with_capacity(scene.batches.len());
+    let mut source_eligibility = Vec::with_capacity(source_count as usize);
+    let mut source_first_instance = 0u32;
+    for batch in &scene.batches {
+        let source_instance_count = u32::try_from(batch.members.len())
+            .map_err(|_| "visibility source count exceeds the WGSL ABI".to_string())?;
+        let index_count = match geometry {
+            RenderGeometry::Triangles => batch.triangle_index_count,
+            RenderGeometry::Lines => batch.line_index_count,
+        };
+        batches.push([
+            source_first_instance,
+            source_instance_count,
+            index_count,
+            0,
+        ]);
+        for member in &batch.members {
+            let suppressed_root = batch.id.layer == RenderBatchLayer::RetainedRoot
+                && scene
+                    .suppressed_root_faces
+                    .binary_search(&member.face_index)
+                    .is_ok();
+            source_eligibility.push(u32::from(batch.enabled && !suppressed_root));
+        }
+        source_first_instance = source_first_instance
+            .checked_add(source_instance_count)
+            .ok_or_else(|| "visibility source count exceeds the WGSL ABI".to_string())?;
+    }
+    debug_assert_eq!(source_first_instance, source_count);
+    Ok(WgslVisibilityCompactionSceneWords {
+        uniform: [batch_count, source_count, 0, 0],
+        batches,
+        source_eligibility,
+    })
+}
+
+/// Validate and widen one CPU visibility fixture to the WGSL `u32` stream.
+/// Live WebGPU execution can instead bind the classifier's resident output.
+pub fn pack_wgsl_source_visibility_words(
+    source_visibility: &[u8],
+    expected_source_count: u32,
+) -> Result<Vec<u32>, String> {
+    if source_visibility.len() != expected_source_count as usize {
+        return Err(format!(
+            "visibility stream has {} records; expected {}",
+            source_visibility.len(), expected_source_count,
+        ));
+    }
+    source_visibility
+        .iter()
+        .enumerate()
+        .map(|(source_instance, &visibility)| {
+            if visibility > 1 {
+                Err(format!(
+                    "visibility source {source_instance} has invalid value {visibility}",
+                ))
+            } else {
+                Ok(u32::from(visibility))
+            }
+        })
+        .collect()
+}
+
+/// Freeze the exact compaction/range/indirect words expected from WebGPU.
+pub fn wgsl_visibility_compaction_oracle_words(
+    scene: &RenderSceneSnapshot,
+    source_visibility: &[u8],
+    geometry: RenderGeometry,
+) -> Result<WgslVisibilityCompactionOracleWords, String> {
+    let plan = VisibilityCompactionPlan::build(scene, source_visibility)
+        .map_err(|error| error.to_string())?;
+    let indirect = plan
+        .indexed_indirect_arguments(scene, geometry)
+        .map_err(|error| error.to_string())?;
+    Ok(WgslVisibilityCompactionOracleWords {
+        compacted_source_instances: plan.compacted_source_instances,
+        compacted_ranges: plan
+            .batches
+            .into_iter()
+            .map(|range| {
+                [
+                    range.batch_index,
+                    range.source_first_instance,
+                    range.source_instance_count,
+                    range.compacted_first_instance,
+                    range.compacted_instance_count,
+                ]
+            })
+            .collect(),
+        indirect_arguments: indirect
+            .into_iter()
+            .map(|arguments| {
+                [
+                    arguments.index_count,
+                    arguments.instance_count,
+                    arguments.first_index,
+                    arguments.base_vertex as u32,
+                    arguments.first_instance,
+                ]
+            })
+            .collect(),
+    })
 }
 
 /// Per-dispatch values not already carried by `LodDispatchState` or the
@@ -2451,8 +2602,159 @@ fn u32_slice_as_bytes_mut(data: &mut [u32]) -> &mut [u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quilting_core::batch::{RenderBatchId, RenderBatchKey, RenderBatchMember};
     use quilting_core::instance_layout::InstanceWriter;
+    use quilting_core::render::{PbrDrawClass, RenderBatchSnapshot, RenderEntityTransform};
+    use quilting_core::screen_partition::ScreenPatchLeafId;
     use std::cell::RefCell;
+
+    const IDENTITY: [f32; 16] = [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    const IDENTITY_MOBIUS: [f32; 16] = [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0,
+        1.0, 0.0, 0.0, 0.0,
+    ];
+
+    fn visibility_member(face_index: u32, leaf_id: ScreenPatchLeafId) -> RenderBatchMember {
+        RenderBatchMember {
+            face_index,
+            leaf_id,
+            node_index: 0,
+            edge_lods: [2; 3],
+            permutation_index: 0,
+            vertex_lods: [2; 3],
+        }
+    }
+
+    fn visibility_batch(
+        material_index: usize,
+        face_index: u32,
+        enabled: bool,
+    ) -> RenderBatchSnapshot {
+        RenderBatchSnapshot {
+            id: RenderBatchId::complete(RenderBatchKey {
+                lod: [2; 3],
+                parity_bucket: 0,
+                material_index,
+                render_node_index: 0,
+            }),
+            members: vec![visibility_member(face_index, ScreenPatchLeafId::ROOT)],
+            triangle_index_count: 6 * (material_index as u32 + 1),
+            line_index_count: 8 * (material_index as u32 + 1),
+            transform: RenderEntityTransform {
+                mobius: IDENTITY_MOBIUS,
+                orientation_sign: 1,
+                euclidean_model: IDENTITY,
+                euclidean_normal: IDENTITY,
+            },
+            enabled,
+            pbr_class: PbrDrawClass::Opaque,
+        }
+    }
+
+    #[test]
+    fn wgsl_visibility_words_match_the_stable_cpu_oracle() {
+        let mut first = visibility_batch(0, 0, true);
+        first
+            .members
+            .push(visibility_member(3, ScreenPatchLeafId::ROOT));
+        let scene = RenderSceneSnapshot {
+            revision: 41,
+            suppressed_root_faces: Vec::new(),
+            batches: vec![
+                first,
+                visibility_batch(1, 1, false),
+                visibility_batch(2, 2, true),
+            ],
+        };
+
+        let words = pack_wgsl_visibility_compaction_scene_words(
+            &scene,
+            RenderGeometry::Triangles,
+        ).unwrap();
+        assert_eq!(words.uniform, [3, 4, 0, 0]);
+        assert_eq!(
+            words.batches,
+            [[0, 2, 6, 0], [2, 1, 12, 0], [3, 1, 18, 0]],
+        );
+        assert_eq!(words.source_eligibility, [1, 1, 0, 1]);
+        assert_eq!(std::mem::size_of_val(&words.uniform), 16);
+        assert_eq!(std::mem::size_of_val(&words.batches[0]), 16);
+
+        let source_visibility = pack_wgsl_source_visibility_words(&[1, 0, 1, 1], 4).unwrap();
+        assert_eq!(source_visibility, [1, 0, 1, 1]);
+        let oracle = wgsl_visibility_compaction_oracle_words(
+            &scene,
+            &[1, 0, 1, 1],
+            RenderGeometry::Triangles,
+        ).unwrap();
+        assert_eq!(oracle.compacted_source_instances, [0, 3]);
+        assert_eq!(
+            oracle.compacted_ranges,
+            [
+                [0, 0, 2, 0, 1],
+                [1, 2, 1, 1, 0],
+                [2, 3, 1, 1, 1],
+            ],
+        );
+        assert_eq!(
+            oracle.indirect_arguments,
+            [[6, 1, 0, 0, 0], [12, 0, 0, 0, 1], [18, 1, 0, 0, 1]],
+        );
+        assert_eq!(std::mem::size_of_val(&oracle.compacted_ranges[0]), 20);
+        assert_eq!(std::mem::size_of_val(&oracle.indirect_arguments[0]), 20);
+    }
+
+    #[test]
+    fn wgsl_visibility_eligibility_replaces_suppressed_roots() {
+        let mut roots = visibility_batch(0, 0, true);
+        roots.id.layer = RenderBatchLayer::RetainedRoot;
+        roots
+            .members
+            .push(visibility_member(1, ScreenPatchLeafId::ROOT));
+        let mut overlay = visibility_batch(0, 0, true);
+        overlay.id.layer = RenderBatchLayer::AdaptiveOverlay;
+        overlay.members[0].leaf_id = ScreenPatchLeafId::ROOT.child(0).unwrap();
+        let scene = RenderSceneSnapshot {
+            revision: 42,
+            suppressed_root_faces: vec![0],
+            batches: vec![roots, overlay],
+        };
+
+        let words = pack_wgsl_visibility_compaction_scene_words(&scene, RenderGeometry::Lines)
+            .unwrap();
+        assert_eq!(words.uniform, [2, 3, 0, 0]);
+        assert_eq!(words.batches, [[0, 2, 8, 0], [2, 1, 8, 0]]);
+        assert_eq!(words.source_eligibility, [0, 1, 1]);
+        let oracle = wgsl_visibility_compaction_oracle_words(
+            &scene,
+            &[1, 1, 1],
+            RenderGeometry::Lines,
+        ).unwrap();
+        assert_eq!(oracle.compacted_source_instances, [1, 2]);
+        assert_eq!(
+            oracle.indirect_arguments,
+            [[8, 1, 0, 0, 0], [8, 1, 0, 0, 1]],
+        );
+    }
+
+    #[test]
+    fn wgsl_visibility_fixture_rejects_bad_shape_and_values() {
+        assert_eq!(
+            pack_wgsl_source_visibility_words(&[1, 0], 3).unwrap_err(),
+            "visibility stream has 2 records; expected 3",
+        );
+        assert_eq!(
+            pack_wgsl_source_visibility_words(&[1, 2, 0], 3).unwrap_err(),
+            "visibility source 1 has invalid value 2",
+        );
+    }
 
     fn subject_record(node: f32, marker: f32) -> Vec<f32> {
         let mut record = vec![0.0; SUBJECT_STATE_STRIDE];

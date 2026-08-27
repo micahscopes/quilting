@@ -14,6 +14,9 @@ pub enum EntryPointStage {
 /// source spelling while flattening and deterministically appends `_`.
 pub const LOD_PASS1_DEVICE_ENTRY_POINT: &str = "classify_lod_pass1_";
 pub const LOD_PASS2_DEVICE_ENTRY_POINT: &str = "classify_lod_pass2_";
+pub const VISIBILITY_COUNT_DEVICE_ENTRY_POINT: &str = "count_visible_instances";
+pub const VISIBILITY_SCAN_DEVICE_ENTRY_POINT: &str = "scan_visible_batches";
+pub const VISIBILITY_SCATTER_DEVICE_ENTRY_POINT: &str = "scatter_visible_instances";
 
 /// All WGSL shader module sources, embedded at compile time.
 pub mod sources {
@@ -26,6 +29,11 @@ pub mod sources {
     pub const LOD_TYPES: &str = include_str!("../shaders/compute/lod_types.wgsl");
     pub const LOD_PASS1: &str = include_str!("../shaders/compute/lod_pass1.wgsl");
     pub const LOD_PASS2: &str = include_str!("../shaders/compute/lod_pass2.wgsl");
+    pub const VISIBILITY_COMPACTION_TYPES: &str =
+        include_str!("../shaders/compute/visibility_compaction_types.wgsl");
+    pub const VISIBILITY_COUNT: &str = include_str!("../shaders/compute/visibility_count.wgsl");
+    pub const VISIBILITY_SCAN: &str = include_str!("../shaders/compute/visibility_scan.wgsl");
+    pub const VISIBILITY_SCATTER: &str = include_str!("../shaders/compute/visibility_scatter.wgsl");
 
     // Entry-point shaders (compiled to GLSL for WebGL2)
     pub const VERTEX_MAIN: &str = include_str!("../shaders/vertex/main.wgsl");
@@ -50,8 +58,7 @@ pub fn compiler_catalog_revision() -> Arc<str> {
 }
 
 fn build_compiler_catalog_revision() -> Arc<str> {
-    const COMPILER_CONFIGURATION: &str =
-        "quilting-shaders/catalog-v1;naga=28.0.0;naga-oil=0.21.0";
+    const COMPILER_CONFIGURATION: &str = "quilting-shaders/catalog-v1;naga=28.0.0;naga-oil=0.21.0";
     let modules = [
         ("quilting::math::quaternion", sources::QUATERNION),
         ("quilting::surface::qb_eval", sources::QB_EVAL),
@@ -59,6 +66,10 @@ fn build_compiler_catalog_revision() -> Arc<str> {
         ("quilting::lighting::matcap", sources::MATCAP),
         ("quilting::viz::density", sources::DENSITY),
         ("quilting::compute::lod_types", sources::LOD_TYPES),
+        (
+            "quilting::compute::visibility_compaction_types",
+            sources::VISIBILITY_COMPACTION_TYPES,
+        ),
     ];
     let capacity = COMPILER_CONFIGURATION.len()
         + modules
@@ -88,6 +99,10 @@ pub fn create_composer() -> Result<Composer, Box<dyn std::error::Error>> {
         ("quilting::lighting::matcap", sources::MATCAP),
         ("quilting::viz::density", sources::DENSITY),
         ("quilting::compute::lod_types", sources::LOD_TYPES),
+        (
+            "quilting::compute::visibility_compaction_types",
+            sources::VISIBILITY_COMPACTION_TYPES,
+        ),
     ];
 
     for (path, source) in modules {
@@ -261,7 +276,11 @@ pub fn compile_patch_prepare_glsl_native() -> Result<String, Box<dyn std::error:
 /// Compile the one-float camera-dependent visibility entry point.
 pub fn compile_patch_visibility_glsl_native() -> Result<String, Box<dyn std::error::Error>> {
     let module = compile_shader(sources::VERTEX_MAIN, HashMap::new())?;
-    emit_glsl_native(&module, naga::ShaderStage::Vertex, "classify_patch_visibility")
+    emit_glsl_native(
+        &module,
+        naga::ShaderStage::Vertex,
+        "classify_patch_visibility",
+    )
 }
 
 /// Compile and validate the backend-neutral first LOD classification pass.
@@ -298,6 +317,45 @@ pub fn compile_lod_pass2_wgsl() -> Result<String, Box<dyn std::error::Error>> {
     emit_wgsl(&compile_lod_pass2_module()?)
 }
 
+fn compile_validated_compute_module(
+    source: &str,
+) -> Result<naga::Module, Box<dyn std::error::Error>> {
+    let module = compile_shader(source, HashMap::new())?;
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)?;
+    Ok(module)
+}
+
+/// Compile the per-batch visible-instance counting pass.
+pub fn compile_visibility_count_module() -> Result<naga::Module, Box<dyn std::error::Error>> {
+    compile_validated_compute_module(sources::VISIBILITY_COUNT)
+}
+
+/// Compile the deterministic batch-prefix and indirect-argument pass.
+pub fn compile_visibility_scan_module() -> Result<naga::Module, Box<dyn std::error::Error>> {
+    compile_validated_compute_module(sources::VISIBILITY_SCAN)
+}
+
+/// Compile the stable per-batch survivor scatter pass.
+pub fn compile_visibility_scatter_module() -> Result<naga::Module, Box<dyn std::error::Error>> {
+    compile_validated_compute_module(sources::VISIBILITY_SCATTER)
+}
+
+pub fn compile_visibility_count_wgsl() -> Result<String, Box<dyn std::error::Error>> {
+    emit_wgsl(&compile_visibility_count_module()?)
+}
+
+pub fn compile_visibility_scan_wgsl() -> Result<String, Box<dyn std::error::Error>> {
+    emit_wgsl(&compile_visibility_scan_module()?)
+}
+
+pub fn compile_visibility_scatter_wgsl() -> Result<String, Box<dyn std::error::Error>> {
+    emit_wgsl(&compile_visibility_scatter_module()?)
+}
+
 /// Compile a fragment shader to GLSL ES 300 for native OpenGL/WebGL
 /// (no coordinate space adjustment).
 pub fn compile_fragment_glsl_native(mode: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -323,9 +381,7 @@ mod tests {
         let first = compiler_catalog_revision();
         let second = compiler_catalog_revision();
         assert_eq!(first, second);
-        assert!(first.starts_with(
-            "quilting-shaders/catalog-v1;naga=28.0.0;naga-oil=0.21.0"
-        ));
+        assert!(first.starts_with("quilting-shaders/catalog-v1;naga=28.0.0;naga-oil=0.21.0"));
         for (path, source) in [
             ("quilting::math::quaternion", sources::QUATERNION),
             ("quilting::surface::qb_eval", sources::QB_EVAL),
@@ -333,6 +389,10 @@ mod tests {
             ("quilting::lighting::matcap", sources::MATCAP),
             ("quilting::viz::density", sources::DENSITY),
             ("quilting::compute::lod_types", sources::LOD_TYPES),
+            (
+                "quilting::compute::visibility_compaction_types",
+                sources::VISIBILITY_COMPACTION_TYPES,
+            ),
         ] {
             assert!(first.contains(path));
             assert!(first.contains(source));
@@ -398,10 +458,10 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
                 .types
                 .iter()
                 .find(|(_, ty)| {
-                    ty.name
-                        .as_deref()
-                        .is_some_and(|candidate| candidate == name
-                            || candidate.starts_with(&format!("{name}X_naga_oil_mod_")))
+                    ty.name.as_deref().is_some_and(|candidate| {
+                        candidate == name
+                            || candidate.starts_with(&format!("{name}X_naga_oil_mod_"))
+                    })
                 })
                 .unwrap_or_else(|| {
                     let names = module
@@ -464,6 +524,113 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
     }
 
     #[test]
+    fn visibility_compaction_storage_contract_is_valid_and_exact() {
+        const PROBE: &str = r#"
+#import quilting::compute::visibility_compaction_types::{VisibilityCompactionUniforms, VisibilityBatchRecord, CompactedBatchRangeRecord, IndexedIndirectArguments}
+
+@group(0) @binding(0) var<uniform> dispatch: VisibilityCompactionUniforms;
+@group(0) @binding(1) var<storage, read> batches: array<VisibilityBatchRecord>;
+@group(0) @binding(2) var<storage, read_write> ranges: array<CompactedBatchRangeRecord>;
+@group(0) @binding(3) var<storage, read_write> arguments: array<IndexedIndirectArguments>;
+
+@compute @workgroup_size(1)
+fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
+    let batch = batches[invocation.x];
+    ranges[invocation.x] = CompactedBatchRangeRecord(
+        invocation.x,
+        batch.source_first_instance,
+        batch.source_instance_count,
+        dispatch.counts.y,
+        0u,
+    );
+    arguments[invocation.x] = IndexedIndirectArguments(
+        batch.index_count,
+        0u,
+        0u,
+        0,
+        dispatch.counts.x,
+    );
+}
+"#;
+        let module = compile_shader(PROBE, HashMap::new()).expect("compaction ABI compiles");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("compaction ABI validates");
+        let mut layouter = naga::proc::Layouter::default();
+        layouter
+            .update(module.to_ctx())
+            .expect("compaction ABI lays out");
+        for (name, expected_size) in [
+            ("VisibilityCompactionUniforms", 16),
+            ("VisibilityBatchRecord", 16),
+            ("CompactedBatchRangeRecord", 20),
+            ("IndexedIndirectArguments", 20),
+        ] {
+            let (handle, ty) = module
+                .types
+                .iter()
+                .find(|(_, ty)| {
+                    ty.name.as_deref().is_some_and(|candidate| {
+                        candidate == name
+                            || candidate.starts_with(&format!("{name}X_naga_oil_mod_"))
+                    })
+                })
+                .unwrap_or_else(|| panic!("missing compaction type {name}"));
+            let layout = layouter[handle];
+            assert_eq!(layout.size, expected_size, "{name} size");
+            assert_eq!(layout.to_stride(), expected_size, "{name} stride");
+            if let naga::TypeInner::Struct { span, .. } = ty.inner {
+                assert_eq!(span, expected_size, "{name} declared span");
+            } else {
+                panic!("{name} is not a struct");
+            }
+        }
+    }
+
+    #[test]
+    fn compile_visibility_compaction_compute_shaders() {
+        for (source_entry, expected_workgroup, expected_bindings, module) in [
+            (
+                "count_visible_instances",
+                [64, 1, 1],
+                5,
+                compile_visibility_count_module().unwrap(),
+            ),
+            (
+                "scan_visible_batches",
+                [1, 1, 1],
+                5,
+                compile_visibility_scan_module().unwrap(),
+            ),
+            (
+                "scatter_visible_instances",
+                [64, 1, 1],
+                6,
+                compile_visibility_scatter_module().unwrap(),
+            ),
+        ] {
+            let entry = module
+                .entry_points
+                .iter()
+                .find(|entry| entry.name == source_entry)
+                .unwrap_or_else(|| panic!("missing {source_entry}"));
+            assert_eq!(entry.stage, naga::ShaderStage::Compute);
+            assert_eq!(entry.workgroup_size, expected_workgroup);
+            assert_eq!(
+                module
+                    .global_variables
+                    .iter()
+                    .filter(|(_, variable)| variable.binding.is_some())
+                    .count(),
+                expected_bindings,
+            );
+        }
+    }
+
+    #[test]
     fn flattened_lod_compute_wgsl_is_standalone_and_reparseable() {
         for (source_entry, device_entry, source) in [
             (
@@ -499,11 +666,54 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
     }
 
     #[test]
+    fn flattened_visibility_compaction_wgsl_is_standalone_and_reparseable() {
+        for (source_entry, device_entry, source) in [
+            (
+                "count_visible_instances",
+                VISIBILITY_COUNT_DEVICE_ENTRY_POINT,
+                compile_visibility_count_wgsl().unwrap(),
+            ),
+            (
+                "scan_visible_batches",
+                VISIBILITY_SCAN_DEVICE_ENTRY_POINT,
+                compile_visibility_scan_wgsl().unwrap(),
+            ),
+            (
+                "scatter_visible_instances",
+                VISIBILITY_SCATTER_DEVICE_ENTRY_POINT,
+                compile_visibility_scatter_wgsl().unwrap(),
+            ),
+        ] {
+            assert!(!source.contains("#import"));
+            assert!(!source.contains("#define_import_path"));
+            assert!(source.contains(source_entry));
+            let module = naga::front::wgsl::parse_str(&source).unwrap();
+            assert_eq!(
+                module
+                    .entry_points
+                    .iter()
+                    .map(|entry| entry.name.as_str())
+                    .collect::<Vec<_>>(),
+                [device_entry],
+            );
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::empty(),
+            )
+            .validate(&module)
+            .unwrap();
+        }
+    }
+
+    #[test]
     fn compile_vertex_shader_to_glsl() {
         let glsl = compile_vertex_glsl();
         assert!(glsl.is_ok(), "vertex shader failed: {:?}", glsl.err());
         let code = glsl.unwrap();
-        assert!(code.contains("#version 300 es"), "should target GLSL ES 300");
+        assert!(
+            code.contains("#version 300 es"),
+            "should target GLSL ES 300"
+        );
         assert!(code.contains("void main()"), "should have main()");
     }
 
@@ -542,7 +752,10 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
         let glsl = compile_fragment_glsl("matcap");
         assert!(glsl.is_ok(), "matcap fragment failed: {:?}", glsl.err());
         let code = glsl.unwrap();
-        assert!(code.contains("#version 300 es"), "should target GLSL ES 300");
+        assert!(
+            code.contains("#version 300 es"),
+            "should target GLSL ES 300"
+        );
     }
 
     #[test]
@@ -562,11 +775,20 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
         let glsl = compile_fragment_glsl("pbr");
         assert!(glsl.is_ok(), "pbr fragment failed: {:?}", glsl.err());
         let code = glsl.unwrap();
-        assert!(code.contains("#version 300 es"), "should target GLSL ES 300");
+        assert!(
+            code.contains("#version 300 es"),
+            "should target GLSL ES 300"
+        );
         // Verify all 5 PBR texture samplers are present
-        assert!(code.contains("sampler2D"), "PBR should have sampler2D uniforms");
+        assert!(
+            code.contains("sampler2D"),
+            "PBR should have sampler2D uniforms"
+        );
         // Verify the PBR UBO block is present
-        assert!(code.contains("PbrUniforms"), "PBR should have PbrUniforms UBO");
+        assert!(
+            code.contains("PbrUniforms"),
+            "PBR should have PbrUniforms UBO"
+        );
     }
 
     #[test]
