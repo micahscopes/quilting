@@ -417,6 +417,77 @@ Leptos-enabled WASM target checks and generated-export smoke pass. Chrome
 reported no warnings or errors; the temporary horse and chess tabs were
 closed, and the user's chess tab and both user-run servers were untouched.
 
+## Exact neighborhood overlay and triangle budget
+
+The next checkpoint extends the comparison through the actual retained render
+transaction. `group_resident_screen_neighborhood_overlay_into` extracts only
+the mutable neighborhood leaves, while fixed observer roots max-compose their
+already-published baseline vertex densities. It rejects a fixed dyadic leaf
+rather than silently replacing retained topology. The shadow compares:
+
+- the complete plan fields described above;
+- the exact set of suppressed baseline roots;
+- ordered sparse overlay groups and their batch keys;
+- every referenced resident atlas topology; and
+- `baseline - suppressed + overlay` against the complete rendered triangle
+  budget.
+
+A focused core regression uses three connected faces: one selected root, one
+fixed observer, and one retained outside face that contributes a larger outer
+corner maximum. The raw component overlay is deliberately unequal to the
+complete result; baseline-composed neighborhood extraction is exactly equal.
+This prevents a passing shadow from depending on the outside face happening to
+have a low resident corner density.
+
+One paused horse comparison used 345 reconciliation faces and 559 observed
+faces. The complete and bounded overlays both rendered 1,160 triangles. The
+overlay extraction took 0.4 ms, the complete local proof took 20.4 ms, and the
+same-epoch complete path took 25.6 ms. The horse was then animated for 194
+epochs:
+
+| Animated horse result | Value |
+| --- | ---: |
+| Matches / attempts | 194 / 194 |
+| Plan / overlay / triangle-budget mismatches | 0 / 0 / 0 |
+| Boundary escapes / failures | 0 / 0 |
+| Terminal reconciliation / observed faces | 345 / 559 |
+| Terminal composed / complete triangles | 1,094 / 1,094 |
+| Terminal overlay / bounded proof / complete path | 0.3 / 2.4 / 3.5 ms |
+
+The pathological skinny inverted chess view retained the intended separation:
+
+| Skinny chess term | Value |
+| --- | ---: |
+| Source / complete leaves | 94,628 / 94,754 |
+| Reconciliation / observed / local leaves | 341 / 505 / 631 |
+| Raw / composed corner mismatches | 8 / 0 |
+| Baseline triangles | 204,456 |
+| Suppressed root triangles | 11,732 |
+| Sparse overlay triangles | 31,386 |
+| Composed / complete triangles | 224,110 / 224,110 |
+| Cold bounded proof / complete path | 81.3 / 689.2 ms |
+
+Three repeated comparisons were exact and reused both frontier and
+reconciliation state. The final warm bounded proof took 49.6 ms versus 68.0 ms
+for the complete path, including 1.0 ms for sparse overlay extraction. The
+broad inverted-board view used 210 reconciliation faces, 276 observed/local
+leaves, and no replacement overlay because its 476,704-triangle baseline was
+already exact. Its bounded proof took 33.0 ms versus 295.7 ms for the complete
+path.
+
+All horse and chess comparisons matched suppression, ordered overlay groups,
+atlas residency, and triangle budgets, with zero boundary escapes or failures.
+The 220 core unit tests, 15 conformal integration tests, 19 WASM runtime tests,
+normal and Leptos-enabled WASM target checks, and generated-export smoke pass.
+Both disposable Chrome consoles were clean. Those tabs were closed after the
+measurements; the user's chess tab and both user-run servers were untouched.
+
+The implementation still has no neighborhood publication authority. Full
+overlay equality is now strong enough for the next deliberately reversible
+gate: publish the neighborhood result only after same-epoch complete-oracle
+equality, retain the complete transaction as fallback, and compare final image
+output before allowing certified epochs to skip the oracle.
+
 ## Decision
 
 The exact component overlay now has physical publication authority. Unchanged
@@ -426,8 +497,9 @@ order-sensitive, uncertified, revoked, or failed candidates retain the complete
 transactional path. Whole-scene and oversized closures are expected policy
 outcomes rather than false failures. Component identity and size are already
 preindexed, so another ineligibility cache is unwarranted. Fixed-boundary
-neighborhood planning, resident edges, and baseline-composed corners now match
-the complete oracle in the initial static and animated gates. The next gate is
-exact sparse neighborhood overlay membership, atlas residency, and triangle
-budget, followed by sustained camera/inversion sampling, before any local
-publication authority is considered.
+neighborhood planning, resident edges, baseline-composed corners, sparse
+overlay membership, atlas residency, and triangle budgets now match the
+complete oracle across the initial static, animated, camera, and inversion
+gates. The next gate is same-epoch exact physical publication with the complete
+transaction retained as fallback, followed by image equivalence and sustained
+sampling. Only then may certified neighborhood epochs skip the complete path.
