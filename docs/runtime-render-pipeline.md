@@ -329,6 +329,22 @@ into a shared scene or command model.
 6. Move PBR material binding and postprocess resources behind backend-specific
    implementations after the geometry path is equivalent.
 
+The CPU oracle for steps 3–4 is now frozen in
+`quilting_core::render::VisibilityCompactionPlan`. It consumes one binary
+current-pose visibility entry per flattened canonical batch member, removes
+disabled instances and suppressed retained roots, preserves visible adaptive
+replacements, and emits stable survivor source IDs plus one range per
+`RenderBatchKey`. `IndexedIndirectArguments` is the exact 20-byte, five-word
+indexed-indirect ABI. Its `first_instance` addresses the compacted survivor-ID
+stream; `first_index` and `base_vertex` remain zero while each batch binds its
+own canonical atlas entry and may later be patched by a packed-atlas backend.
+
+Core tests freeze stable order, zero-instance buckets, retained-root/overlay
+replacement, malformed visibility rejection, stale scene revisions, batch
+shape validation, and ABI size/alignment. This is a conformance oracle, not a
+WebGPU implementation: no `wgpu` device or storage buffer has been introduced,
+and WebGL2 continues to use current-pose degenerate-vertex rejection.
+
 The old JavaScript renderer's useful idea was memoizing tessellation topology
 and prepared meshes. The retained atlas, versioned browser cache, and stable
 batch buffers already implement that principle more completely. Per-patch regl
