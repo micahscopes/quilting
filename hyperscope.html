@@ -409,6 +409,7 @@ import init, {
   mr_setAdaptivePickedFace, mr_setAdaptiveCurrentView,
   mr_setAdaptiveRetainedShadowEnabled,
   mr_setAdaptiveComponentShadowEnabled,
+  mr_setAdaptiveNeighborhoodShadowEnabled,
   mr_setAdaptiveComponentPublicationEnabled,
   mr_setAdaptiveRetainedPublicationEnabled,
   mr_clearAdaptivePickedFace, mr_refreshAdaptivePicked,
@@ -1069,6 +1070,16 @@ const adaptivePickedDiagnostics = {
       return { ok: false, error: 'Wait for the current LOD classification before changing component shadow mode' };
     }
     this.snapshot = mr_setAdaptiveComponentShadowEnabled(Boolean(enabled));
+    if (enabled && this.snapshot?.enabled && this.snapshot?.transitionPending) {
+      this.snapshot = mr_refreshAdaptivePicked();
+    }
+    return this.snapshot;
+  },
+  setNeighborhoodShadow(enabled = true) {
+    if (lodInFlight) {
+      return { ok: false, error: 'Wait for the current LOD classification before changing neighborhood shadow mode' };
+    }
+    this.snapshot = mr_setAdaptiveNeighborhoodShadowEnabled(Boolean(enabled));
     if (enabled && this.snapshot?.enabled && this.snapshot?.transitionPending) {
       this.snapshot = mr_refreshAdaptivePicked();
     }

@@ -3801,6 +3801,7 @@ fn apply_adaptive_screen_plan(
             viewport,
             pose_stamp,
             requested_face_lods,
+            resident_face_lods,
             initial,
             topology,
             max_atlas_lod,
@@ -3963,6 +3964,31 @@ pub fn mr_set_adaptive_component_shadow_enabled(enabled: bool) -> JsValue {
         match state
             .adaptive_picked
             .set_component_shadow_enabled(enabled)
+        {
+            Ok(changed) => {
+                if changed && enabled && state.adaptive_picked.is_enabled() {
+                    state.adaptive_batch_transition_pending = true;
+                }
+                adaptive_picked_snapshot_js(state, None)
+            }
+            Err(error) => adaptive_screen_diagnostic_error(error),
+        }
+    })
+}
+
+/// Compare a statically bounded edge neighborhood plus fixed observer roots
+/// against the complete adaptive oracle. This read-only mode always keeps the
+/// complete plan in the same epoch and never changes GPU publication.
+#[wasm_bindgen(js_name = "mr_setAdaptiveNeighborhoodShadowEnabled")]
+pub fn mr_set_adaptive_neighborhood_shadow_enabled(enabled: bool) -> JsValue {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return JsValue::NULL;
+        };
+        match state
+            .adaptive_picked
+            .set_neighborhood_shadow_enabled(enabled)
         {
             Ok(changed) => {
                 if changed && enabled && state.adaptive_picked.is_enabled() {

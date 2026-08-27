@@ -27,10 +27,10 @@ use quilting_core::screen_partition::{
 };
 use quilting_core::screen_plan::{
     inherited_source_edge_lods, plan_adaptive_screen_components_into,
-    plan_adaptive_screen_mesh_into, AdaptiveScreenComponentPlan,
-    AdaptiveScreenFaceSelectionDiagnostic, AdaptiveScreenMeshPlan,
-    AdaptiveScreenMeshPlanDiagnostic, AdaptiveScreenMeshPlanRequest, PickedScreenMeshPlanError,
-    SelectedScreenPatch,
+    plan_adaptive_screen_mesh_into, plan_adaptive_screen_neighborhood_into,
+    AdaptiveScreenComponentPlan, AdaptiveScreenFaceSelectionDiagnostic, AdaptiveScreenMeshPlan,
+    AdaptiveScreenMeshPlanDiagnostic, AdaptiveScreenMeshPlanRequest,
+    AdaptiveScreenNeighborhoodPlan, PickedScreenMeshPlanError, SelectedScreenPatch,
 };
 use serde::Serialize;
 
@@ -311,6 +311,7 @@ pub(crate) struct AdaptivePickedRuntime {
     group_cache_misses: u64,
     last_timings: AdaptivePlanTimings,
     component_shadow: AdaptiveComponentShadow,
+    neighborhood_shadow: AdaptiveNeighborhoodShadow,
     component_publication_enabled: bool,
     pending_component_shadow_staged: bool,
     pending_component_publication: bool,
@@ -418,6 +419,19 @@ pub(crate) struct AdaptivePickedSnapshot<'a> {
     component_authority_changed_installs: u64,
     component_shadow_last_error: Option<&'a str>,
     component_shadow_last: Option<AdaptiveComponentShadowComparison>,
+    neighborhood_shadow_enabled: bool,
+    neighborhood_shadow_state: &'static str,
+    neighborhood_shadow_attempts: u64,
+    neighborhood_shadow_matches: u64,
+    neighborhood_shadow_mismatches: u64,
+    neighborhood_shadow_boundary_escapes: u64,
+    neighborhood_shadow_failures: u64,
+    neighborhood_shadow_frontier_cache_hits: u64,
+    neighborhood_shadow_frontier_cache_misses: u64,
+    neighborhood_shadow_reconciliation_cache_hits: u64,
+    neighborhood_shadow_reconciliation_cache_misses: u64,
+    neighborhood_shadow_last_error: Option<&'a str>,
+    neighborhood_shadow_last: Option<AdaptiveNeighborhoodShadowComparison>,
     component_publication_enabled: bool,
     component_publication_state: &'static str,
     component_publication_installs: u64,
@@ -524,6 +538,411 @@ struct AdaptivePlanTimings {
     reconcile_ms: f64,
     atlas_work_ms: f64,
     group_ms: f64,
+}
+
+/// Read-only evidence from one bounded neighborhood against the complete
+/// adaptive mesh oracle. Observer roots deliberately inherit the already
+/// reconciled baseline, so request equality is required only for mutable
+/// leaves; topology, residents, and physical corner LoDs must all be exact.
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdaptiveNeighborhoodShadowComparison {
+    source_faces: u64,
+    edge_hops: u32,
+    reconciliation_faces: u64,
+    observed_faces: u64,
+    fixed_leaves: u64,
+    complete_leaves: u64,
+    neighborhood_leaves: u64,
+    frontier_reused: bool,
+    reconciliation_reused: bool,
+    diagnostic_match: bool,
+    selected_faces_match: bool,
+    leaf_mismatches: u64,
+    request_mismatches: u64,
+    resident_mismatches: u64,
+    vertex_mismatches: u64,
+    boundary_escape: bool,
+    exact: bool,
+    plan_ms: f64,
+    frontier_ms: f64,
+    reconcile_ms: f64,
+    compare_ms: f64,
+    total_ms: f64,
+}
+
+#[derive(Default)]
+struct AdaptiveNeighborhoodReconciliationCache {
+    requested_lods: Vec<[u32; 3]>,
+    fixed_leaves: Vec<bool>,
+    max_face_edge_ratio: u32,
+    max_atlas_lod: u32,
+    result: Option<ScreenLeafLodResult>,
+    hits: u64,
+    misses: u64,
+}
+
+impl AdaptiveNeighborhoodReconciliationCache {
+    fn invalidate(&mut self) {
+        self.requested_lods.clear();
+        self.fixed_leaves.clear();
+        self.result = None;
+    }
+
+    fn resolve<'a>(
+        &'a mut self,
+        frontier: &ScreenMeshLeafFrontier,
+        requested_lods: &[[u32; 3]],
+        fixed_leaves: &[bool],
+        max_face_edge_ratio: u32,
+        max_atlas_lod: u32,
+    ) -> Result<(&'a ScreenLeafLodResult, bool), ScreenLeafLodError> {
+        let reused = self.result.is_some()
+            && self.max_face_edge_ratio == max_face_edge_ratio
+            && self.max_atlas_lod == max_atlas_lod
+            && self.requested_lods == requested_lods
+            && self.fixed_leaves == fixed_leaves;
+        if reused {
+            self.hits = self.hits.saturating_add(1);
+        } else {
+            let result = frontier.reconcile_lods_with_fixed_boundary(
+                requested_lods,
+                fixed_leaves,
+                max_face_edge_ratio,
+                max_atlas_lod,
+            )?;
+            self.requested_lods.clear();
+            self.requested_lods.extend_from_slice(requested_lods);
+            self.fixed_leaves.clear();
+            self.fixed_leaves.extend_from_slice(fixed_leaves);
+            self.max_face_edge_ratio = max_face_edge_ratio;
+            self.max_atlas_lod = max_atlas_lod;
+            self.result = Some(result);
+            self.misses = self.misses.saturating_add(1);
+        }
+        Ok((
+            self.result
+                .as_ref()
+                .expect("adaptive neighborhood reconciliation result"),
+            reused,
+        ))
+    }
+}
+
+/// Disabled-by-default bounded recomputation observer. This owns no render
+/// authority: every successfully staged candidate forces the complete oracle
+/// to run in the same epoch before a match can be recorded.
+#[derive(Default)]
+struct AdaptiveNeighborhoodShadow {
+    enabled: bool,
+    attempts: u64,
+    matches: u64,
+    mismatches: u64,
+    boundary_escapes: u64,
+    failures: u64,
+    last_error: Option<String>,
+    last: Option<AdaptiveNeighborhoodShadowComparison>,
+    plan: AdaptiveScreenNeighborhoodPlan,
+    baseline_lods: Vec<[u32; 3]>,
+    frontier: Option<ScreenMeshLeafFrontier>,
+    frontier_cache_hits: u64,
+    frontier_cache_misses: u64,
+    reconciliation_cache: AdaptiveNeighborhoodReconciliationCache,
+    complete_lod_scratch: ScreenMeshLeafLodScratch,
+    neighborhood_lod_scratch: ScreenMeshLeafLodScratch,
+}
+
+fn adaptive_neighborhood_edge_hops(max_face_edge_ratio: u32, max_atlas_lod: u32) -> u32 {
+    let ratio = max_face_edge_ratio.max(2);
+    let mut reach = 1u32;
+    let mut hops = 0u32;
+    while reach < max_atlas_lod {
+        reach = reach.saturating_mul(ratio);
+        hops = hops.saturating_add(1);
+    }
+    hops
+}
+
+impl AdaptiveNeighborhoodShadow {
+    fn set_enabled(&mut self, enabled: bool) -> bool {
+        let changed = self.enabled != enabled;
+        self.enabled = enabled;
+        if changed {
+            self.last_error = None;
+            self.last = None;
+            self.frontier = None;
+            self.frontier_cache_hits = 0;
+            self.frontier_cache_misses = 0;
+            self.reconciliation_cache = AdaptiveNeighborhoodReconciliationCache::default();
+        }
+        changed
+    }
+
+    fn state(&self) -> &'static str {
+        if !self.enabled {
+            "disabled"
+        } else if self.last.as_ref().is_some_and(|last| last.boundary_escape) {
+            "boundary-escape"
+        } else if self.last_error.is_some() {
+            "error"
+        } else if self.last.as_ref().is_some_and(|last| last.exact) {
+            "match"
+        } else if self.last.is_some() {
+            "mismatch"
+        } else {
+            "awaiting-plan"
+        }
+    }
+
+    fn stage_plan(
+        &mut self,
+        request: AdaptiveScreenMeshPlanRequest<'_>,
+        topology: &ScreenMeshTopologyCache,
+        baseline_residents: &[Option<ResidentLod>],
+        standby: ResidentLod,
+        max_face_edge_ratio: u32,
+        max_atlas_lod: u32,
+    ) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        self.attempts = self.attempts.saturating_add(1);
+        self.last_error = None;
+        self.last = None;
+        let total_start = browser_now_ms();
+        self.baseline_lods.clear();
+        self.baseline_lods.extend(
+            baseline_residents
+                .iter()
+                .map(|resident| resident.unwrap_or(standby).edge_lods()),
+        );
+        let edge_hops = adaptive_neighborhood_edge_hops(max_face_edge_ratio, max_atlas_lod);
+        let plan_start = browser_now_ms();
+        if let Err(error) = plan_adaptive_screen_neighborhood_into(
+            request,
+            topology,
+            edge_hops,
+            request.source_requested_lods.len(),
+            &self.baseline_lods,
+            &mut self.plan,
+        ) {
+            self.failures = self.failures.saturating_add(1);
+            self.last_error = Some(error.to_string());
+            return false;
+        }
+        let plan_ms = browser_now_ms() - plan_start;
+        let frontier_start = browser_now_ms();
+        let frontier_reused = self
+            .frontier
+            .as_ref()
+            .is_some_and(|frontier| frontier.leaves() == self.plan.mesh.leaves.as_slice());
+        if frontier_reused {
+            self.frontier_cache_hits = self.frontier_cache_hits.saturating_add(1);
+        } else {
+            match ScreenMeshLeafFrontier::build(&self.plan.mesh.leaves, topology) {
+                Ok(frontier) => {
+                    self.frontier = Some(frontier);
+                    self.reconciliation_cache.invalidate();
+                    self.frontier_cache_misses = self.frontier_cache_misses.saturating_add(1);
+                }
+                Err(error) => {
+                    self.failures = self.failures.saturating_add(1);
+                    self.last_error = Some(error.to_string());
+                    return false;
+                }
+            }
+        }
+        let frontier_ms = browser_now_ms() - frontier_start;
+        let Some(frontier) = self.frontier.as_ref() else {
+            self.failures = self.failures.saturating_add(1);
+            self.last_error = Some("adaptive neighborhood frontier disappeared".into());
+            return false;
+        };
+        let reconcile_start = browser_now_ms();
+        let reconciliation_reused = match self.reconciliation_cache.resolve(
+            frontier,
+            &self.plan.mesh.requested_lods,
+            &self.plan.fixed_leaves,
+            max_face_edge_ratio,
+            max_atlas_lod,
+        ) {
+            Ok((_, reused)) => reused,
+            Err(error @ ScreenLeafLodError::FixedBoundaryPromotion { .. }) => {
+                self.boundary_escapes = self.boundary_escapes.saturating_add(1);
+                self.last_error = Some(error.to_string());
+                self.last = Some(AdaptiveNeighborhoodShadowComparison {
+                    source_faces: request.source_requested_lods.len() as u64,
+                    edge_hops,
+                    reconciliation_faces: self.plan.reconciliation_faces.len() as u64,
+                    observed_faces: self.plan.observed_faces.len() as u64,
+                    fixed_leaves: self
+                        .plan
+                        .fixed_leaves
+                        .iter()
+                        .filter(|&&fixed| fixed)
+                        .count() as u64,
+                    neighborhood_leaves: self.plan.mesh.leaves.len() as u64,
+                    boundary_escape: true,
+                    plan_ms,
+                    frontier_ms,
+                    reconcile_ms: browser_now_ms() - reconcile_start,
+                    total_ms: browser_now_ms() - total_start,
+                    ..AdaptiveNeighborhoodShadowComparison::default()
+                });
+                return false;
+            }
+            Err(error) => {
+                self.failures = self.failures.saturating_add(1);
+                self.last_error = Some(error.to_string());
+                return false;
+            }
+        };
+        let reconcile_ms = browser_now_ms() - reconcile_start;
+        self.last = Some(AdaptiveNeighborhoodShadowComparison {
+            source_faces: request.source_requested_lods.len() as u64,
+            edge_hops,
+            reconciliation_faces: self.plan.reconciliation_faces.len() as u64,
+            observed_faces: self.plan.observed_faces.len() as u64,
+            fixed_leaves: self
+                .plan
+                .fixed_leaves
+                .iter()
+                .filter(|&&fixed| fixed)
+                .count() as u64,
+            neighborhood_leaves: self.plan.mesh.leaves.len() as u64,
+            frontier_reused,
+            reconciliation_reused,
+            plan_ms,
+            frontier_ms,
+            reconcile_ms,
+            total_ms: browser_now_ms() - total_start,
+            ..AdaptiveNeighborhoodShadowComparison::default()
+        });
+        true
+    }
+
+    fn compare_complete(
+        &mut self,
+        complete_plan: &AdaptiveScreenMeshPlan,
+        complete_frontier: &ScreenMeshLeafFrontier,
+        complete_resident: &ScreenLeafLodResult,
+    ) {
+        let Some(comparison) = self.last.as_mut() else {
+            return;
+        };
+        if comparison.boundary_escape {
+            return;
+        }
+        let Some(frontier) = self.frontier.as_ref() else {
+            self.failures = self.failures.saturating_add(1);
+            self.last_error = Some("adaptive neighborhood frontier disappeared".into());
+            return;
+        };
+        let Some(resident) = self.reconciliation_cache.result.as_ref() else {
+            self.failures = self.failures.saturating_add(1);
+            self.last_error = Some("adaptive neighborhood reconciliation disappeared".into());
+            return;
+        };
+        let compare_start = browser_now_ms();
+        let complete_vertices = match complete_frontier
+            .rebuild_vertex_lods_into(&complete_resident.resident, &mut self.complete_lod_scratch)
+        {
+            Ok(vertices) => vertices,
+            Err(error) => {
+                self.failures = self.failures.saturating_add(1);
+                self.last_error = Some(error.to_string());
+                return;
+            }
+        };
+        let neighborhood_vertices = match frontier
+            .rebuild_vertex_lods_into(&resident.resident, &mut self.neighborhood_lod_scratch)
+        {
+            Ok(vertices) => vertices,
+            Err(error) => {
+                self.failures = self.failures.saturating_add(1);
+                self.last_error = Some(error.to_string());
+                return;
+            }
+        };
+        let diagnostic_match = self.plan.mesh.diagnostic == complete_plan.diagnostic;
+        let selected_faces_match = self.plan.mesh.selected_faces == complete_plan.selected_faces;
+        let mut leaf_mismatches = 0usize;
+        let mut request_mismatches = 0usize;
+        let mut resident_mismatches = 0usize;
+        let mut vertex_mismatches = 0usize;
+        let mut neighborhood_index = 0usize;
+        for (complete_index, complete_leaf) in complete_plan.leaves.iter().copied().enumerate() {
+            if self
+                .plan
+                .observed_faces
+                .binary_search(&complete_leaf.source_face)
+                .is_err()
+            {
+                continue;
+            }
+            let neighborhood_leaf = self.plan.mesh.leaves.get(neighborhood_index).copied();
+            leaf_mismatches += usize::from(neighborhood_leaf != Some(complete_leaf));
+            let fixed = self
+                .plan
+                .fixed_leaves
+                .get(neighborhood_index)
+                .copied()
+                .unwrap_or(false);
+            if !fixed {
+                request_mismatches += usize::from(
+                    self.plan.mesh.requested_lods.get(neighborhood_index)
+                        != complete_plan.requested_lods.get(complete_index),
+                );
+            }
+            resident_mismatches += usize::from(
+                resident.resident.get(neighborhood_index)
+                    != complete_resident.resident.get(complete_index),
+            );
+            vertex_mismatches += usize::from(
+                neighborhood_vertices.get(neighborhood_index)
+                    != complete_vertices.get(complete_index),
+            );
+            neighborhood_index += 1;
+        }
+        let unvisited = self
+            .plan
+            .mesh
+            .leaves
+            .len()
+            .saturating_sub(neighborhood_index);
+        leaf_mismatches += unvisited;
+        request_mismatches += self
+            .plan
+            .fixed_leaves
+            .iter()
+            .skip(neighborhood_index)
+            .filter(|&&fixed| !fixed)
+            .count();
+        resident_mismatches += unvisited;
+        vertex_mismatches += unvisited;
+        let exact = diagnostic_match
+            && selected_faces_match
+            && leaf_mismatches == 0
+            && request_mismatches == 0
+            && resident_mismatches == 0
+            && vertex_mismatches == 0;
+        let compare_ms = browser_now_ms() - compare_start;
+        comparison.complete_leaves = complete_plan.leaves.len() as u64;
+        comparison.diagnostic_match = diagnostic_match;
+        comparison.selected_faces_match = selected_faces_match;
+        comparison.leaf_mismatches = leaf_mismatches as u64;
+        comparison.request_mismatches = request_mismatches as u64;
+        comparison.resident_mismatches = resident_mismatches as u64;
+        comparison.vertex_mismatches = vertex_mismatches as u64;
+        comparison.exact = exact;
+        comparison.compare_ms = compare_ms;
+        comparison.total_ms += compare_ms;
+        if exact {
+            self.matches = self.matches.saturating_add(1);
+        } else {
+            self.mismatches = self.mismatches.saturating_add(1);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
@@ -1387,6 +1806,7 @@ impl AdaptivePickedRuntime {
         self.group_cache_misses = 0;
         self.last_timings = AdaptivePlanTimings::default();
         self.component_shadow = AdaptiveComponentShadow::default();
+        self.neighborhood_shadow = AdaptiveNeighborhoodShadow::default();
         self.component_publication_enabled = false;
         self.pending_component_shadow_staged = false;
         self.pending_component_publication = false;
@@ -1482,6 +1902,19 @@ impl AdaptivePickedRuntime {
             self.set_retained_shadow_enabled(true)?;
         }
         Ok(self.component_shadow.set_enabled(enabled))
+    }
+
+    /// Toggle a read-only bounded-neighborhood oracle. This is intentionally
+    /// independent of component publication: a staged neighborhood forces the
+    /// complete plan to execute and never supplies live groups.
+    pub(crate) fn set_neighborhood_shadow_enabled(
+        &mut self,
+        enabled: bool,
+    ) -> Result<bool, String> {
+        if self.has_pending_publication() {
+            return Err("adaptive publication is already staged".into());
+        }
+        Ok(self.neighborhood_shadow.set_enabled(enabled))
     }
 
     pub(crate) fn set_component_publication_enabled(
@@ -2108,6 +2541,7 @@ impl AdaptivePickedRuntime {
         viewport: [f64; 2],
         current_pose_stamp: Option<(u32, u32)>,
         source_requests: &[Option<ResidentLod>],
+        baseline_residents: &[Option<ResidentLod>],
         standby: ResidentLod,
         topology: &ScreenMeshTopologyCache,
         max_atlas_lod: u32,
@@ -2137,6 +2571,7 @@ impl AdaptivePickedRuntime {
             viewport,
             current_pose_stamp,
             source_requests,
+            baseline_residents,
             standby,
             topology,
             max_atlas_lod,
@@ -2165,6 +2600,7 @@ impl AdaptivePickedRuntime {
         viewport: [f64; 2],
         current_pose_stamp: Option<(u32, u32)>,
         source_requests: &[Option<ResidentLod>],
+        baseline_residents: &[Option<ResidentLod>],
         standby: ResidentLod,
         topology: &ScreenMeshTopologyCache,
         max_atlas_lod: u32,
@@ -2212,6 +2648,14 @@ impl AdaptivePickedRuntime {
                 max_total_leaves: config.max_total_leaves,
                 source_requested_lods: &self.source_lod_scratch,
             };
+            let neighborhood_plan_staged = self.neighborhood_shadow.stage_plan(
+                plan_request,
+                topology,
+                baseline_residents,
+                standby,
+                max_face_edge_ratio,
+                max_atlas_lod,
+            );
             let (component_plan_staged, certified_component) =
                 match self.component_shadow.stage_plan(
                     plan_request,
@@ -2226,7 +2670,7 @@ impl AdaptivePickedRuntime {
                     Err(_) => (false, None),
                 };
             self.pending_component_shadow_staged = component_plan_staged;
-            if component_hot_path_allowed && component_plan_staged {
+            if component_hot_path_allowed && component_plan_staged && !neighborhood_plan_staged {
                 let reusable_certificate = certified_component.filter(
                     |certificate| {
                         published_groups_are_live
@@ -2398,6 +2842,10 @@ impl AdaptivePickedRuntime {
             if component_plan_staged {
                 self.component_shadow
                     .compare_staged_plan(plan, frontier, reconciled);
+            }
+            if neighborhood_plan_staged {
+                self.neighborhood_shadow
+                    .compare_complete(plan, frontier, reconciled);
             }
             let reconciliation = (
                 reconciled.shared_edge_promotions as u64,
@@ -2582,6 +3030,27 @@ impl AdaptivePickedRuntime {
             component_authority_changed_installs: self.component_authority_changed_installs,
             component_shadow_last_error: self.component_shadow.last_error.as_deref(),
             component_shadow_last: self.component_shadow.last,
+            neighborhood_shadow_enabled: self.neighborhood_shadow.enabled,
+            neighborhood_shadow_state: self.neighborhood_shadow.state(),
+            neighborhood_shadow_attempts: self.neighborhood_shadow.attempts,
+            neighborhood_shadow_matches: self.neighborhood_shadow.matches,
+            neighborhood_shadow_mismatches: self.neighborhood_shadow.mismatches,
+            neighborhood_shadow_boundary_escapes: self.neighborhood_shadow.boundary_escapes,
+            neighborhood_shadow_failures: self.neighborhood_shadow.failures,
+            neighborhood_shadow_frontier_cache_hits: self.neighborhood_shadow.frontier_cache_hits,
+            neighborhood_shadow_frontier_cache_misses: self
+                .neighborhood_shadow
+                .frontier_cache_misses,
+            neighborhood_shadow_reconciliation_cache_hits: self
+                .neighborhood_shadow
+                .reconciliation_cache
+                .hits,
+            neighborhood_shadow_reconciliation_cache_misses: self
+                .neighborhood_shadow
+                .reconciliation_cache
+                .misses,
+            neighborhood_shadow_last_error: self.neighborhood_shadow.last_error.as_deref(),
+            neighborhood_shadow_last: self.neighborhood_shadow.last,
             component_publication_enabled: self.component_publication_enabled,
             component_publication_state: self.component_publication_state(),
             component_publication_installs: self.component_publication_installs,
@@ -3083,6 +3552,7 @@ mod tests {
                     [640.0, 480.0],
                     Some(stamp),
                     &[Some(resident)],
+                    &[Some(resident)],
                     resident,
                     &topology,
                     1,
@@ -3293,6 +3763,7 @@ mod tests {
                 [640.0, 480.0],
                 Some((3, 1)),
                 &[Some(resident); 2],
+                &[Some(resident); 2],
                 resident,
                 &topology,
                 1,
@@ -3320,6 +3791,7 @@ mod tests {
             &IDENTITY,
             [640.0, 480.0],
             Some((4, 1)),
+            &[Some(resident); 2],
             &[Some(resident); 2],
             resident,
             &topology,
@@ -3363,6 +3835,7 @@ mod tests {
                 [640.0, 480.0],
                 Some((4, 1)),
                 &[Some(resident); 2],
+                &[Some(resident); 2],
                 resident,
                 &topology,
                 1,
@@ -3394,6 +3867,7 @@ mod tests {
                 [640.0, 480.0],
                 Some((5, 1)),
                 &[Some(resident); 2],
+                &[Some(resident); 2],
                 resident,
                 &topology,
                 1,
@@ -3417,6 +3891,14 @@ mod tests {
         assert_eq!(runtime.snapshot().group_cache_hits, 1);
         assert_eq!(runtime.snapshot().group_cache_misses, 2);
         runtime.commit_publication();
+    }
+
+    #[wasm_bindgen_test]
+    fn neighborhood_radius_covers_the_worst_grading_chain() {
+        assert_eq!(adaptive_neighborhood_edge_hops(2, 1), 0);
+        assert_eq!(adaptive_neighborhood_edge_hops(2, 64), 6);
+        assert_eq!(adaptive_neighborhood_edge_hops(4, 64), 3);
+        assert_eq!(adaptive_neighborhood_edge_hops(4, 256), 4);
     }
 
     #[wasm_bindgen_test]
@@ -3523,6 +4005,7 @@ mod tests {
                 &IDENTITY,
                 [640.0, 480.0],
                 Some((3, 1)),
+                &[Some(resident); 2],
                 &[Some(resident); 2],
                 resident,
                 &topology,
@@ -3634,6 +4117,7 @@ mod tests {
             max_triangles: 6,
         });
         runtime.set_component_publication_enabled(true).unwrap();
+        runtime.set_neighborhood_shadow_enabled(true).unwrap();
         assert_eq!(
             runtime.set_retained_shadow_enabled(false).unwrap_err(),
             "adaptive component shadow requires retained overlay shadow",
@@ -3647,6 +4131,7 @@ mod tests {
                 &IDENTITY,
                 [640.0, 480.0],
                 Some((3, 1)),
+                &[Some(resident); 3],
                 &[Some(resident); 3],
                 resident,
                 &topology,
@@ -3710,8 +4195,32 @@ mod tests {
         assert_eq!(comparison.complete_triangles, 6);
         assert!(comparison.triangle_budget_match);
         assert!(comparison.exact);
+        assert!(snapshot.neighborhood_shadow_enabled);
+        assert_eq!(snapshot.neighborhood_shadow_state, "match");
+        assert_eq!(snapshot.neighborhood_shadow_attempts, 1);
+        assert_eq!(snapshot.neighborhood_shadow_matches, 1);
+        assert_eq!(snapshot.neighborhood_shadow_mismatches, 0);
+        assert_eq!(snapshot.neighborhood_shadow_boundary_escapes, 0);
+        assert_eq!(snapshot.neighborhood_shadow_failures, 0);
+        assert_eq!(snapshot.neighborhood_shadow_last_error, None);
+        let neighborhood = snapshot.neighborhood_shadow_last.unwrap();
+        assert_eq!(neighborhood.source_faces, 3);
+        assert_eq!(neighborhood.edge_hops, 0);
+        assert_eq!(neighborhood.reconciliation_faces, 1);
+        assert_eq!(neighborhood.observed_faces, 2);
+        assert_eq!(neighborhood.fixed_leaves, 1);
+        assert_eq!(neighborhood.complete_leaves, 6);
+        assert_eq!(neighborhood.neighborhood_leaves, 5);
+        assert!(neighborhood.diagnostic_match);
+        assert!(neighborhood.selected_faces_match);
+        assert_eq!(neighborhood.leaf_mismatches, 0);
+        assert_eq!(neighborhood.request_mismatches, 0);
+        assert_eq!(neighborhood.resident_mismatches, 0);
+        assert_eq!(neighborhood.vertex_mismatches, 0);
+        assert!(neighborhood.exact);
 
         runtime.commit_publication();
+        runtime.set_neighborhood_shadow_enabled(false).unwrap();
         let published = runtime.snapshot();
         assert_eq!(published.component_publication_state, "active");
         assert_eq!(published.component_publication_installs, 1);
@@ -3723,6 +4232,7 @@ mod tests {
                 &IDENTITY,
                 [640.0, 480.0],
                 Some((4, 1)),
+                &[Some(resident); 3],
                 &[Some(resident); 3],
                 resident,
                 &topology,
@@ -3793,6 +4303,7 @@ mod tests {
                 &IDENTITY,
                 [640.0, 480.0],
                 Some((5, 1)),
+                &[Some(resident); 3],
                 &[Some(resident); 3],
                 resident,
                 &topology,
@@ -3882,6 +4393,7 @@ mod tests {
                 &IDENTITY,
                 [640.0, 480.0],
                 Some((5, 1)),
+                &[Some(resident); 3],
                 &[Some(resident); 3],
                 resident,
                 &topology,
@@ -3994,6 +4506,7 @@ mod tests {
                 &PERSPECTIVE,
                 [1600.0, 900.0],
                 Some((1, 0)),
+                &[Some(resident); 2],
                 &[Some(resident); 2],
                 resident,
                 &topology,
