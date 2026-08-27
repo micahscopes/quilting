@@ -17,7 +17,7 @@ use quilting_core::batch::{
 use quilting_core::patch::{QBPatchDomain, QBTriPatch};
 use quilting_core::permutation::canonical_form;
 use quilting_core::screen_leaf_lod::{
-    reconcile_screen_leaf_lods, ScreenLeafLodResult, ScreenLeafTopology,
+    reconcile_screen_leaf_lods, ScreenLeafLodError, ScreenLeafLodResult, ScreenLeafTopology,
     ScreenMeshLeafFrontier, ScreenMeshLeafLodScratch, ScreenMeshLeafTopology,
     ScreenMeshTopologyCache,
 };
@@ -29,7 +29,8 @@ use quilting_core::screen_plan::{
     inherited_source_edge_lods, plan_adaptive_screen_components_into,
     plan_adaptive_screen_mesh_into, AdaptiveScreenComponentPlan,
     AdaptiveScreenFaceSelectionDiagnostic, AdaptiveScreenMeshPlan,
-    AdaptiveScreenMeshPlanDiagnostic, AdaptiveScreenMeshPlanRequest, SelectedScreenPatch,
+    AdaptiveScreenMeshPlanDiagnostic, AdaptiveScreenMeshPlanRequest, PickedScreenMeshPlanError,
+    SelectedScreenPatch,
 };
 use serde::Serialize;
 
@@ -311,6 +312,7 @@ pub(crate) struct AdaptivePickedRuntime {
     last_timings: AdaptivePlanTimings,
     component_shadow: AdaptiveComponentShadow,
     component_publication_enabled: bool,
+    pending_component_shadow_staged: bool,
     pending_component_publication: bool,
     pending_component_authority: bool,
     published_component_publication: bool,
@@ -410,6 +412,8 @@ pub(crate) struct AdaptivePickedSnapshot<'a> {
     component_authority_oracle_skips: u64,
     component_authority_sample_age: u64,
     component_authority_revoked: bool,
+    component_authority_ineligible_attempts: u64,
+    component_authority_last_ineligible: Option<&'a str>,
     component_authority_revocations: u64,
     component_authority_changed_installs: u64,
     component_shadow_last_error: Option<&'a str>,
@@ -433,6 +437,17 @@ pub(crate) struct AdaptivePickedSnapshot<'a> {
 const COMPONENT_AUTHORITY_ORACLE_INTERVAL: u64 = 16;
 const COMPONENT_AUTHORITY_MAX_FACES: usize = 4_096;
 const COMPONENT_AUTHORITY_LARGE_SCENE_FRACTION: usize = 4;
+
+fn component_authority_face_limit(source_faces: usize) -> usize {
+    let non_whole_scene = source_faces.saturating_sub(1);
+    if source_faces > COMPONENT_AUTHORITY_MAX_FACES {
+        non_whole_scene
+            .min(COMPONENT_AUTHORITY_MAX_FACES)
+            .min(source_faces / COMPONENT_AUTHORITY_LARGE_SCENE_FRACTION)
+    } else {
+        non_whole_scene.min(COMPONENT_AUTHORITY_MAX_FACES)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AdaptiveGroupAuthority {
@@ -571,6 +586,12 @@ struct AdaptiveChangedComponentAuthority {
     reconciliation: AdaptiveReconciliationDiagnostic,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum AdaptiveComponentStage {
+    Ineligible,
+    Staged(Option<AdaptiveCertifiedComponent>),
+}
+
 #[derive(Clone, Debug)]
 struct AdaptiveComponentCertificate {
     stage_signature: AdaptiveComponentStageSignature,
@@ -608,6 +629,8 @@ struct AdaptiveComponentShadow {
     authority_oracle_samples: u64,
     authority_oracle_skips: u64,
     authority_revocations: u64,
+    authority_ineligible_attempts: u64,
+    authority_last_ineligible: Option<String>,
 }
 
 impl AdaptiveComponentShadow {
@@ -632,6 +655,8 @@ impl AdaptiveComponentShadow {
             self.authority_oracle_samples = 0;
             self.authority_oracle_skips = 0;
             self.authority_revocations = 0;
+            self.authority_ineligible_attempts = 0;
+            self.authority_last_ineligible = None;
         }
         changed
     }
@@ -641,6 +666,8 @@ impl AdaptiveComponentShadow {
             "disabled"
         } else if self.last_error.is_some() {
             "error"
+        } else if self.authority_last_ineligible.is_some() {
+            "ineligible"
         } else if self
             .last
             .is_some_and(|comparison| {
@@ -725,12 +752,7 @@ impl AdaptiveComponentShadow {
         let source_faces = self.plan.mesh.diagnostic.source_faces as usize;
         let component_faces = self.plan.component_faces.len();
         let bounded = component_faces != 0
-            && component_faces < source_faces
-            && component_faces <= COMPONENT_AUTHORITY_MAX_FACES
-            && (source_faces <= COMPONENT_AUTHORITY_MAX_FACES
-                || component_faces
-                    .checked_mul(COMPONENT_AUTHORITY_LARGE_SCENE_FRACTION)
-                    .is_some_and(|weighted| weighted <= source_faces));
+            && component_faces <= component_authority_face_limit(source_faces);
         if !bounded {
             return Ok(None);
         }
@@ -772,22 +794,34 @@ impl AdaptiveComponentShadow {
         max_atlas_lod: u32,
         root_topology_revision: u64,
         batch_layout_revision: u64,
-    ) -> Result<Option<AdaptiveCertifiedComponent>, String> {
+    ) -> Result<AdaptiveComponentStage, String> {
         if !self.enabled {
-            return Ok(None);
+            return Ok(AdaptiveComponentStage::Ineligible);
         }
         self.attempts = self.attempts.saturating_add(1);
         self.last_error = None;
         self.last = None;
         self.staged_signature = None;
+        self.authority_last_ineligible = None;
         let total_start = browser_now_ms();
         let plan_start = browser_now_ms();
         if let Err(error) = plan_adaptive_screen_components_into(
             request,
             topology,
-            request.source_requested_lods.len(),
+            component_authority_face_limit(request.source_requested_lods.len()),
             &mut self.plan,
         ) {
+            if let PickedScreenMeshPlanError::ComponentClosure(
+                ScreenLeafLodError::ComponentClosureBudgetExceeded { required, maximum },
+            ) = error
+            {
+                self.authority_ineligible_attempts =
+                    self.authority_ineligible_attempts.saturating_add(1);
+                self.authority_last_ineligible = Some(format!(
+                    "component closure needs {required} faces; authority limit is {maximum}",
+                ));
+                return Ok(AdaptiveComponentStage::Ineligible);
+            }
             self.mismatches = self.mismatches.saturating_add(1);
             self.last_error = Some(error.to_string());
             return Err(error.to_string());
@@ -902,7 +936,7 @@ impl AdaptiveComponentShadow {
             overlay_ms: 0.0,
             total_ms: browser_now_ms() - total_start,
         });
-        Ok(certified_values)
+        Ok(AdaptiveComponentStage::Staged(certified_values))
     }
 
     fn compare_staged_plan(
@@ -1354,6 +1388,7 @@ impl AdaptivePickedRuntime {
         self.last_timings = AdaptivePlanTimings::default();
         self.component_shadow = AdaptiveComponentShadow::default();
         self.component_publication_enabled = false;
+        self.pending_component_shadow_staged = false;
         self.pending_component_publication = false;
         self.pending_component_authority = false;
         self.published_component_publication = false;
@@ -1461,6 +1496,7 @@ impl AdaptivePickedRuntime {
         }
         let changed = self.component_publication_enabled != enabled;
         self.component_publication_enabled = enabled;
+        self.pending_component_shadow_staged = false;
         self.pending_component_publication = false;
         self.pending_component_authority = false;
         self.component_publication_last_error = None;
@@ -1486,6 +1522,8 @@ impl AdaptivePickedRuntime {
             "active"
         } else if self.component_publication_last_error.is_some() {
             "complete-fallback"
+        } else if self.component_shadow.authority_last_ineligible.is_some() {
+            "complete-ineligible"
         } else {
             "awaiting-exact-component"
         }
@@ -1555,27 +1593,33 @@ impl AdaptivePickedRuntime {
             self.pending_overlay_reuses_published = true;
             self.retained_shadow_cache_hits = self.retained_shadow_cache_hits.saturating_add(1);
             self.last_retained_shadow_stage_ms = 0.0;
-            self.component_shadow.compare_overlay(
-                &self.published_overlay,
-                baseline_groups,
-                baseline_residents,
-                baseline_vertex_lods,
-                face_materials,
-                face_nodes,
-                face_render_nodes,
-                initial,
-                atlas_triangle_counts,
-                self.pending_triangles,
-                signature,
-                (
-                    self.pending_shared_edge_promotions,
-                    self.pending_grading_promotions,
-                    self.pending_reconciliation_iterations,
-                ),
-            );
+            if self.pending_component_shadow_staged {
+                self.component_shadow.compare_overlay(
+                    &self.published_overlay,
+                    baseline_groups,
+                    baseline_residents,
+                    baseline_vertex_lods,
+                    face_materials,
+                    face_nodes,
+                    face_render_nodes,
+                    initial,
+                    atlas_triangle_counts,
+                    self.pending_triangles,
+                    signature,
+                    (
+                        self.pending_shared_edge_promotions,
+                        self.pending_grading_promotions,
+                        self.pending_reconciliation_iterations,
+                    ),
+                );
+            }
             self.pending_component_publication = self.component_publication_enabled
+                && self.pending_component_shadow_staged
                 && self.published_component_publication;
-            if self.component_publication_enabled && !self.pending_component_publication {
+            if self.component_publication_enabled
+                && self.pending_component_shadow_staged
+                && !self.pending_component_publication
+            {
                 self.component_publication_fallbacks =
                     self.component_publication_fallbacks.saturating_add(1);
                 self.component_publication_last_error = Some(
@@ -1612,25 +1656,27 @@ impl AdaptivePickedRuntime {
         self.pending_overlay_reuses_published = false;
         self.retained_shadow_cache_misses = self.retained_shadow_cache_misses.saturating_add(1);
         self.last_retained_shadow_stage_ms = browser_now_ms() - stage_start;
-        self.component_shadow.compare_overlay(
-            &self.pending_overlay,
-            baseline_groups,
-            baseline_residents,
-            baseline_vertex_lods,
-            face_materials,
-            face_nodes,
-            face_render_nodes,
-            initial,
-            atlas_triangle_counts,
-            self.pending_triangles,
-            signature,
-            (
-                self.pending_shared_edge_promotions,
-                self.pending_grading_promotions,
-                self.pending_reconciliation_iterations,
-            ),
-        );
-        if self.component_publication_enabled {
+        if self.pending_component_shadow_staged {
+            self.component_shadow.compare_overlay(
+                &self.pending_overlay,
+                baseline_groups,
+                baseline_residents,
+                baseline_vertex_lods,
+                face_materials,
+                face_nodes,
+                face_render_nodes,
+                initial,
+                atlas_triangle_counts,
+                self.pending_triangles,
+                signature,
+                (
+                    self.pending_shared_edge_promotions,
+                    self.pending_grading_promotions,
+                    self.pending_reconciliation_iterations,
+                ),
+            );
+        }
+        if self.component_publication_enabled && self.pending_component_shadow_staged {
             match self
                 .component_shadow
                 .swap_exact_overlay(&mut self.pending_overlay)
@@ -1709,6 +1755,7 @@ impl AdaptivePickedRuntime {
         self.pending_group_signature = None;
         self.pending_overlay_signature = None;
         self.pending_overlay_reuses_published = false;
+        self.pending_component_shadow_staged = false;
         self.pending_component_publication = false;
         self.pending_component_authority = false;
         self.pending_selected_faces.clear();
@@ -2174,10 +2221,12 @@ impl AdaptivePickedRuntime {
                     root_topology_revision,
                     batch_layout_revision,
                 ) {
-                    Ok(certificate) => (self.component_shadow.enabled, certificate),
+                    Ok(AdaptiveComponentStage::Staged(certificate)) => (true, certificate),
+                    Ok(AdaptiveComponentStage::Ineligible) => (false, None),
                     Err(_) => (false, None),
                 };
-            if component_hot_path_allowed {
+            self.pending_component_shadow_staged = component_plan_staged;
+            if component_hot_path_allowed && component_plan_staged {
                 let reusable_certificate = certified_component.filter(
                     |certificate| {
                         published_groups_are_live
@@ -2522,6 +2571,13 @@ impl AdaptivePickedRuntime {
                 .component_shadow
                 .authority_changed_since_oracle,
             component_authority_revoked: self.component_shadow.current_authority_revoked(),
+            component_authority_ineligible_attempts: self
+                .component_shadow
+                .authority_ineligible_attempts,
+            component_authority_last_ineligible: self
+                .component_shadow
+                .authority_last_ineligible
+                .as_deref(),
             component_authority_revocations: self.component_shadow.authority_revocations,
             component_authority_changed_installs: self.component_authority_changed_installs,
             component_shadow_last_error: self.component_shadow.last_error.as_deref(),
@@ -3365,6 +3421,10 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn changed_component_authority_samples_at_a_bounded_interval() {
+        assert_eq!(component_authority_face_limit(3), 2);
+        assert_eq!(component_authority_face_limit(984), 983);
+        assert_eq!(component_authority_face_limit(94_628), 4_096);
+
         let mut shadow = AdaptiveComponentShadow {
             enabled: true,
             staged_signature: Some(AdaptiveComponentStageSignature {
@@ -3407,6 +3467,123 @@ mod tests {
 
         shadow.plan.component_faces = (0..100).collect();
         assert!(shadow.changed_authority_signature().unwrap().is_none());
+    }
+
+    #[wasm_bindgen_test]
+    fn whole_scene_component_uses_complete_path_without_false_fallback() {
+        let positions = [
+            [-0.8, -0.6, 0.0],
+            [-0.2, -0.6, 0.0],
+            [-0.5, 0.0, 0.0],
+            [-0.8, 0.6, 0.0],
+            [-0.2, 0.6, 0.0],
+        ];
+        let source = quilting_mesh::HalfEdgeMesh::from_triangles_welded_exact(
+            &positions,
+            &[[0, 1, 2], [2, 3, 4]],
+        );
+        let topology = ScreenMeshTopologyCache::from_half_edge_mesh(&source).unwrap();
+        let patch = QBTriPatch::flat(positions[0], positions[1], positions[2]);
+        let selected = [SelectedScreenPatch {
+            source_face: 0,
+            transformed_patch: &patch,
+        }];
+        let resident = ResidentLod::uniform(1);
+        let atlas_triangles = BTreeMap::from([([1; 3], 1)]);
+        let baseline_groups = quilting_core::batch::group_resident_faces(
+            &[Some(resident); 2],
+            &[[1; 3]; 2],
+            &[0; 2],
+            &[0; 2],
+            &[0; 2],
+            resident,
+        );
+        let mut groups = BTreeMap::new();
+        let mut runtime = AdaptivePickedRuntime::default();
+        runtime.configure(AdaptivePickedConfig {
+            selection: AdaptiveScreenSelection::Picked { face: 0 },
+            min_px_per_segment: 1.0,
+            max_px_per_segment: 10.0,
+            policy: ScreenPartitionPolicy {
+                min_depth: 1,
+                max_depth: 1,
+                max_leaves: 4,
+                ..ScreenPartitionPolicy::default()
+            },
+            max_total_leaves: 6,
+            max_triangles: 6,
+        });
+        runtime.set_component_publication_enabled(true).unwrap();
+
+        runtime
+            .plan_selected_and_group(
+                &selected,
+                None,
+                4,
+                &IDENTITY,
+                [640.0, 480.0],
+                Some((3, 1)),
+                &[Some(resident); 2],
+                resident,
+                &topology,
+                1,
+                4,
+                &atlas_triangles,
+                &[0; 2],
+                &[0; 2],
+                &[0; 2],
+                0,
+                0,
+                false,
+                false,
+                None,
+                &mut groups,
+            )
+            .unwrap();
+
+        let staged = runtime.snapshot();
+        assert_eq!(staged.component_shadow_state, "ineligible");
+        assert_eq!(staged.component_shadow_attempts, 1);
+        assert_eq!(staged.component_shadow_matches, 0);
+        assert_eq!(staged.component_shadow_mismatches, 0);
+        assert_eq!(staged.component_shadow_frontier_cache_misses, 0);
+        assert_eq!(staged.component_certified_misses, 0);
+        assert_eq!(staged.component_authority_ineligible_attempts, 1);
+        assert_eq!(
+            staged.component_authority_last_ineligible,
+            Some("component closure needs 2 faces; authority limit is 1"),
+        );
+        assert_eq!(staged.component_publication_state, "complete-ineligible");
+        assert!(!runtime.pending_component_shadow_staged);
+        assert_eq!(staged.frontier_cache_misses, 1);
+
+        runtime
+            .stage_pending_overlay(
+                0,
+                &baseline_groups,
+                &[Some(resident); 2],
+                &[[1; 3]; 2],
+                &[0; 2],
+                &[0; 2],
+                &[0; 2],
+                resident,
+                &atlas_triangles,
+            )
+            .unwrap();
+        let overlay = runtime.snapshot();
+        assert_eq!(overlay.component_shadow_state, "ineligible");
+        assert_eq!(overlay.component_publication_state, "complete-ineligible");
+        assert_eq!(overlay.component_publication_fallbacks, 0);
+        assert_eq!(overlay.component_publication_last_error, None);
+
+        runtime.commit_publication();
+        let published = runtime.snapshot();
+        assert_eq!(published.state, "active");
+        assert_eq!(published.component_publication_state, "complete-ineligible");
+        assert_eq!(published.component_publication_installs, 0);
+        assert_eq!(published.component_publication_fallbacks, 0);
+        assert_eq!(published.component_publication_last_error, None);
+        assert_eq!(published.component_shadow_mismatches, 0);
     }
 
     #[wasm_bindgen_test]
