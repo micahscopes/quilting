@@ -6956,6 +6956,72 @@ pub fn mr_refresh_adaptive_picked() -> JsValue {
     })
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdaptiveComponentClosureMeasurement {
+    ok: bool,
+    selected_faces: Vec<u32>,
+    source_faces: u64,
+    component_closure_faces: u64,
+    unaffected_faces: u64,
+    source_scan_reduction_percent: f64,
+    closure_face_sample: Vec<u32>,
+    elapsed_ms: f64,
+}
+
+/// Measure the exact welded-vertex source components touched by the currently
+/// published adaptive selection. This explicit diagnostic neither replans nor
+/// mutates renderer state.
+#[wasm_bindgen(js_name = "mr_measureAdaptiveComponentClosure")]
+pub fn mr_measure_adaptive_component_closure(max_faces: u32) -> JsValue {
+    STATE.with(|state| {
+        let state = state.borrow();
+        let Some(state) = state.as_ref() else {
+            return adaptive_screen_diagnostic_error("renderer is not initialized");
+        };
+        if state.adaptive_batch_transition_pending {
+            return adaptive_screen_diagnostic_error(
+                "adaptive batch transition is awaiting publication",
+            );
+        }
+        let selected_faces = state.adaptive_picked.published_faces();
+        if selected_faces.is_empty() {
+            return adaptive_screen_diagnostic_error(
+                "adaptive component closure has no published face selection",
+            );
+        }
+        let Some(topology) = state.screen_topology_cache.as_ref() else {
+            return adaptive_screen_diagnostic_error("adaptive source topology is unavailable");
+        };
+        let started = browser_now_ms();
+        let mut closure = Vec::new();
+        if let Err(error) = topology.collect_component_closure(
+            selected_faces,
+            max_faces as usize,
+            &mut closure,
+        ) {
+            return adaptive_screen_diagnostic_error(error.to_string());
+        }
+        let source_faces = state.num_faces;
+        let unaffected_faces = source_faces.saturating_sub(closure.len());
+        let source_scan_reduction_percent = if source_faces == 0 {
+            0.0
+        } else {
+            100.0 * unaffected_faces as f64 / source_faces as f64
+        };
+        adaptive_browser_value(&AdaptiveComponentClosureMeasurement {
+            ok: true,
+            selected_faces: selected_faces.to_vec(),
+            source_faces: source_faces as u64,
+            component_closure_faces: closure.len() as u64,
+            unaffected_faces: unaffected_faces as u64,
+            source_scan_reduction_percent,
+            closure_face_sample: closure.into_iter().take(16).collect(),
+            elapsed_ms: browser_now_ms() - started,
+        })
+    })
+}
+
 /// Measure the sparse replacement closure for the exact currently published
 /// adaptive epoch without changing draw resources or scheduling frame work.
 #[wasm_bindgen(js_name = "mr_measureAdaptiveOverlay")]

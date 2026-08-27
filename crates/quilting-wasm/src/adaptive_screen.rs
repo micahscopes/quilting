@@ -652,6 +652,10 @@ impl AdaptivePickedRuntime {
         self.config
     }
 
+    pub(crate) fn published_faces(&self) -> &[u32] {
+        &self.last_published_faces
+    }
+
     pub(crate) fn set_retained_shadow_enabled(&mut self, enabled: bool) -> Result<bool, String> {
         if self.has_pending_publication() {
             return Err("adaptive publication is already staged".into());

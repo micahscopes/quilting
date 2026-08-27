@@ -10,7 +10,7 @@ use crate::atlas::TessellationAtlas;
 use crate::patch::QBPatchDomain;
 use crate::permutation::canonical_form;
 use crate::screen_partition::{ScreenPatchLeaf, ScreenPatchLeafId};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScreenLeafTopology {
@@ -121,6 +121,10 @@ pub enum ScreenLeafLodError {
     MissingSourceFace {
         source_face: u32,
     },
+    ComponentClosureBudgetExceeded {
+        required: usize,
+        maximum: usize,
+    },
 }
 
 impl std::fmt::Display for ScreenLeafLodError {
@@ -175,6 +179,10 @@ impl std::fmt::Display for ScreenLeafLodError {
             Self::MissingSourceFace { source_face } => write!(
                 formatter,
                 "adaptive frontier does not cover source face {source_face}",
+            ),
+            Self::ComponentClosureBudgetExceeded { required, maximum } => write!(
+                formatter,
+                "adaptive source-component closure needs {required} faces; budget is {maximum}",
             ),
         }
     }
@@ -538,12 +546,12 @@ impl MeshVertexIndex {
     }
 }
 
-fn find_vertex_root(parents: &mut [u32], vertex: u32) -> u32 {
-    let mut root = vertex;
+fn find_disjoint_root(parents: &mut [u32], index: u32) -> u32 {
+    let mut root = index;
     while parents[root as usize] != root {
         root = parents[root as usize];
     }
-    let mut current = vertex;
+    let mut current = index;
     while parents[current as usize] != current {
         let next = parents[current as usize];
         parents[current as usize] = root;
@@ -552,9 +560,9 @@ fn find_vertex_root(parents: &mut [u32], vertex: u32) -> u32 {
     root
 }
 
-fn union_vertices(parents: &mut [u32], first: u32, second: u32) {
-    let first_root = find_vertex_root(parents, first);
-    let second_root = find_vertex_root(parents, second);
+fn union_disjoint_indices(parents: &mut [u32], first: u32, second: u32) {
+    let first_root = find_disjoint_root(parents, first);
+    let second_root = find_disjoint_root(parents, second);
     if first_root == second_root {
         return;
     }
@@ -593,13 +601,70 @@ fn canonical_source_vertices(
         {
             return Err(ScreenLeafLodError::InvalidTopology { leaf_index: 0 });
         }
-        union_vertices(&mut parents, from, opposing_to);
-        union_vertices(&mut parents, to, opposing_from);
+        union_disjoint_indices(&mut parents, from, opposing_to);
+        union_disjoint_indices(&mut parents, to, opposing_from);
     }
     for vertex in 0..source_topology.num_vertices {
-        parents[vertex as usize] = find_vertex_root(&mut parents, vertex);
+        parents[vertex as usize] = find_disjoint_root(&mut parents, vertex);
     }
     Ok(parents)
+}
+
+fn canonical_face_components(
+    canonical_face_vertices: &[[u32; 3]],
+    source_vertex_count: usize,
+) -> Result<(Vec<u32>, Vec<u32>, Vec<u32>), ScreenLeafLodError> {
+    let face_count = canonical_face_vertices.len();
+    if face_count > u32::MAX as usize {
+        return Err(ScreenLeafLodError::InvalidTopology { leaf_index: 0 });
+    }
+    let mut parents = (0..face_count as u32).collect::<Vec<_>>();
+    let mut first_face_by_vertex = vec![u32::MAX; source_vertex_count];
+    for (face, vertices) in canonical_face_vertices.iter().copied().enumerate() {
+        let face = face as u32;
+        for vertex in vertices {
+            let first = first_face_by_vertex
+                .get_mut(vertex as usize)
+                .ok_or(ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?;
+            if *first == u32::MAX {
+                *first = face;
+            } else {
+                union_disjoint_indices(&mut parents, face, *first);
+            }
+        }
+    }
+    for face in 0..face_count as u32 {
+        parents[face as usize] = find_disjoint_root(&mut parents, face);
+    }
+
+    let mut root_components = vec![u32::MAX; face_count];
+    let mut face_components = Vec::with_capacity(face_count);
+    let mut component_count = 0usize;
+    for root in parents {
+        let component = &mut root_components[root as usize];
+        if *component == u32::MAX {
+            *component = u32::try_from(component_count)
+                .map_err(|_| ScreenLeafLodError::InvalidTopology { leaf_index: 0 })?;
+            component_count += 1;
+        }
+        face_components.push(*component);
+    }
+
+    let mut component_offsets = vec![0u32; component_count + 1];
+    for &component in &face_components {
+        component_offsets[component as usize + 1] += 1;
+    }
+    for component in 0..component_count {
+        component_offsets[component + 1] += component_offsets[component];
+    }
+    let mut cursors = component_offsets[..component_count].to_vec();
+    let mut component_faces = vec![0u32; face_count];
+    for (face, &component) in face_components.iter().enumerate() {
+        let cursor = &mut cursors[component as usize];
+        component_faces[*cursor as usize] = face as u32;
+        *cursor += 1;
+    }
+    Ok((face_components, component_offsets, component_faces))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -634,6 +699,9 @@ pub struct ScreenMeshTopologyCache {
     source_half_edge_count: usize,
     canonical_face_vertices: Vec<[u32; 3]>,
     face_edges: Vec<[CachedSourceEdge; 3]>,
+    face_components: Vec<u32>,
+    component_offsets: Vec<u32>,
+    component_faces: Vec<u32>,
 }
 
 impl ScreenMeshTopologyCache {
@@ -664,12 +732,60 @@ impl ScreenMeshTopologyCache {
             }
             face_edges.push(cached_edges);
         }
+        let (face_components, component_offsets, component_faces) =
+            canonical_face_components(&canonical_face_vertices, canonical_vertices.len())?;
         Ok(Self {
             source_vertex_count: canonical_vertices.len(),
             source_half_edge_count: source_topology.half_edges.len(),
             canonical_face_vertices,
             face_edges,
+            face_components,
+            component_offsets,
+            component_faces,
         })
+    }
+
+    /// Collect the exact welded-vertex component closure of source-face seeds.
+    /// Output is globally source ordered and remains empty on any invalid seed
+    /// or budget failure.
+    pub fn collect_component_closure(
+        &self,
+        seeds: &[u32],
+        max_faces: usize,
+        output: &mut Vec<u32>,
+    ) -> Result<(), ScreenLeafLodError> {
+        output.clear();
+        let mut components = BTreeSet::<u32>::new();
+        for &source_face in seeds {
+            let component = self
+                .face_components
+                .get(source_face as usize)
+                .copied()
+                .ok_or(ScreenLeafLodError::MissingSourceFace { source_face })?;
+            components.insert(component);
+        }
+        let required = components.iter().try_fold(0usize, |total, &component| {
+            let start = *self.component_offsets.get(component as usize)? as usize;
+            let end = *self.component_offsets.get(component as usize + 1)? as usize;
+            total.checked_add(end.checked_sub(start)?)
+        });
+        let Some(required) = required else {
+            return Err(ScreenLeafLodError::InvalidTopology { leaf_index: 0 });
+        };
+        if required > max_faces {
+            return Err(ScreenLeafLodError::ComponentClosureBudgetExceeded {
+                required,
+                maximum: max_faces,
+            });
+        }
+        output.reserve(required);
+        for component in components {
+            let start = self.component_offsets[component as usize] as usize;
+            let end = self.component_offsets[component as usize + 1] as usize;
+            output.extend_from_slice(&self.component_faces[start..end]);
+        }
+        output.sort_unstable();
+        Ok(())
     }
 
     fn face_vertices(
@@ -1576,6 +1692,48 @@ mod tests {
             validate_screen_mesh_leaf_antichain(&[root, other_face]),
             Ok(())
         );
+    }
+
+    #[test]
+    fn source_component_closure_includes_vertex_only_neighbors_and_is_bounded() {
+        let source_topology = quilting_mesh::HalfEdgeMesh::from_triangles(
+            8,
+            &[
+                [0, 1, 2],
+                // Shares only source vertex 2 with face 0. Corner-density
+                // reconstruction still couples the two faces.
+                [2, 3, 4],
+                [5, 6, 7],
+            ],
+        );
+        let topology = ScreenMeshTopologyCache::from_half_edge_mesh(&source_topology).unwrap();
+        let mut closure = vec![99];
+
+        topology
+            .collect_component_closure(&[0], 2, &mut closure)
+            .unwrap();
+        assert_eq!(closure, [0, 1]);
+
+        topology
+            .collect_component_closure(&[2, 0], 3, &mut closure)
+            .unwrap();
+        assert_eq!(closure, [0, 1, 2]);
+
+        assert_eq!(
+            topology.collect_component_closure(&[0], 1, &mut closure),
+            Err(ScreenLeafLodError::ComponentClosureBudgetExceeded {
+                required: 2,
+                maximum: 1,
+            }),
+        );
+        assert!(closure.is_empty());
+
+        closure.push(99);
+        assert_eq!(
+            topology.collect_component_closure(&[3], 3, &mut closure),
+            Err(ScreenLeafLodError::MissingSourceFace { source_face: 3 }),
+        );
+        assert!(closure.is_empty());
     }
 
     #[test]

@@ -411,6 +411,7 @@ import init, {
   mr_setAdaptiveRetainedPublicationEnabled,
   mr_clearAdaptivePickedFace, mr_refreshAdaptivePicked,
   mr_adaptivePickedDiagnostics, mr_measureAdaptiveOverlay,
+  mr_measureAdaptiveComponentClosure,
   mr_uploadTessAtlas, mr_uploadAnimationPose, mr_clearAnimationState,
   mr_uploadSkinningTexture, mr_uploadMorphTexture,
   mr_setMaterials, mr_appendMaterials, mr_uploadImages, mr_uploadImageBitmaps, mr_uploadEnvMaps,
@@ -1044,6 +1045,9 @@ const adaptivePickedDiagnostics = {
   },
   measureOverlay() {
     return mr_measureAdaptiveOverlay();
+  },
+  measureComponentClosure(maxFaces = currentFaceNodes.length) {
+    return mr_measureAdaptiveComponentClosure(Number(maxFaces));
   },
   setRetainedShadow(enabled = true) {
     if (lodInFlight) {

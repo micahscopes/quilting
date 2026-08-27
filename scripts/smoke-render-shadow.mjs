@@ -8,6 +8,7 @@ const wasmPath = `${repository}/pkg/quilting_wasm_bg.wasm`;
 const {
   default: init,
   mr_adaptivePickedDiagnostics,
+  mr_measureAdaptiveComponentClosure,
   mr_clearAdaptivePickedFace,
   mr_debugFocusState,
   mr_refreshAdaptivePicked,
@@ -59,6 +60,9 @@ assert.equal(
   null,
   'retained adaptive publication should be inert before a renderer exists',
 );
+const rejectedComponentClosure = mr_measureAdaptiveComponentClosure(1_000);
+assert.equal(rejectedComponentClosure.ok, false);
+assert.equal(rejectedComponentClosure.error, 'renderer is not initialized');
 const rejectedAdaptiveConfiguration =
   mr_setAdaptivePickedFace(0, 16, 32, 5, 256, 256, 2_000_000);
 assert.equal(
