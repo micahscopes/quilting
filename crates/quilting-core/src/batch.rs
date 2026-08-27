@@ -998,7 +998,7 @@ pub struct RetainedRootGroupIndex {
     free_tokens: Vec<u32>,
     buckets: BTreeMap<RenderBatchKey, Vec<u32>>,
     affected_faces: Vec<usize>,
-    dirty_keys: Vec<RenderBatchKey>,
+    dirty_tokens: Vec<u32>,
     removals: Vec<(u32, u32)>,
     additions: Vec<(u32, u32)>,
     retire_candidates: Vec<u32>,
@@ -1027,7 +1027,7 @@ impl RetainedRootGroupIndex {
                 .map(|faces| faces.capacity() * std::mem::size_of::<u32>())
                 .sum::<usize>()
             + self.affected_faces.capacity() * std::mem::size_of::<usize>()
-            + self.dirty_keys.capacity() * std::mem::size_of::<RenderBatchKey>()
+            + self.dirty_tokens.capacity() * std::mem::size_of::<u32>()
             + self.removals.capacity() * std::mem::size_of::<(u32, u32)>()
             + self.additions.capacity() * std::mem::size_of::<(u32, u32)>()
             + self.retire_candidates.capacity() * std::mem::size_of::<u32>()
@@ -1185,7 +1185,7 @@ impl RetainedRootGroupIndex {
             return RetainedRootGroupRefresh::default();
         }
 
-        self.dirty_keys.clear();
+        self.dirty_tokens.clear();
         self.removals.clear();
         self.additions.clear();
         self.retire_candidates.clear();
@@ -1201,10 +1201,10 @@ impl RetainedRootGroupIndex {
                 initial,
                 face_index,
             );
-            self.dirty_keys.push(old_key);
-            self.dirty_keys.push(new_key);
+            self.dirty_tokens.push(old_token);
             if old_key != new_key {
                 let new_token = self.token_for_key(new_key);
+                self.dirty_tokens.push(new_token);
                 self.removals.push((old_token, face_index as u32));
                 self.additions.push((new_token, face_index as u32));
                 self.face_tokens[face_index] = new_token;
@@ -1216,9 +1216,10 @@ impl RetainedRootGroupIndex {
                 self.retire_candidates.push(old_token);
             }
         }
-        self.dirty_keys.sort_unstable();
-        self.dirty_keys.dedup();
         let token_keys = &self.token_keys;
+        self.dirty_tokens
+            .sort_unstable_by_key(|&token| token_keys[token as usize]);
+        self.dirty_tokens.dedup();
         self.removals.sort_unstable_by_key(|entry| {
             (token_keys[entry.0 as usize], entry.1)
         });
@@ -1228,7 +1229,8 @@ impl RetainedRootGroupIndex {
 
         let mut output = std::mem::take(&mut self.merge_scratch);
         let mut rebuilt_members = 0usize;
-        for &key in &self.dirty_keys {
+        for dirty_index in 0..self.dirty_tokens.len() {
+            let key = self.token_keys[self.dirty_tokens[dirty_index] as usize];
             let removal_start = self
                 .removals
                 .partition_point(|entry| self.token_keys[entry.0 as usize] < key);
@@ -1255,7 +1257,11 @@ impl RetainedRootGroupIndex {
             }
 
             let bucket = self.buckets.entry(key).or_default();
-            std::mem::swap(bucket, &mut output);
+            // Keep the one large merge scratch allocation local. Swapping it
+            // through every dirty bucket diffuses the largest bucket's
+            // capacity across many small buckets during camera-driven churn.
+            bucket.clear();
+            bucket.extend_from_slice(&output);
             let members = groups.entry(key).or_default();
             members.clear();
             members.reserve(bucket.len());
@@ -1275,7 +1281,7 @@ impl RetainedRootGroupIndex {
         RetainedRootGroupRefresh {
             full_rebuild: false,
             affected_faces: self.affected_faces.len(),
-            dirty_buckets: self.dirty_keys.len(),
+            dirty_buckets: self.dirty_tokens.len(),
             rebuilt_members,
         }
     }
