@@ -14,6 +14,7 @@ const {
   mr_renderShadowDiagnostics,
   mr_setAdaptiveCurrentView,
   mr_setAdaptivePickedFace,
+  mr_setAdaptiveRetainedShadowEnabled,
   mr_setLodGradingRatio,
   mr_setRenderShadowEnabled,
 } = await import(packageUrl);
@@ -46,6 +47,11 @@ assert.equal(
   mr_clearAdaptivePickedFace(),
   null,
   'adaptive clear should be inert before a renderer exists',
+);
+assert.equal(
+  mr_setAdaptiveRetainedShadowEnabled(true),
+  null,
+  'retained adaptive shadow should be inert before a renderer exists',
 );
 const rejectedAdaptiveConfiguration =
   mr_setAdaptivePickedFace(0, 16, 32, 5, 256, 256, 2_000_000);

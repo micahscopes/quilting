@@ -3751,6 +3751,8 @@ fn apply_adaptive_screen_plan(
         adaptive_picked,
         screen_topology_cache,
         requested_face_lods,
+        resident_face_lods,
+        resident_vertex_lods,
         face_materials,
         face_nodes,
         face_render_nodes,
@@ -3761,7 +3763,7 @@ fn apply_adaptive_screen_plan(
         adaptive_picked.record_fallback("adaptive source topology disappeared");
         return false;
     };
-    adaptive_picked
+    let groups_reused = match adaptive_picked
         .plan_selected_and_group(
             &selected_patches,
             selection_diagnostic,
@@ -3783,7 +3785,23 @@ fn apply_adaptive_screen_plan(
             reusable_groups,
             batch_groups,
         )
-        .unwrap_or(false)
+    {
+        Ok(groups_reused) => groups_reused,
+        Err(_) => return false,
+    };
+    if let Err(error) = adaptive_picked.stage_pending_overlay(
+        batch_layout_revision,
+        resident_face_lods,
+        resident_vertex_lods,
+        face_materials,
+        face_nodes,
+        face_render_nodes,
+        initial,
+    ) {
+        adaptive_picked.reject_staged_overlay(groups_reused, batch_groups, error);
+        return false;
+    }
+    groups_reused
 }
 
 #[wasm_bindgen(js_name = "mr_setRoundShadowEnabled")]
@@ -3875,6 +3893,31 @@ pub fn mr_adaptive_root_shadow_diagnostics() -> JsValue {
             serde_wasm_bindgen::to_value(&state.adaptive_root_shadow.snapshot())
                 .unwrap_or(JsValue::NULL)
         })
+    })
+}
+
+/// Stage the exact retained-root plus adaptive-overlay composition beside the
+/// complete live frontier. This is an observation/cutover gate only: enabling
+/// it does not change GPU batches or draw submission.
+#[wasm_bindgen(js_name = "mr_setAdaptiveRetainedShadowEnabled")]
+pub fn mr_set_adaptive_retained_shadow_enabled(enabled: bool) -> JsValue {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return JsValue::NULL;
+        };
+        match state
+            .adaptive_picked
+            .set_retained_shadow_enabled(enabled)
+        {
+            Ok(changed) => {
+                if changed && enabled && state.adaptive_picked.is_enabled() {
+                    state.adaptive_batch_transition_pending = true;
+                }
+                adaptive_picked_snapshot_js(state, None)
+            }
+            Err(error) => adaptive_screen_diagnostic_error(error),
+        }
     })
 }
 

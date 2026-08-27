@@ -95,6 +95,23 @@ The accepted animation pose had revision 3 in continuity epoch 3. Eight faces
 were selected, including 480 nonzero-priority candidates in the current view;
 the plan installed without fallback.
 
+## Persistent shadow publication
+
+The follow-up retained-shadow gate stages the sparse overlay during adaptive
+planning and commits it only with the matching complete GPU epoch. A failed GPU
+upload leaves both the former complete grouping and former published overlay
+intact; fallback and disable publish roots before retiring the overlay. It still
+does not change draw submission.
+
+A fresh static reflected-horse browser run used 984 source faces and a 1,038
+member complete frontier. The committed shadow contained 909 retained roots,
+75 suppressed roots, and 129 overlay members in eight groups, avoiding 87.57%
+of complete-frontier publication membership. The existing measurement oracle
+reused that exact committed shadow with zero overlay extraction work and found
+zero semantic group or member mismatches. Baseline-then-overlay order differed
+in one material-0 group, retaining the opaque-only cutover restriction. The
+parity comparison took 4.1 ms, and Chrome reported no warning or error.
+
 ## Decision
 
 Use two retained renderer layers for order-insensitive passes:

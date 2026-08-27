@@ -308,6 +308,15 @@ pub(crate) struct AdaptivePickedRuntime {
     group_cache_misses: u64,
     last_timings: AdaptivePlanTimings,
     lod_scratch: ScreenMeshLeafLodScratch,
+    retained_shadow_enabled: bool,
+    pending_overlay: AdaptiveRenderOverlay,
+    pending_overlay_signature: Option<AdaptiveGroupSignature>,
+    pending_overlay_reuses_published: bool,
+    published_overlay: AdaptiveRenderOverlay,
+    published_overlay_signature: Option<AdaptiveGroupSignature>,
+    retained_shadow_cache_hits: u64,
+    retained_shadow_cache_misses: u64,
+    last_retained_shadow_stage_ms: f64,
     overlay_shadow: AdaptiveRenderOverlay,
     overlay_baseline_groups: BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
     overlay_member_scratch: Vec<RenderBatchMember>,
@@ -374,6 +383,14 @@ pub(crate) struct AdaptivePickedSnapshot<'a> {
     reconciliation_cache_misses: u64,
     group_cache_hits: u64,
     group_cache_misses: u64,
+    retained_shadow_enabled: bool,
+    retained_shadow_state: &'static str,
+    retained_shadow_suppressed_faces: u64,
+    retained_shadow_groups: u64,
+    retained_shadow_members: u64,
+    retained_shadow_cache_hits: u64,
+    retained_shadow_cache_misses: u64,
+    last_retained_shadow_stage_ms: f64,
     last_timings: AdaptivePlanTimings,
 }
 
@@ -455,6 +472,7 @@ struct AdaptivePlanTimings {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AdaptiveOverlayMeasurement {
     ok: bool,
+    retained_shadow_reused: bool,
     source_faces: u64,
     frontier_leaves: u64,
     complete_groups: u64,
@@ -576,6 +594,15 @@ impl AdaptivePickedRuntime {
         self.group_cache_hits = 0;
         self.group_cache_misses = 0;
         self.last_timings = AdaptivePlanTimings::default();
+        self.retained_shadow_enabled = false;
+        self.pending_overlay = AdaptiveRenderOverlay::default();
+        self.pending_overlay_signature = None;
+        self.pending_overlay_reuses_published = false;
+        self.published_overlay = AdaptiveRenderOverlay::default();
+        self.published_overlay_signature = None;
+        self.retained_shadow_cache_hits = 0;
+        self.retained_shadow_cache_misses = 0;
+        self.last_retained_shadow_stage_ms = 0.0;
         self.overlay_shadow = AdaptiveRenderOverlay::default();
         self.overlay_baseline_groups.clear();
         self.overlay_member_scratch.clear();
@@ -621,6 +648,98 @@ impl AdaptivePickedRuntime {
         self.config
     }
 
+    pub(crate) fn set_retained_shadow_enabled(&mut self, enabled: bool) -> Result<bool, String> {
+        if self.has_pending_publication() {
+            return Err("adaptive publication is already staged".into());
+        }
+        let changed = self.retained_shadow_enabled != enabled;
+        self.retained_shadow_enabled = enabled;
+        self.pending_overlay_signature = None;
+        self.pending_overlay_reuses_published = false;
+        if !enabled {
+            self.published_overlay_signature = None;
+        }
+        Ok(changed)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn stage_pending_overlay(
+        &mut self,
+        batch_layout_revision: u64,
+        baseline_residents: &[Option<ResidentLod>],
+        baseline_vertex_lods: &[[u32; 3]],
+        face_materials: &[usize],
+        face_nodes: &[usize],
+        face_render_nodes: &[usize],
+        initial: ResidentLod,
+    ) -> Result<bool, String> {
+        if !self.retained_shadow_enabled {
+            self.pending_overlay_signature = None;
+            self.pending_overlay_reuses_published = false;
+            self.last_retained_shadow_stage_ms = 0.0;
+            return Ok(false);
+        }
+        if self.pending_plan.is_none() {
+            return Err("adaptive overlay has no staged plan".into());
+        }
+        let signature = self
+            .pending_group_signature
+            .ok_or_else(|| "staged adaptive group identity is unavailable".to_string())?;
+        if signature.batch_layout_revision != batch_layout_revision {
+            return Err("staged adaptive group identity does not match the batch layout".into());
+        }
+        if self.published_overlay_signature == Some(signature) {
+            self.pending_overlay_signature = Some(signature);
+            self.pending_overlay_reuses_published = true;
+            self.retained_shadow_cache_hits = self.retained_shadow_cache_hits.saturating_add(1);
+            self.last_retained_shadow_stage_ms = 0.0;
+            return Ok(true);
+        }
+        let stage_start = browser_now_ms();
+        let frontier = self
+            .frontier
+            .as_ref()
+            .ok_or_else(|| "staged adaptive frontier is unavailable".to_string())?;
+        let resident_edge_lods = &self
+            .reconciliation_cache
+            .result
+            .as_ref()
+            .ok_or_else(|| "staged adaptive reconciliation is unavailable".to_string())?
+            .resident;
+        group_resident_screen_overlay_into(
+            frontier,
+            resident_edge_lods,
+            baseline_residents,
+            baseline_vertex_lods,
+            face_materials,
+            face_nodes,
+            face_render_nodes,
+            initial,
+            &mut self.lod_scratch,
+            &mut self.pending_overlay,
+        )
+        .map_err(|error| error.to_string())?;
+        self.pending_overlay_signature = Some(signature);
+        self.pending_overlay_reuses_published = false;
+        self.retained_shadow_cache_misses = self.retained_shadow_cache_misses.saturating_add(1);
+        self.last_retained_shadow_stage_ms = browser_now_ms() - stage_start;
+        Ok(false)
+    }
+
+    pub(crate) fn reject_staged_overlay(
+        &mut self,
+        groups_reused: bool,
+        live_groups: &mut BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
+        error: impl Into<String>,
+    ) {
+        if !groups_reused {
+            std::mem::swap(live_groups, &mut self.candidate_groups);
+        }
+        self.fallbacks = self.fallbacks.saturating_add(1);
+        self.clear_pending_publication();
+        self.pending_fallback_error = Some(error.into());
+    }
+
     pub(crate) fn record_fallback(&mut self, error: impl Into<String>) {
         if self.config.is_none() {
             return;
@@ -642,13 +761,32 @@ impl AdaptivePickedRuntime {
         self.pending_reconciliation_iterations = 0;
         self.pending_pose_stamp = None;
         self.pending_group_signature = None;
+        self.pending_overlay_signature = None;
+        self.pending_overlay_reuses_published = false;
         self.pending_selected_faces.clear();
+    }
+
+    fn commit_pending_overlay(&mut self) {
+        let Some(signature) = self.pending_overlay_signature.take() else {
+            self.published_overlay_signature = None;
+            return;
+        };
+        if !self.pending_overlay_reuses_published {
+            std::mem::swap(&mut self.published_overlay, &mut self.pending_overlay);
+        }
+        self.published_overlay_signature = Some(signature);
+        self.pending_overlay_reuses_published = false;
+    }
+
+    fn clear_published_overlay(&mut self) {
+        self.published_overlay_signature = None;
     }
 
     /// Commit diagnostics only after the renderer has published every staged
     /// GL bucket. CPU grouping alone is not a visible install.
     pub(crate) fn commit_publication(&mut self) {
         if let Some(plan) = self.pending_plan.take() {
+            self.commit_pending_overlay();
             self.installs = self.installs.saturating_add(1);
             self.last_error = None;
             self.last_plan = Some(plan);
@@ -664,6 +802,7 @@ impl AdaptivePickedRuntime {
             );
             self.published_group_signature = self.pending_group_signature.take();
         } else if let Some(error) = self.pending_fallback_error.take() {
+            self.clear_published_overlay();
             self.last_error = Some(error);
             self.last_plan = None;
             self.last_selection = None;
@@ -675,6 +814,7 @@ impl AdaptivePickedRuntime {
             self.last_published_faces.clear();
             self.published_group_signature = None;
         } else if self.pending_legacy {
+            self.clear_published_overlay();
             self.last_error = None;
             self.last_plan = None;
             self.last_selection = None;
@@ -764,20 +904,28 @@ impl AdaptivePickedRuntime {
             .resident;
 
         let start = browser_now_ms();
-        group_resident_screen_overlay_into(
-            frontier,
-            resident_edge_lods,
-            baseline_residents,
-            baseline_vertex_lods,
-            face_materials,
-            face_nodes,
-            face_render_nodes,
-            initial,
-            &mut self.lod_scratch,
-            &mut self.overlay_shadow,
-        )
-        .map_err(|error| error.to_string())?;
+        let retained_shadow_reused = self.published_overlay_signature == Some(signature);
+        if !retained_shadow_reused {
+            group_resident_screen_overlay_into(
+                frontier,
+                resident_edge_lods,
+                baseline_residents,
+                baseline_vertex_lods,
+                face_materials,
+                face_nodes,
+                face_render_nodes,
+                initial,
+                &mut self.lod_scratch,
+                &mut self.overlay_shadow,
+            )
+            .map_err(|error| error.to_string())?;
+        }
         let overlay_extraction_ms = browser_now_ms() - start;
+        let overlay = if retained_shadow_reused {
+            &self.published_overlay
+        } else {
+            &self.overlay_shadow
+        };
 
         let parity_start = browser_now_ms();
         group_resident_faces_into(
@@ -792,7 +940,7 @@ impl AdaptivePickedRuntime {
         let keys = complete_groups
             .keys()
             .chain(self.overlay_baseline_groups.keys())
-            .chain(self.overlay_shadow.groups.keys())
+            .chain(overlay.groups.keys())
             .copied()
             .collect::<BTreeSet<_>>();
         let mut membership_mismatch_groups = 0usize;
@@ -804,14 +952,14 @@ impl AdaptivePickedRuntime {
             if let Some(roots) = self.overlay_baseline_groups.get(&key) {
                 self.overlay_member_scratch.extend(
                     roots.iter().copied().filter(|member| {
-                        self.overlay_shadow
+                        overlay
                             .suppressed_faces
                             .binary_search(&member.face_index)
                             .is_err()
                     }),
                 );
             }
-            if let Some(replacements) = self.overlay_shadow.groups.get(&key) {
+            if let Some(replacements) = overlay.groups.get(&key) {
                 self.overlay_member_scratch
                     .extend_from_slice(replacements);
             }
@@ -845,15 +993,13 @@ impl AdaptivePickedRuntime {
         let elapsed_ms = browser_now_ms() - start;
 
         let source_faces = baseline_residents.len();
-        let suppressed_faces = self.overlay_shadow.suppressed_faces.len();
-        let overlay_members = self
-            .overlay_shadow
+        let suppressed_faces = overlay.suppressed_faces.len();
+        let overlay_members = overlay
             .groups
             .values()
             .map(Vec::len)
             .sum::<usize>();
-        let overlay_root_members = self
-            .overlay_shadow
+        let overlay_root_members = overlay
             .groups
             .values()
             .flatten()
@@ -876,19 +1022,19 @@ impl AdaptivePickedRuntime {
 
         Ok(AdaptiveOverlayMeasurement {
             ok: true,
+            retained_shadow_reused,
             source_faces: source_faces as u64,
             frontier_leaves: frontier_leaves as u64,
             complete_groups: complete_groups.len() as u64,
             retained_root_faces: retained_root_faces as u64,
             suppressed_faces: suppressed_faces as u64,
-            suppressed_face_sample: self
-                .overlay_shadow
+            suppressed_face_sample: overlay
                 .suppressed_faces
                 .iter()
                 .copied()
                 .take(16)
                 .collect(),
-            overlay_groups: self.overlay_shadow.groups.len() as u64,
+            overlay_groups: overlay.groups.len() as u64,
             overlay_members: overlay_members as u64,
             overlay_root_members: overlay_root_members as u64,
             overlay_dyadic_members: overlay_members.saturating_sub(overlay_root_members) as u64,
@@ -1196,6 +1342,28 @@ impl AdaptivePickedRuntime {
             [face] => Some(*face),
             _ => None,
         };
+        let retained_shadow_state = if !self.retained_shadow_enabled {
+            "disabled"
+        } else if self.pending_overlay_signature.is_some() {
+            "staged"
+        } else if self.published_overlay_signature.is_some() {
+            "published"
+        } else {
+            "awaiting-plan"
+        };
+        let retained_shadow_suppressed_faces = self
+            .published_overlay_signature
+            .map_or(0, |_| self.published_overlay.suppressed_faces.len() as u64);
+        let retained_shadow_groups = self
+            .published_overlay_signature
+            .map_or(0, |_| self.published_overlay.groups.len() as u64);
+        let retained_shadow_members = self.published_overlay_signature.map_or(0, |_| {
+            self.published_overlay
+                .groups
+                .values()
+                .map(Vec::len)
+                .sum::<usize>() as u64
+        });
         AdaptivePickedSnapshot {
             enabled: self.config.is_some(),
             state,
@@ -1244,6 +1412,14 @@ impl AdaptivePickedRuntime {
             reconciliation_cache_misses: self.reconciliation_cache.misses,
             group_cache_hits: self.group_cache_hits,
             group_cache_misses: self.group_cache_misses,
+            retained_shadow_enabled: self.retained_shadow_enabled,
+            retained_shadow_state,
+            retained_shadow_suppressed_faces,
+            retained_shadow_groups,
+            retained_shadow_members,
+            retained_shadow_cache_hits: self.retained_shadow_cache_hits,
+            retained_shadow_cache_misses: self.retained_shadow_cache_misses,
+            last_retained_shadow_stage_ms: self.last_retained_shadow_stage_ms,
             last_timings: self.last_timings,
         }
     }
@@ -1720,6 +1896,7 @@ mod tests {
             max_total_leaves: 1,
             max_triangles: 1,
         });
+        runtime.set_retained_shadow_enabled(true).unwrap();
 
         let mut plan = |runtime: &mut AdaptivePickedRuntime, stamp, grading_ratio| {
             runtime
@@ -1740,6 +1917,17 @@ mod tests {
                     &mut groups,
                 )
                 .unwrap();
+            runtime
+                .stage_pending_overlay(
+                    0,
+                    &[Some(resident)],
+                    &[[1; 3]],
+                    &[0],
+                    &[0],
+                    &[0],
+                    resident,
+                )
+                .unwrap();
         };
 
         plan(&mut runtime, (7, 2), 4);
@@ -1752,6 +1940,11 @@ mod tests {
         assert_eq!(runtime.snapshot().pose_revision, Some(7));
         assert_eq!(runtime.snapshot().published_faces, [0]);
         assert_eq!(runtime.snapshot().last_plan.unwrap().selected_faces, 1);
+        assert!(runtime.snapshot().retained_shadow_enabled);
+        assert_eq!(runtime.snapshot().retained_shadow_state, "published");
+        assert_eq!(runtime.snapshot().retained_shadow_suppressed_faces, 0);
+        assert_eq!(runtime.snapshot().retained_shadow_cache_hits, 0);
+        assert_eq!(runtime.snapshot().retained_shadow_cache_misses, 1);
         let overlay = runtime
             .measure_published_overlay(
                 0,
@@ -1765,6 +1958,7 @@ mod tests {
             )
             .unwrap();
         assert!(overlay.ok);
+        assert!(overlay.retained_shadow_reused);
         assert_eq!(overlay.frontier_leaves, 1);
         assert_eq!(overlay.retained_root_faces, 1);
         assert_eq!(overlay.suppressed_faces, 0);
@@ -1848,6 +2042,8 @@ mod tests {
         assert_eq!(disabled.published_face, None);
         assert!(disabled.published_faces.is_empty());
         assert_eq!(disabled.pose_revision, None);
+        assert_eq!(disabled.retained_shadow_state, "awaiting-plan");
+        assert_eq!(disabled.retained_shadow_members, 0);
     }
 
     #[wasm_bindgen_test]
