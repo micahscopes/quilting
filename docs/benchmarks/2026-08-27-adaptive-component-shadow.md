@@ -163,6 +163,39 @@ complete overlay commits with `componentPublicationState: complete-fallback`.
 This proves the cutover and fallback controls before the complete oracle is
 removed from the hot path.
 
+## Certified repeated-component hot path
+
+An exact complete comparison now issues a reusable component certificate. Its
+identity contains the component reconciliation generation, crack-free root
+topology revision, batch-layout revision, scene-wide diagnostic, and exact
+selected source identities. No hash or approximate pose comparison is used.
+Any identity change runs the complete oracle again.
+
+On an identical repeated pathological-chess request, the certificate allowed
+the component planner to reuse the previously proven complete grouping and
+overlay epoch:
+
+| Repeated phase | Value |
+| --- | ---: |
+| Component planning | 20.2 ms |
+| Component frontier lookup | 0.2 ms, cache hit |
+| Component reconciliation | 0.4 ms, cache hit |
+| Complete mesh/frontier/reconciliation/atlas/grouping | skipped |
+| Component plan phases | 20.8 ms |
+| Including overlay validation | 23.2 ms |
+| Comparable complete cached path | 58.2 ms |
+
+Complete frontier and reconciliation counters remained at zero hits and one
+cold miss, proving that the repeated request did not quietly traverse the
+complete path. Component certificate counters ended at one reuse and one cold
+miss. The sparse work equation remained exactly 224,110 triangles, all seam
+diagnostics remained zero, Chrome reported no messages, and the viewport hash
+remained:
+
+```text
+6e06eaf27721069225789b875bae007b0aeb053b387849321750ce069d4e9e19
+```
+
 ## Automated gates
 
 - 216 `quilting-core` unit tests and 15 integration tests pass.
@@ -173,8 +206,9 @@ removed from the hot path.
 
 ## Decision
 
-The component path has earned a live-but-observational parity lane. It has not
-earned publication authority yet. The next gate is retained component caches
-and repeated pose traces: a cutover must reuse stable component frontiers,
-preserve scene-wide triangle/work budgets, and fall back transactionally to the
-complete planner on any shadow mismatch or oversized connected component.
+The exact component overlay now has physical publication authority, and an
+unchanged certified component epoch may bypass the complete CPU planner. New
+component identities still run the complete oracle before certification. The
+next gate is bounded authority for changed component epochs: oversized,
+uncertified, order-sensitive, or failed candidates must continue to fall back
+transactionally while measured exact samples retain the complete oracle.
