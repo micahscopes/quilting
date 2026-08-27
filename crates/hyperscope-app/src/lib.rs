@@ -947,6 +947,7 @@ impl AppState {
 pub struct AppStore {
     state: Arc<Mutex<AppState>>,
     summary: Mutable<AppSummary>,
+    navigation: Mutable<AppFrameSnapshot>,
     assets: MutableVec<AssetReadModel>,
     authored_assets: MutableVec<AssetDescriptor>,
     authored_entities: MutableVec<AuthoredEntityReadModel>,
@@ -963,6 +964,7 @@ impl Default for AppStore {
 impl AppStore {
     pub fn new(state: AppState) -> Self {
         let summary = state.summary();
+        let navigation = state.frame_snapshot();
         let assets = state.asset_read_models();
         let authored = state.authored_scene_read_model();
         let diagnostics = state.diagnostic_read_models();
@@ -970,6 +972,7 @@ impl AppStore {
         Self {
             state: Arc::new(Mutex::new(state)),
             summary: Mutable::new(summary),
+            navigation: Mutable::new(navigation),
             assets: MutableVec::new_with_values(assets),
             authored_assets: MutableVec::new_with_values(authored.assets),
             authored_entities: MutableVec::new_with_values(authored.entities),
@@ -1025,6 +1028,7 @@ impl AppStore {
         let authored = state.authored_scene_read_model();
         let diagnostics = state.diagnostic_read_models();
         let presentation = state.presentation_read_model();
+        let navigation = state.frame_snapshot();
         let summary = state.summary();
         let revision = summary.revision;
         drop(state);
@@ -1037,6 +1041,7 @@ impl AppStore {
             .replace_cloned(authored.entities);
         self.diagnostics.lock_mut().replace_cloned(diagnostics);
         self.presentation.set_neq(presentation);
+        self.navigation.set_neq(navigation);
         self.summary.set_neq(summary);
         revision
     }
@@ -1053,6 +1058,13 @@ impl AppStore {
 
     pub fn summary_snapshot(&self) -> AppSummary {
         self.summary.get_cloned()
+    }
+
+    /// Last navigation projection published through the low-rate UI commit
+    /// fence. Render and input adapters must use [`Self::frame_snapshot`]
+    /// instead so UI throttling cannot delay semantic integration.
+    pub fn navigation_snapshot(&self) -> AppFrameSnapshot {
+        self.navigation.get_cloned()
     }
 
     pub fn asset_snapshot(&self) -> Vec<AssetReadModel> {
@@ -1106,6 +1118,12 @@ impl AppStore {
 
     pub fn summary_signal(&self) -> MutableSignalCloned<AppSummary> {
         self.summary.signal_cloned()
+    }
+
+    /// Low-rate FRP navigation projection. The summary revision changes only
+    /// after this value and all collection projections have been published.
+    pub fn navigation_signal(&self) -> MutableSignalCloned<AppFrameSnapshot> {
+        self.navigation.signal_cloned()
     }
 
     pub fn asset_signal_vec(&self) -> MutableSignalVec<AssetReadModel> {
@@ -2232,6 +2250,7 @@ mod tests {
     #[test]
     fn high_rate_events_wait_for_an_explicit_ui_flush() {
         let store = AppStore::default();
+        assert_eq!(store.navigation_snapshot().elapsed_seconds, 0.0);
         let presence = PresenceEnvelope {
             header: MessageHeader {
                 version: CURRENT_PROTOCOL_VERSION,
@@ -2270,8 +2289,11 @@ mod tests {
                 delta_seconds: 0.2,
             }))
             .unwrap();
+        assert_eq!(store.frame_snapshot().elapsed_seconds, 0.2);
+        assert_eq!(store.navigation_snapshot().elapsed_seconds, 0.0);
         assert_eq!(store.summary_snapshot().active_peers, 1);
         store.flush_read_models();
+        assert_eq!(store.navigation_snapshot().elapsed_seconds, 0.2);
         assert_eq!(store.summary_snapshot().active_peers, 0);
         assert!(store.presence_snapshot().is_empty());
     }
