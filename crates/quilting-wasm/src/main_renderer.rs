@@ -6550,6 +6550,48 @@ pub fn mr_refresh_adaptive_picked() -> JsValue {
     })
 }
 
+/// Measure the sparse replacement closure for the exact currently published
+/// adaptive epoch without changing draw resources or scheduling frame work.
+#[wasm_bindgen(js_name = "mr_measureAdaptiveOverlay")]
+pub fn mr_measure_adaptive_overlay() -> JsValue {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return adaptive_screen_diagnostic_error("renderer is not initialized");
+        };
+        if state.adaptive_batch_transition_pending {
+            return adaptive_screen_diagnostic_error(
+                "adaptive batch transition is awaiting publication",
+            );
+        }
+        let initial = bounded_standby_resident_lod();
+        let MainState {
+            batch_groups,
+            resident_face_lods,
+            resident_vertex_lods,
+            adaptive_picked,
+            batch_layout_revision,
+            face_materials,
+            face_nodes,
+            face_render_nodes,
+            ..
+        } = state;
+        match adaptive_picked.measure_published_overlay(
+            *batch_layout_revision,
+            batch_groups.len(),
+            resident_face_lods,
+            resident_vertex_lods,
+            face_materials,
+            face_nodes,
+            face_render_nodes,
+            initial,
+        ) {
+            Ok(measurement) => adaptive_browser_value(&measurement),
+            Err(error) => adaptive_screen_diagnostic_error(error),
+        }
+    })
+}
+
 #[wasm_bindgen(js_name = "mr_buildBatches")]
 pub fn mr_build_batches(face_lods: &[f32]) {
     update_batches(face_lods, None);

@@ -408,7 +408,7 @@ import init, {
   mr_setAdaptiveRootShadowEnabled, mr_adaptiveRootShadowDiagnostics,
   mr_setAdaptivePickedFace, mr_setAdaptiveCurrentView,
   mr_clearAdaptivePickedFace, mr_refreshAdaptivePicked,
-  mr_adaptivePickedDiagnostics,
+  mr_adaptivePickedDiagnostics, mr_measureAdaptiveOverlay,
   mr_uploadTessAtlas, mr_uploadAnimationPose, mr_clearAnimationState,
   mr_uploadSkinningTexture, mr_uploadMorphTexture,
   mr_setMaterials, mr_appendMaterials, mr_uploadImages, mr_uploadImageBitmaps, mr_uploadEnvMaps,
@@ -1039,6 +1039,9 @@ const adaptivePickedDiagnostics = {
   refresh() {
     this.snapshot = mr_adaptivePickedDiagnostics();
     return this.snapshot;
+  },
+  measureOverlay() {
+    return mr_measureAdaptiveOverlay();
   },
   syncFloor() {
     if (!this.snapshot?.enabled) return this.snapshot;

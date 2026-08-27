@@ -9,7 +9,8 @@
 use std::collections::BTreeMap;
 
 use quilting_core::batch::{
-    group_resident_screen_leaves_into, RenderBatchKey, RenderBatchMember, ResidentLod,
+    group_resident_screen_leaves_into, group_resident_screen_overlay_into,
+    AdaptiveRenderOverlay, RenderBatchKey, RenderBatchMember, ResidentLod,
 };
 use quilting_core::patch::{QBPatchDomain, QBTriPatch};
 use quilting_core::permutation::canonical_form;
@@ -306,6 +307,7 @@ pub(crate) struct AdaptivePickedRuntime {
     group_cache_misses: u64,
     last_timings: AdaptivePlanTimings,
     lod_scratch: ScreenMeshLeafLodScratch,
+    overlay_shadow: AdaptiveRenderOverlay,
     candidate_groups: BTreeMap<RenderBatchKey, Vec<RenderBatchMember>>,
     attempts: u64,
     installs: u64,
@@ -441,6 +443,29 @@ struct AdaptivePlanTimings {
     group_ms: f64,
 }
 
+/// On-demand workload evidence for retaining unchanged root batches while
+/// publishing only the exact adaptive replacement closure. Measuring this is
+/// deliberately explicit: rebuilding leaf corner densities is real work and
+/// must not silently become part of every animation frame.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AdaptiveOverlayMeasurement {
+    ok: bool,
+    source_faces: u64,
+    frontier_leaves: u64,
+    complete_groups: u64,
+    retained_root_faces: u64,
+    suppressed_faces: u64,
+    suppressed_face_sample: Vec<u32>,
+    overlay_groups: u64,
+    overlay_members: u64,
+    overlay_root_members: u64,
+    overlay_dyadic_members: u64,
+    avoided_publication_members: u64,
+    publication_member_reduction_percent: f64,
+    elapsed_ms: f64,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AdaptivePickedRefreshSnapshot<'a> {
@@ -539,6 +564,7 @@ impl AdaptivePickedRuntime {
         self.group_cache_hits = 0;
         self.group_cache_misses = 0;
         self.last_timings = AdaptivePlanTimings::default();
+        self.overlay_shadow = AdaptiveRenderOverlay::default();
         self.candidate_groups.clear();
         self.clear_pending_publication();
     }
@@ -671,6 +697,125 @@ impl AdaptivePickedRuntime {
         self.clear_pending_publication();
         self.pending_legacy = retry_legacy;
         self.last_publication_error = Some(error.into());
+    }
+
+    /// Extract sparse replacement workload from the exact currently published
+    /// adaptive epoch. Staged and rolled-back candidates are rejected because
+    /// their cached frontier does not describe the live GPU batch map.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn measure_published_overlay(
+        &mut self,
+        batch_layout_revision: u64,
+        complete_groups: usize,
+        baseline_residents: &[Option<ResidentLod>],
+        baseline_vertex_lods: &[[u32; 3]],
+        face_materials: &[usize],
+        face_nodes: &[usize],
+        face_render_nodes: &[usize],
+        initial: ResidentLod,
+    ) -> Result<AdaptiveOverlayMeasurement, String> {
+        if self.config.is_none() {
+            return Err("adaptive screen mode is disabled".into());
+        }
+        if self.has_pending_publication() {
+            return Err("adaptive screen publication is still staged".into());
+        }
+        if let Some(error) = self.last_publication_error.as_deref() {
+            return Err(format!("adaptive screen publication rolled back: {error}"));
+        }
+        if let Some(error) = self.last_error.as_deref() {
+            return Err(format!("adaptive screen renderer is using its fallback: {error}"));
+        }
+        if self.last_plan.is_none() {
+            return Err("adaptive screen frontier has not been published".into());
+        }
+        let signature = self
+            .published_group_signature
+            .ok_or_else(|| "published adaptive group identity is unavailable".to_string())?;
+        if signature.reconciliation_generation != self.reconciliation_cache.generation
+            || signature.batch_layout_revision != batch_layout_revision
+        {
+            return Err("cached adaptive frontier is not the published batch epoch".into());
+        }
+        let frontier = self
+            .frontier
+            .as_ref()
+            .ok_or_else(|| "published adaptive frontier is unavailable".to_string())?;
+        let resident_edge_lods = &self
+            .reconciliation_cache
+            .result
+            .as_ref()
+            .ok_or_else(|| "published adaptive reconciliation is unavailable".to_string())?
+            .resident;
+
+        let start = browser_now_ms();
+        group_resident_screen_overlay_into(
+            frontier,
+            resident_edge_lods,
+            baseline_residents,
+            baseline_vertex_lods,
+            face_materials,
+            face_nodes,
+            face_render_nodes,
+            initial,
+            &mut self.lod_scratch,
+            &mut self.overlay_shadow,
+        )
+        .map_err(|error| error.to_string())?;
+        let elapsed_ms = browser_now_ms() - start;
+
+        let source_faces = baseline_residents.len();
+        let suppressed_faces = self.overlay_shadow.suppressed_faces.len();
+        let overlay_members = self
+            .overlay_shadow
+            .groups
+            .values()
+            .map(Vec::len)
+            .sum::<usize>();
+        let overlay_root_members = self
+            .overlay_shadow
+            .groups
+            .values()
+            .flatten()
+            .filter(|member| member.leaf_id == ScreenPatchLeafId::ROOT)
+            .count();
+        let frontier_leaves = frontier.leaves().len();
+        let retained_root_faces = source_faces.saturating_sub(suppressed_faces);
+        let composed_members = retained_root_faces.saturating_add(overlay_members);
+        if composed_members != frontier_leaves {
+            return Err(format!(
+                "sparse overlay composes {composed_members} members, expected {frontier_leaves}",
+            ));
+        }
+        let avoided_publication_members = frontier_leaves.saturating_sub(overlay_members);
+        let publication_member_reduction_percent = if frontier_leaves == 0 {
+            0.0
+        } else {
+            100.0 * avoided_publication_members as f64 / frontier_leaves as f64
+        };
+
+        Ok(AdaptiveOverlayMeasurement {
+            ok: true,
+            source_faces: source_faces as u64,
+            frontier_leaves: frontier_leaves as u64,
+            complete_groups: complete_groups as u64,
+            retained_root_faces: retained_root_faces as u64,
+            suppressed_faces: suppressed_faces as u64,
+            suppressed_face_sample: self
+                .overlay_shadow
+                .suppressed_faces
+                .iter()
+                .copied()
+                .take(16)
+                .collect(),
+            overlay_groups: self.overlay_shadow.groups.len() as u64,
+            overlay_members: overlay_members as u64,
+            overlay_root_members: overlay_root_members as u64,
+            overlay_dyadic_members: overlay_members.saturating_sub(overlay_root_members) as u64,
+            avoided_publication_members: avoided_publication_members as u64,
+            publication_member_reduction_percent,
+            elapsed_ms,
+        })
     }
 
     #[cfg(test)]
@@ -1509,12 +1654,45 @@ mod tests {
         assert_eq!(runtime.snapshot().pose_revision, Some(7));
         assert_eq!(runtime.snapshot().published_faces, [0]);
         assert_eq!(runtime.snapshot().last_plan.unwrap().selected_faces, 1);
+        let overlay = runtime
+            .measure_published_overlay(
+                0,
+                1,
+                &[Some(resident)],
+                &[[1; 3]],
+                &[0],
+                &[0],
+                &[0],
+                resident,
+            )
+            .unwrap();
+        assert!(overlay.ok);
+        assert_eq!(overlay.frontier_leaves, 1);
+        assert_eq!(overlay.retained_root_faces, 1);
+        assert_eq!(overlay.suppressed_faces, 0);
+        assert_eq!(overlay.overlay_members, 0);
+        assert_eq!(overlay.avoided_publication_members, 1);
 
         plan(&mut runtime, (8, 2), 4);
         assert_eq!(runtime.snapshot().frontier_cache_hits, 1);
         assert_eq!(runtime.snapshot().frontier_cache_misses, 1);
         assert_eq!(runtime.snapshot().reconciliation_cache_hits, 1);
         assert_eq!(runtime.snapshot().reconciliation_cache_misses, 1);
+        assert_eq!(
+            runtime
+                .measure_published_overlay(
+                    0,
+                    1,
+                    &[Some(resident)],
+                    &[[1; 3]],
+                    &[0],
+                    &[0],
+                    &[0],
+                    resident,
+                )
+                .unwrap_err(),
+            "adaptive screen publication is still staged",
+        );
         runtime.record_publication_failure("synthetic upload rollback");
         let rolled_back = runtime.snapshot();
         assert_eq!(rolled_back.state, "rollback-active");
