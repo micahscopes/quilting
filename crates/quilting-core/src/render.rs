@@ -195,6 +195,34 @@ pub struct RenderPoseIdentity {
     pub pose_revision: u64,
 }
 
+/// Whether a backend must resolve a batch's source pose again. The global and
+/// batch-local dirty flags carry topology/pose invalidation; ordinary affine
+/// entity motion is compared explicitly because it is part of the prepared
+/// patch record. The conformal map remains a later evaluation parameter.
+pub fn patch_preparation_needed(
+    global_dirty: bool,
+    batch_dirty: bool,
+    last_model: Option<[f32; 16]>,
+    model: [f32; 16],
+) -> bool {
+    global_dirty || batch_dirty || last_model != Some(model)
+}
+
+/// Whether conservative visibility must be resolved for the current prepared
+/// patches. `residency_revision` identifies the backend-neutral batch command
+/// set, not a backend resource or command buffer.
+pub fn patch_visibility_needed(
+    pose_prepared: bool,
+    last_mvp: Option<[f32; 16]>,
+    last_residency_revision: u64,
+    mvp: [f32; 16],
+    residency_revision: u64,
+) -> bool {
+    pose_prepared
+        || last_mvp != Some(mvp)
+        || last_residency_revision != residency_revision
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderStyle {
     Pbr,
@@ -877,6 +905,27 @@ mod tests {
             selected_node: Some(0),
             focus: FocusFieldPacket::default(),
         }
+    }
+
+    #[test]
+    fn pose_preparation_and_visibility_have_independent_revisions() {
+        let mut mvp = [0.0; 16];
+        mvp[0] = 1.0;
+        assert!(!patch_preparation_needed(false, false, Some(mvp), mvp));
+        assert!(patch_preparation_needed(true, false, Some(mvp), mvp));
+        assert!(patch_preparation_needed(false, true, Some(mvp), mvp));
+        assert!(patch_preparation_needed(false, false, None, mvp));
+        assert!(!patch_visibility_needed(false, Some(mvp), 7, mvp, 7));
+        assert!(patch_visibility_needed(true, Some(mvp), 7, mvp, 7));
+        assert!(patch_visibility_needed(false, None, 7, mvp, 7));
+        assert!(patch_visibility_needed(false, Some(mvp), 6, mvp, 7));
+        let mut moved = mvp;
+        moved[12] = 0.25;
+        assert!(!patch_preparation_needed(false, false, Some(mvp), mvp));
+        let mut moved_model = mvp;
+        moved_model[13] = 0.5;
+        assert!(patch_preparation_needed(false, false, Some(mvp), moved_model));
+        assert!(patch_visibility_needed(false, Some(mvp), 7, moved, 7));
     }
 
     #[test]

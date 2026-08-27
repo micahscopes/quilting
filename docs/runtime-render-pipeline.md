@@ -147,6 +147,13 @@ command by compacting visible instances and emitting indirect draw counts.
 The command contract deliberately says nothing about transform feedback,
 storage buffers, or GPU handles.
 
+The invalidation predicate is shared as well: preparation changes with source
+pose, resident topology, or the entity's ordinary affine model; visibility
+changes with preparation, the view-projection matrix, or the resident batch
+revision. A conformal uniform change does not rebuild the prepared 52-float
+record, but it still participates in the later patch evaluation and the batch
+revision that invalidates visibility.
+
 A negative visibility result must mean “the complete posed rational patch is
 outside the current guarded frustum.” Invalid bounds, a denominator region
 touching zero, or a source bound containing the Möbius pole all survive. The

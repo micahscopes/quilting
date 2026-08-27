@@ -36,9 +36,9 @@ use quilting_renderer::texture::TextureCache;
 use quilting_core::batch;
 use quilting_core::instance_layout;
 use quilting_core::render::{
-    FocusFieldPacket, PbrDrawClass, RenderBatchSnapshot, RenderEntityTransform,
-    RenderFrameOptions, RenderGeometry, RenderSceneSnapshot, RenderStyle,
-    RenderSubmissionStats, RenderView,
+    patch_preparation_needed, patch_visibility_needed, FocusFieldPacket, PbrDrawClass,
+    RenderBatchSnapshot, RenderEntityTransform, RenderFrameOptions, RenderGeometry,
+    RenderSceneSnapshot, RenderStyle, RenderSubmissionStats, RenderView,
 };
 use quilting_core::screen_partition::ScreenPartitionPolicy;
 use quilting_core::screen_leaf_lod::ScreenMeshTopologyCache;
@@ -1410,25 +1410,6 @@ fn embed_face_node_ids(
         instances[face * instance_layout::STRIDE + instance_layout::offset::NODE_ID] = node as f32;
     }
     Ok(())
-}
-
-fn patch_preparation_needed(
-    global_dirty: bool,
-    batch_dirty: bool,
-    last_model: Option<[f32; 16]>,
-    model: [f32; 16],
-) -> bool {
-    global_dirty || batch_dirty || last_model != Some(model)
-}
-
-fn patch_visibility_needed(
-    pose_prepared: bool,
-    last_mvp: Option<[f32; 16]>,
-    last_command_build: u64,
-    mvp: [f32; 16],
-    command_build: u64,
-) -> bool {
-    pose_prepared || last_mvp != Some(mvp) || last_command_build != command_build
 }
 
 fn create_gpu_batch(
@@ -7780,27 +7761,6 @@ mod tests {
             instances[23 * instance_layout::STRIDE + instance_layout::offset::NODE_ID],
             91.0,
         );
-    }
-
-    #[wasm_bindgen_test]
-    fn pose_preparation_and_visibility_have_independent_revisions() {
-        let mut mvp = [0.0; 16];
-        mvp[0] = 1.0;
-        assert!(!patch_preparation_needed(false, false, Some(mvp), mvp));
-        assert!(patch_preparation_needed(true, false, Some(mvp), mvp));
-        assert!(patch_preparation_needed(false, true, Some(mvp), mvp));
-        assert!(patch_preparation_needed(false, false, None, mvp));
-        assert!(!patch_visibility_needed(false, Some(mvp), 7, mvp, 7));
-        assert!(patch_visibility_needed(true, Some(mvp), 7, mvp, 7));
-        assert!(patch_visibility_needed(false, None, 7, mvp, 7));
-        assert!(patch_visibility_needed(false, Some(mvp), 6, mvp, 7));
-        let mut moved = mvp;
-        moved[12] = 0.25;
-        assert!(!patch_preparation_needed(false, false, Some(mvp), mvp));
-        let mut moved_model = mvp;
-        moved_model[13] = 0.5;
-        assert!(patch_preparation_needed(false, false, Some(mvp), moved_model));
-        assert!(patch_visibility_needed(false, Some(mvp), 7, moved, 7));
     }
 
     #[wasm_bindgen_test]
