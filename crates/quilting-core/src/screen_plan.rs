@@ -10,7 +10,10 @@ use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BinaryHeap};
 
 use crate::patch::{QBPatchDomain, QBTriPatch};
-use crate::screen_leaf_lod::{ScreenLeafLodError, ScreenMeshLeafTopology, ScreenMeshTopologyCache};
+use crate::screen_leaf_lod::{
+    ScreenLeafLodError, ScreenMeshLeafTopology, ScreenMeshNeighborhoodScratch,
+    ScreenMeshTopologyCache,
+};
 use crate::screen_partition::{
     partition_screen_patch, ScreenPartitionError, ScreenPartitionPolicy, ScreenPatchLeafId,
 };
@@ -134,6 +137,30 @@ impl AdaptiveScreenComponentPlan {
     fn clear_retain_capacity(&mut self) {
         self.component_faces.clear();
         self.mesh.clear_retain_capacity();
+    }
+}
+
+/// Candidate local adaptive plan with fixed, already-reconciled observation
+/// roots around its mutable edge neighborhood. This representation is not a
+/// publication certificate; callers must reconcile with `fixed_leaves` and
+/// compare the result with the complete oracle before promotion.
+#[derive(Debug, Default)]
+pub struct AdaptiveScreenNeighborhoodPlan {
+    pub reconciliation_faces: Vec<u32>,
+    pub observed_faces: Vec<u32>,
+    pub fixed_leaves: Vec<bool>,
+    pub mesh: AdaptiveScreenMeshPlan,
+    seed_faces: Vec<u32>,
+    neighborhood_scratch: ScreenMeshNeighborhoodScratch,
+}
+
+impl AdaptiveScreenNeighborhoodPlan {
+    fn clear_retain_capacity(&mut self) {
+        self.reconciliation_faces.clear();
+        self.observed_faces.clear();
+        self.fixed_leaves.clear();
+        self.mesh.clear_retain_capacity();
+        self.seed_faces.clear();
     }
 }
 
@@ -582,6 +609,86 @@ pub fn plan_adaptive_screen_components_into(
         output.clear_retain_capacity();
     }
     result
+}
+
+/// Build a bounded mutable edge neighborhood plus immutable root observers.
+///
+/// Observer requests come from the caller's already-reconciled source-root
+/// residency, not raw requests. Reconciliation must use
+/// [`crate::screen_leaf_lod::ScreenMeshLeafFrontier::reconcile_lods_with_fixed_boundary`]
+/// with the emitted `fixed_leaves`; a fixed-boundary promotion means the
+/// chosen edge radius is insufficient and must fall back or expand.
+pub fn plan_adaptive_screen_neighborhood_into(
+    request: AdaptiveScreenMeshPlanRequest<'_>,
+    topology: &ScreenMeshTopologyCache,
+    edge_hops: u32,
+    max_neighborhood_faces: usize,
+    baseline_resident_lods: &[[u32; 3]],
+    output: &mut AdaptiveScreenNeighborhoodPlan,
+) -> Result<(), AdaptiveScreenMeshPlanError> {
+    output.clear_retain_capacity();
+    if topology.source_face_count() != request.source_requested_lods.len()
+        || baseline_resident_lods.len() != request.source_requested_lods.len()
+    {
+        return Err(ScreenLeafLodError::LengthMismatch.into());
+    }
+    output.seed_faces.extend(
+        request
+            .selected_patches
+            .iter()
+            .map(|selected| selected.source_face),
+    );
+    let neighborhood = topology.collect_face_neighborhood(
+        &output.seed_faces,
+        edge_hops,
+        max_neighborhood_faces,
+        &mut output.reconciliation_faces,
+        &mut output.observed_faces,
+        &mut output.neighborhood_scratch,
+    );
+    if let Err(error) = neighborhood {
+        output.clear_retain_capacity();
+        return Err(error.into());
+    }
+    if output.observed_faces.is_empty() {
+        output.clear_retain_capacity();
+        return Err(PickedScreenMeshPlanError::EmptyScene);
+    }
+    if let Err(error) =
+        plan_adaptive_screen_mesh_reusing(request, Some(&output.observed_faces), &mut output.mesh)
+    {
+        output.clear_retain_capacity();
+        return Err(error);
+    }
+
+    output.fixed_leaves.reserve(output.mesh.leaves.len());
+    let fixed_result = (|| {
+        for (leaf_index, leaf) in output.mesh.leaves.iter().copied().enumerate() {
+            let fixed = output
+                .reconciliation_faces
+                .binary_search(&leaf.source_face)
+                .is_err();
+            if fixed {
+                if leaf.id != ScreenPatchLeafId::ROOT {
+                    return Err(PickedScreenMeshPlanError::InvalidLeafDomain);
+                }
+                let face = leaf.source_face as usize;
+                let resident = baseline_resident_lods
+                    .get(face)
+                    .copied()
+                    .ok_or(PickedScreenMeshPlanError::InvalidSelectedFace)?;
+                validate_source_face_lods(face, resident, request.max_atlas_lod)?;
+                output.mesh.requested_lods[leaf_index] = resident;
+            }
+            output.fixed_leaves.push(fixed);
+        }
+        Ok(())
+    })();
+    if let Err(error) = fixed_result {
+        output.clear_retain_capacity();
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn plan_adaptive_screen_mesh_reusing(
@@ -1649,6 +1756,131 @@ mod tests {
             .zip(component_vertices.iter().copied())
             .collect::<Vec<_>>();
         assert_eq!(local_component, complete_component);
+    }
+
+    #[test]
+    fn neighborhood_plan_uses_fixed_corner_observers_without_component_expansion() {
+        let positions = [
+            [-0.8, -0.6, 0.0],
+            [-0.2, -0.6, 0.0],
+            [-0.5, 0.0, 0.0],
+            [-0.8, 0.6, 0.0],
+            [-0.2, 0.6, 0.0],
+            [0.2, -0.5, 0.0],
+            [0.8, -0.5, 0.0],
+            [0.5, 0.5, 0.0],
+        ];
+        let triangles = [[0, 1, 2], [2, 3, 4], [5, 6, 7]];
+        let source =
+            quilting_mesh::HalfEdgeMesh::from_triangles_welded_exact(&positions, &triangles);
+        let topology =
+            crate::screen_leaf_lod::ScreenMeshTopologyCache::from_half_edge_mesh(&source).unwrap();
+        let patch = QBTriPatch::flat(positions[0], positions[1], positions[2]);
+        let selected = [SelectedScreenPatch {
+            source_face: 0,
+            transformed_patch: &patch,
+        }];
+        let source_lods = [[2, 4, 8], [64, 1, 1], [32, 16, 8]];
+        let request = AdaptiveScreenMeshPlanRequest {
+            selected_patches: &selected,
+            view_projection: &IDENTITY,
+            viewport: [640.0, 480.0],
+            min_px_per_segment: 16.0,
+            max_px_per_segment: 10_000.0,
+            policy: ScreenPartitionPolicy {
+                min_depth: 1,
+                max_depth: 1,
+                max_leaves: 4,
+                ..ScreenPartitionPolicy::default()
+            },
+            max_atlas_lod: 64,
+            retain_culled_leaves: true,
+            max_partition_leaves: 4,
+            max_total_leaves: 6,
+            source_requested_lods: &source_lods,
+        };
+
+        let root_leaves = (0..3)
+            .map(|source_face| ScreenMeshLeafTopology {
+                source_face,
+                id: ScreenPatchLeafId::ROOT,
+                domain: QBPatchDomain::FULL,
+            })
+            .collect::<Vec<_>>();
+        let root_frontier =
+            crate::screen_leaf_lod::ScreenMeshLeafFrontier::build(&root_leaves, &topology).unwrap();
+        let baseline = root_frontier.reconcile_lods(&source_lods, 4, 64).unwrap();
+        assert_eq!(baseline.resident[1], [64, 16, 16]);
+
+        let complete = plan_adaptive_screen_mesh(request).unwrap();
+        let complete_frontier =
+            crate::screen_leaf_lod::ScreenMeshLeafFrontier::build(&complete.leaves, &topology)
+                .unwrap();
+        let complete_resident = complete_frontier
+            .reconcile_lods(&complete.requested_lods, 4, 64)
+            .unwrap();
+        let complete_vertices = complete_frontier
+            .rebuild_vertex_lods(&complete_resident.resident)
+            .unwrap();
+
+        let mut neighborhood = AdaptiveScreenNeighborhoodPlan::default();
+        plan_adaptive_screen_neighborhood_into(
+            request,
+            &topology,
+            0,
+            2,
+            &baseline.resident,
+            &mut neighborhood,
+        )
+        .unwrap();
+        assert_eq!(neighborhood.reconciliation_faces, [0]);
+        assert_eq!(neighborhood.observed_faces, [0, 1]);
+        assert_eq!(neighborhood.mesh.leaves.len(), 5);
+        assert_eq!(
+            neighborhood.fixed_leaves,
+            [false, false, false, false, true]
+        );
+        assert_eq!(neighborhood.mesh.requested_lods[4], [64, 16, 16]);
+        assert_ne!(neighborhood.mesh.requested_lods[4], source_lods[1]);
+
+        let local_frontier = crate::screen_leaf_lod::ScreenMeshLeafFrontier::build(
+            &neighborhood.mesh.leaves,
+            &topology,
+        )
+        .unwrap();
+        let local_resident = local_frontier
+            .reconcile_lods_with_fixed_boundary(
+                &neighborhood.mesh.requested_lods,
+                &neighborhood.fixed_leaves,
+                4,
+                64,
+            )
+            .unwrap();
+        let local_vertices = local_frontier
+            .rebuild_vertex_lods(&local_resident.resident)
+            .unwrap();
+        let complete_observed = complete
+            .leaves
+            .iter()
+            .copied()
+            .zip(complete_resident.resident.iter().copied())
+            .zip(complete_vertices.iter().copied())
+            .filter(|((leaf, _), _)| {
+                neighborhood
+                    .observed_faces
+                    .binary_search(&leaf.source_face)
+                    .is_ok()
+            })
+            .collect::<Vec<_>>();
+        let local_observed = neighborhood
+            .mesh
+            .leaves
+            .iter()
+            .copied()
+            .zip(local_resident.resident.iter().copied())
+            .zip(local_vertices.iter().copied())
+            .collect::<Vec<_>>();
+        assert_eq!(local_observed, complete_observed);
     }
 
     #[test]
