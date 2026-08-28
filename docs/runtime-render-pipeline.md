@@ -435,12 +435,16 @@ promotion gates. The compaction fixture crosses three 64-lane chunks, preserves
 stable source order, covers a disabled bucket and retained-root replacement,
 and keeps indirect `first_instance` zero for baseline WebGPU portability.
 
-The WebGL2 GLSL programs and runtime authority remain untouched. Classifier
-readback in `quilting-webgpu` is still full and diagnostic. Compaction readback
-uses temporary conformance staging only; live residency exposes the source
-visibility, compacted range/survivor, aligned batch-index, and indirect buffers
-for a no-readback render path. An authoritative backend should copy only
-bounded, delayed telemetry to the CPU.
+The WebGL2 GLSL programs and runtime authority remain untouched. WebGPU LOD
+classification now has separate input-write and command-encoding entry points
+that return a borrow-safe device output with a monotonic encoding epoch. The
+resident model no longer allocates a staging buffer. Full classifier readback
+is an explicit diagnostic wrapper that allocates temporary conformance staging;
+the no-readback path performs no copy, map, or await. Compaction diagnostics use
+the same temporary-staging policy. Live residency exposes classification,
+source visibility, compacted range/survivor, aligned batch-index, and indirect
+buffers for an ordered device-only path. An authoritative backend should copy
+only bounded, delayed telemetry to the CPU.
 
 Patch preparation now writes the exact 208-byte prepared record on-device, and
 the first production WGSL graphics pipeline pulls those records through the
@@ -512,11 +516,12 @@ backend enabled versus 7,458,547 bytes with the feature disabled: an 84,870-byte
 feature set reached roughly 50 MB before release optimization—so size gates
 must compare optimized outputs.
 
-The next cut is authoritative renderer integration: bind the same-device LOD
-classifier output directly to visibility/scene selection, stop rebuilding
-topology words from worker readback, attach the live shared frame executor to a
-browser surface, and add WebGL2 image/workload parity behind the existing
-explicit backend switch. PBR, wire, LOD color, stretch, picking,
+The next cut is authoritative renderer integration: consume the new
+device-resident LOD output in same-device edge reconciliation, atlas selection,
+and batch/topology publication; stop rebuilding topology words from worker
+readback; attach the live shared frame executor to a browser surface; and add
+WebGL2 image/workload parity behind the existing explicit backend switch. PBR,
+wire, LOD color, stretch, picking,
 material/texture binding, and postprocess commands still reject explicitly
 rather than silently lowering to normals. That cut is what finally removes the
 live classifier readback, CPU topology repacking, and rejected atlas vertex

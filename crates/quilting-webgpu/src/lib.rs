@@ -395,6 +395,7 @@ pub struct LodClassifierDevice {
 /// Retained device buffers for one immutable prepared model and atlas lookup.
 pub struct LodClassifierModel {
     prepared: PreparedLodModel,
+    classification_epoch: u64,
     joint_capacity: usize,
     subject_rows: usize,
     uniform: wgpu::Buffer,
@@ -404,9 +405,32 @@ pub struct LodClassifierModel {
     morph_weights: wgpu::Buffer,
     subject_states: wgpu::Buffer,
     packed_records: wgpu::Buffer,
-    readback: wgpu::Buffer,
     pass1_bind_group: wgpu::BindGroup,
     pass2_bind_group: wgpu::BindGroup,
+}
+
+/// One encoded, device-resident LOD classification result. The packed words
+/// remain owned by the uploaded model and can be bound directly by downstream
+/// compute passes. The mutable model borrow prevents another classification
+/// from overwriting this epoch while a consumer is encoding against it.
+pub struct DeviceLodClassification<'model> {
+    packed_records: &'model wgpu::Buffer,
+    face_count: u32,
+    epoch: u64,
+}
+
+impl DeviceLodClassification<'_> {
+    pub fn packed_records_buffer(&self) -> &wgpu::Buffer {
+        self.packed_records
+    }
+
+    pub fn face_count(&self) -> u32 {
+        self.face_count
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
 }
 
 /// Retained current-scene topology and prepared-patch output. Immutable source
@@ -815,8 +839,8 @@ impl LodClassifierDevice {
         joint_matrices.extend_from_slice(&identity_matrix());
         joint_matrices.extend_from_slice(&identity_matrix());
         let mut resident = self.upload_model(prepared, &atlas)?;
-        let actual = self
-            .classify(
+        let actual = {
+            let output = self.classify_on_device(
                 &mut resident,
                 &dispatch,
                 metrics,
@@ -824,11 +848,35 @@ impl LodClassifierDevice {
                     joint_matrices: &joint_matrices,
                     morph_weights: &[],
                 },
-            )
-            .await?;
+            )?;
+            if output.face_count() != 1 || output.epoch() != 1 {
+                return Err(LodWebGpuError::Conformance(format!(
+                    "device-resident classification identity mismatch: faces={}, epoch={}",
+                    output.face_count(),
+                    output.epoch(),
+                )));
+            }
+            self.read_lod_classification_for_diagnostics(&output)
+                .await?
+        };
         if actual != expected {
             return Err(LodWebGpuError::Conformance(format!(
                 "full pipeline mismatch: expected {expected:?}, got {actual:?}"
+            )));
+        }
+        let next_output = self.classify_on_device(
+            &mut resident,
+            &dispatch,
+            metrics,
+            LodPose {
+                joint_matrices: &joint_matrices,
+                morph_weights: &[],
+            },
+        )?;
+        if next_output.epoch() != 2 {
+            return Err(LodWebGpuError::Conformance(format!(
+                "device-resident classification epoch did not advance: {}",
+                next_output.epoch(),
             )));
         }
         let full_pipeline_words = actual.len();
@@ -2971,9 +3019,8 @@ impl LodClassifierDevice {
     }
 
     /// Upload immutable geometry/topology once and allocate retained dynamic
-    /// buffers. The current implementation deliberately keeps readback for
-    /// shadow conformance; an authoritative backend will consume packed words
-    /// on-device instead.
+    /// buffers. Diagnostic readback is allocated only by an explicit
+    /// conformance call; the resident model owns device-local results.
     pub fn upload_model(
         &self,
         prepared: PreparedLodModel,
@@ -3048,13 +3095,6 @@ impl LodClassifierDevice {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("LOD diagnostic readback"),
-            size: face_count as u64 * PACKED_RECORD_BYTES,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         let pass1_layout = self.pass1_pipeline.get_bind_group_layout(0);
         let pass1_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("LOD pass one bindings"),
@@ -3086,6 +3126,7 @@ impl LodClassifierDevice {
 
         Ok(LodClassifierModel {
             prepared,
+            classification_epoch: 0,
             joint_capacity,
             subject_rows,
             uniform,
@@ -3095,21 +3136,21 @@ impl LodClassifierDevice {
             morph_weights,
             subject_states,
             packed_records,
-            readback,
             pass1_bind_group,
             pass2_bind_group,
         })
     }
 
-    /// Execute both passes in one command buffer and return the diagnostic
-    /// packed words only after the device signals the map callback.
-    pub async fn classify(
+    /// Upload the current pose, dispatch metrics, and authored subject state.
+    /// This changes no immutable model shape and performs no command encoding
+    /// or readback.
+    pub fn write_lod_classification_state(
         &self,
-        model: &mut LodClassifierModel,
+        model: &LodClassifierModel,
         dispatch: &LodDispatchState,
         metrics: WgslLodDispatchMetrics,
         pose: LodPose<'_>,
-    ) -> Result<Vec<u32>, LodWebGpuError> {
+    ) -> Result<(), LodWebGpuError> {
         self.write_dynamic_pose(model, pose, metrics.num_joints)?;
         let subject_words = pack_wgsl_lod_subject_words(&model.prepared, dispatch)
             .map_err(LodWebGpuError::Payload)?;
@@ -3127,13 +3168,22 @@ impl LodClassifierDevice {
             0,
             bytemuck::cast_slice(&subject_words),
         );
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("quilting LOD classifier"),
-            });
+        Ok(())
+    }
+
+    /// Append both classifier passes to an application-owned encoder and
+    /// return the exact device-local packed output. A downstream reconciliation
+    /// pass can consume this handle in the same encoder and queue submission.
+    pub fn encode_lod_classification<'model>(
+        &self,
+        model: &'model mut LodClassifierModel,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<DeviceLodClassification<'model>, LodWebGpuError> {
+        let epoch = model.classification_epoch.checked_add(1).ok_or_else(|| {
+            LodWebGpuError::Payload("LOD classification epoch overflowed".to_string())
+        })?;
         let groups = (model.prepared.residency.num_faces as u32).div_ceil(LOD_WORKGROUP_SIZE);
-        {
+        if groups != 0 {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("quilting LOD pass one"),
                 timestamp_writes: None,
@@ -3142,7 +3192,7 @@ impl LodClassifierDevice {
             pass.set_bind_group(0, &model.pass1_bind_group, &[]);
             pass.dispatch_workgroups(groups, 1, 1);
         }
-        {
+        if groups != 0 {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("quilting LOD pass two"),
                 timestamp_writes: None,
@@ -3151,11 +3201,78 @@ impl LodClassifierDevice {
             pass.set_bind_group(0, &model.pass2_bind_group, &[]);
             pass.dispatch_workgroups(groups, 1, 1);
         }
-        let readback_bytes = model.prepared.residency.num_faces as u64 * PACKED_RECORD_BYTES;
-        encoder.copy_buffer_to_buffer(&model.packed_records, 0, &model.readback, 0, readback_bytes);
-        self.queue.submit([encoder.finish()]);
+        model.classification_epoch = epoch;
+        Ok(DeviceLodClassification {
+            packed_records: &model.packed_records,
+            face_count: model.prepared.residency.num_faces as u32,
+            epoch,
+        })
+    }
 
-        self.readback_words(&model.readback, readback_bytes).await
+    /// Upload state, execute both classifier passes, and leave their packed
+    /// output on the device. This is the authoritative fast path: it submits no
+    /// copy to a staging buffer and never maps GPU memory.
+    pub fn classify_on_device<'model>(
+        &self,
+        model: &'model mut LodClassifierModel,
+        dispatch: &LodDispatchState,
+        metrics: WgslLodDispatchMetrics,
+        pose: LodPose<'_>,
+    ) -> Result<DeviceLodClassification<'model>, LodWebGpuError> {
+        self.write_lod_classification_state(model, dispatch, metrics, pose)?;
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quilting LOD classifier"),
+            });
+        let output = self.encode_lod_classification(model, &mut encoder)?;
+        self.queue.submit([encoder.finish()]);
+        Ok(output)
+    }
+
+    /// Copy a device-resident result into temporary staging for conformance or
+    /// diagnostics. Live rendering must bind the output buffer directly.
+    pub async fn read_lod_classification_for_diagnostics(
+        &self,
+        output: &DeviceLodClassification<'_>,
+    ) -> Result<Vec<u32>, LodWebGpuError> {
+        let readback_bytes = u64::from(output.face_count) * PACKED_RECORD_BYTES;
+        if readback_bytes == 0 {
+            return Ok(Vec::new());
+        }
+        let readback = gpu_buffer(
+            &self.device,
+            "LOD temporary diagnostic readback",
+            readback_bytes,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quilting LOD diagnostic copy"),
+            });
+        encoder.copy_buffer_to_buffer(
+            output.packed_records_buffer(),
+            0,
+            &readback,
+            0,
+            readback_bytes,
+        );
+        self.queue.submit([encoder.finish()]);
+        self.readback_words(&readback, readback_bytes).await
+    }
+
+    /// Diagnostic compatibility wrapper around [`Self::classify_on_device`].
+    /// It is intentionally unsuitable for an authoritative render loop.
+    pub async fn classify(
+        &self,
+        model: &mut LodClassifierModel,
+        dispatch: &LodDispatchState,
+        metrics: WgslLodDispatchMetrics,
+        pose: LodPose<'_>,
+    ) -> Result<Vec<u32>, LodWebGpuError> {
+        let output = self.classify_on_device(model, dispatch, metrics, pose)?;
+        self.read_lod_classification_for_diagnostics(&output).await
     }
 
     /// Execute only the coherence/packing pass over caller-supplied
