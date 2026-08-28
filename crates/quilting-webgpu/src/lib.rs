@@ -21,6 +21,7 @@ use quilting_renderer::compute::{
     WgslVisibilityCompactionSceneWords,
 };
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 use wgpu::util::DeviceExt;
 
@@ -313,6 +314,28 @@ pub struct PatchAtlasDraw<'a> {
     pub index_count: u32,
 }
 
+/// Element ranges for one canonical entry in Hyperscope's packed global atlas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PackedPatchAtlasEntry {
+    pub triangle_first_index: u32,
+    pub triangle_index_count: u32,
+    pub line_first_index: u32,
+    pub line_index_count: u32,
+}
+
+/// WebGPU ownership of the exact packed atlas already consumed by WebGL2.
+/// One global barycentric buffer and two global index buffers serve every
+/// canonical key; lightweight range views are rebuilt without GPU allocation.
+pub struct PackedPatchAtlas {
+    barycentric_buffer: wgpu::Buffer,
+    triangle_index_buffer: wgpu::Buffer,
+    line_index_buffer: wgpu::Buffer,
+    entries: BTreeMap<[u32; 3], PackedPatchAtlasEntry>,
+    vertex_count: u32,
+    triangle_index_count: u32,
+    line_index_count: u32,
+}
+
 /// Attachments for the current WebGPU patch pass. Clearing is explicit so an
 /// application can compose Quilting into an existing render graph without the
 /// backend inventing frame ownership.
@@ -522,6 +545,123 @@ impl LodClassifierDevice {
     /// the caller's subsequent command submission on this same queue.
     pub fn queue(&self) -> &wgpu::Queue {
         &self.queue
+    }
+
+    /// Upload Hyperscope's existing seven-word packed-atlas metadata and three
+    /// shared geometry arrays. This is the WebGPU counterpart of WebGL2's
+    /// `TessAtlasBuffers`; it deliberately preserves the same canonical keys
+    /// and global index values.
+    pub fn upload_packed_patch_atlas(
+        &self,
+        patches: &[u32],
+        barycentrics: &[f32],
+        triangle_indices: &[u32],
+        line_indices: &[u32],
+    ) -> Result<PackedPatchAtlas, LodWebGpuError> {
+        if patches.is_empty() || !patches.len().is_multiple_of(7) {
+            return Err(LodWebGpuError::Payload(
+                "packed WebGPU atlas metadata must contain nonempty seven-word records".to_string(),
+            ));
+        }
+        if barycentrics.is_empty()
+            || !barycentrics.len().is_multiple_of(3)
+            || barycentrics.iter().any(|value| !value.is_finite())
+        {
+            return Err(LodWebGpuError::Payload(
+                "packed WebGPU atlas barycentrics must contain finite vec3 records".to_string(),
+            ));
+        }
+        let vertex_count = u32::try_from(barycentrics.len() / 3).map_err(|_| {
+            LodWebGpuError::Payload("packed WebGPU atlas vertex count exceeds u32".to_string())
+        })?;
+        let triangle_index_count = u32::try_from(triangle_indices.len()).map_err(|_| {
+            LodWebGpuError::Payload(
+                "packed WebGPU atlas triangle index count exceeds u32".to_string(),
+            )
+        })?;
+        let line_index_count = u32::try_from(line_indices.len()).map_err(|_| {
+            LodWebGpuError::Payload("packed WebGPU atlas line index count exceeds u32".to_string())
+        })?;
+        if triangle_indices
+            .iter()
+            .chain(line_indices)
+            .any(|&index| index >= vertex_count)
+        {
+            return Err(LodWebGpuError::Payload(
+                "packed WebGPU atlas contains an out-of-range global vertex index".to_string(),
+            ));
+        }
+
+        let keys = patches
+            .chunks_exact(7)
+            .map(|patch| [patch[0], patch[1], patch[2]])
+            .collect::<Vec<_>>();
+        prepare_lod_atlas_lookup(keys.iter().copied()).map_err(|error| {
+            LodWebGpuError::Payload(format!("packed WebGPU atlas keys: {error}"))
+        })?;
+        let mut entries = BTreeMap::new();
+        for (entry_index, patch) in patches.chunks_exact(7).enumerate() {
+            let key = [patch[0], patch[1], patch[2]];
+            let triangle_end = patch[3].checked_add(patch[4]).ok_or_else(|| {
+                LodWebGpuError::Payload(format!(
+                    "packed WebGPU atlas entry {entry_index} triangle range overflows",
+                ))
+            })?;
+            let line_end = patch[5].checked_add(patch[6]).ok_or_else(|| {
+                LodWebGpuError::Payload(format!(
+                    "packed WebGPU atlas entry {entry_index} line range overflows",
+                ))
+            })?;
+            if triangle_end > triangle_index_count || line_end > line_index_count {
+                return Err(LodWebGpuError::Payload(format!(
+                    "packed WebGPU atlas entry {entry_index} range exceeds its index buffer",
+                )));
+            }
+            if entries
+                .insert(
+                    key,
+                    PackedPatchAtlasEntry {
+                        triangle_first_index: patch[3],
+                        triangle_index_count: patch[4],
+                        line_first_index: patch[5],
+                        line_index_count: patch[6],
+                    },
+                )
+                .is_some()
+            {
+                return Err(LodWebGpuError::Payload(format!(
+                    "packed WebGPU atlas repeats canonical key {key:?}",
+                )));
+            }
+        }
+
+        let barycentric_buffer = buffer_init_or_zero(
+            &self.device,
+            "packed patch atlas barycentrics",
+            bytemuck::cast_slice(barycentrics),
+            wgpu::BufferUsages::VERTEX,
+        );
+        let triangle_index_buffer = buffer_init_or_zero(
+            &self.device,
+            "packed patch atlas triangle indices",
+            bytemuck::cast_slice(triangle_indices),
+            wgpu::BufferUsages::INDEX,
+        );
+        let line_index_buffer = buffer_init_or_zero(
+            &self.device,
+            "packed patch atlas line indices",
+            bytemuck::cast_slice(line_indices),
+            wgpu::BufferUsages::INDEX,
+        );
+        Ok(PackedPatchAtlas {
+            barycentric_buffer,
+            triangle_index_buffer,
+            line_index_buffer,
+            entries,
+            vertex_count,
+            triangle_index_count,
+            line_index_count,
+        })
     }
 
     /// Run the same minimum exact matrix on native and browser devices.
@@ -1923,23 +2063,15 @@ impl LodClassifierDevice {
         self.write_source_visibility(&visibility, &source_visibility)?;
 
         let barycentrics = [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
-        let barycentric_buffer =
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("patch render conformance barycentrics"),
-                    contents: bytemuck::cast_slice(&barycentrics),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-        // The invalid prefix proves packed-atlas slicing: reading from element
-        // zero would produce no plausible footprint under robust buffer access.
-        let indices = [u32::MAX, u32::MAX, u32::MAX, 0, 1, 2];
-        let index_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("patch render conformance indices"),
-                contents: bytemuck::cast_slice(&indices),
-                usage: wgpu::BufferUsages::INDEX,
-            });
+        // The degenerate prefix proves packed-atlas slicing: reading from
+        // element zero would produce no plausible rasterized footprint.
+        let indices = [0u32, 0, 0, 0, 1, 2];
+        let packed_atlas = self.upload_packed_patch_atlas(
+            &[2, 4, 8, 3, 3, 0, 0, 1, 2, 4, 3, 3, 0, 0],
+            &barycentrics,
+            &indices,
+            &[],
+        )?;
         let target = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("patch render conformance target"),
             size: wgpu::Extent3d {
@@ -1969,14 +2101,7 @@ impl LodClassifierDevice {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("patch prepare compact render conformance"),
             });
-        let atlas = || PatchAtlasDraw {
-            barycentric_buffer: &barycentric_buffer,
-            index_buffer: &index_buffer,
-            index_format: wgpu::IndexFormat::Uint32,
-            first_index: 3,
-            index_count: 3,
-        };
-        let atlases = [atlas(), atlas()];
+        let atlases = packed_atlas.triangle_draws_for_scene(&render_scene)?;
         let encoding = self.encode_normals_render_frame(
             &mut encoder,
             &render_frame,
@@ -2643,6 +2768,84 @@ impl PatchPreparationScene {
     /// pipeline can bind this directly as read-only storage without readback.
     pub fn prepared_records_buffer(&self) -> &wgpu::Buffer {
         &self.prepared_records
+    }
+}
+
+impl PackedPatchAtlas {
+    pub fn entry(&self, key: [u32; 3]) -> Option<PackedPatchAtlasEntry> {
+        self.entries.get(&key).copied()
+    }
+
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn vertex_count(&self) -> u32 {
+        self.vertex_count
+    }
+
+    pub fn triangle_index_count(&self) -> u32 {
+        self.triangle_index_count
+    }
+
+    pub fn line_index_count(&self) -> u32 {
+        self.line_index_count
+    }
+
+    pub fn triangle_draw(&self, key: [u32; 3]) -> Option<PatchAtlasDraw<'_>> {
+        let entry = self.entry(key)?;
+        Some(PatchAtlasDraw {
+            barycentric_buffer: &self.barycentric_buffer,
+            index_buffer: &self.triangle_index_buffer,
+            index_format: wgpu::IndexFormat::Uint32,
+            first_index: entry.triangle_first_index,
+            index_count: entry.triangle_index_count,
+        })
+    }
+
+    pub fn line_draw(&self, key: [u32; 3]) -> Option<PatchAtlasDraw<'_>> {
+        let entry = self.entry(key)?;
+        Some(PatchAtlasDraw {
+            barycentric_buffer: &self.barycentric_buffer,
+            index_buffer: &self.line_index_buffer,
+            index_format: wgpu::IndexFormat::Uint32,
+            first_index: entry.line_first_index,
+            index_count: entry.line_index_count,
+        })
+    }
+
+    /// Resolve the exact packed-atlas entry required by every extracted batch.
+    /// The returned views borrow the three retained global buffers and perform
+    /// no GPU allocation or geometry copy.
+    pub fn triangle_draws_for_scene(
+        &self,
+        scene: &RenderSceneSnapshot,
+    ) -> Result<Vec<PatchAtlasDraw<'_>>, LodWebGpuError> {
+        scene
+            .validate()
+            .map_err(|error| LodWebGpuError::Payload(format!("render scene contract: {error}")))?;
+        scene
+            .batches
+            .iter()
+            .enumerate()
+            .map(|(batch_index, batch)| {
+                let draw = self.triangle_draw(batch.id.key.lod).ok_or_else(|| {
+                    LodWebGpuError::Payload(format!(
+                        "packed WebGPU atlas is missing batch {batch_index} key {:?}",
+                        batch.id.key.lod,
+                    ))
+                })?;
+                if draw.index_count != batch.triangle_index_count {
+                    return Err(LodWebGpuError::Payload(format!(
+                        "packed WebGPU atlas key {:?} has {} triangle indices; batch {batch_index} requires {}",
+                        batch.id.key.lod,
+                        draw.index_count,
+                        batch.triangle_index_count,
+                    )));
+                }
+                Ok(draw)
+            })
+            .collect()
     }
 }
 

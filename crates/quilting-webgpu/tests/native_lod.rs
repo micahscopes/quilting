@@ -16,8 +16,7 @@ use quilting_renderer::compute::{
     wgsl_visibility_compaction_oracle_words, LodAtlasLookup, LodDispatchState, LodModelData,
     LodSubjectState, PackedLodClassification, PreparedLodModel, WgslLodDispatchMetrics,
 };
-use quilting_webgpu::{LodClassifierDevice, LodPose, PatchAtlasDraw, PatchRenderTarget};
-use wgpu::util::DeviceExt;
+use quilting_webgpu::{LodClassifierDevice, LodPose, PatchRenderTarget};
 
 fn identity_matrix() -> [f32; 16] {
     [
@@ -306,32 +305,40 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         let bindings = classifier
             .create_patch_render_bindings(&pipeline, &patches, &visibility)
             .unwrap();
-        let barycentric_buffer =
+        let packed_atlas = classifier
+            .upload_packed_patch_atlas(
+                &[1, 1, 1, 3, 3, 0, 0],
+                &[1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                &[0, 0, 0, 0, 1, 2],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(packed_atlas.entry_count(), 1);
+        assert_eq!(packed_atlas.vertex_count(), 3);
+        assert_eq!(packed_atlas.triangle_index_count(), 6);
+        assert_eq!(packed_atlas.line_index_count(), 0);
+        assert!(
             classifier
-                .device()
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("shared frame barycentrics"),
-                    contents: bytemuck::cast_slice(&[
-                        1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0,
-                    ]),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-        let index_buffer =
-            classifier
-                .device()
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("shared frame indices"),
-                    contents: bytemuck::cast_slice(&[u32::MAX, u32::MAX, u32::MAX, 0, 1, 2]),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-        let atlas = || PatchAtlasDraw {
-            barycentric_buffer: &barycentric_buffer,
-            index_buffer: &index_buffer,
-            index_format: wgpu::IndexFormat::Uint32,
-            first_index: 3,
-            index_count: 3,
-        };
-        let atlases = [atlas(), atlas()];
+                .upload_packed_patch_atlas(
+                    &[1, 1, 1, 0, 3, 0, 0],
+                    &[1.0f32, 0.0, 0.0],
+                    &[0, 1, 0],
+                    &[],
+                )
+                .err()
+                .expect("out-of-range packed atlas must fail")
+                .to_string()
+                .contains("out-of-range global vertex index")
+        );
+        assert!(classifier
+            .upload_packed_patch_atlas(&[1, 1, 1, 5, 3, 0, 0], &[1.0f32, 0.0, 0.0], &[0], &[],)
+            .err()
+            .expect("out-of-range packed atlas metadata must fail")
+            .to_string()
+            .contains("range exceeds its index buffer"));
+        let atlases = packed_atlas
+            .triangle_draws_for_scene(&render_scene)
+            .unwrap();
         let target = classifier
             .device()
             .create_texture(&wgpu::TextureDescriptor {
