@@ -595,12 +595,22 @@ source root from only the `(material, render node)` pairs actually present in
 the scene. Equal pairs must agree on enabled state, PBR class, transform, and
 orientation; every source face must resolve exactly once, including a root
 temporarily suppressed by the adaptive overlay. Sparse or very large material
-IDs therefore do not inflate the domain table. An independent draw oracle
-sorts eligible resident roots by `(domain row, atlas, parity, source face)` and
-emits only occupied ranges plus exact triangle and line indirect records. Its
-memory contract is O(source faces + observed runs), not a fixed material ×
-atlas Cartesian product. This is the semantic gate for the device radix/run
-implementation; it does not add a CPU operation to the live frame path.
+IDs therefore do not inflate the domain table. WebGPU retains one four-word
+face selector and one 16-byte record per observed domain; native and browser
+conformance match the exact 18-word two-domain fixture, including a
+million-scale material ID and orientation-reversing state.
+
+An independent state-sorted oracle can still group eligible roots by
+`(domain row, atlas, parity, source face)` and emits only occupied triangle and
+line ranges. It is a correctness reference for backends that require
+state-sorted material draws, not a mandate to build a GPU radix sorter. Baseline
+browser WebGPU has no variable-count multi-draw-indirect facility: wgpu can
+only emulate a CPU-known fixed count there. The scalable WebGPU route is
+therefore domain indirection in the vertex/material stages while retaining the
+bounded atlas/parity schedule. Entity orientation folds into effective parity;
+only genuinely distinct pass classes such as opaque/non-opaque may multiply
+that bounded schedule. This stays independent of material count and adds no
+frame readback.
 
 The next cut binds the source-indexed prepared records, compacted face IDs,
 bucket ranges, and global-atlas indirect arguments into actual graphics

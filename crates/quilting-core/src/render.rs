@@ -164,6 +164,13 @@ impl ResidentRootDrawDomains {
             if batch.id.layer == RenderBatchLayer::AdaptiveOverlay {
                 continue;
             }
+            if !batch
+                .members
+                .iter()
+                .any(|member| member.leaf_id == crate::screen_partition::ScreenPatchLeafId::ROOT)
+            {
+                continue;
+            }
             let key = (
                 batch.id.key.material_index,
                 batch.id.key.render_node_index,

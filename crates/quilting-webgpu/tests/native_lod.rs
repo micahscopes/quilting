@@ -273,6 +273,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         assert_eq!(report.resident_bucket_words, 323);
         assert_eq!(report.resident_root_topology_words, 240);
         assert_eq!(report.resident_root_prepared_words, 1040);
+        assert_eq!(report.resident_root_domain_words, 18);
         assert_eq!(report.coherence_words, 10);
         assert_eq!(report.prepared_patch_words, 104);
         assert!(report.rendered_patch_pixels >= 8);

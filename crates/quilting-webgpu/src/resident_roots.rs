@@ -52,12 +52,33 @@ pub struct ResidentRootTopologyScene {
     pub(super) emit_bind_group: wgpu::BindGroup,
 }
 
+/// Device-resident material/render indirection for source roots. The domain
+/// table contains only observed scene domains; current LOD never changes a
+/// face's row.
+pub struct ResidentRootDrawDomainScene {
+    pub(super) face_count: u32,
+    pub(super) domain_count: u32,
+    pub(super) domains: Vec<ResidentRootDrawDomain>,
+    pub(super) face_domain_rows: wgpu::Buffer,
+    pub(super) domain_records: wgpu::Buffer,
+}
+
+/// Diagnostic copy of the exact two storage tables retained for root draws.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResidentRootDrawDomainOutput {
+    pub face_domain_rows: Vec<u32>,
+    /// `(material, render_node, pbr_class, flags)`; flags bit zero is enabled
+    /// and bit one marks an orientation-reversing entity transform.
+    pub domain_records: Vec<[u32; 4]>,
+}
+
 /// Atomic retained aggregate for direct source-indexed root preparation.
 /// Topology emission and the ordinary rational-QB preparation pass share the
 /// same device buffer; no CPU topology upload exists in this path.
 pub struct ResidentRootPreparationScene {
     pub(super) topology: ResidentRootTopologyScene,
     pub(super) patches: PatchPreparationScene,
+    pub(super) draw_domains: ResidentRootDrawDomainScene,
 }
 
 impl ResidentGeometryBucketScene {
@@ -116,9 +137,161 @@ impl ResidentRootPreparationScene {
     pub fn patches(&self) -> &PatchPreparationScene {
         &self.patches
     }
+
+    pub fn draw_domains(&self) -> &ResidentRootDrawDomainScene {
+        &self.draw_domains
+    }
+}
+
+impl ResidentRootDrawDomainScene {
+    pub fn face_count(&self) -> u32 {
+        self.face_count
+    }
+
+    pub fn domain_count(&self) -> u32 {
+        self.domain_count
+    }
+
+    pub fn domains(&self) -> &[ResidentRootDrawDomain] {
+        &self.domains
+    }
+
+    pub fn face_domain_rows_buffer(&self) -> &wgpu::Buffer {
+        &self.face_domain_rows
+    }
+
+    pub fn domain_records_buffer(&self) -> &wgpu::Buffer {
+        &self.domain_records
+    }
 }
 
 impl LodClassifierDevice {
+    /// Retain one dense row per observed material/render domain plus one row
+    /// selector per source face. LOD changes never rebuild either table.
+    pub fn upload_resident_root_draw_domain_scene(
+        &self,
+        scene: &RenderSceneSnapshot,
+        face_count: usize,
+    ) -> Result<ResidentRootDrawDomainScene, LodWebGpuError> {
+        let domains = ResidentRootDrawDomains::build(scene, face_count)
+            .map_err(|error| LodWebGpuError::Payload(error.to_string()))?;
+        self.upload_resident_root_draw_domains(domains)
+    }
+
+    fn upload_resident_root_draw_domains(
+        &self,
+        domains: ResidentRootDrawDomains,
+    ) -> Result<ResidentRootDrawDomainScene, LodWebGpuError> {
+        let face_count = u32::try_from(domains.face_domain_rows.len())
+            .map_err(|_| LodWebGpuError::Payload("resident root face count exceeds u32".into()))?;
+        let domain_count = u32::try_from(domains.domains.len()).map_err(|_| {
+            LodWebGpuError::Payload("resident root draw-domain count exceeds u32".into())
+        })?;
+        if domains
+            .face_domain_rows
+            .iter()
+            .any(|&row| row >= domain_count)
+        {
+            return Err(LodWebGpuError::Payload(
+                "resident root face references a missing draw domain".to_string(),
+            ));
+        }
+        let domain_records = domains
+            .domains
+            .iter()
+            .map(|domain| {
+                let material_index = u32::try_from(domain.material_index).map_err(|_| {
+                    LodWebGpuError::Payload(
+                        "resident root material index exceeds the WebGPU ABI".to_string(),
+                    )
+                })?;
+                let render_node_index = u32::try_from(domain.render_node_index).map_err(|_| {
+                    LodWebGpuError::Payload(
+                        "resident root render-node index exceeds the WebGPU ABI".to_string(),
+                    )
+                })?;
+                let pbr_class = match domain.pbr_class {
+                    PbrDrawClass::Opaque => 0,
+                    PbrDrawClass::Blend => 1,
+                    PbrDrawClass::Transmission => 2,
+                };
+                let flags = u32::from(domain.enabled)
+                    | (u32::from(domain.transform.orientation_sign < 0) << 1);
+                Ok([material_index, render_node_index, pbr_class, flags])
+            })
+            .collect::<Result<Vec<_>, LodWebGpuError>>()?;
+        let face_domain_rows = buffer_init_or_zero(
+            &self.device,
+            "resident root face draw-domain rows",
+            bytemuck::cast_slice(&domains.face_domain_rows),
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        );
+        let domain_records_buffer = buffer_init_or_zero(
+            &self.device,
+            "resident root draw-domain records",
+            bytemuck::cast_slice(&domain_records),
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        );
+        Ok(ResidentRootDrawDomainScene {
+            face_count,
+            domain_count,
+            domains: domains.domains,
+            face_domain_rows,
+            domain_records: domain_records_buffer,
+        })
+    }
+
+    /// Diagnostic projection of immutable root draw-domain storage. The live
+    /// render path binds these buffers directly.
+    pub async fn resident_root_draw_domains_for_diagnostics(
+        &self,
+        scene: &ResidentRootDrawDomainScene,
+    ) -> Result<ResidentRootDrawDomainOutput, LodWebGpuError> {
+        if scene.face_count == 0 {
+            return Ok(ResidentRootDrawDomainOutput {
+                face_domain_rows: Vec::new(),
+                domain_records: Vec::new(),
+            });
+        }
+        let face_bytes = u64::from(scene.face_count) * PACKED_RECORD_BYTES;
+        let domain_bytes = u64::from(scene.domain_count) * 16;
+        let face_readback = gpu_buffer(
+            &self.device,
+            "resident root face-domain diagnostic readback",
+            face_bytes,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let domain_readback = gpu_buffer(
+            &self.device,
+            "resident root domain-record diagnostic readback",
+            domain_bytes,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("resident root draw-domain diagnostic encoder"),
+            });
+        encoder.copy_buffer_to_buffer(&scene.face_domain_rows, 0, &face_readback, 0, face_bytes);
+        encoder.copy_buffer_to_buffer(&scene.domain_records, 0, &domain_readback, 0, domain_bytes);
+        self.queue.submit([encoder.finish()]);
+        let face_domain_rows = self.readback_words(&face_readback, face_bytes).await?;
+        let words = self.readback_words(&domain_readback, domain_bytes).await?;
+        if !words.len().is_multiple_of(4) {
+            return Err(LodWebGpuError::Mapping(
+                "resident root domain readback is not four-word aligned".to_string(),
+            ));
+        }
+        let domain_records = words
+            .chunks_exact(4)
+            .map(|record| [record[0], record[1], record[2], record[3]])
+            .collect();
+        Ok(ResidentRootDrawDomainOutput {
+            face_domain_rows,
+            domain_records,
+        })
+    }
+
     /// Upload immutable source/affine extraction for direct resident-root
     /// preparation. The returned aggregate owns no CPU topology records: its
     /// preparation bind group reads the output of `ResidentRootTopologyScene`.
@@ -134,13 +307,17 @@ impl LodClassifierDevice {
             source_instances,
         )
         .map_err(LodWebGpuError::Payload)?;
-        self.upload_resident_root_preparation_words(model, words)
+        let draw_domains =
+            ResidentRootDrawDomains::build(scene, model.prepared.residency.num_faces)
+                .map_err(|error| LodWebGpuError::Payload(error.to_string()))?;
+        self.upload_resident_root_preparation_words(model, words, draw_domains)
     }
 
     pub(super) fn upload_resident_root_preparation_words(
         &self,
         model: &LodClassifierModel,
         words: WgslResidentRootPreparationSceneWords,
+        draw_domains: ResidentRootDrawDomains,
     ) -> Result<ResidentRootPreparationScene, LodWebGpuError> {
         let face_count = u32::try_from(model.prepared.residency.num_faces)
             .map_err(|_| LodWebGpuError::Payload("resident root faces exceed u32".into()))?;
@@ -207,7 +384,12 @@ impl LodClassifierDevice {
             &words.source_faces,
             &words.subjects,
         )?;
-        Ok(ResidentRootPreparationScene { topology, patches })
+        let draw_domains = self.upload_resident_root_draw_domains(draw_domains)?;
+        Ok(ResidentRootPreparationScene {
+            topology,
+            patches,
+            draw_domains,
+        })
     }
 
     pub fn write_resident_root_preparation_pose(

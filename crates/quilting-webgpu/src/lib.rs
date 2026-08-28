@@ -8,8 +8,8 @@
 mod resident_roots;
 
 pub use resident_roots::{
-    ResidentGeometryBucketOutput, ResidentGeometryBucketScene, ResidentRootPreparationScene,
-    ResidentRootTopologyScene,
+    ResidentGeometryBucketOutput, ResidentGeometryBucketScene, ResidentRootDrawDomainOutput,
+    ResidentRootDrawDomainScene, ResidentRootPreparationScene, ResidentRootTopologyScene,
 };
 
 use futures_channel::oneshot;
@@ -20,7 +20,8 @@ use quilting_core::instance_layout::InstanceWriter;
 use quilting_core::render::{
     FocusFieldPacket, PbrDrawClass, RenderBatchSnapshot, RenderCommand, RenderEntityTransform,
     RenderFrame, RenderFrameOptions, RenderGeometry, RenderPass, RenderPoseIdentity,
-    RenderSceneSnapshot, RenderStyle, RenderSubmissionStats, RenderView,
+    RenderSceneSnapshot, RenderStyle, RenderSubmissionStats, RenderView, ResidentRootDrawDomain,
+    ResidentRootDrawDomains,
 };
 use quilting_core::screen_partition::ScreenPatchLeafId;
 use quilting_renderer::compute::{
@@ -241,6 +242,7 @@ pub struct LodDeviceConformance {
     pub resident_bucket_words: usize,
     pub resident_root_topology_words: usize,
     pub resident_root_prepared_words: usize,
+    pub resident_root_domain_words: usize,
     pub coherence_words: usize,
     pub prepared_patch_words: usize,
     pub rendered_patch_pixels: usize,
@@ -1009,7 +1011,9 @@ impl LodClassifierDevice {
         })
     }
 
-    async fn run_resident_lod_conformance(&self) -> Result<(usize, usize, usize), LodWebGpuError> {
+    async fn run_resident_lod_conformance(
+        &self,
+    ) -> Result<(usize, usize, usize, usize), LodWebGpuError> {
         let face_count = 10usize;
         let mut positions = vec![0.0, 0.0, 0.0];
         for point in 0..=face_count {
@@ -1091,8 +1095,51 @@ impl LodClassifierDevice {
             subjects: vec![subject_zero, subject_one],
             face_subject_rows: face_subject_rows.clone(),
         };
+        let draw_domains = ResidentRootDrawDomains {
+            domains: vec![
+                ResidentRootDrawDomain {
+                    material_index: 3,
+                    render_node_index: 1,
+                    pbr_class: PbrDrawClass::Opaque,
+                    transform: RenderEntityTransform {
+                        mobius: identity_mobius(),
+                        orientation_sign: 1,
+                        euclidean_model: identity_matrix(),
+                        euclidean_normal: identity_matrix(),
+                    },
+                    enabled: true,
+                },
+                ResidentRootDrawDomain {
+                    material_index: 1_000_000,
+                    render_node_index: 9,
+                    pbr_class: PbrDrawClass::Blend,
+                    transform: RenderEntityTransform {
+                        mobius: identity_mobius(),
+                        orientation_sign: -1,
+                        euclidean_model: identity_matrix(),
+                        euclidean_normal: identity_matrix(),
+                    },
+                    enabled: true,
+                },
+            ],
+            face_domain_rows: face_subject_rows.clone(),
+        };
         let root_preparation =
-            self.upload_resident_root_preparation_words(&model, root_words.clone())?;
+            self.upload_resident_root_preparation_words(&model, root_words.clone(), draw_domains)?;
+        let actual_domains = self
+            .resident_root_draw_domains_for_diagnostics(&root_preparation.draw_domains)
+            .await?;
+        let expected_domains = ResidentRootDrawDomainOutput {
+            face_domain_rows: face_subject_rows.clone(),
+            domain_records: vec![[3, 1, 0, 1], [1_000_000, 9, 1, 3]],
+        };
+        if actual_domains != expected_domains {
+            return Err(LodWebGpuError::Conformance(format!(
+                "resident root draw-domain mismatch: expected {expected_domains:?}, got {actual_domains:?}",
+            )));
+        }
+        let compared_domain_words =
+            actual_domains.face_domain_rows.len() + actual_domains.domain_records.len() * 4;
         let mut dispatch_words = [0u32; 68];
         dispatch_words[64] = face_count as u32;
         self.queue
@@ -1184,6 +1231,7 @@ impl LodClassifierDevice {
             compared_words,
             compared_topology_words,
             compared_prepared_words,
+            compared_domain_words,
         ))
     }
 
@@ -1457,8 +1505,12 @@ impl LodClassifierDevice {
                 next_output.epoch(),
             )));
         }
-        let (resident_lod_words, resident_root_topology_words, resident_root_prepared_words) =
-            self.run_resident_lod_conformance().await?;
+        let (
+            resident_lod_words,
+            resident_root_topology_words,
+            resident_root_prepared_words,
+            resident_root_domain_words,
+        ) = self.run_resident_lod_conformance().await?;
         let resident_bucket_words = self.run_resident_geometry_bucket_conformance().await?;
         let full_pipeline_words = actual.len();
 
@@ -1578,6 +1630,7 @@ impl LodClassifierDevice {
             resident_bucket_words,
             resident_root_topology_words,
             resident_root_prepared_words,
+            resident_root_domain_words,
             coherence_words: actual.len(),
             prepared_patch_words,
             rendered_patch_pixels,
@@ -4659,7 +4712,7 @@ pub async fn run_browser_lod_conformance() -> Result<String, wasm_bindgen::JsVal
         .await
         .map_err(browser_error)?;
     Ok(format!(
-        "adapter={} backend={:?} full_pipeline_words={} resident_lod_words={} resident_visibility_words={} resident_bucket_words={} resident_root_topology_words={} resident_root_prepared_words={} coherence_words={} \
+        "adapter={} backend={:?} full_pipeline_words={} resident_lod_words={} resident_visibility_words={} resident_bucket_words={} resident_root_topology_words={} resident_root_prepared_words={} resident_root_domain_words={} coherence_words={} \
          prepared_patch_words={} rendered_patch_pixels={} shared_frame_draws={} compacted_source_words={} \
          compacted_range_words={} indirect_argument_words={} indirect_draws={}",
         adapter_info.name,
@@ -4670,6 +4723,7 @@ pub async fn run_browser_lod_conformance() -> Result<String, wasm_bindgen::JsVal
         report.resident_bucket_words,
         report.resident_root_topology_words,
         report.resident_root_prepared_words,
+        report.resident_root_domain_words,
         report.coherence_words,
         report.prepared_patch_words,
         report.rendered_patch_pixels,
