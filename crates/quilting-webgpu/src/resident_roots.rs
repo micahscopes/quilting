@@ -15,6 +15,7 @@ pub struct ResidentGeometryBucketScene {
     pub(super) chunk_count: u32,
     pub(super) eligibility_word_count: u32,
     pub(super) root_eligibility: wgpu::Buffer,
+    pub(super) suppressed_faces: Mutex<Vec<u32>>,
     pub(super) _chunk_counts: wgpu::Buffer,
     pub(super) _chunk_offsets: wgpu::Buffer,
     pub(super) _bucket_counts: wgpu::Buffer,
@@ -1113,6 +1114,7 @@ impl LodClassifierDevice {
             chunk_count,
             eligibility_word_count,
             root_eligibility,
+            suppressed_faces: Mutex::new(Vec::new()),
             _chunk_counts: chunk_counts,
             _chunk_offsets: chunk_offsets,
             _bucket_counts: bucket_counts,
@@ -1148,8 +1150,24 @@ impl LodClassifierDevice {
                 "resident root eligibility has nonzero padding".to_string(),
             ));
         }
+        let suppressed_faces = (0..scene.face_count)
+            .filter(|&face| words[(face / 32) as usize] & (1u32 << (face % 32)) == 0)
+            .collect::<Vec<_>>();
+        self.write_resident_root_eligibility_state(scene, words, suppressed_faces)
+    }
+
+    fn write_resident_root_eligibility_state(
+        &self,
+        scene: &ResidentGeometryBucketScene,
+        words: &[u32],
+        suppressed_faces: Vec<u32>,
+    ) -> Result<(), LodWebGpuError> {
+        let mut retained_suppression = scene.suppressed_faces.lock().map_err(|_| {
+            LodWebGpuError::Payload("resident root suppression lock was poisoned".to_string())
+        })?;
         self.queue
             .write_buffer(&scene.root_eligibility, 0, bytemuck::cast_slice(words));
+        *retained_suppression = suppressed_faces;
         Ok(())
     }
 
@@ -1160,7 +1178,7 @@ impl LodClassifierDevice {
     ) -> Result<(), LodWebGpuError> {
         let words = pack_wgsl_root_eligibility_bits(scene.face_count as usize, suppressed_faces)
             .map_err(LodWebGpuError::Payload)?;
-        self.write_resident_root_eligibility_bits(scene, &words)
+        self.write_resident_root_eligibility_state(scene, &words, suppressed_faces.to_vec())
     }
 
     /// Append deterministic root histogram, chunk prefix, global bucket scan,

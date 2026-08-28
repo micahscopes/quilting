@@ -15,8 +15,8 @@ use quilting_core::{batch, instance_layout};
 use quilting_core::batch::RenderBatchLayer;
 use quilting_core::quaternion::{Mobius, Quat};
 use quilting_core::render::{
-    RenderEntityTransform, RenderGeometry, RenderSceneSnapshot, ResidentRootDrawDomains,
-    VisibilityCompactionPlan,
+    RenderBatchSnapshot, RenderEntityTransform, RenderGeometry, RenderSceneSnapshot,
+    ResidentRootDrawDomains, VisibilityCompactionPlan,
 };
 use quilting_mesh::HalfEdgeMesh;
 use std::collections::{HashMap, VecDeque};
@@ -714,6 +714,26 @@ pub struct WgslPatchPreparationSceneWords {
     pub subjects: Vec<[u32; 32]>,
 }
 
+/// Sparse topology and affine rows for only the adaptive replacement layer.
+/// Immutable source-face records remain owned by the resident-root scene and
+/// are shared by the WebGPU bind group rather than copied into every overlay.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WgslAdaptiveOverlayPreparationSceneWords {
+    /// `PatchPrepareDispatch`: patches, source vertices, joints, morph targets.
+    pub uniform: [u32; 4],
+    pub topology: Vec<[u32; 12]>,
+    pub subjects: Vec<[u32; 32]>,
+}
+
+/// One once-validated sparse projection shared by WebGPU preparation,
+/// visibility compaction, and the full-scene-to-local batch index map.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WgslAdaptiveOverlaySceneWords {
+    pub source_batch_indices: Vec<u32>,
+    pub preparation: WgslAdaptiveOverlayPreparationSceneWords,
+    pub visibility: WgslVisibilityCompactionSceneWords,
+}
+
 /// Immutable source and affine rows for source-indexed resident-root
 /// preparation. Topology is intentionally absent: WebGPU reconstructs it from
 /// the packed resident LOD and writes one record per source face on-device.
@@ -783,31 +803,22 @@ fn wgsl_patch_subject_words(transform: RenderEntityTransform) -> [u32; 32] {
     subject
 }
 
-/// Pack one retained render scene into the exact WebGPU patch-preparation ABI.
-/// The flattened member order is the same stable source-instance order used by
-/// visibility compaction and indirect draw resolution.
-pub fn pack_wgsl_patch_preparation_scene_words(
+fn pack_wgsl_patch_topology(
     prepared: &PreparedLodModel,
-    scene: &RenderSceneSnapshot,
-    source_instances: &[f32],
-) -> Result<WgslPatchPreparationSceneWords, String> {
-    scene.validate().map_err(|error| error.to_string())?;
+    batches: &[&RenderBatchSnapshot],
+) -> Result<(u32, Vec<[u32; 12]>, Vec<[u32; 32]>), String> {
     let num_faces = prepared.residency.num_faces;
-    let source_faces = pack_wgsl_patch_source_faces(prepared, source_instances)?;
-    let patch_count = scene.batches.iter().try_fold(0u32, |total, batch| {
+    let patch_count = batches.iter().try_fold(0u32, |total, batch| {
         let count = u32::try_from(batch.members.len())
             .map_err(|_| "patch instance count exceeds the WGSL ABI".to_string())?;
         total
             .checked_add(count)
             .ok_or_else(|| "patch instance count exceeds the WGSL ABI".to_string())
     })?;
-    let num_morph_targets = u32::try_from(prepared.model.num_morph_targets)
-        .map_err(|_| "patch morph target count exceeds the WGSL ABI".to_string())?;
-
     let mut topology = Vec::with_capacity(patch_count as usize);
     let mut subjects = Vec::<[u32; 32]>::new();
     let mut subject_rows = std::collections::BTreeMap::<[u32; 32], u32>::new();
-    for batch in &scene.batches {
+    for &batch in batches {
         let subject = wgsl_patch_subject_words(batch.transform);
         let subject_index = if let Some(&row) = subject_rows.get(&subject) {
             row
@@ -858,11 +869,27 @@ pub fn pack_wgsl_patch_preparation_scene_words(
     }
     debug_assert_eq!(topology.len(), patch_count as usize);
     if subjects.is_empty() {
-        // WebGPU forbids zero-sized storage bindings. A valid scene with zero
-        // batches has no dispatches, but retaining one inert row keeps the
-        // residency constructible and the ABI deterministic.
+        // WebGPU forbids zero-sized storage bindings. A valid empty projection
+        // dispatches nothing, while one inert row keeps its ABI constructible.
         subjects.push([0; 32]);
     }
+    Ok((patch_count, topology, subjects))
+}
+
+/// Pack one retained render scene into the exact WebGPU patch-preparation ABI.
+/// The flattened member order is the same stable source-instance order used by
+/// visibility compaction and indirect draw resolution.
+pub fn pack_wgsl_patch_preparation_scene_words(
+    prepared: &PreparedLodModel,
+    scene: &RenderSceneSnapshot,
+    source_instances: &[f32],
+) -> Result<WgslPatchPreparationSceneWords, String> {
+    scene.validate().map_err(|error| error.to_string())?;
+    let source_faces = pack_wgsl_patch_source_faces(prepared, source_instances)?;
+    let num_morph_targets = u32::try_from(prepared.model.num_morph_targets)
+        .map_err(|_| "patch morph target count exceeds the WGSL ABI".to_string())?;
+    let batches = scene.batches.iter().collect::<Vec<_>>();
+    let (patch_count, topology, subjects) = pack_wgsl_patch_topology(prepared, &batches)?;
     Ok(WgslPatchPreparationSceneWords {
         uniform: [
             patch_count,
@@ -873,6 +900,76 @@ pub fn pack_wgsl_patch_preparation_scene_words(
         topology,
         source_faces,
         subjects,
+    })
+}
+
+/// Project only adaptive dyadic leaves into sparse preparation records. The
+/// full scene is validated first, so replacement coverage and root suppression
+/// remain one backend-neutral contract even though roots are omitted here.
+pub fn pack_wgsl_adaptive_overlay_preparation_scene_words(
+    prepared: &PreparedLodModel,
+    scene: &RenderSceneSnapshot,
+) -> Result<WgslAdaptiveOverlayPreparationSceneWords, String> {
+    scene.validate().map_err(|error| error.to_string())?;
+    let batches = scene
+        .batches
+        .iter()
+        .filter(|batch| batch.id.layer == RenderBatchLayer::AdaptiveOverlay)
+        .collect::<Vec<_>>();
+    let (patch_count, topology, subjects) = pack_wgsl_patch_topology(prepared, &batches)?;
+    let num_morph_targets = u32::try_from(prepared.model.num_morph_targets)
+        .map_err(|_| "patch morph target count exceeds the WGSL ABI".to_string())?;
+    Ok(WgslAdaptiveOverlayPreparationSceneWords {
+        uniform: [
+            patch_count,
+            prepared.residency.num_vertices,
+            0,
+            num_morph_targets,
+        ],
+        topology,
+        subjects,
+    })
+}
+
+/// Validate the composed scene once, then project all sparse overlay GPU
+/// inputs from the same ordered batch selection. This is the publication path
+/// used by WebGPU when screen partitioning changes at interactive cadence.
+pub fn pack_wgsl_adaptive_overlay_scene_words(
+    prepared: &PreparedLodModel,
+    scene: &RenderSceneSnapshot,
+    geometry: RenderGeometry,
+) -> Result<WgslAdaptiveOverlaySceneWords, String> {
+    scene.validate().map_err(|error| error.to_string())?;
+    let mut source_batch_indices = Vec::new();
+    let mut batches = Vec::new();
+    for (index, batch) in scene.batches.iter().enumerate() {
+        if batch.id.layer != RenderBatchLayer::AdaptiveOverlay {
+            continue;
+        }
+        source_batch_indices.push(
+            u32::try_from(index)
+                .map_err(|_| "adaptive source batch index exceeds the WGSL ABI".to_string())?,
+        );
+        batches.push(batch);
+    }
+    let (patch_count, topology, subjects) = pack_wgsl_patch_topology(prepared, &batches)?;
+    let num_morph_targets = u32::try_from(prepared.model.num_morph_targets)
+        .map_err(|_| "patch morph target count exceeds the WGSL ABI".to_string())?;
+    let preparation = WgslAdaptiveOverlayPreparationSceneWords {
+        uniform: [
+            patch_count,
+            prepared.residency.num_vertices,
+            0,
+            num_morph_targets,
+        ],
+        topology,
+        subjects,
+    };
+    let visibility = pack_wgsl_visibility_batches(scene, &batches, geometry, false)?;
+    Ok(WgslAdaptiveOverlaySceneWords {
+        source_batch_indices,
+        preparation,
+        visibility,
     })
 }
 
@@ -983,9 +1080,35 @@ pub fn pack_wgsl_visibility_compaction_scene_words(
     geometry: RenderGeometry,
 ) -> Result<WgslVisibilityCompactionSceneWords, String> {
     scene.validate().map_err(|error| error.to_string())?;
-    let batch_count = u32::try_from(scene.batches.len())
+    let batches = scene.batches.iter().collect::<Vec<_>>();
+    pack_wgsl_visibility_batches(scene, &batches, geometry, true)
+}
+
+/// Pack only adaptive replacement batches. Their source stream is compact and
+/// never contains the suppressed roots themselves; current classifier
+/// visibility is expanded into this stream on-device before compaction.
+pub fn pack_wgsl_adaptive_overlay_visibility_scene_words(
+    scene: &RenderSceneSnapshot,
+    geometry: RenderGeometry,
+) -> Result<WgslVisibilityCompactionSceneWords, String> {
+    scene.validate().map_err(|error| error.to_string())?;
+    let batches = scene
+        .batches
+        .iter()
+        .filter(|batch| batch.id.layer == RenderBatchLayer::AdaptiveOverlay)
+        .collect::<Vec<_>>();
+    pack_wgsl_visibility_batches(scene, &batches, geometry, false)
+}
+
+fn pack_wgsl_visibility_batches(
+    scene: &RenderSceneSnapshot,
+    selected_batches: &[&RenderBatchSnapshot],
+    geometry: RenderGeometry,
+    suppress_roots: bool,
+) -> Result<WgslVisibilityCompactionSceneWords, String> {
+    let batch_count = u32::try_from(selected_batches.len())
         .map_err(|_| "visibility batch count exceeds the WGSL ABI".to_string())?;
-    let source_count = scene.batches.iter().try_fold(0u32, |total, batch| {
+    let source_count = selected_batches.iter().try_fold(0u32, |total, batch| {
         let count = u32::try_from(batch.members.len())
             .map_err(|_| "visibility source count exceeds the WGSL ABI".to_string())?;
         total
@@ -993,10 +1116,10 @@ pub fn pack_wgsl_visibility_compaction_scene_words(
             .ok_or_else(|| "visibility source count exceeds the WGSL ABI".to_string())
     })?;
 
-    let mut batches = Vec::with_capacity(scene.batches.len());
+    let mut batches = Vec::with_capacity(selected_batches.len());
     let mut source_eligibility = Vec::with_capacity(source_count as usize);
     let mut source_first_instance = 0u32;
-    for batch in &scene.batches {
+    for &batch in selected_batches {
         let source_instance_count = u32::try_from(batch.members.len())
             .map_err(|_| "visibility source count exceeds the WGSL ABI".to_string())?;
         let index_count = match geometry {
@@ -1010,7 +1133,8 @@ pub fn pack_wgsl_visibility_compaction_scene_words(
             0,
         ]);
         for member in &batch.members {
-            let suppressed_root = batch.id.layer == RenderBatchLayer::RetainedRoot
+            let suppressed_root = suppress_roots
+                && batch.id.layer == RenderBatchLayer::RetainedRoot
                 && scene
                     .suppressed_root_faces
                     .binary_search(&member.face_index)
@@ -3524,6 +3648,56 @@ mod tests {
         assert_eq!(std::mem::size_of_val(&words.subjects[0]), 128);
         assert_eq!(words.subjects[0][0], 1.0f32.to_bits());
         assert_eq!(words.subjects[0][16], 1.0f32.to_bits());
+    }
+
+    #[test]
+    fn adaptive_overlay_words_are_sparse_and_preserve_full_scene_validation() {
+        let (prepared, _, _) = patch_preparation_fixture();
+        let mut root_zero = visibility_batch(0, 0, true);
+        root_zero.id.layer = RenderBatchLayer::RetainedRoot;
+        let mut root_one = visibility_batch(1, 1, true);
+        root_one.id.layer = RenderBatchLayer::RetainedRoot;
+        let mut overlay = visibility_batch(2, 0, true);
+        overlay.id.layer = RenderBatchLayer::AdaptiveOverlay;
+        overlay.members[0].leaf_id = ScreenPatchLeafId::ROOT.child(3).unwrap();
+        let scene = RenderSceneSnapshot {
+            revision: 57,
+            suppressed_root_faces: vec![0],
+            batches: vec![root_zero, root_one, overlay],
+        };
+
+        let preparation =
+            pack_wgsl_adaptive_overlay_preparation_scene_words(&prepared, &scene).unwrap();
+        assert_eq!(preparation.uniform, [1, 4, 0, 0]);
+        assert_eq!(preparation.topology.len(), 1);
+        assert_eq!(preparation.topology[0][4], 0.0f32.to_bits());
+        assert_eq!(preparation.topology[0][8], 1.0f32.to_bits());
+        assert_eq!(preparation.topology[0][9], 3.0f32.to_bits());
+        assert_eq!(preparation.subjects.len(), 1);
+
+        let visibility = pack_wgsl_adaptive_overlay_visibility_scene_words(
+            &scene,
+            RenderGeometry::Triangles,
+        )
+        .unwrap();
+        assert_eq!(visibility.uniform, [1, 1, 0, 0]);
+        assert_eq!(visibility.batches, [[0, 1, 18, 0]]);
+        assert_eq!(visibility.source_eligibility, [1]);
+        let combined = pack_wgsl_adaptive_overlay_scene_words(
+            &prepared,
+            &scene,
+            RenderGeometry::Triangles,
+        )
+        .unwrap();
+        assert_eq!(combined.source_batch_indices, [2]);
+        assert_eq!(combined.preparation, preparation);
+        assert_eq!(combined.visibility, visibility);
+
+        let mut invalid = scene;
+        invalid.suppressed_root_faces.clear();
+        assert!(pack_wgsl_adaptive_overlay_preparation_scene_words(&prepared, &invalid)
+            .unwrap_err()
+            .contains("not masked"));
     }
 
     #[test]

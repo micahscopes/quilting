@@ -586,9 +586,9 @@ match 240 topology words and 1,040 prepared-record words across both 2:1 and
 allocated only by the conformance wrappers; production encoding remains one
 same-device command chain.
 
-The optimized monolithic WASM artifact now measures 7,510,894 bytes with this
+The optimized monolithic WASM artifact now measures 7,511,347 bytes with this
 backend enabled versus 7,295,009 bytes with the feature disabled: a
-215,885-byte (2.96%) release delta. Both artifacts were rebuilt from the same
+216,338-byte (2.97%) release delta. Both artifacts were rebuilt from the same
 tree with `wasm-pack --release` and `wasm-opt`; debug artifacts are not
 representative, so size gates must continue to compare optimized outputs.
 
@@ -629,15 +629,28 @@ The direct-render conformance is deliberately end-to-end rather than a staged
 fixture: classifier → 2:1 resident reconciliation → root topology → animated
 QB preparation → domain-aware histogram/scan/scatter → two fixed indirect
 draws are encoded in one command buffer with no intermediate map or copy.
-Radeon/Vulkan passes the hardware gate; Chromium `BrowserWebGpu` renders an
-exact 178-pixel normals footprint and reports
-`resident_root_indirect_draws=2`, including an orientation-reversing domain,
+The sparse adaptive layer now projects only replacement batches from the same
+fully validated scene. It owns leaf topology, deduplicated affine subjects,
+prepared output, current visibility, compacted IDs, and indirect arguments;
+the immutable 208-byte source-face table is reference-counted with the root
+preparation scene instead of copied. Root suppression is a separate explicit
+publication after the candidate overlay is completely allocated, so a failed
+candidate cannot punch holes in the currently drawable baseline. Its packed
+mask is retained and checked at encode time rather than rewritten every frame.
+
+Composition uses the same classifier epoch and global atlas. Roots clear the
+shared color/depth target, then adaptive batches load both attachments and
+issue one indirect draw per sparse state bucket. The composed conformance keeps
+one resident root, suppresses a second, and replaces it with one dyadic child
+inside a single command encoder. Radeon/Vulkan passes the hardware gate;
+Chromium `BrowserWebGpu` renders an exact 144-pixel normals footprint and
+reports `resident_root_indirect_draws=2`, `adaptive_overlay_patches=1`, and
+`adaptive_overlay_indirect_draws=1`, including an orientation-reversing domain,
 a million-scale material ID, and no console warning or error.
 
-The next cut composes the sparse adaptive overlay without rebuilding the
-retained baseline from worker readback. After that, attach the live shared
-frame executor to a browser surface and add WebGL2 image/workload parity behind
-the existing explicit backend switch. PBR, wire, LOD color, stretch, picking,
+The next cut attaches this shared executor to a live browser surface and adds
+WebGL2 image/workload parity behind the existing explicit backend switch. PBR,
+wire, LOD color, stretch, picking,
 material/texture binding, and postprocess commands still reject explicitly
 rather than silently lowering to normals. Those cuts are what remove the live
 classifier readback, CPU topology repacking, and rejected atlas vertex

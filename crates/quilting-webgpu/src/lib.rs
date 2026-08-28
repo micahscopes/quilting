@@ -5,8 +5,12 @@
 //! and `RenderFrame` values, retains only device pipelines/buffers, and owns no
 //! semantic scene, FRP, replicated state, canvas, or presentation lifecycle.
 
+mod adaptive_overlay;
 mod resident_roots;
 
+pub use adaptive_overlay::{
+    AdaptiveOverlayFrameEncoding, AdaptiveOverlayScene, ResidentAdaptiveFrameEncoding,
+};
 pub use resident_roots::{
     ResidentGeometryBucketOutput, ResidentGeometryBucketScene, ResidentRootDrawDomainOutput,
     ResidentRootDrawDomainScene, ResidentRootFrameEncoding, ResidentRootPreparationScene,
@@ -26,20 +30,21 @@ use quilting_core::render::{
 };
 use quilting_core::screen_partition::ScreenPatchLeafId;
 use quilting_renderer::compute::{
-    pack_lod_classification, pack_wgsl_lod_atlas_words, pack_wgsl_lod_dispatch_words,
-    pack_wgsl_lod_model_words, pack_wgsl_lod_subject_words,
+    pack_lod_classification, pack_wgsl_adaptive_overlay_scene_words, pack_wgsl_lod_atlas_words,
+    pack_wgsl_lod_dispatch_words, pack_wgsl_lod_model_words, pack_wgsl_lod_subject_words,
     pack_wgsl_patch_preparation_scene_words, pack_wgsl_resident_root_preparation_scene_words,
     pack_wgsl_root_eligibility_bits, pack_wgsl_source_visibility_words,
     pack_wgsl_visibility_compaction_scene_words, prepare_lod_atlas_lookup, prepare_lod_model,
     reconcile_and_pack_wgsl_lod_pass2, reconcile_and_pack_wgsl_resident_lods,
     wgsl_resident_geometry_bucket_oracle_words_with_domains,
     wgsl_resident_root_topology_oracle_words, LodAtlasLookup, LodDispatchState, LodModelData,
-    PreparedLodModel, WgslLodDispatchMetrics, WgslPatchPreparationSceneWords,
-    WgslResidentRootPreparationSceneWords, WgslVisibilityCompactionSceneWords,
+    PreparedLodModel, WgslAdaptiveOverlayPreparationSceneWords, WgslLodDispatchMetrics,
+    WgslPatchPreparationSceneWords, WgslResidentRootPreparationSceneWords,
+    WgslVisibilityCompactionSceneWords,
 };
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use wgpu::util::DeviceExt;
 
 const LOD_WORKGROUP_SIZE: u32 = 64;
@@ -244,8 +249,10 @@ pub struct LodDeviceConformance {
     pub resident_root_topology_words: usize,
     pub resident_root_prepared_words: usize,
     pub resident_root_domain_words: usize,
-    pub resident_root_rendered_pixels: usize,
+    pub resident_adaptive_rendered_pixels: usize,
     pub resident_root_indirect_draws: usize,
+    pub adaptive_overlay_patches: usize,
+    pub adaptive_overlay_indirect_draws: usize,
     pub coherence_words: usize,
     pub prepared_patch_words: usize,
     pub rendered_patch_pixels: usize,
@@ -535,6 +542,7 @@ pub struct PatchPreparationScene {
     uniform_words: [u32; 4],
     uniform: wgpu::Buffer,
     topology: wgpu::Buffer,
+    source_faces: Arc<wgpu::Buffer>,
     subjects: wgpu::Buffer,
     prepared_records: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
@@ -1246,25 +1254,29 @@ impl LodClassifierDevice {
         ))
     }
 
-    /// Prove the direct chain from a packed resident word through topology,
-    /// preparation, domain-aware bucketing, global-atlas indexed-indirect
-    /// drawing, and rasterization without an intermediate map.
-    async fn validate_resident_root_render_conformance(
+    /// Prove the direct chain from packed resident words through root topology,
+    /// sparse dyadic replacement preparation, domain-aware bucketing, shared
+    /// global-atlas indirect drawing, and composited rasterization without an
+    /// intermediate map or duplicated source-face buffer.
+    async fn validate_resident_adaptive_render_conformance(
         &self,
-    ) -> Result<(usize, usize), LodWebGpuError> {
+    ) -> Result<(usize, usize, usize, usize), LodWebGpuError> {
         const WIDTH: u32 = 32;
         const HEIGHT: u32 = 32;
         const PADDED_BYTES_PER_ROW: u32 = 256;
 
-        let positions = vec![-0.6, -0.5, 0.0, 0.6, -0.5, 0.0, 0.0, 0.65, 0.0];
+        let positions = vec![
+            -0.9, -0.7, 0.0, -0.1, -0.7, 0.0, -0.5, 0.5, 0.0, 0.1, -0.7, 0.0, 0.9, -0.7, 0.0, 0.5,
+            0.5, 0.0,
+        ];
         let prepared = prepare_lod_model(LodModelData {
             positions: positions.clone(),
-            faces: vec![[0, 1, 2]],
-            joint_indices: vec![[0; 4]; 3],
-            joint_weights: vec![[0.0; 4]; 3],
+            faces: vec![[0, 1, 2], [3, 4, 5]],
+            joint_indices: vec![[0; 4]; 6],
+            joint_weights: vec![[0.0; 4]; 6],
             morph_deltas: Vec::new(),
             num_morph_targets: 0,
-            face_nodes: vec![7],
+            face_nodes: vec![7, 8],
         })
         .map_err(LodWebGpuError::Conformance)?;
         let atlas_lookup =
@@ -1285,38 +1297,79 @@ impl LodClassifierDevice {
         };
         let render_scene = RenderSceneSnapshot {
             revision: 101,
-            suppressed_root_faces: Vec::new(),
-            batches: vec![RenderBatchSnapshot {
-                id: RenderBatchId {
-                    key: RenderBatchKey {
-                        lod: [1; 3],
-                        parity_bucket: 0,
-                        material_index: 1_000_000,
-                        render_node_index: 9,
+            suppressed_root_faces: vec![0],
+            batches: vec![
+                RenderBatchSnapshot {
+                    id: RenderBatchId {
+                        key: RenderBatchKey {
+                            lod: [1; 3],
+                            parity_bucket: 0,
+                            material_index: 1_000_000,
+                            render_node_index: 9,
+                        },
+                        layer: RenderBatchLayer::RetainedRoot,
                     },
-                    layer: RenderBatchLayer::RetainedRoot,
+                    members: vec![
+                        RenderBatchMember {
+                            face_index: 0,
+                            leaf_id: ScreenPatchLeafId::ROOT,
+                            node_index: 7,
+                            edge_lods: [1; 3],
+                            permutation_index: 0,
+                            vertex_lods: [1; 3],
+                        },
+                        RenderBatchMember {
+                            face_index: 1,
+                            leaf_id: ScreenPatchLeafId::ROOT,
+                            node_index: 8,
+                            edge_lods: [1; 3],
+                            permutation_index: 0,
+                            vertex_lods: [1; 3],
+                        },
+                    ],
+                    triangle_index_count: 3,
+                    line_index_count: 0,
+                    transform,
+                    enabled: true,
+                    pbr_class: PbrDrawClass::Opaque,
                 },
-                members: vec![RenderBatchMember {
-                    face_index: 0,
-                    leaf_id: ScreenPatchLeafId::ROOT,
-                    node_index: 7,
-                    edge_lods: [1; 3],
-                    permutation_index: 0,
-                    vertex_lods: [1; 3],
-                }],
-                triangle_index_count: 3,
-                line_index_count: 0,
-                transform,
-                enabled: true,
-                pbr_class: PbrDrawClass::Opaque,
-            }],
+                RenderBatchSnapshot {
+                    id: RenderBatchId {
+                        key: RenderBatchKey {
+                            lod: [1; 3],
+                            parity_bucket: 0,
+                            material_index: 1_000_000,
+                            render_node_index: 9,
+                        },
+                        layer: RenderBatchLayer::AdaptiveOverlay,
+                    },
+                    members: vec![RenderBatchMember {
+                        face_index: 0,
+                        leaf_id: ScreenPatchLeafId::ROOT.child(3).ok_or_else(|| {
+                            LodWebGpuError::Conformance(
+                                "resident overlay conformance child is missing".to_string(),
+                            )
+                        })?,
+                        node_index: 7,
+                        edge_lods: [1; 3],
+                        permutation_index: 0,
+                        vertex_lods: [1; 3],
+                    }],
+                    triangle_index_count: 3,
+                    line_index_count: 0,
+                    transform,
+                    enabled: true,
+                    pbr_class: PbrDrawClass::Opaque,
+                },
+            ],
         };
-        let mut source_instances = vec![0.0; PREPARED_PATCH_RECORD_WORDS];
-        {
-            let mut writer = InstanceWriter::new(&mut source_instances, 0);
-            for vertex in 0..3u32 {
+        let faces = [[0u32, 1, 2], [3, 4, 5]];
+        let mut source_instances = vec![0.0; 2 * PREPARED_PATCH_RECORD_WORDS];
+        for (face, vertices) in faces.into_iter().enumerate() {
+            let mut writer = InstanceWriter::new(&mut source_instances, face);
+            for (corner, vertex) in vertices.into_iter().enumerate() {
                 writer.set_position(
-                    vertex as usize,
+                    corner,
                     vertex,
                     [
                         positions[vertex as usize * 3],
@@ -1324,10 +1377,10 @@ impl LodClassifierDevice {
                         positions[vertex as usize * 3 + 2],
                     ],
                 );
-                writer.set_normal(vertex as usize, [0.0, 0.0, 1.0]);
+                writer.set_normal(corner, [0.0, 0.0, 1.0]);
             }
-            writer.set_face_id(0);
-            writer.set_node_id(7);
+            writer.set_face_id(face as u32);
+            writer.set_node_id(7 + face as u32);
         }
         let preparation =
             self.upload_resident_root_preparation_scene(&model, &render_scene, &source_instances)?;
@@ -1336,8 +1389,52 @@ impl LodClassifierDevice {
             &packed_atlas,
             &preparation.draw_domains,
         )?;
-        let pipeline =
-            self.create_resident_root_render_pipeline(wgpu::TextureFormat::Rgba8Unorm, None, 1)?;
+        let pipeline = self.create_resident_root_render_pipeline(
+            wgpu::TextureFormat::Rgba8Unorm,
+            Some(wgpu::TextureFormat::Depth24Plus),
+            1,
+        )?;
+        let overlay_pipeline = self.create_offscreen_patch_render_pipeline()?;
+        let mut invalid_overlay_scene = render_scene.clone();
+        invalid_overlay_scene.batches.pop();
+        if self
+            .upload_adaptive_overlay_scene(
+                &overlay_pipeline,
+                &model,
+                &preparation,
+                &invalid_overlay_scene,
+            )
+            .is_ok()
+            || !geometry
+                .suppressed_faces
+                .lock()
+                .map_err(|_| {
+                    LodWebGpuError::Conformance(
+                        "resident suppression conformance lock was poisoned".to_string(),
+                    )
+                })?
+                .is_empty()
+        {
+            return Err(LodWebGpuError::Conformance(
+                "failed adaptive allocation mutated resident root suppression".to_string(),
+            ));
+        }
+        let overlay = self
+            .upload_adaptive_overlay_scene(&overlay_pipeline, &model, &preparation, &render_scene)?
+            .ok_or_else(|| {
+                LodWebGpuError::Conformance(
+                    "resident render conformance lost its adaptive overlay".to_string(),
+                )
+            })?;
+        if !Arc::ptr_eq(
+            &overlay.patches.source_faces,
+            &preparation.patches.source_faces,
+        ) {
+            return Err(LodWebGpuError::Conformance(
+                "adaptive overlay duplicated the resident source-face buffer".to_string(),
+            ));
+        }
+        self.publish_adaptive_overlay_suppression(&geometry, Some(&overlay))?;
         let foreign_domains = self.upload_resident_root_draw_domain_scene(&model, &render_scene)?;
         let foreign_geometry =
             self.upload_resident_geometry_bucket_scene(&model, &packed_atlas, &foreign_domains)?;
@@ -1410,6 +1507,21 @@ impl LodClassifierDevice {
             view_formats: &[],
         });
         let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("resident adaptive conformance depth"),
+            size: wgpu::Extent3d {
+                width: WIDTH,
+                height: HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth24Plus,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
         let readback_bytes = u64::from(PADDED_BYTES_PER_ROW) * u64::from(HEIGHT);
         let readback = gpu_buffer(
             &self.device,
@@ -1429,35 +1541,46 @@ impl LodClassifierDevice {
             FaceLodGrading::TwoToOne,
             &mut encoder,
         );
-        let encoding = self.encode_resident_root_normals(
+        let encoding = self.encode_resident_adaptive_normals(
             &mut encoder,
             &frame,
+            &render_scene,
             classification.model,
             &resident,
             &preparation,
             &geometry,
             &pipeline,
             &bindings,
+            &overlay_pipeline,
+            Some(&overlay),
             &packed_atlas,
             PatchRenderTarget {
                 color_view: &target_view,
                 resolve_target: None,
-                depth_stencil_view: None,
+                depth_stencil_view: Some(&depth_view),
                 clear_color: Some(wgpu::Color::TRANSPARENT),
-                clear_depth: None,
+                clear_depth: Some(1.0),
             },
             LodPose::default(),
             0,
             true,
         )?;
-        if encoding
+        let overlay_encoding = encoding.overlay.ok_or_else(|| {
+            LodWebGpuError::Conformance("adaptive overlay was not encoded".to_string())
+        })?;
+        if encoding.roots
             != (ResidentRootFrameEncoding {
                 indirect_draw_calls: 2,
-                source_face_count: 1,
+                source_face_count: 2,
             })
+            || overlay_encoding
+                != (AdaptiveOverlayFrameEncoding {
+                    indirect_draw_calls: 1,
+                    source_patch_count: 1,
+                })
         {
             return Err(LodWebGpuError::Conformance(format!(
-                "resident root render encoding mismatch: {encoding:?}",
+                "resident adaptive render encoding mismatch: {encoding:?}",
             )));
         }
         encoder.copy_texture_to_buffer(
@@ -1500,7 +1623,12 @@ impl LodClassifierDevice {
                 "resident root render produced an implausible {rendered}-pixel footprint",
             )));
         }
-        Ok((rendered, encoding.indirect_draw_calls as usize))
+        Ok((
+            rendered,
+            encoding.roots.indirect_draw_calls as usize,
+            overlay_encoding.source_patch_count as usize,
+            overlay_encoding.indirect_draw_calls as usize,
+        ))
     }
 
     async fn run_resident_visibility_conformance(
@@ -1798,8 +1926,12 @@ impl LodClassifierDevice {
             resident_root_prepared_words,
             resident_root_domain_words,
         ) = self.run_resident_lod_conformance().await?;
-        let (resident_root_rendered_pixels, resident_root_indirect_draws) =
-            self.validate_resident_root_render_conformance().await?;
+        let (
+            resident_adaptive_rendered_pixels,
+            resident_root_indirect_draws,
+            adaptive_overlay_patches,
+            adaptive_overlay_indirect_draws,
+        ) = self.validate_resident_adaptive_render_conformance().await?;
         let resident_bucket_words = self.run_resident_geometry_bucket_conformance().await?;
         let full_pipeline_words = actual.len();
 
@@ -1920,8 +2052,10 @@ impl LodClassifierDevice {
             resident_root_topology_words,
             resident_root_prepared_words,
             resident_root_domain_words,
-            resident_root_rendered_pixels,
+            resident_adaptive_rendered_pixels,
             resident_root_indirect_draws,
+            adaptive_overlay_patches,
+            adaptive_overlay_indirect_draws,
             coherence_words: actual.len(),
             prepared_patch_words,
             rendered_patch_pixels,
@@ -2058,6 +2192,29 @@ impl LodClassifierDevice {
         source_face_words: &[[u32; PREPARED_PATCH_RECORD_WORDS]],
         subject_words: &[[u32; PATCH_SUBJECT_RECORD_WORDS]],
     ) -> Result<PatchPreparationScene, LodWebGpuError> {
+        let source_faces = Arc::new(buffer_init_or_zero(
+            &self.device,
+            "patch preparation source faces",
+            bytemuck::cast_slice(source_face_words),
+            wgpu::BufferUsages::STORAGE,
+        ));
+        self.allocate_patch_preparation_scene_with_source(
+            model,
+            uniform_words,
+            topology,
+            source_faces,
+            subject_words,
+        )
+    }
+
+    fn allocate_patch_preparation_scene_with_source(
+        &self,
+        model: &LodClassifierModel,
+        uniform_words: [u32; 4],
+        topology: wgpu::Buffer,
+        source_faces: Arc<wgpu::Buffer>,
+        subject_words: &[[u32; PATCH_SUBJECT_RECORD_WORDS]],
+    ) -> Result<PatchPreparationScene, LodWebGpuError> {
         let patch_count = uniform_words[0];
         let subject_count = u32::try_from(subject_words.len())
             .map_err(|_| LodWebGpuError::Payload("patch subject count exceeds u32".into()))?;
@@ -2066,12 +2223,6 @@ impl LodClassifierDevice {
             "patch preparation uniform",
             bytemuck::cast_slice(&uniform_words),
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        );
-        let source_faces = buffer_init_or_zero(
-            &self.device,
-            "patch preparation source faces",
-            bytemuck::cast_slice(source_face_words),
-            wgpu::BufferUsages::STORAGE,
         );
         let subjects = buffer_init_or_zero(
             &self.device,
@@ -2097,7 +2248,7 @@ impl LodClassifierDevice {
             entries: &[
                 bind(0, &uniform),
                 bind(1, &topology),
-                bind(2, &source_faces),
+                bind(2, source_faces.as_ref()),
                 bind(3, &model.skinning),
                 bind(4, &model.joint_matrices),
                 bind(5, &model.morph_deltas),
@@ -2112,6 +2263,7 @@ impl LodClassifierDevice {
             uniform_words,
             uniform,
             topology,
+            source_faces,
             subjects,
             prepared_records,
             bind_group,
@@ -2164,11 +2316,15 @@ impl LodClassifierDevice {
         num_joints: u32,
     ) -> Result<(), LodWebGpuError> {
         self.write_dynamic_pose(model, pose, num_joints)?;
+        self.write_patch_joint_count(scene, num_joints);
+        Ok(())
+    }
+
+    fn write_patch_joint_count(&self, scene: &PatchPreparationScene, num_joints: u32) {
         let mut uniform_words = scene.uniform_words;
         uniform_words[2] = num_joints;
         self.queue
             .write_buffer(&scene.uniform, 0, bytemuck::cast_slice(&uniform_words));
-        Ok(())
     }
 
     pub fn encode_patch_preparation(
@@ -5003,7 +5159,7 @@ pub async fn run_browser_lod_conformance() -> Result<String, wasm_bindgen::JsVal
         .await
         .map_err(browser_error)?;
     Ok(format!(
-        "adapter={} backend={:?} full_pipeline_words={} resident_lod_words={} resident_visibility_words={} resident_bucket_words={} resident_root_topology_words={} resident_root_prepared_words={} resident_root_domain_words={} resident_root_rendered_pixels={} resident_root_indirect_draws={} coherence_words={} \
+        "adapter={} backend={:?} full_pipeline_words={} resident_lod_words={} resident_visibility_words={} resident_bucket_words={} resident_root_topology_words={} resident_root_prepared_words={} resident_root_domain_words={} resident_adaptive_rendered_pixels={} resident_root_indirect_draws={} adaptive_overlay_patches={} adaptive_overlay_indirect_draws={} coherence_words={} \
          prepared_patch_words={} rendered_patch_pixels={} shared_frame_draws={} compacted_source_words={} \
          compacted_range_words={} indirect_argument_words={} indirect_draws={}",
         adapter_info.name,
@@ -5015,8 +5171,10 @@ pub async fn run_browser_lod_conformance() -> Result<String, wasm_bindgen::JsVal
         report.resident_root_topology_words,
         report.resident_root_prepared_words,
         report.resident_root_domain_words,
-        report.resident_root_rendered_pixels,
+        report.resident_adaptive_rendered_pixels,
         report.resident_root_indirect_draws,
+        report.adaptive_overlay_patches,
+        report.adaptive_overlay_indirect_draws,
         report.coherence_words,
         report.prepared_patch_words,
         report.rendered_patch_pixels,
