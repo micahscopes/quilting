@@ -6,6 +6,7 @@
 //! handle, WebGPU resource, DOM object, or platform callback.
 
 use crate::batch::{RenderBatchId, RenderBatchLayer, RenderBatchMember};
+use crate::material::PbrMaterial;
 use crate::permutation::perm_sign;
 use serde::{Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet};
@@ -71,6 +72,9 @@ impl RenderBatchSnapshot {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderSceneSnapshot {
     pub revision: u64,
+    /// Authored material table addressed by `RenderBatchKey::material_index`.
+    /// Empty tables retain the glTF default-material semantics.
+    pub materials: Vec<PbrMaterial>,
     /// Exact roots omitted from the logical retained layer and replaced by
     /// adaptive overlay members. Physical WebGL2 root batches may still
     /// dispatch these instances with a zero visibility scalar; WebGPU may
@@ -242,6 +246,11 @@ impl ResidentRootDrawDomains {
 
 impl RenderSceneSnapshot {
     pub fn validate(&self) -> Result<(), RenderContractError> {
+        for (material_index, material) in self.materials.iter().enumerate() {
+            if material.validate().is_err() {
+                return Err(RenderContractError::InvalidMaterial { material_index });
+            }
+        }
         if self
             .suppressed_root_faces
             .windows(2)
@@ -1288,6 +1297,7 @@ fn append_draw_commands(
 pub enum RenderContractError {
     InvalidTransform,
     InvalidView,
+    InvalidMaterial { material_index: usize },
     InvalidBatchKey { batch_index: usize },
     InvalidBatchGeometry { batch_index: usize },
     InvalidBatchMember { batch_index: usize, face_index: u32 },
@@ -1330,6 +1340,9 @@ impl fmt::Display for RenderContractError {
         match self {
             Self::InvalidTransform => formatter.write_str("render transform is invalid"),
             Self::InvalidView => formatter.write_str("render view is invalid"),
+            Self::InvalidMaterial { material_index } => {
+                write!(formatter, "render material {material_index} is invalid")
+            }
             Self::InvalidBatchKey { batch_index } => {
                 write!(formatter, "render batch {batch_index} has an invalid key")
             }
@@ -1509,6 +1522,7 @@ mod tests {
     fn scene() -> RenderSceneSnapshot {
         RenderSceneSnapshot {
             revision: 7,
+            materials: Vec::new(),
             suppressed_root_faces: Vec::new(),
             batches: vec![
                 batch(0, 0, PbrDrawClass::Opaque, true),
@@ -1634,6 +1648,7 @@ mod tests {
             .unwrap();
         let scene = RenderSceneSnapshot {
             revision: 11,
+            materials: Vec::new(),
             suppressed_root_faces: vec![0],
             batches: vec![roots, overlay],
         };
@@ -1893,6 +1908,18 @@ mod tests {
     }
 
     #[test]
+    fn scene_validation_rejects_invalid_authored_materials() {
+        let mut invalid = scene();
+        let mut material = PbrMaterial::default();
+        material.ior = f32::NAN;
+        invalid.materials.push(material);
+        assert_eq!(
+            invalid.validate(),
+            Err(RenderContractError::InvalidMaterial { material_index: 0 }),
+        );
+    }
+
+    #[test]
     fn retained_layers_validate_logical_replacement_and_physical_dispatch() {
         let mut roots = batch(0, 0, PbrDrawClass::Opaque, true);
         roots.id.layer = RenderBatchLayer::RetainedRoot;
@@ -1915,6 +1942,7 @@ mod tests {
         });
         let retained = RenderSceneSnapshot {
             revision: 8,
+            materials: Vec::new(),
             suppressed_root_faces: vec![0],
             batches: vec![roots, overlay],
         };
@@ -1990,6 +2018,7 @@ mod tests {
 
         let scene = RenderSceneSnapshot {
             revision: 11,
+            materials: Vec::new(),
             suppressed_root_faces: Vec::new(),
             batches: vec![low, high, sparse_material],
         };
@@ -2013,6 +2042,7 @@ mod tests {
         conflicting.members[0].vertex_lods = [4; 3];
         let conflict_scene = RenderSceneSnapshot {
             revision: 12,
+            materials: Vec::new(),
             suppressed_root_faces: Vec::new(),
             batches: vec![first.clone(), conflicting],
         };
@@ -2026,6 +2056,7 @@ mod tests {
 
         let missing_scene = RenderSceneSnapshot {
             revision: 13,
+            materials: Vec::new(),
             suppressed_root_faces: Vec::new(),
             batches: vec![first],
         };

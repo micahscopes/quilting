@@ -191,6 +191,7 @@ fn shared_render_frame_fixture() -> (PreparedLodModel, Vec<f32>, RenderSceneSnap
     }
     let scene = RenderSceneSnapshot {
         revision: 91,
+        materials: Vec::new(),
         suppressed_root_faces: Vec::new(),
         batches,
     };
@@ -678,6 +679,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
 
         let compaction_scene = RenderSceneSnapshot {
             revision: 19,
+            materials: Vec::new(),
             suppressed_root_faces: Vec::new(),
             batches: vec![
                 compaction_batch(0, 0..130, true),
@@ -730,6 +732,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         overlay.members[0].leaf_id = ScreenPatchLeafId::ROOT.child(0).unwrap();
         let replacement_scene = RenderSceneSnapshot {
             revision: 20,
+            materials: Vec::new(),
             suppressed_root_faces: vec![0],
             batches: vec![roots, overlay],
         };

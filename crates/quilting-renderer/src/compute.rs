@@ -3596,6 +3596,7 @@ mod tests {
         second.members[0].leaf_id = ScreenPatchLeafId::ROOT.child(3).unwrap();
         let scene = RenderSceneSnapshot {
             revision: 51,
+            materials: Vec::new(),
             suppressed_root_faces: Vec::new(),
             batches: vec![first, second],
         };
@@ -3654,6 +3655,7 @@ mod tests {
         overlay.members[0].leaf_id = ScreenPatchLeafId::ROOT.child(3).unwrap();
         let scene = RenderSceneSnapshot {
             revision: 57,
+            materials: Vec::new(),
             suppressed_root_faces: vec![0],
             batches: vec![root_zero, root_one, overlay],
         };
@@ -3744,6 +3746,7 @@ mod tests {
             .push(visibility_member(3, ScreenPatchLeafId::ROOT));
         let scene = RenderSceneSnapshot {
             revision: 41,
+            materials: Vec::new(),
             suppressed_root_faces: Vec::new(),
             batches: vec![
                 first,
@@ -3798,6 +3801,7 @@ mod tests {
         overlay.members[0].leaf_id = ScreenPatchLeafId::ROOT.child(0).unwrap();
         let scene = RenderSceneSnapshot {
             revision: 42,
+            materials: Vec::new(),
             suppressed_root_faces: vec![0],
             batches: vec![roots, overlay],
         };

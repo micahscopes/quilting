@@ -81,6 +81,24 @@ pub struct PbrMaterial {
     pub textures: PbrTextureReferences,
 }
 
+/// Resolve a glTF material-table index with the renderer's established
+/// compatibility fallback: the first authored material, then the caller's
+/// default when the table is empty. The returned slot is stable enough for
+/// backend binding caches; `usize::MAX` denotes the synthetic default.
+pub fn pbr_material_for_index<'a>(
+    materials: &'a [PbrMaterial],
+    default_material: &'a PbrMaterial,
+    requested: usize,
+) -> (usize, &'a PbrMaterial) {
+    if let Some(material) = materials.get(requested) {
+        (requested, material)
+    } else if let Some(material) = materials.first() {
+        (0, material)
+    } else {
+        (usize::MAX, default_material)
+    }
+}
+
 impl PbrMaterial {
     pub fn validate(&self) -> Result<(), &'static str> {
         let finite = self
@@ -185,5 +203,25 @@ mod tests {
         material.validate().unwrap();
         material.attenuation_distance = Some(f32::INFINITY);
         assert!(material.validate().is_err());
+    }
+
+    #[test]
+    fn material_resolution_preserves_authored_and_default_fallbacks() {
+        let default = PbrMaterial::default();
+        let mut authored = PbrMaterial::default();
+        authored.roughness = 0.25;
+        let materials = vec![authored.clone()];
+        assert_eq!(
+            pbr_material_for_index(&materials, &default, 0),
+            (0, &authored)
+        );
+        assert_eq!(
+            pbr_material_for_index(&materials, &default, 17),
+            (0, &authored)
+        );
+        assert_eq!(
+            pbr_material_for_index(&[], &default, 17),
+            (usize::MAX, &default),
+        );
     }
 }

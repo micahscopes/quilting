@@ -35,7 +35,9 @@ use quilting_renderer::Renderer;
 use quilting_renderer::texture::TextureCache;
 use quilting_core::batch;
 use quilting_core::instance_layout;
-use quilting_core::material::{PbrAlphaMode, PbrMaterial, PbrTextureReferences};
+use quilting_core::material::{
+    pbr_material_for_index, PbrAlphaMode, PbrMaterial, PbrTextureReferences,
+};
 use quilting_core::render::{
     patch_preparation_needed, patch_visibility_needed, render_draw_passes, FocusFieldPacket,
     MatcapStyle, PbrDrawClass, RenderBatchSnapshot, RenderEntityTransform, RenderFrameOptions,
@@ -87,20 +89,6 @@ const RUNTIME_TIMING_WINDOW_CAPACITY: usize = 2_048;
 fn bytemuck_cast_slice<T>(data: &[T]) -> &[u8] {
     unsafe {
         std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * std::mem::size_of::<T>())
-    }
-}
-
-fn pbr_material_for_index<'a>(
-    materials: &'a [PbrMaterial],
-    default_material: &'a PbrMaterial,
-    requested: usize,
-) -> (usize, &'a PbrMaterial) {
-    if let Some(material) = materials.get(requested) {
-        (requested, material)
-    } else if let Some(material) = materials.first() {
-        (0, material)
-    } else {
-        (usize::MAX, default_material)
     }
 }
 
@@ -2645,6 +2633,7 @@ fn extract_render_scene(renderer: &MainState) -> Result<RenderSceneSnapshot, Str
     }
     Ok(RenderSceneSnapshot {
         revision: 0,
+        materials: renderer.materials.clone(),
         suppressed_root_faces: renderer.active_suppressed_root_faces.clone(),
         batches,
     })

@@ -1402,6 +1402,7 @@ impl LodClassifierDevice {
         };
         let render_scene = RenderSceneSnapshot {
             revision: 101,
+            materials: Vec::new(),
             suppressed_root_faces: vec![0],
             batches: vec![
                 RenderBatchSnapshot {
@@ -4765,6 +4766,7 @@ impl LodClassifierDevice {
         };
         let render_scene = RenderSceneSnapshot {
             revision: 73,
+            materials: Vec::new(),
             suppressed_root_faces: vec![0],
             batches: vec![
                 batch(
