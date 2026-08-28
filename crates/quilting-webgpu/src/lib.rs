@@ -15,10 +15,11 @@ use quilting_core::render::{
 use quilting_core::screen_partition::ScreenPatchLeafId;
 use quilting_renderer::compute::{
     pack_wgsl_lod_atlas_words, pack_wgsl_lod_dispatch_words, pack_wgsl_lod_model_words,
-    pack_wgsl_lod_subject_words, pack_wgsl_source_visibility_words, prepare_lod_atlas_lookup,
-    prepare_lod_model, reconcile_and_pack_wgsl_lod_pass2, LodAtlasLookup, LodDispatchState,
-    LodModelData, PreparedLodModel, WgslLodDispatchMetrics, WgslPatchPreparationSceneWords,
-    WgslVisibilityCompactionSceneWords,
+    pack_wgsl_lod_subject_words, pack_wgsl_patch_preparation_scene_words,
+    pack_wgsl_source_visibility_words, pack_wgsl_visibility_compaction_scene_words,
+    prepare_lod_atlas_lookup, prepare_lod_model, reconcile_and_pack_wgsl_lod_pass2, LodAtlasLookup,
+    LodDispatchState, LodModelData, PreparedLodModel, WgslLodDispatchMetrics,
+    WgslPatchPreparationSceneWords, WgslVisibilityCompactionSceneWords,
 };
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -420,6 +421,17 @@ pub struct PatchRenderBindings {
     frames: wgpu::Buffer,
     frame_words: Mutex<Vec<u32>>,
     bind_group: wgpu::BindGroup,
+}
+
+/// One coherent retained scene for prepared-patch rendering. Applications
+/// replace this aggregate atomically when extracted batch membership changes;
+/// frame code cannot accidentally combine preparation, compaction, and bind
+/// groups from different scene epochs.
+pub struct PatchRenderScene {
+    scene: RenderSceneSnapshot,
+    patches: PatchPreparationScene,
+    visibility: VisibilityCompactionScene,
+    bindings: PatchRenderBindings,
 }
 
 /// Retained scene shape and output buffers for deterministic visibility
@@ -1359,6 +1371,86 @@ impl LodClassifierDevice {
         })
     }
 
+    /// Upload every immutable resource derived from one backend-neutral scene
+    /// as a single replacement candidate. Construction failure leaves the
+    /// caller's previous aggregate untouched.
+    pub fn upload_patch_render_scene(
+        &self,
+        pipeline: &PatchRenderPipeline,
+        model: &LodClassifierModel,
+        mut scene: RenderSceneSnapshot,
+        source_instances: &[f32],
+        revision: u64,
+    ) -> Result<PatchRenderScene, LodWebGpuError> {
+        scene.revision = revision;
+        let patch_words =
+            pack_wgsl_patch_preparation_scene_words(&model.prepared, &scene, source_instances)
+                .map_err(LodWebGpuError::Payload)?;
+        let visibility_words =
+            pack_wgsl_visibility_compaction_scene_words(&scene, RenderGeometry::Triangles)
+                .map_err(LodWebGpuError::Payload)?;
+        let patches = self.upload_patch_preparation_scene(model, patch_words)?;
+        let visibility = self.upload_visibility_compaction_scene(visibility_words)?;
+        let bindings = self.create_patch_render_bindings(pipeline, &patches, &visibility)?;
+        Ok(PatchRenderScene {
+            scene,
+            patches,
+            visibility,
+            bindings,
+        })
+    }
+
+    /// Upload current pose and visibility inputs for one coherent retained
+    /// scene. These queue writes precede the caller's subsequent encoder
+    /// submission on the same queue.
+    pub fn write_patch_render_scene_state(
+        &self,
+        model: &LodClassifierModel,
+        scene: &PatchRenderScene,
+        pose: LodPose<'_>,
+        num_joints: u32,
+        source_visibility: &[u8],
+    ) -> Result<(), LodWebGpuError> {
+        self.write_patch_pose(model, &scene.patches, pose, num_joints)?;
+        self.write_source_visibility(&scene.visibility, source_visibility)
+    }
+
+    /// Encode the supported normals-mode subset from one coherent scene
+    /// aggregate and the retained packed atlas.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_normals_patch_render_scene<'resource, VisibilityProducer>(
+        &'resource self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &RenderFrame,
+        pipeline: &'resource PatchRenderPipeline,
+        scene: &'resource PatchRenderScene,
+        atlas: &'resource PackedPatchAtlas,
+        target: PatchRenderTarget<'resource>,
+        use_qb: bool,
+        encode_visibility: VisibilityProducer,
+    ) -> Result<PatchFrameEncoding, LodWebGpuError>
+    where
+        VisibilityProducer: FnOnce(
+            &mut wgpu::CommandEncoder,
+            &PatchPreparationScene,
+            &VisibilityCompactionScene,
+        ) -> Result<(), LodWebGpuError>,
+    {
+        self.encode_normals_render_frame(
+            encoder,
+            frame,
+            &scene.scene,
+            pipeline,
+            &scene.bindings,
+            &scene.patches,
+            &scene.visibility,
+            atlas,
+            target,
+            use_qb,
+            encode_visibility,
+        )
+    }
+
     /// Upload one exact frame record per retained batch. This table is written
     /// before command submission, then indexed on-device by every indirect
     /// draw; scenes with distinct per-entity Möbius maps therefore need no
@@ -1421,7 +1513,7 @@ impl LodClassifierDevice {
         bindings: &'resource PatchRenderBindings,
         patches: &'resource PatchPreparationScene,
         visibility: &'resource VisibilityCompactionScene,
-        atlases: &'resource [PatchAtlasDraw<'resource>],
+        atlas: &'resource PackedPatchAtlas,
         target: PatchRenderTarget<'resource>,
         use_qb: bool,
         encode_visibility: VisibilityProducer,
@@ -1462,31 +1554,35 @@ impl LodClassifierDevice {
             || visibility.source_count != source_instance_count
             || visibility.batch_count != batch_count
             || bindings.frame_count != batch_count
-            || atlases.len() != scene.batches.len()
         {
             return Err(LodWebGpuError::Payload(format!(
-                "WebGPU render residency does not match scene: batches={batch_count}, instances={source_instance_count}, patch_records={}, visibility={}/{}, frames={}, atlases={}",
+                "WebGPU render residency does not match scene: batches={batch_count}, instances={source_instance_count}, patch_records={}, visibility={}/{}, frames={}",
                 patches.patch_count,
                 visibility.batch_count,
                 visibility.source_count,
                 bindings.frame_count,
-                atlases.len(),
             )));
         }
 
-        for (batch_index, (batch, atlas)) in scene.batches.iter().zip(atlases).enumerate() {
-            if atlas.index_count != batch.triangle_index_count {
+        for (batch_index, batch) in scene.batches.iter().enumerate() {
+            let draw = atlas.triangle_draw(batch.id.key.lod).ok_or_else(|| {
+                LodWebGpuError::Payload(format!(
+                    "packed WebGPU atlas is missing batch {batch_index} key {:?}",
+                    batch.id.key.lod,
+                ))
+            })?;
+            if draw.index_count != batch.triangle_index_count {
                 return Err(LodWebGpuError::Payload(format!(
                     "WebGPU atlas {batch_index} has {} triangle indices; scene requires {}",
-                    atlas.index_count, batch.triangle_index_count,
+                    draw.index_count, batch.triangle_index_count,
                 )));
             }
-            let index_width = match atlas.index_format {
+            let index_width = match draw.index_format {
                 wgpu::IndexFormat::Uint16 => 2,
                 wgpu::IndexFormat::Uint32 => 4,
             };
-            let first_index_byte = u64::from(atlas.first_index) * index_width;
-            let required_index_bytes = u64::from(atlas.index_count)
+            let first_index_byte = u64::from(draw.first_index) * index_width;
+            let required_index_bytes = u64::from(draw.index_count)
                 .checked_mul(index_width)
                 .and_then(|bytes| first_index_byte.checked_add(bytes))
                 .ok_or_else(|| {
@@ -1494,10 +1590,10 @@ impl LodClassifierDevice {
                         "WebGPU atlas {batch_index} index range exceeds u64",
                     ))
                 })?;
-            if atlas.index_buffer.size() < required_index_bytes {
+            if draw.index_buffer.size() < required_index_bytes {
                 return Err(LodWebGpuError::Payload(format!(
                     "WebGPU atlas {batch_index} index buffer is {} bytes; packed range ends at {required_index_bytes}",
-                    atlas.index_buffer.size(),
+                    draw.index_buffer.size(),
                 )));
             }
         }
@@ -1571,7 +1667,12 @@ impl LodClassifierDevice {
                     continue;
                 };
                 let batch = &scene.batches[batch_index as usize];
-                let atlas = &atlases[batch_index as usize];
+                let draw = atlas.triangle_draw(batch.id.key.lod).ok_or_else(|| {
+                    LodWebGpuError::Payload(format!(
+                        "packed WebGPU atlas lost batch {batch_index} key {:?}",
+                        batch.id.key.lod,
+                    ))
+                })?;
                 let permutation_sign = if batch.id.key.parity_bucket == 0 {
                     1
                 } else {
@@ -1586,7 +1687,7 @@ impl LodClassifierDevice {
                     &mut render_pass,
                     bindings,
                     visibility,
-                    atlas,
+                    draw,
                     batch_index,
                     winding,
                 )?;
@@ -2140,7 +2241,6 @@ impl LodClassifierDevice {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("patch prepare compact render conformance"),
             });
-        let atlases = packed_atlas.triangle_draws_for_scene(&render_scene)?;
         let encoding = self.encode_normals_render_frame(
             &mut encoder,
             &render_frame,
@@ -2149,7 +2249,7 @@ impl LodClassifierDevice {
             &bindings,
             patches,
             &visibility,
-            &atlases,
+            &packed_atlas,
             PatchRenderTarget {
                 color_view: &target_view,
                 resolve_target: None,
@@ -2810,6 +2910,20 @@ impl PatchPreparationScene {
     }
 }
 
+impl PatchRenderScene {
+    pub fn scene(&self) -> &RenderSceneSnapshot {
+        &self.scene
+    }
+
+    pub fn patch_count(&self) -> u32 {
+        self.patches.patch_count
+    }
+
+    pub fn batch_count(&self) -> u32 {
+        self.visibility.batch_count
+    }
+}
+
 impl PackedPatchAtlas {
     pub fn entry(&self, key: [u32; 3]) -> Option<PackedPatchAtlasEntry> {
         self.entries.get(&key).copied()
@@ -2897,7 +3011,7 @@ impl PatchRenderPipeline {
         pass: &mut wgpu::RenderPass<'pass>,
         bindings: &'pass PatchRenderBindings,
         visibility: &'pass VisibilityCompactionScene,
-        atlas: &'pass PatchAtlasDraw<'pass>,
+        atlas: PatchAtlasDraw<'pass>,
         batch_index: u32,
         winding: PatchWinding,
     ) -> Result<(), LodWebGpuError> {

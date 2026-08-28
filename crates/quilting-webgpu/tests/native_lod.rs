@@ -10,8 +10,8 @@ use quilting_core::render::{
 };
 use quilting_core::screen_partition::ScreenPatchLeafId;
 use quilting_renderer::compute::{
-    pack_lod_classification, pack_wgsl_patch_preparation_scene_words,
-    pack_wgsl_visibility_compaction_scene_words, prepare_lod_atlas_lookup,
+    pack_lod_classification, pack_wgsl_visibility_compaction_scene_words,
+    prepare_lod_atlas_lookup,
     prepare_lod_dispatch_state, prepare_lod_model, unpack_lod_classification_fields,
     wgsl_visibility_compaction_oracle_words, LodAtlasLookup, LodDispatchState, LodModelData,
     LodSubjectState, PackedLodClassification, PreparedLodModel, WgslLodDispatchMetrics,
@@ -278,32 +278,25 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
 
         let (prepared, source_instances, render_scene, render_frame) =
             shared_render_frame_fixture();
-        let preparation_words =
-            pack_wgsl_patch_preparation_scene_words(&prepared, &render_scene, &source_instances)
-                .unwrap();
         let model = classifier
             .upload_model(prepared, &complete_atlas())
-            .unwrap();
-        let patches = classifier
-            .upload_patch_preparation_scene(&model, preparation_words)
-            .unwrap();
-        classifier
-            .write_patch_pose(&model, &patches, LodPose::default(), 0)
-            .unwrap();
-        let visibility_words =
-            pack_wgsl_visibility_compaction_scene_words(&render_scene, RenderGeometry::Triangles)
-                .unwrap();
-        let visibility = classifier
-            .upload_visibility_compaction_scene(visibility_words)
-            .unwrap();
-        classifier
-            .write_source_visibility(&visibility, &[1, 1])
             .unwrap();
         let pipeline = classifier
             .create_patch_render_pipeline(wgpu::TextureFormat::Rgba8Unorm, None, 1)
             .unwrap();
-        let bindings = classifier
-            .create_patch_render_bindings(&pipeline, &patches, &visibility)
+        let retained_scene = classifier
+            .upload_patch_render_scene(
+                &pipeline,
+                &model,
+                render_scene.clone(),
+                &source_instances,
+                render_scene.revision,
+            )
+            .unwrap();
+        assert_eq!(retained_scene.patch_count(), 2);
+        assert_eq!(retained_scene.batch_count(), 2);
+        classifier
+            .write_patch_render_scene_state(&model, &retained_scene, LodPose::default(), 0, &[1, 1])
             .unwrap();
         let packed_atlas = classifier
             .upload_packed_patch_atlas(
@@ -336,9 +329,6 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             .expect("out-of-range packed atlas metadata must fail")
             .to_string()
             .contains("range exceeds its index buffer"));
-        let atlases = packed_atlas
-            .triangle_draws_for_scene(&render_scene)
-            .unwrap();
         let target = classifier
             .device()
             .create_texture(&wgpu::TextureDescriptor {
@@ -366,15 +356,12 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                     label: Some("shared RenderFrame conformance"),
                 });
         let encoding = classifier
-            .encode_normals_render_frame(
+            .encode_normals_patch_render_scene(
                 &mut encoder,
                 &render_frame,
-                &render_scene,
                 &pipeline,
-                &bindings,
-                &patches,
-                &visibility,
-                &atlases,
+                &retained_scene,
+                &packed_atlas,
                 PatchRenderTarget {
                     color_view: &target_view,
                     resolve_target: None,
