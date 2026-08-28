@@ -15,7 +15,7 @@ use quilting_renderer::compute::{
     wgsl_visibility_compaction_oracle_words, LodAtlasLookup, LodDispatchState, LodModelData,
     LodSubjectState, PackedLodClassification, PreparedLodModel, WgslLodDispatchMetrics,
 };
-use quilting_webgpu::{LodClassifierDevice, LodPose};
+use quilting_webgpu::{LodClassifierDevice, LodPose, PatchRenderSceneUpdate};
 
 fn identity_matrix() -> [f32; 16] {
     [
@@ -281,7 +281,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             .upload_model(prepared, &complete_atlas())
             .unwrap();
         let pipeline = classifier.create_offscreen_patch_render_pipeline().unwrap();
-        let retained_scene = classifier
+        let mut retained_scene = classifier
             .upload_patch_render_scene(
                 &pipeline,
                 &model,
@@ -292,6 +292,59 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             .unwrap();
         assert_eq!(retained_scene.patch_count(), 2);
         assert_eq!(retained_scene.batch_count(), 2);
+        let mut reordered_scene = render_scene.clone();
+        let (first, second) = reordered_scene.batches.split_at_mut(1);
+        std::mem::swap(&mut first[0].members, &mut second[0].members);
+        reordered_scene.revision += 1;
+        assert!(matches!(
+            classifier
+                .update_patch_render_scene_in_place(
+                    &model,
+                    &mut retained_scene,
+                    reordered_scene.clone(),
+                    &source_instances,
+                    reordered_scene.revision,
+                )
+                .unwrap(),
+            PatchRenderSceneUpdate::Updated,
+        ));
+        assert_eq!(retained_scene.scene(), &reordered_scene);
+
+        let mut resized_scene = reordered_scene.clone();
+        let mut empty_batch = resized_scene.batches.last().unwrap().clone();
+        empty_batch.id.key.material_index += 1;
+        empty_batch.id.key.render_node_index += 1;
+        empty_batch.members.clear();
+        resized_scene.batches.push(empty_batch);
+        resized_scene.revision += 1;
+        let returned_scene = match classifier
+            .update_patch_render_scene_in_place(
+                &model,
+                &mut retained_scene,
+                resized_scene.clone(),
+                &source_instances,
+                resized_scene.revision,
+            )
+            .unwrap()
+        {
+            PatchRenderSceneUpdate::ShapeChanged(scene) => scene,
+            PatchRenderSceneUpdate::Updated => panic!("batch-count change updated in place"),
+        };
+        assert_eq!(returned_scene, resized_scene);
+        assert_eq!(retained_scene.scene(), &reordered_scene);
+
+        assert!(matches!(
+            classifier
+                .update_patch_render_scene_in_place(
+                    &model,
+                    &mut retained_scene,
+                    render_scene.clone(),
+                    &source_instances,
+                    render_scene.revision,
+                )
+                .unwrap(),
+            PatchRenderSceneUpdate::Updated,
+        ));
         classifier
             .write_patch_render_scene_state(&model, &retained_scene, LodPose::default(), 0, &[1, 1])
             .unwrap();

@@ -412,8 +412,11 @@ pub struct LodClassifierModel {
 /// joint-count word change with animation.
 pub struct PatchPreparationScene {
     patch_count: u32,
+    subject_count: u32,
     uniform_words: [u32; 4],
     uniform: wgpu::Buffer,
+    topology: wgpu::Buffer,
+    subjects: wgpu::Buffer,
     prepared_records: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
 }
@@ -446,6 +449,14 @@ pub struct PatchRenderScene {
     bindings: PatchRenderBindings,
 }
 
+/// Outcome of attempting to publish a new extracted topology into retained
+/// scene allocations. Shape changes return ownership of the validated input so
+/// the caller can construct an atomic replacement without cloning it.
+pub enum PatchRenderSceneUpdate {
+    Updated,
+    ShapeChanged(RenderSceneSnapshot),
+}
+
 /// Retained scene shape and output buffers for deterministic visibility
 /// compaction. Only `source_visibility` changes with the current pose.
 pub struct VisibilityCompactionScene {
@@ -453,6 +464,8 @@ pub struct VisibilityCompactionScene {
     source_count: u32,
     batch_index_uniform_stride: u32,
     batch_index_uniform: wgpu::Buffer,
+    batches: wgpu::Buffer,
+    source_eligibility: wgpu::Buffer,
     source_visibility: wgpu::Buffer,
     compacted_source_instances: wgpu::Buffer,
     compacted_ranges: wgpu::Buffer,
@@ -920,6 +933,8 @@ impl LodClassifierDevice {
         words: WgslPatchPreparationSceneWords,
     ) -> Result<PatchPreparationScene, LodWebGpuError> {
         let patch_count = words.uniform[0];
+        let subject_count = u32::try_from(words.subjects.len())
+            .map_err(|_| LodWebGpuError::Payload("patch subject count exceeds u32".into()))?;
         let num_morph_targets = u32::try_from(model.prepared.model.num_morph_targets)
             .map_err(|_| LodWebGpuError::Payload("patch morph target count exceeds u32".into()))?;
         if words.uniform[1] != model.prepared.residency.num_vertices
@@ -1022,7 +1037,7 @@ impl LodClassifierDevice {
             } else {
                 bytemuck::cast_slice(&words.topology)
             },
-            wgpu::BufferUsages::STORAGE,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         );
         let source_faces = buffer_init_or_zero(
             &self.device,
@@ -1034,7 +1049,7 @@ impl LodClassifierDevice {
             &self.device,
             "patch preparation subjects",
             bytemuck::cast_slice(&words.subjects),
-            wgpu::BufferUsages::STORAGE,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         );
         let prepared_bytes = u64::from(patch_count)
             .checked_mul(PREPARED_PATCH_RECORD_BYTES)
@@ -1065,8 +1080,11 @@ impl LodClassifierDevice {
         });
         Ok(PatchPreparationScene {
             patch_count,
+            subject_count,
             uniform_words: words.uniform,
             uniform,
+            topology,
+            subjects,
             prepared_records,
             bind_group,
         })
@@ -1474,6 +1492,75 @@ impl LodClassifierDevice {
         })
     }
 
+    /// Publish a new extracted topology into an existing scene allocation when
+    /// its patch, subject, and batch cardinalities are unchanged. All queue
+    /// writes precede the next frame encoder on the same device queue; callers
+    /// retain full aggregate replacement as the shape-change fallback.
+    pub fn update_patch_render_scene_in_place(
+        &self,
+        model: &LodClassifierModel,
+        retained: &mut PatchRenderScene,
+        mut scene: RenderSceneSnapshot,
+        source_instances: &[f32],
+        revision: u64,
+    ) -> Result<PatchRenderSceneUpdate, LodWebGpuError> {
+        scene.revision = revision;
+        let patch_words =
+            pack_wgsl_patch_preparation_scene_words(&model.prepared, &scene, source_instances)
+                .map_err(LodWebGpuError::Payload)?;
+        let visibility_words =
+            pack_wgsl_visibility_compaction_scene_words(&scene, RenderGeometry::Triangles)
+                .map_err(LodWebGpuError::Payload)?;
+
+        let same_shape = patch_words.uniform[0] == retained.patches.patch_count
+            && patch_words.topology.len() == retained.patches.patch_count as usize
+            && patch_words.subjects.len() == retained.patches.subject_count as usize
+            && visibility_words.uniform[0] == retained.visibility.batch_count
+            && visibility_words.uniform[1] == retained.visibility.source_count
+            && visibility_words.batches.len() == retained.visibility.batch_count as usize
+            && visibility_words.source_eligibility.len()
+                == retained.visibility.source_count as usize;
+        if !same_shape {
+            return Ok(PatchRenderSceneUpdate::ShapeChanged(scene));
+        }
+        if patch_words.uniform[1..] != retained.patches.uniform_words[1..]
+            || visibility_words.uniform[2..] != [0, 0]
+        {
+            return Err(LodWebGpuError::Payload(
+                "in-place WebGPU scene update changed immutable model words".to_string(),
+            ));
+        }
+
+        if !patch_words.topology.is_empty() {
+            self.queue.write_buffer(
+                &retained.patches.topology,
+                0,
+                bytemuck::cast_slice(&patch_words.topology),
+            );
+        }
+        self.queue.write_buffer(
+            &retained.patches.subjects,
+            0,
+            bytemuck::cast_slice(&patch_words.subjects),
+        );
+        if !visibility_words.batches.is_empty() {
+            self.queue.write_buffer(
+                &retained.visibility.batches,
+                0,
+                bytemuck::cast_slice(&visibility_words.batches),
+            );
+        }
+        if !visibility_words.source_eligibility.is_empty() {
+            self.queue.write_buffer(
+                &retained.visibility.source_eligibility,
+                0,
+                bytemuck::cast_slice(&visibility_words.source_eligibility),
+            );
+        }
+        retained.scene = scene;
+        Ok(PatchRenderSceneUpdate::Updated)
+    }
+
     /// Upload current pose and visibility inputs for one coherent retained
     /// scene. These queue writes precede the caller's subsequent encoder
     /// submission on the same queue.
@@ -1869,13 +1956,13 @@ impl LodClassifierDevice {
             &self.device,
             "visibility compaction batches",
             bytemuck::cast_slice(&words.batches),
-            wgpu::BufferUsages::STORAGE,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         );
         let source_eligibility = buffer_init_or_zero(
             &self.device,
             "visibility compaction eligibility",
             bytemuck::cast_slice(&words.source_eligibility),
-            wgpu::BufferUsages::STORAGE,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         );
         let source_bytes = u64::from(source_count)
             .checked_mul(PACKED_RECORD_BYTES)
@@ -2009,6 +2096,8 @@ impl LodClassifierDevice {
             source_count,
             batch_index_uniform_stride,
             batch_index_uniform,
+            batches,
+            source_eligibility,
             source_visibility,
             compacted_source_instances,
             compacted_ranges,

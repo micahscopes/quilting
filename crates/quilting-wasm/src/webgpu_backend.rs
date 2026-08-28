@@ -13,7 +13,8 @@ use quilting_core::render::{
 use quilting_renderer::compute::{LodAtlasLookup, PreparedLodModel};
 use quilting_webgpu::{
     LodClassifierDevice, LodClassifierModel, LodPose, OffscreenPatchRenderTarget, PackedPatchAtlas,
-    PatchFrameEncoding, PatchRenderPipeline, PatchRenderScene, WebGpuAdapterSummary,
+    PatchFrameEncoding, PatchRenderPipeline, PatchRenderScene, PatchRenderSceneUpdate,
+    WebGpuAdapterSummary,
 };
 use serde::Serialize;
 use std::cell::RefCell;
@@ -44,6 +45,8 @@ struct WebGpuBackend {
     atlas_uploads: u64,
     model_uploads: u64,
     scene_uploads: u64,
+    scene_rebuilds: u64,
+    scene_updates: u64,
     target_rebuilds: u64,
     frame_attempts: u64,
     frames_submitted: u64,
@@ -87,6 +90,8 @@ pub(crate) struct WebGpuBackendDiagnostics {
     atlas_uploads: u64,
     model_uploads: u64,
     scene_uploads: u64,
+    scene_rebuilds: u64,
+    scene_updates: u64,
     target_rebuilds: u64,
     frame_attempts: u64,
     frames_submitted: u64,
@@ -138,6 +143,8 @@ impl WebGpuBackend {
             atlas_uploads: self.atlas_uploads,
             model_uploads: self.model_uploads,
             scene_uploads: self.scene_uploads,
+            scene_rebuilds: self.scene_rebuilds,
+            scene_updates: self.scene_updates,
             target_rebuilds: self.target_rebuilds,
             frame_attempts: self.frame_attempts,
             frames_submitted: self.frames_submitted,
@@ -340,9 +347,10 @@ pub(crate) fn record_frame_prerequisite_failure(error: impl ToString) {
     });
 }
 
-/// Atomically replace the device-side render scene derived from the shared
-/// backend-neutral extraction. The previous scene remains usable if packing or
-/// allocation fails.
+/// Publish one device-side render scene derived from shared backend-neutral
+/// extraction. Shape-compatible epochs update retained buffers in place; a
+/// cardinality change allocates an atomic replacement. The previous scene
+/// remains usable if packing or allocation fails.
 pub(crate) fn replace_scene(
     source_revision: u64,
     scene: RenderSceneSnapshot,
@@ -354,6 +362,44 @@ pub(crate) fn replace_scene(
             return Ok(false);
         }
         let next_revision = backend.scene_uploads.saturating_add(1);
+        let update_result = {
+            let WebGpuBackend {
+                device,
+                model,
+                scene: retained,
+                ..
+            } = &mut *backend;
+            match (device.as_ref(), model.as_ref(), retained.as_mut()) {
+                (Some(device), Some(model), Some(retained)) => device
+                    .update_patch_render_scene_in_place(
+                        model,
+                        retained,
+                        scene,
+                        source_instances,
+                        next_revision,
+                    )
+                    .map_err(|error| error.to_string()),
+                _ => Ok(PatchRenderSceneUpdate::ShapeChanged(scene)),
+            }
+        };
+        let scene = match update_result {
+            Ok(PatchRenderSceneUpdate::Updated) => {
+                backend.scene_source_revision = Some(source_revision);
+                backend.scene_uploads = next_revision;
+                backend.scene_updates = backend.scene_updates.saturating_add(1);
+                backend.last_frame_input = None;
+                backend.last_source_visibility.clear();
+                backend.next_source_visibility.clear();
+                backend.next_morph_weights.clear();
+                backend.last_error = None;
+                return Ok(true);
+            }
+            Ok(PatchRenderSceneUpdate::ShapeChanged(scene)) => scene,
+            Err(error) => {
+                backend.last_error = Some(error.clone());
+                return Err(error);
+            }
+        };
         let result = {
             let device = backend
                 .device
@@ -376,6 +422,7 @@ pub(crate) fn replace_scene(
                 backend.scene = Some(scene);
                 backend.scene_source_revision = Some(source_revision);
                 backend.scene_uploads = next_revision;
+                backend.scene_rebuilds = backend.scene_rebuilds.saturating_add(1);
                 backend.last_frame_input = None;
                 backend.last_source_visibility.clear();
                 backend.next_source_visibility.clear();
