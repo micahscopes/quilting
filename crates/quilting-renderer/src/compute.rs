@@ -1193,12 +1193,62 @@ pub fn wgsl_resident_geometry_bucket_oracle_words(
     atlas_draws: &[[u32; 4]],
     root_eligibility: &[u32],
 ) -> Result<WgslResidentGeometryBucketOracleWords, String> {
+    let face_domain_rows = vec![0; packed_residents.len()];
+    wgsl_resident_geometry_bucket_oracle_words_with_domain_flags(
+        packed_residents,
+        atlas_draws,
+        root_eligibility,
+        &face_domain_rows,
+        &[1],
+    )
+}
+
+/// Domain-aware variant used by direct WebGPU root rendering. Disabled
+/// domains emit no roots; orientation reversal is folded into the two parity
+/// buckets so rasterizer winding remains uniform inside every draw.
+pub fn wgsl_resident_geometry_bucket_oracle_words_with_domains(
+    packed_residents: &[u32],
+    atlas_draws: &[[u32; 4]],
+    root_eligibility: &[u32],
+    domains: &ResidentRootDrawDomains,
+) -> Result<WgslResidentGeometryBucketOracleWords, String> {
+    let domain_flags = domains
+        .domains
+        .iter()
+        .map(|domain| {
+            u32::from(domain.enabled)
+                | (u32::from(domain.transform.orientation_sign < 0) << 1)
+        })
+        .collect::<Vec<_>>();
+    wgsl_resident_geometry_bucket_oracle_words_with_domain_flags(
+        packed_residents,
+        atlas_draws,
+        root_eligibility,
+        &domains.face_domain_rows,
+        &domain_flags,
+    )
+}
+
+fn wgsl_resident_geometry_bucket_oracle_words_with_domain_flags(
+    packed_residents: &[u32],
+    atlas_draws: &[[u32; 4]],
+    root_eligibility: &[u32],
+    face_domain_rows: &[u32],
+    domain_flags: &[u32],
+) -> Result<WgslResidentGeometryBucketOracleWords, String> {
     u32::try_from(packed_residents.len())
         .map_err(|_| "resident geometry face count exceeds u32".to_string())?;
     if atlas_draws.is_empty() || atlas_draws.len() > u8::MAX as usize {
         return Err("resident geometry buckets require 1..=255 atlas entries".to_string());
     }
     validate_wgsl_root_eligibility_bits(packed_residents.len(), root_eligibility)?;
+    if face_domain_rows.len() != packed_residents.len() {
+        return Err(format!(
+            "resident geometry has {} face-domain rows; expected {}",
+            face_domain_rows.len(),
+            packed_residents.len(),
+        ));
+    }
     let bucket_count = atlas_draws
         .len()
         .checked_mul(2)
@@ -1206,6 +1256,13 @@ pub fn wgsl_resident_geometry_bucket_oracle_words(
     let mut buckets = vec![Vec::<u32>::new(); bucket_count];
     for (face, &packed) in packed_residents.iter().enumerate() {
         if root_eligibility[face / 32] & (1u32 << (face % 32)) == 0 {
+            continue;
+        }
+        let domain_row = face_domain_rows[face];
+        let flags = *domain_flags.get(domain_row as usize).ok_or_else(|| {
+            format!("resident geometry face {face} references missing domain {domain_row}")
+        })?;
+        if flags & 1 == 0 {
             continue;
         }
         let fields = unpack_lod_classification_fields(packed)?;
@@ -1218,7 +1275,8 @@ pub fn wgsl_resident_geometry_bucket_oracle_words(
                 atlas_draws.len(),
             ));
         }
-        let bucket = atlas_index as usize * 2 + fields.parity_bucket as usize;
+        let parity = fields.parity_bucket ^ ((flags >> 1) & 1) as u8;
+        let bucket = atlas_index as usize * 2 + parity as usize;
         buckets[bucket].push(face as u32);
     }
 
@@ -1298,10 +1356,12 @@ pub fn wgsl_resident_root_sparse_draw_oracle_words(
                 atlas_draws.len(),
             ));
         }
+        let effective_parity = fields.parity_bucket
+            ^ u8::from(domain.transform.orientation_sign < 0);
         keyed_faces.push((
             domain_row,
             atlas_index,
-            fields.parity_bucket,
+            effective_parity,
             face as u32,
         ));
     }

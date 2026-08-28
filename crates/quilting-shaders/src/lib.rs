@@ -36,6 +36,8 @@ pub const VISIBILITY_SCATTER_DEVICE_ENTRY_POINT: &str = "scatter_visible_instanc
 pub const PATCH_PREPARE_DEVICE_ENTRY_POINT: &str = "prepare_patch_instances";
 pub const PATCH_RENDER_DEVICE_VERTEX_ENTRY_POINT: &str = "render_patch_vertex";
 pub const PATCH_RENDER_DEVICE_NORMALS_ENTRY_POINT: &str = "render_patch_normals";
+pub const RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT: &str = "render_resident_root_vertex";
+pub const RESIDENT_ROOT_RENDER_DEVICE_NORMALS_ENTRY_POINT: &str = "render_resident_root_normals";
 
 /// All WGSL shader module sources, embedded at compile time.
 pub mod sources {
@@ -44,6 +46,7 @@ pub mod sources {
     pub const QB_EVAL: &str = include_str!("../shaders/surface/qb_eval.wgsl");
     pub const PATCH_PREPARE: &str = include_str!("../shaders/surface/patch_prepare.wgsl");
     pub const PATCH_RENDER: &str = include_str!("../shaders/surface/patch_render.wgsl");
+    pub const PATCH_RENDER_VERTEX: &str = include_str!("../shaders/render/patch_vertex.wgsl");
     pub const PBR: &str = include_str!("../shaders/lighting/pbr.wgsl");
     pub const MATCAP: &str = include_str!("../shaders/lighting/matcap.wgsl");
     pub const DENSITY: &str = include_str!("../shaders/viz/density.wgsl");
@@ -53,6 +56,8 @@ pub mod sources {
         include_str!("../shaders/compute/patch_prepare_types.wgsl");
     pub const PATCH_PREPARE_COMPUTE: &str = include_str!("../shaders/compute/patch_prepare.wgsl");
     pub const PATCH_RENDER_DEVICE: &str = include_str!("../shaders/render/patch.wgsl");
+    pub const RESIDENT_ROOT_RENDER_DEVICE: &str =
+        include_str!("../shaders/render/resident_root_patch.wgsl");
     pub const LOD_PASS1: &str = include_str!("../shaders/compute/lod_pass1.wgsl");
     pub const LOD_PASS2: &str = include_str!("../shaders/compute/lod_pass2.wgsl");
     pub const LOD_RESIDENT: &str = include_str!("../shaders/compute/lod_resident.wgsl");
@@ -104,6 +109,10 @@ fn build_compiler_catalog_revision() -> Arc<str> {
         ("quilting::lighting::matcap", sources::MATCAP),
         ("quilting::viz::density", sources::DENSITY),
         ("quilting::surface::patch_render", sources::PATCH_RENDER),
+        (
+            "quilting::render::patch_vertex",
+            sources::PATCH_RENDER_VERTEX,
+        ),
         ("quilting::compute::lod_types", sources::LOD_TYPES),
         ("quilting::compute::pose", sources::POSE),
         (
@@ -152,6 +161,10 @@ pub fn create_composer() -> Result<Composer, Box<dyn std::error::Error>> {
         ("quilting::lighting::matcap", sources::MATCAP),
         ("quilting::viz::density", sources::DENSITY),
         ("quilting::surface::patch_render", sources::PATCH_RENDER),
+        (
+            "quilting::render::patch_vertex",
+            sources::PATCH_RENDER_VERTEX,
+        ),
         ("quilting::compute::lod_types", sources::LOD_TYPES),
         ("quilting::compute::pose", sources::POSE),
         (
@@ -418,6 +431,23 @@ pub fn compile_patch_render_device_module() -> Result<naga::Module, Box<dyn std:
 /// Standalone WGSL containing the WebGPU QB vertex and diagnostic fragment.
 pub fn compile_patch_render_device_wgsl() -> Result<String, Box<dyn std::error::Error>> {
     emit_wgsl(&compile_patch_render_device_module()?)
+}
+
+/// Compile and validate the source-face-indexed resident-root render entries.
+pub fn compile_resident_root_render_device_module(
+) -> Result<naga::Module, Box<dyn std::error::Error>> {
+    let module = compile_shader(sources::RESIDENT_ROOT_RENDER_DEVICE, HashMap::new())?;
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)?;
+    Ok(module)
+}
+
+/// Standalone WGSL for direct device-resident root rendering.
+pub fn compile_resident_root_render_device_wgsl() -> Result<String, Box<dyn std::error::Error>> {
+    emit_wgsl(&compile_resident_root_render_device_module()?)
 }
 
 fn compile_validated_compute_module(
@@ -863,6 +893,65 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             PATCH_RENDER_DEVICE_NORMALS_ENTRY_POINT,
             naga::ShaderStage::Fragment,
         )));
+    }
+
+    #[test]
+    fn compile_resident_root_render_device_shader() {
+        let module = compile_resident_root_render_device_module()
+            .expect("resident root render device shader compiles and validates");
+        assert_eq!(
+            module
+                .global_variables
+                .iter()
+                .filter(|(_, variable)| variable.binding.is_some())
+                .count(),
+            7,
+        );
+        let entries = module
+            .entry_points
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.stage))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            entries,
+            [
+                (
+                    RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT,
+                    naga::ShaderStage::Vertex,
+                ),
+                (
+                    RESIDENT_ROOT_RENDER_DEVICE_NORMALS_ENTRY_POINT,
+                    naga::ShaderStage::Fragment,
+                ),
+            ],
+        );
+        let mut layouter = naga::proc::Layouter::default();
+        layouter
+            .update(module.to_ctx())
+            .expect("resident root render layouts");
+        for (name, expected_size) in [
+            ("PatchRenderFrame", 224),
+            ("DrawRootBucketIndex", 16),
+            ("ResidentBucketRangeRecord", 20),
+            ("ResidentDrawDomainRecord", 16),
+        ] {
+            let (handle, _) = module
+                .types
+                .iter()
+                .find(|(_, ty)| {
+                    ty.name.as_deref().is_some_and(|candidate| {
+                        candidate == name
+                            || candidate.starts_with(&format!("{name}X_naga_oil_mod_"))
+                    })
+                })
+                .unwrap_or_else(|| panic!("missing resident root render type {name}"));
+            assert_eq!(layouter[handle].size, expected_size, "{name} size");
+        }
+        let source =
+            compile_resident_root_render_device_wgsl().expect("flatten resident root render WGSL");
+        assert!(!source.contains("#import"));
+        assert!(!source.contains("#define_import_path"));
+        naga::front::wgsl::parse_str(&source).expect("reparse resident root render WGSL");
     }
 
     #[test]

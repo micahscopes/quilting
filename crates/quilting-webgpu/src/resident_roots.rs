@@ -8,6 +8,7 @@ use super::*;
 /// Retained root-only geometry buckets derived from packed resident LOD.
 pub struct ResidentGeometryBucketScene {
     pub(super) model_identity: u64,
+    pub(super) domain_identity: u64,
     pub(super) face_count: u32,
     pub(super) atlas_count: u32,
     pub(super) bucket_count: u32,
@@ -56,6 +57,8 @@ pub struct ResidentRootTopologyScene {
 /// table contains only observed scene domains; current LOD never changes a
 /// face's row.
 pub struct ResidentRootDrawDomainScene {
+    pub(super) model_identity: u64,
+    pub(super) domain_identity: u64,
     pub(super) face_count: u32,
     pub(super) domain_count: u32,
     pub(super) domains: Vec<ResidentRootDrawDomain>,
@@ -70,6 +73,33 @@ pub struct ResidentRootDrawDomainOutput {
     /// `(material, render_node, pbr_class, flags)`; flags bit zero is enabled
     /// and bit one marks an orientation-reversing entity transform.
     pub domain_records: Vec<[u32; 4]>,
+}
+
+/// Graphics pipelines that pull source-indexed prepared roots through the
+/// device-generated atlas/parity bucket plan.
+pub struct ResidentRootRenderPipeline {
+    bind_group_layout: wgpu::BindGroupLayout,
+    counter_clockwise: wgpu::RenderPipeline,
+    clockwise: wgpu::RenderPipeline,
+}
+
+/// Retained per-domain frames and source-face indirection for root rendering.
+pub struct ResidentRootRenderBindings {
+    model_identity: u64,
+    domain_identity: u64,
+    domain_count: u32,
+    bucket_count: u32,
+    bucket_index_uniform_stride: u32,
+    frames: wgpu::Buffer,
+    frame_words: Mutex<Vec<u32>>,
+    _bucket_index_uniform: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResidentRootFrameEncoding {
+    pub indirect_draw_calls: u32,
+    pub source_face_count: u32,
 }
 
 /// Atomic retained aggregate for direct source-indexed root preparation.
@@ -165,21 +195,397 @@ impl ResidentRootDrawDomainScene {
     }
 }
 
+impl ResidentRootRenderBindings {
+    pub fn domain_count(&self) -> u32 {
+        self.domain_count
+    }
+
+    pub fn bucket_count(&self) -> u32 {
+        self.bucket_count
+    }
+}
+
+impl LodClassifierDevice {
+    pub fn create_resident_root_render_pipeline(
+        &self,
+        color_format: wgpu::TextureFormat,
+        depth_format: Option<wgpu::TextureFormat>,
+        sample_count: u32,
+    ) -> Result<ResidentRootRenderPipeline, LodWebGpuError> {
+        if sample_count == 0 {
+            return Err(LodWebGpuError::Payload(
+                "resident root render sample count must be nonzero".to_string(),
+            ));
+        }
+        let source = quilting_shaders::compile_resident_root_render_device_wgsl()
+            .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
+        let module = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("quilting resident root render"),
+                source: wgpu::ShaderSource::Wgsl(Cow::Owned(source)),
+            });
+        let bind_group_layout =
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("quilting resident root render bindings"),
+                    entries: &[
+                        render_buffer_layout(
+                            0,
+                            wgpu::BufferBindingType::Storage { read_only: true },
+                            PATCH_RENDER_FRAME_BYTES,
+                            false,
+                        ),
+                        render_buffer_layout(
+                            1,
+                            wgpu::BufferBindingType::Storage { read_only: true },
+                            PREPARED_PATCH_RECORD_BYTES,
+                            false,
+                        ),
+                        render_buffer_layout(
+                            2,
+                            wgpu::BufferBindingType::Storage { read_only: true },
+                            PACKED_RECORD_BYTES,
+                            false,
+                        ),
+                        render_buffer_layout(
+                            3,
+                            wgpu::BufferBindingType::Storage { read_only: true },
+                            RESIDENT_BUCKET_RANGE_RECORD_BYTES,
+                            false,
+                        ),
+                        render_buffer_layout(
+                            4,
+                            wgpu::BufferBindingType::Uniform,
+                            DRAW_BATCH_INDEX_BYTES,
+                            true,
+                        ),
+                        render_buffer_layout(
+                            5,
+                            wgpu::BufferBindingType::Storage { read_only: true },
+                            PACKED_RECORD_BYTES,
+                            false,
+                        ),
+                        render_buffer_layout(
+                            6,
+                            wgpu::BufferBindingType::Storage { read_only: true },
+                            16,
+                            false,
+                        ),
+                    ],
+                });
+        let pipeline_layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("quilting resident root render pipeline layout"),
+                bind_group_layouts: &[Some(&bind_group_layout)],
+                immediate_size: 0,
+            });
+        let depth_stencil = depth_format.map(|format| wgpu::DepthStencilState {
+            format,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        });
+        let attributes = wgpu::vertex_attr_array![0 => Float32x3];
+        let create = |front_face| {
+            self.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("quilting resident root normals"),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some(
+                            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT,
+                        ),
+                        compilation_options: Default::default(),
+                        buffers: &[wgpu::VertexBufferLayout {
+                            array_stride: 12,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &attributes,
+                        }],
+                    },
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        front_face,
+                        cull_mode: None,
+                        ..Default::default()
+                    },
+                    depth_stencil: depth_stencil.clone(),
+                    multisample: wgpu::MultisampleState {
+                        count: sample_count,
+                        ..Default::default()
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some(
+                            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_NORMALS_ENTRY_POINT,
+                        ),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: color_format,
+                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
+        };
+        Ok(ResidentRootRenderPipeline {
+            bind_group_layout,
+            counter_clockwise: create(wgpu::FrontFace::Ccw),
+            clockwise: create(wgpu::FrontFace::Cw),
+        })
+    }
+
+    pub fn create_resident_root_render_bindings(
+        &self,
+        pipeline: &ResidentRootRenderPipeline,
+        preparation: &ResidentRootPreparationScene,
+        geometry: &ResidentGeometryBucketScene,
+    ) -> Result<ResidentRootRenderBindings, LodWebGpuError> {
+        let domains = &preparation.draw_domains;
+        if domains.model_identity != preparation.topology.model_identity
+            || geometry.model_identity != preparation.topology.model_identity
+            || geometry.domain_identity != domains.domain_identity
+            || domains.face_count != preparation.topology.face_count
+            || geometry.face_count != preparation.topology.face_count
+            || domains.domain_count == 0
+            || geometry.bucket_count == 0
+        {
+            return Err(LodWebGpuError::Payload(
+                "resident root render bindings have incompatible retained domains".to_string(),
+            ));
+        }
+        let frame_bytes = u64::from(domains.domain_count)
+            .checked_mul(PATCH_RENDER_FRAME_BYTES)
+            .ok_or_else(|| {
+                LodWebGpuError::Payload("resident root frame table is too large".to_string())
+            })?;
+        let frame_word_count = usize::try_from(domains.domain_count)
+            .ok()
+            .and_then(|count| count.checked_mul(PATCH_RENDER_FRAME_WORDS))
+            .ok_or_else(|| {
+                LodWebGpuError::Payload(
+                    "resident root frame staging table exceeds address space".to_string(),
+                )
+            })?;
+        let frames = gpu_buffer(
+            &self.device,
+            "resident root render frame table",
+            frame_bytes,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
+        let uniform_alignment = self
+            .device
+            .limits()
+            .min_uniform_buffer_offset_alignment
+            .max(1);
+        let bucket_index_uniform_stride = u32::try_from(
+            DRAW_BATCH_INDEX_BYTES.div_ceil(u64::from(uniform_alignment))
+                * u64::from(uniform_alignment),
+        )
+        .map_err(|_| LodWebGpuError::Payload("root bucket-index stride exceeds u32".into()))?;
+        let bucket_index_bytes = usize::try_from(geometry.bucket_count)
+            .ok()
+            .and_then(|count| count.checked_mul(bucket_index_uniform_stride as usize))
+            .ok_or_else(|| {
+                LodWebGpuError::Payload("root bucket-index table is too large".to_string())
+            })?;
+        let mut bucket_index_words = vec![0u8; bucket_index_bytes];
+        for bucket in 0..geometry.bucket_count {
+            let offset = bucket as usize * bucket_index_uniform_stride as usize;
+            bucket_index_words[offset..offset + 4].copy_from_slice(&bucket.to_le_bytes());
+        }
+        let bucket_index_uniform = buffer_init_or_zero(
+            &self.device,
+            "resident root draw bucket indices",
+            &bucket_index_words,
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("quilting resident root render bindings"),
+            layout: &pipeline.bind_group_layout,
+            entries: &[
+                bind(0, &frames),
+                bind(1, &preparation.patches.prepared_records),
+                bind(2, &geometry.compacted_faces),
+                bind(3, &geometry.bucket_ranges),
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &bucket_index_uniform,
+                        offset: 0,
+                        size: std::num::NonZeroU64::new(DRAW_BATCH_INDEX_BYTES),
+                    }),
+                },
+                bind(5, &domains.face_domain_rows),
+                bind(6, &domains.domain_records),
+            ],
+        });
+        Ok(ResidentRootRenderBindings {
+            model_identity: preparation.topology.model_identity,
+            domain_identity: domains.domain_identity,
+            domain_count: domains.domain_count,
+            bucket_count: geometry.bucket_count,
+            bucket_index_uniform_stride,
+            frames,
+            frame_words: Mutex::new(vec![0; frame_word_count]),
+            _bucket_index_uniform: bucket_index_uniform,
+            bind_group,
+        })
+    }
+
+    pub fn write_resident_root_render_frames(
+        &self,
+        bindings: &ResidentRootRenderBindings,
+        frame: &RenderFrame,
+        domains: &ResidentRootDrawDomainScene,
+        use_qb: bool,
+    ) -> Result<(), LodWebGpuError> {
+        if bindings.model_identity != domains.model_identity
+            || bindings.domain_identity != domains.domain_identity
+            || bindings.domain_count != domains.domain_count
+        {
+            return Err(LodWebGpuError::Payload(
+                "resident root render frames belong to a different domain table".to_string(),
+            ));
+        }
+        let mut words = bindings.frame_words.lock().map_err(|_| {
+            LodWebGpuError::Payload("resident root frame staging lock was poisoned".to_string())
+        })?;
+        for (destination, domain) in words
+            .chunks_exact_mut(PATCH_RENDER_FRAME_WORDS)
+            .zip(&domains.domains)
+        {
+            destination.copy_from_slice(
+                &PatchRenderFrame::from_transform(frame, domain.transform, use_qb).to_words()?,
+            );
+        }
+        self.queue
+            .write_buffer(&bindings.frames, 0, bytemuck::cast_slice(&words));
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_resident_root_normals<'resource>(
+        &'resource self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &RenderFrame,
+        model: &LodClassifierModel,
+        resident: &DeviceResidentLod<'_>,
+        preparation: &'resource ResidentRootPreparationScene,
+        geometry: &'resource ResidentGeometryBucketScene,
+        pipeline: &'resource ResidentRootRenderPipeline,
+        bindings: &'resource ResidentRootRenderBindings,
+        atlas: &'resource PackedPatchAtlas,
+        target: PatchRenderTarget<'resource>,
+        pose: LodPose<'_>,
+        num_joints: u32,
+        use_qb: bool,
+    ) -> Result<ResidentRootFrameEncoding, LodWebGpuError> {
+        if frame.style != RenderStyle::Normals {
+            return Err(LodWebGpuError::Payload(
+                "resident root normals renderer requires a normals frame".to_string(),
+            ));
+        }
+        if bindings.model_identity != model.identity
+            || geometry.model_identity != model.identity
+            || preparation.topology.model_identity != model.identity
+            || bindings.domain_identity != preparation.draw_domains.domain_identity
+            || geometry.domain_identity != preparation.draw_domains.domain_identity
+            || bindings.bucket_count != geometry.bucket_count
+            || geometry.atlas_count != atlas.keys.len() as u32
+        {
+            return Err(LodWebGpuError::Payload(
+                "resident root render resources belong to different epochs".to_string(),
+            ));
+        }
+        self.write_resident_root_render_frames(bindings, frame, &preparation.draw_domains, use_qb)?;
+        self.write_resident_root_preparation_pose(model, preparation, pose, num_joints)?;
+        self.encode_resident_root_preparation(preparation, resident, encoder)?;
+        self.encode_resident_geometry_buckets(geometry, resident, encoder)?;
+
+        let color_load = target
+            .clear_color
+            .map_or(wgpu::LoadOp::Load, wgpu::LoadOp::Clear);
+        let depth_stencil_attachment =
+            target
+                .depth_stencil_view
+                .map(|view| wgpu::RenderPassDepthStencilAttachment {
+                    view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: target
+                            .clear_depth
+                            .map_or(wgpu::LoadOp::Load, wgpu::LoadOp::Clear),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("quilting resident root normals"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target.color_view,
+                depth_slice: None,
+                resolve_target: target.resolve_target,
+                ops: wgpu::Operations {
+                    load: color_load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_vertex_buffer(0, atlas.barycentric_buffer.slice(..));
+        pass.set_index_buffer(
+            atlas.triangle_index_buffer.slice(..),
+            wgpu::IndexFormat::Uint32,
+        );
+        for bucket in 0..geometry.bucket_count {
+            let render_pipeline = if bucket % 2 == 0 {
+                &pipeline.counter_clockwise
+            } else {
+                &pipeline.clockwise
+            };
+            pass.set_pipeline(render_pipeline);
+            pass.set_bind_group(
+                0,
+                &bindings.bind_group,
+                &[bucket * bindings.bucket_index_uniform_stride],
+            );
+            pass.draw_indexed_indirect(
+                &geometry.indirect_arguments,
+                u64::from(bucket) * INDEXED_INDIRECT_RECORD_BYTES,
+            );
+        }
+        drop(pass);
+        Ok(ResidentRootFrameEncoding {
+            indirect_draw_calls: geometry.bucket_count,
+            source_face_count: geometry.face_count,
+        })
+    }
+}
+
 impl LodClassifierDevice {
     /// Retain one dense row per observed material/render domain plus one row
     /// selector per source face. LOD changes never rebuild either table.
     pub fn upload_resident_root_draw_domain_scene(
         &self,
+        model: &LodClassifierModel,
         scene: &RenderSceneSnapshot,
-        face_count: usize,
     ) -> Result<ResidentRootDrawDomainScene, LodWebGpuError> {
-        let domains = ResidentRootDrawDomains::build(scene, face_count)
+        let domains = ResidentRootDrawDomains::build(scene, model.prepared.residency.num_faces)
             .map_err(|error| LodWebGpuError::Payload(error.to_string()))?;
-        self.upload_resident_root_draw_domains(domains)
+        self.upload_resident_root_draw_domains(model.identity, domains)
     }
 
-    fn upload_resident_root_draw_domains(
+    pub(super) fn upload_resident_root_draw_domains(
         &self,
+        model_identity: u64,
         domains: ResidentRootDrawDomains,
     ) -> Result<ResidentRootDrawDomainScene, LodWebGpuError> {
         let face_count = u32::try_from(domains.face_domain_rows.len())
@@ -233,6 +639,8 @@ impl LodClassifierDevice {
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         );
         Ok(ResidentRootDrawDomainScene {
+            model_identity,
+            domain_identity: self.allocate_model_identity()?,
             face_count,
             domain_count,
             domains: domains.domains,
@@ -384,7 +792,7 @@ impl LodClassifierDevice {
             &words.source_faces,
             &words.subjects,
         )?;
-        let draw_domains = self.upload_resident_root_draw_domains(draw_domains)?;
+        let draw_domains = self.upload_resident_root_draw_domains(model.identity, draw_domains)?;
         Ok(ResidentRootPreparationScene {
             topology,
             patches,
@@ -459,15 +867,22 @@ impl LodClassifierDevice {
         &self,
         model: &LodClassifierModel,
         atlas: &PackedPatchAtlas,
+        draw_domains: &ResidentRootDrawDomainScene,
     ) -> Result<ResidentGeometryBucketScene, LodWebGpuError> {
         let face_count = u32::try_from(model.prepared.residency.num_faces)
             .map_err(|_| LodWebGpuError::Payload("resident geometry faces exceed u32".into()))?;
+        if draw_domains.model_identity != model.identity || draw_domains.face_count != face_count {
+            return Err(LodWebGpuError::Payload(
+                "resident geometry draw domains belong to a different WebGPU model".to_string(),
+            ));
+        }
         self.upload_resident_geometry_bucket_scene_for_records(
             model.identity,
             face_count,
             &model.atlas_keys,
             &model.resident.packed_records,
             atlas,
+            draw_domains,
         )
     }
 
@@ -478,7 +893,13 @@ impl LodClassifierDevice {
         atlas_keys: &[[u32; 3]],
         resident_records: &wgpu::Buffer,
         atlas: &PackedPatchAtlas,
+        draw_domains: &ResidentRootDrawDomainScene,
     ) -> Result<ResidentGeometryBucketScene, LodWebGpuError> {
+        if draw_domains.model_identity != model_identity || draw_domains.face_count != face_count {
+            return Err(LodWebGpuError::Payload(
+                "resident geometry draw-domain shape does not match the classifier".to_string(),
+            ));
+        }
         if atlas_keys != atlas.keys {
             return Err(LodWebGpuError::Payload(
                 "resident geometry classifier and packed atlas keys differ".to_string(),
@@ -637,6 +1058,8 @@ impl LodClassifierDevice {
                 bind(1, resident_records),
                 bind(2, &root_eligibility),
                 bind(4, &chunk_counts),
+                bind(10, &draw_domains.face_domain_rows),
+                bind(11, &draw_domains.domain_records),
             ],
         });
         let prefix_layout = self
@@ -677,10 +1100,13 @@ impl LodClassifierDevice {
                 bind(5, &chunk_offsets),
                 bind(7, &bucket_ranges),
                 bind(9, &compacted_faces),
+                bind(10, &draw_domains.face_domain_rows),
+                bind(11, &draw_domains.domain_records),
             ],
         });
         Ok(ResidentGeometryBucketScene {
             model_identity,
+            domain_identity: draw_domains.domain_identity,
             face_count,
             atlas_count,
             bucket_count,
@@ -1103,12 +1529,47 @@ impl LodClassifierDevice {
             wgpu::BufferUsages::STORAGE,
         );
         let identity = self.allocate_model_identity()?;
+        let transform = |orientation_sign| RenderEntityTransform {
+            mobius: identity_mobius(),
+            orientation_sign,
+            euclidean_model: identity_matrix(),
+            euclidean_normal: identity_matrix(),
+        };
+        let draw_domain_words = ResidentRootDrawDomains {
+            domains: vec![
+                ResidentRootDrawDomain {
+                    material_index: 3,
+                    render_node_index: 1,
+                    pbr_class: PbrDrawClass::Opaque,
+                    transform: transform(1),
+                    enabled: true,
+                },
+                ResidentRootDrawDomain {
+                    material_index: 500_000,
+                    render_node_index: 8,
+                    pbr_class: PbrDrawClass::Blend,
+                    transform: transform(-1),
+                    enabled: true,
+                },
+                ResidentRootDrawDomain {
+                    material_index: 900_000,
+                    render_node_index: 13,
+                    pbr_class: PbrDrawClass::Transmission,
+                    transform: transform(1),
+                    enabled: false,
+                },
+            ],
+            face_domain_rows: (0..face_count).map(|face| (face % 3) as u32).collect(),
+        };
+        let draw_domains =
+            self.upload_resident_root_draw_domains(identity, draw_domain_words.clone())?;
         let scene = self.upload_resident_geometry_bucket_scene_for_records(
             identity,
             face_count as u32,
             &atlas_lookup.keys,
             &packed_buffer,
             &atlas,
+            &draw_domains,
         )?;
         let resident = DeviceResidentLod {
             packed_records: &packed_buffer,
@@ -1157,9 +1618,13 @@ impl LodClassifierDevice {
         for suppressed in suppression_cases {
             let eligibility = pack_wgsl_root_eligibility_bits(face_count, &suppressed)
                 .map_err(LodWebGpuError::Conformance)?;
-            let expected =
-                wgsl_resident_geometry_bucket_oracle_words(&packed, &atlas_draws, &eligibility)
-                    .map_err(LodWebGpuError::Conformance)?;
+            let expected = wgsl_resident_geometry_bucket_oracle_words_with_domains(
+                &packed,
+                &atlas_draws,
+                &eligibility,
+                &draw_domain_words,
+            )
+            .map_err(LodWebGpuError::Conformance)?;
             let actual = self
                 .resident_geometry_buckets_for_diagnostics(&scene, &resident, &suppressed)
                 .await?;

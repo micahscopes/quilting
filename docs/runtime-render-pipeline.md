@@ -560,10 +560,12 @@ correctness layer until partition and leaf-LOD extraction move onto the GPU.
 The two retained chunk tables cost
 `2 × ceil(source_faces / 64) × (2 × atlas_entries) × 4` bytes and are rejected
 up front if they exceed the selected device's storage-binding limit. Native
-Radeon/Vulkan and Chromium `BrowserWebGpu` both match 323 exact output words
-across a 137-face, three-atlas, all-S3 fixture with two successive suppression
-fields; the browser also runs a real classifier → reconciliation → root-bucket
-chain and reports no console warning or error.
+Radeon/Vulkan and Chromium `BrowserWebGpu` both match 243 exact output words
+across a 137-face, three-atlas, all-S3 fixture with normal, orientation-reversing,
+and disabled draw domains plus two successive suppression fields. Disabled
+domains fail closed before scatter, while orientation reversal is folded into
+the effective S3 parity. The browser also runs a real classifier →
+reconciliation → root-bucket chain and reports no console warning or error.
 
 Direct root preparation now consumes that same resident word without a CPU
 topology projection. A vertex-clear and face-atomic-maximum pair reconstructs
@@ -584,9 +586,9 @@ match 240 topology words and 1,040 prepared-record words across both 2:1 and
 allocated only by the conformance wrappers; production encoding remains one
 same-device command chain.
 
-The optimized monolithic WASM artifact now measures 7,675,713 bytes with this
-backend enabled versus 7,461,219 bytes with the feature disabled: a
-214,494-byte (2.87%) release delta. Both artifacts were rebuilt from the same
+The optimized monolithic WASM artifact now measures 7,510,894 bytes with this
+backend enabled versus 7,295,009 bytes with the feature disabled: a
+215,885-byte (2.96%) release delta. Both artifacts were rebuilt from the same
 tree with `wasm-pack --release` and `wasm-opt`; debug artifacts are not
 representative, so size gates must continue to compare optimized outputs.
 
@@ -612,17 +614,33 @@ only genuinely distinct pass classes such as opaque/non-opaque may multiply
 that bounded schedule. This stays independent of material count and adds no
 frame readback.
 
-The next cut binds the source-indexed prepared records, compacted face IDs,
-bucket ranges, and global-atlas indirect arguments into actual graphics
-execution. It must extend the root key with material/render domains without a
-fixed material × atlas cross-product, then compose the sparse adaptive overlay
-without rebuilding the retained baseline from worker readback. After that,
-attach the live shared frame executor to a browser surface and add WebGL2
-image/workload parity behind the existing explicit backend switch. PBR, wire,
-LOD color, stretch, picking,
+The retained-root path now binds those source-indexed prepared records,
+compacted face IDs, bucket ranges, domain tables, and global-atlas indirect
+arguments into actual graphics execution. One shared vertex module evaluates
+both ordinary prepared-patch draws and device-resident roots, preventing the
+QB/conformal vertex contract from drifting between paths. A source root pulls
+its compact domain row in the vertex stage; disabled domains become degenerate,
+and the domain selects its own conformal/entity frame without a material ×
+atlas cross-product. The global barycentric vertex and triangle-index buffers
+are bound once. A fixed, browser-portable atlas × effective-parity loop then
+issues indexed-indirect draws using each atlas record's real `first_index`.
+
+The direct-render conformance is deliberately end-to-end rather than a staged
+fixture: classifier → 2:1 resident reconciliation → root topology → animated
+QB preparation → domain-aware histogram/scan/scatter → two fixed indirect
+draws are encoded in one command buffer with no intermediate map or copy.
+Radeon/Vulkan passes the hardware gate; Chromium `BrowserWebGpu` renders an
+exact 178-pixel normals footprint and reports
+`resident_root_indirect_draws=2`, including an orientation-reversing domain,
+a million-scale material ID, and no console warning or error.
+
+The next cut composes the sparse adaptive overlay without rebuilding the
+retained baseline from worker readback. After that, attach the live shared
+frame executor to a browser surface and add WebGL2 image/workload parity behind
+the existing explicit backend switch. PBR, wire, LOD color, stretch, picking,
 material/texture binding, and postprocess commands still reject explicitly
-rather than silently lowering to normals. That cut is what finally removes the
-live classifier readback, CPU topology repacking, and rejected atlas vertex
+rather than silently lowering to normals. Those cuts are what remove the live
+classifier readback, CPU topology repacking, and rejected atlas vertex
 invocations from an authoritative runtime.
 
 The old JavaScript renderer's useful idea was memoizing tessellation topology

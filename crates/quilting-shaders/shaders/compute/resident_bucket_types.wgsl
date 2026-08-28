@@ -17,6 +17,14 @@ struct ResidentAtlasDrawRecord {
     line_index_count: u32,
 }
 
+struct ResidentDrawDomainRecord {
+    material_index: u32,
+    render_node_index: u32,
+    pbr_class: u32,
+    // bit 0 = enabled, bit 1 = orientation reversing.
+    flags: u32,
+}
+
 struct ResidentBucketRangeRecord {
     bucket_index: u32,
     atlas_index: u32,
@@ -33,8 +41,12 @@ struct ResidentIndexedIndirectArguments {
     first_instance: u32,
 }
 
-fn resident_geometry_bucket(packed: u32, atlas_count: u32) -> u32 {
-    if (packed & (1u << 15u)) == 0u {
+fn resident_geometry_bucket(
+    packed: u32,
+    atlas_count: u32,
+    domain: ResidentDrawDomainRecord,
+) -> u32 {
+    if (packed & (1u << 15u)) == 0u || (domain.flags & 1u) == 0u {
         return INVALID_RESIDENT_BUCKET;
     }
     let atlas_index = (packed >> 16u) & 255u;
@@ -43,5 +55,6 @@ fn resident_geometry_bucket(packed: u32, atlas_count: u32) -> u32 {
         return INVALID_RESIDENT_BUCKET;
     }
     let odd = permutation == 1u || permutation == 2u || permutation == 5u;
-    return atlas_index * 2u + select(0u, 1u, odd);
+    let effective_odd = select(0u, 1u, odd) ^ ((domain.flags >> 1u) & 1u);
+    return atlas_index * 2u + effective_odd;
 }

@@ -1,4 +1,4 @@
-#import quilting::compute::resident_bucket_types::{ResidentBucketUniforms, ResidentAtlasDrawRecord, ResidentBucketRangeRecord, ResidentIndexedIndirectArguments, RESIDENT_BUCKET_WORKGROUP_SIZE, MAX_RESIDENT_BUCKETS, INVALID_RESIDENT_BUCKET, resident_geometry_bucket}
+#import quilting::compute::resident_bucket_types::{ResidentBucketUniforms, ResidentAtlasDrawRecord, ResidentBucketRangeRecord, ResidentIndexedIndirectArguments, ResidentDrawDomainRecord, RESIDENT_BUCKET_WORKGROUP_SIZE, MAX_RESIDENT_BUCKETS, INVALID_RESIDENT_BUCKET, resident_geometry_bucket}
 
 @group(0) @binding(0) var<uniform> dispatch: ResidentBucketUniforms;
 @group(0) @binding(1) var<storage, read> resident_lod: array<u32>;
@@ -10,6 +10,8 @@
 @group(0) @binding(7) var<storage, read_write> bucket_ranges: array<ResidentBucketRangeRecord>;
 @group(0) @binding(8) var<storage, read_write> indirect_arguments: array<ResidentIndexedIndirectArguments>;
 @group(0) @binding(9) var<storage, read_write> compacted_faces: array<u32>;
+@group(0) @binding(10) var<storage, read> face_domain_rows: array<u32>;
+@group(0) @binding(11) var<storage, read> draw_domains: array<ResidentDrawDomainRecord>;
 
 var<workgroup> histogram: array<atomic<u32>, 510>;
 var<workgroup> local_buckets: array<u32, 64>;
@@ -38,7 +40,8 @@ fn histogram_resident_geometry_buckets(
     let eligible = face < dispatch.counts.x
         && (root_eligibility[face / 32u] & (1u << (face % 32u))) != 0u;
     if eligible {
-        let bucket = resident_geometry_bucket(resident_lod[face], dispatch.counts.w);
+        let domain = draw_domains[face_domain_rows[face]];
+        let bucket = resident_geometry_bucket(resident_lod[face], dispatch.counts.w, domain);
         if bucket != INVALID_RESIDENT_BUCKET && bucket < MAX_RESIDENT_BUCKETS {
             atomicAdd(&histogram[bucket], 1u);
         }
@@ -119,7 +122,8 @@ fn scatter_resident_geometry_faces(
     let eligible = face < dispatch.counts.x
         && (root_eligibility[face / 32u] & (1u << (face % 32u))) != 0u;
     if eligible {
-        bucket = resident_geometry_bucket(resident_lod[face], dispatch.counts.w);
+        let domain = draw_domains[face_domain_rows[face]];
+        bucket = resident_geometry_bucket(resident_lod[face], dispatch.counts.w, domain);
     }
     local_buckets[local_index] = bucket;
     workgroupBarrier();
