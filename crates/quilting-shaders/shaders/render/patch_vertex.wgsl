@@ -2,6 +2,7 @@
 
 #import quilting::surface::patch_prepare::PreparedPatchRecord
 #import quilting::surface::patch_render::{PatchRenderTransform, PatchSurfaceInput, evaluate_patch_surface}
+#import quilting::lighting::matcap::matcap_shade
 
 struct PatchRenderFrame {
     mvp: mat4x4<f32>,
@@ -98,4 +99,44 @@ fn shade_patch_normals(front_facing: bool, input: PatchVertexOutput) -> vec4<f32
         return vec4<f32>(rgb.r * 0.3 + 0.7, rgb.g * 0.3, rgb.b * 0.3, input.fade);
     }
     return vec4<f32>(rgb, input.fade);
+}
+
+fn patch_lod_heatmap(t_in: f32) -> vec3<f32> {
+    let t = clamp(t_in, 0.0, 1.0);
+    let c0 = vec3<f32>(0.0, 0.0, 0.5);
+    let c1 = vec3<f32>(0.0, 0.5, 1.0);
+    let c2 = vec3<f32>(0.0, 1.0, 0.5);
+    let c3 = vec3<f32>(1.0, 1.0, 0.0);
+    let c4 = vec3<f32>(1.0, 0.0, 0.0);
+    if t < 0.25 { return mix(c0, c1, t * 4.0); }
+    if t < 0.5  { return mix(c1, c2, (t - 0.25) * 4.0); }
+    if t < 0.75 { return mix(c2, c3, (t - 0.5) * 4.0); }
+    return mix(c3, c4, (t - 0.75) * 4.0);
+}
+
+fn shade_patch_lod(input: PatchVertexOutput) -> vec4<f32> {
+    if input.fade < 0.001 {
+        discard;
+    }
+    var normal = normalize(input.normal_vs);
+    if normal.z < 0.0 {
+        normal = -normal;
+    }
+    return vec4<f32>(matcap_shade(normal, patch_lod_heatmap(input.density)), input.fade);
+}
+
+fn shade_patch_stretch(input: PatchVertexOutput) -> vec4<f32> {
+    if input.fade < 0.001 {
+        discard;
+    }
+    let stretch = (input.mobius_stretch - 0.5) * 2.0;
+    let expand = max(stretch, 0.0);
+    let squash = max(-stretch, 0.0);
+    let extreme = max(expand, squash);
+    return vec4<f32>(
+        0.25 + expand * 0.75,
+        0.25 * (1.0 - extreme * 0.7),
+        0.25 + squash * 0.75,
+        input.fade,
+    );
 }

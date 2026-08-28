@@ -36,6 +36,8 @@ pub const VISIBILITY_SCATTER_DEVICE_ENTRY_POINT: &str = "scatter_visible_instanc
 pub const PATCH_PREPARE_DEVICE_ENTRY_POINT: &str = "prepare_patch_instances";
 pub const PATCH_RENDER_DEVICE_VERTEX_ENTRY_POINT: &str = "render_patch_vertex";
 pub const PATCH_RENDER_DEVICE_NORMALS_ENTRY_POINT: &str = "render_patch_normals";
+pub const PATCH_RENDER_DEVICE_LOD_ENTRY_POINT: &str = "render_patch_lod";
+pub const PATCH_RENDER_DEVICE_STRETCH_ENTRY_POINT: &str = "render_patch_stretch";
 pub const RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT: &str = "render_resident_root_vertex";
 pub const RESIDENT_ROOT_RENDER_DEVICE_NORMALS_ENTRY_POINT: &str = "render_resident_root_normals";
 
@@ -845,12 +847,18 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             .find(|entry| entry.name == "render_patch_vertex")
             .expect("patch render vertex entry point");
         assert_eq!(vertex.stage, naga::ShaderStage::Vertex);
-        let fragment = module
-            .entry_points
-            .iter()
-            .find(|entry| entry.name == "render_patch_normals")
-            .expect("patch normals fragment entry point");
-        assert_eq!(fragment.stage, naga::ShaderStage::Fragment);
+        for name in [
+            PATCH_RENDER_DEVICE_NORMALS_ENTRY_POINT,
+            PATCH_RENDER_DEVICE_LOD_ENTRY_POINT,
+            PATCH_RENDER_DEVICE_STRETCH_ENTRY_POINT,
+        ] {
+            let fragment = module
+                .entry_points
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap_or_else(|| panic!("missing patch fragment entry point {name}"));
+            assert_eq!(fragment.stage, naga::ShaderStage::Fragment);
+        }
         assert_eq!(
             module
                 .global_variables
@@ -884,13 +892,21 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             .iter()
             .map(|entry| (entry.name.as_str(), entry.stage))
             .collect::<Vec<_>>();
-        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.len(), 4);
         assert!(entries.contains(&(
             PATCH_RENDER_DEVICE_VERTEX_ENTRY_POINT,
             naga::ShaderStage::Vertex,
         )));
         assert!(entries.contains(&(
             PATCH_RENDER_DEVICE_NORMALS_ENTRY_POINT,
+            naga::ShaderStage::Fragment,
+        )));
+        assert!(entries.contains(&(
+            PATCH_RENDER_DEVICE_LOD_ENTRY_POINT,
+            naga::ShaderStage::Fragment,
+        )));
+        assert!(entries.contains(&(
+            PATCH_RENDER_DEVICE_STRETCH_ENTRY_POINT,
             naga::ShaderStage::Fragment,
         )));
     }
