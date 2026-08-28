@@ -289,7 +289,8 @@ pub struct WebGpuAdapterSummary {
 pub struct VisibilityCompactionOutput {
     pub compacted_source_instances: Vec<u32>,
     pub compacted_ranges: Vec<[u32; 5]>,
-    pub indirect_arguments: Vec<[u32; 5]>,
+    pub triangle_indirect_arguments: Vec<[u32; 5]>,
+    pub line_indirect_arguments: Vec<[u32; 5]>,
 }
 
 /// Backend-neutral dynamic values consumed by the WebGPU prepared-surface
@@ -693,7 +694,8 @@ pub struct VisibilityCompactionScene {
     source_visibility: wgpu::Buffer,
     compacted_source_instances: wgpu::Buffer,
     compacted_ranges: wgpu::Buffer,
-    indirect_arguments: wgpu::Buffer,
+    triangle_indirect_arguments: wgpu::Buffer,
+    line_indirect_arguments: wgpu::Buffer,
     count_bind_group: wgpu::BindGroup,
     scan_bind_group: wgpu::BindGroup,
     scatter_bind_group: wgpu::BindGroup,
@@ -1858,7 +1860,7 @@ impl LodClassifierDevice {
         let visibility =
             self.upload_visibility_compaction_scene(WgslVisibilityCompactionSceneWords {
                 uniform: [1, source_count, 0, 0],
-                batches: vec![[0, source_count, 3, 0]],
+                batches: vec![[0, source_count, 3, 6]],
                 source_eligibility: vec![1; source_count as usize],
             })?;
         let expansion = self.create_face_visibility_expansion_scene(
@@ -1976,7 +1978,7 @@ impl LodClassifierDevice {
                 VISIBILITY_RANGE_RECORD_BYTES,
             );
             encoder.copy_buffer_to_buffer(
-                &visibility.indirect_arguments,
+                &visibility.triangle_indirect_arguments,
                 0,
                 &indirect_readback,
                 0,
@@ -2254,7 +2256,7 @@ impl LodClassifierDevice {
         source_visibility.extend([1, 1, 1, 1, 0, 1, 1]);
         let compaction_words = WgslVisibilityCompactionSceneWords {
             uniform: [3, 137, 0, 0],
-            batches: vec![[0, 130, 6, 0], [130, 3, 12, 0], [133, 4, 18, 0]],
+            batches: vec![[0, 130, 6, 8], [130, 3, 12, 16], [133, 4, 18, 24]],
             source_eligibility: [vec![1; 130], vec![0; 3], vec![1; 4]].concat(),
         };
         let mut expected_sources = (0..batch_zero_count)
@@ -2263,17 +2265,20 @@ impl LodClassifierDevice {
         expected_sources.extend([133, 135, 136]);
         let expected_ranges = vec![[0, 0, 130, 0, 86], [1, 130, 3, 86, 0], [2, 133, 4, 86, 3]];
         let expected_indirect = vec![[6, 86, 0, 0, 0], [12, 0, 0, 0, 0], [18, 3, 0, 0, 0]];
+        let expected_line_indirect = vec![[8, 86, 0, 0, 0], [16, 0, 0, 0, 0], [24, 3, 0, 0, 0]];
         let mut compaction = self.upload_visibility_compaction_scene(compaction_words)?;
         let compacted = self
             .compact_visibility(&mut compaction, &source_visibility)
             .await?;
         if compacted.compacted_source_instances != expected_sources
             || compacted.compacted_ranges != expected_ranges
-            || compacted.indirect_arguments != expected_indirect
+            || compacted.triangle_indirect_arguments != expected_indirect
+            || compacted.line_indirect_arguments != expected_line_indirect
         {
             return Err(LodWebGpuError::Conformance(format!(
                 "visibility compaction mismatch: expected sources {expected_sources:?}, ranges \
-                 {expected_ranges:?}, indirect {expected_indirect:?}; got {compacted:?}"
+                 {expected_ranges:?}, triangle indirect {expected_indirect:?}, line indirect \
+                 {expected_line_indirect:?}; got {compacted:?}"
             )));
         }
         let indirect_draws = self
@@ -2299,7 +2304,9 @@ impl LodClassifierDevice {
             shared_frame_draws,
             compacted_source_words: compacted.compacted_source_instances.len(),
             compacted_range_words: compacted.compacted_ranges.len() * 5,
-            indirect_argument_words: compacted.indirect_arguments.len() * 5,
+            indirect_argument_words: (compacted.triangle_indirect_arguments.len()
+                + compacted.line_indirect_arguments.len())
+                * 5,
             indirect_draws,
         })
     }
@@ -3129,8 +3136,7 @@ impl LodClassifierDevice {
             pack_wgsl_patch_preparation_scene_words(&model.prepared, &scene, source_instances)
                 .map_err(LodWebGpuError::Payload)?;
         let visibility_words =
-            pack_wgsl_visibility_compaction_scene_words(&scene, RenderGeometry::Triangles)
-                .map_err(LodWebGpuError::Payload)?;
+            pack_wgsl_visibility_compaction_scene_words(&scene).map_err(LodWebGpuError::Payload)?;
         let patches = self.upload_patch_preparation_scene(model, patch_words)?;
         let visibility = self.upload_visibility_compaction_scene(visibility_words)?;
         let face_visibility = self.create_face_visibility_expansion_scene(
@@ -3167,8 +3173,7 @@ impl LodClassifierDevice {
             pack_wgsl_patch_preparation_scene_words(&model.prepared, &scene, source_instances)
                 .map_err(LodWebGpuError::Payload)?;
         let visibility_words =
-            pack_wgsl_visibility_compaction_scene_words(&scene, RenderGeometry::Triangles)
-                .map_err(LodWebGpuError::Payload)?;
+            pack_wgsl_visibility_compaction_scene_words(&scene).map_err(LodWebGpuError::Payload)?;
 
         let same_shape = model.identity == retained.model_identity
             && patch_words.uniform[0] == retained.patches.patch_count
@@ -4058,9 +4063,13 @@ impl LodClassifierDevice {
         }
         let mut expected_first = 0u32;
         for batch in &words.batches {
-            if batch[0] != expected_first || batch[3] != 0 {
+            if batch[0] != expected_first
+                || !batch[2].is_multiple_of(3)
+                || !batch[3].is_multiple_of(2)
+            {
                 return Err(LodWebGpuError::Payload(
-                    "visibility compaction batch ranges are not canonical".to_string(),
+                    "visibility compaction batch ranges or geometry counts are not canonical"
+                        .to_string(),
                 ));
             }
             expected_first = expected_first.checked_add(batch[1]).ok_or_else(|| {
@@ -4176,9 +4185,17 @@ impl LodClassifierDevice {
             range_bytes,
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         );
-        let indirect_arguments = gpu_buffer(
+        let triangle_indirect_arguments = gpu_buffer(
             &self.device,
-            "visibility indirect arguments",
+            "visibility triangle indirect arguments",
+            indirect_bytes,
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_SRC,
+        );
+        let line_indirect_arguments = gpu_buffer(
+            &self.device,
+            "visibility line indirect arguments",
             indirect_bytes,
             wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::INDIRECT
@@ -4205,7 +4222,8 @@ impl LodClassifierDevice {
                 bind(1, &batches),
                 bind(2, &batch_counts),
                 bind(3, &compacted_ranges),
-                bind(4, &indirect_arguments),
+                bind(4, &triangle_indirect_arguments),
+                bind(5, &line_indirect_arguments),
             ],
         });
         let scatter_layout = self.visibility_scatter_pipeline.get_bind_group_layout(0);
@@ -4232,7 +4250,8 @@ impl LodClassifierDevice {
             source_visibility,
             compacted_source_instances,
             compacted_ranges,
-            indirect_arguments,
+            triangle_indirect_arguments,
+            line_indirect_arguments,
             count_bind_group,
             scan_bind_group,
             scatter_bind_group,
@@ -4334,7 +4353,8 @@ impl LodClassifierDevice {
             return Ok(VisibilityCompactionOutput {
                 compacted_source_instances: Vec::new(),
                 compacted_ranges: Vec::new(),
-                indirect_arguments: Vec::new(),
+                triangle_indirect_arguments: Vec::new(),
+                line_indirect_arguments: Vec::new(),
             });
         }
 
@@ -4353,9 +4373,15 @@ impl LodClassifierDevice {
             range_bytes,
             wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         );
-        let indirect_readback = gpu_buffer(
+        let triangle_indirect_readback = gpu_buffer(
             &self.device,
-            "visibility indirect diagnostic readback",
+            "visibility triangle indirect diagnostic readback",
+            indirect_bytes,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let line_indirect_readback = gpu_buffer(
+            &self.device,
+            "visibility line indirect diagnostic readback",
             indirect_bytes,
             wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         );
@@ -4376,9 +4402,16 @@ impl LodClassifierDevice {
         }
         encoder.copy_buffer_to_buffer(&scene.compacted_ranges, 0, &range_readback, 0, range_bytes);
         encoder.copy_buffer_to_buffer(
-            &scene.indirect_arguments,
+            &scene.triangle_indirect_arguments,
             0,
-            &indirect_readback,
+            &triangle_indirect_readback,
+            0,
+            indirect_bytes,
+        );
+        encoder.copy_buffer_to_buffer(
+            &scene.line_indirect_arguments,
+            0,
+            &line_indirect_readback,
             0,
             indirect_bytes,
         );
@@ -4388,10 +4421,15 @@ impl LodClassifierDevice {
             self.readback_words(&range_readback, range_bytes).await?,
             "visibility range",
         )?;
-        let indirect_arguments = words_to_five_records(
-            self.readback_words(&indirect_readback, indirect_bytes)
+        let triangle_indirect_arguments = words_to_five_records(
+            self.readback_words(&triangle_indirect_readback, indirect_bytes)
                 .await?,
-            "visibility indirect",
+            "visibility triangle indirect",
+        )?;
+        let line_indirect_arguments = words_to_five_records(
+            self.readback_words(&line_indirect_readback, indirect_bytes)
+                .await?,
+            "visibility line indirect",
         )?;
         let survivor_count = compacted_ranges
             .last()
@@ -4410,7 +4448,8 @@ impl LodClassifierDevice {
         Ok(VisibilityCompactionOutput {
             compacted_source_instances,
             compacted_ranges,
-            indirect_arguments,
+            triangle_indirect_arguments,
+            line_indirect_arguments,
         })
     }
 
@@ -4528,7 +4567,7 @@ impl LodClassifierDevice {
         })?;
         let visibility_words = WgslVisibilityCompactionSceneWords {
             uniform: [2, patches.patch_count, 0, 0],
-            batches: vec![[0, 1, 3, 0], [1, 1, 3, 0]],
+            batches: vec![[0, 1, 3, 6], [1, 1, 3, 6]],
             source_eligibility: vec![0, 1],
         };
         let visibility = self.upload_visibility_compaction_scene(visibility_words)?;
@@ -4860,7 +4899,7 @@ impl LodClassifierDevice {
                     &[batch_index * scene.batch_index_uniform_stride],
                 );
                 pass.draw_indexed_indirect(
-                    &scene.indirect_arguments,
+                    &scene.triangle_indirect_arguments,
                     u64::from(batch_index) * INDEXED_INDIRECT_RECORD_BYTES,
                 );
             }
@@ -5512,9 +5551,14 @@ impl VisibilityCompactionScene {
         &self.compacted_ranges
     }
 
-    /// One exact 20-byte `DrawIndexedIndirect` record per retained batch.
-    pub fn indirect_arguments_buffer(&self) -> &wgpu::Buffer {
-        &self.indirect_arguments
+    /// One exact triangle `DrawIndexedIndirect` record per retained batch.
+    pub fn triangle_indirect_arguments_buffer(&self) -> &wgpu::Buffer {
+        &self.triangle_indirect_arguments
+    }
+
+    /// One exact line `DrawIndexedIndirect` record per retained batch.
+    pub fn line_indirect_arguments_buffer(&self) -> &wgpu::Buffer {
+        &self.line_indirect_arguments
     }
 }
 
@@ -5681,7 +5725,7 @@ impl PatchRenderPipeline {
             atlas.index_format,
         );
         pass.draw_indexed_indirect(
-            &visibility.indirect_arguments,
+            &visibility.triangle_indirect_arguments,
             u64::from(batch_index) * INDEXED_INDIRECT_RECORD_BYTES,
         );
         Ok(())

@@ -291,7 +291,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         assert_eq!(report.shared_frame_draws, 2);
         assert_eq!(report.compacted_source_words, 89);
         assert_eq!(report.compacted_range_words, 15);
-        assert_eq!(report.indirect_argument_words, 15);
+        assert_eq!(report.indirect_argument_words, 30);
         assert_eq!(report.indirect_draws, 3);
 
         let (prepared, source_instances, render_scene, render_frame) =
@@ -668,11 +668,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             RenderGeometry::Triangles,
         )
         .unwrap();
-        let words = pack_wgsl_visibility_compaction_scene_words(
-            &compaction_scene,
-            RenderGeometry::Triangles,
-        )
-        .unwrap();
+        let words = pack_wgsl_visibility_compaction_scene_words(&compaction_scene).unwrap();
         let mut resident = classifier
             .upload_visibility_compaction_scene(words)
             .unwrap();
@@ -685,7 +681,20 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             expected.compacted_source_instances,
         );
         assert_eq!(actual.compacted_ranges, expected.compacted_ranges);
-        assert_eq!(actual.indirect_arguments, expected.indirect_arguments);
+        assert_eq!(
+            actual.triangle_indirect_arguments,
+            expected.indirect_arguments
+        );
+        let expected_lines = wgsl_visibility_compaction_oracle_words(
+            &compaction_scene,
+            &source_visibility,
+            RenderGeometry::Lines,
+        )
+        .unwrap();
+        assert_eq!(
+            actual.line_indirect_arguments,
+            expected_lines.indirect_arguments
+        );
 
         let mut roots = compaction_batch(0, [0, 1], true);
         roots.id.layer = RenderBatchLayer::RetainedRoot;
@@ -703,9 +712,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             RenderGeometry::Lines,
         )
         .unwrap();
-        let words =
-            pack_wgsl_visibility_compaction_scene_words(&replacement_scene, RenderGeometry::Lines)
-                .unwrap();
+        let words = pack_wgsl_visibility_compaction_scene_words(&replacement_scene).unwrap();
         let mut resident = classifier
             .upload_visibility_compaction_scene(words)
             .unwrap();
@@ -718,7 +725,17 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             expected.compacted_source_instances,
         );
         assert_eq!(actual.compacted_ranges, expected.compacted_ranges);
-        assert_eq!(actual.indirect_arguments, expected.indirect_arguments);
+        assert_eq!(actual.line_indirect_arguments, expected.indirect_arguments);
+        let expected_triangles = wgsl_visibility_compaction_oracle_words(
+            &replacement_scene,
+            &[1, 1, 1],
+            RenderGeometry::Triangles,
+        )
+        .unwrap();
+        assert_eq!(
+            actual.triangle_indirect_arguments,
+            expected_triangles.indirect_arguments
+        );
 
         let atlas = complete_atlas();
         let simple_triangle = || {

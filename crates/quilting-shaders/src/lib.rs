@@ -997,7 +997,7 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
         0u,
     );
     arguments[invocation.x] = IndexedIndirectArguments(
-        batch.index_count,
+        batch.triangle_index_count + batch.line_index_count,
         0u,
         0u,
         0,
@@ -1055,7 +1055,7 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             (
                 "scan_visible_batches",
                 [1, 1, 1],
-                5,
+                6,
                 compile_visibility_scan_module().unwrap(),
             ),
             (

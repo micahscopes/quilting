@@ -8,7 +8,8 @@
 @group(0) @binding(1) var<storage, read> batches: array<VisibilityBatchRecord>;
 @group(0) @binding(2) var<storage, read> batch_counts: array<u32>;
 @group(0) @binding(3) var<storage, read_write> compacted_ranges: array<CompactedBatchRangeRecord>;
-@group(0) @binding(4) var<storage, read_write> indirect_arguments: array<IndexedIndirectArguments>;
+@group(0) @binding(4) var<storage, read_write> triangle_indirect_arguments: array<IndexedIndirectArguments>;
+@group(0) @binding(5) var<storage, read_write> line_indirect_arguments: array<IndexedIndirectArguments>;
 
 @compute @workgroup_size(1)
 fn scan_visible_batches(@builtin(global_invocation_id) invocation: vec3<u32>) {
@@ -26,8 +27,17 @@ fn scan_visible_batches(@builtin(global_invocation_id) invocation: vec3<u32>) {
             compacted_first,
             instance_count,
         );
-        indirect_arguments[batch_index] = IndexedIndirectArguments(
-            batch.index_count,
+        triangle_indirect_arguments[batch_index] = IndexedIndirectArguments(
+            batch.triangle_index_count,
+            instance_count,
+            0u,
+            0,
+            // WebGPU requires the optional indirect-first-instance feature for
+            // nonzero values. The vertex stage indexes from the range prefix.
+            0u,
+        );
+        line_indirect_arguments[batch_index] = IndexedIndirectArguments(
+            batch.line_index_count,
             instance_count,
             0u,
             0,

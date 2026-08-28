@@ -13,8 +13,8 @@ struct VisibilityCompactionUniforms {
 struct VisibilityBatchRecord {
     source_first_instance: u32,
     source_instance_count: u32,
-    index_count: u32,
-    _padding: u32,
+    triangle_index_count: u32,
+    line_index_count: u32,
 }
 
 struct CompactedBatchRangeRecord {

@@ -937,7 +937,6 @@ pub fn pack_wgsl_adaptive_overlay_preparation_scene_words(
 pub fn pack_wgsl_adaptive_overlay_scene_words(
     prepared: &PreparedLodModel,
     scene: &RenderSceneSnapshot,
-    geometry: RenderGeometry,
 ) -> Result<WgslAdaptiveOverlaySceneWords, String> {
     scene.validate().map_err(|error| error.to_string())?;
     let mut source_batch_indices = Vec::new();
@@ -965,7 +964,7 @@ pub fn pack_wgsl_adaptive_overlay_scene_words(
         topology,
         subjects,
     };
-    let visibility = pack_wgsl_visibility_batches(scene, &batches, geometry, false)?;
+    let visibility = pack_wgsl_visibility_batches(scene, &batches, false)?;
     Ok(WgslAdaptiveOverlaySceneWords {
         source_batch_indices,
         preparation,
@@ -1077,11 +1076,10 @@ pub struct WgslVisibilityCompactionOracleWords {
 /// but carry zero eligibility, preserving stable source-instance identities.
 pub fn pack_wgsl_visibility_compaction_scene_words(
     scene: &RenderSceneSnapshot,
-    geometry: RenderGeometry,
 ) -> Result<WgslVisibilityCompactionSceneWords, String> {
     scene.validate().map_err(|error| error.to_string())?;
     let batches = scene.batches.iter().collect::<Vec<_>>();
-    pack_wgsl_visibility_batches(scene, &batches, geometry, true)
+    pack_wgsl_visibility_batches(scene, &batches, true)
 }
 
 /// Pack only adaptive replacement batches. Their source stream is compact and
@@ -1089,7 +1087,6 @@ pub fn pack_wgsl_visibility_compaction_scene_words(
 /// visibility is expanded into this stream on-device before compaction.
 pub fn pack_wgsl_adaptive_overlay_visibility_scene_words(
     scene: &RenderSceneSnapshot,
-    geometry: RenderGeometry,
 ) -> Result<WgslVisibilityCompactionSceneWords, String> {
     scene.validate().map_err(|error| error.to_string())?;
     let batches = scene
@@ -1097,13 +1094,12 @@ pub fn pack_wgsl_adaptive_overlay_visibility_scene_words(
         .iter()
         .filter(|batch| batch.id.layer == RenderBatchLayer::AdaptiveOverlay)
         .collect::<Vec<_>>();
-    pack_wgsl_visibility_batches(scene, &batches, geometry, false)
+    pack_wgsl_visibility_batches(scene, &batches, false)
 }
 
 fn pack_wgsl_visibility_batches(
     scene: &RenderSceneSnapshot,
     selected_batches: &[&RenderBatchSnapshot],
-    geometry: RenderGeometry,
     suppress_roots: bool,
 ) -> Result<WgslVisibilityCompactionSceneWords, String> {
     let batch_count = u32::try_from(selected_batches.len())
@@ -1122,15 +1118,11 @@ fn pack_wgsl_visibility_batches(
     for &batch in selected_batches {
         let source_instance_count = u32::try_from(batch.members.len())
             .map_err(|_| "visibility source count exceeds the WGSL ABI".to_string())?;
-        let index_count = match geometry {
-            RenderGeometry::Triangles => batch.triangle_index_count,
-            RenderGeometry::Lines => batch.line_index_count,
-        };
         batches.push([
             source_first_instance,
             source_instance_count,
-            index_count,
-            0,
+            batch.triangle_index_count,
+            batch.line_index_count,
         ]);
         for member in &batch.members {
             let suppressed_root = suppress_roots
@@ -3675,20 +3667,11 @@ mod tests {
         assert_eq!(preparation.topology[0][9], 3.0f32.to_bits());
         assert_eq!(preparation.subjects.len(), 1);
 
-        let visibility = pack_wgsl_adaptive_overlay_visibility_scene_words(
-            &scene,
-            RenderGeometry::Triangles,
-        )
-        .unwrap();
+        let visibility = pack_wgsl_adaptive_overlay_visibility_scene_words(&scene).unwrap();
         assert_eq!(visibility.uniform, [1, 1, 0, 0]);
-        assert_eq!(visibility.batches, [[0, 1, 18, 0]]);
+        assert_eq!(visibility.batches, [[0, 1, 18, 24]]);
         assert_eq!(visibility.source_eligibility, [1]);
-        let combined = pack_wgsl_adaptive_overlay_scene_words(
-            &prepared,
-            &scene,
-            RenderGeometry::Triangles,
-        )
-        .unwrap();
+        let combined = pack_wgsl_adaptive_overlay_scene_words(&prepared, &scene).unwrap();
         assert_eq!(combined.source_batch_indices, [2]);
         assert_eq!(combined.preparation, preparation);
         assert_eq!(combined.visibility, visibility);
@@ -3769,14 +3752,11 @@ mod tests {
             ],
         };
 
-        let words = pack_wgsl_visibility_compaction_scene_words(
-            &scene,
-            RenderGeometry::Triangles,
-        ).unwrap();
+        let words = pack_wgsl_visibility_compaction_scene_words(&scene).unwrap();
         assert_eq!(words.uniform, [3, 4, 0, 0]);
         assert_eq!(
             words.batches,
-            [[0, 2, 6, 0], [2, 1, 12, 0], [3, 1, 18, 0]],
+            [[0, 2, 6, 8], [2, 1, 12, 16], [3, 1, 18, 24]],
         );
         assert_eq!(words.source_eligibility, [1, 1, 0, 1]);
         assert_eq!(std::mem::size_of_val(&words.uniform), 16);
@@ -3822,10 +3802,9 @@ mod tests {
             batches: vec![roots, overlay],
         };
 
-        let words = pack_wgsl_visibility_compaction_scene_words(&scene, RenderGeometry::Lines)
-            .unwrap();
+        let words = pack_wgsl_visibility_compaction_scene_words(&scene).unwrap();
         assert_eq!(words.uniform, [2, 3, 0, 0]);
-        assert_eq!(words.batches, [[0, 2, 8, 0], [2, 1, 8, 0]]);
+        assert_eq!(words.batches, [[0, 2, 6, 8], [2, 1, 6, 8]]);
         assert_eq!(words.source_eligibility, [0, 1, 1]);
         let oracle = wgsl_visibility_compaction_oracle_words(
             &scene,

@@ -108,12 +108,8 @@ impl LodClassifierDevice {
                 "adaptive overlay roots belong to a different resource epoch".to_string(),
             ));
         }
-        let words = pack_wgsl_adaptive_overlay_scene_words(
-            &model.prepared,
-            scene,
-            RenderGeometry::Triangles,
-        )
-        .map_err(LodWebGpuError::Payload)?;
+        let words = pack_wgsl_adaptive_overlay_scene_words(&model.prepared, scene)
+            .map_err(LodWebGpuError::Payload)?;
         let source_batch_indices = words.source_batch_indices;
         if source_batch_indices.is_empty() {
             if !scene.suppressed_root_faces.is_empty() {
