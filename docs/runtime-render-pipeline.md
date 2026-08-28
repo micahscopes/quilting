@@ -665,6 +665,11 @@ root plus sparse dyadic replacement fixture is classified, reconciled,
 prepared, bucketed, and drawn through the shared executor directly into the
 surface. Its root/overlay encoding must equal the separately raster-verified
 offscreen encoding before the browser gate can pass.
+The old nonzero-word footprint check is now replaced by normalized image
+evidence over the actual padded texture copy. Chromium reports 144 alpha-covered
+pixels and canonical RGBA8 hash `3fe933548a480845`; native Radeon/Vulkan passes
+the same coverage/signature construction without assuming byte origin or
+channel order.
 
 Hyperscope does not yet claim that surface: its visible `cv` canvas is currently
 claimed as WebGL2 before the rollback-safe WebGPU shadow starts, and browser

@@ -34,6 +34,10 @@ use quilting_core::render::{
     RenderSceneSnapshot, RenderStyle, RenderSubmissionStats, RenderView, ResidentRootDrawDomain,
     ResidentRootDrawDomains,
 };
+use quilting_core::render_evidence::{
+    render_image_signature, RenderImageChannelOrder, RenderImageOrigin, RenderImageSignature,
+    Rgba8ImageView,
+};
 use quilting_core::screen_partition::ScreenPatchLeafId;
 use quilting_renderer::compute::{
     pack_lod_classification, pack_wgsl_adaptive_overlay_scene_words, pack_wgsl_lod_atlas_words,
@@ -256,6 +260,7 @@ pub struct LodDeviceConformance {
     pub resident_root_prepared_words: usize,
     pub resident_root_domain_words: usize,
     pub resident_adaptive_rendered_pixels: usize,
+    pub resident_adaptive_image: RenderImageSignature,
     pub resident_root_indirect_draws: usize,
     pub adaptive_overlay_patches: usize,
     pub adaptive_overlay_indirect_draws: usize,
@@ -1267,7 +1272,7 @@ impl LodClassifierDevice {
     async fn validate_resident_adaptive_render_conformance(
         &self,
         presentation: Option<&mut PatchPresentationSurface>,
-    ) -> Result<(usize, usize, usize, usize), LodWebGpuError> {
+    ) -> Result<(usize, RenderImageSignature, usize, usize, usize), LodWebGpuError> {
         const WIDTH: u32 = 32;
         const HEIGHT: u32 = 32;
         const PADDED_BYTES_PER_ROW: u32 = 256;
@@ -1628,14 +1633,34 @@ impl LodClassifierDevice {
                 "resident root direct render failed validation: {error}",
             )));
         }
-        let words_per_row = PADDED_BYTES_PER_ROW as usize / std::mem::size_of::<u32>();
         let pixels = self.readback_words(&readback, readback_bytes).await?;
-        let rendered = pixels
-            .chunks_exact(words_per_row)
-            .take(HEIGHT as usize)
-            .flat_map(|row| &row[..WIDTH as usize])
-            .filter(|&&pixel| pixel != 0)
-            .count();
+        let channel_order = match color_format {
+            wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba8UnormSrgb => {
+                RenderImageChannelOrder::Rgba
+            }
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb => {
+                RenderImageChannelOrder::Bgra
+            }
+            _ => {
+                return Err(LodWebGpuError::Conformance(format!(
+                    "resident adaptive image evidence requires RGBA8/BGRA8, got {color_format:?}",
+                )));
+            }
+        };
+        let image = Rgba8ImageView::new(
+            [WIDTH, HEIGHT],
+            PADDED_BYTES_PER_ROW as usize,
+            RenderImageOrigin::TopLeft,
+            channel_order,
+            bytemuck::cast_slice(&pixels),
+        )
+        .map_err(|error| LodWebGpuError::Conformance(error.to_string()))?;
+        let image_signature = render_image_signature(image, 0);
+        let rendered = usize::try_from(image_signature.covered_pixels).map_err(|_| {
+            LodWebGpuError::Conformance(
+                "resident adaptive coverage exceeds address space".to_string(),
+            )
+        })?;
         if !(32..WIDTH as usize * HEIGHT as usize).contains(&rendered) {
             return Err(LodWebGpuError::Conformance(format!(
                 "resident root render produced an implausible {rendered}-pixel footprint",
@@ -1743,6 +1768,7 @@ impl LodClassifierDevice {
         }
         Ok((
             rendered,
+            image_signature,
             encoding.roots.indirect_draw_calls as usize,
             overlay_encoding.source_patch_count as usize,
             overlay_encoding.indirect_draw_calls as usize,
@@ -2062,6 +2088,7 @@ impl LodClassifierDevice {
         ) = self.run_resident_lod_conformance().await?;
         let (
             resident_adaptive_rendered_pixels,
+            resident_adaptive_image,
             resident_root_indirect_draws,
             adaptive_overlay_patches,
             adaptive_overlay_indirect_draws,
@@ -2189,6 +2216,7 @@ impl LodClassifierDevice {
             resident_root_prepared_words,
             resident_root_domain_words,
             resident_adaptive_rendered_pixels,
+            resident_adaptive_image,
             resident_root_indirect_draws,
             adaptive_overlay_patches,
             adaptive_overlay_indirect_draws,
@@ -5292,7 +5320,7 @@ pub async fn run_browser_lod_conformance(
         .map_err(browser_error)?;
     let surface = presentation.diagnostics();
     Ok(format!(
-        "adapter={} backend={} surface={}x{} surface_format={} surface_presented={} surface_reconfigurations={} full_pipeline_words={} resident_lod_words={} resident_visibility_words={} resident_bucket_words={} resident_root_topology_words={} resident_root_prepared_words={} resident_root_domain_words={} resident_adaptive_rendered_pixels={} resident_root_indirect_draws={} adaptive_overlay_patches={} adaptive_overlay_indirect_draws={} coherence_words={} \
+        "adapter={} backend={} surface={}x{} surface_format={} surface_presented={} surface_reconfigurations={} full_pipeline_words={} resident_lod_words={} resident_visibility_words={} resident_bucket_words={} resident_root_topology_words={} resident_root_prepared_words={} resident_root_domain_words={} resident_adaptive_rendered_pixels={} resident_adaptive_image_hash={:016x} resident_root_indirect_draws={} adaptive_overlay_patches={} adaptive_overlay_indirect_draws={} coherence_words={} \
          prepared_patch_words={} rendered_patch_pixels={} shared_frame_draws={} compacted_source_words={} \
          compacted_range_words={} indirect_argument_words={} indirect_draws={}",
         adapter.name,
@@ -5310,6 +5338,7 @@ pub async fn run_browser_lod_conformance(
         report.resident_root_prepared_words,
         report.resident_root_domain_words,
         report.resident_adaptive_rendered_pixels,
+        report.resident_adaptive_image.rgba8_hash,
         report.resident_root_indirect_draws,
         report.adaptive_overlay_patches,
         report.adaptive_overlay_indirect_draws,

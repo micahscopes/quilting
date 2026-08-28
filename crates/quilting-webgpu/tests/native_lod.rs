@@ -275,6 +275,12 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         assert_eq!(report.resident_root_prepared_words, 1040);
         assert_eq!(report.resident_root_domain_words, 18);
         assert!(report.resident_adaptive_rendered_pixels >= 32);
+        assert_eq!(report.resident_adaptive_image.size, [32, 32]);
+        assert_eq!(
+            report.resident_adaptive_image.covered_pixels as usize,
+            report.resident_adaptive_rendered_pixels,
+        );
+        assert_ne!(report.resident_adaptive_image.rgba8_hash, 0);
         assert_eq!(report.resident_root_indirect_draws, 2);
         assert_eq!(report.adaptive_overlay_patches, 1);
         assert_eq!(report.adaptive_overlay_indirect_draws, 1);
