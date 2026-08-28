@@ -40,6 +40,7 @@ pub const PATCH_RENDER_DEVICE_LOD_ENTRY_POINT: &str = "render_patch_lod";
 pub const PATCH_RENDER_DEVICE_STRETCH_ENTRY_POINT: &str = "render_patch_stretch";
 pub const PATCH_RENDER_DEVICE_MATCAP_ENTRY_POINT: &str = "render_patch_matcap";
 pub const PATCH_RENDER_DEVICE_WIRE_ENTRY_POINT: &str = "render_patch_wire";
+pub const PATCH_RENDER_DEVICE_PBR_ENTRY_POINT: &str = "render_patch_pbr";
 pub const RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT: &str = "render_resident_root_vertex";
 pub const RESIDENT_ROOT_RENDER_DEVICE_NORMALS_ENTRY_POINT: &str = "render_resident_root_normals";
 
@@ -855,6 +856,7 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             PATCH_RENDER_DEVICE_STRETCH_ENTRY_POINT,
             PATCH_RENDER_DEVICE_MATCAP_ENTRY_POINT,
             PATCH_RENDER_DEVICE_WIRE_ENTRY_POINT,
+            PATCH_RENDER_DEVICE_PBR_ENTRY_POINT,
         ] {
             let fragment = module
                 .entry_points
@@ -869,11 +871,15 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
                 .iter()
                 .filter(|(_, variable)| variable.binding.is_some())
                 .count(),
-            5,
+            6,
         );
         let mut layouter = naga::proc::Layouter::default();
         layouter.update(module.to_ctx()).expect("patch render layouts");
-        for (name, expected_size) in [("PatchRenderFrame", 224), ("DrawBatchIndex", 16)] {
+        for (name, expected_size) in [
+            ("PatchRenderFrame", 224),
+            ("PatchPbrMaterial", 96),
+            ("DrawBatchIndex", 16),
+        ] {
             let (handle, _) = module
                 .types
                 .iter()
@@ -896,7 +902,7 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             .iter()
             .map(|entry| (entry.name.as_str(), entry.stage))
             .collect::<Vec<_>>();
-        assert_eq!(entries.len(), 6);
+        assert_eq!(entries.len(), 7);
         assert!(entries.contains(&(
             PATCH_RENDER_DEVICE_VERTEX_ENTRY_POINT,
             naga::ShaderStage::Vertex,
@@ -919,6 +925,10 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
         )));
         assert!(entries.contains(&(
             PATCH_RENDER_DEVICE_WIRE_ENTRY_POINT,
+            naga::ShaderStage::Fragment,
+        )));
+        assert!(entries.contains(&(
+            PATCH_RENDER_DEVICE_PBR_ENTRY_POINT,
             naga::ShaderStage::Fragment,
         )));
     }

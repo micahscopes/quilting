@@ -4,6 +4,7 @@ use quilting_core::batch::{
     FaceLodGrading, RenderBatchId, RenderBatchKey, RenderBatchLayer, RenderBatchMember,
 };
 use quilting_core::instance_layout::{self, InstanceWriter};
+use quilting_core::material::PbrMaterial;
 use quilting_core::quaternion::{Mobius, Quat};
 use quilting_core::render::{
     FocusFieldPacket, MatcapStyle, PbrDrawClass, RenderBatchSnapshot, RenderEntityTransform,
@@ -189,9 +190,16 @@ fn shared_render_frame_fixture() -> (PreparedLodModel, Vec<f32>, RenderSceneSnap
             pbr_class: PbrDrawClass::Opaque,
         });
     }
+    let mut matte = PbrMaterial::default();
+    matte.base_color = [0.75, 0.08, 0.04, 1.0];
+    matte.roughness = 0.85;
+    let mut metal = PbrMaterial::default();
+    metal.base_color = [0.04, 0.18, 0.8, 1.0];
+    metal.metallic = 0.9;
+    metal.roughness = 0.18;
     let scene = RenderSceneSnapshot {
         revision: 91,
-        materials: Vec::new(),
+        materials: vec![matte, metal],
         suppressed_root_faces: Vec::new(),
         batches,
     };
@@ -609,6 +617,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             .unwrap();
         let mut diagnostic_hashes = Vec::new();
         for (revision, style) in [
+            RenderStyle::Pbr,
             RenderStyle::Matcap,
             RenderStyle::Lod,
             RenderStyle::Stretch,

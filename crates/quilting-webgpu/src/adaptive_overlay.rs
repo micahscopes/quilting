@@ -128,7 +128,7 @@ impl LodClassifierDevice {
             &visibility,
             model.prepared.residency.num_faces,
         )?;
-        let bindings = self.create_patch_render_bindings(pipeline, &patches, &visibility)?;
+        let bindings = self.create_patch_render_bindings(pipeline, scene, &patches, &visibility)?;
         let batches = source_batch_indices
             .iter()
             .map(|&index| scene.batches[index as usize].clone())

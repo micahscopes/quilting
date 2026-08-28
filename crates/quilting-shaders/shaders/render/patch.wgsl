@@ -1,4 +1,4 @@
-#import quilting::render::patch_vertex::{PatchRenderFrame, PatchVertexOutput, evaluate_prepared_patch_vertex, shade_patch_lod, shade_patch_matcap, shade_patch_normals, shade_patch_stretch, shade_patch_wire}
+#import quilting::render::patch_vertex::{PatchPbrMaterial, PatchRenderFrame, PatchVertexOutput, evaluate_prepared_patch_vertex, shade_patch_lod, shade_patch_matcap, shade_patch_normals, shade_patch_pbr, shade_patch_stretch, shade_patch_wire}
 #import quilting::surface::patch_prepare::PreparedPatchRecord
 #import quilting::compute::visibility_compaction_types::CompactedBatchRangeRecord
 
@@ -18,6 +18,7 @@ struct DrawBatchIndex {
 @group(0) @binding(2) var<storage, read> compacted_sources: array<u32>;
 @group(0) @binding(3) var<storage, read> compacted_ranges: array<CompactedBatchRangeRecord>;
 @group(0) @binding(4) var<uniform> draw_batch: DrawBatchIndex;
+@group(0) @binding(5) var<storage, read> pbr_materials: array<PatchPbrMaterial>;
 
 struct PatchVertexInput {
     @location(0) bary: vec3<f32>,
@@ -64,4 +65,18 @@ fn render_patch_matcap(input: PatchVertexOutput) -> @location(0) vec4<f32> {
 @fragment
 fn render_patch_wire(input: PatchVertexOutput) -> @location(0) vec4<f32> {
     return shade_patch_wire(input);
+}
+
+@fragment
+fn render_patch_pbr(
+    @builtin(front_facing) front_facing: bool,
+    input: PatchVertexOutput,
+) -> @location(0) vec4<f32> {
+    let material_index = u32(max(frames[draw_batch.batch_index].modes.z, 0));
+    return shade_patch_pbr(
+        front_facing,
+        input,
+        pbr_materials[material_index],
+        frames[draw_batch.batch_index].modes.w,
+    );
 }
