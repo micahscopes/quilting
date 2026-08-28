@@ -237,6 +237,8 @@ for (const graphicsBackendStep of [
   'quiltingWasmBackend.mr_uploadWebGpuComposedModel(',
   "graphicsBackendDiagnostics.state = 'presentation-ready';",
   "graphicsBackendDiagnostics.state = 'presenting';",
+  'function webGpuPresentationSupportsRenderMode(mode)',
+  'residency?.presentationStyle === graphicsBackendDiagnostics.renderMode',
   "presentationCanvas.classList.toggle('webgpu-presenting', presenting);",
   "webglCanvas.classList.toggle('webgpu-input-layer', presenting);",
   "globalThis.__hyperscopeGraphicsBackend = graphicsBackendDiagnostics;",
@@ -246,6 +248,19 @@ for (const graphicsBackendStep of [
     browserSource.includes(graphicsBackendStep),
     `browser graphics backend adapter is missing ${graphicsBackendStep}`,
   );
+}
+const webGpuModeSupportSource = browserSource.match(
+  /function webGpuPresentationSupportsRenderMode\(mode\) \{[\s\S]*?\n\}/,
+)?.[0];
+assert.ok(webGpuModeSupportSource, 'could not locate WebGPU mode support predicate');
+const webGpuPresentationSupportsRenderMode = runInNewContext(
+  `${webGpuModeSupportSource}; webGpuPresentationSupportsRenderMode`,
+);
+for (const mode of ['normals', 'lod', 'stretch']) {
+  assert.equal(webGpuPresentationSupportsRenderMode(mode), true, `${mode} should use WebGPU`);
+}
+for (const mode of ['pbr', 'matcap', 'wire', 'both']) {
+  assert.equal(webGpuPresentationSupportsRenderMode(mode), false, `${mode} should use WebGL2`);
 }
 const browserDefaultsSource = browserSource.match(
   /const PARAM_DEFAULTS = (\{[\s\S]*?\n\});/,

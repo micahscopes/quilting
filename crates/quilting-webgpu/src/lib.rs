@@ -2852,6 +2852,18 @@ impl LodClassifierDevice {
         )
     }
 
+    /// Create the fixed-format offscreen diagnostic family without exposing
+    /// backend texture enums to application adapters.
+    pub fn create_offscreen_diagnostic_patch_render_pipelines(
+        &self,
+    ) -> Result<DiagnosticPatchRenderPipelines, LodWebGpuError> {
+        self.create_diagnostic_patch_render_pipelines(
+            wgpu::TextureFormat::Rgba8Unorm,
+            Some(wgpu::TextureFormat::Depth24Plus),
+            1,
+        )
+    }
+
     pub fn create_offscreen_patch_render_target(
         &self,
         size: [u32; 2],

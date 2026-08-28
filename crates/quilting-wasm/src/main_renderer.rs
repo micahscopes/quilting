@@ -2224,7 +2224,7 @@ pub fn mr_reset_runtime_timing_diagnostics() -> Result<(), JsValue> {
 #[wasm_bindgen(js_name = "mr_setRenderMode")]
 pub fn mr_set_render_mode(mode: &str) {
     #[cfg(feature = "webgpu-backend")]
-    let mut entered_normals = false;
+    let mut entered_webgpu_diagnostic = false;
     STATE.with(|s| {
         if let Some(ref mut st) = *s.borrow_mut() {
             let next = match mode {
@@ -2236,14 +2236,17 @@ pub fn mr_set_render_mode(mode: &str) {
             };
             #[cfg(feature = "webgpu-backend")]
             {
-                entered_normals = st.render_style != RenderStyle::Normals
-                    && next == RenderStyle::Normals;
+                entered_webgpu_diagnostic = st.render_style != next
+                    && matches!(
+                        next,
+                        RenderStyle::Normals | RenderStyle::Lod | RenderStyle::Stretch
+                    );
             }
             st.render_style = next;
         }
     });
     #[cfg(feature = "webgpu-backend")]
-    if entered_normals {
+    if entered_webgpu_diagnostic {
         crate::webgpu_backend::force_next_frame();
     }
 }
@@ -2650,7 +2653,10 @@ fn submit_webgpu_frame(
 ) -> crate::webgpu_backend::LiveFrameDisposition {
     use crate::webgpu_backend::LiveFrameDisposition;
 
-    if renderer.render_style != RenderStyle::Normals {
+    if !matches!(
+        renderer.render_style,
+        RenderStyle::Normals | RenderStyle::Lod | RenderStyle::Stretch
+    ) {
         return LiveFrameDisposition::IncumbentRequired;
     }
     let source_revision = renderer.render_command_builds;

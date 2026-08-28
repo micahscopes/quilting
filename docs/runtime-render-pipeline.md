@@ -678,9 +678,12 @@ Hyperscope now has an opt-in presentation cut at `gfx=webgpu`. Browser layout
 supplies an unclaimed `cv-webgpu`; Rust owns its adapter/device, surface format,
 depth attachment, resize, acquisition, encoding, submission, and presentation.
 The existing `cv` remains the event target and hidden WebGL2 rollback layer
-while normals is supported. The adapter reveals it synchronously when the mode
-is not normals, and reveals WebGPU only after a successful fresh presentation.
-WebGPU now submits first: a successful or safely retained surface frame elides
+while normals, LOD color, or conformal stretch is supported. The adapter
+reveals it synchronously for every other mode, and reveals WebGPU only after a
+successful fresh presentation in the requested style. The residency
+diagnostics carry that presented style, preventing an old normals surface from
+being exposed during a mode switch. WebGPU now submits first: a successful or
+safely retained surface frame elides
 the entire hidden WebGL2 frame—including begin, patch preparation, camera
 visibility, and patch-color draw—while unavailable residency or any frame
 failure falls through to WebGL2 in the same render call. The incumbent dirty
@@ -688,7 +691,7 @@ stamps remain pending, so a later fallback or mode switch refreshes before it
 draws. Picking was already independent: `mr_pick` prepares and classifies the
 retained WebGL2 buffers against its exact pick camera on demand. This
 dual-canvas interval is deliberate input/picking migration debt, but ordinary
-WebGPU normals presentation no longer pays for two rendering pipelines.
+WebGPU diagnostic presentation no longer pays for two rendering pipelines.
 Runtime diagnostics expose `webglPatchFrames`,
 `webgpuPresentationPatchFrames`, and `webgpuRetainedPresentationFrames` so the
 ownership cut is measurable rather than inferred from canvas opacity.
@@ -715,9 +718,13 @@ reported `effective=webgpu`, 5 physical indirect draws over 984 instances, and
 no surface loss or frame failure. Switching to PBR exposed WebGL2 with
 `state=unsupported-mode`; switching back advanced the surface presentation
 counter from 4 to 5 before WebGPU became visible again. No warning, error,
-assertion, or failed request occurred. PBR, wire, LOD color, stretch, picking,
-material/texture binding, and postprocess commands still reject explicitly
-rather than silently lowering to normals. Those cuts are what remove the live
+assertion, or failed request occurred. The same retained scene now selects
+normals, LOD-color, and stretch pipelines that share one shader module and one
+binding-layout identity; native Radeon/Vulkan renders distinct nonempty images
+for the latter two without rebuilding scene resources. Their live Chrome gate
+remains pending. PBR, matcap, wire/composite, picking, material/texture binding,
+and postprocess commands still reject explicitly rather than silently lowering
+to another style. Those cuts are what remove the live
 classifier readback, CPU topology repacking, and rejected atlas vertex
 invocations from an authoritative runtime.
 

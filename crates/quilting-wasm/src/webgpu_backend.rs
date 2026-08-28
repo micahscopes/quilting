@@ -12,9 +12,9 @@ use quilting_core::render::{
 };
 use quilting_renderer::compute::{LodAtlasLookup, PreparedLodModel};
 use quilting_webgpu::{
-    LodClassifierDevice, LodClassifierModel, LodPose, OffscreenPatchRenderTarget, PackedPatchAtlas,
-    PatchFrameEncoding, PatchPresentationSurface, PatchRenderPipeline, PatchRenderScene,
-    PatchRenderSceneUpdate, StagedOffscreenImageReadback, SurfacePresentation,
+    DiagnosticPatchRenderPipelines, LodClassifierDevice, LodClassifierModel, LodPose,
+    OffscreenPatchRenderTarget, PackedPatchAtlas, PatchFrameEncoding, PatchPresentationSurface,
+    PatchRenderScene, PatchRenderSceneUpdate, StagedOffscreenImageReadback, SurfacePresentation,
     WebGpuAdapterSummary,
 };
 use serde::Serialize;
@@ -32,7 +32,7 @@ struct WebGpuBackend {
     atlas: Option<PackedPatchAtlas>,
     model: Option<LodClassifierModel>,
     model_source: Option<PreparedLodModel>,
-    pipeline: Option<PatchRenderPipeline>,
+    pipelines: Option<DiagnosticPatchRenderPipelines>,
     scene: Option<PatchRenderScene>,
     scene_source_revision: Option<u64>,
     target: Option<OffscreenPatchRenderTarget>,
@@ -105,6 +105,7 @@ pub(crate) struct WebGpuBackendDiagnostics {
     presentation_ready: bool,
     presentation_viewport: [u32; 2],
     presentation_color_format: Option<String>,
+    presentation_style: Option<&'static str>,
     presentation_frames: u64,
     presentation_skips: u64,
     presentation_losses: u64,
@@ -177,6 +178,10 @@ impl WebGpuBackend {
             presentation_color_format: presentation
                 .as_ref()
                 .map(|presentation| presentation.color_format.clone()),
+            presentation_style: self.presentation.as_ref().and_then(|_| {
+                self.last_frame_input
+                    .map(|frame| render_style_name(frame.style))
+            }),
             presentation_frames: presentation
                 .as_ref()
                 .map_or(0, |presentation| presentation.frames_presented),
@@ -251,8 +256,8 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
     if should_request {
         match LodClassifierDevice::request_headless("Hyperscope WebGPU shadow").await {
             Ok((device, adapter)) => {
-                let pipeline = device
-                    .create_offscreen_patch_render_pipeline()
+                let pipelines = device
+                    .create_offscreen_diagnostic_patch_render_pipelines()
                     .map_err(|error| error.to_string())
                     .map_err(|error| BACKEND.with(|slot| slot.borrow_mut().fail(error)))?;
                 BACKEND.with(|slot| {
@@ -262,7 +267,7 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
                     backend.atlas = None;
                     backend.model = None;
                     backend.model_source = None;
-                    backend.pipeline = Some(pipeline);
+                    backend.pipelines = Some(pipelines);
                     backend.scene = None;
                     backend.scene_source_revision = None;
                     backend.target = None;
@@ -287,7 +292,8 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
 }
 
 /// Claim an application-selected, previously unclaimed browser canvas and
-/// initialize the live normals presentation pipeline on a compatible device.
+/// initialize the live triangle-diagnostic presentation pipelines on a
+/// compatible device.
 /// A headless device cannot be promoted after the fact because its adapter was
 /// not selected against this surface.
 #[cfg(target_arch = "wasm32")]
@@ -329,8 +335,8 @@ pub(crate) async fn initialize_presentation(
         Ok(request) => request,
         Err(error) => return Err(BACKEND.with(|slot| slot.borrow_mut().fail(error))),
     };
-    let pipeline = device
-        .create_patch_render_pipeline(
+    let pipelines = device
+        .create_diagnostic_patch_render_pipelines(
             presentation.color_format(),
             Some(presentation.depth_format()),
             1,
@@ -344,7 +350,7 @@ pub(crate) async fn initialize_presentation(
         backend.atlas = None;
         backend.model = None;
         backend.model_source = None;
-        backend.pipeline = Some(pipeline);
+        backend.pipelines = Some(pipelines);
         backend.scene = None;
         backend.scene_source_revision = None;
         backend.target = None;
@@ -532,9 +538,10 @@ pub(crate) fn replace_scene(
                 .as_ref()
                 .ok_or_else(|| "ready WebGPU backend has no device".to_string())?;
             let pipeline = backend
-                .pipeline
+                .pipelines
                 .as_ref()
-                .ok_or_else(|| "ready WebGPU backend has no render pipeline".to_string())?;
+                .and_then(|pipelines| pipelines.get(RenderStyle::Normals))
+                .ok_or_else(|| "ready WebGPU backend has no normals pipeline".to_string())?;
             let model = backend
                 .model
                 .as_ref()
@@ -579,7 +586,12 @@ pub(crate) fn submit_frame(
 ) -> Result<LiveFrameDisposition, String> {
     BACKEND.with(|slot| {
         let mut backend = slot.borrow_mut();
-        if backend.state != "ready" || style != RenderStyle::Normals {
+        if backend.state != "ready"
+            || !matches!(
+                style,
+                RenderStyle::Normals | RenderStyle::Lod | RenderStyle::Stretch
+            )
+        {
             return Ok(LiveFrameDisposition::IncumbentRequired);
         }
         // Atlas/model/scene residency arrives asynchronously during ordinary
@@ -774,7 +786,7 @@ pub(crate) fn submit_frame(
                 if backend.presentation.is_some() {
                     let WebGpuBackend {
                         device,
-                        pipeline,
+                        pipelines,
                         scene,
                         atlas,
                         presentation,
@@ -783,9 +795,10 @@ pub(crate) fn submit_frame(
                     let device = device
                         .as_ref()
                         .ok_or_else(|| "ready WebGPU backend has no device".to_string())?;
-                    let pipeline = pipeline
+                    let pipeline = pipelines
                         .as_ref()
-                        .ok_or_else(|| "ready WebGPU backend has no render pipeline".to_string())?;
+                        .and_then(|pipelines| pipelines.get(style))
+                        .ok_or_else(|| format!("ready WebGPU backend has no {style:?} pipeline"))?;
                     let scene = scene.as_ref().ok_or_else(|| {
                         "WebGPU render frame requires scene residency".to_string()
                     })?;
@@ -796,7 +809,7 @@ pub(crate) fn submit_frame(
                         .as_mut()
                         .ok_or_else(|| "WebGPU presentation surface disappeared".to_string())?;
                     match device
-                        .present_normals_patch_scene_with_face_visibility(
+                        .present_diagnostic_patch_scene_with_face_visibility(
                             presentation,
                             &frame,
                             pipeline,
@@ -819,9 +832,10 @@ pub(crate) fn submit_frame(
                         .as_ref()
                         .ok_or_else(|| "ready WebGPU backend has no device".to_string())?;
                     let pipeline = backend
-                        .pipeline
+                        .pipelines
                         .as_ref()
-                        .ok_or_else(|| "ready WebGPU backend has no render pipeline".to_string())?;
+                        .and_then(|pipelines| pipelines.get(style))
+                        .ok_or_else(|| format!("ready WebGPU backend has no {style:?} pipeline"))?;
                     let scene = backend.scene.as_ref().ok_or_else(|| {
                         "WebGPU render frame requires scene residency".to_string()
                     })?;
@@ -832,12 +846,16 @@ pub(crate) fn submit_frame(
                         .target
                         .as_ref()
                         .ok_or_else(|| "WebGPU render frame requires a target".to_string())?;
-                    device
-                        .render_offscreen_normals_patch_scene_with_webgl_clear(
+                    let encoding = if style == RenderStyle::Normals {
+                        device.render_offscreen_normals_patch_scene_with_webgl_clear(
                             &frame, pipeline, scene, atlas, target, true,
                         )
-                        .map(Some)
-                        .map_err(|error| error.to_string())
+                    } else {
+                        device.render_offscreen_diagnostic_patch_scene_with_face_visibility(
+                            &frame, pipeline, scene, atlas, target, true,
+                        )
+                    };
+                    encoding.map(Some).map_err(|error| error.to_string())
                 }
             });
         match result {
@@ -884,10 +902,16 @@ pub(crate) fn submit_frame(
                 })
             }
             Ok(None) => {
+                let retained_style_matches = backend
+                    .last_frame_input
+                    .is_some_and(|last_frame| last_frame.style == style);
                 backend.next_face_visibility_bits = face_visibility_bits;
                 backend.next_morph_weights = effective_morph_weights;
                 Ok(
-                    if backend.presentation.is_some() && backend.last_frame_revision != 0 {
+                    if backend.presentation.is_some()
+                        && backend.last_frame_revision != 0
+                        && retained_style_matches
+                    {
                         LiveFrameDisposition::PresentationRetained
                     } else {
                         LiveFrameDisposition::IncumbentRequired
@@ -960,4 +984,16 @@ pub(crate) fn force_next_frame() {
 
 pub(crate) fn diagnostics() -> WebGpuBackendDiagnostics {
     BACKEND.with(|slot| slot.borrow().diagnostics())
+}
+
+fn render_style_name(style: RenderStyle) -> &'static str {
+    match style {
+        RenderStyle::Pbr => "pbr",
+        RenderStyle::Matcap => "matcap",
+        RenderStyle::Wire => "wire",
+        RenderStyle::Normals => "normals",
+        RenderStyle::MatcapWire => "both",
+        RenderStyle::Lod => "lod",
+        RenderStyle::Stretch => "stretch",
+    }
 }
