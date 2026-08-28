@@ -586,17 +586,7 @@ pub(crate) fn submit_frame(
 ) -> Result<LiveFrameDisposition, String> {
     BACKEND.with(|slot| {
         let mut backend = slot.borrow_mut();
-        if backend.state != "ready"
-            || !matches!(
-                style,
-                RenderStyle::Matcap
-                    | RenderStyle::Wire
-                    | RenderStyle::Normals
-                    | RenderStyle::MatcapWire
-                    | RenderStyle::Lod
-                    | RenderStyle::Stretch
-            )
-        {
+        if backend.state != "ready" || !quilting_webgpu::supports_patch_presentation_style(style) {
             return Ok(LiveFrameDisposition::IncumbentRequired);
         }
         // Atlas/model/scene residency arrives asynchronously during ordinary

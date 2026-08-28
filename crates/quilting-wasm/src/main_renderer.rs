@@ -2657,13 +2657,7 @@ fn submit_webgpu_frame(
 ) -> crate::webgpu_backend::LiveFrameDisposition {
     use crate::webgpu_backend::LiveFrameDisposition;
 
-    if !matches!(
-        renderer.render_style,
-        RenderStyle::Matcap
-            | RenderStyle::Normals
-            | RenderStyle::Lod
-            | RenderStyle::Stretch
-    ) {
+    if !quilting_webgpu::supports_patch_presentation_style(renderer.render_style) {
         return LiveFrameDisposition::IncumbentRequired;
     }
     let source_revision = renderer.render_command_builds;

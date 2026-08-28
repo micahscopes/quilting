@@ -644,6 +644,22 @@ pub struct DiagnosticPatchRenderPipelines {
     wire: PatchRenderPipeline,
 }
 
+/// Whether the retained WebGPU patch renderer can present this style without
+/// falling back to the incumbent backend. Keep live adapters on this single
+/// capability predicate so a newly added pipeline cannot be stranded behind
+/// a stale front-door mode list.
+pub const fn supports_patch_presentation_style(style: RenderStyle) -> bool {
+    matches!(
+        style,
+        RenderStyle::Matcap
+            | RenderStyle::Wire
+            | RenderStyle::Normals
+            | RenderStyle::MatcapWire
+            | RenderStyle::Lod
+            | RenderStyle::Stretch
+    )
+}
+
 /// Scene/frame bindings shared by every atlas bucket and indirect batch draw.
 pub struct PatchRenderBindings {
     frame_count: u32,

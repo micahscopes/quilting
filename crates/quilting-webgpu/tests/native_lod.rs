@@ -18,7 +18,24 @@ use quilting_renderer::compute::{
     wgsl_visibility_compaction_oracle_words, LodAtlasLookup, LodDispatchState, LodModelData,
     LodSubjectState, PackedLodClassification, PreparedLodModel, WgslLodDispatchMetrics,
 };
-use quilting_webgpu::{LodClassifierDevice, LodPose, PatchRenderSceneUpdate};
+use quilting_webgpu::{
+    supports_patch_presentation_style, LodClassifierDevice, LodPose, PatchRenderSceneUpdate,
+};
+
+#[test]
+fn live_patch_style_capability_has_one_authoritative_predicate() {
+    for style in [
+        RenderStyle::Matcap,
+        RenderStyle::Wire,
+        RenderStyle::Normals,
+        RenderStyle::MatcapWire,
+        RenderStyle::Lod,
+        RenderStyle::Stretch,
+    ] {
+        assert!(supports_patch_presentation_style(style), "{style:?}");
+    }
+    assert!(!supports_patch_presentation_style(RenderStyle::Pbr));
+}
 
 fn identity_matrix() -> [f32; 16] {
     [
