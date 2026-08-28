@@ -3443,6 +3443,47 @@ impl LodClassifierDevice {
         )
     }
 
+    /// Present the live normals subset directly to a Rust-owned browser
+    /// surface. The same frame, scene bindings, visibility expansion, and draw
+    /// encoder are used by the offscreen parity path; only attachment ownership
+    /// and submission/presentation differ.
+    pub fn present_normals_patch_scene_with_face_visibility(
+        &self,
+        surface: &mut PatchPresentationSurface,
+        frame: &RenderFrame,
+        pipeline: &PatchRenderPipeline,
+        scene: &PatchRenderScene,
+        atlas: &PackedPatchAtlas,
+        use_qb: bool,
+    ) -> Result<SurfacePresentation<PatchFrameEncoding>, LodWebGpuError> {
+        surface.present_with(
+            self,
+            "quilting live presentation frame",
+            |encoder, mut target| {
+                target.clear_color = Some(wgpu::Color {
+                    r: 0.2,
+                    g: 0.2,
+                    b: 0.3,
+                    a: 1.0,
+                });
+                target.clear_depth = Some(1.0);
+                self.encode_normals_patch_render_scene(
+                    encoder,
+                    frame,
+                    pipeline,
+                    scene,
+                    atlas,
+                    target,
+                    use_qb,
+                    |encoder, _, _| {
+                        self.encode_face_visibility_expansion(scene, encoder);
+                        Ok(())
+                    },
+                )
+            },
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render_offscreen_normals_patch_scene_impl(
         &self,

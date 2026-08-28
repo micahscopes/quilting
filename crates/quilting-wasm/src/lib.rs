@@ -47,6 +47,29 @@ pub async fn mr_init_webgpu_backend() -> Result<JsValue, JsValue> {
         .map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
+#[cfg(all(feature = "webgpu-backend", target_arch = "wasm32"))]
+#[wasm_bindgen(js_name = "mr_initWebGpuPresentation")]
+pub async fn mr_init_webgpu_presentation(
+    canvas_id: &str,
+    width: u32,
+    height: u32,
+) -> Result<JsValue, JsValue> {
+    let window = web_sys::window().ok_or_else(|| JsValue::from_str("window unavailable"))?;
+    let document = window
+        .document()
+        .ok_or_else(|| JsValue::from_str("document unavailable"))?;
+    let canvas = document
+        .get_element_by_id(canvas_id)
+        .ok_or_else(|| JsValue::from_str("WebGPU presentation canvas not found"))?
+        .dyn_into::<web_sys::HtmlCanvasElement>()
+        .map_err(|_| JsValue::from_str("WebGPU presentation element is not a canvas"))?;
+    let diagnostics = webgpu_backend::initialize_presentation(canvas, [width, height])
+        .await
+        .map_err(|error| JsValue::from_str(&error))?;
+    serde_wasm_bindgen::to_value(&diagnostics)
+        .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
 #[cfg(feature = "webgpu-backend")]
 #[wasm_bindgen(js_name = "mr_webGpuBackendDiagnostics")]
 pub fn mr_webgpu_backend_diagnostics() -> JsValue {

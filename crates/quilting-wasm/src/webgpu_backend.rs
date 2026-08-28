@@ -1,10 +1,10 @@
 //! Rollback-safe browser residency for the staged WebGPU backend.
 //!
-//! This module deliberately owns no semantic scene or canvas. The incumbent
-//! WebGL2 renderer remains authoritative while exact packed-atlas, prepared
-//! model, extracted scene, and current frame inputs are mirrored into a
-//! headless WebGPU device. The first live frame target remains offscreen until
-//! image/workload parity permits an explicit presentation-surface cutover.
+//! This module deliberately owns no semantic scene or browser layout. Exact
+//! packed-atlas, prepared-model, extracted-scene, and current-frame inputs can
+//! be mirrored into a headless device for parity or presented through an
+//! application-supplied canvas. Canvas selection remains an explicit startup
+//! decision; a claimed context is never silently repurposed.
 
 use quilting_core::render::{
     RenderFrame, RenderFrameOptions, RenderPoseIdentity, RenderSceneSnapshot, RenderStyle,
@@ -13,8 +13,9 @@ use quilting_core::render::{
 use quilting_renderer::compute::{LodAtlasLookup, PreparedLodModel};
 use quilting_webgpu::{
     LodClassifierDevice, LodClassifierModel, LodPose, OffscreenPatchRenderTarget, PackedPatchAtlas,
-    PatchFrameEncoding, PatchRenderPipeline, PatchRenderScene, PatchRenderSceneUpdate,
-    StagedOffscreenImageReadback, WebGpuAdapterSummary,
+    PatchFrameEncoding, PatchPresentationSurface, PatchRenderPipeline, PatchRenderScene,
+    PatchRenderSceneUpdate, StagedOffscreenImageReadback, SurfacePresentation,
+    WebGpuAdapterSummary,
 };
 use serde::Serialize;
 use std::cell::RefCell;
@@ -35,6 +36,7 @@ struct WebGpuBackend {
     scene: Option<PatchRenderScene>,
     scene_source_revision: Option<u64>,
     target: Option<OffscreenPatchRenderTarget>,
+    presentation: Option<PatchPresentationSurface>,
     last_frame_input: Option<LiveFrameInput>,
     last_face_visibility_bits: Vec<u32>,
     next_face_visibility_bits: Vec<u32>,
@@ -89,6 +91,12 @@ pub(crate) struct WebGpuBackendDiagnostics {
     scene_instances: u32,
     target_ready: bool,
     target_viewport: [u32; 2],
+    presentation_ready: bool,
+    presentation_viewport: [u32; 2],
+    presentation_color_format: Option<String>,
+    presentation_frames: u64,
+    presentation_skips: u64,
+    presentation_losses: u64,
     initialization_attempts: u64,
     atlas_uploads: u64,
     model_uploads: u64,
@@ -114,6 +122,10 @@ pub(crate) struct WebGpuBackendDiagnostics {
 
 impl WebGpuBackend {
     fn diagnostics(&self) -> WebGpuBackendDiagnostics {
+        let presentation = self
+            .presentation
+            .as_ref()
+            .map(PatchPresentationSurface::diagnostics);
         WebGpuBackendDiagnostics {
             state: if self.state.is_empty() {
                 "disabled"
@@ -145,6 +157,24 @@ impl WebGpuBackend {
                 .target
                 .as_ref()
                 .map_or([0, 0], OffscreenPatchRenderTarget::size),
+            presentation_ready: presentation
+                .as_ref()
+                .is_some_and(|presentation| presentation.configured),
+            presentation_viewport: presentation
+                .as_ref()
+                .map_or([0, 0], |presentation| presentation.size),
+            presentation_color_format: presentation
+                .as_ref()
+                .map(|presentation| presentation.color_format.clone()),
+            presentation_frames: presentation
+                .as_ref()
+                .map_or(0, |presentation| presentation.frames_presented),
+            presentation_skips: presentation
+                .as_ref()
+                .map_or(0, |presentation| presentation.frames_skipped),
+            presentation_losses: presentation
+                .as_ref()
+                .map_or(0, |presentation| presentation.surface_losses),
             initialization_attempts: self.initialization_attempts,
             atlas_uploads: self.atlas_uploads,
             model_uploads: self.model_uploads,
@@ -225,6 +255,7 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
                     backend.scene = None;
                     backend.scene_source_revision = None;
                     backend.target = None;
+                    backend.presentation = None;
                     backend.last_frame_input = None;
                     backend.last_face_visibility_bits.clear();
                     backend.next_face_visibility_bits.clear();
@@ -241,6 +272,82 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
             }
         }
     }
+    Ok(diagnostics())
+}
+
+/// Claim an application-selected, previously unclaimed browser canvas and
+/// initialize the live normals presentation pipeline on a compatible device.
+/// A headless device cannot be promoted after the fact because its adapter was
+/// not selected against this surface.
+#[cfg(target_arch = "wasm32")]
+pub(crate) async fn initialize_presentation(
+    canvas: web_sys::HtmlCanvasElement,
+    size: [u32; 2],
+) -> Result<WebGpuBackendDiagnostics, String> {
+    let should_request = BACKEND.with(|slot| {
+        let mut backend = slot.borrow_mut();
+        match backend.state {
+            "ready" if backend.presentation.is_some() => return Ok(false),
+            "ready" => {
+                return Err(
+                    "headless WebGPU backend is already initialized; presentation requires a fresh startup"
+                        .to_string(),
+                );
+            }
+            "initializing" => {
+                return Err("WebGPU backend initialization is already in progress".to_string());
+            }
+            _ => {}
+        }
+        backend.state = "initializing";
+        backend.initialization_attempts = backend.initialization_attempts.saturating_add(1);
+        backend.last_error = None;
+        Ok(true)
+    })?;
+    if !should_request {
+        return Ok(diagnostics());
+    }
+
+    let request = LodClassifierDevice::request_canvas_presentation(
+        canvas,
+        size,
+        "Hyperscope WebGPU presentation",
+    )
+    .await;
+    let (device, adapter, presentation) = match request {
+        Ok(request) => request,
+        Err(error) => return Err(BACKEND.with(|slot| slot.borrow_mut().fail(error))),
+    };
+    let pipeline = device
+        .create_patch_render_pipeline(
+            presentation.color_format(),
+            Some(presentation.depth_format()),
+            1,
+        )
+        .map_err(|error| error.to_string())
+        .map_err(|error| BACKEND.with(|slot| slot.borrow_mut().fail(error)))?;
+    BACKEND.with(|slot| {
+        let mut backend = slot.borrow_mut();
+        backend.device = Some(device);
+        backend.adapter = Some(adapter);
+        backend.atlas = None;
+        backend.model = None;
+        backend.model_source = None;
+        backend.pipeline = Some(pipeline);
+        backend.scene = None;
+        backend.scene_source_revision = None;
+        backend.target = None;
+        backend.presentation = Some(presentation);
+        backend.last_frame_input = None;
+        backend.last_face_visibility_bits.clear();
+        backend.next_face_visibility_bits.clear();
+        backend.last_joint_matrices.clear();
+        backend.last_morph_weights.clear();
+        backend.next_morph_weights.clear();
+        backend.last_logical_submission = RenderSubmissionStats::default();
+        backend.state = "ready";
+        backend.last_error = None;
+    });
     Ok(diagnostics())
 }
 
@@ -446,9 +553,9 @@ pub(crate) fn replace_scene(
     })
 }
 
-/// Execute one current live frame into an offscreen target. This is a measured
-/// shadow only: the WebGL2 canvas remains authoritative and no pixel readback
-/// occurs on the frame path.
+/// Execute one current live frame into either the retained offscreen parity
+/// target or the explicitly selected presentation surface. Neither path reads
+/// pixels back during ordinary rendering.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn submit_frame(
     source_render_call: u64,
@@ -552,7 +659,30 @@ pub(crate) fn submit_frame(
         }
         let visibility_upload_required = backend.last_face_visibility_bits != face_visibility_bits;
 
-        if backend
+        if backend.presentation.is_some() {
+            let resize = {
+                let WebGpuBackend {
+                    device,
+                    presentation,
+                    ..
+                } = &mut *backend;
+                let device = device
+                    .as_ref()
+                    .ok_or_else(|| "ready WebGPU backend has no device".to_string())?;
+                presentation
+                    .as_mut()
+                    .ok_or_else(|| "WebGPU presentation surface disappeared".to_string())?
+                    .resize(device.device(), view.viewport)
+                    .map_err(|error| error.to_string())
+            };
+            if let Err(error) = resize {
+                return Err(backend.reject_frame(
+                    face_visibility_bits,
+                    effective_morph_weights,
+                    error,
+                ));
+            }
+        } else if backend
             .target
             .as_ref()
             .is_none_or(|target| target.size() != view.viewport)
@@ -579,31 +709,19 @@ pub(crate) fn submit_frame(
             backend.target = Some(target);
             backend.target_rebuilds = backend.target_rebuilds.saturating_add(1);
         }
-        let result = (|| {
+        let prepared_frame = (|| {
             let device = backend
                 .device
                 .as_ref()
                 .ok_or_else(|| "ready WebGPU backend has no device".to_string())?;
-            let pipeline = backend
-                .pipeline
-                .as_ref()
-                .ok_or_else(|| "ready WebGPU backend has no render pipeline".to_string())?;
             let model = backend
                 .model
                 .as_ref()
                 .ok_or_else(|| "WebGPU render frame requires model residency".to_string())?;
-            let atlas = backend
-                .atlas
-                .as_ref()
-                .ok_or_else(|| "WebGPU render frame requires atlas residency".to_string())?;
             let scene = backend
                 .scene
                 .as_ref()
                 .ok_or_else(|| "WebGPU render frame requires scene residency".to_string())?;
-            let target = backend
-                .target
-                .as_ref()
-                .ok_or_else(|| "WebGPU render frame requires a target".to_string())?;
             let frame = RenderFrame::build(
                 frame_revision,
                 RenderPoseIdentity {
@@ -632,18 +750,85 @@ pub(crate) fn submit_frame(
                     .write_patch_render_face_visibility_bits(scene, &face_visibility_bits)
                     .map_err(|error| error.to_string())?;
             }
-            device
-                .render_offscreen_normals_patch_scene_with_webgl_clear(
-                    &frame, pipeline, scene, atlas, target, true,
-                )
-                .map_err(|error| error.to_string())
+            Ok::<_, String>(frame)
         })();
+        let result =
+            prepared_frame.and_then(|frame| {
+                if backend.presentation.is_some() {
+                    let WebGpuBackend {
+                        device,
+                        pipeline,
+                        scene,
+                        atlas,
+                        presentation,
+                        ..
+                    } = &mut *backend;
+                    let device = device
+                        .as_ref()
+                        .ok_or_else(|| "ready WebGPU backend has no device".to_string())?;
+                    let pipeline = pipeline
+                        .as_ref()
+                        .ok_or_else(|| "ready WebGPU backend has no render pipeline".to_string())?;
+                    let scene = scene.as_ref().ok_or_else(|| {
+                        "WebGPU render frame requires scene residency".to_string()
+                    })?;
+                    let atlas = atlas.as_ref().ok_or_else(|| {
+                        "WebGPU render frame requires atlas residency".to_string()
+                    })?;
+                    let presentation = presentation
+                        .as_mut()
+                        .ok_or_else(|| "WebGPU presentation surface disappeared".to_string())?;
+                    match device
+                        .present_normals_patch_scene_with_face_visibility(
+                            presentation,
+                            &frame,
+                            pipeline,
+                            scene,
+                            atlas,
+                            true,
+                        )
+                        .map_err(|error| error.to_string())?
+                    {
+                        SurfacePresentation::Presented(encoding) => Ok(Some(encoding)),
+                        SurfacePresentation::Skipped(_) => Ok(None),
+                        SurfacePresentation::RecreateRequired => Err(
+                            "WebGPU presentation surface was lost; reload or use gfx=webgl2"
+                                .to_string(),
+                        ),
+                    }
+                } else {
+                    let device = backend
+                        .device
+                        .as_ref()
+                        .ok_or_else(|| "ready WebGPU backend has no device".to_string())?;
+                    let pipeline = backend
+                        .pipeline
+                        .as_ref()
+                        .ok_or_else(|| "ready WebGPU backend has no render pipeline".to_string())?;
+                    let scene = backend.scene.as_ref().ok_or_else(|| {
+                        "WebGPU render frame requires scene residency".to_string()
+                    })?;
+                    let atlas = backend.atlas.as_ref().ok_or_else(|| {
+                        "WebGPU render frame requires atlas residency".to_string()
+                    })?;
+                    let target = backend
+                        .target
+                        .as_ref()
+                        .ok_or_else(|| "WebGPU render frame requires a target".to_string())?;
+                    device
+                        .render_offscreen_normals_patch_scene_with_webgl_clear(
+                            &frame, pipeline, scene, atlas, target, true,
+                        )
+                        .map(Some)
+                        .map_err(|error| error.to_string())
+                }
+            });
         match result {
-            Ok(PatchFrameEncoding {
+            Ok(Some(PatchFrameEncoding {
                 logical_submission,
                 indirect_draw_calls,
                 source_instance_count,
-            }) => {
+            })) => {
                 backend.frames_submitted = backend.frames_submitted.saturating_add(1);
                 if visibility_upload_required {
                     backend.visibility_uploads = backend.visibility_uploads.saturating_add(1);
@@ -676,6 +861,11 @@ pub(crate) fn submit_frame(
                 backend.last_frame_input = Some(frame_input);
                 backend.last_error = None;
                 Ok(true)
+            }
+            Ok(None) => {
+                backend.next_face_visibility_bits = face_visibility_bits;
+                backend.next_morph_weights = effective_morph_weights;
+                Ok(false)
             }
             Err(error) => {
                 Err(backend.reject_frame(face_visibility_bits, effective_morph_weights, error))
