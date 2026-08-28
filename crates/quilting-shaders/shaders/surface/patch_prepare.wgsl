@@ -23,9 +23,8 @@ struct PreparedPatchRecord {
 }
 
 // Current-pose values are kept separate from the immutable source record.
-// Root records retain authored normals for the established render-time normal
-// path. Adaptive records receive already-posed normals because their
-// restricted controls do not have source vertex indices.
+// Every prepared record receives already-posed normals, avoiding repeated
+// skinning and affine normal transforms at each tessellated render vertex.
 struct PosedPatchControls {
     pose_position_a: vec3<f32>,
     pose_position_b: vec3<f32>,
@@ -119,6 +118,9 @@ fn prepare_patch_record(
     result.record_lod_info = lod_info;
     result.record_vertex_lod = vec4<f32>(face_info.yzw, face_info.x);
     result.record_uv_c_prepare = vec4<f32>(source.record_uv_c_prepare.xy, 0.0, 1.0);
+    result.record_normal_a = vec4<f32>(posed.pose_normal_a, source.record_normal_a.w);
+    result.record_normal_b = vec4<f32>(posed.pose_normal_b, source.record_normal_b.w);
+    result.record_normal_c = vec4<f32>(posed.pose_normal_c, source.record_normal_c.w);
 
     let leaf_depth = patch_leaf_depth(leaf_meta);
     if leaf_depth > 0 {

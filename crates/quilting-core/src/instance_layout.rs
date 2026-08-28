@@ -30,7 +30,8 @@
 //!   vertex. The rest of the codebase stores quaternions `(w, x, y, z)`, so
 //!   this slot is the one deliberate exception. GPU-prepared adaptive leaves
 //!   instead tag `p0.x` with negative `(depth + 1)` and store the dyadic path
-//!   in `p1.x`; their normals have already been posed before restriction.
+//!   in `p1.x`. Every GPU-prepared record carries already-posed normals;
+//!   adaptive normals are additionally restricted before rendering.
 //! - Locations 4, 5, 6 carry the source patch's rational QB weights. Ordinary
 //!   triangle meshes use identity weights; fitted/remeshed patches must retain
 //!   their non-identity weights through preparation and rendering. The shader

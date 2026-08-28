@@ -1,4 +1,4 @@
-#import quilting::surface::patch_prepare::{PreparedPatchRecord, PosedPatchControls, patch_leaf_depth, prepare_patch_record}
+#import quilting::surface::patch_prepare::{PreparedPatchRecord, PosedPatchControls, prepare_patch_record}
 #import quilting::compute::patch_prepare_types::{PatchTopologyRecord, PatchSubjectState, PatchPrepareDispatch}
 #import quilting::compute::pose::{animated_position, animated_normal}
 
@@ -48,23 +48,19 @@ fn prepare_patch_instances(@builtin(global_invocation_id) invocation: vec3<u32>)
         dispatch.counts.w,
     ), 1.0)).xyz;
 
-    // Preserve the established root-record semantics. Adaptive controls lose
-    // source vertex IDs, so only they bake posed normals during preparation;
-    // roots retain authored normals for the existing render-time path.
-    var normal_a = source.record_normal_a.xyz;
-    var normal_b = source.record_normal_b.xyz;
-    var normal_c = source.record_normal_c.xyz;
-    if patch_leaf_depth(topology.leaf_meta) > 0 {
-        normal_a = (subject.normal_model * vec4<f32>(animated_normal(
-            normal_a, vertex_a, dispatch.counts.z,
-        ), 0.0)).xyz;
-        normal_b = (subject.normal_model * vec4<f32>(animated_normal(
-            normal_b, vertex_b, dispatch.counts.z,
-        ), 0.0)).xyz;
-        normal_c = (subject.normal_model * vec4<f32>(animated_normal(
-            normal_c, vertex_c, dispatch.counts.z,
-        ), 0.0)).xyz;
-    }
+    // A prepared record is fully posed: do normal skinning and the affine
+    // normal transform once per patch control instead of once per generated
+    // tessellation vertex. Root controls retain their source vertex IDs for
+    // picking and diagnostics, but their normals are no longer source-space.
+    let normal_a = (subject.normal_model * vec4<f32>(animated_normal(
+        source.record_normal_a.xyz, vertex_a, dispatch.counts.z,
+    ), 0.0)).xyz;
+    let normal_b = (subject.normal_model * vec4<f32>(animated_normal(
+        source.record_normal_b.xyz, vertex_b, dispatch.counts.z,
+    ), 0.0)).xyz;
+    let normal_c = (subject.normal_model * vec4<f32>(animated_normal(
+        source.record_normal_c.xyz, vertex_c, dispatch.counts.z,
+    ), 0.0)).xyz;
 
     prepared_records[patch_index] = prepare_patch_record(
         source,

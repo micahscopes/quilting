@@ -4,7 +4,7 @@
 
 #import quilting::math::quaternion::{qmul, qconj, qinv, q_to_point}
 #import quilting::surface::qb_eval::eval_qb
-#import quilting::surface::patch_prepare::{PreparedPatchRecord, PosedPatchControls, patch_leaf_depth, dyadic_leaf_domain, prepare_patch_record}
+#import quilting::surface::patch_prepare::{PreparedPatchRecord, PosedPatchControls, dyadic_leaf_domain, prepare_patch_record}
 #import quilting::viz::density::edge_log2_density
 
 struct Uniforms {
@@ -520,18 +520,12 @@ fn prepare_patches(in: PatchPrepareInput) -> PreparedPatchOutput {
     let posed_p0 = posed_position(source.record_position_a);
     let posed_p1 = posed_position(source.record_position_b);
     let posed_p2 = posed_position(source.record_position_c);
-    var posed_n0 = source.record_normal_a.xyz;
-    var posed_n1 = source.record_normal_b.xyz;
-    var posed_n2 = source.record_normal_c.xyz;
-    let leaf_depth = patch_leaf_depth(in.leaf_meta);
-    if leaf_depth > 0 {
-        // Mid-edge controls have no source vertex ID. Pose the three authored
-        // normals first, then restrict that linear field so adaptive records
-        // never perform skinning lookups with fabricated indices.
-        posed_n0 = posed_normal(source.record_normal_a.xyz, i32(source.record_position_a.x));
-        posed_n1 = posed_normal(source.record_normal_b.xyz, i32(source.record_position_b.x));
-        posed_n2 = posed_normal(source.record_normal_c.xyz, i32(source.record_position_c.x));
-    }
+    // Pose all prepared normals once per control. Adaptive restriction then
+    // interpolates this posed field; root records also avoid repeating the
+    // same work for every tessellation vertex during the draw pass.
+    let posed_n0 = posed_normal(source.record_normal_a.xyz, i32(source.record_position_a.x));
+    let posed_n1 = posed_normal(source.record_normal_b.xyz, i32(source.record_position_b.x));
+    let posed_n2 = posed_normal(source.record_normal_c.xyz, i32(source.record_position_c.x));
     let prepared = prepare_patch_record(
         source,
         in.lod_info,
@@ -760,19 +754,20 @@ fn vs_main(in: VertexInput) -> VertexOutput {
         pos = pos * (POSITION_CLAMP / pos_r);
     }
 
-    // Smooth normals: skin them if GPU skinning is active, then transform through Möbius.
+    // Prepared normals are already skinned and affine-transformed. Preserve
+    // the complete legacy pose path only for an unprepared fallback record.
     var sn0 = in.smooth_n0.xyz;
     var sn1 = in.smooth_n1.xyz;
     var sn2 = in.smooth_n2.xyz;
-    if !adaptive && joints.num_joints > 0 {
-        let vi0 = i32(in.p0.x);
-        let vi1 = i32(in.p1.x);
-        let vi2 = i32(in.p2.x);
-        sn0 = skin_normal(sn0, vi0);
-        sn1 = skin_normal(sn1, vi1);
-        sn2 = skin_normal(sn2, vi2);
-    }
-    if !adaptive {
+    if !prepared {
+        if joints.num_joints > 0 {
+            let vi0 = i32(in.p0.x);
+            let vi1 = i32(in.p1.x);
+            let vi2 = i32(in.p2.x);
+            sn0 = skin_normal(sn0, vi0);
+            sn1 = skin_normal(sn1, vi1);
+            sn2 = skin_normal(sn2, vi2);
+        }
         sn0 = (u.normal_model * vec4<f32>(sn0, 0.0)).xyz;
         sn1 = (u.normal_model * vec4<f32>(sn1, 0.0)).xyz;
         sn2 = (u.normal_model * vec4<f32>(sn2, 0.0)).xyz;

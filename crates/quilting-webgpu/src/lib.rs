@@ -100,7 +100,9 @@ fn patch_preparation_conformance_words() -> (
     for (word, value) in subject[..16].iter_mut().zip(identity_matrix()) {
         *word = bits(value);
     }
-    for (word, value) in subject[16..].iter_mut().zip(identity_matrix()) {
+    let mut normal_model = identity_matrix();
+    normal_model[10] = 2.0;
+    for (word, value) in subject[16..].iter_mut().zip(normal_model) {
         *word = bits(value);
     }
 
@@ -122,6 +124,9 @@ fn patch_preparation_conformance_words() -> (
     }
     root[38] = bits(0.0);
     root[39] = bits(1.0);
+    for word in [42, 46, 50] {
+        root[word] = bits(2.0);
+    }
 
     let mut child = source;
     for (corner, tagged_position) in [
@@ -148,6 +153,9 @@ fn patch_preparation_conformance_words() -> (
     }
     child[38] = bits(0.0);
     child[39] = bits(1.0);
+    for word in [42, 46, 50] {
+        child[word] = bits(2.0);
+    }
 
     (
         WgslPatchPreparationSceneWords {
