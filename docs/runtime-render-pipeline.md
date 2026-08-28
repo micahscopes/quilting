@@ -442,11 +442,25 @@ visibility, compacted range/survivor, aligned batch-index, and indirect buffers
 for a no-readback render path. An authoritative backend should copy only
 bounded, delayed telemetry to the CPU.
 
-The next cut is renderer integration: compute-prepared QB instance records,
-the production WGSL vertex/fragment pipelines, shared `RenderFrame` command
-ordering, and WebGL2 image/workload parity behind an explicit backend switch.
-That cut—not the already-proven shadow executor—is what finally removes the
-live four-byte-per-face readback and rejected atlas vertex invocations.
+Patch preparation now writes the exact 208-byte prepared record on-device, and
+the first production WGSL graphics pipeline pulls those records through the
+same pure rational-QB/Möbius evaluator used by WebGL2. A validated
+`RenderSceneSnapshot`/`RenderFrame` executor coalesces the canonical all-batch
+prepare and visibility phases, selects a device-resident conformal frame per
+batch, derives winding from semantic orientation plus S3 parity, and issues
+portable compacted indexed-indirect normals draws. Native Vulkan and Chromium
+both execute a two-batch retained-root/adaptive-overlay frame; the browser gate
+reports two shared-frame draws and a nonempty ten-pixel footprint with no
+console warning or error.
+
+The next cut is application residency and renderer integration: resolve the
+live canonical atlas cache into WebGPU buffers, feed the same-pose visibility
+producer without CPU upload, attach the extracted frame to a browser surface,
+and add WebGL2 image/workload parity behind an explicit backend switch. PBR,
+wire, LOD color, stretch, picking, material/texture binding, and postprocess
+commands still reject explicitly rather than silently lowering to normals.
+That cut is what finally removes the live four-byte-per-face readback and
+rejected atlas vertex invocations from an authoritative runtime.
 
 The old JavaScript renderer's useful idea was memoizing tessellation topology
 and prepared meshes. The retained atlas, versioned browser cache, and stable

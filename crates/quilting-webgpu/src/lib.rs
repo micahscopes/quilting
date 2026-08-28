@@ -1,11 +1,18 @@
-//! Shadow WebGPU execution for Quilting's two-pass LOD classifier.
+//! Staged WebGPU execution for Quilting's shared render contract.
 //!
-//! This crate is intentionally outside the current WebGL2 authority path. It
-//! consumes the exact backend-neutral payload frozen by `quilting-renderer`,
-//! retains device pipelines and model buffers, and returns packed words for
-//! conformance comparison. It owns no scene, FRP, or replicated state.
+//! This crate remains outside the current WebGL2 authority path while backend
+//! parity is established. It consumes backend-neutral `RenderSceneSnapshot`
+//! and `RenderFrame` values, retains only device pipelines/buffers, and owns no
+//! semantic scene, FRP, replicated state, canvas, or presentation lifecycle.
 
 use futures_channel::oneshot;
+use quilting_core::batch::{RenderBatchId, RenderBatchKey, RenderBatchLayer, RenderBatchMember};
+use quilting_core::render::{
+    FocusFieldPacket, PbrDrawClass, RenderBatchSnapshot, RenderCommand, RenderEntityTransform,
+    RenderFrame, RenderFrameOptions, RenderGeometry, RenderPass, RenderPoseIdentity,
+    RenderSceneSnapshot, RenderStyle, RenderSubmissionStats, RenderView,
+};
+use quilting_core::screen_partition::ScreenPatchLeafId;
 use quilting_renderer::compute::{
     pack_wgsl_lod_atlas_words, pack_wgsl_lod_dispatch_words, pack_wgsl_lod_model_words,
     pack_wgsl_lod_subject_words, pack_wgsl_source_visibility_words, prepare_lod_atlas_lookup,
@@ -14,6 +21,7 @@ use quilting_renderer::compute::{
     WgslVisibilityCompactionSceneWords,
 };
 use std::borrow::Cow;
+use std::sync::Mutex;
 use wgpu::util::DeviceExt;
 
 const LOD_WORKGROUP_SIZE: u32 = 64;
@@ -95,8 +103,8 @@ fn patch_preparation_conformance_words() -> (
         record
     };
     let topology = vec![
-        topology_record([2.0, 4.0, 8.0, 5.0], [0.0, 3.0, 6.0, 9.0], [0.0, 0.0]),
-        topology_record([1.0, 2.0, 4.0, 3.0], [0.0, 4.0, 5.0, 6.0], [1.0, 3.0]),
+        topology_record([8.0, 4.0, 2.0, 5.0], [0.0, 4.0, 8.0, 16.0], [0.0, 0.0]),
+        topology_record([2.0, 4.0, 1.0, 3.0], [0.0, 4.0, 8.0, 8.0], [1.0, 3.0]),
     ];
     let mut subject = [0u32; 32];
     for (word, value) in subject[..16].iter_mut().zip(identity_matrix()) {
@@ -118,10 +126,10 @@ fn patch_preparation_conformance_words() -> (
             *word = bits(value);
         }
     }
-    for (word, value) in root[24..28].iter_mut().zip([2.0, 4.0, 8.0, 5.0]) {
+    for (word, value) in root[24..28].iter_mut().zip([8.0, 4.0, 2.0, 5.0]) {
         *word = bits(value);
     }
-    for (word, value) in root[28..32].iter_mut().zip([3.0, 6.0, 9.0, 0.0]) {
+    for (word, value) in root[28..32].iter_mut().zip([4.0, 8.0, 16.0, 0.0]) {
         *word = bits(value);
     }
     root[38] = bits(0.0);
@@ -144,10 +152,10 @@ fn patch_preparation_conformance_words() -> (
             *word = bits(value);
         }
     }
-    for (word, value) in child[24..28].iter_mut().zip([1.0, 2.0, 4.0, 3.0]) {
+    for (word, value) in child[24..28].iter_mut().zip([2.0, 4.0, 1.0, 3.0]) {
         *word = bits(value);
     }
-    for (word, value) in child[28..32].iter_mut().zip([4.0, 5.0, 6.0, 0.0]) {
+    for (word, value) in child[28..32].iter_mut().zip([4.0, 8.0, 8.0, 0.0]) {
         *word = bits(value);
     }
     for (word, value) in child[32..38].iter_mut().zip([0.5, 0.0, 0.5, 0.5, 0.0, 0.5]) {
@@ -209,6 +217,7 @@ pub struct LodDeviceConformance {
     pub coherence_words: usize,
     pub prepared_patch_words: usize,
     pub rendered_patch_pixels: usize,
+    pub shared_frame_draws: usize,
     pub compacted_source_words: usize,
     pub compacted_range_words: usize,
     pub indirect_argument_words: usize,
@@ -237,6 +246,23 @@ pub struct PatchRenderFrame {
 }
 
 impl PatchRenderFrame {
+    /// Derive one backend record from the shared frame and a retained batch.
+    /// Affine model/normal state was already consumed by patch preparation;
+    /// only the batch-local conformal map remains dynamic at evaluation time.
+    pub fn from_render_frame(
+        frame: &RenderFrame,
+        batch: &quilting_core::render::RenderBatchSnapshot,
+        use_qb: bool,
+    ) -> Self {
+        Self {
+            mvp: frame.view.mvp,
+            mv: frame.view.model_view,
+            use_qb,
+            mobius: batch.transform.mobius,
+            camera_position: frame.view.camera_position,
+        }
+    }
+
     fn to_words(self) -> Result<[u32; PATCH_RENDER_FRAME_WORDS], LodWebGpuError> {
         if self
             .mvp
@@ -272,6 +298,37 @@ impl PatchRenderFrame {
 pub enum PatchWinding {
     CounterClockwise,
     Clockwise,
+}
+
+/// Canonical atlas buffers selected for one retained render batch. Ownership
+/// stays with the backend atlas cache; a frame merely borrows the exact entry
+/// named by `RenderBatchId::key`.
+pub struct PatchAtlasDraw<'a> {
+    pub barycentric_buffer: &'a wgpu::Buffer,
+    pub index_buffer: &'a wgpu::Buffer,
+    pub index_format: wgpu::IndexFormat,
+    pub index_count: u32,
+}
+
+/// Attachments for the current WebGPU patch pass. Clearing is explicit so an
+/// application can compose Quilting into an existing render graph without the
+/// backend inventing frame ownership.
+pub struct PatchRenderTarget<'a> {
+    pub color_view: &'a wgpu::TextureView,
+    pub resolve_target: Option<&'a wgpu::TextureView>,
+    pub depth_stencil_view: Option<&'a wgpu::TextureView>,
+    pub clear_color: Option<wgpu::Color>,
+    pub clear_depth: Option<f32>,
+}
+
+/// CPU-visible facts about encoding one shared frame. Compacted survivor
+/// counts deliberately remain device-local; delayed telemetry may observe
+/// them later without turning this result into a readback boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PatchFrameEncoding {
+    pub logical_submission: RenderSubmissionStats,
+    pub indirect_draw_calls: u32,
+    pub source_instance_count: u32,
 }
 
 /// Device-local pipelines shared by every uploaded classifier model.
@@ -327,6 +384,7 @@ pub struct PatchRenderPipeline {
 pub struct PatchRenderBindings {
     frame_count: u32,
     frames: wgpu::Buffer,
+    frame_words: Mutex<Vec<u32>>,
     bind_group: wgpu::BindGroup,
 }
 
@@ -448,6 +506,19 @@ impl LodClassifierDevice {
             visibility_scan_pipeline,
             visibility_scatter_pipeline,
         })
+    }
+
+    /// Borrow the application-supplied device for attachment and atlas
+    /// residency creation. Quilting retains pipelines, not ownership of the
+    /// surrounding render graph.
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    /// Borrow the application-supplied queue. Frame uploads are ordered before
+    /// the caller's subsequent command submission on this same queue.
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
     }
 
     /// Run the same minimum exact matrix on native and browser devices.
@@ -576,7 +647,7 @@ impl LodClassifierDevice {
             )));
         }
         let prepared_patch_words = prepared_patches.len() * PREPARED_PATCH_RECORD_WORDS;
-        let rendered_patch_pixels = self
+        let (rendered_patch_pixels, shared_frame_draws) = self
             .validate_patch_render_conformance(
                 &patch_model,
                 &patch_scene,
@@ -625,6 +696,7 @@ impl LodClassifierDevice {
             coherence_words: actual.len(),
             prepared_patch_words,
             rendered_patch_pixels,
+            shared_frame_draws,
             compacted_source_words: compacted.compacted_source_instances.len(),
             compacted_range_words: compacted.compacted_ranges.len() * 5,
             indirect_argument_words: compacted.indirect_arguments.len() * 5,
@@ -1065,6 +1137,14 @@ impl LodClassifierDevice {
             .ok_or_else(|| {
                 LodWebGpuError::Payload("patch render frame table is too large".to_string())
             })?;
+        let frame_word_count = usize::try_from(visibility.batch_count)
+            .ok()
+            .and_then(|count| count.checked_mul(PATCH_RENDER_FRAME_WORDS))
+            .ok_or_else(|| {
+                LodWebGpuError::Payload(
+                    "patch render frame staging table exceeds address space".to_string(),
+                )
+            })?;
         let frames = gpu_buffer(
             &self.device,
             "patch render frame table",
@@ -1092,6 +1172,7 @@ impl LodClassifierDevice {
         Ok(PatchRenderBindings {
             frame_count: visibility.batch_count,
             frames,
+            frame_words: Mutex::new(vec![0; frame_word_count]),
             bind_group,
         })
     }
@@ -1112,9 +1193,11 @@ impl LodClassifierDevice {
                 bindings.frame_count,
             )));
         }
-        let mut words = Vec::with_capacity(frames.len() * PATCH_RENDER_FRAME_WORDS);
-        for frame in frames {
-            words.extend(frame.to_words()?);
+        let mut words = bindings.frame_words.lock().map_err(|_| {
+            LodWebGpuError::Payload("patch render frame staging lock was poisoned".to_string())
+        })?;
+        for (destination, frame) in words.chunks_exact_mut(PATCH_RENDER_FRAME_WORDS).zip(frames) {
+            destination.copy_from_slice(&frame.to_words()?);
         }
         debug_assert_eq!(
             std::mem::size_of_val(words.as_slice()) as u64,
@@ -1134,6 +1217,203 @@ impl LodClassifierDevice {
         frame: PatchRenderFrame,
     ) -> Result<(), LodWebGpuError> {
         self.write_patch_render_frames(bindings, &[frame])
+    }
+
+    /// Encode the currently supported production subset of a shared frame:
+    /// prepared rational-QB patches in normals mode. The canonical command
+    /// sequence proves that every logical prepare precedes every visibility
+    /// resolution, so each scene-wide compute phase is safely coalesced once.
+    ///
+    /// `encode_visibility` runs after patch preparation and before compaction.
+    /// It may dispatch a same-device classifier into
+    /// [`VisibilityCompactionScene::source_visibility_buffer`], or be a no-op
+    /// when the caller already uploaded an exact current-pose stream. No map or
+    /// copy to CPU memory occurs here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_normals_render_frame<'resource, VisibilityProducer>(
+        &'resource self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &RenderFrame,
+        scene: &RenderSceneSnapshot,
+        pipeline: &'resource PatchRenderPipeline,
+        bindings: &'resource PatchRenderBindings,
+        patches: &'resource PatchPreparationScene,
+        visibility: &'resource VisibilityCompactionScene,
+        atlases: &'resource [PatchAtlasDraw<'resource>],
+        target: PatchRenderTarget<'resource>,
+        use_qb: bool,
+        encode_visibility: VisibilityProducer,
+    ) -> Result<PatchFrameEncoding, LodWebGpuError>
+    where
+        VisibilityProducer: FnOnce(
+            &mut wgpu::CommandEncoder,
+            &PatchPreparationScene,
+            &VisibilityCompactionScene,
+        ) -> Result<(), LodWebGpuError>,
+    {
+        frame
+            .validate(scene)
+            .map_err(|error| LodWebGpuError::Payload(format!("render frame contract: {error}")))?;
+        if frame.style != RenderStyle::Normals {
+            return Err(LodWebGpuError::Payload(format!(
+                "WebGPU patch renderer does not yet support {:?} style",
+                frame.style,
+            )));
+        }
+        if scene.batches.is_empty() {
+            return Err(LodWebGpuError::Payload(
+                "WebGPU patch renderer requires a nonempty retained scene".to_string(),
+            ));
+        }
+        let batch_count = u32::try_from(scene.batches.len()).map_err(|_| {
+            LodWebGpuError::Payload("render scene batch count exceeds u32".to_string())
+        })?;
+        let source_instance_count = scene.batches.iter().try_fold(0u32, |total, batch| {
+            let count = u32::try_from(batch.members.len()).map_err(|_| {
+                LodWebGpuError::Payload("render batch instance count exceeds u32".to_string())
+            })?;
+            total.checked_add(count).ok_or_else(|| {
+                LodWebGpuError::Payload("render scene instance count exceeds u32".to_string())
+            })
+        })?;
+        if patches.patch_count != source_instance_count
+            || visibility.source_count != source_instance_count
+            || visibility.batch_count != batch_count
+            || bindings.frame_count != batch_count
+            || atlases.len() != scene.batches.len()
+        {
+            return Err(LodWebGpuError::Payload(format!(
+                "WebGPU render residency does not match scene: batches={batch_count}, instances={source_instance_count}, patch_records={}, visibility={}/{}, frames={}, atlases={}",
+                patches.patch_count,
+                visibility.batch_count,
+                visibility.source_count,
+                bindings.frame_count,
+                atlases.len(),
+            )));
+        }
+
+        for (batch_index, (batch, atlas)) in scene.batches.iter().zip(atlases).enumerate() {
+            if atlas.index_count != batch.triangle_index_count {
+                return Err(LodWebGpuError::Payload(format!(
+                    "WebGPU atlas {batch_index} has {} triangle indices; scene requires {}",
+                    atlas.index_count, batch.triangle_index_count,
+                )));
+            }
+            let index_width = match atlas.index_format {
+                wgpu::IndexFormat::Uint16 => 2,
+                wgpu::IndexFormat::Uint32 => 4,
+            };
+            let required_index_bytes = u64::from(atlas.index_count) * index_width;
+            if atlas.index_buffer.size() < required_index_bytes {
+                return Err(LodWebGpuError::Payload(format!(
+                    "WebGPU atlas {batch_index} index buffer is {} bytes; {required_index_bytes} required",
+                    atlas.index_buffer.size(),
+                )));
+            }
+        }
+
+        // Keep unsupported commands explicit even after shared validation, so
+        // extending RenderFrame cannot silently lower to the wrong pipeline.
+        for command in &frame.commands {
+            match command {
+                RenderCommand::PreparePatches { .. }
+                | RenderCommand::ResolveVisibility { .. }
+                | RenderCommand::DrawPatches {
+                    pass: RenderPass::Normals,
+                    geometry: RenderGeometry::Triangles,
+                    ..
+                } => {}
+                unsupported => {
+                    return Err(LodWebGpuError::Payload(format!(
+                        "WebGPU patch renderer does not yet support command {unsupported:?}",
+                    )));
+                }
+            }
+        }
+
+        let render_frames = scene
+            .batches
+            .iter()
+            .map(|batch| PatchRenderFrame::from_render_frame(frame, batch, use_qb))
+            .collect::<Vec<_>>();
+        self.write_patch_render_frames(bindings, &render_frames)?;
+
+        self.encode_patch_preparation(patches, encoder);
+        encode_visibility(encoder, patches, visibility)?;
+        self.encode_visibility_compaction(visibility, encoder);
+
+        let mut indirect_draw_calls = 0u32;
+        {
+            let color_load = target
+                .clear_color
+                .map_or(wgpu::LoadOp::Load, wgpu::LoadOp::Clear);
+            let depth_stencil_attachment =
+                target
+                    .depth_stencil_view
+                    .map(|view| wgpu::RenderPassDepthStencilAttachment {
+                        view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: target
+                                .clear_depth
+                                .map_or(wgpu::LoadOp::Load, wgpu::LoadOp::Clear),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    });
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("quilting shared normals frame"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target.color_view,
+                    depth_slice: None,
+                    resolve_target: target.resolve_target,
+                    ops: wgpu::Operations {
+                        load: color_load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            for command in &frame.commands {
+                let RenderCommand::DrawPatches { batch_index, .. } = *command else {
+                    continue;
+                };
+                let batch = &scene.batches[batch_index as usize];
+                let atlas = &atlases[batch_index as usize];
+                let permutation_sign = if batch.id.key.parity_bucket == 0 {
+                    1
+                } else {
+                    -1
+                };
+                let winding = if batch.transform.orientation_sign * permutation_sign < 0 {
+                    PatchWinding::Clockwise
+                } else {
+                    PatchWinding::CounterClockwise
+                };
+                pipeline.draw_batch(
+                    &mut render_pass,
+                    bindings,
+                    visibility,
+                    atlas.barycentric_buffer,
+                    atlas.index_buffer,
+                    atlas.index_format,
+                    batch_index,
+                    winding,
+                )?;
+                indirect_draw_calls = indirect_draw_calls.saturating_add(1);
+            }
+        }
+
+        let logical_submission = frame
+            .expected_submission_stats(scene)
+            .map_err(|error| LodWebGpuError::Payload(format!("render frame contract: {error}")))?;
+        Ok(PatchFrameEncoding {
+            logical_submission,
+            indirect_draw_calls,
+            source_instance_count,
+        })
     }
 
     /// Upload retained batch shape and static eligibility once. Output buffers
@@ -1517,33 +1797,118 @@ impl LodClassifierDevice {
         patches: &PatchPreparationScene,
         pose: LodPose<'_>,
         num_joints: u32,
-    ) -> Result<usize, LodWebGpuError> {
+    ) -> Result<(usize, usize), LodWebGpuError> {
         const WIDTH: u32 = 32;
         const HEIGHT: u32 = 32;
         const PADDED_BYTES_PER_ROW: u32 = 256;
 
+        let normal_model = {
+            let mut matrix = identity_matrix();
+            matrix[10] = 2.0;
+            matrix
+        };
+        let batch = |material_index,
+                     layer,
+                     lod,
+                     edge_lods,
+                     parity_bucket,
+                     face_index,
+                     leaf_id,
+                     permutation_index,
+                     vertex_lods| RenderBatchSnapshot {
+            id: RenderBatchId {
+                key: RenderBatchKey {
+                    lod,
+                    parity_bucket,
+                    material_index,
+                    render_node_index: 0,
+                },
+                layer,
+            },
+            members: vec![RenderBatchMember {
+                face_index,
+                leaf_id,
+                node_index: 7,
+                edge_lods,
+                permutation_index,
+                vertex_lods,
+            }],
+            triangle_index_count: 3,
+            line_index_count: 6,
+            transform: RenderEntityTransform {
+                mobius: identity_mobius(),
+                orientation_sign: 1,
+                euclidean_model: identity_matrix(),
+                euclidean_normal: normal_model,
+            },
+            enabled: true,
+            pbr_class: PbrDrawClass::Opaque,
+        };
+        let render_scene = RenderSceneSnapshot {
+            revision: 73,
+            suppressed_root_faces: vec![0],
+            batches: vec![
+                batch(
+                    0,
+                    RenderBatchLayer::RetainedRoot,
+                    [2, 4, 8],
+                    [8, 4, 2],
+                    1,
+                    0,
+                    ScreenPatchLeafId::ROOT,
+                    5,
+                    [4, 8, 16],
+                ),
+                batch(
+                    1,
+                    RenderBatchLayer::AdaptiveOverlay,
+                    [1, 2, 4],
+                    [2, 4, 1],
+                    0,
+                    0,
+                    ScreenPatchLeafId::ROOT.child(3).ok_or_else(|| {
+                        LodWebGpuError::Conformance(
+                            "missing adaptive conformance child".to_string(),
+                        )
+                    })?,
+                    3,
+                    [4, 8, 8],
+                ),
+            ],
+        };
+        let mvp = [
+            0.5, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.75, -0.25, 0.5, 1.0,
+        ];
+        let render_frame = RenderFrame::build(
+            11,
+            RenderPoseIdentity {
+                asset_revision: 5,
+                pose_revision: 9,
+            },
+            RenderStyle::Normals,
+            RenderView {
+                viewport: [WIDTH, HEIGHT],
+                mvp,
+                model_view: identity_matrix(),
+                camera_position: [0.0, 0.0, 4.0],
+                selected_node: None,
+                focus: FocusFieldPacket::default(),
+            },
+            RenderFrameOptions::default(),
+            &render_scene,
+        )
+        .map_err(|error| {
+            LodWebGpuError::Conformance(format!("shared render-frame fixture is invalid: {error}",))
+        })?;
         let visibility_words = WgslVisibilityCompactionSceneWords {
-            uniform: [1, patches.patch_count, 0, 0],
-            batches: vec![[0, patches.patch_count, 3, 0]],
-            source_eligibility: vec![1; patches.patch_count as usize],
+            uniform: [2, patches.patch_count, 0, 0],
+            batches: vec![[0, 1, 3, 0], [1, 1, 3, 0]],
+            source_eligibility: vec![0, 1],
         };
         let visibility = self.upload_visibility_compaction_scene(visibility_words)?;
         let pipeline =
             self.create_patch_render_pipeline(wgpu::TextureFormat::Rgba8Unorm, None, 1)?;
         let bindings = self.create_patch_render_bindings(&pipeline, patches, &visibility)?;
-        let mvp = [
-            0.5, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.75, -0.25, 0.5, 1.0,
-        ];
-        self.write_patch_render_frame(
-            &bindings,
-            PatchRenderFrame {
-                mvp,
-                mv: identity_matrix(),
-                use_qb: true,
-                mobius: identity_mobius(),
-                camera_position: [0.0, 0.0, 4.0],
-            },
-        )?;
         self.write_patch_pose(model, patches, pose, num_joints)?;
         let source_visibility = vec![1; patches.patch_count as usize];
         self.write_source_visibility(&visibility, &source_visibility)?;
@@ -1593,35 +1958,46 @@ impl LodClassifierDevice {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("patch prepare compact render conformance"),
             });
-        self.encode_patch_preparation(patches, &mut encoder);
-        self.encode_visibility_compaction(&visibility, &mut encoder);
+        let atlas = || PatchAtlasDraw {
+            barycentric_buffer: &barycentric_buffer,
+            index_buffer: &index_buffer,
+            index_format: wgpu::IndexFormat::Uint32,
+            index_count: 3,
+        };
+        let atlases = [atlas(), atlas()];
+        let encoding = self.encode_normals_render_frame(
+            &mut encoder,
+            &render_frame,
+            &render_scene,
+            &pipeline,
+            &bindings,
+            patches,
+            &visibility,
+            &atlases,
+            PatchRenderTarget {
+                color_view: &target_view,
+                resolve_target: None,
+                depth_stencil_view: None,
+                clear_color: Some(wgpu::Color::TRANSPARENT),
+                clear_depth: None,
+            },
+            true,
+            |_, _, _| Ok(()),
+        )?;
+        if encoding.indirect_draw_calls != 2
+            || encoding.source_instance_count != 2
+            || encoding.logical_submission
+                != render_frame
+                    .expected_submission_stats(&render_scene)
+                    .map_err(|error| {
+                        LodWebGpuError::Conformance(format!(
+                            "shared render-frame stats are invalid: {error}",
+                        ))
+                    })?
         {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("patch render conformance pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pipeline.draw_batch(
-                &mut pass,
-                &bindings,
-                &visibility,
-                &barycentric_buffer,
-                &index_buffer,
-                wgpu::IndexFormat::Uint32,
-                0,
-                PatchWinding::CounterClockwise,
-            )?;
+            return Err(LodWebGpuError::Conformance(format!(
+                "shared render-frame encoding mismatch: {encoding:?}",
+            )));
         }
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
@@ -1663,7 +2039,7 @@ impl LodClassifierDevice {
                 "patch render produced an implausible {rendered}-pixel footprint"
             )));
         }
-        Ok(rendered)
+        Ok((rendered, encoding.indirect_draw_calls as usize))
     }
 
     /// Prove that portable zero-based arguments emitted by compaction can be
@@ -2202,14 +2578,6 @@ impl LodClassifierDevice {
         readback.unmap();
         Ok(packed)
     }
-
-    pub fn device(&self) -> &wgpu::Device {
-        &self.device
-    }
-
-    pub fn queue(&self) -> &wgpu::Queue {
-        &self.queue
-    }
 }
 
 impl VisibilityCompactionScene {
@@ -2428,7 +2796,7 @@ pub async fn run_browser_lod_conformance() -> Result<String, wasm_bindgen::JsVal
         .map_err(browser_error)?;
     Ok(format!(
         "adapter={} backend={:?} full_pipeline_words={} coherence_words={} \
-         prepared_patch_words={} rendered_patch_pixels={} compacted_source_words={} \
+         prepared_patch_words={} rendered_patch_pixels={} shared_frame_draws={} compacted_source_words={} \
          compacted_range_words={} indirect_argument_words={} indirect_draws={}",
         adapter_info.name,
         adapter_info.backend,
@@ -2436,6 +2804,7 @@ pub async fn run_browser_lod_conformance() -> Result<String, wasm_bindgen::JsVal
         report.coherence_words,
         report.prepared_patch_words,
         report.rendered_patch_pixels,
+        report.shared_frame_draws,
         report.compacted_source_words,
         report.compacted_range_words,
         report.indirect_argument_words,
