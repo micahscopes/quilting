@@ -622,9 +622,19 @@ pub struct PatchPreparationScene {
 /// Winding is pipeline state in WebGPU, so both variants share one explicit
 /// bind-group layout instead of recompiling or mutating state per batch.
 pub struct PatchRenderPipeline {
+    style: RenderStyle,
     bind_group_layout: wgpu::BindGroupLayout,
     counter_clockwise: wgpu::RenderPipeline,
     clockwise: wgpu::RenderPipeline,
+}
+
+/// Retained triangle-diagnostic pipelines sharing one shader module and bind
+/// group layout. A scene can switch among these styles without rebuilding its
+/// bindings or duplicating geometry residency.
+pub struct DiagnosticPatchRenderPipelines {
+    normals: PatchRenderPipeline,
+    lod: PatchRenderPipeline,
+    stretch: PatchRenderPipeline,
 }
 
 /// Scene/frame bindings shared by every atlas bucket and indirect batch draw.
@@ -2629,6 +2639,67 @@ impl LodClassifierDevice {
         depth_format: Option<wgpu::TextureFormat>,
         sample_count: u32,
     ) -> Result<PatchRenderPipeline, LodWebGpuError> {
+        self.create_diagnostic_patch_render_pipeline(
+            RenderStyle::Normals,
+            color_format,
+            depth_format,
+            sample_count,
+        )
+    }
+
+    /// Create one triangle-based diagnostic pipeline over the shared prepared
+    /// QB vertex path. Styles with additional resources or geometry (matcap,
+    /// PBR, and wire) remain explicit future cuts rather than silently
+    /// selecting the wrong shader or index stream.
+    pub fn create_diagnostic_patch_render_pipeline(
+        &self,
+        style: RenderStyle,
+        color_format: wgpu::TextureFormat,
+        depth_format: Option<wgpu::TextureFormat>,
+        sample_count: u32,
+    ) -> Result<PatchRenderPipeline, LodWebGpuError> {
+        self.create_diagnostic_patch_render_pipelines_for(
+            &[style],
+            color_format,
+            depth_format,
+            sample_count,
+        )?
+        .pop()
+        .ok_or_else(|| LodWebGpuError::Payload("diagnostic pipeline set was empty".to_string()))
+    }
+
+    /// Create the complete currently supported triangle-diagnostic family.
+    /// Every member borrows the same binding-layout identity, so a live scene
+    /// changes style by selecting a pipeline—not by republishing resources.
+    pub fn create_diagnostic_patch_render_pipelines(
+        &self,
+        color_format: wgpu::TextureFormat,
+        depth_format: Option<wgpu::TextureFormat>,
+        sample_count: u32,
+    ) -> Result<DiagnosticPatchRenderPipelines, LodWebGpuError> {
+        let mut pipelines = self.create_diagnostic_patch_render_pipelines_for(
+            &[RenderStyle::Normals, RenderStyle::Lod, RenderStyle::Stretch],
+            color_format,
+            depth_format,
+            sample_count,
+        )?;
+        let stretch = pipelines.pop().expect("requested stretch pipeline");
+        let lod = pipelines.pop().expect("requested LOD pipeline");
+        let normals = pipelines.pop().expect("requested normals pipeline");
+        Ok(DiagnosticPatchRenderPipelines {
+            normals,
+            lod,
+            stretch,
+        })
+    }
+
+    fn create_diagnostic_patch_render_pipelines_for(
+        &self,
+        styles: &[RenderStyle],
+        color_format: wgpu::TextureFormat,
+        depth_format: Option<wgpu::TextureFormat>,
+        sample_count: u32,
+    ) -> Result<Vec<PatchRenderPipeline>, LodWebGpuError> {
         if sample_count == 0 {
             return Err(LodWebGpuError::Payload(
                 "patch render sample count must be nonzero".to_string(),
@@ -2636,6 +2707,27 @@ impl LodClassifierDevice {
         }
         let source = quilting_shaders::compile_patch_render_device_wgsl()
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
+        let fragment_entry_points = styles
+            .iter()
+            .copied()
+            .map(|style| {
+                let entry_point = match style {
+                    RenderStyle::Normals => {
+                        quilting_shaders::PATCH_RENDER_DEVICE_NORMALS_ENTRY_POINT
+                    }
+                    RenderStyle::Lod => quilting_shaders::PATCH_RENDER_DEVICE_LOD_ENTRY_POINT,
+                    RenderStyle::Stretch => {
+                        quilting_shaders::PATCH_RENDER_DEVICE_STRETCH_ENTRY_POINT
+                    }
+                    unsupported => {
+                        return Err(LodWebGpuError::Payload(format!(
+                            "WebGPU prepared-patch diagnostic pipeline does not support {unsupported:?}",
+                        )));
+                    }
+                };
+                Ok((style, entry_point))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let module = self
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2694,55 +2786,58 @@ impl LodClassifierDevice {
             bias: wgpu::DepthBiasState::default(),
         });
         let attributes = wgpu::vertex_attr_array![0 => Float32x3];
-        let create = |front_face| {
-            self.device
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("quilting prepared QB normals"),
-                    layout: Some(&pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &module,
-                        entry_point: Some(quilting_shaders::PATCH_RENDER_DEVICE_VERTEX_ENTRY_POINT),
-                        compilation_options: Default::default(),
-                        buffers: &[wgpu::VertexBufferLayout {
-                            array_stride: 12,
-                            step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &attributes,
-                        }],
-                    },
-                    primitive: wgpu::PrimitiveState {
-                        topology: wgpu::PrimitiveTopology::TriangleList,
-                        front_face,
-                        cull_mode: None,
-                        ..Default::default()
-                    },
-                    depth_stencil: depth_stencil.clone(),
-                    multisample: wgpu::MultisampleState {
-                        count: sample_count,
-                        ..Default::default()
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &module,
-                        entry_point: Some(
-                            quilting_shaders::PATCH_RENDER_DEVICE_NORMALS_ENTRY_POINT,
-                        ),
-                        compilation_options: Default::default(),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: color_format,
-                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                    }),
-                    multiview_mask: None,
-                    cache: None,
-                })
-        };
-        let counter_clockwise = create(wgpu::FrontFace::Ccw);
-        let clockwise = create(wgpu::FrontFace::Cw);
-        Ok(PatchRenderPipeline {
-            bind_group_layout,
-            counter_clockwise,
-            clockwise,
-        })
+        let mut pipelines = Vec::with_capacity(fragment_entry_points.len());
+        for (style, fragment_entry_point) in fragment_entry_points {
+            let create = |front_face| {
+                self.device
+                    .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some("quilting prepared QB diagnostic"),
+                        layout: Some(&pipeline_layout),
+                        vertex: wgpu::VertexState {
+                            module: &module,
+                            entry_point: Some(
+                                quilting_shaders::PATCH_RENDER_DEVICE_VERTEX_ENTRY_POINT,
+                            ),
+                            compilation_options: Default::default(),
+                            buffers: &[wgpu::VertexBufferLayout {
+                                array_stride: 12,
+                                step_mode: wgpu::VertexStepMode::Vertex,
+                                attributes: &attributes,
+                            }],
+                        },
+                        primitive: wgpu::PrimitiveState {
+                            topology: wgpu::PrimitiveTopology::TriangleList,
+                            front_face,
+                            cull_mode: None,
+                            ..Default::default()
+                        },
+                        depth_stencil: depth_stencil.clone(),
+                        multisample: wgpu::MultisampleState {
+                            count: sample_count,
+                            ..Default::default()
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &module,
+                            entry_point: Some(fragment_entry_point),
+                            compilation_options: Default::default(),
+                            targets: &[Some(wgpu::ColorTargetState {
+                                format: color_format,
+                                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                                write_mask: wgpu::ColorWrites::ALL,
+                            })],
+                        }),
+                        multiview_mask: None,
+                        cache: None,
+                    })
+            };
+            pipelines.push(PatchRenderPipeline {
+                style,
+                bind_group_layout: bind_group_layout.clone(),
+                counter_clockwise: create(wgpu::FrontFace::Ccw),
+                clockwise: create(wgpu::FrontFace::Cw),
+            });
+        }
+        Ok(pipelines)
     }
 
     /// Create the fixed-format live shadow pipeline without leaking backend
@@ -3306,8 +3401,43 @@ impl LodClassifierDevice {
         self.readback_words(&readback, output_bytes).await
     }
 
-    /// Encode the supported normals-mode subset from one coherent scene
+    /// Encode one supported triangle-diagnostic frame from a coherent scene
     /// aggregate and the retained packed atlas.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_diagnostic_patch_render_scene<'resource, VisibilityProducer>(
+        &'resource self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &RenderFrame,
+        pipeline: &'resource PatchRenderPipeline,
+        scene: &'resource PatchRenderScene,
+        atlas: &'resource PackedPatchAtlas,
+        target: PatchRenderTarget<'resource>,
+        use_qb: bool,
+        encode_visibility: VisibilityProducer,
+    ) -> Result<PatchFrameEncoding, LodWebGpuError>
+    where
+        VisibilityProducer: FnOnce(
+            &mut wgpu::CommandEncoder,
+            &PatchPreparationScene,
+            &VisibilityCompactionScene,
+        ) -> Result<(), LodWebGpuError>,
+    {
+        self.encode_diagnostic_render_frame(
+            encoder,
+            frame,
+            &scene.scene,
+            pipeline,
+            &scene.bindings,
+            &scene.patches,
+            &scene.visibility,
+            atlas,
+            target,
+            use_qb,
+            encode_visibility,
+        )
+    }
+
+    /// Compatibility wrapper for the first promoted diagnostic mode.
     #[allow(clippy::too_many_arguments)]
     pub fn encode_normals_patch_render_scene<'resource, VisibilityProducer>(
         &'resource self,
@@ -3327,14 +3457,12 @@ impl LodClassifierDevice {
             &VisibilityCompactionScene,
         ) -> Result<(), LodWebGpuError>,
     {
-        self.encode_normals_render_frame(
+        require_normals_frame_pipeline(frame, pipeline)?;
+        self.encode_diagnostic_patch_render_scene(
             encoder,
             frame,
-            &scene.scene,
             pipeline,
-            &scene.bindings,
-            &scene.patches,
-            &scene.visibility,
+            scene,
             atlas,
             target,
             use_qb,
@@ -3354,7 +3482,8 @@ impl LodClassifierDevice {
         target: &OffscreenPatchRenderTarget,
         use_qb: bool,
     ) -> Result<PatchFrameEncoding, LodWebGpuError> {
-        self.render_offscreen_normals_patch_scene_impl(
+        require_normals_frame_pipeline(frame, pipeline)?;
+        self.render_offscreen_diagnostic_patch_scene_impl(
             frame,
             pipeline,
             scene,
@@ -3377,7 +3506,8 @@ impl LodClassifierDevice {
         target: &OffscreenPatchRenderTarget,
         use_qb: bool,
     ) -> Result<PatchFrameEncoding, LodWebGpuError> {
-        self.render_offscreen_normals_patch_scene_impl(
+        require_normals_frame_pipeline(frame, pipeline)?;
+        self.render_offscreen_diagnostic_patch_scene_impl(
             frame,
             pipeline,
             scene,
@@ -3402,7 +3532,8 @@ impl LodClassifierDevice {
         use_qb: bool,
         clear_color: wgpu::Color,
     ) -> Result<PatchFrameEncoding, LodWebGpuError> {
-        self.render_offscreen_normals_patch_scene_impl(
+        require_normals_frame_pipeline(frame, pipeline)?;
+        self.render_offscreen_diagnostic_patch_scene_impl(
             frame,
             pipeline,
             scene,
@@ -3426,7 +3557,8 @@ impl LodClassifierDevice {
         target: &OffscreenPatchRenderTarget,
         use_qb: bool,
     ) -> Result<PatchFrameEncoding, LodWebGpuError> {
-        self.render_offscreen_normals_patch_scene_impl(
+        require_normals_frame_pipeline(frame, pipeline)?;
+        self.render_offscreen_diagnostic_patch_scene_impl(
             frame,
             pipeline,
             scene,
@@ -3443,11 +3575,11 @@ impl LodClassifierDevice {
         )
     }
 
-    /// Present the live normals subset directly to a Rust-owned browser
+    /// Present a live triangle-diagnostic frame directly to a Rust-owned browser
     /// surface. The same frame, scene bindings, visibility expansion, and draw
     /// encoder are used by the offscreen parity path; only attachment ownership
     /// and submission/presentation differ.
-    pub fn present_normals_patch_scene_with_face_visibility(
+    pub fn present_diagnostic_patch_scene_with_face_visibility(
         &self,
         surface: &mut PatchPresentationSurface,
         frame: &RenderFrame,
@@ -3467,7 +3599,7 @@ impl LodClassifierDevice {
                     a: 1.0,
                 });
                 target.clear_depth = Some(1.0);
-                self.encode_normals_patch_render_scene(
+                self.encode_diagnostic_patch_render_scene(
                     encoder,
                     frame,
                     pipeline,
@@ -3484,8 +3616,47 @@ impl LodClassifierDevice {
         )
     }
 
+    /// Compatibility wrapper for normals-only presentation callers.
+    pub fn present_normals_patch_scene_with_face_visibility(
+        &self,
+        surface: &mut PatchPresentationSurface,
+        frame: &RenderFrame,
+        pipeline: &PatchRenderPipeline,
+        scene: &PatchRenderScene,
+        atlas: &PackedPatchAtlas,
+        use_qb: bool,
+    ) -> Result<SurfacePresentation<PatchFrameEncoding>, LodWebGpuError> {
+        require_normals_frame_pipeline(frame, pipeline)?;
+        self.present_diagnostic_patch_scene_with_face_visibility(
+            surface, frame, pipeline, scene, atlas, use_qb,
+        )
+    }
+
+    /// Submit a supported triangle-diagnostic frame with compact per-face
+    /// visibility to a retained offscreen target.
+    pub fn render_offscreen_diagnostic_patch_scene_with_face_visibility(
+        &self,
+        frame: &RenderFrame,
+        pipeline: &PatchRenderPipeline,
+        scene: &PatchRenderScene,
+        atlas: &PackedPatchAtlas,
+        target: &OffscreenPatchRenderTarget,
+        use_qb: bool,
+    ) -> Result<PatchFrameEncoding, LodWebGpuError> {
+        self.render_offscreen_diagnostic_patch_scene_impl(
+            frame,
+            pipeline,
+            scene,
+            atlas,
+            target,
+            use_qb,
+            true,
+            wgpu::Color::TRANSPARENT,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
-    fn render_offscreen_normals_patch_scene_impl(
+    fn render_offscreen_diagnostic_patch_scene_impl(
         &self,
         frame: &RenderFrame,
         pipeline: &PatchRenderPipeline,
@@ -3507,7 +3678,7 @@ impl LodClassifierDevice {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("quilting live offscreen shadow frame"),
             });
-        let encoding = self.encode_normals_patch_render_scene(
+        let encoding = self.encode_diagnostic_patch_render_scene(
             &mut encoder,
             frame,
             pipeline,
@@ -3585,7 +3756,7 @@ impl LodClassifierDevice {
     /// when the caller already uploaded an exact current-pose stream. No map or
     /// copy to CPU memory occurs here.
     #[allow(clippy::too_many_arguments)]
-    pub fn encode_normals_render_frame<'resource, VisibilityProducer>(
+    pub fn encode_diagnostic_render_frame<'resource, VisibilityProducer>(
         &'resource self,
         encoder: &mut wgpu::CommandEncoder,
         frame: &RenderFrame,
@@ -3609,12 +3780,22 @@ impl LodClassifierDevice {
         frame
             .validate(scene)
             .map_err(|error| LodWebGpuError::Payload(format!("render frame contract: {error}")))?;
-        if frame.style != RenderStyle::Normals {
+        if pipeline.style != frame.style {
             return Err(LodWebGpuError::Payload(format!(
-                "WebGPU patch renderer does not yet support {:?} style",
-                frame.style,
+                "WebGPU patch pipeline {:?} cannot render {:?} frame",
+                pipeline.style, frame.style,
             )));
         }
+        let expected_pass = match frame.style {
+            RenderStyle::Normals => RenderPass::Normals,
+            RenderStyle::Lod => RenderPass::Lod,
+            RenderStyle::Stretch => RenderPass::Stretch,
+            unsupported => {
+                return Err(LodWebGpuError::Payload(format!(
+                    "WebGPU patch renderer does not yet support {unsupported:?} style",
+                )));
+            }
+        };
         if scene.batches.is_empty() {
             return Err(LodWebGpuError::Payload(
                 "WebGPU patch renderer requires a nonempty retained scene".to_string(),
@@ -3683,13 +3864,12 @@ impl LodClassifierDevice {
         // extending RenderFrame cannot silently lower to the wrong pipeline.
         for command in &frame.commands {
             match command {
-                RenderCommand::PreparePatches { .. }
-                | RenderCommand::ResolveVisibility { .. }
-                | RenderCommand::DrawPatches {
-                    pass: RenderPass::Normals,
+                RenderCommand::PreparePatches { .. } | RenderCommand::ResolveVisibility { .. } => {}
+                RenderCommand::DrawPatches {
+                    pass,
                     geometry: RenderGeometry::Triangles,
                     ..
-                } => {}
+                } if *pass == expected_pass => {}
                 unsupported => {
                     return Err(LodWebGpuError::Payload(format!(
                         "WebGPU patch renderer does not yet support command {unsupported:?}",
@@ -3728,7 +3908,7 @@ impl LodClassifierDevice {
                         stencil_ops: None,
                     });
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("quilting shared normals frame"),
+                label: Some("quilting shared diagnostic frame"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target.color_view,
                     depth_slice: None,
@@ -3784,6 +3964,51 @@ impl LodClassifierDevice {
             indirect_draw_calls,
             source_instance_count,
         })
+    }
+
+    /// Compatibility entry point for the first promoted mode. New
+    /// triangle-diagnostic callers should use
+    /// [`Self::encode_diagnostic_render_frame`] with a style-matched pipeline.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_normals_render_frame<'resource, VisibilityProducer>(
+        &'resource self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &RenderFrame,
+        scene: &RenderSceneSnapshot,
+        pipeline: &'resource PatchRenderPipeline,
+        bindings: &'resource PatchRenderBindings,
+        patches: &'resource PatchPreparationScene,
+        visibility: &'resource VisibilityCompactionScene,
+        atlas: &'resource PackedPatchAtlas,
+        target: PatchRenderTarget<'resource>,
+        use_qb: bool,
+        encode_visibility: VisibilityProducer,
+    ) -> Result<PatchFrameEncoding, LodWebGpuError>
+    where
+        VisibilityProducer: FnOnce(
+            &mut wgpu::CommandEncoder,
+            &PatchPreparationScene,
+            &VisibilityCompactionScene,
+        ) -> Result<(), LodWebGpuError>,
+    {
+        if frame.style != RenderStyle::Normals || pipeline.style != RenderStyle::Normals {
+            return Err(LodWebGpuError::Payload(
+                "normals render entry point requires a normals frame and pipeline".to_string(),
+            ));
+        }
+        self.encode_diagnostic_render_frame(
+            encoder,
+            frame,
+            scene,
+            pipeline,
+            bindings,
+            patches,
+            visibility,
+            atlas,
+            target,
+            use_qb,
+            encode_visibility,
+        )
     }
 
     /// Upload retained batch shape and static eligibility once. Output buffers
@@ -5376,6 +5601,19 @@ impl PackedPatchAtlas {
     }
 }
 
+fn require_normals_frame_pipeline(
+    frame: &RenderFrame,
+    pipeline: &PatchRenderPipeline,
+) -> Result<(), LodWebGpuError> {
+    if frame.style == RenderStyle::Normals && pipeline.style == RenderStyle::Normals {
+        Ok(())
+    } else {
+        Err(LodWebGpuError::Payload(
+            "normals render entry point requires a normals frame and pipeline".to_string(),
+        ))
+    }
+}
+
 impl PatchRenderPipeline {
     /// Encode one compacted indirect QB batch. The caller selects the atlas
     /// buffers corresponding to that batch's canonical LOD key.
@@ -5420,6 +5658,17 @@ impl PatchRenderPipeline {
             u64::from(batch_index) * INDEXED_INDIRECT_RECORD_BYTES,
         );
         Ok(())
+    }
+}
+
+impl DiagnosticPatchRenderPipelines {
+    pub fn get(&self, style: RenderStyle) -> Option<&PatchRenderPipeline> {
+        match style {
+            RenderStyle::Normals => Some(&self.normals),
+            RenderStyle::Lod => Some(&self.lod),
+            RenderStyle::Stretch => Some(&self.stretch),
+            _ => None,
+        }
     }
 }
 

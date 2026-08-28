@@ -10,6 +10,7 @@ use quilting_core::render::{
     RenderFrameOptions, RenderGeometry, RenderPoseIdentity, RenderSceneSnapshot, RenderStyle,
     RenderView,
 };
+use quilting_core::render_evidence::render_image_signature;
 use quilting_core::screen_partition::ScreenPatchLeafId;
 use quilting_renderer::compute::{
     pack_lod_classification, pack_wgsl_visibility_compaction_scene_words, prepare_lod_atlas_lookup,
@@ -557,6 +558,90 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         if let Some(error) = error_scope.pop().await {
             panic!("face visibility expansion validation: {error}");
         }
+
+        let diagnostic_pipelines = classifier
+            .create_diagnostic_patch_render_pipelines(
+                wgpu::TextureFormat::Rgba8Unorm,
+                Some(wgpu::TextureFormat::Depth24Plus),
+                1,
+            )
+            .unwrap();
+        let unsupported = classifier.create_diagnostic_patch_render_pipeline(
+            RenderStyle::Wire,
+            wgpu::TextureFormat::Rgba8Unorm,
+            Some(wgpu::TextureFormat::Depth24Plus),
+            1,
+        );
+        let unsupported = match unsupported {
+            Err(error) => error,
+            Ok(_) => panic!("wire unexpectedly created a triangle-diagnostic pipeline"),
+        };
+        assert!(unsupported.to_string().contains("does not support Wire"));
+        let diagnostic_scene = classifier
+            .upload_patch_render_scene(
+                diagnostic_pipelines.get(RenderStyle::Normals).unwrap(),
+                &model,
+                render_scene.clone(),
+                &source_instances,
+                render_scene.revision,
+            )
+            .unwrap();
+        classifier
+            .write_patch_render_pose_state(&model, &diagnostic_scene, LodPose::default(), 0)
+            .unwrap();
+        classifier
+            .write_patch_render_face_visibility_bits(&diagnostic_scene, &[0b11])
+            .unwrap();
+        let mut diagnostic_hashes = Vec::new();
+        for (revision, style) in [RenderStyle::Lod, RenderStyle::Stretch]
+            .into_iter()
+            .enumerate()
+        {
+            let frame = RenderFrame::build(
+                20 + revision as u64,
+                render_frame.pose,
+                style,
+                render_frame.view,
+                render_frame.options,
+                &render_scene,
+            )
+            .unwrap();
+            let error_scope = classifier
+                .device()
+                .push_error_scope(wgpu::ErrorFilter::Validation);
+            let encoding = classifier
+                .render_offscreen_diagnostic_patch_scene_with_face_visibility(
+                    &frame,
+                    diagnostic_pipelines.get(style).unwrap(),
+                    &diagnostic_scene,
+                    &packed_atlas,
+                    &target,
+                    true,
+                )
+                .unwrap();
+            assert_eq!(encoding.indirect_draw_calls, 2);
+            assert_eq!(
+                encoding.logical_submission,
+                frame.expected_submission_stats(&render_scene).unwrap()
+            );
+            let image = classifier
+                .stage_offscreen_patch_render_target_image(&target)
+                .unwrap()
+                .read()
+                .await
+                .unwrap();
+            let image = render_image_signature(image.view().unwrap(), 0);
+            assert!(image.covered_pixels > 0, "{style:?} rendered no patches");
+            diagnostic_hashes.push(image.rgba8_hash);
+            classifier
+                .device()
+                .poll(wgpu::PollType::wait_indefinitely())
+                .unwrap();
+            if let Some(error) = error_scope.pop().await {
+                panic!("{style:?} shared-pipeline validation: {error}");
+            }
+        }
+        assert_ne!(diagnostic_hashes[0], diagnostic_hashes[1]);
 
         let compaction_scene = RenderSceneSnapshot {
             revision: 19,
