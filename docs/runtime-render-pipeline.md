@@ -678,7 +678,7 @@ Hyperscope now has an opt-in presentation cut at `gfx=webgpu`. Browser layout
 supplies an unclaimed `cv-webgpu`; Rust owns its adapter/device, surface format,
 depth attachment, resize, acquisition, encoding, submission, and presentation.
 The existing `cv` remains the event target and hidden WebGL2 rollback layer
-while normals, LOD color, or conformal stretch is supported. The adapter
+while matcap, normals, LOD color, or conformal stretch is supported. The adapter
 reveals it synchronously for every other mode, and reveals WebGPU only after a
 successful fresh presentation in the requested style. The residency
 diagnostics carry that presented style, preventing an old normals surface from
@@ -719,12 +719,15 @@ no surface loss or frame failure. Switching to PBR exposed WebGL2 with
 `state=unsupported-mode`; switching back advanced the surface presentation
 counter from 4 to 5 before WebGPU became visible again. No warning, error,
 assertion, or failed request occurred. The same retained scene now selects
-normals, LOD-color, and stretch pipelines that share one shader module and one
-binding-layout identity; native Radeon/Vulkan renders distinct nonempty images
-for the latter two without rebuilding scene resources. Their live Chrome gate
-remains pending. PBR, matcap, wire/composite, picking, material/texture binding,
-and postprocess commands still reject explicitly rather than silently lowering
-to another style. Those cuts are what remove the live
+matcap, normals, LOD-color, and stretch pipelines that share one shader module
+and one binding-layout identity. Matcap profile selection is a typed
+backend-neutral `RenderFrameOptions` value packed into the existing frame table,
+not a second browser uniform path. Native Radeon/Vulkan renders distinct
+nonempty images for all three non-normal styles without rebuilding scene
+resources. Their live Chrome gate remains pending. PBR, wire/composite,
+picking, material/texture binding, and postprocess commands still reject
+explicitly rather than silently lowering to another style. Those cuts are what
+remove the live
 classifier readback, CPU topology repacking, and rejected atlas vertex
 invocations from an authoritative runtime.
 

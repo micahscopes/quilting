@@ -589,7 +589,10 @@ pub(crate) fn submit_frame(
         if backend.state != "ready"
             || !matches!(
                 style,
-                RenderStyle::Normals | RenderStyle::Lod | RenderStyle::Stretch
+                RenderStyle::Matcap
+                    | RenderStyle::Normals
+                    | RenderStyle::Lod
+                    | RenderStyle::Stretch
             )
         {
             return Ok(LiveFrameDisposition::IncumbentRequired);

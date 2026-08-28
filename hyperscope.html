@@ -599,7 +599,7 @@ const graphicsBackendDiagnostics = {
 globalThis.__hyperscopeGraphicsBackend = graphicsBackendDiagnostics;
 
 function webGpuPresentationSupportsRenderMode(mode) {
-  return mode === 'normals' || mode === 'lod' || mode === 'stretch';
+  return mode === 'matcap' || mode === 'normals' || mode === 'lod' || mode === 'stretch';
 }
 
 function synchronizeGraphicsBackendPresentation() {

@@ -256,10 +256,10 @@ assert.ok(webGpuModeSupportSource, 'could not locate WebGPU mode support predica
 const webGpuPresentationSupportsRenderMode = runInNewContext(
   `${webGpuModeSupportSource}; webGpuPresentationSupportsRenderMode`,
 );
-for (const mode of ['normals', 'lod', 'stretch']) {
+for (const mode of ['matcap', 'normals', 'lod', 'stretch']) {
   assert.equal(webGpuPresentationSupportsRenderMode(mode), true, `${mode} should use WebGPU`);
 }
-for (const mode of ['pbr', 'matcap', 'wire', 'both']) {
+for (const mode of ['pbr', 'wire', 'both']) {
   assert.equal(webGpuPresentationSupportsRenderMode(mode), false, `${mode} should use WebGL2`);
 }
 const browserDefaultsSource = browserSource.match(

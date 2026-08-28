@@ -2239,7 +2239,10 @@ pub fn mr_set_render_mode(mode: &str) {
                 entered_webgpu_diagnostic = st.render_style != next
                     && matches!(
                         next,
-                        RenderStyle::Normals | RenderStyle::Lod | RenderStyle::Stretch
+                        RenderStyle::Matcap
+                            | RenderStyle::Normals
+                            | RenderStyle::Lod
+                            | RenderStyle::Stretch
                     );
             }
             st.render_style = next;
@@ -2655,7 +2658,10 @@ fn submit_webgpu_frame(
 
     if !matches!(
         renderer.render_style,
-        RenderStyle::Normals | RenderStyle::Lod | RenderStyle::Stretch
+        RenderStyle::Matcap
+            | RenderStyle::Normals
+            | RenderStyle::Lod
+            | RenderStyle::Stretch
     ) {
         return LiveFrameDisposition::IncumbentRequired;
     }
