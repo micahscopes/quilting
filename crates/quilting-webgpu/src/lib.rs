@@ -18,10 +18,11 @@ use quilting_core::screen_partition::ScreenPatchLeafId;
 use quilting_renderer::compute::{
     pack_lod_classification, pack_wgsl_lod_atlas_words, pack_wgsl_lod_dispatch_words,
     pack_wgsl_lod_model_words, pack_wgsl_lod_subject_words,
-    pack_wgsl_patch_preparation_scene_words, pack_wgsl_source_visibility_words,
-    pack_wgsl_visibility_compaction_scene_words, prepare_lod_atlas_lookup, prepare_lod_model,
-    reconcile_and_pack_wgsl_lod_pass2, reconcile_and_pack_wgsl_resident_lods, LodAtlasLookup,
-    LodDispatchState, LodModelData, PreparedLodModel, WgslLodDispatchMetrics,
+    pack_wgsl_patch_preparation_scene_words, pack_wgsl_root_eligibility_bits,
+    pack_wgsl_source_visibility_words, pack_wgsl_visibility_compaction_scene_words,
+    prepare_lod_atlas_lookup, prepare_lod_model, reconcile_and_pack_wgsl_lod_pass2,
+    reconcile_and_pack_wgsl_resident_lods, wgsl_resident_geometry_bucket_oracle_words,
+    LodAtlasLookup, LodDispatchState, LodModelData, PreparedLodModel, WgslLodDispatchMetrics,
     WgslPatchPreparationSceneWords, WgslVisibilityCompactionSceneWords,
 };
 use std::borrow::Cow;
@@ -41,6 +42,9 @@ const FACE_VISIBILITY_UNIFORM_BYTES: u64 = 16;
 const VISIBILITY_BATCH_RECORD_BYTES: u64 = 16;
 const VISIBILITY_RANGE_RECORD_BYTES: u64 = 20;
 const INDEXED_INDIRECT_RECORD_BYTES: u64 = 20;
+const RESIDENT_ATLAS_DRAW_RECORD_BYTES: u64 = 16;
+const RESIDENT_BUCKET_RANGE_RECORD_BYTES: u64 = 20;
+const MAX_RESIDENT_GEOMETRY_BUCKETS: u32 = 510;
 const DRAW_BATCH_INDEX_BYTES: u64 = 16;
 const PATCH_PREPARE_UNIFORM_BYTES: u64 = 16;
 const PATCH_TOPOLOGY_RECORD_BYTES: u64 = 48;
@@ -223,6 +227,7 @@ pub struct LodDeviceConformance {
     pub full_pipeline_words: usize,
     pub resident_lod_words: usize,
     pub resident_visibility_words: usize,
+    pub resident_bucket_words: usize,
     pub coherence_words: usize,
     pub prepared_patch_words: usize,
     pub rendered_patch_pixels: usize,
@@ -347,6 +352,7 @@ pub struct PackedPatchAtlas {
     triangle_index_buffer: wgpu::Buffer,
     line_index_buffer: wgpu::Buffer,
     entries: BTreeMap<[u32; 3], PackedPatchAtlasEntry>,
+    keys: Vec<[u32; 3]>,
     vertex_count: u32,
     triangle_index_count: u32,
     line_index_count: u32,
@@ -399,6 +405,10 @@ pub struct LodClassifierDevice {
     patch_prepare_pipeline: wgpu::ComputePipeline,
     visibility_expand_pipeline: wgpu::ComputePipeline,
     lod_visibility_expand_pipeline: wgpu::ComputePipeline,
+    resident_bucket_histogram_pipeline: wgpu::ComputePipeline,
+    resident_bucket_prefix_pipeline: wgpu::ComputePipeline,
+    resident_bucket_scan_pipeline: wgpu::ComputePipeline,
+    resident_bucket_scatter_pipeline: wgpu::ComputePipeline,
     visibility_count_pipeline: wgpu::ComputePipeline,
     visibility_scan_pipeline: wgpu::ComputePipeline,
     visibility_scatter_pipeline: wgpu::ComputePipeline,
@@ -407,6 +417,7 @@ pub struct LodClassifierDevice {
 /// Retained device buffers for one immutable prepared model and atlas lookup.
 pub struct LodClassifierModel {
     identity: u64,
+    atlas_keys: Vec<[u32; 3]>,
     prepared: PreparedLodModel,
     classification_epoch: u64,
     joint_capacity: usize,
@@ -548,6 +559,38 @@ struct FaceVisibilityExpansionScene {
     lod_bind_group: wgpu::BindGroup,
 }
 
+/// Retained root-only geometry buckets derived from packed resident LOD.
+/// Adaptive dyadic leaves remain a separate sparse overlay because their edge
+/// LOD and permutation cannot be reconstructed from one source-face record.
+pub struct ResidentGeometryBucketScene {
+    model_identity: u64,
+    face_count: u32,
+    atlas_count: u32,
+    bucket_count: u32,
+    chunk_count: u32,
+    eligibility_word_count: u32,
+    root_eligibility: wgpu::Buffer,
+    _chunk_counts: wgpu::Buffer,
+    _chunk_offsets: wgpu::Buffer,
+    _bucket_counts: wgpu::Buffer,
+    compacted_faces: wgpu::Buffer,
+    bucket_ranges: wgpu::Buffer,
+    indirect_arguments: wgpu::Buffer,
+    histogram_bind_group: wgpu::BindGroup,
+    prefix_bind_group: wgpu::BindGroup,
+    scan_bind_group: wgpu::BindGroup,
+    scatter_bind_group: wgpu::BindGroup,
+}
+
+/// Diagnostic projection of the retained root geometry plan. Production draw
+/// execution consumes the same buffers directly and never constructs this.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResidentGeometryBucketOutput {
+    pub compacted_faces: Vec<u32>,
+    pub bucket_ranges: Vec<[u32; 5]>,
+    pub indirect_arguments: Vec<[u32; 5]>,
+}
+
 /// Retained scene shape and output buffers for deterministic visibility
 /// compaction. Only `source_visibility` changes with the current pose.
 pub struct VisibilityCompactionScene {
@@ -620,6 +663,8 @@ impl LodClassifierDevice {
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
         let visibility_scatter_source = quilting_shaders::compile_visibility_scatter_wgsl()
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
+        let resident_buckets_source = quilting_shaders::compile_resident_buckets_wgsl()
+            .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
         let pass1_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("quilting LOD pass one"),
             source: wgpu::ShaderSource::Wgsl(Cow::Owned(pass1_source)),
@@ -656,6 +701,10 @@ impl LodClassifierDevice {
         let visibility_scatter_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("quilting visibility scatter"),
             source: wgpu::ShaderSource::Wgsl(Cow::Owned(visibility_scatter_source)),
+        });
+        let resident_buckets_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("quilting resident geometry buckets"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(resident_buckets_source)),
         });
         let pass1_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("quilting LOD pass one"),
@@ -753,6 +802,42 @@ impl LodClassifierDevice {
                 compilation_options: Default::default(),
                 cache: None,
             });
+        let resident_bucket_histogram_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("quilting resident geometry bucket histogram"),
+                layout: None,
+                module: &resident_buckets_module,
+                entry_point: Some(quilting_shaders::RESIDENT_BUCKET_HISTOGRAM_DEVICE_ENTRY_POINT),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let resident_bucket_prefix_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("quilting resident geometry bucket chunk prefix"),
+                layout: None,
+                module: &resident_buckets_module,
+                entry_point: Some(quilting_shaders::RESIDENT_BUCKET_PREFIX_DEVICE_ENTRY_POINT),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let resident_bucket_scan_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("quilting resident geometry bucket scan"),
+                layout: None,
+                module: &resident_buckets_module,
+                entry_point: Some(quilting_shaders::RESIDENT_BUCKET_SCAN_DEVICE_ENTRY_POINT),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let resident_bucket_scatter_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("quilting resident geometry bucket scatter"),
+                layout: None,
+                module: &resident_buckets_module,
+                entry_point: Some(quilting_shaders::RESIDENT_BUCKET_SCATTER_DEVICE_ENTRY_POINT),
+                compilation_options: Default::default(),
+                cache: None,
+            });
         Ok(Self {
             device,
             queue,
@@ -766,6 +851,10 @@ impl LodClassifierDevice {
             patch_prepare_pipeline,
             visibility_expand_pipeline,
             lod_visibility_expand_pipeline,
+            resident_bucket_histogram_pipeline,
+            resident_bucket_prefix_pipeline,
+            resident_bucket_scan_pipeline,
+            resident_bucket_scatter_pipeline,
             visibility_count_pipeline,
             visibility_scan_pipeline,
             visibility_scatter_pipeline,
@@ -834,7 +923,7 @@ impl LodClassifierDevice {
             .chunks_exact(7)
             .map(|patch| [patch[0], patch[1], patch[2]])
             .collect::<Vec<_>>();
-        prepare_lod_atlas_lookup(keys.iter().copied()).map_err(|error| {
+        let lookup = prepare_lod_atlas_lookup(keys.iter().copied()).map_err(|error| {
             LodWebGpuError::Payload(format!("packed WebGPU atlas keys: {error}"))
         })?;
         let mut entries = BTreeMap::new();
@@ -896,10 +985,531 @@ impl LodClassifierDevice {
             triangle_index_buffer,
             line_index_buffer,
             entries,
+            keys: lookup.keys,
             vertex_count,
             triangle_index_count,
             line_index_count,
         })
+    }
+
+    /// Allocate the deterministic retained-root atlas/parity plan. The atlas
+    /// keys must exactly match the sorted classifier lookup uploaded with the
+    /// model; equal cardinality alone is not sufficient because packed records
+    /// carry only an eight-bit atlas index.
+    pub fn upload_resident_geometry_bucket_scene(
+        &self,
+        model: &LodClassifierModel,
+        atlas: &PackedPatchAtlas,
+    ) -> Result<ResidentGeometryBucketScene, LodWebGpuError> {
+        let face_count = u32::try_from(model.prepared.residency.num_faces)
+            .map_err(|_| LodWebGpuError::Payload("resident geometry faces exceed u32".into()))?;
+        self.upload_resident_geometry_bucket_scene_for_records(
+            model.identity,
+            face_count,
+            &model.atlas_keys,
+            &model.resident.packed_records,
+            atlas,
+        )
+    }
+
+    fn upload_resident_geometry_bucket_scene_for_records(
+        &self,
+        model_identity: u64,
+        face_count: u32,
+        atlas_keys: &[[u32; 3]],
+        resident_records: &wgpu::Buffer,
+        atlas: &PackedPatchAtlas,
+    ) -> Result<ResidentGeometryBucketScene, LodWebGpuError> {
+        if atlas_keys != atlas.keys {
+            return Err(LodWebGpuError::Payload(
+                "resident geometry classifier and packed atlas keys differ".to_string(),
+            ));
+        }
+        let atlas_count = u32::try_from(atlas.keys.len())
+            .map_err(|_| LodWebGpuError::Payload("resident geometry atlas exceeds u32".into()))?;
+        let bucket_count = atlas_count.checked_mul(2).ok_or_else(|| {
+            LodWebGpuError::Payload("resident geometry bucket count overflowed".to_string())
+        })?;
+        if bucket_count == 0 || bucket_count > MAX_RESIDENT_GEOMETRY_BUCKETS {
+            return Err(LodWebGpuError::Payload(format!(
+                "resident geometry needs 1..={MAX_RESIDENT_GEOMETRY_BUCKETS} buckets; got {bucket_count}",
+            )));
+        }
+        let chunk_count = face_count.div_ceil(LOD_WORKGROUP_SIZE);
+        let eligibility_word_count = face_count.div_ceil(32);
+        let table_records = u64::from(chunk_count)
+            .checked_mul(u64::from(bucket_count))
+            .ok_or_else(|| {
+                LodWebGpuError::Payload("resident geometry chunk table overflowed".to_string())
+            })?;
+        if table_records > u64::from(u32::MAX) {
+            return Err(LodWebGpuError::Payload(
+                "resident geometry chunk table exceeds WGSL u32 indexing".to_string(),
+            ));
+        }
+        let storage_limit = self
+            .device
+            .limits()
+            .max_buffer_size
+            .min(self.device.limits().max_storage_buffer_binding_size);
+        let storage_bytes = |records: u64, stride: u64, label: &str| {
+            let bytes = records.checked_mul(stride).ok_or_else(|| {
+                LodWebGpuError::Payload(format!("resident geometry {label} size overflowed"))
+            })?;
+            if bytes > storage_limit {
+                return Err(LodWebGpuError::Payload(format!(
+                    "resident geometry {label} needs {bytes} bytes; device storage limit is {storage_limit}",
+                )));
+            }
+            Ok(bytes)
+        };
+        let table_bytes = storage_bytes(table_records, PACKED_RECORD_BYTES, "chunk table")?;
+        storage_bytes(
+            u64::from(atlas_count),
+            RESIDENT_ATLAS_DRAW_RECORD_BYTES,
+            "atlas draws",
+        )?;
+        let bucket_bytes = storage_bytes(
+            u64::from(bucket_count),
+            PACKED_RECORD_BYTES,
+            "bucket counts",
+        )?;
+        let range_bytes = storage_bytes(
+            u64::from(bucket_count),
+            RESIDENT_BUCKET_RANGE_RECORD_BYTES,
+            "bucket ranges",
+        )?;
+        let indirect_bytes = storage_bytes(
+            u64::from(bucket_count),
+            INDEXED_INDIRECT_RECORD_BYTES,
+            "indirect arguments",
+        )?;
+        let face_bytes = storage_bytes(
+            u64::from(face_count),
+            PACKED_RECORD_BYTES,
+            "compacted faces",
+        )?;
+
+        let uniform_words = [face_count, bucket_count, chunk_count, atlas_count];
+        let uniform = buffer_init_or_zero(
+            &self.device,
+            "resident geometry bucket uniform",
+            bytemuck::cast_slice(&uniform_words),
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let eligibility = pack_wgsl_root_eligibility_bits(face_count as usize, &[])
+            .map_err(LodWebGpuError::Payload)?;
+        let root_eligibility = buffer_init_or_zero(
+            &self.device,
+            "resident root eligibility bits",
+            bytemuck::cast_slice(&eligibility),
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
+        let atlas_draws = atlas
+            .keys
+            .iter()
+            .map(|key| {
+                let draw = atlas.entries.get(key).ok_or_else(|| {
+                    LodWebGpuError::Payload(format!(
+                        "resident geometry atlas has no draw for canonical key {key:?}",
+                    ))
+                })?;
+                Ok([
+                    draw.triangle_first_index,
+                    draw.triangle_index_count,
+                    draw.line_first_index,
+                    draw.line_index_count,
+                ])
+            })
+            .collect::<Result<Vec<_>, LodWebGpuError>>()?;
+        let atlas_draw_buffer = buffer_init_or_zero(
+            &self.device,
+            "resident geometry atlas draws",
+            bytemuck::cast_slice(&atlas_draws),
+            wgpu::BufferUsages::STORAGE,
+        );
+        let chunk_counts = gpu_buffer(
+            &self.device,
+            "resident geometry chunk counts",
+            table_bytes,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let chunk_offsets = gpu_buffer(
+            &self.device,
+            "resident geometry chunk offsets",
+            table_bytes,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let bucket_counts = gpu_buffer(
+            &self.device,
+            "resident geometry bucket counts",
+            bucket_bytes,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let compacted_faces = gpu_buffer(
+            &self.device,
+            "resident geometry compacted faces",
+            face_bytes,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        );
+        let bucket_ranges = gpu_buffer(
+            &self.device,
+            "resident geometry bucket ranges",
+            range_bytes,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        );
+        let indirect_arguments = gpu_buffer(
+            &self.device,
+            "resident geometry indirect arguments",
+            indirect_bytes,
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_SRC,
+        );
+
+        let histogram_layout = self
+            .resident_bucket_histogram_pipeline
+            .get_bind_group_layout(0);
+        let histogram_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("resident geometry bucket histogram bindings"),
+            layout: &histogram_layout,
+            entries: &[
+                bind(0, &uniform),
+                bind(1, resident_records),
+                bind(2, &root_eligibility),
+                bind(4, &chunk_counts),
+            ],
+        });
+        let prefix_layout = self
+            .resident_bucket_prefix_pipeline
+            .get_bind_group_layout(0);
+        let prefix_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("resident geometry bucket prefix bindings"),
+            layout: &prefix_layout,
+            entries: &[
+                bind(0, &uniform),
+                bind(4, &chunk_counts),
+                bind(5, &chunk_offsets),
+                bind(6, &bucket_counts),
+            ],
+        });
+        let scan_layout = self.resident_bucket_scan_pipeline.get_bind_group_layout(0);
+        let scan_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("resident geometry bucket scan bindings"),
+            layout: &scan_layout,
+            entries: &[
+                bind(0, &uniform),
+                bind(3, &atlas_draw_buffer),
+                bind(6, &bucket_counts),
+                bind(7, &bucket_ranges),
+                bind(8, &indirect_arguments),
+            ],
+        });
+        let scatter_layout = self
+            .resident_bucket_scatter_pipeline
+            .get_bind_group_layout(0);
+        let scatter_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("resident geometry bucket scatter bindings"),
+            layout: &scatter_layout,
+            entries: &[
+                bind(0, &uniform),
+                bind(1, resident_records),
+                bind(2, &root_eligibility),
+                bind(5, &chunk_offsets),
+                bind(7, &bucket_ranges),
+                bind(9, &compacted_faces),
+            ],
+        });
+        Ok(ResidentGeometryBucketScene {
+            model_identity,
+            face_count,
+            atlas_count,
+            bucket_count,
+            chunk_count,
+            eligibility_word_count,
+            root_eligibility,
+            _chunk_counts: chunk_counts,
+            _chunk_offsets: chunk_offsets,
+            _bucket_counts: bucket_counts,
+            compacted_faces,
+            bucket_ranges,
+            indirect_arguments,
+            histogram_bind_group,
+            prefix_bind_group,
+            scan_bind_group,
+            scatter_bind_group,
+        })
+    }
+
+    pub fn write_resident_root_eligibility_bits(
+        &self,
+        scene: &ResidentGeometryBucketScene,
+        words: &[u32],
+    ) -> Result<(), LodWebGpuError> {
+        if words.len() != scene.eligibility_word_count as usize {
+            return Err(LodWebGpuError::Payload(format!(
+                "resident root eligibility has {} words; expected {}",
+                words.len(),
+                scene.eligibility_word_count,
+            )));
+        }
+        let tail = scene.face_count % 32;
+        if tail != 0
+            && words
+                .last()
+                .is_some_and(|word| word & !((1u32 << tail) - 1) != 0)
+        {
+            return Err(LodWebGpuError::Payload(
+                "resident root eligibility has nonzero padding".to_string(),
+            ));
+        }
+        self.queue
+            .write_buffer(&scene.root_eligibility, 0, bytemuck::cast_slice(words));
+        Ok(())
+    }
+
+    pub fn write_resident_root_suppression(
+        &self,
+        scene: &ResidentGeometryBucketScene,
+        suppressed_faces: &[u32],
+    ) -> Result<(), LodWebGpuError> {
+        let words = pack_wgsl_root_eligibility_bits(scene.face_count as usize, suppressed_faces)
+            .map_err(LodWebGpuError::Payload)?;
+        self.write_resident_root_eligibility_bits(scene, &words)
+    }
+
+    /// Append deterministic root histogram, chunk prefix, global bucket scan,
+    /// and stable face scatter to an application-owned encoder.
+    pub fn encode_resident_geometry_buckets(
+        &self,
+        scene: &ResidentGeometryBucketScene,
+        resident: &DeviceResidentLod<'_>,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<(), LodWebGpuError> {
+        if scene.model_identity != resident.model_identity {
+            return Err(LodWebGpuError::Payload(
+                "resident geometry buckets belong to a different WebGPU model".to_string(),
+            ));
+        }
+        if scene.face_count != resident.face_count {
+            return Err(LodWebGpuError::Payload(format!(
+                "resident geometry has {} faces; classifier result has {}",
+                scene.face_count, resident.face_count,
+            )));
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("quilting resident geometry bucket histogram"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.resident_bucket_histogram_pipeline);
+            pass.set_bind_group(0, &scene.histogram_bind_group, &[]);
+            pass.dispatch_workgroups(scene.chunk_count, 1, 1);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("quilting resident geometry bucket chunk prefix"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.resident_bucket_prefix_pipeline);
+            pass.set_bind_group(0, &scene.prefix_bind_group, &[]);
+            pass.dispatch_workgroups(scene.bucket_count.div_ceil(LOD_WORKGROUP_SIZE), 1, 1);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("quilting resident geometry bucket scan"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.resident_bucket_scan_pipeline);
+            pass.set_bind_group(0, &scene.scan_bind_group, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("quilting resident geometry bucket scatter"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.resident_bucket_scatter_pipeline);
+            pass.set_bind_group(0, &scene.scatter_bind_group, &[]);
+            pass.dispatch_workgroups(scene.chunk_count, 1, 1);
+        }
+        Ok(())
+    }
+
+    /// Diagnostic-only exact readback. The live path binds the compacted face,
+    /// range, and indirect buffers directly to preparation/render execution.
+    pub async fn resident_geometry_buckets_for_diagnostics(
+        &self,
+        scene: &ResidentGeometryBucketScene,
+        resident: &DeviceResidentLod<'_>,
+        suppressed_faces: &[u32],
+    ) -> Result<ResidentGeometryBucketOutput, LodWebGpuError> {
+        self.write_resident_root_suppression(scene, suppressed_faces)?;
+        let face_bytes = u64::from(scene.face_count) * PACKED_RECORD_BYTES;
+        let range_bytes = u64::from(scene.bucket_count) * RESIDENT_BUCKET_RANGE_RECORD_BYTES;
+        let indirect_bytes = u64::from(scene.bucket_count) * INDEXED_INDIRECT_RECORD_BYTES;
+        let face_readback = gpu_buffer(
+            &self.device,
+            "resident geometry face diagnostic readback",
+            face_bytes,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let range_readback = gpu_buffer(
+            &self.device,
+            "resident geometry range diagnostic readback",
+            range_bytes,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let indirect_readback = gpu_buffer(
+            &self.device,
+            "resident geometry indirect diagnostic readback",
+            indirect_bytes,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("resident geometry bucket diagnostic encoder"),
+            });
+        self.encode_resident_geometry_buckets(scene, resident, &mut encoder)?;
+        encoder.copy_buffer_to_buffer(&scene.compacted_faces, 0, &face_readback, 0, face_bytes);
+        encoder.copy_buffer_to_buffer(&scene.bucket_ranges, 0, &range_readback, 0, range_bytes);
+        encoder.copy_buffer_to_buffer(
+            &scene.indirect_arguments,
+            0,
+            &indirect_readback,
+            0,
+            indirect_bytes,
+        );
+        self.queue.submit([encoder.finish()]);
+        let bucket_ranges = words_to_five_records(
+            self.readback_words(&range_readback, range_bytes).await?,
+            "resident geometry range",
+        )?;
+        let indirect_arguments = words_to_five_records(
+            self.readback_words(&indirect_readback, indirect_bytes)
+                .await?,
+            "resident geometry indirect",
+        )?;
+        let survivor_count = bucket_ranges
+            .last()
+            .map_or(0u32, |range| range[3].saturating_add(range[4]));
+        let mut compacted_faces = self.readback_words(&face_readback, face_bytes).await?;
+        compacted_faces.truncate(survivor_count as usize);
+        Ok(ResidentGeometryBucketOutput {
+            compacted_faces,
+            bucket_ranges,
+            indirect_arguments,
+        })
+    }
+
+    async fn run_resident_geometry_bucket_conformance(&self) -> Result<usize, LodWebGpuError> {
+        let atlas_keys = [[1, 1, 1], [1, 1, 2], [1, 2, 4]];
+        let atlas_lookup =
+            prepare_lod_atlas_lookup(atlas_keys).map_err(LodWebGpuError::Conformance)?;
+        let atlas = self.upload_packed_patch_atlas(
+            &[
+                1, 2, 4, 6, 3, 0, 0, 1, 1, 1, 0, 3, 0, 0, 1, 1, 2, 3, 3, 0, 0,
+            ],
+            &[1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            &[0, 1, 2, 0, 1, 2, 0, 1, 2],
+            &[],
+        )?;
+        let face_count = 137usize;
+        let permutations = [0, 1, 2, 4, 3, 5];
+        let exponents = [[0, 0, 0], [0, 0, 1], [0, 1, 2]];
+        let packed = (0..face_count)
+            .map(|face| {
+                let atlas_index = face % atlas_keys.len();
+                pack_lod_classification(
+                    exponents[atlas_index],
+                    permutations[face % permutations.len()],
+                    (face % 11 != 0).then_some(atlas_index as u32),
+                    face as u8,
+                )
+                .map_err(LodWebGpuError::Conformance)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let packed_buffer = buffer_init_or_zero(
+            &self.device,
+            "resident geometry bucket conformance records",
+            bytemuck::cast_slice(&packed),
+            wgpu::BufferUsages::STORAGE,
+        );
+        let identity = self.allocate_model_identity()?;
+        let scene = self.upload_resident_geometry_bucket_scene_for_records(
+            identity,
+            face_count as u32,
+            &atlas_lookup.keys,
+            &packed_buffer,
+            &atlas,
+        )?;
+        let resident = DeviceResidentLod {
+            packed_records: &packed_buffer,
+            model_identity: identity,
+            face_count: face_count as u32,
+            classification_epoch: 1,
+            grading: FaceLodGrading::TwoToOne,
+        };
+        let foreign_resident = DeviceResidentLod {
+            packed_records: &packed_buffer,
+            model_identity: self.allocate_model_identity()?,
+            face_count: face_count as u32,
+            classification_epoch: 1,
+            grading: FaceLodGrading::TwoToOne,
+        };
+        let mut rejection_encoder =
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("foreign resident geometry bucket rejection"),
+                });
+        if self
+            .encode_resident_geometry_buckets(&scene, &foreign_resident, &mut rejection_encoder)
+            .is_ok()
+        {
+            return Err(LodWebGpuError::Conformance(
+                "resident geometry accepted a foreign model result".to_string(),
+            ));
+        }
+        let invalid_padding = vec![u32::MAX; scene.eligibility_word_count as usize];
+        if self
+            .write_resident_root_eligibility_bits(&scene, &invalid_padding)
+            .is_ok()
+        {
+            return Err(LodWebGpuError::Conformance(
+                "resident geometry accepted nonzero eligibility padding".to_string(),
+            ));
+        }
+        let atlas_draws = [[0, 3, 0, 0], [3, 3, 0, 0], [6, 3, 0, 0]];
+        let suppression_cases = [
+            vec![2, 64, 65, 130],
+            (0..face_count as u32)
+                .filter(|face| face % 3 == 0)
+                .collect::<Vec<_>>(),
+        ];
+        let mut compared_words = 0usize;
+        for suppressed in suppression_cases {
+            let eligibility = pack_wgsl_root_eligibility_bits(face_count, &suppressed)
+                .map_err(LodWebGpuError::Conformance)?;
+            let expected =
+                wgsl_resident_geometry_bucket_oracle_words(&packed, &atlas_draws, &eligibility)
+                    .map_err(LodWebGpuError::Conformance)?;
+            let actual = self
+                .resident_geometry_buckets_for_diagnostics(&scene, &resident, &suppressed)
+                .await?;
+            if actual.compacted_faces != expected.compacted_faces
+                || actual.bucket_ranges != expected.bucket_ranges
+                || actual.indirect_arguments != expected.indirect_arguments
+            {
+                return Err(LodWebGpuError::Conformance(format!(
+                    "resident geometry bucket mismatch for suppression {suppressed:?}: expected {expected:?}, got {actual:?}",
+                )));
+            }
+            compared_words += actual.compacted_faces.len()
+                + actual.bucket_ranges.len() * 5
+                + actual.indirect_arguments.len() * 5;
+        }
+        Ok(compared_words)
     }
 
     async fn run_resident_lod_conformance(&self) -> Result<usize, LodWebGpuError> {
@@ -999,6 +1609,13 @@ impl LodClassifierDevice {
             &visibility,
             model.prepared.residency.num_faces,
         )?;
+        let packed_atlas = self.upload_packed_patch_atlas(
+            &[1, 1, 2, 0, 3, 0, 0],
+            &[1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            &[0, 1, 2],
+            &[],
+        )?;
+        let bucket_scene = self.upload_resident_geometry_bucket_scene(model, &packed_atlas)?;
         let output_bytes = u64::from(source_count)
             .checked_mul(PACKED_RECORD_BYTES)
             .ok_or_else(|| {
@@ -1054,7 +1671,7 @@ impl LodClassifierDevice {
                     morph_weights: &[0.0],
                 },
             )?;
-            let _resident =
+            let resident =
                 self.reconcile_resident_lod_on_device(&classification, FaceLodGrading::TwoToOne);
             let mut encoder = self
                 .device
@@ -1115,6 +1732,22 @@ impl LodClassifierDevice {
                     "resident visibility indirect arguments mismatch: expected {expected_indirect:?}, got {indirect:?}",
                 )));
             }
+            let bucketed = self
+                .resident_geometry_buckets_for_diagnostics(&bucket_scene, &resident, &[])
+                .await?;
+            let expected_faces = if expected == 0 { vec![] } else { vec![0] };
+            if bucketed.compacted_faces != expected_faces
+                || bucketed
+                    .indirect_arguments
+                    .iter()
+                    .map(|arguments| arguments[1])
+                    .sum::<u32>()
+                    != expected
+            {
+                return Err(LodWebGpuError::Conformance(format!(
+                    "classifier-to-root-bucket mismatch: expected visibility {expected}, got {bucketed:?}",
+                )));
+            }
             compared_words += actual.len();
         }
         Ok(compared_words)
@@ -1125,7 +1758,8 @@ impl LodClassifierDevice {
     /// This covers one complete animated-capable two-pass dispatch; exact 2:1
     /// and 4:1 resident closure across a maximum-range ten-face chain; all S3
     /// permutations; visible-only neighbor promotion; invisible records;
-    /// priorities; and multiple atlas keys in the coherence pass.
+    /// priorities; multiple atlas keys in the coherence pass; and exact
+    /// source-stable root bucketing across three 64-face chunks.
     pub async fn run_conformance_matrix(&self) -> Result<LodDeviceConformance, LodWebGpuError> {
         let prepared = prepare_lod_model(LodModelData {
             positions: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -1227,6 +1861,7 @@ impl LodClassifierDevice {
             )));
         }
         let resident_lod_words = self.run_resident_lod_conformance().await?;
+        let resident_bucket_words = self.run_resident_geometry_bucket_conformance().await?;
         let full_pipeline_words = actual.len();
 
         let pass1 = [
@@ -1342,6 +1977,7 @@ impl LodClassifierDevice {
             full_pipeline_words,
             resident_lod_words,
             resident_visibility_words,
+            resident_bucket_words,
             coherence_words: actual.len(),
             prepared_patch_words,
             rendered_patch_pixels,
@@ -3691,6 +4327,7 @@ impl LodClassifierDevice {
 
         Ok(LodClassifierModel {
             identity,
+            atlas_keys: atlas.keys.clone(),
             prepared,
             classification_epoch: 0,
             joint_capacity,
@@ -4140,6 +4777,38 @@ impl PatchRenderScene {
     }
 }
 
+impl ResidentGeometryBucketScene {
+    pub fn face_count(&self) -> u32 {
+        self.face_count
+    }
+
+    pub fn atlas_count(&self) -> u32 {
+        self.atlas_count
+    }
+
+    pub fn bucket_count(&self) -> u32 {
+        self.bucket_count
+    }
+
+    /// Future GPU adaptive partitioning can update this packed inclusion field
+    /// directly instead of publishing suppressed source faces through the CPU.
+    pub fn root_eligibility_buffer(&self) -> &wgpu::Buffer {
+        &self.root_eligibility
+    }
+
+    pub fn compacted_faces_buffer(&self) -> &wgpu::Buffer {
+        &self.compacted_faces
+    }
+
+    pub fn bucket_ranges_buffer(&self) -> &wgpu::Buffer {
+        &self.bucket_ranges
+    }
+
+    pub fn indirect_arguments_buffer(&self) -> &wgpu::Buffer {
+        &self.indirect_arguments
+    }
+}
+
 impl OffscreenPatchRenderTarget {
     pub fn size(&self) -> [u32; 2] {
         self.size
@@ -4391,7 +5060,7 @@ pub async fn run_browser_lod_conformance() -> Result<String, wasm_bindgen::JsVal
         .await
         .map_err(browser_error)?;
     Ok(format!(
-        "adapter={} backend={:?} full_pipeline_words={} resident_lod_words={} resident_visibility_words={} coherence_words={} \
+        "adapter={} backend={:?} full_pipeline_words={} resident_lod_words={} resident_visibility_words={} resident_bucket_words={} coherence_words={} \
          prepared_patch_words={} rendered_patch_pixels={} shared_frame_draws={} compacted_source_words={} \
          compacted_range_words={} indirect_argument_words={} indirect_draws={}",
         adapter_info.name,
@@ -4399,6 +5068,7 @@ pub async fn run_browser_lod_conformance() -> Result<String, wasm_bindgen::JsVal
         report.full_pipeline_words,
         report.resident_lod_words,
         report.resident_visibility_words,
+        report.resident_bucket_words,
         report.coherence_words,
         report.prepared_patch_words,
         report.rendered_patch_pixels,

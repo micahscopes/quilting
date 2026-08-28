@@ -998,6 +998,139 @@ pub fn wgsl_visibility_compaction_oracle_words(
     })
 }
 
+/// Exact retained-root geometry buckets produced from packed resident LOD.
+/// Buckets are ordered by sorted atlas index, then even/odd S3 parity. Faces
+/// inside each bucket retain source order so this oracle can detect unstable
+/// GPU scatter without depending on material or render-domain policy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WgslResidentGeometryBucketOracleWords {
+    pub compacted_faces: Vec<u32>,
+    /// `(bucket, atlas, parity, compacted_first, compacted_count)`.
+    pub bucket_ranges: Vec<[u32; 5]>,
+    /// Exact five-word `DrawIndexedIndirect` records for triangle geometry.
+    pub indirect_arguments: Vec<[u32; 5]>,
+}
+
+/// Pack the retained-root inclusion field used while a sparse adaptive overlay
+/// replaces selected source faces. One means the root remains eligible. The
+/// final word's unused high bits are always zero.
+pub fn pack_wgsl_root_eligibility_bits(
+    face_count: usize,
+    suppressed_faces: &[u32],
+) -> Result<Vec<u32>, String> {
+    let word_count = face_count.div_ceil(32);
+    let mut words = vec![u32::MAX; word_count];
+    if let Some(last) = words.last_mut() {
+        let tail = face_count % 32;
+        if tail != 0 {
+            *last = (1u32 << tail) - 1;
+        }
+    }
+    let mut previous = None;
+    for &face in suppressed_faces {
+        if previous.is_some_and(|previous| previous >= face) {
+            return Err(format!(
+                "suppressed root faces are not strictly increasing at {face}",
+            ));
+        }
+        if face as usize >= face_count {
+            return Err(format!(
+                "suppressed root face {face} exceeds the {face_count}-face domain",
+            ));
+        }
+        words[face as usize / 32] &= !(1u32 << (face % 32));
+        previous = Some(face);
+    }
+    Ok(words)
+}
+
+fn validate_wgsl_root_eligibility_bits(
+    face_count: usize,
+    words: &[u32],
+) -> Result<(), String> {
+    let expected = face_count.div_ceil(32);
+    if words.len() != expected {
+        return Err(format!(
+            "root eligibility has {} words; expected {expected}",
+            words.len(),
+        ));
+    }
+    let tail = face_count % 32;
+    if tail != 0
+        && words
+            .last()
+            .is_some_and(|word| word & !((1u32 << tail) - 1) != 0)
+    {
+        return Err("root eligibility has nonzero padding".to_string());
+    }
+    Ok(())
+}
+
+/// Freeze the root-only atlas/parity bucket plan expected from WebGPU.
+/// `atlas_draws` contains `(triangle_first, triangle_count, line_first,
+/// line_count)` in the same sorted-key order used by the classifier lookup.
+pub fn wgsl_resident_geometry_bucket_oracle_words(
+    packed_residents: &[u32],
+    atlas_draws: &[[u32; 4]],
+    root_eligibility: &[u32],
+) -> Result<WgslResidentGeometryBucketOracleWords, String> {
+    u32::try_from(packed_residents.len())
+        .map_err(|_| "resident geometry face count exceeds u32".to_string())?;
+    if atlas_draws.is_empty() || atlas_draws.len() > u8::MAX as usize {
+        return Err("resident geometry buckets require 1..=255 atlas entries".to_string());
+    }
+    validate_wgsl_root_eligibility_bits(packed_residents.len(), root_eligibility)?;
+    let bucket_count = atlas_draws
+        .len()
+        .checked_mul(2)
+        .ok_or_else(|| "resident geometry bucket count overflow".to_string())?;
+    let mut buckets = vec![Vec::<u32>::new(); bucket_count];
+    for (face, &packed) in packed_residents.iter().enumerate() {
+        if root_eligibility[face / 32] & (1u32 << (face % 32)) == 0 {
+            continue;
+        }
+        let fields = unpack_lod_classification_fields(packed)?;
+        let Some(atlas_index) = fields.atlas_index else {
+            continue;
+        };
+        if atlas_index as usize >= atlas_draws.len() {
+            return Err(format!(
+                "resident face {face} references atlas index {atlas_index}, but only {} entries exist",
+                atlas_draws.len(),
+            ));
+        }
+        let bucket = atlas_index as usize * 2 + fields.parity_bucket as usize;
+        buckets[bucket].push(face as u32);
+    }
+
+    let mut compacted_faces = Vec::with_capacity(packed_residents.len());
+    let mut bucket_ranges = Vec::with_capacity(bucket_count);
+    let mut indirect_arguments = Vec::with_capacity(bucket_count);
+    for (bucket, faces) in buckets.into_iter().enumerate() {
+        let atlas_index = bucket / 2;
+        let parity = bucket % 2;
+        let compacted_first = u32::try_from(compacted_faces.len())
+            .map_err(|_| "resident geometry compacted prefix exceeds u32".to_string())?;
+        let compacted_count = u32::try_from(faces.len())
+            .map_err(|_| "resident geometry bucket count exceeds u32".to_string())?;
+        compacted_faces.extend(faces);
+        bucket_ranges.push([
+            bucket as u32,
+            atlas_index as u32,
+            parity as u32,
+            compacted_first,
+            compacted_count,
+        ]);
+        let draw = atlas_draws[atlas_index];
+        indirect_arguments.push([draw[1], compacted_count, draw[0], 0, 0]);
+    }
+    Ok(WgslResidentGeometryBucketOracleWords {
+        compacted_faces,
+        bucket_ranges,
+        indirect_arguments,
+    })
+}
+
 /// Per-dispatch values not already carried by `LodDispatchState` or the
 /// immutable prepared model. Matrices retain the column-major renderer ABI.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -3132,6 +3265,88 @@ mod tests {
             pack_wgsl_source_visibility_words(&[1, 2, 0], 3).unwrap_err(),
             "visibility source 1 has invalid value 2",
         );
+    }
+
+    #[test]
+    fn resident_geometry_bucket_oracle_is_stable_by_atlas_and_parity() {
+        let packed = [
+            pack_lod_classification([1, 2, 4], 0, Some(1), 0).unwrap(),
+            pack_lod_classification([1, 1, 2], 1, Some(0), 0).unwrap(),
+            pack_lod_classification([1, 1, 1], 0, None, 0).unwrap(),
+            pack_lod_classification([1, 2, 4], 5, Some(1), 0).unwrap(),
+            pack_lod_classification([1, 1, 2], 4, Some(0), 0).unwrap(),
+            pack_lod_classification([2, 4, 8], 2, Some(2), 0).unwrap(),
+        ];
+        let atlas_draws = [[10, 6, 100, 8], [20, 12, 108, 16], [40, 18, 124, 24]];
+        let eligibility = pack_wgsl_root_eligibility_bits(packed.len(), &[5]).unwrap();
+        assert_eq!(eligibility, [0b01_1111]);
+        let oracle = wgsl_resident_geometry_bucket_oracle_words(
+            &packed,
+            &atlas_draws,
+            &eligibility,
+        )
+        .unwrap();
+        assert_eq!(oracle.compacted_faces, [4, 1, 0, 3]);
+        assert_eq!(
+            oracle.bucket_ranges,
+            [
+                [0, 0, 0, 0, 1],
+                [1, 0, 1, 1, 1],
+                [2, 1, 0, 2, 1],
+                [3, 1, 1, 3, 1],
+                [4, 2, 0, 4, 0],
+                [5, 2, 1, 4, 0],
+            ],
+        );
+        assert_eq!(
+            oracle.indirect_arguments,
+            [
+                [6, 1, 10, 0, 0],
+                [6, 1, 10, 0, 0],
+                [12, 1, 20, 0, 0],
+                [12, 1, 20, 0, 0],
+                [18, 0, 40, 0, 0],
+                [18, 0, 40, 0, 0],
+            ],
+        );
+    }
+
+    #[test]
+    fn resident_geometry_bucket_inputs_reject_padding_and_bad_domains() {
+        assert_eq!(
+            pack_wgsl_root_eligibility_bits(35, &[1, 34]).unwrap(),
+            [u32::MAX & !(1 << 1), 0b011],
+        );
+        assert!(pack_wgsl_root_eligibility_bits(4, &[1, 1])
+            .unwrap_err()
+            .contains("strictly increasing"));
+        assert!(pack_wgsl_root_eligibility_bits(4, &[4])
+            .unwrap_err()
+            .contains("exceeds"));
+
+        let visible = pack_lod_classification([1; 3], 0, Some(0), 0).unwrap();
+        assert_eq!(
+            wgsl_resident_geometry_bucket_oracle_words(&[visible], &[[0, 3, 0, 0]], &[])
+                .unwrap_err(),
+            "root eligibility has 0 words; expected 1",
+        );
+        assert_eq!(
+            wgsl_resident_geometry_bucket_oracle_words(
+                &[visible; 2],
+                &[[0, 3, 0, 0]],
+                &[u32::MAX],
+            )
+            .unwrap_err(),
+            "root eligibility has nonzero padding",
+        );
+        let missing = pack_lod_classification([1; 3], 0, Some(1), 0).unwrap();
+        assert!(wgsl_resident_geometry_bucket_oracle_words(
+            &[missing],
+            &[[0, 3, 0, 0]],
+            &[1],
+        )
+        .unwrap_err()
+        .contains("only 1 entries"));
     }
 
     fn subject_record(node: f32, marker: f32) -> Vec<f32> {

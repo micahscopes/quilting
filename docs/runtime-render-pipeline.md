@@ -539,19 +539,45 @@ compact CPU bitset adapter until its classifier and draw construction are moved
 onto this same device; the direct resident path is ready for that cut and does
 not introduce a diagnostic readback into production.
 
-The optimized monolithic WASM artifact measured 7,543,417 bytes with this
-backend enabled versus 7,458,547 bytes with the feature disabled: an 84,870-byte
-(1.14%) release delta. Debug artifacts are not representative here—the same
-feature set reached roughly 50 MB before release optimization—so size gates
-must compare optimized outputs.
+The next device stage now derives a deterministic retained-root geometry plan
+from the packed resident words themselves. Its bounded bucket domain is sorted
+atlas index × S3 parity (at most `255 × 2`), with one packed source-face
+eligibility field for roots replaced by the sparse adaptive overlay. A
+64-face-chunk histogram, independent per-bucket chunk prefix, one bounded
+global bucket scan, and source-order scatter produce compacted face IDs,
+five-word ranges, and portable indexed-indirect records. Local histogram
+atomics affect counts only; the scatter rank is defined by source order, so the
+GPU output is byte-exact with the independent Rust oracle across chunk
+boundaries. Indirect records retain the packed global atlas's real
+`first_index`, removing the need to bind a different index-buffer slice for
+each root bucket.
 
-The next cut is authoritative GPU draw construction: deterministically bucket
-the reconciled resident faces by atlas entry and S3 parity, scan/scatter stable
-source-face instances into those buckets, and issue indirect draws without
-rebuilding batch/topology words from worker readback. Material/render domains
-then extend the same key for PBR. After that, attach the live shared frame
-executor to a browser surface and add WebGL2 image/workload parity behind the
-existing explicit backend switch. PBR, wire, LOD color, stretch, picking,
+This stage intentionally covers retained roots, not adaptive dyadic leaves.
+Leaves of one authored face can have distinct edge LOD and permutation, so
+pretending to recover them from one source-face resident word would discard
+the conformal screen partition. The existing sparse overlay remains a separate
+correctness layer until partition and leaf-LOD extraction move onto the GPU.
+The two retained chunk tables cost
+`2 × ceil(source_faces / 64) × (2 × atlas_entries) × 4` bytes and are rejected
+up front if they exceed the selected device's storage-binding limit. Native
+Radeon/Vulkan and Chromium `BrowserWebGpu` both match 323 exact output words
+across a 137-face, three-atlas, all-S3 fixture with two successive suppression
+fields; the browser also runs a real classifier → reconciliation → root-bucket
+chain and reports no console warning or error.
+
+The optimized monolithic WASM artifact now measures 7,669,789 bytes with this
+backend enabled versus 7,459,748 bytes with the feature disabled: a
+210,041-byte (2.82%) release delta. Both artifacts were rebuilt from the same
+tree with `wasm-pack --release` and `wasm-opt`; debug artifacts are not
+representative, so size gates must continue to compare optimized outputs.
+
+The next cut consumes the root plan in actual graphics execution: prepare one
+root record per compacted face, extend the bucket key with material/render
+domains where required, and compose the sparse adaptive overlay without
+rebuilding the retained baseline from worker readback. After that, attach the
+live shared frame executor to a browser surface and add WebGL2 image/workload
+parity behind the existing explicit backend switch. PBR, wire, LOD color,
+stretch, picking,
 material/texture binding, and postprocess commands still reject explicitly
 rather than silently lowering to normals. That cut is what finally removes the
 live classifier readback, CPU topology repacking, and rejected atlas vertex
