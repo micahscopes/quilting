@@ -128,6 +128,13 @@ fn shade_patch_lod(input: PatchVertexOutput) -> vec4<f32> {
     return vec4<f32>(matcap_shade(normal, patch_lod_heatmap(input.density)), input.fade);
 }
 
+fn shade_patch_wire(input: PatchVertexOutput) -> vec4<f32> {
+    if input.fade < 0.001 {
+        discard;
+    }
+    return vec4<f32>(patch_lod_heatmap(input.density), input.fade);
+}
+
 fn shade_patch_stretch(input: PatchVertexOutput) -> vec4<f32> {
     if input.fade < 0.001 {
         discard;
