@@ -464,16 +464,16 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             .unwrap();
         let packed_atlas = classifier
             .upload_packed_patch_atlas(
-                &[1, 1, 1, 3, 3, 0, 0],
+                &[1, 1, 1, 3, 3, 0, 6],
                 &[1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
                 &[0, 0, 0, 0, 1, 2],
-                &[],
+                &[0, 1, 1, 2, 2, 0],
             )
             .unwrap();
         assert_eq!(packed_atlas.entry_count(), 1);
         assert_eq!(packed_atlas.vertex_count(), 3);
         assert_eq!(packed_atlas.triangle_index_count(), 6);
-        assert_eq!(packed_atlas.line_index_count(), 0);
+        assert_eq!(packed_atlas.line_index_count(), 6);
         assert!(
             classifier
                 .upload_packed_patch_atlas(
@@ -566,17 +566,14 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 1,
             )
             .unwrap();
-        let unsupported = classifier.create_diagnostic_patch_render_pipeline(
-            RenderStyle::Wire,
-            wgpu::TextureFormat::Rgba8Unorm,
-            Some(wgpu::TextureFormat::Depth24Plus),
-            1,
-        );
-        let unsupported = match unsupported {
-            Err(error) => error,
-            Ok(_) => panic!("wire unexpectedly created a triangle-diagnostic pipeline"),
-        };
-        assert!(unsupported.to_string().contains("does not support Wire"));
+        let _wire_pipeline = classifier
+            .create_diagnostic_patch_render_pipeline(
+                RenderStyle::Wire,
+                wgpu::TextureFormat::Rgba8Unorm,
+                Some(wgpu::TextureFormat::Depth24Plus),
+                1,
+            )
+            .unwrap();
         let diagnostic_scene = classifier
             .upload_patch_render_scene(
                 diagnostic_pipelines.get(RenderStyle::Normals).unwrap(),
@@ -593,9 +590,15 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             .write_patch_render_face_visibility_bits(&diagnostic_scene, &[0b11])
             .unwrap();
         let mut diagnostic_hashes = Vec::new();
-        for (revision, style) in [RenderStyle::Matcap, RenderStyle::Lod, RenderStyle::Stretch]
-            .into_iter()
-            .enumerate()
+        for (revision, style) in [
+            RenderStyle::Matcap,
+            RenderStyle::Lod,
+            RenderStyle::Stretch,
+            RenderStyle::Wire,
+            RenderStyle::MatcapWire,
+        ]
+        .into_iter()
+        .enumerate()
         {
             let options = RenderFrameOptions {
                 matcap_style: MatcapStyle::GoldenSoft,
@@ -614,16 +617,21 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 .device()
                 .push_error_scope(wgpu::ErrorFilter::Validation);
             let encoding = classifier
-                .render_offscreen_diagnostic_patch_scene_with_face_visibility(
+                .render_offscreen_supported_patch_scene_with_face_visibility(
                     &frame,
-                    diagnostic_pipelines.get(style).unwrap(),
+                    &diagnostic_pipelines,
                     &diagnostic_scene,
                     &packed_atlas,
                     &target,
                     true,
                 )
                 .unwrap();
-            assert_eq!(encoding.indirect_draw_calls, 2);
+            let expected_draws = if style == RenderStyle::MatcapWire {
+                4
+            } else {
+                2
+            };
+            assert_eq!(encoding.indirect_draw_calls, expected_draws);
             assert_eq!(
                 encoding.logical_submission,
                 frame.expected_submission_stats(&render_scene).unwrap()
@@ -645,9 +653,11 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 panic!("{style:?} shared-pipeline validation: {error}");
             }
         }
-        assert_ne!(diagnostic_hashes[0], diagnostic_hashes[1]);
-        assert_ne!(diagnostic_hashes[0], diagnostic_hashes[2]);
-        assert_ne!(diagnostic_hashes[1], diagnostic_hashes[2]);
+        for (left, left_hash) in diagnostic_hashes.iter().enumerate() {
+            for right_hash in &diagnostic_hashes[left + 1..] {
+                assert_ne!(left_hash, right_hash);
+            }
+        }
 
         let compaction_scene = RenderSceneSnapshot {
             revision: 19,

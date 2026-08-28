@@ -622,24 +622,26 @@ pub struct PatchPreparationScene {
     bind_group: wgpu::BindGroup,
 }
 
-/// Retained WebGPU graphics pipelines for the first shared QB surface mode.
+/// Retained WebGPU graphics pipelines for one prepared QB surface mode.
 /// Winding is pipeline state in WebGPU, so both variants share one explicit
 /// bind-group layout instead of recompiling or mutating state per batch.
 pub struct PatchRenderPipeline {
     style: RenderStyle,
+    geometry: RenderGeometry,
     bind_group_layout: wgpu::BindGroupLayout,
     counter_clockwise: wgpu::RenderPipeline,
     clockwise: wgpu::RenderPipeline,
 }
 
-/// Retained triangle-diagnostic pipelines sharing one shader module and bind
-/// group layout. A scene can switch among these styles without rebuilding its
-/// bindings or duplicating geometry residency.
+/// Retained diagnostic pipelines sharing one shader module and bind-group
+/// layout. Triangle, line, and composite frames can switch without rebuilding
+/// scene bindings or duplicating geometry residency.
 pub struct DiagnosticPatchRenderPipelines {
     normals: PatchRenderPipeline,
     matcap: PatchRenderPipeline,
     lod: PatchRenderPipeline,
     stretch: PatchRenderPipeline,
+    wire: PatchRenderPipeline,
 }
 
 /// Scene/frame bindings shared by every atlas bucket and indirect batch draw.
@@ -2658,10 +2660,9 @@ impl LodClassifierDevice {
         )
     }
 
-    /// Create one triangle-based diagnostic pipeline over the shared prepared
-    /// QB vertex path. Styles with additional resources or geometry (matcap,
-    /// PBR, and wire) remain explicit future cuts rather than silently
-    /// selecting the wrong shader or index stream.
+    /// Create one single-pass diagnostic pipeline over the shared prepared QB
+    /// vertex path. PBR and composite styles remain explicit rather than
+    /// silently selecting the wrong resources or draw sequence.
     pub fn create_diagnostic_patch_render_pipeline(
         &self,
         style: RenderStyle,
@@ -2679,7 +2680,7 @@ impl LodClassifierDevice {
         .ok_or_else(|| LodWebGpuError::Payload("diagnostic pipeline set was empty".to_string()))
     }
 
-    /// Create the complete currently supported triangle-diagnostic family.
+    /// Create the complete currently supported diagnostic pipeline family.
     /// Every member borrows the same binding-layout identity, so a live scene
     /// changes style by selecting a pipeline—not by republishing resources.
     pub fn create_diagnostic_patch_render_pipelines(
@@ -2694,11 +2695,13 @@ impl LodClassifierDevice {
                 RenderStyle::Matcap,
                 RenderStyle::Lod,
                 RenderStyle::Stretch,
+                RenderStyle::Wire,
             ],
             color_format,
             depth_format,
             sample_count,
         )?;
+        let wire = pipelines.pop().expect("requested wire pipeline");
         let stretch = pipelines.pop().expect("requested stretch pipeline");
         let lod = pipelines.pop().expect("requested LOD pipeline");
         let matcap = pipelines.pop().expect("requested matcap pipeline");
@@ -2708,6 +2711,7 @@ impl LodClassifierDevice {
             matcap,
             lod,
             stretch,
+            wire,
         })
     }
 
@@ -2729,24 +2733,40 @@ impl LodClassifierDevice {
             .iter()
             .copied()
             .map(|style| {
-                let entry_point = match style {
+                let (geometry, entry_point) = match style {
                     RenderStyle::Normals => {
-                        quilting_shaders::PATCH_RENDER_DEVICE_NORMALS_ENTRY_POINT
+                        (
+                            RenderGeometry::Triangles,
+                            quilting_shaders::PATCH_RENDER_DEVICE_NORMALS_ENTRY_POINT,
+                        )
                     }
                     RenderStyle::Matcap => {
-                        quilting_shaders::PATCH_RENDER_DEVICE_MATCAP_ENTRY_POINT
+                        (
+                            RenderGeometry::Triangles,
+                            quilting_shaders::PATCH_RENDER_DEVICE_MATCAP_ENTRY_POINT,
+                        )
                     }
-                    RenderStyle::Lod => quilting_shaders::PATCH_RENDER_DEVICE_LOD_ENTRY_POINT,
+                    RenderStyle::Lod => (
+                        RenderGeometry::Triangles,
+                        quilting_shaders::PATCH_RENDER_DEVICE_LOD_ENTRY_POINT,
+                    ),
                     RenderStyle::Stretch => {
-                        quilting_shaders::PATCH_RENDER_DEVICE_STRETCH_ENTRY_POINT
+                        (
+                            RenderGeometry::Triangles,
+                            quilting_shaders::PATCH_RENDER_DEVICE_STRETCH_ENTRY_POINT,
+                        )
                     }
+                    RenderStyle::Wire => (
+                        RenderGeometry::Lines,
+                        quilting_shaders::PATCH_RENDER_DEVICE_WIRE_ENTRY_POINT,
+                    ),
                     unsupported => {
                         return Err(LodWebGpuError::Payload(format!(
                             "WebGPU prepared-patch diagnostic pipeline does not support {unsupported:?}",
                         )));
                     }
                 };
-                Ok((style, entry_point))
+                Ok((style, geometry, entry_point))
             })
             .collect::<Result<Vec<_>, _>>()?;
         let module = self
@@ -2808,7 +2828,7 @@ impl LodClassifierDevice {
         });
         let attributes = wgpu::vertex_attr_array![0 => Float32x3];
         let mut pipelines = Vec::with_capacity(fragment_entry_points.len());
-        for (style, fragment_entry_point) in fragment_entry_points {
+        for (style, geometry, fragment_entry_point) in fragment_entry_points {
             let create = |front_face| {
                 self.device
                     .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -2827,7 +2847,10 @@ impl LodClassifierDevice {
                             }],
                         },
                         primitive: wgpu::PrimitiveState {
-                            topology: wgpu::PrimitiveTopology::TriangleList,
+                            topology: match geometry {
+                                RenderGeometry::Triangles => wgpu::PrimitiveTopology::TriangleList,
+                                RenderGeometry::Lines => wgpu::PrimitiveTopology::LineList,
+                            },
                             front_face,
                             cull_mode: None,
                             ..Default::default()
@@ -2851,11 +2874,17 @@ impl LodClassifierDevice {
                         cache: None,
                     })
             };
+            let counter_clockwise = create(wgpu::FrontFace::Ccw);
+            let clockwise = match geometry {
+                RenderGeometry::Triangles => create(wgpu::FrontFace::Cw),
+                RenderGeometry::Lines => counter_clockwise.clone(),
+            };
             pipelines.push(PatchRenderPipeline {
                 style,
+                geometry,
                 bind_group_layout: bind_group_layout.clone(),
-                counter_clockwise: create(wgpu::FrontFace::Ccw),
-                clockwise: create(wgpu::FrontFace::Cw),
+                counter_clockwise,
+                clockwise,
             });
         }
         Ok(pipelines)
@@ -3432,7 +3461,7 @@ impl LodClassifierDevice {
         self.readback_words(&readback, output_bytes).await
     }
 
-    /// Encode one supported triangle-diagnostic frame from a coherent scene
+    /// Encode one supported single-pass diagnostic frame from a coherent scene
     /// aggregate and the retained packed atlas.
     #[allow(clippy::too_many_arguments)]
     pub fn encode_diagnostic_patch_render_scene<'resource, VisibilityProducer>(
@@ -3458,6 +3487,42 @@ impl LodClassifierDevice {
             frame,
             &scene.scene,
             pipeline,
+            &scene.bindings,
+            &scene.patches,
+            &scene.visibility,
+            atlas,
+            target,
+            use_qb,
+            encode_visibility,
+        )
+    }
+
+    /// Encode a supported single- or multi-pass diagnostic frame from one
+    /// coherent retained scene aggregate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_supported_patch_render_scene<'resource, VisibilityProducer>(
+        &'resource self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &RenderFrame,
+        pipelines: &'resource DiagnosticPatchRenderPipelines,
+        scene: &'resource PatchRenderScene,
+        atlas: &'resource PackedPatchAtlas,
+        target: PatchRenderTarget<'resource>,
+        use_qb: bool,
+        encode_visibility: VisibilityProducer,
+    ) -> Result<PatchFrameEncoding, LodWebGpuError>
+    where
+        VisibilityProducer: FnOnce(
+            &mut wgpu::CommandEncoder,
+            &PatchPreparationScene,
+            &VisibilityCompactionScene,
+        ) -> Result<(), LodWebGpuError>,
+    {
+        self.encode_supported_render_frame(
+            encoder,
+            frame,
+            &scene.scene,
+            pipelines,
             &scene.bindings,
             &scene.patches,
             &scene.visibility,
@@ -3606,10 +3671,9 @@ impl LodClassifierDevice {
         )
     }
 
-    /// Present a live triangle-diagnostic frame directly to a Rust-owned browser
-    /// surface. The same frame, scene bindings, visibility expansion, and draw
-    /// encoder are used by the offscreen parity path; only attachment ownership
-    /// and submission/presentation differ.
+    /// Present a live single-pass diagnostic frame directly to a Rust-owned
+    /// browser surface. The same frame, scene bindings, visibility expansion,
+    /// and draw encoder are used by the offscreen parity path.
     pub fn present_diagnostic_patch_scene_with_face_visibility(
         &self,
         surface: &mut PatchPresentationSurface,
@@ -3647,6 +3711,45 @@ impl LodClassifierDevice {
         )
     }
 
+    /// Present any supported diagnostic frame, including matcap plus wire,
+    /// from one preparation/visibility result and one surface submission.
+    pub fn present_supported_patch_scene_with_face_visibility(
+        &self,
+        surface: &mut PatchPresentationSurface,
+        frame: &RenderFrame,
+        pipelines: &DiagnosticPatchRenderPipelines,
+        scene: &PatchRenderScene,
+        atlas: &PackedPatchAtlas,
+        use_qb: bool,
+    ) -> Result<SurfacePresentation<PatchFrameEncoding>, LodWebGpuError> {
+        surface.present_with(
+            self,
+            "quilting live presentation frame",
+            |encoder, mut target| {
+                target.clear_color = Some(wgpu::Color {
+                    r: 0.2,
+                    g: 0.2,
+                    b: 0.3,
+                    a: 1.0,
+                });
+                target.clear_depth = Some(1.0);
+                self.encode_supported_patch_render_scene(
+                    encoder,
+                    frame,
+                    pipelines,
+                    scene,
+                    atlas,
+                    target,
+                    use_qb,
+                    |encoder, _, _| {
+                        self.encode_face_visibility_expansion(scene, encoder);
+                        Ok(())
+                    },
+                )
+            },
+        )
+    }
+
     /// Compatibility wrapper for normals-only presentation callers.
     pub fn present_normals_patch_scene_with_face_visibility(
         &self,
@@ -3663,7 +3766,7 @@ impl LodClassifierDevice {
         )
     }
 
-    /// Submit a supported triangle-diagnostic frame with compact per-face
+    /// Submit a supported single-pass diagnostic frame with compact per-face
     /// visibility to a retained offscreen target.
     pub fn render_offscreen_diagnostic_patch_scene_with_face_visibility(
         &self,
@@ -3684,6 +3787,51 @@ impl LodClassifierDevice {
             true,
             wgpu::Color::TRANSPARENT,
         )
+    }
+
+    /// Submit any supported diagnostic frame to the retained offscreen target
+    /// without a readback. Composite styles still prepare and compact once.
+    pub fn render_offscreen_supported_patch_scene_with_face_visibility(
+        &self,
+        frame: &RenderFrame,
+        pipelines: &DiagnosticPatchRenderPipelines,
+        scene: &PatchRenderScene,
+        atlas: &PackedPatchAtlas,
+        target: &OffscreenPatchRenderTarget,
+        use_qb: bool,
+    ) -> Result<PatchFrameEncoding, LodWebGpuError> {
+        if frame.view.viewport != target.size {
+            return Err(LodWebGpuError::Payload(format!(
+                "offscreen target {:?} does not match frame viewport {:?}",
+                target.size, frame.view.viewport,
+            )));
+        }
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quilting live offscreen diagnostic frame"),
+            });
+        let encoding = self.encode_supported_patch_render_scene(
+            &mut encoder,
+            frame,
+            pipelines,
+            scene,
+            atlas,
+            PatchRenderTarget {
+                color_view: &target.color_view,
+                resolve_target: None,
+                depth_stencil_view: Some(&target.depth_view),
+                clear_color: Some(wgpu::Color::TRANSPARENT),
+                clear_depth: Some(1.0),
+            },
+            use_qb,
+            |encoder, _, _| {
+                self.encode_face_visibility_expansion(scene, encoder);
+                Ok(())
+            },
+        )?;
+        self.queue.submit([encoder.finish()]);
+        Ok(encoding)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3776,10 +3924,10 @@ impl LodClassifierDevice {
         self.write_patch_render_frames(bindings, &[frame])
     }
 
-    /// Encode the currently supported production subset of a shared frame:
-    /// prepared rational-QB patches in normals mode. The canonical command
-    /// sequence proves that every logical prepare precedes every visibility
-    /// resolution, so each scene-wide compute phase is safely coalesced once.
+    /// Encode the supported prepared rational-QB subset of a shared frame. The
+    /// canonical command sequence proves that every logical prepare precedes
+    /// every visibility resolution, so each scene-wide compute phase is safely
+    /// coalesced once.
     ///
     /// `encode_visibility` runs after patch preparation and before compaction.
     /// It may dispatch a same-device classifier into
@@ -3787,21 +3935,25 @@ impl LodClassifierDevice {
     /// when the caller already uploaded an exact current-pose stream. No map or
     /// copy to CPU memory occurs here.
     #[allow(clippy::too_many_arguments)]
-    pub fn encode_diagnostic_render_frame<'resource, VisibilityProducer>(
+    fn encode_render_frame_with_pipelines<'resource, VisibilityProducer, PipelineResolver>(
         &'resource self,
         encoder: &mut wgpu::CommandEncoder,
         frame: &RenderFrame,
         scene: &RenderSceneSnapshot,
-        pipeline: &'resource PatchRenderPipeline,
         bindings: &'resource PatchRenderBindings,
         patches: &'resource PatchPreparationScene,
         visibility: &'resource VisibilityCompactionScene,
         atlas: &'resource PackedPatchAtlas,
         target: PatchRenderTarget<'resource>,
         use_qb: bool,
+        resolve_pipeline: PipelineResolver,
         encode_visibility: VisibilityProducer,
     ) -> Result<PatchFrameEncoding, LodWebGpuError>
     where
+        PipelineResolver: Fn(
+            RenderPass,
+            RenderGeometry,
+        ) -> Result<&'resource PatchRenderPipeline, LodWebGpuError>,
         VisibilityProducer: FnOnce(
             &mut wgpu::CommandEncoder,
             &PatchPreparationScene,
@@ -3811,23 +3963,6 @@ impl LodClassifierDevice {
         frame
             .validate(scene)
             .map_err(|error| LodWebGpuError::Payload(format!("render frame contract: {error}")))?;
-        if pipeline.style != frame.style {
-            return Err(LodWebGpuError::Payload(format!(
-                "WebGPU patch pipeline {:?} cannot render {:?} frame",
-                pipeline.style, frame.style,
-            )));
-        }
-        let expected_pass = match frame.style {
-            RenderStyle::Normals => RenderPass::Normals,
-            RenderStyle::Matcap => RenderPass::Matcap,
-            RenderStyle::Lod => RenderPass::Lod,
-            RenderStyle::Stretch => RenderPass::Stretch,
-            unsupported => {
-                return Err(LodWebGpuError::Payload(format!(
-                    "WebGPU patch renderer does not yet support {unsupported:?} style",
-                )));
-            }
-        };
         if scene.batches.is_empty() {
             return Err(LodWebGpuError::Payload(
                 "WebGPU patch renderer requires a nonempty retained scene".to_string(),
@@ -3858,50 +3993,61 @@ impl LodClassifierDevice {
             )));
         }
 
-        for (batch_index, batch) in scene.batches.iter().enumerate() {
-            let draw = atlas.triangle_draw(batch.id.key.lod).ok_or_else(|| {
-                LodWebGpuError::Payload(format!(
-                    "packed WebGPU atlas is missing batch {batch_index} key {:?}",
-                    batch.id.key.lod,
-                ))
-            })?;
-            if draw.index_count != batch.triangle_index_count {
-                return Err(LodWebGpuError::Payload(format!(
-                    "WebGPU atlas {batch_index} has {} triangle indices; scene requires {}",
-                    draw.index_count, batch.triangle_index_count,
-                )));
-            }
-            let index_width = match draw.index_format {
-                wgpu::IndexFormat::Uint16 => 2,
-                wgpu::IndexFormat::Uint32 => 4,
-            };
-            let first_index_byte = u64::from(draw.first_index) * index_width;
-            let required_index_bytes = u64::from(draw.index_count)
-                .checked_mul(index_width)
-                .and_then(|bytes| first_index_byte.checked_add(bytes))
-                .ok_or_else(|| {
-                    LodWebGpuError::Payload(format!(
-                        "WebGPU atlas {batch_index} index range exceeds u64",
-                    ))
-                })?;
-            if draw.index_buffer.size() < required_index_bytes {
-                return Err(LodWebGpuError::Payload(format!(
-                    "WebGPU atlas {batch_index} index buffer is {} bytes; packed range ends at {required_index_bytes}",
-                    draw.index_buffer.size(),
-                )));
-            }
-        }
-
         // Keep unsupported commands explicit even after shared validation, so
         // extending RenderFrame cannot silently lower to the wrong pipeline.
         for command in &frame.commands {
             match command {
                 RenderCommand::PreparePatches { .. } | RenderCommand::ResolveVisibility { .. } => {}
                 RenderCommand::DrawPatches {
+                    batch_index,
                     pass,
-                    geometry: RenderGeometry::Triangles,
+                    geometry,
                     ..
-                } if *pass == expected_pass => {}
+                } => {
+                    let pipeline = resolve_pipeline(*pass, *geometry)?;
+                    if pipeline.geometry != *geometry {
+                        return Err(LodWebGpuError::Payload(format!(
+                            "WebGPU {pass:?} pipeline uses {:?}, but the frame requires {geometry:?}",
+                            pipeline.geometry,
+                        )));
+                    }
+                    let batch = &scene.batches[*batch_index as usize];
+                    let draw = atlas.draw(batch.id.key.lod, *geometry).ok_or_else(|| {
+                        LodWebGpuError::Payload(format!(
+                            "packed WebGPU atlas is missing batch {batch_index} key {:?} for {geometry:?}",
+                            batch.id.key.lod,
+                        ))
+                    })?;
+                    let expected_count = match geometry {
+                        RenderGeometry::Triangles => batch.triangle_index_count,
+                        RenderGeometry::Lines => batch.line_index_count,
+                    };
+                    if draw.index_count != expected_count {
+                        return Err(LodWebGpuError::Payload(format!(
+                            "WebGPU atlas batch {batch_index} has {} {geometry:?} indices; scene requires {expected_count}",
+                            draw.index_count,
+                        )));
+                    }
+                    let index_width = match draw.index_format {
+                        wgpu::IndexFormat::Uint16 => 2,
+                        wgpu::IndexFormat::Uint32 => 4,
+                    };
+                    let first_index_byte = u64::from(draw.first_index) * index_width;
+                    let required_index_bytes = u64::from(draw.index_count)
+                        .checked_mul(index_width)
+                        .and_then(|bytes| first_index_byte.checked_add(bytes))
+                        .ok_or_else(|| {
+                            LodWebGpuError::Payload(format!(
+                                "WebGPU atlas batch {batch_index} {geometry:?} range exceeds u64",
+                            ))
+                        })?;
+                    if draw.index_buffer.size() < required_index_bytes {
+                        return Err(LodWebGpuError::Payload(format!(
+                            "WebGPU atlas batch {batch_index} {geometry:?} buffer is {} bytes; packed range ends at {required_index_bytes}",
+                            draw.index_buffer.size(),
+                        )));
+                    }
+                }
                 unsupported => {
                     return Err(LodWebGpuError::Payload(format!(
                         "WebGPU patch renderer does not yet support command {unsupported:?}",
@@ -3956,16 +4102,23 @@ impl LodClassifierDevice {
                 multiview_mask: None,
             });
             for command in &frame.commands {
-                let RenderCommand::DrawPatches { batch_index, .. } = *command else {
+                let RenderCommand::DrawPatches {
+                    batch_index,
+                    pass,
+                    geometry,
+                    ..
+                } = *command
+                else {
                     continue;
                 };
                 let batch = &scene.batches[batch_index as usize];
-                let draw = atlas.triangle_draw(batch.id.key.lod).ok_or_else(|| {
+                let draw = atlas.draw(batch.id.key.lod, geometry).ok_or_else(|| {
                     LodWebGpuError::Payload(format!(
-                        "packed WebGPU atlas lost batch {batch_index} key {:?}",
+                        "packed WebGPU atlas lost batch {batch_index} key {:?} for {geometry:?}",
                         batch.id.key.lod,
                     ))
                 })?;
+                let pipeline = resolve_pipeline(pass, geometry)?;
                 let permutation_sign = if batch.id.key.parity_bucket == 0 {
                     1
                 } else {
@@ -3998,8 +4151,93 @@ impl LodClassifierDevice {
         })
     }
 
+    /// Encode one single-pass diagnostic frame with a style-matched pipeline.
+    /// Composite frames use [`Self::encode_supported_render_frame`] so each
+    /// draw command can select its canonical triangle or line pipeline.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_diagnostic_render_frame<'resource, VisibilityProducer>(
+        &'resource self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &RenderFrame,
+        scene: &RenderSceneSnapshot,
+        pipeline: &'resource PatchRenderPipeline,
+        bindings: &'resource PatchRenderBindings,
+        patches: &'resource PatchPreparationScene,
+        visibility: &'resource VisibilityCompactionScene,
+        atlas: &'resource PackedPatchAtlas,
+        target: PatchRenderTarget<'resource>,
+        use_qb: bool,
+        encode_visibility: VisibilityProducer,
+    ) -> Result<PatchFrameEncoding, LodWebGpuError>
+    where
+        VisibilityProducer: FnOnce(
+            &mut wgpu::CommandEncoder,
+            &PatchPreparationScene,
+            &VisibilityCompactionScene,
+        ) -> Result<(), LodWebGpuError>,
+    {
+        if pipeline.style != frame.style || frame.style == RenderStyle::MatcapWire {
+            return Err(LodWebGpuError::Payload(format!(
+                "single WebGPU patch pipeline {:?} cannot render {:?} frame",
+                pipeline.style, frame.style,
+            )));
+        }
+        self.encode_render_frame_with_pipelines(
+            encoder,
+            frame,
+            scene,
+            bindings,
+            patches,
+            visibility,
+            atlas,
+            target,
+            use_qb,
+            |_, _| Ok(pipeline),
+            encode_visibility,
+        )
+    }
+
+    /// Encode any currently supported diagnostic style, including the
+    /// matcap-plus-wire composite, through one preparation and visibility pass.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_supported_render_frame<'resource, VisibilityProducer>(
+        &'resource self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &RenderFrame,
+        scene: &RenderSceneSnapshot,
+        pipelines: &'resource DiagnosticPatchRenderPipelines,
+        bindings: &'resource PatchRenderBindings,
+        patches: &'resource PatchPreparationScene,
+        visibility: &'resource VisibilityCompactionScene,
+        atlas: &'resource PackedPatchAtlas,
+        target: PatchRenderTarget<'resource>,
+        use_qb: bool,
+        encode_visibility: VisibilityProducer,
+    ) -> Result<PatchFrameEncoding, LodWebGpuError>
+    where
+        VisibilityProducer: FnOnce(
+            &mut wgpu::CommandEncoder,
+            &PatchPreparationScene,
+            &VisibilityCompactionScene,
+        ) -> Result<(), LodWebGpuError>,
+    {
+        self.encode_render_frame_with_pipelines(
+            encoder,
+            frame,
+            scene,
+            bindings,
+            patches,
+            visibility,
+            atlas,
+            target,
+            use_qb,
+            |pass, geometry| pipelines.get_for_pass(pass, geometry),
+            encode_visibility,
+        )
+    }
+
     /// Compatibility entry point for the first promoted mode. New
-    /// triangle-diagnostic callers should use
+    /// single-pass diagnostic callers should use
     /// [`Self::encode_diagnostic_render_frame`] with a style-matched pipeline.
     #[allow(clippy::too_many_arguments)]
     pub fn encode_normals_render_frame<'resource, VisibilityProducer>(
@@ -5615,6 +5853,13 @@ impl PackedPatchAtlas {
         self.line_index_count
     }
 
+    pub fn draw(&self, key: [u32; 3], geometry: RenderGeometry) -> Option<PatchAtlasDraw<'_>> {
+        match geometry {
+            RenderGeometry::Triangles => self.triangle_draw(key),
+            RenderGeometry::Lines => self.line_draw(key),
+        }
+    }
+
     pub fn triangle_draw(&self, key: [u32; 3]) -> Option<PatchAtlasDraw<'_>> {
         let entry = self.entry(key)?;
         Some(PatchAtlasDraw {
@@ -5724,8 +5969,12 @@ impl PatchRenderPipeline {
             atlas.index_buffer.slice(index_byte_offset..),
             atlas.index_format,
         );
+        let indirect_arguments = match self.geometry {
+            RenderGeometry::Triangles => &visibility.triangle_indirect_arguments,
+            RenderGeometry::Lines => &visibility.line_indirect_arguments,
+        };
         pass.draw_indexed_indirect(
-            &visibility.triangle_indirect_arguments,
+            indirect_arguments,
             u64::from(batch_index) * INDEXED_INDIRECT_RECORD_BYTES,
         );
         Ok(())
@@ -5739,8 +5988,35 @@ impl DiagnosticPatchRenderPipelines {
             RenderStyle::Matcap => Some(&self.matcap),
             RenderStyle::Lod => Some(&self.lod),
             RenderStyle::Stretch => Some(&self.stretch),
+            RenderStyle::Wire => Some(&self.wire),
             _ => None,
         }
+    }
+
+    fn get_for_pass(
+        &self,
+        pass: RenderPass,
+        geometry: RenderGeometry,
+    ) -> Result<&PatchRenderPipeline, LodWebGpuError> {
+        let pipeline = match pass {
+            RenderPass::Matcap => &self.matcap,
+            RenderPass::Wire => &self.wire,
+            RenderPass::Normals => &self.normals,
+            RenderPass::Lod => &self.lod,
+            RenderPass::Stretch => &self.stretch,
+            unsupported => {
+                return Err(LodWebGpuError::Payload(format!(
+                    "WebGPU patch renderer does not yet support {unsupported:?}",
+                )));
+            }
+        };
+        if pipeline.geometry != geometry {
+            return Err(LodWebGpuError::Payload(format!(
+                "WebGPU {pass:?} pipeline uses {:?}, but command requires {geometry:?}",
+                pipeline.geometry,
+            )));
+        }
+        Ok(pipeline)
     }
 }
 
