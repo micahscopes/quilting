@@ -13,7 +13,11 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = ["console_error_panic_hook"]
 leptos-ui = ["dep:hyperscope-web", "hyperscope-web/csr"]
-webgpu-backend = ["dep:quilting-webgpu", "dep:wasm-bindgen-futures"]
+webgpu-backend = [
+    "dep:quilting-webgpu",
+    "dep:wasm-bindgen-futures",
+    "quilting-webgpu/browser-surface",
+]
 
 [dependencies]
 quilting-core = { version = "0.1.0", path = "../quilting-core" }

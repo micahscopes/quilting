@@ -648,8 +648,23 @@ reports `resident_root_indirect_draws=2`, `adaptive_overlay_patches=1`, and
 `adaptive_overlay_indirect_draws=1`, including an orientation-reversing domain,
 a million-scale material ID, and no console warning or error.
 
-The next cut attaches this shared executor to a live browser surface and adds
-WebGL2 image/workload parity behind the existing explicit backend switch. PBR,
+The backend now owns a real presentation-surface lifecycle as a separate Rust
+resource. Browser creation requests an adapter compatible with a previously
+unclaimed canvas, chooses a supported linear eight-bit format and FIFO when
+available, configures a matching depth attachment, suspends cleanly at zero
+size, recreates attachments on resize, retries one outdated acquisition, skips
+timeout/occlusion, and reports surface loss for canvas-level recreation. Frame
+ownership is a closure over the same `PatchRenderTarget` accepted by offscreen
+execution, so promotion does not introduce a second draw API. The browser gate
+uses the same device for the complete resident/adaptive matrix and a 256×256
+`Bgra8Unorm` canvas presentation; Chromium reports one presented frame and one
+configuration with no warning, error, or assertion.
+
+Hyperscope does not yet claim that surface: its visible `cv` canvas is currently
+claimed as WebGL2 before the rollback-safe WebGPU shadow starts, and browser
+canvas context type cannot be changed afterward. The next cut gives the shared
+executor the live surface target in the standalone gate, then adds WebGL2
+image/workload parity and an explicit pre-context application cutover. PBR,
 wire, LOD color, stretch, picking,
 material/texture binding, and postprocess commands still reject explicitly
 rather than silently lowering to normals. Those cuts are what remove the live

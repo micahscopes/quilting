@@ -8,12 +8,14 @@
     <style>
       :root { color-scheme: dark; font-family: ui-monospace, monospace; }
       body { margin: 2rem; background: #111; color: #ddd; }
+      canvas { width: 256px; height: 256px; border: 1px solid #50647a; }
       [data-status="passed"] { color: #9eebae; }
       [data-status="failed"] { color: #ff9b9b; }
     </style>
   </head>
   <body>
     <h1>Quilting WebGPU LOD conformance</h1>
+    <canvas id="surface" width="256" height="256"></canvas>
     <pre id="result" data-status="running">running</pre>
     <script type="module">
       const result = document.querySelector("#result");
@@ -21,7 +23,9 @@
       try {
         const module = await import("/target/webgpu-conformance/quilting_webgpu.js");
         await module.default();
-        state.report = await module.run_browser_lod_conformance();
+        state.report = await module.run_browser_lod_conformance(
+          document.querySelector("#surface"),
+        );
         state.status = "passed";
       } catch (error) {
         state.status = "failed";

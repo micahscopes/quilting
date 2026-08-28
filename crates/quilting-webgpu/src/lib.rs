@@ -2,14 +2,20 @@
 //!
 //! This crate remains outside the current WebGL2 authority path while backend
 //! parity is established. It consumes backend-neutral `RenderSceneSnapshot`
-//! and `RenderFrame` values, retains only device pipelines/buffers, and owns no
-//! semantic scene, FRP, replicated state, canvas, or presentation lifecycle.
+//! and `RenderFrame` values, retains device pipelines/buffers, and can own an
+//! explicitly supplied presentation surface. Semantic scene, FRP, replicated
+//! state, browser layout, and canvas selection remain application concerns.
 
 mod adaptive_overlay;
+mod presentation;
 mod resident_roots;
 
 pub use adaptive_overlay::{
     AdaptiveOverlayFrameEncoding, AdaptiveOverlayScene, ResidentAdaptiveFrameEncoding,
+};
+pub use presentation::{
+    PatchPresentationSurface, PresentationSkipReason, SurfacePresentation,
+    SurfacePresentationDiagnostics,
 };
 pub use resident_roots::{
     ResidentGeometryBucketOutput, ResidentGeometryBucketScene, ResidentRootDrawDomainOutput,
@@ -5139,31 +5145,77 @@ fn storage_buffer<T: bytemuck::Pod>(
 /// native hardware gate. Enabled only for the standalone browser harness.
 #[cfg(all(target_arch = "wasm32", feature = "browser-conformance"))]
 #[wasm_bindgen::prelude::wasm_bindgen]
-pub async fn run_browser_lod_conformance() -> Result<String, wasm_bindgen::JsValue> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    let adapter = instance
-        .request_adapter(&wgpu::RequestAdapterOptions::default())
-        .await
-        .map_err(browser_error)?;
-    let adapter_info = adapter.get_info();
-    let (device, queue) = adapter
-        .request_device(&wgpu::DeviceDescriptor {
-            label: Some("quilting browser LOD conformance"),
-            ..Default::default()
-        })
-        .await
-        .map_err(browser_error)?;
-    let classifier = LodClassifierDevice::new(device, queue).map_err(browser_error)?;
+pub async fn run_browser_lod_conformance(
+    canvas: web_sys::HtmlCanvasElement,
+) -> Result<String, wasm_bindgen::JsValue> {
+    let size = [canvas.width(), canvas.height()];
+    let (classifier, adapter, mut presentation) = LodClassifierDevice::request_canvas_presentation(
+        canvas,
+        size,
+        "quilting browser LOD conformance",
+    )
+    .await
+    .map_err(browser_error)?;
     let report = classifier
         .run_conformance_matrix()
         .await
         .map_err(browser_error)?;
+    let presented = presentation
+        .present_with(
+            &classifier,
+            "quilting browser presentation conformance",
+            |encoder, target| {
+                let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("quilting browser presentation clear"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target.color_view,
+                        depth_slice: None,
+                        resolve_target: target.resolve_target,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.06,
+                                g: 0.24,
+                                b: 0.48,
+                                a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: target.depth_stencil_view.map(|view| {
+                        wgpu::RenderPassDepthStencilAttachment {
+                            view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.0),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                Ok(())
+            },
+        )
+        .map_err(browser_error)?;
+    if presented != SurfacePresentation::Presented(()) {
+        return Err(browser_error(format!(
+            "browser presentation surface did not present: {presented:?}"
+        )));
+    }
+    let surface = presentation.diagnostics();
     Ok(format!(
-        "adapter={} backend={:?} full_pipeline_words={} resident_lod_words={} resident_visibility_words={} resident_bucket_words={} resident_root_topology_words={} resident_root_prepared_words={} resident_root_domain_words={} resident_adaptive_rendered_pixels={} resident_root_indirect_draws={} adaptive_overlay_patches={} adaptive_overlay_indirect_draws={} coherence_words={} \
+        "adapter={} backend={} surface={}x{} surface_format={} surface_presented={} surface_reconfigurations={} full_pipeline_words={} resident_lod_words={} resident_visibility_words={} resident_bucket_words={} resident_root_topology_words={} resident_root_prepared_words={} resident_root_domain_words={} resident_adaptive_rendered_pixels={} resident_root_indirect_draws={} adaptive_overlay_patches={} adaptive_overlay_indirect_draws={} coherence_words={} \
          prepared_patch_words={} rendered_patch_pixels={} shared_frame_draws={} compacted_source_words={} \
          compacted_range_words={} indirect_argument_words={} indirect_draws={}",
-        adapter_info.name,
-        adapter_info.backend,
+        adapter.name,
+        adapter.backend,
+        surface.size[0],
+        surface.size[1],
+        surface.color_format,
+        surface.frames_presented,
+        surface.reconfigurations,
         report.full_pipeline_words,
         report.resident_lod_words,
         report.resident_visibility_words,
