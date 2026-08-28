@@ -225,6 +225,14 @@ pub struct LodDeviceConformance {
     pub indirect_draws: usize,
 }
 
+/// Stable diagnostics for an adapter selected without a presentation surface.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebGpuAdapterSummary {
+    pub name: String,
+    pub backend: String,
+    pub device_type: String,
+}
+
 /// Diagnostic copy of the exact same-device visibility outputs. The retained
 /// GPU buffers remain suitable for direct storage/indirect consumption; this
 /// owned projection exists only for conformance gates.
@@ -431,6 +439,37 @@ pub struct VisibilityCompactionScene {
 }
 
 impl LodClassifierDevice {
+    /// Request a compute/render device without claiming a window or canvas.
+    /// Hyperscope uses this for rollback-safe shadow residency before the
+    /// explicit backend switch owns a presentation surface.
+    pub async fn request_headless(
+        label: &str,
+    ) -> Result<(Self, WebGpuAdapterSummary), LodWebGpuError> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions::default())
+            .await
+            .map_err(|error| {
+                LodWebGpuError::Payload(format!("WebGPU adapter request failed: {error}"))
+            })?;
+        let info = adapter.get_info();
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some(label),
+                ..Default::default()
+            })
+            .await
+            .map_err(|error| {
+                LodWebGpuError::Payload(format!("WebGPU device request failed: {error}"))
+            })?;
+        let summary = WebGpuAdapterSummary {
+            name: info.name,
+            backend: format!("{:?}", info.backend),
+            device_type: format!("{:?}", info.device_type),
+        };
+        Ok((Self::new(device, queue)?, summary))
+    }
+
     /// Compile and retain the two flattened WGSL pipelines on an existing
     /// device. Device creation and adapter policy stay with the application.
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Result<Self, LodWebGpuError> {
