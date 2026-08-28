@@ -8996,6 +8996,41 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
 
         sync_render_batches(state);
         refresh_render_shadow_scene(state);
+
+        // The explicitly selected WebGPU normals backend submits before any
+        // WebGL frame work. A valid presentation frame needs none of the
+        // incumbent's prepared or camera-visibility buffers: `mr_pick`
+        // refreshes both for its exact pick camera, while a later fallback or
+        // mode switch observes the deliberately retained dirty stamps below.
+        #[cfg(feature = "webgpu-backend")]
+        match submit_webgpu_frame(state, &camera) {
+            crate::webgpu_backend::LiveFrameDisposition::PresentationSubmitted(
+                submission_stats,
+            ) => {
+                state.webgpu_presentation_patch_frames = state
+                    .webgpu_presentation_patch_frames
+                    .saturating_add(1);
+                observe_render_submission(state, &camera, submission_stats);
+                state.last_render_submission = submission_stats;
+                state.render_submission_totals.merge(submission_stats);
+                state
+                    .render_timing
+                    .observe(render_started_ms, browser_now_ms());
+                return;
+            }
+            crate::webgpu_backend::LiveFrameDisposition::PresentationRetained => {
+                state.webgpu_retained_presentation_frames = state
+                    .webgpu_retained_presentation_frames
+                    .saturating_add(1);
+                state.last_render_submission = RenderSubmissionStats::default();
+                state
+                    .render_timing
+                    .observe(render_started_ms, browser_now_ms());
+                return;
+            }
+            crate::webgpu_backend::LiveFrameDisposition::IncumbentRequired => {}
+        }
+
         let prepare_all = state.patch_prepare_dirty;
         if prepare_all {
             // Hidden batches cannot dispatch through a zero-instance render
@@ -9118,43 +9153,6 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     0,
                 );
             }
-        }
-
-        // The explicitly selected WebGPU normals backend submits first. Once
-        // its presentation surface owns a valid frame, avoid issuing the same
-        // visible patch workload through the hidden WebGL canvas. WebGL's
-        // retained preparation/visibility buffers remain current above for
-        // on-demand picking; any unavailable or failed WebGPU frame falls
-        // through to the incumbent draw below in this same render call.
-        #[cfg(feature = "webgpu-backend")]
-        match submit_webgpu_frame(state, &camera) {
-            crate::webgpu_backend::LiveFrameDisposition::PresentationSubmitted(
-                submission_stats,
-            ) => {
-                state.webgpu_presentation_patch_frames = state
-                    .webgpu_presentation_patch_frames
-                    .saturating_add(1);
-                observe_render_submission(state, &camera, submission_stats);
-                state.last_render_submission = submission_stats;
-                state.render_submission_totals.merge(submission_stats);
-                state.renderer.end_frame();
-                state
-                    .render_timing
-                    .observe(render_started_ms, browser_now_ms());
-                return;
-            }
-            crate::webgpu_backend::LiveFrameDisposition::PresentationRetained => {
-                state.webgpu_retained_presentation_frames = state
-                    .webgpu_retained_presentation_frames
-                    .saturating_add(1);
-                state.last_render_submission = RenderSubmissionStats::default();
-                state.renderer.end_frame();
-                state
-                    .render_timing
-                    .observe(render_started_ms, browser_now_ms());
-                return;
-            }
-            crate::webgpu_backend::LiveFrameDisposition::IncumbentRequired => {}
         }
 
         // Mode-specific UBO setup

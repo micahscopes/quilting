@@ -681,12 +681,15 @@ The existing `cv` remains the event target and hidden WebGL2 rollback layer
 while normals is supported. The adapter reveals it synchronously when the mode
 is not normals, and reveals WebGPU only after a successful fresh presentation.
 WebGPU now submits first: a successful or safely retained surface frame elides
-the hidden WebGL2 patch-color draw, while unavailable residency or any frame
-failure falls through to WebGL2 in the same render call. WebGL2 preparation and
-camera-visibility buffers remain current for on-demand picking and immediate
-fallback. This dual-canvas interval is deliberate migration debt; moving those
-remaining input/picking buffers no longer requires paying for two visible
-normals submissions. Runtime diagnostics expose `webglPatchFrames`,
+the entire hidden WebGL2 frame—including begin, patch preparation, camera
+visibility, and patch-color draw—while unavailable residency or any frame
+failure falls through to WebGL2 in the same render call. The incumbent dirty
+stamps remain pending, so a later fallback or mode switch refreshes before it
+draws. Picking was already independent: `mr_pick` prepares and classifies the
+retained WebGL2 buffers against its exact pick camera on demand. This
+dual-canvas interval is deliberate input/picking migration debt, but ordinary
+WebGPU normals presentation no longer pays for two rendering pipelines.
+Runtime diagnostics expose `webglPatchFrames`,
 `webgpuPresentationPatchFrames`, and `webgpuRetainedPresentationFrames` so the
 ownership cut is measurable rather than inferred from canvas opacity.
 
