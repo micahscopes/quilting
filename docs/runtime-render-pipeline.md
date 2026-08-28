@@ -730,12 +730,27 @@ backend-neutral `RenderFrameOptions` value packed into the existing frame table,
 not a second browser uniform path. Native Radeon/Vulkan renders nonempty,
 pairwise-distinct images for matcap, LOD, stretch, wire, and matcap-plus-wire
 without rebuilding scene resources and validates both indirect geometry
-tables. Their live Chrome gate remains pending. PBR, picking, material/texture
-binding, and postprocess commands still reject explicitly rather than silently
-lowering to another style. Those cuts are what
-remove the live
-classifier readback, CPU topology repacking, and rejected atlas vertex
-invocations from an authoritative runtime.
+tables. Their live Chrome gate remains pending. Picking and unsupported
+PBR/postprocess commands still reject explicitly rather than silently lowering
+to another style. Those cuts are what remove the live classifier readback, CPU
+topology repacking, and rejected atlas vertex invocations from an authoritative
+runtime.
+
+Authored PBR state now crosses the backend boundary as validated
+`quilting_core::material::PbrMaterial` records carried by
+`RenderSceneSnapshot`. Texture references are typed optional indices rather
+than negative sentinels, glTF's infinite attenuation distance remains an
+explicit `None`, and both backends use the same material-index fallback rule.
+WebGPU retains a stable 96-byte material table and can render the untextured
+opaque/masked subset with shared Rust BRDF code, alpha masking, unlit and
+double-sided semantics, selection tint, tone mapping, and fade. Radeon/Vulkan
+produces a nonempty image distinct from every diagnostic style for a scene with
+two authored materials. This is deliberately not a live-browser cut yet:
+preflight rejects textures, alpha blend/transmission, sheen, focus
+postprocessing, and nonopaque draw classes before encoding, and Hyperscope
+keeps WebGL2 visible. The next PBR boundary is retained browser texture and
+environment residency, followed by transmission/focus resources and direct
+cross-backend image evidence.
 
 Cross-backend image evidence now has one backend-neutral diagnostic contract
 in `quilting-core`. It validates exact dimensions and row strides, normalizes
