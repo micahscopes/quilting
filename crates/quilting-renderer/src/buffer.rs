@@ -9,6 +9,7 @@
 
 use glow::HasContext;
 use quilting_core::instance_layout;
+use quilting_core::material::PbrMaterial;
 
 /// A non-owning slice of the packed canonical tessellation atlas.
 /// Cached by LOD triple -- these never change, only instance data changes per frame.
@@ -863,99 +864,6 @@ impl MatcapUniformBuf {
     }
 }
 
-/// CPU-side PBR material parameters matching the WGSL PbrUniforms layout.
-/// Used to upload per-material data to the PBR UBO.
-#[derive(Debug, Clone)]
-pub struct PbrParams {
-    pub base_color: [f32; 4],
-    pub metallic: f32,
-    pub roughness: f32,
-    pub has_base_color_tex: bool,
-    pub has_metallic_roughness_tex: bool,
-    pub emissive_factor: [f32; 3],
-    pub normal_scale: f32,
-    pub has_normal_tex: bool,
-    pub has_emissive_tex: bool,
-    pub has_occlusion_tex: bool,
-    pub occlusion_strength: f32,
-    pub alpha_cutoff: f32,
-    pub alpha_mode: f32, // 0=opaque, 1=mask, 2=blend
-    pub unlit: bool,
-    pub has_env_map: bool,
-    pub env_mip_count: f32,
-    pub double_sided: bool,
-    pub debug_output: bool,
-    pub sheen_color: [f32; 3],
-    pub has_sheen: bool,
-    pub sheen_roughness: f32,
-    pub specular_color: [f32; 3],
-    pub has_specular: bool,
-    pub normal_uv_scale: [f32; 2],
-    pub normal_uv_offset: [f32; 2],
-    pub normal_uv_rotation: f32,
-    pub base_uv_scale: [f32; 2],
-    pub base_uv_rotation: f32,
-    // KHR_materials_ior / transmission / volume
-    pub ior: f32,
-    pub transmission_factor: f32,
-    pub thickness_factor: f32,
-    pub attenuation_color: [f32; 3],
-    pub attenuation_distance: f32,
-    // Image indices for texture binding (-1 = none)
-    pub base_color_tex_idx: i32,
-    pub metallic_roughness_tex_idx: i32,
-    pub normal_tex_idx: i32,
-    pub emissive_tex_idx: i32,
-    pub occlusion_tex_idx: i32,
-    pub transmission_tex_idx: i32,
-}
-
-impl Default for PbrParams {
-    fn default() -> Self {
-        PbrParams {
-            base_color: [1.0, 1.0, 1.0, 1.0],
-            metallic: 0.0,
-            roughness: 1.0,
-            has_base_color_tex: false,
-            has_metallic_roughness_tex: false,
-            emissive_factor: [0.0; 3],
-            normal_scale: 1.0,
-            has_normal_tex: false,
-            has_emissive_tex: false,
-            has_occlusion_tex: false,
-            occlusion_strength: 1.0,
-            alpha_cutoff: 0.5,
-            alpha_mode: 0.0,
-            unlit: false,
-            has_env_map: false,
-            env_mip_count: 1.0,
-            double_sided: false,
-            debug_output: false,
-            sheen_color: [0.0; 3],
-            has_sheen: false,
-            sheen_roughness: 0.0,
-            specular_color: [1.0; 3],
-            has_specular: false,
-            normal_uv_scale: [1.0, 1.0],
-            normal_uv_offset: [0.0, 0.0],
-            normal_uv_rotation: 0.0,
-            base_uv_scale: [1.0, 1.0],
-            base_uv_rotation: 0.0,
-            ior: 1.5,
-            transmission_factor: 0.0,
-            thickness_factor: 0.0,
-            attenuation_color: [1.0; 3],
-            attenuation_distance: f32::INFINITY,
-            base_color_tex_idx: -1,
-            metallic_roughness_tex_idx: -1,
-            normal_tex_idx: -1,
-            emissive_tex_idx: -1,
-            occlusion_tex_idx: -1,
-            transmission_tex_idx: -1,
-        }
-    }
-}
-
 /// UBO for PBR material and frame-global focus uniforms (binding 2, 256 bytes).
 ///
 /// Matches WGSL PbrUniforms struct in fragment/pbr.wgsl.
@@ -973,17 +881,13 @@ impl PbrUniformBuf {
         }
     }
 
-    pub fn upload(&self, gl: &glow::Context, p: &PbrParams) {
-        self.upload_with_environment(gl, p, p.has_env_map, p.env_mip_count);
-    }
-
     /// Upload authored material parameters while supplying renderer-owned
     /// environment state separately. This avoids copying an entire material
     /// merely to change two frame-global fields.
     pub fn upload_with_environment(
         &self,
         gl: &glow::Context,
-        p: &PbrParams,
+        p: &PbrMaterial,
         has_env_map: bool,
         env_mip_count: f32,
     ) {
@@ -1000,7 +904,7 @@ impl PbrUniformBuf {
     pub fn upload_with_environment_and_selection(
         &self,
         gl: &glow::Context,
-        p: &PbrParams,
+        p: &PbrMaterial,
         has_env_map: bool,
         env_mip_count: f32,
         selection_tint: [f32; 4],
@@ -1015,7 +919,7 @@ impl PbrUniformBuf {
     pub fn upload_with_frame_state(
         &self,
         gl: &glow::Context,
-        p: &PbrParams,
+        p: &PbrMaterial,
         has_env_map: bool,
         env_mip_count: f32,
         selection_tint: [f32; 4],
@@ -1029,15 +933,15 @@ impl PbrUniformBuf {
         // base_color vec4 at offset 0
         f(0, p.base_color[0]); f(4, p.base_color[1]); f(8, p.base_color[2]); f(12, p.base_color[3]);
         // metallic, roughness, has_base_color_tex, has_mr_tex at offset 16
-        f(16, p.metallic); f(20, p.roughness); f(24, b(p.has_base_color_tex)); f(28, b(p.has_metallic_roughness_tex));
+        f(16, p.metallic); f(20, p.roughness); f(24, b(p.textures.base_color.is_some())); f(28, b(p.textures.metallic_roughness.is_some()));
         // emissive_factor vec4 at offset 32
         f(32, p.emissive_factor[0]); f(36, p.emissive_factor[1]); f(40, p.emissive_factor[2]);
         // normal_scale, has_normal_tex, has_emissive_tex, has_occlusion_tex at offset 48
-        f(48, p.normal_scale); f(52, b(p.has_normal_tex)); f(56, b(p.has_emissive_tex)); f(60, b(p.has_occlusion_tex));
+        f(48, p.normal_scale); f(52, b(p.textures.normal.is_some())); f(56, b(p.textures.emissive.is_some())); f(60, b(p.textures.occlusion.is_some()));
         // occlusion_strength, alpha_cutoff, alpha_mode, unlit at offset 64
-        f(64, p.occlusion_strength); f(68, p.alpha_cutoff); f(72, p.alpha_mode); f(76, b(p.unlit));
+        f(64, p.occlusion_strength); f(68, p.alpha_cutoff); f(72, p.alpha_mode.as_f32()); f(76, b(p.unlit));
         // has_env_map, env_mip_count, double_sided, debug_output at offset 80
-        f(80, b(has_env_map)); f(84, env_mip_count); f(88, b(p.double_sided)); f(92, b(p.debug_output));
+        f(80, b(has_env_map)); f(84, env_mip_count); f(88, b(p.double_sided)); f(92, 0.0);
         // sheen_color vec4 at offset 96 (w = has_sheen)
         f(96, p.sheen_color[0]); f(100, p.sheen_color[1]); f(104, p.sheen_color[2]); f(108, b(p.has_sheen));
         // sheen_roughness at offset 112
@@ -1052,10 +956,10 @@ impl PbrUniformBuf {
         f(164, p.base_uv_scale[0]); f(168, p.base_uv_scale[1]); f(172, p.base_uv_rotation);
         // ior, transmission_factor, thickness_factor, has_transmission_tex at offset 176
         f(176, p.ior); f(180, p.transmission_factor); f(184, p.thickness_factor);
-        f(188, if p.transmission_tex_idx >= 0 { 1.0 } else { 0.0 });
+        f(188, b(p.textures.transmission.is_some()));
         // attenuation_color vec4 at offset 192 (w = attenuation_distance)
         f(192, p.attenuation_color[0]); f(196, p.attenuation_color[1]); f(200, p.attenuation_color[2]);
-        f(204, p.attenuation_distance);
+        f(204, p.attenuation_distance.unwrap_or(f32::INFINITY));
         // Renderer-owned selection tint vec4 at offset 208 (rgb + blend amount).
         f(208, selection_tint[0]); f(212, selection_tint[1]);
         f(216, selection_tint[2]); f(220, selection_tint[3]);

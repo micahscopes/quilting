@@ -15,7 +15,7 @@ use crate::auxiliary_programs::{
 use glow::HasContext;
 use quilting_renderer::buffer::{
     create_patch_input_vao, create_patch_visibility_input_vao, EnvironmentMaps, MeshBuffers,
-    MeshDraw, PbrParams, PersistentBatchInstances, TessAtlasBuffers, TessBuffers,
+    MeshDraw, PersistentBatchInstances, TessAtlasBuffers, TessBuffers,
 };
 use quilting_renderer::compute::{
     apply_lod_classification_publication, build_composed_lod_model,
@@ -35,6 +35,7 @@ use quilting_renderer::Renderer;
 use quilting_renderer::texture::TextureCache;
 use quilting_core::batch;
 use quilting_core::instance_layout;
+use quilting_core::material::{PbrAlphaMode, PbrMaterial, PbrTextureReferences};
 use quilting_core::render::{
     patch_preparation_needed, patch_visibility_needed, render_draw_passes, FocusFieldPacket,
     MatcapStyle, PbrDrawClass, RenderBatchSnapshot, RenderEntityTransform, RenderFrameOptions,
@@ -90,10 +91,10 @@ fn bytemuck_cast_slice<T>(data: &[T]) -> &[u8] {
 }
 
 fn pbr_material_for_index<'a>(
-    materials: &'a [PbrParams],
-    default_material: &'a PbrParams,
+    materials: &'a [PbrMaterial],
+    default_material: &'a PbrMaterial,
     requested: usize,
-) -> (usize, &'a PbrParams) {
+) -> (usize, &'a PbrMaterial) {
     if let Some(material) = materials.get(requested) {
         (requested, material)
     } else if let Some(material) = materials.first() {
@@ -103,10 +104,10 @@ fn pbr_material_for_index<'a>(
     }
 }
 
-fn pbr_draw_class(material: &PbrParams) -> PbrDrawClass {
+fn pbr_draw_class(material: &PbrMaterial) -> PbrDrawClass {
     if material.transmission_factor > 0.0 {
         PbrDrawClass::Transmission
-    } else if material.alpha_mode > 1.5 {
+    } else if material.alpha_mode == PbrAlphaMode::Blend {
         PbrDrawClass::Blend
     } else {
         PbrDrawClass::Opaque
@@ -117,7 +118,7 @@ fn bind_pbr_material_state(
     gl: &glow::Context,
     renderer: &Renderer,
     texture_cache: &TextureCache,
-    material: &PbrParams,
+    material: &PbrMaterial,
     texture_defaults: &[glow::Texture; 5],
     has_env_map: bool,
     env_mip_count: f32,
@@ -153,8 +154,8 @@ fn bind_pbr_material_state(
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
         }
     }
-    let bind_texture = |unit: u32, index: i32| {
-        if index >= 0 {
+    let bind_texture = |unit: u32, index: Option<u32>| {
+        if let Some(index) = index {
             let texture = texture_cache.get(Some(index as usize));
             unsafe {
                 gl.active_texture(glow::TEXTURE0 + unit);
@@ -162,13 +163,13 @@ fn bind_pbr_material_state(
             }
         }
     };
-    bind_texture(0, material.base_color_tex_idx);
-    bind_texture(1, material.metallic_roughness_tex_idx);
-    bind_texture(2, material.normal_tex_idx);
-    bind_texture(3, material.emissive_tex_idx);
-    bind_texture(4, material.occlusion_tex_idx);
+    bind_texture(0, material.textures.base_color);
+    bind_texture(1, material.textures.metallic_roughness);
+    bind_texture(2, material.textures.normal);
+    bind_texture(3, material.textures.emissive);
+    bind_texture(4, material.textures.occlusion);
     if bind_transmission {
-        bind_texture(10, material.transmission_tex_idx);
+        bind_texture(10, material.textures.transmission);
     }
 }
 
@@ -708,7 +709,7 @@ struct MainState {
     /// glTF geometry is world-baked and shares one sentinel state; explicitly
     /// authored/presented nodes remain distinct.
     face_render_nodes: Vec<usize>,
-    materials: Vec<PbrParams>,
+    materials: Vec<PbrMaterial>,
     num_faces: usize,
     render_style: RenderStyle,
     /// Analytic character-matcap profile selected by the browser shell.
@@ -2570,7 +2571,7 @@ fn sync_render_batches(renderer: &mut MainState) {
     let mut render_batches = std::mem::take(&mut renderer.render_batches);
     render_batches.clear();
     render_batches.reserve(renderer.batches.len());
-    let default_material = PbrParams::default();
+    let default_material = PbrMaterial::default();
     for (&id, batch) in &renderer.batches {
         let conformal = conformal_state_for_node(renderer, batch.render_node_index);
         let euclidean_orientation = affine_orientation_sign(&conformal.euclidean_model);
@@ -7283,22 +7284,62 @@ pub fn mr_same_context_lod_diagnostics() -> Result<JsValue, JsValue> {
 ///  transmission_tex_idx, double_sided]
 ///
 /// `hyperscope.html` packs the matching array.
-fn decode_pbr_material(d: &[f32]) -> Option<PbrParams> {
-    (d.len() >= MATERIAL_STRIDE).then(|| PbrParams {
+fn decode_texture_reference(enabled: bool, raw_index: f32) -> Option<Option<u32>> {
+    if !enabled {
+        return Some(None);
+    }
+    if !raw_index.is_finite()
+        || raw_index < 0.0
+        || raw_index >= 4_294_967_296.0
+        || raw_index.fract() != 0.0
+    {
+        return None;
+    }
+    Some(Some(raw_index as u32))
+}
+
+fn decode_optional_texture_reference(raw_index: f32) -> Option<Option<u32>> {
+    if raw_index.is_finite() && raw_index < 0.0 {
+        Some(None)
+    } else {
+        decode_texture_reference(true, raw_index)
+    }
+}
+
+fn decode_attenuation_distance(value: f32) -> Option<Option<f32>> {
+    if value == f32::INFINITY {
+        Some(None)
+    } else if value.is_finite() && value > 0.0 {
+        Some(Some(value))
+    } else {
+        None
+    }
+}
+
+fn decode_pbr_material(d: &[f32]) -> Option<PbrMaterial> {
+    if d.len() < MATERIAL_STRIDE
+        || d[..47].iter().chain(&d[48..50]).any(|value| !value.is_finite())
+    {
+        return None;
+    }
+    let textures = PbrTextureReferences {
+        base_color: decode_texture_reference(d[14] > 0.5, d[36])?,
+        metallic_roughness: decode_texture_reference(d[15] > 0.5, d[37])?,
+        normal: decode_texture_reference(d[16] > 0.5, d[38])?,
+        emissive: decode_texture_reference(d[17] > 0.5, d[39])?,
+        occlusion: decode_texture_reference(d[18] > 0.5, d[40])?,
+        transmission: decode_optional_texture_reference(d[48])?,
+    };
+    let material = PbrMaterial {
         base_color: [d[0], d[1], d[2], d[3]],
         metallic: d[4],
         roughness: d[5],
         normal_scale: d[6],
         occlusion_strength: d[7],
         alpha_cutoff: d[8],
-        alpha_mode: d[9],
+        alpha_mode: PbrAlphaMode::from_wire_f32(d[9])?,
         unlit: d[10] > 0.5,
         emissive_factor: [d[11], d[12], d[13]],
-        has_base_color_tex: d[14] > 0.5,
-        has_metallic_roughness_tex: d[15] > 0.5,
-        has_normal_tex: d[16] > 0.5,
-        has_emissive_tex: d[17] > 0.5,
-        has_occlusion_tex: d[18] > 0.5,
         sheen_color: [d[19], d[20], d[21]],
         has_sheen: d[22] > 0.5,
         sheen_roughness: d[23],
@@ -7309,20 +7350,16 @@ fn decode_pbr_material(d: &[f32]) -> Option<PbrParams> {
         normal_uv_rotation: d[32],
         base_uv_scale: [d[33], d[34]],
         base_uv_rotation: d[35],
-        base_color_tex_idx: d[36] as i32,
-        metallic_roughness_tex_idx: d[37] as i32,
-        normal_tex_idx: d[38] as i32,
-        emissive_tex_idx: d[39] as i32,
-        occlusion_tex_idx: d[40] as i32,
         ior: d[41],
         transmission_factor: d[42],
         thickness_factor: d[43],
         attenuation_color: [d[44], d[45], d[46]],
-        attenuation_distance: d[47],
-        transmission_tex_idx: d[48] as i32,
+        attenuation_distance: decode_attenuation_distance(d[47])?,
         double_sided: d[49] > 0.5,
-        ..PbrParams::default()
-    })
+        textures,
+    };
+    material.validate().ok()?;
+    Some(material)
 }
 
 #[wasm_bindgen(js_name = "mr_setMaterials")]
@@ -8019,7 +8056,7 @@ fn retained_gpu_publication_active(state: &MainState) -> bool {
 }
 
 fn retained_frontier_order_safe(state: &MainState) -> bool {
-    let default_material = PbrParams::default();
+    let default_material = PbrMaterial::default();
     state.batch_groups.keys().all(|key| {
         let (_, material) = pbr_material_for_index(
             &state.materials,
@@ -9271,7 +9308,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
 
                 // PBR: two-pass rendering — opaque first, then transparent
                 unsafe { gl.use_program(Some(state.renderer.programs().pbr)); }
-                let default_mat = PbrParams::default();
+                let default_mat = PbrMaterial::default();
                 let texture_defaults = [white, black, black, black, white];
                 let mut submission_stats = RenderSubmissionStats::default();
                 let mut material_updates = 0u64;
@@ -9498,7 +9535,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     );
                     if !transparent_draw_pass.batches.includes(batch.pbr_class) { continue; }
 
-                    let is_blend = mat.alpha_mode > 1.5;
+                    let is_blend = mat.alpha_mode == PbrAlphaMode::Blend;
                     let is_transmission = mat.transmission_factor > 0.0;
                     unsafe {
                         if is_blend {
