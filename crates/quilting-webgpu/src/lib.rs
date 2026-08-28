@@ -307,6 +307,9 @@ pub struct PatchAtlasDraw<'a> {
     pub barycentric_buffer: &'a wgpu::Buffer,
     pub index_buffer: &'a wgpu::Buffer,
     pub index_format: wgpu::IndexFormat,
+    /// First index element in the packed global index buffer. The bound slice
+    /// starts here so the portable indirect record can retain `first_index=0`.
+    pub first_index: u32,
     pub index_count: u32,
 }
 
@@ -1303,10 +1306,18 @@ impl LodClassifierDevice {
                 wgpu::IndexFormat::Uint16 => 2,
                 wgpu::IndexFormat::Uint32 => 4,
             };
-            let required_index_bytes = u64::from(atlas.index_count) * index_width;
+            let first_index_byte = u64::from(atlas.first_index) * index_width;
+            let required_index_bytes = u64::from(atlas.index_count)
+                .checked_mul(index_width)
+                .and_then(|bytes| first_index_byte.checked_add(bytes))
+                .ok_or_else(|| {
+                    LodWebGpuError::Payload(format!(
+                        "WebGPU atlas {batch_index} index range exceeds u64",
+                    ))
+                })?;
             if atlas.index_buffer.size() < required_index_bytes {
                 return Err(LodWebGpuError::Payload(format!(
-                    "WebGPU atlas {batch_index} index buffer is {} bytes; {required_index_bytes} required",
+                    "WebGPU atlas {batch_index} index buffer is {} bytes; packed range ends at {required_index_bytes}",
                     atlas.index_buffer.size(),
                 )));
             }
@@ -1396,9 +1407,7 @@ impl LodClassifierDevice {
                     &mut render_pass,
                     bindings,
                     visibility,
-                    atlas.barycentric_buffer,
-                    atlas.index_buffer,
-                    atlas.index_format,
+                    atlas,
                     batch_index,
                     winding,
                 )?;
@@ -1921,7 +1930,9 @@ impl LodClassifierDevice {
                     contents: bytemuck::cast_slice(&barycentrics),
                     usage: wgpu::BufferUsages::VERTEX,
                 });
-        let indices = [0u32, 1, 2];
+        // The invalid prefix proves packed-atlas slicing: reading from element
+        // zero would produce no plausible footprint under robust buffer access.
+        let indices = [u32::MAX, u32::MAX, u32::MAX, 0, 1, 2];
         let index_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1962,6 +1973,7 @@ impl LodClassifierDevice {
             barycentric_buffer: &barycentric_buffer,
             index_buffer: &index_buffer,
             index_format: wgpu::IndexFormat::Uint32,
+            first_index: 3,
             index_count: 3,
         };
         let atlases = [atlas(), atlas()];
@@ -2643,9 +2655,7 @@ impl PatchRenderPipeline {
         pass: &mut wgpu::RenderPass<'pass>,
         bindings: &'pass PatchRenderBindings,
         visibility: &'pass VisibilityCompactionScene,
-        barycentric_buffer: &'pass wgpu::Buffer,
-        index_buffer: &'pass wgpu::Buffer,
-        index_format: wgpu::IndexFormat,
+        atlas: &'pass PatchAtlasDraw<'pass>,
         batch_index: u32,
         winding: PatchWinding,
     ) -> Result<(), LodWebGpuError> {
@@ -2665,8 +2675,16 @@ impl PatchRenderPipeline {
         };
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bindings.bind_group, &[dynamic_offset]);
-        pass.set_vertex_buffer(0, barycentric_buffer.slice(..));
-        pass.set_index_buffer(index_buffer.slice(..), index_format);
+        pass.set_vertex_buffer(0, atlas.barycentric_buffer.slice(..));
+        let index_width = match atlas.index_format {
+            wgpu::IndexFormat::Uint16 => 2,
+            wgpu::IndexFormat::Uint32 => 4,
+        };
+        let index_byte_offset = u64::from(atlas.first_index) * index_width;
+        pass.set_index_buffer(
+            atlas.index_buffer.slice(index_byte_offset..),
+            atlas.index_format,
+        );
         pass.draw_indexed_indirect(
             &visibility.indirect_arguments,
             u64::from(batch_index) * INDEXED_INDIRECT_RECORD_BYTES,

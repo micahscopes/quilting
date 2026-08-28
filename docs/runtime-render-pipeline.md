@@ -451,7 +451,9 @@ batch, derives winding from semantic orientation plus S3 parity, and issues
 portable compacted indexed-indirect normals draws. Native Vulkan and Chromium
 both execute a two-batch retained-root/adaptive-overlay frame; the browser gate
 reports two shared-frame draws and a nonempty ten-pixel footprint with no
-console warning or error.
+console warning or error. Each draw borrows an element-offset slice of the
+existing packed global barycentric/index atlas, keeping indirect `first_index`
+zero without allocating one WebGPU buffer per canonical patch.
 
 The next cut is application residency and renderer integration: resolve the
 live canonical atlas cache into WebGPU buffers, feed the same-pose visibility

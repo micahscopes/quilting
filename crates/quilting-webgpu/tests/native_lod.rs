@@ -321,13 +321,14 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 .device()
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("shared frame indices"),
-                    contents: bytemuck::cast_slice(&[0u32, 1, 2]),
+                    contents: bytemuck::cast_slice(&[u32::MAX, u32::MAX, u32::MAX, 0, 1, 2]),
                     usage: wgpu::BufferUsages::INDEX,
                 });
         let atlas = || PatchAtlasDraw {
             barycentric_buffer: &barycentric_buffer,
             index_buffer: &index_buffer,
             index_format: wgpu::IndexFormat::Uint32,
+            first_index: 3,
             index_count: 3,
         };
         let atlases = [atlas(), atlas()];
