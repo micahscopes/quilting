@@ -31,6 +31,8 @@
 //! - [`batch`] — grouping faces into instanced draw calls.
 //! - [`render`] — backend-neutral scene snapshots and frame commands shared by
 //!   WebGL2 and WebGPU implementations.
+//! - [`render_evidence`] — normalized, bounded workload/image evidence for
+//!   backend parity gates; never part of the warm frame path.
 //! - [`render_pipeline`] — immutable shader, binding-layout, and pipeline
 //!   descriptions suitable for functional planning and backend memoization.
 //! - [`source_bounds`] — backend-neutral post-model, pre-conformal bounds for
@@ -67,6 +69,7 @@ pub mod conformal_lod;
 pub mod batch;
 pub mod educational;
 pub mod render;
+pub mod render_evidence;
 pub mod render_pipeline;
 pub mod source_bounds;
 pub mod screen_metric;

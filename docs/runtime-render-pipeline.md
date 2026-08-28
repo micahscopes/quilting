@@ -676,6 +676,16 @@ rather than silently lowering to normals. Those cuts are what remove the live
 classifier readback, CPU topology repacking, and rejected atlas vertex
 invocations from an authoritative runtime.
 
+Cross-backend image evidence now has one backend-neutral diagnostic contract
+in `quilting-core`. It validates exact dimensions and row strides, normalizes
+WebGL bottom-left versus staging top-left origin, RGBA versus BGRA channel
+order, and padded GPU-copy rows, then produces a canonical RGBA8 hash, coverage
+and channel moments. Pairwise comparison reports exact mismatched/coverage
+rates, normalized mean error, per-channel maxima, and at most eight pixel
+examples against an explicit tolerance. The contract is intentionally absent
+from the warm frame path. WebGL2 and WebGPU still need to feed the same
+diagnostic fixture into it before the application cutover is justified.
+
 The old JavaScript renderer's useful idea was memoizing tessellation topology
 and prepared meshes. The retained atlas, versioned browser cache, and stable
 batch buffers already implement that principle more completely. Per-patch regl
