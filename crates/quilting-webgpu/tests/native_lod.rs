@@ -4,7 +4,9 @@ use quilting_core::batch::{
     FaceLodGrading, RenderBatchId, RenderBatchKey, RenderBatchLayer, RenderBatchMember,
 };
 use quilting_core::instance_layout::{self, InstanceWriter};
-use quilting_core::material::PbrMaterial;
+use quilting_core::material::{
+    PbrMaterial, Rgba8TextureAsset, TextureAssetDescriptor, TextureWrapMode,
+};
 use quilting_core::quaternion::{Mobius, Quat};
 use quilting_core::render::{
     FocusFieldPacket, MatcapStyle, PbrDrawClass, RenderBatchSnapshot, RenderEntityTransform,
@@ -21,7 +23,7 @@ use quilting_renderer::compute::{
 };
 use quilting_webgpu::{
     supports_basic_pbr_frame, supports_patch_presentation_style, LodClassifierDevice, LodPose,
-    PatchRenderSceneUpdate,
+    PatchRenderSceneUpdate, PbrTextureTableUpdate,
 };
 
 #[test]
@@ -294,6 +296,122 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             .await
             .expect("request native WebGPU device");
         let classifier = LodClassifierDevice::new(device, queue).unwrap();
+
+        let texture_a = TextureAssetDescriptor {
+            width: 2,
+            height: 2,
+            wrap_s: TextureWrapMode::Repeat,
+            wrap_t: TextureWrapMode::ClampToEdge,
+        };
+        let texture_b = TextureAssetDescriptor {
+            width: 1,
+            height: 2,
+            wrap_s: TextureWrapMode::MirroredRepeat,
+            wrap_t: TextureWrapMode::Repeat,
+        };
+        let initial_a = [
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+        let initial_b = [13, 17, 19, 255, 23, 29, 31, 255];
+        let initial_assets = [
+            Rgba8TextureAsset::new(texture_a, &initial_a).unwrap(),
+            Rgba8TextureAsset::new(texture_b, &initial_b).unwrap(),
+        ];
+        let error_scope = classifier
+            .device()
+            .push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut texture_table = classifier
+            .upload_pbr_texture_table(&initial_assets)
+            .unwrap();
+        assert_eq!(texture_table.descriptors(), &[texture_a, texture_b]);
+        assert!(texture_table.linear_view(0).is_some());
+        assert!(texture_table.srgb_view(0).is_some());
+        assert!(texture_table.sampler(1).is_some());
+        assert_eq!(
+            classifier
+                .read_pbr_texture_rgba8_for_diagnostics(&texture_table, 0)
+                .await
+                .unwrap(),
+            initial_a,
+        );
+
+        let updated_a = [7; 16];
+        let updated_b = [11; 8];
+        let updated_assets = [
+            Rgba8TextureAsset::new(texture_a, &updated_a).unwrap(),
+            Rgba8TextureAsset::new(texture_b, &updated_b).unwrap(),
+        ];
+        assert_eq!(
+            classifier
+                .update_pbr_texture_table_in_place(&mut texture_table, &updated_assets)
+                .unwrap(),
+            PbrTextureTableUpdate::Updated,
+        );
+        assert_eq!(
+            classifier
+                .read_pbr_texture_rgba8_for_diagnostics(&texture_table, 0)
+                .await
+                .unwrap(),
+            updated_a,
+        );
+
+        let rejected_a = [37; 16];
+        let malformed_b = [41; 7];
+        let malformed_assets = [
+            Rgba8TextureAsset::new(texture_a, &rejected_a).unwrap(),
+            Rgba8TextureAsset {
+                descriptor: texture_b,
+                pixels: &malformed_b,
+            },
+        ];
+        assert!(classifier
+            .update_pbr_texture_table_in_place(&mut texture_table, &malformed_assets)
+            .unwrap_err()
+            .to_string()
+            .contains("requires 8 bytes, got 7"));
+        assert_eq!(
+            classifier
+                .read_pbr_texture_rgba8_for_diagnostics(&texture_table, 0)
+                .await
+                .unwrap(),
+            updated_a,
+            "a rejected candidate must not publish its valid prefix",
+        );
+
+        let replacement_descriptor = TextureAssetDescriptor {
+            width: 4,
+            height: 1,
+            ..texture_a
+        };
+        let replacement_pixels = [43; 16];
+        let replacement_assets =
+            [Rgba8TextureAsset::new(replacement_descriptor, &replacement_pixels).unwrap()];
+        assert_eq!(
+            classifier
+                .update_pbr_texture_table_in_place(&mut texture_table, &replacement_assets)
+                .unwrap(),
+            PbrTextureTableUpdate::ShapeChanged,
+        );
+        assert_eq!(texture_table.descriptors(), &[texture_a, texture_b]);
+        texture_table = classifier
+            .upload_pbr_texture_table(&replacement_assets)
+            .unwrap();
+        assert_eq!(texture_table.descriptors(), &[replacement_descriptor]);
+        assert_eq!(
+            classifier
+                .read_pbr_texture_rgba8_for_diagnostics(&texture_table, 0)
+                .await
+                .unwrap(),
+            replacement_pixels,
+        );
+        classifier
+            .device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        if let Some(error) = error_scope.pop().await {
+            panic!("PBR texture residency validation: {error}");
+        }
+
         let report = classifier.run_conformance_matrix().await.unwrap();
         assert_eq!(report.full_pipeline_words, 1);
         assert_eq!(report.resident_lod_words, 20);

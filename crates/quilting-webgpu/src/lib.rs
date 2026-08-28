@@ -7,12 +7,14 @@
 //! state, browser layout, and canvas selection remain application concerns.
 
 mod adaptive_overlay;
+mod pbr_resources;
 mod presentation;
 mod resident_roots;
 
 pub use adaptive_overlay::{
     AdaptiveOverlayFrameEncoding, AdaptiveOverlayScene, ResidentAdaptiveFrameEncoding,
 };
+pub use pbr_resources::{PbrTextureTable, PbrTextureTableUpdate};
 pub use presentation::{
     PatchPresentationSurface, PresentationSkipReason, SurfacePresentation,
     SurfacePresentationDiagnostics,
