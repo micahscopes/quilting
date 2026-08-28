@@ -24,7 +24,11 @@ struct DrawBatchIndex {
     _padding_c: u32,
 }
 
-@group(0) @binding(0) var<uniform> frame: PatchRenderFrame;
+// A real extracted scene may assign a distinct conformal map to every batch.
+// Keep those immutable-for-the-frame records in one device table and select
+// them with the same portable batch index used for compacted ranges. A single
+// uniform here would make queue writes race all draws in one submission.
+@group(0) @binding(0) var<storage, read> frames: array<PatchRenderFrame>;
 @group(0) @binding(1) var<storage, read> prepared_records: array<PreparedPatchRecord>;
 @group(0) @binding(2) var<storage, read> compacted_sources: array<u32>;
 @group(0) @binding(3) var<storage, read> compacted_ranges: array<CompactedBatchRangeRecord>;
@@ -58,6 +62,7 @@ fn render_patch_vertex(
     input: PatchVertexInput,
     @builtin(instance_index) local_instance: u32,
 ) -> PatchVertexOutput {
+    let frame = frames[draw_batch.batch_index];
     let range = compacted_ranges[draw_batch.batch_index];
     let compacted_index = range.compacted_first_instance + local_instance;
     let source_instance = compacted_sources[compacted_index];

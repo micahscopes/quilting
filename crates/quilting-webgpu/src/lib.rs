@@ -325,7 +325,8 @@ pub struct PatchRenderPipeline {
 
 /// Scene/frame bindings shared by every atlas bucket and indirect batch draw.
 pub struct PatchRenderBindings {
-    frame: wgpu::Buffer,
+    frame_count: u32,
+    frames: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
 }
 
@@ -945,7 +946,7 @@ impl LodClassifierDevice {
                     entries: &[
                         render_buffer_layout(
                             0,
-                            wgpu::BufferBindingType::Uniform,
+                            wgpu::BufferBindingType::Storage { read_only: true },
                             PATCH_RENDER_FRAME_BYTES,
                             false,
                         ),
@@ -1059,17 +1060,22 @@ impl LodClassifierDevice {
                     .to_string(),
             ));
         }
-        let frame = gpu_buffer(
+        let frame_bytes = u64::from(visibility.batch_count)
+            .checked_mul(PATCH_RENDER_FRAME_BYTES)
+            .ok_or_else(|| {
+                LodWebGpuError::Payload("patch render frame table is too large".to_string())
+            })?;
+        let frames = gpu_buffer(
             &self.device,
-            "patch render frame",
-            PATCH_RENDER_FRAME_BYTES,
-            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            "patch render frame table",
+            frame_bytes,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         );
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("quilting prepared QB render bindings"),
             layout: &pipeline.bind_group_layout,
             entries: &[
-                bind(0, &frame),
+                bind(0, &frames),
                 bind(1, &patches.prepared_records),
                 bind(2, &visibility.compacted_source_instances),
                 bind(3, &visibility.compacted_ranges),
@@ -1083,22 +1089,51 @@ impl LodClassifierDevice {
                 },
             ],
         });
-        Ok(PatchRenderBindings { frame, bind_group })
+        Ok(PatchRenderBindings {
+            frame_count: visibility.batch_count,
+            frames,
+            bind_group,
+        })
     }
 
+    /// Upload one exact frame record per retained batch. This table is written
+    /// before command submission, then indexed on-device by every indirect
+    /// draw; scenes with distinct per-entity Möbius maps therefore need no
+    /// queue writes between draws.
+    pub fn write_patch_render_frames(
+        &self,
+        bindings: &PatchRenderBindings,
+        frames: &[PatchRenderFrame],
+    ) -> Result<(), LodWebGpuError> {
+        if frames.len() != bindings.frame_count as usize {
+            return Err(LodWebGpuError::Payload(format!(
+                "patch render frame table has {} records; expected {}",
+                frames.len(),
+                bindings.frame_count,
+            )));
+        }
+        let mut words = Vec::with_capacity(frames.len() * PATCH_RENDER_FRAME_WORDS);
+        for frame in frames {
+            words.extend(frame.to_words()?);
+        }
+        debug_assert_eq!(
+            std::mem::size_of_val(words.as_slice()) as u64,
+            u64::from(bindings.frame_count) * PATCH_RENDER_FRAME_BYTES,
+        );
+        self.queue
+            .write_buffer(&bindings.frames, 0, bytemuck::cast_slice(&words));
+        Ok(())
+    }
+
+    /// Narrow compatibility helper for single-batch conformance fixtures.
+    /// Production scenes must upload the complete table atomically with
+    /// [`Self::write_patch_render_frames`].
     pub fn write_patch_render_frame(
         &self,
         bindings: &PatchRenderBindings,
         frame: PatchRenderFrame,
     ) -> Result<(), LodWebGpuError> {
-        let words = frame.to_words()?;
-        debug_assert_eq!(
-            std::mem::size_of_val(&words) as u64,
-            PATCH_RENDER_FRAME_BYTES
-        );
-        self.queue
-            .write_buffer(&bindings.frame, 0, bytemuck::cast_slice(&words));
-        Ok(())
+        self.write_patch_render_frames(bindings, &[frame])
     }
 
     /// Upload retained batch shape and static eligibility once. Output buffers
