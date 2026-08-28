@@ -15,6 +15,7 @@ pub enum EntryPointStage {
 pub const LOD_PASS1_DEVICE_ENTRY_POINT: &str = "classify_lod_pass1_";
 pub const LOD_PASS2_DEVICE_ENTRY_POINT: &str = "classify_lod_pass2_";
 pub const VISIBILITY_COUNT_DEVICE_ENTRY_POINT: &str = "count_visible_instances";
+pub const VISIBILITY_EXPAND_DEVICE_ENTRY_POINT: &str = "expand_face_visibility";
 pub const VISIBILITY_SCAN_DEVICE_ENTRY_POINT: &str = "scan_visible_batches";
 pub const VISIBILITY_SCATTER_DEVICE_ENTRY_POINT: &str = "scatter_visible_instances";
 pub const PATCH_PREPARE_DEVICE_ENTRY_POINT: &str = "prepare_patch_instances";
@@ -42,6 +43,7 @@ pub mod sources {
     pub const VISIBILITY_COMPACTION_TYPES: &str =
         include_str!("../shaders/compute/visibility_compaction_types.wgsl");
     pub const VISIBILITY_COUNT: &str = include_str!("../shaders/compute/visibility_count.wgsl");
+    pub const VISIBILITY_EXPAND: &str = include_str!("../shaders/compute/visibility_expand.wgsl");
     pub const VISIBILITY_SCAN: &str = include_str!("../shaders/compute/visibility_scan.wgsl");
     pub const VISIBILITY_SCATTER: &str = include_str!("../shaders/compute/visibility_scatter.wgsl");
 
@@ -384,6 +386,11 @@ pub fn compile_visibility_count_module() -> Result<naga::Module, Box<dyn std::er
     compile_validated_compute_module(sources::VISIBILITY_COUNT)
 }
 
+/// Compile compact per-face visibility expansion into current patch order.
+pub fn compile_visibility_expand_module() -> Result<naga::Module, Box<dyn std::error::Error>> {
+    compile_validated_compute_module(sources::VISIBILITY_EXPAND)
+}
+
 /// Compile the deterministic batch-prefix and indirect-argument pass.
 pub fn compile_visibility_scan_module() -> Result<naga::Module, Box<dyn std::error::Error>> {
     compile_validated_compute_module(sources::VISIBILITY_SCAN)
@@ -396,6 +403,10 @@ pub fn compile_visibility_scatter_module() -> Result<naga::Module, Box<dyn std::
 
 pub fn compile_visibility_count_wgsl() -> Result<String, Box<dyn std::error::Error>> {
     emit_wgsl(&compile_visibility_count_module()?)
+}
+
+pub fn compile_visibility_expand_wgsl() -> Result<String, Box<dyn std::error::Error>> {
+    emit_wgsl(&compile_visibility_expand_module()?)
 }
 
 pub fn compile_visibility_scan_wgsl() -> Result<String, Box<dyn std::error::Error>> {
@@ -926,6 +937,11 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
     #[test]
     fn flattened_visibility_compaction_wgsl_is_standalone_and_reparseable() {
         for (source_entry, device_entry, source) in [
+            (
+                "expand_face_visibility",
+                VISIBILITY_EXPAND_DEVICE_ENTRY_POINT,
+                compile_visibility_expand_wgsl().unwrap(),
+            ),
             (
                 "count_visible_instances",
                 VISIBILITY_COUNT_DEVICE_ENTRY_POINT,

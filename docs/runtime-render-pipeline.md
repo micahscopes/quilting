@@ -492,14 +492,19 @@ scratch storage, preventing stale GPU suffix weights without a warm-path
 allocation. Animated execution also exposes the next bottleneck honestly:
 worker-driven animated LOD changes publish a new batch topology almost every
 accepted epoch. The retained WebGPU aggregate now updates topology, subject,
-batch, and eligibility
-buffers in place whenever patch, subject, and batch cardinalities remain
-compatible; only a shape change constructs replacement buffers and bind
-groups. One animated horse run observed 1,161 coherent scene publications:
+batch, and eligibility buffers in place whenever patch, subject, and batch
+cardinalities remain compatible; only a shape change constructs replacement
+buffers and bind groups. One animated horse run observed 1,161 coherent scene publications:
 1,159 retained updates and two model-boundary rebuilds, with zero frame
-failures. The shadow still repacks that topology on the CPU and uploads one
-widened four-byte visibility word per source instance. Those transfers are
-instrumentation of the incumbent authority, not the intended final design.
+failures. Visibility is no longer flattened and widened on the CPU after each
+batch reorder. The shadow uploads one compact face-indexed bitset only when it
+changes, and a 64-lane GPU pass expands those bits through current patch
+topology immediately before compaction. For the 984-face horse that input is
+31 words, or 124 bytes. A 1,907-frame animated run submitted 1,906 frames,
+updated retained topology 1,733 times, and uploaded visibility twice for 248
+bytes total with zero failures; the earlier 1,220-frame flattened run uploaded
+4,801,920 bytes. The shadow still repacks topology on the CPU from worker
+readback, which remains instrumentation rather than the intended authority.
 
 The optimized monolithic WASM artifact measured 7,543,417 bytes with this
 backend enabled versus 7,458,547 bytes with the feature disabled: an 84,870-byte
@@ -510,12 +515,12 @@ must compare optimized outputs.
 The next cut is authoritative renderer integration: bind the same-device LOD
 classifier output directly to visibility/scene selection, stop rebuilding
 topology words from worker readback, attach the live shared frame executor to a
-browser surface, and add WebGL2 image/workload parity
-behind the existing explicit backend switch. PBR, wire, LOD color, stretch, picking,
+browser surface, and add WebGL2 image/workload parity behind the existing
+explicit backend switch. PBR, wire, LOD color, stretch, picking,
 material/texture binding, and postprocess commands still reject explicitly
 rather than silently lowering to normals. That cut is what finally removes the
-live four-byte-per-face readback and rejected atlas vertex invocations from an
-authoritative runtime.
+live classifier readback, CPU topology repacking, and rejected atlas vertex
+invocations from an authoritative runtime.
 
 The old JavaScript renderer's useful idea was memoizing tessellation topology
 and prepared meshes. The retained atlas, versioned browser cache, and stable

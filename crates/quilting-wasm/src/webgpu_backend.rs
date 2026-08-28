@@ -36,8 +36,8 @@ struct WebGpuBackend {
     scene_source_revision: Option<u64>,
     target: Option<OffscreenPatchRenderTarget>,
     last_frame_input: Option<LiveFrameInput>,
-    last_source_visibility: Vec<u8>,
-    next_source_visibility: Vec<u8>,
+    last_face_visibility_bits: Vec<u32>,
+    next_face_visibility_bits: Vec<u32>,
     last_joint_matrices: Vec<f32>,
     last_morph_weights: Vec<f32>,
     next_morph_weights: Vec<f32>,
@@ -52,6 +52,7 @@ struct WebGpuBackend {
     frames_submitted: u64,
     frames_skipped_unchanged: u64,
     frame_failures: u64,
+    visibility_uploads: u64,
     visibility_upload_bytes: u64,
     last_frame_revision: u64,
     last_indirect_draw_calls: u32,
@@ -97,6 +98,7 @@ pub(crate) struct WebGpuBackendDiagnostics {
     frames_submitted: u64,
     frames_skipped_unchanged: u64,
     frame_failures: u64,
+    visibility_uploads: u64,
     visibility_upload_bytes: u64,
     last_frame_revision: u64,
     last_indirect_draw_calls: u32,
@@ -150,6 +152,7 @@ impl WebGpuBackend {
             frames_submitted: self.frames_submitted,
             frames_skipped_unchanged: self.frames_skipped_unchanged,
             frame_failures: self.frame_failures,
+            visibility_uploads: self.visibility_uploads,
             visibility_upload_bytes: self.visibility_upload_bytes,
             last_frame_revision: self.last_frame_revision,
             last_indirect_draw_calls: self.last_indirect_draw_calls,
@@ -169,12 +172,12 @@ impl WebGpuBackend {
 
     fn reject_frame(
         &mut self,
-        source_visibility: Vec<u8>,
+        face_visibility_bits: Vec<u32>,
         morph_weights: Vec<f32>,
         error: impl ToString,
     ) -> String {
         let error = error.to_string();
-        self.next_source_visibility = source_visibility;
+        self.next_face_visibility_bits = face_visibility_bits;
         self.next_morph_weights = morph_weights;
         self.frame_failures = self.frame_failures.saturating_add(1);
         self.last_frame_failure = Some(error.clone());
@@ -217,8 +220,8 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
                     backend.scene_source_revision = None;
                     backend.target = None;
                     backend.last_frame_input = None;
-                    backend.last_source_visibility.clear();
-                    backend.next_source_visibility.clear();
+                    backend.last_face_visibility_bits.clear();
+                    backend.next_face_visibility_bits.clear();
                     backend.last_joint_matrices.clear();
                     backend.last_morph_weights.clear();
                     backend.next_morph_weights.clear();
@@ -271,8 +274,8 @@ pub(crate) fn replace_atlas(
                 backend.scene = None;
                 backend.scene_source_revision = None;
                 backend.last_frame_input = None;
-                backend.last_source_visibility.clear();
-                backend.next_source_visibility.clear();
+                backend.last_face_visibility_bits.clear();
+                backend.next_face_visibility_bits.clear();
                 backend.next_morph_weights.clear();
                 backend.atlas_uploads = backend.atlas_uploads.saturating_add(1);
                 if backend.model.is_some() {
@@ -313,8 +316,8 @@ pub(crate) fn replace_model(
                 backend.scene = None;
                 backend.scene_source_revision = None;
                 backend.last_frame_input = None;
-                backend.last_source_visibility.clear();
-                backend.next_source_visibility.clear();
+                backend.last_face_visibility_bits.clear();
+                backend.next_face_visibility_bits.clear();
                 backend.next_morph_weights.clear();
                 backend.model_uploads = backend.model_uploads.saturating_add(1);
                 backend.last_error = None;
@@ -388,8 +391,6 @@ pub(crate) fn replace_scene(
                 backend.scene_uploads = next_revision;
                 backend.scene_updates = backend.scene_updates.saturating_add(1);
                 backend.last_frame_input = None;
-                backend.last_source_visibility.clear();
-                backend.next_source_visibility.clear();
                 backend.next_morph_weights.clear();
                 backend.last_error = None;
                 return Ok(true);
@@ -424,8 +425,8 @@ pub(crate) fn replace_scene(
                 backend.scene_uploads = next_revision;
                 backend.scene_rebuilds = backend.scene_rebuilds.saturating_add(1);
                 backend.last_frame_input = None;
-                backend.last_source_visibility.clear();
-                backend.next_source_visibility.clear();
+                backend.last_face_visibility_bits.clear();
+                backend.next_face_visibility_bits.clear();
                 backend.next_morph_weights.clear();
                 backend.last_error = None;
                 Ok(true)
@@ -467,58 +468,49 @@ pub(crate) fn submit_frame(
         backend.frame_attempts = backend.frame_attempts.saturating_add(1);
         let frame_revision = backend.frame_attempts;
 
-        let mut source_visibility = std::mem::take(&mut backend.next_source_visibility);
-        source_visibility.clear();
+        let mut face_visibility_bits = std::mem::take(&mut backend.next_face_visibility_bits);
+        face_visibility_bits.clear();
         let mut effective_morph_weights = std::mem::take(&mut backend.next_morph_weights);
         effective_morph_weights.clear();
-        let resident_morph_targets = match backend.model_source.as_ref() {
-            Some(model) => model.model.num_morph_targets,
+        let (resident_faces, resident_morph_targets) = match backend.model_source.as_ref() {
+            Some(model) => (model.residency.num_faces, model.model.num_morph_targets),
             None => {
                 return Err(backend.reject_frame(
-                    source_visibility,
+                    face_visibility_bits,
                     effective_morph_weights,
                     "WebGPU render frame requires immutable model source",
                 ));
             }
         };
+        if face_visibility.len() != resident_faces {
+            return Err(backend.reject_frame(
+                face_visibility_bits,
+                effective_morph_weights,
+                format!(
+                    "WebGPU face visibility has {} values; expected {resident_faces}",
+                    face_visibility.len(),
+                ),
+            ));
+        }
+        face_visibility_bits.resize(resident_faces.div_ceil(32), 0);
+        for (face, &visible) in face_visibility.iter().enumerate() {
+            if visible {
+                face_visibility_bits[face / 32] |= 1 << (face % 32);
+            }
+        }
         if morph_weights.len() > resident_morph_targets {
             return Err(backend.reject_frame(
-                source_visibility,
+                face_visibility_bits,
                 effective_morph_weights,
                 "WebGPU morph weight payload exceeds resident targets",
             ));
         }
         effective_morph_weights.extend_from_slice(morph_weights);
         effective_morph_weights.resize(resident_morph_targets, 0.0);
-        let visibility_result = backend
-            .scene
-            .as_ref()
-            .ok_or_else(|| "WebGPU render frame requires scene residency".to_string())
-            .and_then(|scene| {
-                source_visibility.reserve(scene.patch_count() as usize);
-                for batch in &scene.scene().batches {
-                    for member in &batch.members {
-                        let visible =
-                            face_visibility
-                                .get(member.face_index as usize)
-                                .ok_or_else(|| {
-                                    format!(
-                                        "WebGPU source patch references missing face visibility {}",
-                                        member.face_index,
-                                    )
-                                })?;
-                        source_visibility.push(u8::from(*visible));
-                    }
-                }
-                Ok(())
-            });
-        if let Err(error) = visibility_result {
-            return Err(backend.reject_frame(source_visibility, effective_morph_weights, error));
-        }
 
         if !joint_matrices.len().is_multiple_of(16) {
             return Err(backend.reject_frame(
-                source_visibility,
+                face_visibility_bits,
                 effective_morph_weights,
                 "WebGPU joint matrix payload is malformed",
             ));
@@ -527,7 +519,7 @@ pub(crate) fn submit_frame(
             Ok(num_joints) => num_joints,
             Err(_) => {
                 return Err(backend.reject_frame(
-                    source_visibility,
+                    face_visibility_bits,
                     effective_morph_weights,
                     "WebGPU joint count exceeds u32",
                 ));
@@ -541,15 +533,16 @@ pub(crate) fn submit_frame(
             options,
         };
         let unchanged = backend.last_frame_input == Some(frame_input)
-            && backend.last_source_visibility == source_visibility
+            && backend.last_face_visibility_bits == face_visibility_bits
             && backend.last_joint_matrices == joint_matrices
             && backend.last_morph_weights == effective_morph_weights;
         if unchanged {
-            backend.next_source_visibility = source_visibility;
+            backend.next_face_visibility_bits = face_visibility_bits;
             backend.next_morph_weights = effective_morph_weights;
             backend.frames_skipped_unchanged = backend.frames_skipped_unchanged.saturating_add(1);
             return Ok(false);
         }
+        let visibility_upload_required = backend.last_face_visibility_bits != face_visibility_bits;
 
         if backend
             .target
@@ -569,7 +562,7 @@ pub(crate) fn submit_frame(
                 Ok(target) => target,
                 Err(error) => {
                     return Err(backend.reject_frame(
-                        source_visibility,
+                        face_visibility_bits,
                         effective_morph_weights,
                         error,
                     ));
@@ -616,7 +609,7 @@ pub(crate) fn submit_frame(
             )
             .map_err(|error| error.to_string())?;
             device
-                .write_patch_render_scene_state(
+                .write_patch_render_pose_state(
                     model,
                     scene,
                     LodPose {
@@ -624,11 +617,17 @@ pub(crate) fn submit_frame(
                         morph_weights: &effective_morph_weights,
                     },
                     num_joints,
-                    &source_visibility,
                 )
                 .map_err(|error| error.to_string())?;
+            if visibility_upload_required {
+                device
+                    .write_patch_render_face_visibility_bits(scene, &face_visibility_bits)
+                    .map_err(|error| error.to_string())?;
+            }
             device
-                .render_offscreen_normals_patch_scene(&frame, pipeline, scene, atlas, target, true)
+                .render_offscreen_normals_patch_scene_with_face_visibility(
+                    &frame, pipeline, scene, atlas, target, true,
+                )
                 .map_err(|error| error.to_string())
         })();
         match result {
@@ -638,15 +637,23 @@ pub(crate) fn submit_frame(
                 ..
             }) => {
                 backend.frames_submitted = backend.frames_submitted.saturating_add(1);
-                backend.visibility_upload_bytes = backend
-                    .visibility_upload_bytes
-                    .saturating_add(u64::from(source_instance_count).saturating_mul(4));
+                if visibility_upload_required {
+                    backend.visibility_uploads = backend.visibility_uploads.saturating_add(1);
+                    backend.visibility_upload_bytes = backend
+                        .visibility_upload_bytes
+                        .saturating_add((face_visibility_bits.len() as u64).saturating_mul(4));
+                }
                 backend.last_frame_revision = frame_revision;
                 backend.last_indirect_draw_calls = indirect_draw_calls;
                 backend.last_source_instances = source_instance_count;
                 backend.last_viewport = view.viewport;
-                std::mem::swap(&mut backend.last_source_visibility, &mut source_visibility);
-                backend.next_source_visibility = source_visibility;
+                if visibility_upload_required {
+                    std::mem::swap(
+                        &mut backend.last_face_visibility_bits,
+                        &mut face_visibility_bits,
+                    );
+                }
+                backend.next_face_visibility_bits = face_visibility_bits;
                 backend.last_joint_matrices.clear();
                 backend
                     .last_joint_matrices
@@ -661,7 +668,7 @@ pub(crate) fn submit_frame(
                 Ok(true)
             }
             Err(error) => {
-                Err(backend.reject_frame(source_visibility, effective_morph_weights, error))
+                Err(backend.reject_frame(face_visibility_bits, effective_morph_weights, error))
             }
         }
     })

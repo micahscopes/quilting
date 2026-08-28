@@ -309,6 +309,13 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             PatchRenderSceneUpdate::Updated,
         ));
         assert_eq!(retained_scene.scene(), &reordered_scene);
+        assert_eq!(
+            classifier
+                .expand_face_visibility_for_diagnostics(&retained_scene, &[0b01])
+                .await
+                .unwrap(),
+            [0, 1],
+        );
 
         let mut resized_scene = reordered_scene.clone();
         let mut empty_batch = resized_scene.batches.last().unwrap().clone();
@@ -345,6 +352,13 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 .unwrap(),
             PatchRenderSceneUpdate::Updated,
         ));
+        assert_eq!(
+            classifier
+                .expand_face_visibility_for_diagnostics(&retained_scene, &[0b01])
+                .await
+                .unwrap(),
+            [1, 0],
+        );
         classifier
             .write_patch_render_scene_state(&model, &retained_scene, LodPose::default(), 0, &[1, 1])
             .unwrap();
@@ -409,6 +423,40 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             .unwrap();
         if let Some(error) = error_scope.pop().await {
             panic!("shared RenderFrame validation: {error}");
+        }
+
+        classifier
+            .write_patch_render_pose_state(&model, &retained_scene, LodPose::default(), 0)
+            .unwrap();
+        classifier
+            .write_patch_render_face_visibility_bits(&retained_scene, &[0b11])
+            .unwrap();
+        assert!(classifier
+            .write_patch_render_face_visibility_bits(&retained_scene, &[u32::MAX])
+            .unwrap_err()
+            .to_string()
+            .contains("nonzero padding"));
+        let error_scope = classifier
+            .device()
+            .push_error_scope(wgpu::ErrorFilter::Validation);
+        let encoding = classifier
+            .render_offscreen_normals_patch_scene_with_face_visibility(
+                &render_frame,
+                &pipeline,
+                &retained_scene,
+                &packed_atlas,
+                &target,
+                true,
+            )
+            .unwrap();
+        assert_eq!(encoding.indirect_draw_calls, 2);
+        assert_eq!(encoding.source_instance_count, 2);
+        classifier
+            .device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        if let Some(error) = error_scope.pop().await {
+            panic!("face visibility expansion validation: {error}");
         }
 
         let compaction_scene = RenderSceneSnapshot {

@@ -33,6 +33,7 @@ const JOINT_MATRIX_BYTES: u64 = 64;
 const PASS1_RECORD_BYTES: u64 = 16;
 const PACKED_RECORD_BYTES: u64 = 4;
 const VISIBILITY_UNIFORM_BYTES: u64 = 16;
+const FACE_VISIBILITY_UNIFORM_BYTES: u64 = 16;
 const VISIBILITY_BATCH_RECORD_BYTES: u64 = 16;
 const VISIBILITY_RANGE_RECORD_BYTES: u64 = 20;
 const INDEXED_INDIRECT_RECORD_BYTES: u64 = 20;
@@ -385,6 +386,7 @@ pub struct LodClassifierDevice {
     pass1_pipeline: wgpu::ComputePipeline,
     pass2_pipeline: wgpu::ComputePipeline,
     patch_prepare_pipeline: wgpu::ComputePipeline,
+    visibility_expand_pipeline: wgpu::ComputePipeline,
     visibility_count_pipeline: wgpu::ComputePipeline,
     visibility_scan_pipeline: wgpu::ComputePipeline,
     visibility_scatter_pipeline: wgpu::ComputePipeline,
@@ -446,6 +448,7 @@ pub struct PatchRenderScene {
     scene: RenderSceneSnapshot,
     patches: PatchPreparationScene,
     visibility: VisibilityCompactionScene,
+    face_visibility: FaceVisibilityExpansionScene,
     bindings: PatchRenderBindings,
 }
 
@@ -455,6 +458,16 @@ pub struct PatchRenderScene {
 pub enum PatchRenderSceneUpdate {
     Updated,
     ShapeChanged(RenderSceneSnapshot),
+}
+
+/// Compact per-face CPU/shadow visibility and its retained expansion bindings.
+/// A future same-device classifier can replace the bitset producer while
+/// preserving the topology-to-source expansion contract.
+struct FaceVisibilityExpansionScene {
+    face_count: u32,
+    word_count: u32,
+    bits: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
 }
 
 /// Retained scene shape and output buffers for deterministic visibility
@@ -516,6 +529,8 @@ impl LodClassifierDevice {
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
         let patch_prepare_source = quilting_shaders::compile_patch_prepare_compute_wgsl()
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
+        let visibility_expand_source = quilting_shaders::compile_visibility_expand_wgsl()
+            .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
         let visibility_count_source = quilting_shaders::compile_visibility_count_wgsl()
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
         let visibility_scan_source = quilting_shaders::compile_visibility_scan_wgsl()
@@ -533,6 +548,10 @@ impl LodClassifierDevice {
         let patch_prepare_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("quilting patch preparation"),
             source: wgpu::ShaderSource::Wgsl(Cow::Owned(patch_prepare_source)),
+        });
+        let visibility_expand_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("quilting face visibility expansion"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(visibility_expand_source)),
         });
         let visibility_count_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("quilting visibility count"),
@@ -571,6 +590,15 @@ impl LodClassifierDevice {
                 compilation_options: Default::default(),
                 cache: None,
             });
+        let visibility_expand_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("quilting face visibility expansion"),
+                layout: None,
+                module: &visibility_expand_module,
+                entry_point: Some(quilting_shaders::VISIBILITY_EXPAND_DEVICE_ENTRY_POINT),
+                compilation_options: Default::default(),
+                cache: None,
+            });
         let visibility_count_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("quilting visibility count"),
@@ -604,6 +632,7 @@ impl LodClassifierDevice {
             pass1_pipeline,
             pass2_pipeline,
             patch_prepare_pipeline,
+            visibility_expand_pipeline,
             visibility_count_pipeline,
             visibility_scan_pipeline,
             visibility_scatter_pipeline,
@@ -1463,6 +1492,52 @@ impl LodClassifierDevice {
         })
     }
 
+    fn create_face_visibility_expansion_scene(
+        &self,
+        patches: &PatchPreparationScene,
+        visibility: &VisibilityCompactionScene,
+        face_count: usize,
+    ) -> Result<FaceVisibilityExpansionScene, LodWebGpuError> {
+        let face_count = u32::try_from(face_count)
+            .map_err(|_| LodWebGpuError::Payload("face visibility count exceeds u32".into()))?;
+        let word_count = face_count.div_ceil(32);
+        let uniform_words = [patches.patch_count, face_count, word_count, 0];
+        debug_assert_eq!(
+            std::mem::size_of_val(&uniform_words) as u64,
+            FACE_VISIBILITY_UNIFORM_BYTES,
+        );
+        let uniform = buffer_init_or_zero(
+            &self.device,
+            "face visibility expansion uniform",
+            bytemuck::cast_slice(&uniform_words),
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let bit_bytes = u64::from(word_count).saturating_mul(PACKED_RECORD_BYTES);
+        let bits = gpu_buffer(
+            &self.device,
+            "packed face visibility bits",
+            bit_bytes.max(PACKED_RECORD_BYTES),
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
+        let layout = self.visibility_expand_pipeline.get_bind_group_layout(0);
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("face visibility expansion bindings"),
+            layout: &layout,
+            entries: &[
+                bind(0, &uniform),
+                bind(1, &patches.topology),
+                bind(2, &bits),
+                bind(3, &visibility.source_visibility),
+            ],
+        });
+        Ok(FaceVisibilityExpansionScene {
+            face_count,
+            word_count,
+            bits,
+            bind_group,
+        })
+    }
+
     /// Upload every immutable resource derived from one backend-neutral scene
     /// as a single replacement candidate. Construction failure leaves the
     /// caller's previous aggregate untouched.
@@ -1483,11 +1558,17 @@ impl LodClassifierDevice {
                 .map_err(LodWebGpuError::Payload)?;
         let patches = self.upload_patch_preparation_scene(model, patch_words)?;
         let visibility = self.upload_visibility_compaction_scene(visibility_words)?;
+        let face_visibility = self.create_face_visibility_expansion_scene(
+            &patches,
+            &visibility,
+            model.prepared.residency.num_faces,
+        )?;
         let bindings = self.create_patch_render_bindings(pipeline, &patches, &visibility)?;
         Ok(PatchRenderScene {
             scene,
             patches,
             visibility,
+            face_visibility,
             bindings,
         })
     }
@@ -1572,8 +1653,106 @@ impl LodClassifierDevice {
         num_joints: u32,
         source_visibility: &[u8],
     ) -> Result<(), LodWebGpuError> {
-        self.write_patch_pose(model, &scene.patches, pose, num_joints)?;
+        self.write_patch_render_pose_state(model, scene, pose, num_joints)?;
         self.write_source_visibility(&scene.visibility, source_visibility)
+    }
+
+    pub fn write_patch_render_pose_state(
+        &self,
+        model: &LodClassifierModel,
+        scene: &PatchRenderScene,
+        pose: LodPose<'_>,
+        num_joints: u32,
+    ) -> Result<(), LodWebGpuError> {
+        self.write_patch_pose(model, &scene.patches, pose, num_joints)
+    }
+
+    /// Upload a compact face-indexed visibility bitset. Expansion into current
+    /// flattened patch order occurs on-device after patch preparation.
+    pub fn write_patch_render_face_visibility_bits(
+        &self,
+        scene: &PatchRenderScene,
+        words: &[u32],
+    ) -> Result<(), LodWebGpuError> {
+        let expected = scene.face_visibility.word_count as usize;
+        if words.len() != expected {
+            return Err(LodWebGpuError::Payload(format!(
+                "face visibility bitset has {} words; expected {expected}",
+                words.len(),
+            )));
+        }
+        let tail_bits = scene.face_visibility.face_count % 32;
+        if tail_bits != 0
+            && words
+                .last()
+                .is_some_and(|word| word & !((1u32 << tail_bits) - 1) != 0)
+        {
+            return Err(LodWebGpuError::Payload(
+                "face visibility bitset has nonzero padding".to_string(),
+            ));
+        }
+        if !words.is_empty() {
+            self.queue
+                .write_buffer(&scene.face_visibility.bits, 0, bytemuck::cast_slice(words));
+        }
+        Ok(())
+    }
+
+    fn encode_face_visibility_expansion(
+        &self,
+        scene: &PatchRenderScene,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        if scene.patches.patch_count == 0 {
+            return;
+        }
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("quilting face visibility expansion"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.visibility_expand_pipeline);
+        pass.set_bind_group(0, &scene.face_visibility.bind_group, &[]);
+        pass.dispatch_workgroups(scene.patches.patch_count.div_ceil(LOD_WORKGROUP_SIZE), 1, 1);
+    }
+
+    /// Diagnostic-only exact readback for validating the compact visibility
+    /// adapter. Production rendering encodes the same pass directly into
+    /// compaction and never calls this method.
+    pub async fn expand_face_visibility_for_diagnostics(
+        &self,
+        scene: &PatchRenderScene,
+        words: &[u32],
+    ) -> Result<Vec<u32>, LodWebGpuError> {
+        self.write_patch_render_face_visibility_bits(scene, words)?;
+        let output_bytes = u64::from(scene.visibility.source_count)
+            .checked_mul(PACKED_RECORD_BYTES)
+            .ok_or_else(|| {
+                LodWebGpuError::Payload("expanded visibility readback is too large".to_string())
+            })?;
+        if output_bytes == 0 {
+            return Ok(Vec::new());
+        }
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("expanded face visibility diagnostic readback"),
+            size: output_bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("expanded face visibility diagnostic encoder"),
+            });
+        self.encode_face_visibility_expansion(scene, &mut encoder);
+        encoder.copy_buffer_to_buffer(
+            &scene.visibility.source_visibility,
+            0,
+            &readback,
+            0,
+            output_bytes,
+        );
+        self.queue.submit([encoder.finish()]);
+        self.readback_words(&readback, output_bytes).await
     }
 
     /// Encode the supported normals-mode subset from one coherent scene
@@ -1624,6 +1803,38 @@ impl LodClassifierDevice {
         target: &OffscreenPatchRenderTarget,
         use_qb: bool,
     ) -> Result<PatchFrameEncoding, LodWebGpuError> {
+        self.render_offscreen_normals_patch_scene_impl(
+            frame, pipeline, scene, atlas, target, use_qb, false,
+        )
+    }
+
+    /// Submit a live offscreen normals frame whose current visibility arrives
+    /// as the compact per-face bitset retained by this scene.
+    pub fn render_offscreen_normals_patch_scene_with_face_visibility(
+        &self,
+        frame: &RenderFrame,
+        pipeline: &PatchRenderPipeline,
+        scene: &PatchRenderScene,
+        atlas: &PackedPatchAtlas,
+        target: &OffscreenPatchRenderTarget,
+        use_qb: bool,
+    ) -> Result<PatchFrameEncoding, LodWebGpuError> {
+        self.render_offscreen_normals_patch_scene_impl(
+            frame, pipeline, scene, atlas, target, use_qb, true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_offscreen_normals_patch_scene_impl(
+        &self,
+        frame: &RenderFrame,
+        pipeline: &PatchRenderPipeline,
+        scene: &PatchRenderScene,
+        atlas: &PackedPatchAtlas,
+        target: &OffscreenPatchRenderTarget,
+        use_qb: bool,
+        expand_face_visibility: bool,
+    ) -> Result<PatchFrameEncoding, LodWebGpuError> {
         if frame.view.viewport != target.size {
             return Err(LodWebGpuError::Payload(format!(
                 "offscreen target {:?} does not match frame viewport {:?}",
@@ -1649,7 +1860,12 @@ impl LodClassifierDevice {
                 clear_depth: Some(1.0),
             },
             use_qb,
-            |_, _, _| Ok(()),
+            |encoder, _, _| {
+                if expand_face_visibility {
+                    self.encode_face_visibility_expansion(scene, encoder);
+                }
+                Ok(())
+            },
         )?;
         self.queue.submit([encoder.finish()]);
         Ok(encoding)
@@ -2025,7 +2241,9 @@ impl LodClassifierDevice {
             &self.device,
             "visibility compaction current visibility",
             source_bytes,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
         );
         let batch_counts = gpu_buffer(
             &self.device,
