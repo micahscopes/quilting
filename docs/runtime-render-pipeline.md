@@ -677,12 +677,18 @@ channel order.
 Hyperscope now has an opt-in presentation cut at `gfx=webgpu`. Browser layout
 supplies an unclaimed `cv-webgpu`; Rust owns its adapter/device, surface format,
 depth attachment, resize, acquisition, encoding, submission, and presentation.
-The existing `cv` remains the event target and hidden WebGL2 oracle while
-normals is supported. The adapter reveals it synchronously when the mode is not
-normals, and reveals WebGPU only after a successful fresh presentation. This
-dual-canvas interval is deliberate migration debt: visible pixel authority has
-moved, but eliminating the hidden WebGL draw/classifier work requires the
-remaining input, picking, and LOD cuts.
+The existing `cv` remains the event target and hidden WebGL2 rollback layer
+while normals is supported. The adapter reveals it synchronously when the mode
+is not normals, and reveals WebGPU only after a successful fresh presentation.
+WebGPU now submits first: a successful or safely retained surface frame elides
+the hidden WebGL2 patch-color draw, while unavailable residency or any frame
+failure falls through to WebGL2 in the same render call. WebGL2 preparation and
+camera-visibility buffers remain current for on-demand picking and immediate
+fallback. This dual-canvas interval is deliberate migration debt; moving those
+remaining input/picking buffers no longer requires paying for two visible
+normals submissions. Runtime diagnostics expose `webglPatchFrames`,
+`webgpuPresentationPatchFrames`, and `webgpuRetainedPresentationFrames` so the
+ownership cut is measurable rather than inferred from canvas opacity.
 
 The live shadow still draws the same extracted normals frame into its retained
 offscreen target. An explicit one-shot diagnostic rerenders the incumbent

@@ -575,6 +575,15 @@ struct MainState {
     render_commands_dirty: bool,
     render_command_builds: u64,
     render_calls: u64,
+    /// Frames whose visible patch pass was actually submitted through WebGL2.
+    /// This excludes preparation, visibility, picking, and overlay-only work.
+    webgl_patch_frames: u64,
+    #[cfg(feature = "webgpu-backend")]
+    /// Changed visible frames submitted directly to the WebGPU surface.
+    webgpu_presentation_patch_frames: u64,
+    #[cfg(feature = "webgpu-backend")]
+    /// Render calls satisfied by retaining an already-current WebGPU surface.
+    webgpu_retained_presentation_frames: u64,
     /// Derived backend telemetry. It is never semantic scene state and is
     /// cleared explicitly before a promotion measurement window.
     render_timing: RenderTimingDiagnostics,
@@ -2052,6 +2061,11 @@ pub fn mr_init(canvas_id: &str) -> bool {
             render_commands_dirty: true,
             render_command_builds: 0,
             render_calls: 0,
+            webgl_patch_frames: 0,
+            #[cfg(feature = "webgpu-backend")]
+            webgpu_presentation_patch_frames: 0,
+            #[cfg(feature = "webgpu-backend")]
+            webgpu_retained_presentation_frames: 0,
             render_timing: RenderTimingDiagnostics::default(),
             patch_prepare_dirty: true,
             patch_prepare_frames: 0,
@@ -2630,9 +2644,14 @@ fn extract_render_scene(renderer: &MainState) -> Result<RenderSceneSnapshot, Str
 }
 
 #[cfg(feature = "webgpu-backend")]
-fn submit_webgpu_shadow_frame(renderer: &MainState, camera: &Camera) {
+fn submit_webgpu_frame(
+    renderer: &MainState,
+    camera: &Camera,
+) -> crate::webgpu_backend::LiveFrameDisposition {
+    use crate::webgpu_backend::LiveFrameDisposition;
+
     if renderer.render_style != RenderStyle::Normals {
-        return;
+        return LiveFrameDisposition::IncumbentRequired;
     }
     let source_revision = renderer.render_command_builds;
     if crate::webgpu_backend::needs_scene(source_revision) {
@@ -2640,7 +2659,7 @@ fn submit_webgpu_shadow_frame(renderer: &MainState, camera: &Camera) {
             Ok(scene) => scene,
             Err(error) => {
                 crate::webgpu_backend::record_frame_prerequisite_failure(error);
-                return;
+                return LiveFrameDisposition::IncumbentRequired;
             }
         };
         if let Err(error) = crate::webgpu_backend::replace_scene(
@@ -2649,17 +2668,17 @@ fn submit_webgpu_shadow_frame(renderer: &MainState, camera: &Camera) {
             &renderer.cached_instances,
         ) {
             crate::webgpu_backend::record_frame_prerequisite_failure(error);
-            return;
+            return LiveFrameDisposition::IncumbentRequired;
         }
     }
     let (joint_matrices, morph_weights) = match renderer.surface_runtime.current_pose_payload() {
         Ok(pose) => pose,
         Err(error) => {
             crate::webgpu_backend::record_frame_prerequisite_failure(error);
-            return;
+            return LiveFrameDisposition::IncumbentRequired;
         }
     };
-    let _ = crate::webgpu_backend::submit_frame(
+    crate::webgpu_backend::submit_frame(
         renderer.render_calls,
         renderer.render_style,
         RenderView {
@@ -2683,7 +2702,8 @@ fn submit_webgpu_shadow_frame(renderer: &MainState, camera: &Camera) {
         &renderer.classified_face_visibility,
         joint_matrices,
         morph_weights,
-    );
+    )
+    .unwrap_or(LiveFrameDisposition::IncumbentRequired)
 }
 
 #[cfg(feature = "webgpu-backend")]
@@ -5471,6 +5491,7 @@ pub fn mr_debug_resident_lod_edges() -> JsValue {
             ("lastGpuBatchFailures", batch_stats.last_gpu_failures),
             ("renderCommandBuilds", state.render_command_builds),
             ("renderCalls", state.render_calls),
+            ("webglPatchFrames", state.webgl_patch_frames),
             ("patchPrepareFrames", state.patch_prepare_frames),
             (
                 "skippedPatchPrepareFrames",
@@ -5551,6 +5572,24 @@ pub fn mr_debug_resident_lod_edges() -> JsValue {
                 &name.into(),
                 &JsValue::from(value as f64),
             ).ok();
+        }
+        #[cfg(feature = "webgpu-backend")]
+        for (name, value) in [
+            (
+                "webgpuPresentationPatchFrames",
+                state.webgpu_presentation_patch_frames,
+            ),
+            (
+                "webgpuRetainedPresentationFrames",
+                state.webgpu_retained_presentation_frames,
+            ),
+        ] {
+            js_sys::Reflect::set(
+                &result,
+                &name.into(),
+                &JsValue::from(value as f64),
+            )
+            .ok();
         }
         js_sys::Reflect::set(
             &result,
@@ -9081,6 +9120,43 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
             }
         }
 
+        // The explicitly selected WebGPU normals backend submits first. Once
+        // its presentation surface owns a valid frame, avoid issuing the same
+        // visible patch workload through the hidden WebGL canvas. WebGL's
+        // retained preparation/visibility buffers remain current above for
+        // on-demand picking; any unavailable or failed WebGPU frame falls
+        // through to the incumbent draw below in this same render call.
+        #[cfg(feature = "webgpu-backend")]
+        match submit_webgpu_frame(state, &camera) {
+            crate::webgpu_backend::LiveFrameDisposition::PresentationSubmitted(
+                submission_stats,
+            ) => {
+                state.webgpu_presentation_patch_frames = state
+                    .webgpu_presentation_patch_frames
+                    .saturating_add(1);
+                observe_render_submission(state, &camera, submission_stats);
+                state.last_render_submission = submission_stats;
+                state.render_submission_totals.merge(submission_stats);
+                state.renderer.end_frame();
+                state
+                    .render_timing
+                    .observe(render_started_ms, browser_now_ms());
+                return;
+            }
+            crate::webgpu_backend::LiveFrameDisposition::PresentationRetained => {
+                state.webgpu_retained_presentation_frames = state
+                    .webgpu_retained_presentation_frames
+                    .saturating_add(1);
+                state.last_render_submission = RenderSubmissionStats::default();
+                state.renderer.end_frame();
+                state
+                    .render_timing
+                    .observe(render_started_ms, browser_now_ms());
+                return;
+            }
+            crate::webgpu_backend::LiveFrameDisposition::IncumbentRequired => {}
+        }
+
         // Mode-specific UBO setup
         let has_env = state.env_maps.prefiltered.is_some();
         let env_mips = state.env_maps.mip_count;
@@ -9594,6 +9670,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 state.pbr_draw_calls = state
                     .pbr_draw_calls
                     .saturating_add(submission_stats.draw_calls);
+                state.webgl_patch_frames = state.webgl_patch_frames.saturating_add(1);
                 state.pbr_material_updates += material_updates;
                 state.pbr_vertex_uniform_updates += vertex_uniform_updates;
                 state.last_render_submission = submission_stats;
@@ -9621,6 +9698,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         let submission_stats = state
             .renderer
             .render(state.render_style, &camera, render_batches);
+        state.webgl_patch_frames = state.webgl_patch_frames.saturating_add(1);
         #[cfg(feature = "webgpu-backend")]
         if state.backend_evidence_requested {
             state.backend_evidence_requested = false;
@@ -9652,8 +9730,6 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         state.last_render_submission = submission_stats;
         state.render_submission_totals.merge(submission_stats);
         state.renderer.end_frame();
-        #[cfg(feature = "webgpu-backend")]
-        submit_webgpu_shadow_frame(state, &camera);
         state
             .render_timing
             .observe(render_started_ms, browser_now_ms());

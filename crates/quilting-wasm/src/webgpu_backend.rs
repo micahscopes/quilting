@@ -74,6 +74,17 @@ struct LiveFrameInput {
     options: RenderFrameOptions,
 }
 
+/// Whether the incumbent renderer still has to submit the visible patch pass
+/// after one WebGPU frame attempt. Offscreen shadow work never owns visible
+/// pixels, while a successfully presented (or deliberately retained) surface
+/// frame does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LiveFrameDisposition {
+    IncumbentRequired,
+    PresentationSubmitted(RenderSubmissionStats),
+    PresentationRetained,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WebGpuBackendDiagnostics {
@@ -565,20 +576,20 @@ pub(crate) fn submit_frame(
     face_visibility: &[bool],
     joint_matrices: &[f32],
     morph_weights: &[f32],
-) -> Result<bool, String> {
+) -> Result<LiveFrameDisposition, String> {
     BACKEND.with(|slot| {
         let mut backend = slot.borrow_mut();
         if backend.state != "ready" || style != RenderStyle::Normals {
-            return Ok(false);
+            return Ok(LiveFrameDisposition::IncumbentRequired);
         }
         // Atlas/model/scene residency arrives asynchronously during ordinary
         // application startup. Frames before the first coherent scene are
         // inert lifecycle gaps, not failed render attempts.
         if backend.scene.is_none() {
-            return Ok(false);
+            return Ok(LiveFrameDisposition::IncumbentRequired);
         }
         if view.viewport[0] == 0 || view.viewport[1] == 0 {
-            return Ok(false);
+            return Ok(LiveFrameDisposition::IncumbentRequired);
         }
         backend.frame_attempts = backend.frame_attempts.saturating_add(1);
         let frame_revision = backend.frame_attempts;
@@ -655,7 +666,13 @@ pub(crate) fn submit_frame(
             backend.next_face_visibility_bits = face_visibility_bits;
             backend.next_morph_weights = effective_morph_weights;
             backend.frames_skipped_unchanged = backend.frames_skipped_unchanged.saturating_add(1);
-            return Ok(false);
+            return Ok(
+                if backend.presentation.is_some() && backend.last_frame_revision != 0 {
+                    LiveFrameDisposition::PresentationRetained
+                } else {
+                    LiveFrameDisposition::IncumbentRequired
+                },
+            );
         }
         let visibility_upload_required = backend.last_face_visibility_bits != face_visibility_bits;
 
@@ -860,12 +877,22 @@ pub(crate) fn submit_frame(
                 backend.next_morph_weights = effective_morph_weights;
                 backend.last_frame_input = Some(frame_input);
                 backend.last_error = None;
-                Ok(true)
+                Ok(if backend.presentation.is_some() {
+                    LiveFrameDisposition::PresentationSubmitted(logical_submission)
+                } else {
+                    LiveFrameDisposition::IncumbentRequired
+                })
             }
             Ok(None) => {
                 backend.next_face_visibility_bits = face_visibility_bits;
                 backend.next_morph_weights = effective_morph_weights;
-                Ok(false)
+                Ok(
+                    if backend.presentation.is_some() && backend.last_frame_revision != 0 {
+                        LiveFrameDisposition::PresentationRetained
+                    } else {
+                        LiveFrameDisposition::IncumbentRequired
+                    },
+                )
             }
             Err(error) => {
                 Err(backend.reject_frame(face_visibility_bits, effective_morph_weights, error))
