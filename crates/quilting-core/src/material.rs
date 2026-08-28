@@ -5,6 +5,133 @@
 //! these stable asset references into resources owned by their device epoch.
 
 use serde::{Deserialize, Serialize};
+use std::error::Error;
+use std::fmt;
+
+/// Backend-neutral texture addressing modes. The explicit WebGL conversion
+/// keeps the current browser wire format at the adapter boundary; render and
+/// asset code should carry this enum instead of GL constants.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextureWrapMode {
+    ClampToEdge,
+    MirroredRepeat,
+    #[default]
+    Repeat,
+}
+
+impl TextureWrapMode {
+    pub const GL_CLAMP_TO_EDGE: u32 = 0x812f;
+    pub const GL_MIRRORED_REPEAT: u32 = 0x8370;
+    pub const GL_REPEAT: u32 = 0x2901;
+
+    pub const fn from_gl_enum(value: u32) -> Option<Self> {
+        match value {
+            Self::GL_CLAMP_TO_EDGE => Some(Self::ClampToEdge),
+            Self::GL_MIRRORED_REPEAT => Some(Self::MirroredRepeat),
+            Self::GL_REPEAT => Some(Self::Repeat),
+            _ => None,
+        }
+    }
+
+    pub const fn as_gl_enum(self) -> u32 {
+        match self {
+            Self::ClampToEdge => Self::GL_CLAMP_TO_EDGE,
+            Self::MirroredRepeat => Self::GL_MIRRORED_REPEAT,
+            Self::Repeat => Self::GL_REPEAT,
+        }
+    }
+}
+
+/// Stable metadata for one decoded two-dimensional texture table entry.
+/// Pixel ownership is deliberately separate so native byte uploads and
+/// browser `ImageBitmap` uploads can share validation without forcing a large
+/// copy through WASM memory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextureAssetDescriptor {
+    pub width: u32,
+    pub height: u32,
+    pub wrap_s: TextureWrapMode,
+    pub wrap_t: TextureWrapMode,
+}
+
+impl TextureAssetDescriptor {
+    pub fn validate(self) -> Result<(), TextureAssetError> {
+        self.rgba8_byte_len().map(|_| ())
+    }
+
+    pub fn rgba8_byte_len(self) -> Result<usize, TextureAssetError> {
+        if self.width == 0 || self.height == 0 {
+            return Err(TextureAssetError::ZeroDimension {
+                width: self.width,
+                height: self.height,
+            });
+        }
+        u64::from(self.width)
+            .checked_mul(u64::from(self.height))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .ok_or(TextureAssetError::Rgba8ByteLengthOverflow {
+                width: self.width,
+                height: self.height,
+            })
+    }
+}
+
+/// Borrowed native upload packet. Browser-native image handles use the same
+/// [`TextureAssetDescriptor`] but remain platform adapter values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rgba8TextureAsset<'a> {
+    pub descriptor: TextureAssetDescriptor,
+    pub pixels: &'a [u8],
+}
+
+impl<'a> Rgba8TextureAsset<'a> {
+    pub fn new(
+        descriptor: TextureAssetDescriptor,
+        pixels: &'a [u8],
+    ) -> Result<Self, TextureAssetError> {
+        let expected = descriptor.rgba8_byte_len()?;
+        if pixels.len() != expected {
+            return Err(TextureAssetError::InvalidRgba8ByteLength {
+                expected,
+                actual: pixels.len(),
+            });
+        }
+        Ok(Self { descriptor, pixels })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextureAssetError {
+    ZeroDimension { width: u32, height: u32 },
+    Rgba8ByteLengthOverflow { width: u32, height: u32 },
+    InvalidRgba8ByteLength { expected: usize, actual: usize },
+}
+
+impl fmt::Display for TextureAssetError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroDimension { width, height } => {
+                write!(
+                    formatter,
+                    "texture dimensions must be nonzero, got {width}x{height}"
+                )
+            }
+            Self::Rgba8ByteLengthOverflow { width, height } => write!(
+                formatter,
+                "RGBA8 texture byte length overflows the host for {width}x{height}",
+            ),
+            Self::InvalidRgba8ByteLength { expected, actual } => write!(
+                formatter,
+                "RGBA8 texture requires {expected} bytes, got {actual}",
+            ),
+        }
+    }
+}
+
+impl Error for TextureAssetError {}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -174,6 +301,59 @@ impl Default for PbrMaterial {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn descriptor(width: u32, height: u32) -> TextureAssetDescriptor {
+        TextureAssetDescriptor {
+            width,
+            height,
+            wrap_s: TextureWrapMode::Repeat,
+            wrap_t: TextureWrapMode::ClampToEdge,
+        }
+    }
+
+    #[test]
+    fn texture_wrap_modes_round_trip_the_legacy_gl_wire_values() {
+        for mode in [
+            TextureWrapMode::ClampToEdge,
+            TextureWrapMode::MirroredRepeat,
+            TextureWrapMode::Repeat,
+        ] {
+            assert_eq!(TextureWrapMode::from_gl_enum(mode.as_gl_enum()), Some(mode));
+        }
+        assert_eq!(TextureWrapMode::from_gl_enum(0), None);
+    }
+
+    #[test]
+    fn texture_descriptors_are_small_serializable_asset_metadata() {
+        let descriptor = descriptor(17, 9);
+        descriptor.validate().unwrap();
+        assert_eq!(descriptor.rgba8_byte_len().unwrap(), 17 * 9 * 4);
+        let encoded = serde_json::to_string(&descriptor).unwrap();
+        assert_eq!(
+            serde_json::from_str::<TextureAssetDescriptor>(&encoded).unwrap(),
+            descriptor,
+        );
+    }
+
+    #[test]
+    fn texture_asset_validation_rejects_bad_dimensions_and_payloads() {
+        assert!(matches!(
+            descriptor(0, 1).validate(),
+            Err(TextureAssetError::ZeroDimension { .. })
+        ));
+        assert!(matches!(
+            descriptor(u32::MAX, u32::MAX).validate(),
+            Err(TextureAssetError::Rgba8ByteLengthOverflow { .. })
+        ));
+        assert_eq!(
+            Rgba8TextureAsset::new(descriptor(2, 2), &[0; 15]),
+            Err(TextureAssetError::InvalidRgba8ByteLength {
+                expected: 16,
+                actual: 15,
+            }),
+        );
+        Rgba8TextureAsset::new(descriptor(2, 2), &[0; 16]).unwrap();
+    }
 
     #[test]
     fn alpha_mode_wire_values_are_exact() {
