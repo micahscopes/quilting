@@ -382,6 +382,21 @@ impl SurfaceRuntime {
         })
     }
 
+    /// Borrow the current renderer-owned pose for a same-frame backend shadow.
+    /// Static scenes legitimately expose empty slices. Morph weights are the
+    /// accepted active prefix used by the incumbent renderer; absent resident
+    /// targets remain at their zero contribution.
+    #[cfg(any(feature = "webgpu-backend", test))]
+    pub fn current_pose_payload(&self) -> Result<(&[f32], &[f32]), String> {
+        if !self.joint_matrices.len().is_multiple_of(16) {
+            return Err("renderer joint matrix payload is malformed".to_string());
+        }
+        if self.morph_weights.len() > self.morph_num_targets {
+            return Err("renderer morph weight payload exceeds resident targets".to_string());
+        }
+        Ok((&self.joint_matrices, &self.morph_weights))
+    }
+
     #[cfg(test)]
     pub fn set_pose(&mut self, joint_matrices: &[f32], morph_weights: &[f32]) {
         self.joint_matrices.clear();
@@ -2720,5 +2735,23 @@ mod tests {
         assert_eq!(source.continuity_epoch, 3);
         assert!(runtime.lod_pose_source(0.5, 12.5, 7, 3).is_err());
         assert!(runtime.lod_pose_source(0.75, 12.5, 8, 3).is_err());
+    }
+
+    #[test]
+    fn current_pose_payload_accepts_active_morph_prefix() {
+        let mut runtime = SurfaceRuntime::default();
+        assert_eq!(runtime.current_pose_payload().unwrap(), (&[][..], &[][..]));
+
+        runtime.set_morph_targets(&[0.0; 9], 3, 1);
+        assert_eq!(runtime.current_pose_payload().unwrap(), (&[][..], &[][..]));
+        runtime.set_pose(&identity_matrix(), &[0.25, 0.5]);
+        assert_eq!(
+            runtime.current_pose_payload().unwrap_err(),
+            "renderer morph weight payload exceeds resident targets",
+        );
+        runtime.set_pose(&identity_matrix(), &[0.25]);
+        let (joints, morphs) = runtime.current_pose_payload().unwrap();
+        assert_eq!(joints, identity_matrix());
+        assert_eq!(morphs, &[0.25]);
     }
 }

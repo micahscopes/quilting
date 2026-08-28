@@ -236,6 +236,7 @@ for (const graphicsBackendStep of [
   'quiltingWasmBackend.mr_uploadWebGpuComposedModel(',
   "graphicsBackendDiagnostics.state = 'presentation-fallback';",
   "globalThis.__hyperscopeGraphicsBackend = graphicsBackendDiagnostics;",
+  'return refreshWebGpuBackendDiagnostics();',
 ]) {
   assert.ok(
     browserSource.includes(graphicsBackendStep),

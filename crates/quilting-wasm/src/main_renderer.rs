@@ -2575,6 +2575,62 @@ fn extract_render_scene(renderer: &MainState) -> Result<RenderSceneSnapshot, Str
     })
 }
 
+#[cfg(feature = "webgpu-backend")]
+fn submit_webgpu_shadow_frame(renderer: &MainState, camera: &Camera) {
+    if renderer.render_style != RenderStyle::Normals {
+        return;
+    }
+    let source_revision = renderer.render_command_builds;
+    if crate::webgpu_backend::needs_scene(source_revision) {
+        let scene = match extract_render_scene(renderer) {
+            Ok(scene) => scene,
+            Err(error) => {
+                crate::webgpu_backend::record_frame_prerequisite_failure(error);
+                return;
+            }
+        };
+        if let Err(error) = crate::webgpu_backend::replace_scene(
+            source_revision,
+            scene,
+            &renderer.cached_instances,
+        ) {
+            crate::webgpu_backend::record_frame_prerequisite_failure(error);
+            return;
+        }
+    }
+    let (joint_matrices, morph_weights) = match renderer.surface_runtime.current_pose_payload() {
+        Ok(pose) => pose,
+        Err(error) => {
+            crate::webgpu_backend::record_frame_prerequisite_failure(error);
+            return;
+        }
+    };
+    let _ = crate::webgpu_backend::submit_frame(
+        renderer.render_style,
+        RenderView {
+            viewport: [
+                renderer.viewport_size.0.max(0) as u32,
+                renderer.viewport_size.1.max(0) as u32,
+            ],
+            mvp: camera.mvp,
+            model_view: camera.mv,
+            camera_position: camera.camera_pos,
+            selected_node: usize::try_from(renderer.selected_node).ok(),
+            focus: FocusFieldPacket {
+                sphere: renderer.focus_sphere,
+                enabled: renderer.focus_field_enabled,
+            },
+        },
+        RenderFrameOptions {
+            focus_postprocess: renderer.fuzzy_enabled,
+            highlight_face: u32::try_from(renderer.highlight_face).ok(),
+        },
+        &renderer.classified_face_visibility,
+        joint_matrices,
+        morph_weights,
+    );
+}
+
 fn refresh_render_shadow_scene(renderer: &mut MainState) {
     if !renderer.render_shadow.is_enabled() || !renderer.render_shadow_scene_dirty {
         return;
@@ -9267,6 +9323,8 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         state.last_render_submission = submission_stats;
         state.render_submission_totals.merge(submission_stats);
         state.renderer.end_frame();
+        #[cfg(feature = "webgpu-backend")]
+        submit_webgpu_shadow_frame(state, &camera);
         state
             .render_timing
             .observe(render_started_ms, browser_now_ms());

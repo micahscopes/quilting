@@ -464,7 +464,11 @@ The application now has rollback-safe WebGPU residency behind the canonical
 headless browser device after the incumbent renderer initializes, mirrors each
 atomic packed-atlas replacement, and uploads the same prepared composed LOD
 model without constructing a redundant WebGL classifier when the worker
-remains authoritative. `gfx=webgpu` currently performs that same residency but
+remains authoritative. The backend now replaces preparation/compaction/binding
+resources as one atomic `PatchRenderScene`, resolves packed-atlas slices during
+encoding without a per-frame draw-view allocation, and executes supported live
+normals frames into a depth-backed offscreen target. `gfx=webgpu` currently
+performs that same residency and shadow execution but
 reports `effective=webgl2`, `state=presentation-fallback`, and a concrete reason
 until presentation parity exists. A failed device, atlas, or model shadow is a
 diagnostic warning and never retires working WebGL resources.
@@ -476,16 +480,32 @@ The canvas continued through WebGL2 with no console errors. The default route
 remained disabled and allocated no WebGPU residency; the explicit presentation
 request declared its fallback.
 
+The first live normals gate extracted five real horse batches and 984 source
+instances at a 496×770 viewport, then submitted five compacted indirect draws
+per changed frame with no validation warning or frame failure. Exact retained
+input comparison prevents an idle requestAnimationFrame loop from burning a
+second renderer: one static run observed 1,604 frames, submitted one, and
+skipped 1,603 unchanged inputs. Animated pose changes correctly submit new
+frames. The same-frame pose bridge preserves the incumbent renderer's active
+morph-weight prefix and zero-fills inactive resident targets through retained
+scratch storage, preventing stale GPU suffix weights without a warm-path
+allocation. Animated execution also exposes the next bottleneck honestly: worker-driven animated
+LOD changes currently replace the retained WebGPU scene almost every accepted
+topology epoch and upload one widened four-byte visibility word per source
+instance. Those transfers are shadow-only instrumentation, not the intended
+authoritative design.
+
 The optimized monolithic WASM artifact measured 7,543,417 bytes with this
 backend enabled versus 7,458,547 bytes with the feature disabled: an 84,870-byte
 (1.14%) release delta. Debug artifacts are not representative here—the same
 feature set reached roughly 50 MB before release optimization—so size gates
 must compare optimized outputs.
 
-The next cut is authoritative renderer integration: feed the same-pose
-visibility producer without CPU upload, attach the already-proven shared frame
-executor to a browser surface, and add WebGL2 image/workload parity behind the
-existing explicit backend switch. PBR, wire, LOD color, stretch, picking,
+The next cut is authoritative renderer integration: bind the same-device LOD
+classifier output directly to visibility/scene selection, stop rebuilding
+whole animated scene aggregates from worker readback, attach the live shared
+frame executor to a browser surface, and add WebGL2 image/workload parity
+behind the existing explicit backend switch. PBR, wire, LOD color, stretch, picking,
 material/texture binding, and postprocess commands still reject explicitly
 rather than silently lowering to normals. That cut is what finally removes the
 live four-byte-per-face readback and rejected atlas vertex invocations from an

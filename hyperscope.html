@@ -578,6 +578,9 @@ const graphicsBackendDiagnostics = {
   state: WEBGPU_SHADOW_ENABLED ? 'awaiting-wasm' : 'disabled',
   fallbackReason: null,
   residency: null,
+  refresh() {
+    return refreshWebGpuBackendDiagnostics();
+  },
 };
 globalThis.__hyperscopeGraphicsBackend = graphicsBackendDiagnostics;
 
