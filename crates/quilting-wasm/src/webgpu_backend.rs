@@ -590,7 +590,9 @@ pub(crate) fn submit_frame(
             || !matches!(
                 style,
                 RenderStyle::Matcap
+                    | RenderStyle::Wire
                     | RenderStyle::Normals
+                    | RenderStyle::MatcapWire
                     | RenderStyle::Lod
                     | RenderStyle::Stretch
             )
@@ -798,10 +800,9 @@ pub(crate) fn submit_frame(
                     let device = device
                         .as_ref()
                         .ok_or_else(|| "ready WebGPU backend has no device".to_string())?;
-                    let pipeline = pipelines
-                        .as_ref()
-                        .and_then(|pipelines| pipelines.get(style))
-                        .ok_or_else(|| format!("ready WebGPU backend has no {style:?} pipeline"))?;
+                    let pipelines = pipelines.as_ref().ok_or_else(|| {
+                        "ready WebGPU backend has no diagnostic pipelines".to_string()
+                    })?;
                     let scene = scene.as_ref().ok_or_else(|| {
                         "WebGPU render frame requires scene residency".to_string()
                     })?;
@@ -812,10 +813,10 @@ pub(crate) fn submit_frame(
                         .as_mut()
                         .ok_or_else(|| "WebGPU presentation surface disappeared".to_string())?;
                     match device
-                        .present_diagnostic_patch_scene_with_face_visibility(
+                        .present_supported_patch_scene_with_face_visibility(
                             presentation,
                             &frame,
-                            pipeline,
+                            pipelines,
                             scene,
                             atlas,
                             true,
@@ -834,11 +835,9 @@ pub(crate) fn submit_frame(
                         .device
                         .as_ref()
                         .ok_or_else(|| "ready WebGPU backend has no device".to_string())?;
-                    let pipeline = backend
-                        .pipelines
-                        .as_ref()
-                        .and_then(|pipelines| pipelines.get(style))
-                        .ok_or_else(|| format!("ready WebGPU backend has no {style:?} pipeline"))?;
+                    let pipelines = backend.pipelines.as_ref().ok_or_else(|| {
+                        "ready WebGPU backend has no diagnostic pipelines".to_string()
+                    })?;
                     let scene = backend.scene.as_ref().ok_or_else(|| {
                         "WebGPU render frame requires scene residency".to_string()
                     })?;
@@ -850,12 +849,15 @@ pub(crate) fn submit_frame(
                         .as_ref()
                         .ok_or_else(|| "WebGPU render frame requires a target".to_string())?;
                     let encoding = if style == RenderStyle::Normals {
+                        let pipeline = pipelines.get(RenderStyle::Normals).ok_or_else(|| {
+                            "ready WebGPU backend has no normals pipeline".to_string()
+                        })?;
                         device.render_offscreen_normals_patch_scene_with_webgl_clear(
                             &frame, pipeline, scene, atlas, target, true,
                         )
                     } else {
-                        device.render_offscreen_diagnostic_patch_scene_with_face_visibility(
-                            &frame, pipeline, scene, atlas, target, true,
+                        device.render_offscreen_supported_patch_scene_with_face_visibility(
+                            &frame, pipelines, scene, atlas, target, true,
                         )
                     };
                     encoding.map(Some).map_err(|error| error.to_string())
