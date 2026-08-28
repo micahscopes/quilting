@@ -565,19 +565,39 @@ across a 137-face, three-atlas, all-S3 fixture with two successive suppression
 fields; the browser also runs a real classifier → reconciliation → root-bucket
 chain and reports no console warning or error.
 
-The optimized monolithic WASM artifact now measures 7,669,789 bytes with this
-backend enabled versus 7,459,748 bytes with the feature disabled: a
-210,041-byte (2.82%) release delta. Both artifacts were rebuilt from the same
+Direct root preparation now consumes that same resident word without a CPU
+topology projection. A vertex-clear and face-atomic-maximum pair reconstructs
+the continuous compact-vertex density field used by LOD coloring, including
+the standby topology of currently invisible faces. A third pass restores the
+face-local edge order from the S3 permutation and emits the existing 48-byte
+`PatchTopologyRecord` in source-face order. The ordinary animated rational-QB
+preparation pass binds that output directly and writes prepared records by
+source face. Consequently the compacted face IDs and five-word bucket ranges
+are already layout-compatible with the render vertex puller; no second scatter
+or widened instance stream is required.
+
+The independent Rust oracle covers shared vertices, every packed topology
+field, exact affine-subject rows, incomplete/conflicting extraction, and
+source-model validation. Native Radeon/Vulkan and Chromium `BrowserWebGpu`
+match 240 topology words and 1,040 prepared-record words across both 2:1 and
+4:1 resident closure, with no console warning or error. Diagnostic staging is
+allocated only by the conformance wrappers; production encoding remains one
+same-device command chain.
+
+The optimized monolithic WASM artifact now measures 7,675,713 bytes with this
+backend enabled versus 7,461,219 bytes with the feature disabled: a
+214,494-byte (2.87%) release delta. Both artifacts were rebuilt from the same
 tree with `wasm-pack --release` and `wasm-opt`; debug artifacts are not
 representative, so size gates must continue to compare optimized outputs.
 
-The next cut consumes the root plan in actual graphics execution: prepare one
-root record per compacted face, extend the bucket key with material/render
-domains where required, and compose the sparse adaptive overlay without
-rebuilding the retained baseline from worker readback. After that, attach the
-live shared frame executor to a browser surface and add WebGL2 image/workload
-parity behind the existing explicit backend switch. PBR, wire, LOD color,
-stretch, picking,
+The next cut binds the source-indexed prepared records, compacted face IDs,
+bucket ranges, and global-atlas indirect arguments into actual graphics
+execution. It must extend the root key with material/render domains without a
+fixed material × atlas cross-product, then compose the sparse adaptive overlay
+without rebuilding the retained baseline from worker readback. After that,
+attach the live shared frame executor to a browser surface and add WebGL2
+image/workload parity behind the existing explicit backend switch. PBR, wire,
+LOD color, stretch, picking,
 material/texture binding, and postprocess commands still reject explicitly
 rather than silently lowering to normals. That cut is what finally removes the
 live classifier readback, CPU topology repacking, and rejected atlas vertex

@@ -77,3 +77,31 @@ fn pack_lod_classification(
     }
     return packed;
 }
+
+fn unpack_lod_permutation(packed: u32) -> u32 {
+    return (packed >> 12u) & 7u;
+}
+
+fn unpack_lod_canonical_counts(packed: u32) -> vec3<u32> {
+    return vec3<u32>(
+        1u << (packed & 15u),
+        1u << ((packed >> 4u) & 15u),
+        1u << ((packed >> 8u) & 15u),
+    );
+}
+
+// Recover the authored face-edge order from the sorted atlas order. This is
+// the WGSL equivalent of ResidentLod::edge_lods and is shared by preparation,
+// diagnostic corner maxima, and future material-aware draw construction.
+fn unpack_lod_edge_counts(packed: u32) -> vec3<u32> {
+    let canonical = unpack_lod_canonical_counts(packed);
+    switch unpack_lod_permutation(packed) {
+        case 0u: { return canonical.xyz; }
+        case 1u: { return canonical.xzy; }
+        case 2u: { return canonical.yxz; }
+        case 3u: { return canonical.yzx; }
+        case 4u: { return canonical.zxy; }
+        case 5u: { return canonical.zyx; }
+        default: { return canonical.xyz; }
+    }
+}

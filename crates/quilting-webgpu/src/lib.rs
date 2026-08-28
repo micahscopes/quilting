@@ -9,6 +9,7 @@ use futures_channel::oneshot;
 use quilting_core::batch::{
     FaceLodGrading, RenderBatchId, RenderBatchKey, RenderBatchLayer, RenderBatchMember,
 };
+use quilting_core::instance_layout::InstanceWriter;
 use quilting_core::render::{
     FocusFieldPacket, PbrDrawClass, RenderBatchSnapshot, RenderCommand, RenderEntityTransform,
     RenderFrame, RenderFrameOptions, RenderGeometry, RenderPass, RenderPoseIdentity,
@@ -18,12 +19,14 @@ use quilting_core::screen_partition::ScreenPatchLeafId;
 use quilting_renderer::compute::{
     pack_lod_classification, pack_wgsl_lod_atlas_words, pack_wgsl_lod_dispatch_words,
     pack_wgsl_lod_model_words, pack_wgsl_lod_subject_words,
-    pack_wgsl_patch_preparation_scene_words, pack_wgsl_root_eligibility_bits,
-    pack_wgsl_source_visibility_words, pack_wgsl_visibility_compaction_scene_words,
-    prepare_lod_atlas_lookup, prepare_lod_model, reconcile_and_pack_wgsl_lod_pass2,
-    reconcile_and_pack_wgsl_resident_lods, wgsl_resident_geometry_bucket_oracle_words,
+    pack_wgsl_patch_preparation_scene_words, pack_wgsl_resident_root_preparation_scene_words,
+    pack_wgsl_root_eligibility_bits, pack_wgsl_source_visibility_words,
+    pack_wgsl_visibility_compaction_scene_words, prepare_lod_atlas_lookup, prepare_lod_model,
+    reconcile_and_pack_wgsl_lod_pass2, reconcile_and_pack_wgsl_resident_lods,
+    wgsl_resident_geometry_bucket_oracle_words, wgsl_resident_root_topology_oracle_words,
     LodAtlasLookup, LodDispatchState, LodModelData, PreparedLodModel, WgslLodDispatchMetrics,
-    WgslPatchPreparationSceneWords, WgslVisibilityCompactionSceneWords,
+    WgslPatchPreparationSceneWords, WgslResidentRootPreparationSceneWords,
+    WgslVisibilityCompactionSceneWords,
 };
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -51,6 +54,7 @@ const PATCH_TOPOLOGY_RECORD_BYTES: u64 = 48;
 const PREPARED_PATCH_RECORD_WORDS: usize = 52;
 const PREPARED_PATCH_RECORD_BYTES: u64 = 208;
 const PATCH_SUBJECT_RECORD_BYTES: u64 = 128;
+const PATCH_SUBJECT_RECORD_WORDS: usize = 32;
 const PATCH_RENDER_FRAME_WORDS: usize = 56;
 const PATCH_RENDER_FRAME_BYTES: u64 = 224;
 
@@ -228,6 +232,8 @@ pub struct LodDeviceConformance {
     pub resident_lod_words: usize,
     pub resident_visibility_words: usize,
     pub resident_bucket_words: usize,
+    pub resident_root_topology_words: usize,
+    pub resident_root_prepared_words: usize,
     pub coherence_words: usize,
     pub prepared_patch_words: usize,
     pub rendered_patch_pixels: usize,
@@ -409,6 +415,9 @@ pub struct LodClassifierDevice {
     resident_bucket_prefix_pipeline: wgpu::ComputePipeline,
     resident_bucket_scan_pipeline: wgpu::ComputePipeline,
     resident_bucket_scatter_pipeline: wgpu::ComputePipeline,
+    resident_root_vertex_clear_pipeline: wgpu::ComputePipeline,
+    resident_root_vertex_accumulate_pipeline: wgpu::ComputePipeline,
+    resident_root_topology_pipeline: wgpu::ComputePipeline,
     visibility_count_pipeline: wgpu::ComputePipeline,
     visibility_scan_pipeline: wgpu::ComputePipeline,
     visibility_scatter_pipeline: wgpu::ComputePipeline,
@@ -423,6 +432,7 @@ pub struct LodClassifierModel {
     joint_capacity: usize,
     subject_rows: usize,
     uniform: wgpu::Buffer,
+    faces: wgpu::Buffer,
     skinning: wgpu::Buffer,
     joint_matrices: wgpu::Buffer,
     morph_deltas: wgpu::Buffer,
@@ -591,6 +601,31 @@ pub struct ResidentGeometryBucketOutput {
     pub indirect_arguments: Vec<[u32; 5]>,
 }
 
+/// Source-face-indexed root topology reconstructed from packed resident LOD.
+/// The compacted bucket plan can therefore pull prepared records by face ID;
+/// no second topology scatter or CPU batch expansion is required.
+pub struct ResidentRootTopologyScene {
+    model_identity: u64,
+    face_count: u32,
+    vertex_count: u32,
+    subject_count: u32,
+    _uniform: wgpu::Buffer,
+    face_subject_rows: wgpu::Buffer,
+    _vertex_lod_max: wgpu::Buffer,
+    topology_records: wgpu::Buffer,
+    clear_bind_group: wgpu::BindGroup,
+    accumulate_bind_group: wgpu::BindGroup,
+    emit_bind_group: wgpu::BindGroup,
+}
+
+/// Atomic retained aggregate for direct source-indexed root preparation.
+/// Topology emission and the ordinary rational-QB preparation pass share the
+/// same device buffer; no CPU topology upload exists in this path.
+pub struct ResidentRootPreparationScene {
+    topology: ResidentRootTopologyScene,
+    patches: PatchPreparationScene,
+}
+
 /// Retained scene shape and output buffers for deterministic visibility
 /// compaction. Only `source_visibility` changes with the current pose.
 pub struct VisibilityCompactionScene {
@@ -665,6 +700,8 @@ impl LodClassifierDevice {
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
         let resident_buckets_source = quilting_shaders::compile_resident_buckets_wgsl()
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
+        let resident_root_topology_source = quilting_shaders::compile_resident_root_topology_wgsl()
+            .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
         let pass1_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("quilting LOD pass one"),
             source: wgpu::ShaderSource::Wgsl(Cow::Owned(pass1_source)),
@@ -706,6 +743,11 @@ impl LodClassifierDevice {
             label: Some("quilting resident geometry buckets"),
             source: wgpu::ShaderSource::Wgsl(Cow::Owned(resident_buckets_source)),
         });
+        let resident_root_topology_module =
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("quilting resident root topology"),
+                source: wgpu::ShaderSource::Wgsl(Cow::Owned(resident_root_topology_source)),
+            });
         let pass1_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("quilting LOD pass one"),
             layout: None,
@@ -838,6 +880,28 @@ impl LodClassifierDevice {
                 compilation_options: Default::default(),
                 cache: None,
             });
+        let resident_root_pipeline = |label, entry_point| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(label),
+                layout: None,
+                module: &resident_root_topology_module,
+                entry_point: Some(entry_point),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let resident_root_vertex_clear_pipeline = resident_root_pipeline(
+            "quilting resident root vertex LOD clear",
+            quilting_shaders::RESIDENT_ROOT_VERTEX_CLEAR_DEVICE_ENTRY_POINT,
+        );
+        let resident_root_vertex_accumulate_pipeline = resident_root_pipeline(
+            "quilting resident root vertex LOD accumulation",
+            quilting_shaders::RESIDENT_ROOT_VERTEX_ACCUMULATE_DEVICE_ENTRY_POINT,
+        );
+        let resident_root_topology_pipeline = resident_root_pipeline(
+            "quilting resident root topology emission",
+            quilting_shaders::RESIDENT_ROOT_TOPOLOGY_DEVICE_ENTRY_POINT,
+        );
         Ok(Self {
             device,
             queue,
@@ -855,6 +919,9 @@ impl LodClassifierDevice {
             resident_bucket_prefix_pipeline,
             resident_bucket_scan_pipeline,
             resident_bucket_scatter_pipeline,
+            resident_root_vertex_clear_pipeline,
+            resident_root_vertex_accumulate_pipeline,
+            resident_root_topology_pipeline,
             visibility_count_pipeline,
             visibility_scan_pipeline,
             visibility_scatter_pipeline,
@@ -1403,6 +1470,211 @@ impl LodClassifierDevice {
         })
     }
 
+    /// Allocate the retained source-face root topology pass. Subject rows are
+    /// an extraction concern and may be updated without replacing geometry;
+    /// packed edge LOD, S3 permutation, and shared corner maxima remain device
+    /// outputs owned by the current resident classifier epoch.
+    pub fn upload_resident_root_topology_scene(
+        &self,
+        model: &LodClassifierModel,
+        face_subject_rows: &[u32],
+        subject_count: u32,
+    ) -> Result<ResidentRootTopologyScene, LodWebGpuError> {
+        let face_count = u32::try_from(model.prepared.residency.num_faces)
+            .map_err(|_| LodWebGpuError::Payload("resident root faces exceed u32".into()))?;
+        let vertex_count = model.prepared.residency.num_vertices;
+        if face_subject_rows.len() != face_count as usize {
+            return Err(LodWebGpuError::Payload(format!(
+                "resident root topology has {} subject rows; expected {face_count}",
+                face_subject_rows.len(),
+            )));
+        }
+        if subject_count == 0 || face_subject_rows.iter().any(|&row| row >= subject_count) {
+            return Err(LodWebGpuError::Payload(format!(
+                "resident root topology subject rows exceed the {subject_count}-row domain",
+            )));
+        }
+        if let Some(last_face) = face_count.checked_sub(1) {
+            if last_face as f32 as u32 != last_face {
+                return Err(LodWebGpuError::Payload(
+                    "resident root face IDs exceed exact f32 encoding".to_string(),
+                ));
+            }
+        }
+
+        let uniform_words = [face_count, vertex_count, subject_count, 0];
+        let uniform = buffer_init_or_zero(
+            &self.device,
+            "resident root topology uniform",
+            bytemuck::cast_slice(&uniform_words),
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let face_subject_rows = buffer_init_or_zero(
+            &self.device,
+            "resident root face subject rows",
+            bytemuck::cast_slice(face_subject_rows),
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
+        let vertex_lod_max = gpu_buffer(
+            &self.device,
+            "resident root vertex LOD maxima",
+            u64::from(vertex_count) * PACKED_RECORD_BYTES,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let topology_records = gpu_buffer(
+            &self.device,
+            "resident root topology records",
+            u64::from(face_count) * PATCH_TOPOLOGY_RECORD_BYTES,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        );
+
+        let clear_layout = self
+            .resident_root_vertex_clear_pipeline
+            .get_bind_group_layout(0);
+        let clear_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("resident root vertex LOD clear bindings"),
+            layout: &clear_layout,
+            entries: &[bind(0, &uniform), bind(4, &vertex_lod_max)],
+        });
+        let accumulate_layout = self
+            .resident_root_vertex_accumulate_pipeline
+            .get_bind_group_layout(0);
+        let accumulate_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("resident root vertex LOD accumulation bindings"),
+            layout: &accumulate_layout,
+            entries: &[
+                bind(0, &uniform),
+                bind(1, &model.resident.packed_records),
+                bind(2, &model.faces),
+                bind(4, &vertex_lod_max),
+            ],
+        });
+        let emit_layout = self
+            .resident_root_topology_pipeline
+            .get_bind_group_layout(0);
+        let emit_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("resident root topology emission bindings"),
+            layout: &emit_layout,
+            entries: &[
+                bind(0, &uniform),
+                bind(1, &model.resident.packed_records),
+                bind(2, &model.faces),
+                bind(3, &face_subject_rows),
+                bind(4, &vertex_lod_max),
+                bind(5, &topology_records),
+            ],
+        });
+        Ok(ResidentRootTopologyScene {
+            model_identity: model.identity,
+            face_count,
+            vertex_count,
+            subject_count,
+            _uniform: uniform,
+            face_subject_rows,
+            _vertex_lod_max: vertex_lod_max,
+            topology_records,
+            clear_bind_group,
+            accumulate_bind_group,
+            emit_bind_group,
+        })
+    }
+
+    pub fn write_resident_root_subject_rows(
+        &self,
+        scene: &ResidentRootTopologyScene,
+        face_subject_rows: &[u32],
+    ) -> Result<(), LodWebGpuError> {
+        if face_subject_rows.len() != scene.face_count as usize
+            || face_subject_rows
+                .iter()
+                .any(|&row| row >= scene.subject_count)
+        {
+            return Err(LodWebGpuError::Payload(
+                "resident root subject-row update changed the retained domain".to_string(),
+            ));
+        }
+        self.queue.write_buffer(
+            &scene.face_subject_rows,
+            0,
+            bytemuck::cast_slice(face_subject_rows),
+        );
+        Ok(())
+    }
+
+    /// Append vertex-maximum reconstruction and exact root topology emission
+    /// to an application-owned encoder. The output remains indexed by source
+    /// face and is suitable for direct patch preparation.
+    pub fn encode_resident_root_topology(
+        &self,
+        scene: &ResidentRootTopologyScene,
+        resident: &DeviceResidentLod<'_>,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<(), LodWebGpuError> {
+        if scene.model_identity != resident.model_identity {
+            return Err(LodWebGpuError::Payload(
+                "resident root topology belongs to a different WebGPU model".to_string(),
+            ));
+        }
+        if scene.face_count != resident.face_count {
+            return Err(LodWebGpuError::Payload(format!(
+                "resident root topology has {} faces; classifier result has {}",
+                scene.face_count, resident.face_count,
+            )));
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("quilting resident root vertex LOD clear"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.resident_root_vertex_clear_pipeline);
+            pass.set_bind_group(0, &scene.clear_bind_group, &[]);
+            pass.dispatch_workgroups(scene.vertex_count.div_ceil(LOD_WORKGROUP_SIZE), 1, 1);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("quilting resident root vertex LOD accumulation"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.resident_root_vertex_accumulate_pipeline);
+            pass.set_bind_group(0, &scene.accumulate_bind_group, &[]);
+            pass.dispatch_workgroups(scene.face_count.div_ceil(LOD_WORKGROUP_SIZE), 1, 1);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("quilting resident root topology emission"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.resident_root_topology_pipeline);
+            pass.set_bind_group(0, &scene.emit_bind_group, &[]);
+            pass.dispatch_workgroups(scene.face_count.div_ceil(LOD_WORKGROUP_SIZE), 1, 1);
+        }
+        Ok(())
+    }
+
+    /// Diagnostic-only projection of the same source-indexed topology buffer.
+    pub async fn resident_root_topology_for_diagnostics(
+        &self,
+        scene: &ResidentRootTopologyScene,
+        resident: &DeviceResidentLod<'_>,
+    ) -> Result<Vec<[u32; 12]>, LodWebGpuError> {
+        let bytes = u64::from(scene.face_count) * PATCH_TOPOLOGY_RECORD_BYTES;
+        let readback = gpu_buffer(
+            &self.device,
+            "resident root topology diagnostic readback",
+            bytes,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("resident root topology diagnostic encoder"),
+            });
+        self.encode_resident_root_topology(scene, resident, &mut encoder)?;
+        encoder.copy_buffer_to_buffer(&scene.topology_records, 0, &readback, 0, bytes);
+        self.queue.submit([encoder.finish()]);
+        words_to_twelve_records(self.readback_words(&readback, bytes).await?)
+    }
+
     async fn run_resident_geometry_bucket_conformance(&self) -> Result<usize, LodWebGpuError> {
         let atlas_keys = [[1, 1, 1], [1, 1, 2], [1, 2, 4]];
         let atlas_lookup =
@@ -1512,7 +1784,7 @@ impl LodClassifierDevice {
         Ok(compared_words)
     }
 
-    async fn run_resident_lod_conformance(&self) -> Result<usize, LodWebGpuError> {
+    async fn run_resident_lod_conformance(&self) -> Result<(usize, usize, usize), LodWebGpuError> {
         let face_count = 10usize;
         let mut positions = vec![0.0, 0.0, 0.0];
         for point in 0..=face_count {
@@ -1523,6 +1795,28 @@ impl LodClassifierDevice {
             .map(|face| [0, face as u32 + 1, face as u32 + 2])
             .collect::<Vec<_>>();
         let vertex_count = positions.len() / 3;
+        let mut source_instances = vec![0.0; face_count * PREPARED_PATCH_RECORD_WORDS];
+        for (face, vertices) in faces.iter().copied().enumerate() {
+            let mut writer = InstanceWriter::new(&mut source_instances, face);
+            for (corner, vertex) in vertices.into_iter().enumerate() {
+                writer.set_position(
+                    corner,
+                    vertex,
+                    [
+                        positions[vertex as usize * 3],
+                        positions[vertex as usize * 3 + 1],
+                        positions[vertex as usize * 3 + 2],
+                    ],
+                );
+                writer.set_normal(corner, [0.0, 0.0, 1.0]);
+            }
+            writer.set_face_id(face as u32);
+            writer.set_node_id(0);
+        }
+        let source_face_words = source_instances
+            .chunks_exact(PREPARED_PATCH_RECORD_WORDS)
+            .map(|source| std::array::from_fn(|word| source[word].to_bits()))
+            .collect::<Vec<_>>();
         let prepared = prepare_lod_model(LodModelData {
             positions,
             faces,
@@ -1553,6 +1847,27 @@ impl LodClassifierDevice {
         requested[2] = request(0, false, 23);
 
         let mut model = self.upload_model(prepared, &atlas)?;
+        let face_subject_rows = (0..face_count)
+            .map(|face| (face % 2) as u32)
+            .collect::<Vec<_>>();
+        let mut subject_zero = [0u32; PATCH_SUBJECT_RECORD_WORDS];
+        let mut subject_one = [0u32; PATCH_SUBJECT_RECORD_WORDS];
+        for (word, value) in subject_zero[..16].iter_mut().zip(identity_matrix()) {
+            *word = value.to_bits();
+        }
+        for (word, value) in subject_zero[16..].iter_mut().zip(identity_matrix()) {
+            *word = value.to_bits();
+        }
+        subject_one.copy_from_slice(&subject_zero);
+        subject_one[12] = 0.25f32.to_bits();
+        let root_words = WgslResidentRootPreparationSceneWords {
+            uniform: [face_count as u32, vertex_count as u32, 0, 0],
+            source_faces: source_face_words,
+            subjects: vec![subject_zero, subject_one],
+            face_subject_rows: face_subject_rows.clone(),
+        };
+        let root_preparation =
+            self.upload_resident_root_preparation_words(&model, root_words.clone())?;
         let mut dispatch_words = [0u32; 68];
         dispatch_words[64] = face_count as u32;
         self.queue
@@ -1566,6 +1881,8 @@ impl LodClassifierDevice {
             epoch: 1,
         };
         let mut compared_words = 0usize;
+        let mut compared_topology_words = 0usize;
+        let mut compared_prepared_words = 0usize;
         for grading in [FaceLodGrading::TwoToOne, FaceLodGrading::FourToOne] {
             let expected = reconcile_and_pack_wgsl_resident_lods(
                 &requested,
@@ -1585,9 +1902,64 @@ impl LodClassifierDevice {
                     "resident {grading:?} chain mismatch at {mismatch:?}: expected {expected:?}, got {actual:?}",
                 )));
             }
+            let expected_topology = wgsl_resident_root_topology_oracle_words(
+                &model.prepared,
+                &expected,
+                &face_subject_rows,
+                2,
+            )
+            .map_err(LodWebGpuError::Conformance)?;
+            let actual_topology = self
+                .resident_root_topology_for_diagnostics(&root_preparation.topology, &resident)
+                .await?;
+            if actual_topology != expected_topology.topology {
+                let mismatch = actual_topology
+                    .iter()
+                    .zip(&expected_topology.topology)
+                    .position(|(actual, expected)| actual != expected);
+                return Err(LodWebGpuError::Conformance(format!(
+                    "resident root {grading:?} topology mismatch at face {mismatch:?}",
+                )));
+            }
+            let ordinary_scene = self.upload_patch_preparation_scene(
+                &model,
+                WgslPatchPreparationSceneWords {
+                    uniform: root_words.uniform,
+                    topology: expected_topology.topology.clone(),
+                    source_faces: root_words.source_faces.clone(),
+                    subjects: root_words.subjects.clone(),
+                },
+            )?;
+            let ordinary_prepared = self
+                .prepare_patches(&model, &ordinary_scene, LodPose::default(), 0)
+                .await?;
+            let resident_prepared = self
+                .prepare_resident_roots_for_diagnostics(
+                    &model,
+                    &root_preparation,
+                    &resident,
+                    LodPose::default(),
+                    0,
+                )
+                .await?;
+            if resident_prepared != ordinary_prepared {
+                let mismatch = resident_prepared
+                    .iter()
+                    .zip(&ordinary_prepared)
+                    .position(|(actual, expected)| actual != expected);
+                return Err(LodWebGpuError::Conformance(format!(
+                    "resident root {grading:?} preparation mismatch at face {mismatch:?}",
+                )));
+            }
             compared_words += actual.len();
+            compared_topology_words += actual_topology.len() * 12;
+            compared_prepared_words += resident_prepared.len() * PREPARED_PATCH_RECORD_WORDS;
         }
-        Ok(compared_words)
+        Ok((
+            compared_words,
+            compared_topology_words,
+            compared_prepared_words,
+        ))
     }
 
     async fn run_resident_visibility_conformance(
@@ -1860,7 +2232,8 @@ impl LodClassifierDevice {
                 next_output.epoch(),
             )));
         }
-        let resident_lod_words = self.run_resident_lod_conformance().await?;
+        let (resident_lod_words, resident_root_topology_words, resident_root_prepared_words) =
+            self.run_resident_lod_conformance().await?;
         let resident_bucket_words = self.run_resident_geometry_bucket_conformance().await?;
         let full_pipeline_words = actual.len();
 
@@ -1978,6 +2351,8 @@ impl LodClassifierDevice {
             resident_lod_words,
             resident_visibility_words,
             resident_bucket_words,
+            resident_root_topology_words,
+            resident_root_prepared_words,
             coherence_words: actual.len(),
             prepared_patch_words,
             rendered_patch_pixels,
@@ -1999,8 +2374,6 @@ impl LodClassifierDevice {
         words: WgslPatchPreparationSceneWords,
     ) -> Result<PatchPreparationScene, LodWebGpuError> {
         let patch_count = words.uniform[0];
-        let subject_count = u32::try_from(words.subjects.len())
-            .map_err(|_| LodWebGpuError::Payload("patch subject count exceeds u32".into()))?;
         let num_morph_targets = u32::try_from(model.prepared.model.num_morph_targets)
             .map_err(|_| LodWebGpuError::Payload("patch morph target count exceeds u32".into()))?;
         if words.uniform[1] != model.prepared.residency.num_vertices
@@ -2088,12 +2461,6 @@ impl LodClassifierDevice {
             .iter()
             .all(|record| { std::mem::size_of_val(record) as u64 == PATCH_SUBJECT_RECORD_BYTES }));
 
-        let uniform = buffer_init_or_zero(
-            &self.device,
-            "patch preparation uniform",
-            bytemuck::cast_slice(&words.uniform),
-            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        );
         let inert_topology = [[0u32; 12]];
         let topology = buffer_init_or_zero(
             &self.device,
@@ -2105,16 +2472,42 @@ impl LodClassifierDevice {
             },
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         );
+        self.allocate_patch_preparation_scene(
+            model,
+            words.uniform,
+            topology,
+            &words.source_faces,
+            &words.subjects,
+        )
+    }
+
+    fn allocate_patch_preparation_scene(
+        &self,
+        model: &LodClassifierModel,
+        uniform_words: [u32; 4],
+        topology: wgpu::Buffer,
+        source_face_words: &[[u32; PREPARED_PATCH_RECORD_WORDS]],
+        subject_words: &[[u32; PATCH_SUBJECT_RECORD_WORDS]],
+    ) -> Result<PatchPreparationScene, LodWebGpuError> {
+        let patch_count = uniform_words[0];
+        let subject_count = u32::try_from(subject_words.len())
+            .map_err(|_| LodWebGpuError::Payload("patch subject count exceeds u32".into()))?;
+        let uniform = buffer_init_or_zero(
+            &self.device,
+            "patch preparation uniform",
+            bytemuck::cast_slice(&uniform_words),
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
         let source_faces = buffer_init_or_zero(
             &self.device,
             "patch preparation source faces",
-            bytemuck::cast_slice(&words.source_faces),
+            bytemuck::cast_slice(source_face_words),
             wgpu::BufferUsages::STORAGE,
         );
         let subjects = buffer_init_or_zero(
             &self.device,
             "patch preparation subjects",
-            bytemuck::cast_slice(&words.subjects),
+            bytemuck::cast_slice(subject_words),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         );
         let prepared_bytes = u64::from(patch_count)
@@ -2147,13 +2540,161 @@ impl LodClassifierDevice {
         Ok(PatchPreparationScene {
             patch_count,
             subject_count,
-            uniform_words: words.uniform,
+            uniform_words,
             uniform,
             topology,
             subjects,
             prepared_records,
             bind_group,
         })
+    }
+
+    /// Upload immutable source/affine extraction for direct resident-root
+    /// preparation. The returned aggregate owns no CPU topology records: its
+    /// preparation bind group reads the output of `ResidentRootTopologyScene`.
+    pub fn upload_resident_root_preparation_scene(
+        &self,
+        model: &LodClassifierModel,
+        scene: &RenderSceneSnapshot,
+        source_instances: &[f32],
+    ) -> Result<ResidentRootPreparationScene, LodWebGpuError> {
+        let words = pack_wgsl_resident_root_preparation_scene_words(
+            &model.prepared,
+            scene,
+            source_instances,
+        )
+        .map_err(LodWebGpuError::Payload)?;
+        self.upload_resident_root_preparation_words(model, words)
+    }
+
+    fn upload_resident_root_preparation_words(
+        &self,
+        model: &LodClassifierModel,
+        words: WgslResidentRootPreparationSceneWords,
+    ) -> Result<ResidentRootPreparationScene, LodWebGpuError> {
+        let face_count = u32::try_from(model.prepared.residency.num_faces)
+            .map_err(|_| LodWebGpuError::Payload("resident root faces exceed u32".into()))?;
+        let subject_count = u32::try_from(words.subjects.len())
+            .map_err(|_| LodWebGpuError::Payload("patch subject count exceeds u32".into()))?;
+        let num_morph_targets = u32::try_from(model.prepared.model.num_morph_targets)
+            .map_err(|_| LodWebGpuError::Payload("patch morph target count exceeds u32".into()))?;
+        if words.uniform
+            != [
+                face_count,
+                model.prepared.residency.num_vertices,
+                0,
+                num_morph_targets,
+            ]
+            || words.source_faces.len() != face_count as usize
+            || words.face_subject_rows.len() != face_count as usize
+            || words.subjects.is_empty()
+        {
+            return Err(LodWebGpuError::Payload(
+                "resident root preparation scene shape is malformed".to_string(),
+            ));
+        }
+        for (face_index, (source, expected_vertices)) in words
+            .source_faces
+            .iter()
+            .zip(&model.prepared.model.faces)
+            .enumerate()
+        {
+            for (corner, &expected_vertex) in expected_vertices.iter().enumerate() {
+                let encoded_vertex = f32::from_bits(source[corner * 4]);
+                if !encoded_vertex.is_finite()
+                    || encoded_vertex < 0.0
+                    || encoded_vertex.fract() != 0.0
+                    || encoded_vertex as u32 != expected_vertex
+                {
+                    return Err(LodWebGpuError::Payload(format!(
+                        "resident root source face {face_index} corner {corner} does not match the model",
+                    )));
+                }
+            }
+        }
+        if words
+            .source_faces
+            .iter()
+            .flatten()
+            .chain(words.subjects.iter().flatten())
+            .copied()
+            .map(f32::from_bits)
+            .any(|value| !value.is_finite())
+        {
+            return Err(LodWebGpuError::Payload(
+                "resident root preparation source contains non-finite values".to_string(),
+            ));
+        }
+        let topology = self.upload_resident_root_topology_scene(
+            model,
+            &words.face_subject_rows,
+            subject_count,
+        )?;
+        let patches = self.allocate_patch_preparation_scene(
+            model,
+            words.uniform,
+            topology.topology_records.clone(),
+            &words.source_faces,
+            &words.subjects,
+        )?;
+        Ok(ResidentRootPreparationScene { topology, patches })
+    }
+
+    pub fn write_resident_root_preparation_pose(
+        &self,
+        model: &LodClassifierModel,
+        scene: &ResidentRootPreparationScene,
+        pose: LodPose<'_>,
+        num_joints: u32,
+    ) -> Result<(), LodWebGpuError> {
+        if model.identity != scene.topology.model_identity {
+            return Err(LodWebGpuError::Payload(
+                "resident root preparation belongs to a different WebGPU model".to_string(),
+            ));
+        }
+        self.write_patch_pose(model, &scene.patches, pose, num_joints)
+    }
+
+    /// Emit exact source-indexed topology, then prepare animated rational-QB
+    /// controls in the same command encoder. The resulting records are pulled
+    /// by the compacted source-face IDs produced by resident bucketing.
+    pub fn encode_resident_root_preparation(
+        &self,
+        scene: &ResidentRootPreparationScene,
+        resident: &DeviceResidentLod<'_>,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<(), LodWebGpuError> {
+        self.encode_resident_root_topology(&scene.topology, resident, encoder)?;
+        self.encode_patch_preparation(&scene.patches, encoder);
+        Ok(())
+    }
+
+    /// Diagnostic-only exact readback of direct root preparation.
+    pub async fn prepare_resident_roots_for_diagnostics(
+        &self,
+        model: &LodClassifierModel,
+        scene: &ResidentRootPreparationScene,
+        resident: &DeviceResidentLod<'_>,
+        pose: LodPose<'_>,
+        num_joints: u32,
+    ) -> Result<Vec<[u32; PREPARED_PATCH_RECORD_WORDS]>, LodWebGpuError> {
+        self.write_resident_root_preparation_pose(model, scene, pose, num_joints)?;
+        let bytes = u64::from(scene.patches.patch_count) * PREPARED_PATCH_RECORD_BYTES;
+        let readback = gpu_buffer(
+            &self.device,
+            "resident root preparation diagnostic readback",
+            bytes,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("resident root preparation diagnostic encoder"),
+            });
+        self.encode_resident_root_preparation(scene, resident, &mut encoder)?;
+        encoder.copy_buffer_to_buffer(&scene.patches.prepared_records, 0, &readback, 0, bytes);
+        self.queue.submit([encoder.finish()]);
+        words_to_patch_records(self.readback_words(&readback, bytes).await?)
     }
 
     fn write_dynamic_pose(
@@ -4333,6 +4874,7 @@ impl LodClassifierDevice {
             joint_capacity,
             subject_rows,
             uniform,
+            faces,
             skinning,
             joint_matrices,
             morph_deltas,
@@ -4809,6 +5351,32 @@ impl ResidentGeometryBucketScene {
     }
 }
 
+impl ResidentRootTopologyScene {
+    pub fn face_count(&self) -> u32 {
+        self.face_count
+    }
+
+    pub fn subject_count(&self) -> u32 {
+        self.subject_count
+    }
+
+    /// Exact 48-byte `PatchTopologyRecord`s in source-face order. The next
+    /// stage binds this buffer directly to patch preparation.
+    pub fn topology_records_buffer(&self) -> &wgpu::Buffer {
+        &self.topology_records
+    }
+}
+
+impl ResidentRootPreparationScene {
+    pub fn topology(&self) -> &ResidentRootTopologyScene {
+        &self.topology
+    }
+
+    pub fn patches(&self) -> &PatchPreparationScene {
+        &self.patches
+    }
+}
+
 impl OffscreenPatchRenderTarget {
     pub fn size(&self) -> [u32; 2] {
         self.size
@@ -4966,6 +5534,18 @@ fn words_to_five_records(words: Vec<u32>, label: &str) -> Result<Vec<[u32; 5]>, 
         .collect())
 }
 
+fn words_to_twelve_records(words: Vec<u32>) -> Result<Vec<[u32; 12]>, LodWebGpuError> {
+    if !words.len().is_multiple_of(12) {
+        return Err(LodWebGpuError::Mapping(
+            "resident root topology readback does not contain twelve-word records".to_string(),
+        ));
+    }
+    Ok(words
+        .chunks_exact(12)
+        .map(|record| std::array::from_fn(|word| record[word]))
+        .collect())
+}
+
 fn bind(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry {
         binding,
@@ -5060,7 +5640,7 @@ pub async fn run_browser_lod_conformance() -> Result<String, wasm_bindgen::JsVal
         .await
         .map_err(browser_error)?;
     Ok(format!(
-        "adapter={} backend={:?} full_pipeline_words={} resident_lod_words={} resident_visibility_words={} resident_bucket_words={} coherence_words={} \
+        "adapter={} backend={:?} full_pipeline_words={} resident_lod_words={} resident_visibility_words={} resident_bucket_words={} resident_root_topology_words={} resident_root_prepared_words={} coherence_words={} \
          prepared_patch_words={} rendered_patch_pixels={} shared_frame_draws={} compacted_source_words={} \
          compacted_range_words={} indirect_argument_words={} indirect_draws={}",
         adapter_info.name,
@@ -5069,6 +5649,8 @@ pub async fn run_browser_lod_conformance() -> Result<String, wasm_bindgen::JsVal
         report.resident_lod_words,
         report.resident_visibility_words,
         report.resident_bucket_words,
+        report.resident_root_topology_words,
+        report.resident_root_prepared_words,
         report.coherence_words,
         report.prepared_patch_words,
         report.rendered_patch_pixels,

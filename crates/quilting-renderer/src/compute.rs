@@ -15,7 +15,7 @@ use quilting_core::{batch, instance_layout};
 use quilting_core::batch::RenderBatchLayer;
 use quilting_core::quaternion::{Mobius, Quat};
 use quilting_core::render::{
-    RenderGeometry, RenderSceneSnapshot, VisibilityCompactionPlan,
+    RenderEntityTransform, RenderGeometry, RenderSceneSnapshot, VisibilityCompactionPlan,
 };
 use quilting_mesh::HalfEdgeMesh;
 use std::collections::{HashMap, VecDeque};
@@ -713,15 +713,22 @@ pub struct WgslPatchPreparationSceneWords {
     pub subjects: Vec<[u32; 32]>,
 }
 
-/// Pack one retained render scene into the exact WebGPU patch-preparation ABI.
-/// The flattened member order is the same stable source-instance order used by
-/// visibility compaction and indirect draw resolution.
-pub fn pack_wgsl_patch_preparation_scene_words(
+/// Immutable source and affine rows for source-indexed resident-root
+/// preparation. Topology is intentionally absent: WebGPU reconstructs it from
+/// the packed resident LOD and writes one record per source face on-device.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WgslResidentRootPreparationSceneWords {
+    /// Faces, source vertices, dynamic joints, morph targets.
+    pub uniform: [u32; 4],
+    pub source_faces: Vec<[u32; instance_layout::STRIDE]>,
+    pub subjects: Vec<[u32; 32]>,
+    pub face_subject_rows: Vec<u32>,
+}
+
+fn pack_wgsl_patch_source_faces(
     prepared: &PreparedLodModel,
-    scene: &RenderSceneSnapshot,
     source_instances: &[f32],
-) -> Result<WgslPatchPreparationSceneWords, String> {
-    scene.validate().map_err(|error| error.to_string())?;
+) -> Result<Vec<[u32; instance_layout::STRIDE]>, String> {
     let num_faces = prepared.residency.num_faces;
     let required_source_words = num_faces
         .checked_mul(instance_layout::STRIDE)
@@ -752,11 +759,40 @@ pub fn pack_wgsl_patch_preparation_scene_words(
             }
         }
     }
-
-    let source_faces = source_instances
+    Ok(source_instances
         .chunks_exact(instance_layout::STRIDE)
         .map(|source| std::array::from_fn(|word| source[word].to_bits()))
-        .collect::<Vec<_>>();
+        .collect())
+}
+
+fn wgsl_patch_subject_words(transform: RenderEntityTransform) -> [u32; 32] {
+    let mut subject = [0u32; 32];
+    for (word, value) in subject[..16]
+        .iter_mut()
+        .zip(transform.euclidean_model)
+    {
+        *word = value.to_bits();
+    }
+    for (word, value) in subject[16..]
+        .iter_mut()
+        .zip(transform.euclidean_normal)
+    {
+        *word = value.to_bits();
+    }
+    subject
+}
+
+/// Pack one retained render scene into the exact WebGPU patch-preparation ABI.
+/// The flattened member order is the same stable source-instance order used by
+/// visibility compaction and indirect draw resolution.
+pub fn pack_wgsl_patch_preparation_scene_words(
+    prepared: &PreparedLodModel,
+    scene: &RenderSceneSnapshot,
+    source_instances: &[f32],
+) -> Result<WgslPatchPreparationSceneWords, String> {
+    scene.validate().map_err(|error| error.to_string())?;
+    let num_faces = prepared.residency.num_faces;
+    let source_faces = pack_wgsl_patch_source_faces(prepared, source_instances)?;
     let patch_count = scene.batches.iter().try_fold(0u32, |total, batch| {
         let count = u32::try_from(batch.members.len())
             .map_err(|_| "patch instance count exceeds the WGSL ABI".to_string())?;
@@ -771,19 +807,7 @@ pub fn pack_wgsl_patch_preparation_scene_words(
     let mut subjects = Vec::<[u32; 32]>::new();
     let mut subject_rows = std::collections::BTreeMap::<[u32; 32], u32>::new();
     for batch in &scene.batches {
-        let mut subject = [0u32; 32];
-        for (word, value) in subject[..16]
-            .iter_mut()
-            .zip(batch.transform.euclidean_model)
-        {
-            *word = value.to_bits();
-        }
-        for (word, value) in subject[16..]
-            .iter_mut()
-            .zip(batch.transform.euclidean_normal)
-        {
-            *word = value.to_bits();
-        }
+        let subject = wgsl_patch_subject_words(batch.transform);
         let subject_index = if let Some(&row) = subject_rows.get(&subject) {
             row
         } else {
@@ -848,6 +872,80 @@ pub fn pack_wgsl_patch_preparation_scene_words(
         topology,
         source_faces,
         subjects,
+    })
+}
+
+/// Pack only the immutable source and affine extraction required by direct
+/// resident-root preparation. Every source face must resolve to one affine
+/// subject row; repeated root/overlay members may reference that row but may
+/// not disagree. Material, conformal frame, and pass state remain draw-domain
+/// metadata and are deliberately absent from this preparation contract.
+pub fn pack_wgsl_resident_root_preparation_scene_words(
+    prepared: &PreparedLodModel,
+    scene: &RenderSceneSnapshot,
+    source_instances: &[f32],
+) -> Result<WgslResidentRootPreparationSceneWords, String> {
+    scene.validate().map_err(|error| error.to_string())?;
+    let num_faces = prepared.residency.num_faces;
+    let source_faces = pack_wgsl_patch_source_faces(prepared, source_instances)?;
+    let mut subjects = Vec::<[u32; 32]>::new();
+    let mut subject_rows = std::collections::BTreeMap::<[u32; 32], u32>::new();
+    let mut face_subject_rows = vec![None::<u32>; num_faces];
+    for batch in &scene.batches {
+        let subject = wgsl_patch_subject_words(batch.transform);
+        let subject_index = if let Some(&row) = subject_rows.get(&subject) {
+            row
+        } else {
+            let row = u32::try_from(subjects.len())
+                .map_err(|_| "resident root subject count exceeds the WGSL ABI".to_string())?;
+            subjects.push(subject);
+            subject_rows.insert(subject, row);
+            row
+        };
+        for member in &batch.members {
+            let face = member.face_index as usize;
+            if face >= num_faces {
+                return Err(format!(
+                    "resident root preparation references missing source face {}",
+                    member.face_index,
+                ));
+            }
+            match &mut face_subject_rows[face] {
+                Some(previous) if *previous != subject_index => {
+                    return Err(format!(
+                        "resident root source face {face} resolves to conflicting affine subjects",
+                    ));
+                }
+                Some(_) => {}
+                destination @ None => *destination = Some(subject_index),
+            }
+        }
+    }
+    let face_subject_rows = face_subject_rows
+        .into_iter()
+        .enumerate()
+        .map(|(face, row)| {
+            row.ok_or_else(|| {
+                format!("resident root preparation has no affine subject for source face {face}")
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    if subjects.is_empty() {
+        subjects.push([0; 32]);
+    }
+    let num_morph_targets = u32::try_from(prepared.model.num_morph_targets)
+        .map_err(|_| "patch morph target count exceeds the WGSL ABI".to_string())?;
+    Ok(WgslResidentRootPreparationSceneWords {
+        uniform: [
+            u32::try_from(num_faces)
+                .map_err(|_| "resident root face count exceeds the WGSL ABI".to_string())?,
+            prepared.residency.num_vertices,
+            0,
+            num_morph_targets,
+        ],
+        source_faces,
+        subjects,
+        face_subject_rows,
     })
 }
 
@@ -1011,6 +1109,14 @@ pub struct WgslResidentGeometryBucketOracleWords {
     pub indirect_arguments: Vec<[u32; 5]>,
 }
 
+/// Exact 48-byte root topology records reconstructed from packed resident LOD.
+/// Records remain source-face indexed so the compacted root list can pull the
+/// same prepared record without another permutation or scatter stage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WgslResidentRootTopologyOracleWords {
+    pub topology: Vec<[u32; 12]>,
+}
+
 /// Pack the retained-root inclusion field used while a sparse adaptive overlay
 /// replaces selected source faces. One means the root remains eligible. The
 /// final word's unused high bits are always zero.
@@ -1129,6 +1235,97 @@ pub fn wgsl_resident_geometry_bucket_oracle_words(
         bucket_ranges,
         indirect_arguments,
     })
+}
+
+/// Freeze the source-indexed root topology expected from the WebGPU resident
+/// path. Corner-density values are compact-vertex maxima over every incident
+/// resident edge, exactly matching [`batch::rebuild_resident_vertex_lods`]
+/// without expanding the packed classifier words on the CPU.
+pub fn wgsl_resident_root_topology_oracle_words(
+    prepared: &PreparedLodModel,
+    packed_residents: &[u32],
+    face_subject_rows: &[u32],
+    subject_count: u32,
+) -> Result<WgslResidentRootTopologyOracleWords, String> {
+    let face_count = prepared.model.faces.len();
+    if packed_residents.len() != face_count || face_subject_rows.len() != face_count {
+        return Err(format!(
+            "resident root topology has {} packed records and {} subject rows; expected {face_count} of each",
+            packed_residents.len(),
+            face_subject_rows.len(),
+        ));
+    }
+    u32::try_from(face_count)
+        .map_err(|_| "resident root topology face count exceeds u32".to_string())?;
+    if let Some(last_face) = face_count.checked_sub(1) {
+        let last_face = u32::try_from(last_face)
+            .map_err(|_| "resident root topology face count exceeds u32".to_string())?;
+        if last_face as f32 as u32 != last_face {
+            return Err("resident root topology face IDs exceed exact f32 encoding".to_string());
+        }
+    }
+    if subject_count == 0
+        || face_subject_rows
+            .iter()
+            .any(|&subject| subject >= subject_count)
+    {
+        return Err(format!(
+            "resident root topology subject rows exceed the {subject_count}-row domain",
+        ));
+    }
+
+    let residents = packed_residents
+        .iter()
+        .copied()
+        .map(|packed| {
+            let fields = unpack_lod_classification_fields(packed)?;
+            Ok(batch::ResidentLod {
+                canonical: fields.canonical,
+                perm_index: fields.permutation as usize,
+                parity_bucket: fields.parity_bucket as usize,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let mut vertex_max = vec![1u32; prepared.residency.num_vertices as usize];
+    for (&vertices, resident) in prepared.model.faces.iter().zip(&residents) {
+        let [edge_a, edge_b, edge_c] = resident.edge_lods();
+        let corner_lods = [
+            edge_b.max(edge_c),
+            edge_a.max(edge_c),
+            edge_a.max(edge_b),
+        ];
+        for (&vertex, corner_lod) in vertices.iter().zip(corner_lods) {
+            let maximum = vertex_max.get_mut(vertex as usize).ok_or_else(|| {
+                format!("resident root topology references missing vertex {vertex}")
+            })?;
+            *maximum = (*maximum).max(corner_lod);
+        }
+    }
+
+    let mut topology = Vec::with_capacity(face_count);
+    for (face, ((&vertices, resident), &subject_index)) in prepared
+        .model
+        .faces
+        .iter()
+        .zip(&residents)
+        .zip(face_subject_rows)
+        .enumerate()
+    {
+        let mut record = [0u32; 12];
+        for (word, value) in record[..3].iter_mut().zip(resident.edge_lods()) {
+            *word = (value as f32).to_bits();
+        }
+        record[3] = (resident.perm_index as f32).to_bits();
+        record[4] = (face as f32).to_bits();
+        for (word, &vertex) in record[5..8].iter_mut().zip(&vertices) {
+            *word = (vertex_max[vertex as usize] as f32).to_bits();
+        }
+        record[8] = 0.0f32.to_bits();
+        record[9] = 0.0f32.to_bits();
+        record[10] = subject_index;
+        topology.push(record);
+    }
+    Ok(WgslResidentRootTopologyOracleWords { topology })
 }
 
 /// Per-dispatch values not already carried by `LodDispatchState` or the
@@ -3159,6 +3356,48 @@ mod tests {
     }
 
     #[test]
+    fn resident_root_preparation_reuses_source_and_affine_contracts_without_topology() {
+        let (prepared, instances, scene) = patch_preparation_fixture();
+        let ordinary =
+            pack_wgsl_patch_preparation_scene_words(&prepared, &scene, &instances).unwrap();
+        let roots = pack_wgsl_resident_root_preparation_scene_words(
+            &prepared,
+            &scene,
+            &instances,
+        )
+        .unwrap();
+        assert_eq!(roots.uniform, [2, 4, 0, 0]);
+        assert_eq!(roots.source_faces, ordinary.source_faces);
+        assert_eq!(roots.subjects, ordinary.subjects);
+        assert_eq!(roots.face_subject_rows, [0, 0]);
+    }
+
+    #[test]
+    fn resident_root_preparation_requires_complete_consistent_face_subjects() {
+        let (prepared, instances, mut scene) = patch_preparation_fixture();
+        scene.batches.pop();
+        assert!(pack_wgsl_resident_root_preparation_scene_words(
+            &prepared,
+            &scene,
+            &instances,
+        )
+        .unwrap_err()
+        .contains("no affine subject for source face 1"));
+
+        let (_, _, mut scene) = patch_preparation_fixture();
+        scene.batches[0].members[0].leaf_id = ScreenPatchLeafId::ROOT.child(0).unwrap();
+        scene.batches[1].members[0].face_index = 0;
+        scene.batches[1].transform.euclidean_model[12] = 3.0;
+        let error = pack_wgsl_resident_root_preparation_scene_words(
+            &prepared,
+            &scene,
+            &instances,
+        )
+        .unwrap_err();
+        assert!(error.contains("conflicting affine subjects"), "{error}");
+    }
+
+    #[test]
     fn wgsl_patch_preparation_rejects_a_mismatched_source_model() {
         let (prepared, mut instances, scene) = patch_preparation_fixture();
         instances[0] = 3.0;
@@ -3347,6 +3586,57 @@ mod tests {
         )
         .unwrap_err()
         .contains("only 1 entries"));
+    }
+
+    #[test]
+    fn resident_root_topology_restores_local_edges_and_shared_corner_maxima() {
+        let (prepared, _, _) = patch_preparation_fixture();
+        let packed = [
+            pack_lod_classification([1, 2, 3], 5, Some(2), 17).unwrap(),
+            // Invisible faces retain drawable standby topology and still
+            // participate in the continuous diagnostic corner field.
+            pack_lod_classification([0, 1, 2], 3, None, 23).unwrap(),
+        ];
+        let oracle =
+            wgsl_resident_root_topology_oracle_words(&prepared, &packed, &[1, 0], 2).unwrap();
+        assert_eq!(oracle.topology.len(), 2);
+        assert_eq!(
+            oracle.topology[0][..10],
+            [8.0, 4.0, 2.0, 5.0, 0.0, 4.0, 8.0, 8.0, 0.0, 0.0]
+                .map(f32::to_bits),
+        );
+        assert_eq!(oracle.topology[0][10..], [1, 0]);
+        assert_eq!(
+            oracle.topology[1][..10],
+            [2.0, 4.0, 1.0, 3.0, 1.0, 8.0, 2.0, 8.0, 0.0, 0.0]
+                .map(f32::to_bits),
+        );
+        assert_eq!(oracle.topology[1][10..], [0, 0]);
+    }
+
+    #[test]
+    fn resident_root_topology_rejects_shape_and_subject_mismatches() {
+        let (prepared, _, _) = patch_preparation_fixture();
+        let visible = pack_lod_classification([1; 3], 0, Some(0), 0).unwrap();
+        assert!(wgsl_resident_root_topology_oracle_words(&prepared, &[visible], &[0, 0], 1)
+            .unwrap_err()
+            .contains("expected 2 of each"));
+        assert!(wgsl_resident_root_topology_oracle_words(
+            &prepared,
+            &[visible; 2],
+            &[0, 1],
+            1,
+        )
+        .unwrap_err()
+        .contains("subject rows"));
+        assert!(wgsl_resident_root_topology_oracle_words(
+            &prepared,
+            &[visible; 2],
+            &[0, 0],
+            0,
+        )
+        .unwrap_err()
+        .contains("0-row domain"));
     }
 
     fn subject_record(node: f32, marker: f32) -> Vec<f32> {

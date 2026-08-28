@@ -26,6 +26,11 @@ pub const RESIDENT_BUCKET_HISTOGRAM_DEVICE_ENTRY_POINT: &str =
 pub const RESIDENT_BUCKET_PREFIX_DEVICE_ENTRY_POINT: &str = "prefix_resident_geometry_chunks";
 pub const RESIDENT_BUCKET_SCAN_DEVICE_ENTRY_POINT: &str = "scan_resident_geometry_buckets";
 pub const RESIDENT_BUCKET_SCATTER_DEVICE_ENTRY_POINT: &str = "scatter_resident_geometry_faces";
+pub const RESIDENT_ROOT_VERTEX_CLEAR_DEVICE_ENTRY_POINT: &str =
+    "clear_resident_root_vertex_lods";
+pub const RESIDENT_ROOT_VERTEX_ACCUMULATE_DEVICE_ENTRY_POINT: &str =
+    "accumulate_resident_root_vertex_lods";
+pub const RESIDENT_ROOT_TOPOLOGY_DEVICE_ENTRY_POINT: &str = "emit_resident_root_topology";
 pub const VISIBILITY_SCAN_DEVICE_ENTRY_POINT: &str = "scan_visible_batches";
 pub const VISIBILITY_SCATTER_DEVICE_ENTRY_POINT: &str = "scatter_visible_instances";
 pub const PATCH_PREPARE_DEVICE_ENTRY_POINT: &str = "prepare_patch_instances";
@@ -60,6 +65,10 @@ pub mod sources {
     pub const RESIDENT_BUCKET_TYPES: &str =
         include_str!("../shaders/compute/resident_bucket_types.wgsl");
     pub const RESIDENT_BUCKETS: &str = include_str!("../shaders/compute/resident_buckets.wgsl");
+    pub const RESIDENT_ROOT_TOPOLOGY_TYPES: &str =
+        include_str!("../shaders/compute/resident_root_topology_types.wgsl");
+    pub const RESIDENT_ROOT_TOPOLOGY: &str =
+        include_str!("../shaders/compute/resident_root_topology.wgsl");
     pub const VISIBILITY_SCAN: &str = include_str!("../shaders/compute/visibility_scan.wgsl");
     pub const VISIBILITY_SCATTER: &str = include_str!("../shaders/compute/visibility_scatter.wgsl");
 
@@ -109,6 +118,10 @@ fn build_compiler_catalog_revision() -> Arc<str> {
             "quilting::compute::resident_bucket_types",
             sources::RESIDENT_BUCKET_TYPES,
         ),
+        (
+            "quilting::compute::resident_root_topology_types",
+            sources::RESIDENT_ROOT_TOPOLOGY_TYPES,
+        ),
     ];
     let capacity = COMPILER_CONFIGURATION.len()
         + modules
@@ -152,6 +165,10 @@ pub fn create_composer() -> Result<Composer, Box<dyn std::error::Error>> {
         (
             "quilting::compute::resident_bucket_types",
             sources::RESIDENT_BUCKET_TYPES,
+        ),
+        (
+            "quilting::compute::resident_root_topology_types",
+            sources::RESIDENT_ROOT_TOPOLOGY_TYPES,
         ),
     ];
 
@@ -435,6 +452,11 @@ pub fn compile_resident_buckets_module() -> Result<naga::Module, Box<dyn std::er
     compile_validated_compute_module(sources::RESIDENT_BUCKETS)
 }
 
+pub fn compile_resident_root_topology_module(
+) -> Result<naga::Module, Box<dyn std::error::Error>> {
+    compile_validated_compute_module(sources::RESIDENT_ROOT_TOPOLOGY)
+}
+
 /// Compile the deterministic batch-prefix and indirect-argument pass.
 pub fn compile_visibility_scan_module() -> Result<naga::Module, Box<dyn std::error::Error>> {
     compile_validated_compute_module(sources::VISIBILITY_SCAN)
@@ -459,6 +481,10 @@ pub fn compile_lod_visibility_expand_wgsl() -> Result<String, Box<dyn std::error
 
 pub fn compile_resident_buckets_wgsl() -> Result<String, Box<dyn std::error::Error>> {
     emit_wgsl(&compile_resident_buckets_module()?)
+}
+
+pub fn compile_resident_root_topology_wgsl() -> Result<String, Box<dyn std::error::Error>> {
+    emit_wgsl(&compile_resident_root_topology_module()?)
 }
 
 pub fn compile_visibility_scan_wgsl() -> Result<String, Box<dyn std::error::Error>> {
@@ -1101,6 +1127,29 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
                 RESIDENT_BUCKET_PREFIX_DEVICE_ENTRY_POINT,
                 RESIDENT_BUCKET_SCAN_DEVICE_ENTRY_POINT,
                 RESIDENT_BUCKET_SCATTER_DEVICE_ENTRY_POINT,
+            ],
+        );
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .unwrap();
+
+        let source = compile_resident_root_topology_wgsl().unwrap();
+        assert!(!source.contains("#import"));
+        assert!(!source.contains("#define_import_path"));
+        let module = naga::front::wgsl::parse_str(&source).unwrap();
+        assert_eq!(
+            module
+                .entry_points
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                RESIDENT_ROOT_VERTEX_CLEAR_DEVICE_ENTRY_POINT,
+                RESIDENT_ROOT_VERTEX_ACCUMULATE_DEVICE_ENTRY_POINT,
+                RESIDENT_ROOT_TOPOLOGY_DEVICE_ENTRY_POINT,
             ],
         );
         naga::valid::Validator::new(
