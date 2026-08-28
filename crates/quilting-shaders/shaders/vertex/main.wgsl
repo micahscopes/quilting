@@ -2,10 +2,9 @@
 // Imports quilting modules for quaternion math, surface evaluation, and density viz.
 // Compiles to GLSL ES 300 via naga for WebGL2.
 
-#import quilting::math::quaternion::{qmul, qconj, qinv, q_to_point}
-#import quilting::surface::qb_eval::eval_qb
-#import quilting::surface::patch_prepare::{PreparedPatchRecord, PosedPatchControls, dyadic_leaf_domain, prepare_patch_record}
-#import quilting::viz::density::edge_log2_density
+#import quilting::math::quaternion::{qmul, qconj, qinv}
+#import quilting::surface::patch_prepare::{PreparedPatchRecord, PosedPatchControls, prepare_patch_record}
+#import quilting::surface::patch_render::{PatchRenderTransform, PatchSurfaceInput, POSITION_CLAMP, evaluate_patch_surface}
 
 struct Uniforms {
     mvp: mat4x4<f32>,
@@ -14,29 +13,17 @@ struct Uniforms {
     suppress_source_roots: i32,
     use_qb: i32,
     _reserved_face_offset: f32,
-    // Möbius transform: p' = (a*p + b) * (c*p + d)^{-1}
     mob_a: vec4<f32>,
     mob_b: vec4<f32>,
     mob_c: vec4<f32>,
     mob_d: vec4<f32>,
-    camera_pos: vec4<f32>,   // world-space camera position (xyz, w unused)
-    model: mat4x4<f32>,      // ordinary affine transform before Möbius
+    camera_pos: vec4<f32>,
+    model: mat4x4<f32>,
     normal_model: mat4x4<f32>,
 }
 
 @group(0) @binding(0)
 var<uniform> u: Uniforms;
-
-// Hard ceiling on evaluated positions, in model units (meshes are normalized
-// to unit half-extent upstream). Near a Möbius pole |X| ~ 1/|bot| grows
-// without bound and bottoms out at the qinv sentinel (~1e10) when the f32
-// denominator cancels outright; coordinates that large wreck rasterizer and
-// depth precision. 1e4 is far beyond anything distinguishable on screen at
-// any usable zoom — sphere inversions that legitimately send geometry far
-// away are untouched — while staying well inside f32 range for the mvp
-// multiply. Direction is preserved, so clamped spikes still point the right
-// way and shrink continuously as the pole recedes.
-const POSITION_CLAMP: f32 = 1e4;
 
 // Skeletal animation: skin matrices (joint_world * inverse_bind) uploaded per frame.
 // num_joints = 0 means no skinning active.
@@ -573,315 +560,82 @@ fn classify_patch_visibility(in: PatchVisibilityInput) -> PatchVisibilityOutput 
     );
 }
 
-// S3 permutation remapping: reorder bary coords so one tessellation
-// buffer can serve all 6 permutations of a canonical LOD triple.
-fn perm_bary(b: vec3<f32>, p: i32) -> vec3<f32> {
-    switch p {
-        case 1: { return vec3<f32>(b.x, b.z, b.y); }
-        case 2: { return vec3<f32>(b.y, b.x, b.z); }
-        case 3: { return vec3<f32>(b.y, b.z, b.x); }
-        case 4: { return vec3<f32>(b.z, b.x, b.y); }
-        case 5: { return vec3<f32>(b.z, b.y, b.x); }
-        default: { return b; }
-    }
-}
-
-// Flat evaluation: linear interpolation of imaginary parts
-fn eval_flat(bary: vec3<f32>, p0: vec4<f32>, p1: vec4<f32>, p2: vec4<f32>) -> vec3<f32> {
-    return bary.x * p0.yzw + bary.y * p1.yzw + bary.z * p2.yzw;
-}
-
-// Fused Möbius + QB evaluation.
-// The Möbius transform folds directly into the rational Bézier form:
-//   top = Σ λᵢ (a*pᵢ+b)*wᵢ     (p'w' — inverse cancels algebraically)
-//   bot = Σ λᵢ (c*pᵢ+d)*wᵢ     (conformal weight)
-//   X = top * bot⁻¹              (only 1 inverse total)
-struct MobiusQBResult {
-    position: vec3<f32>,
-    normal: vec3<f32>,
-    fade: f32,
-}
-
-fn eval_mobius_qb(
-    bary: vec3<f32>,
-    p0: vec4<f32>, p1: vec4<f32>, p2: vec4<f32>,
-    w0: vec4<f32>, w1: vec4<f32>, w2: vec4<f32>,
-) -> MobiusQBResult {
-    // Möbius-fused numerator: (a*pᵢ+b)*wᵢ
-    let pw0 = qmul(qmul(u.mob_a, p0) + u.mob_b, w0);
-    let pw1 = qmul(qmul(u.mob_a, p1) + u.mob_b, w1);
-    let pw2 = qmul(qmul(u.mob_a, p2) + u.mob_b, w2);
-    // Möbius-fused denominator: (c*pᵢ+d)*wᵢ
-    let bw0 = qmul(qmul(u.mob_c, p0) + u.mob_d, w0);
-    let bw1 = qmul(qmul(u.mob_c, p1) + u.mob_d, w1);
-    let bw2 = qmul(qmul(u.mob_c, p2) + u.mob_d, w2);
-
-    let top = bary.x * pw0 + bary.y * pw1 + bary.z * pw2;
-    let bot = bary.x * bw0 + bary.y * bw1 + bary.z * bw2;
-    let bi = qinv(bot);
-    let X = qmul(top, bi);
-
-    // Conformal fade: |bot|² → 0 near Möbius pole.
-    //
-    // Fade is deliberately a *shading* control (fragment alpha + discard),
-    // not a geometry one. Collapsing or clipping faded vertices here would
-    // pop whole patches that still contain valid visible geometry — a patch
-    // can have one corner at the pole and the others in plain sight. Instead:
-    // the LOD passes saturate tessellation near the pole (so every
-    // sub-triangle touching it has all corners deep in the fade≈0 band and
-    // gets discarded by the fragment shaders), and POSITION_CLAMP bounds
-    // whatever the rasterizer sees. Sphere inversions that legitimately send
-    // geometry far away keep rendering.
-    let fade = smoothstep(0.0001, 0.001, dot(bot, bot));
-
-    // Analytic normal via quotient rule: dXu = (dtop_u - X*dbot_u) * bot⁻¹.
-    // Both tangents share the right factor bot⁻¹ = conj(bot)/|bot|². The
-    // 1/|bot|² part is a positive real scalar common to both, so it scales
-    // the cross product without turning it — and it is exactly what overflows
-    // f32 near the pole: |dX| ~ 1/|bot|², so length(n) computes
-    // dot(n, n) ~ 1/|bot|⁸, which hits +inf at |bot|² ≈ 2.6e-10 (ten orders
-    // above the qinv guard), making n/inf = 0 and the view-space normal NaN.
-    // Right-multiplying by conj(bot) instead keeps the exact normal direction
-    // with every intermediate O(|X|·|bot|); normalize() absorbs the scale.
-    let dtop_u = pw1 - pw0;
-    let dbot_u = bw1 - bw0;
-    let dtop_v = pw2 - pw0;
-    let dbot_v = bw2 - bw0;
-    let cb = qconj(bot);
-    let dXu = qmul(dtop_u - qmul(X, dbot_u), cb);
-    let dXv = qmul(dtop_v - qmul(X, dbot_v), cb);
-
-    var n = cross(dXu.yzw, dXv.yzw);
-    let nl = length(n);
-    if nl > 1e-10 {
-        n = n / nl;
-    } else {
-        n = vec3<f32>(0.0, 0.0, 1.0);
-    }
-    return MobiusQBResult(q_to_point(X), n, fade);
-}
-
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-
-    // The atlas stores only canonical tessellations. Map their barycentrics back
-    // to this face using the permutation packed beside its edge LODs.
-    let perm_index = clamp(i32(round(in.lod_info.w)), 0, 5);
-    let bary = perm_bary(in.bary, perm_index);
-
-    var pos: vec3<f32>;
-    var nrm: vec3<f32>;
-    out.fade = 1.0;
-
     let prepared = in.uv2_pad.w > 0.5;
-    let adaptive = prepared && in.p0.x < -0.5;
-    var source_bary = bary;
-    var leaf_lod_scale = 1.0;
-    if adaptive {
-        let leaf_depth = -in.p0.x - 1.0;
-        leaf_lod_scale = exp2(leaf_depth);
-        let domain = dyadic_leaf_domain(vec2<f32>(leaf_depth, in.p1.x));
-        source_bary = bary.x * domain.domain_corner_a
-            + bary.y * domain.domain_corner_b
-            + bary.z * domain.domain_corner_c;
-    }
     if prepared && in.prepared_visibility < 0.5 {
         return culled_vertex_output();
     }
 
-    // Prepared records already contain posed, affine-transformed control
-    // points. The fallback path preserves rendering when preparation is absent.
-    var sp0: vec4<f32>;
-    var sp1: vec4<f32>;
-    var sp2: vec4<f32>;
-    if prepared {
-        sp0 = vec4<f32>(0.0, in.p0.yzw);
-        sp1 = vec4<f32>(0.0, in.p1.yzw);
-        sp2 = vec4<f32>(0.0, in.p2.yzw);
-    } else {
-        sp0 = vec4<f32>(0.0, posed_position(in.p0));
-        sp1 = vec4<f32>(0.0, posed_position(in.p1));
-        sp2 = vec4<f32>(0.0, posed_position(in.p2));
+    var control_a = in.p0;
+    var control_b = in.p1;
+    var control_c = in.p2;
+    var normal_a = in.smooth_n0;
+    var normal_b = in.smooth_n1;
+    var normal_c = in.smooth_n2;
+    if !prepared {
+        control_a = vec4<f32>(in.p0.x, posed_position(in.p0));
+        control_b = vec4<f32>(in.p1.x, posed_position(in.p1));
+        control_c = vec4<f32>(in.p2.x, posed_position(in.p2));
         if patch_outside_frustum(
-            sp0.yzw, sp1.yzw, sp2.yzw,
+            control_a.yzw, control_b.yzw, control_c.yzw,
             in.w0, in.w1, in.w2,
         ) {
             return culled_vertex_output();
         }
-    }
-
-    if u.use_qb == 1 {
-        out.source_position_ws = eval_qb(bary, sp0, sp1, sp2, in.w0, in.w1, in.w2);
-    } else {
-        out.source_position_ws = eval_flat(bary, sp0, sp1, sp2);
-    }
-
-    if u.use_qb == 1 {
-        let result = eval_mobius_qb(
-            bary,
-            sp0, sp1, sp2,
-            in.w0, in.w1, in.w2,
+        normal_a = vec4<f32>(
+            posed_normal(in.smooth_n0.xyz, i32(in.p0.x)),
+            in.smooth_n0.w,
         );
-        pos = result.position;
-        nrm = result.normal;
-        out.fade = result.fade;
-    } else {
-        // Flat path: apply Möbius to vertices directly
-        let mp0 = qmul(qmul(u.mob_a, sp0) + u.mob_b, qinv(qmul(u.mob_c, sp0) + u.mob_d));
-        let mp1 = qmul(qmul(u.mob_a, sp1) + u.mob_b, qinv(qmul(u.mob_c, sp1) + u.mob_d));
-        let mp2 = qmul(qmul(u.mob_a, sp2) + u.mob_b, qinv(qmul(u.mob_c, sp2) + u.mob_d));
-        pos = eval_flat(bary, mp0, mp1, mp2);
-        // Normalize the edges before crossing: near a Möbius pole the
-        // transformed corners reach sentinel scale (~1e10) and the raw cross
-        // product overflows dot(n, n) inside normalize(). Unit edges give the
-        // same direction at O(1) magnitude; degenerate edges fall back
-        // instead of producing NaN.
-        let fe1 = normalize(mp1.yzw - mp0.yzw);
-        let fe2 = normalize(mp2.yzw - mp0.yzw);
-        let fcross = cross(fe1, fe2);
-        let flen = length(fcross);
-        if flen > 1e-10 {
-            nrm = fcross / flen;
-        } else {
-            nrm = vec3<f32>(0.0, 0.0, 1.0);
-        }
+        normal_b = vec4<f32>(
+            posed_normal(in.smooth_n1.xyz, i32(in.p1.x)),
+            in.smooth_n1.w,
+        );
+        normal_c = vec4<f32>(
+            posed_normal(in.smooth_n2.xyz, i32(in.p2.x)),
+            in.smooth_n2.w,
+        );
     }
 
-    // Backstop against Möbius-pole blow-ups; see POSITION_CLAMP.
-    let pos_r = length(pos);
-    if pos_r > POSITION_CLAMP {
-        pos = pos * (POSITION_CLAMP / pos_r);
-    }
-
-    // Prepared normals are already skinned and affine-transformed. Preserve
-    // the complete legacy pose path only for an unprepared fallback record.
-    var sn0 = in.smooth_n0.xyz;
-    var sn1 = in.smooth_n1.xyz;
-    var sn2 = in.smooth_n2.xyz;
-    if !prepared {
-        if joints.num_joints > 0 {
-            let vi0 = i32(in.p0.x);
-            let vi1 = i32(in.p1.x);
-            let vi2 = i32(in.p2.x);
-            sn0 = skin_normal(sn0, vi0);
-            sn1 = skin_normal(sn1, vi1);
-            sn2 = skin_normal(sn2, vi2);
-        }
-        sn0 = (u.normal_model * vec4<f32>(sn0, 0.0)).xyz;
-        sn1 = (u.normal_model * vec4<f32>(sn1, 0.0)).xyz;
-        sn2 = (u.normal_model * vec4<f32>(sn2, 0.0)).xyz;
-    }
-    let has_smooth = dot(sn0, sn0) + dot(sn1, sn1) + dot(sn2, sn2) > 0.01;
-    if has_smooth {
-        // Transform every normal through the Möbius differential. The c=0
-        // branch still contains rotations and negative scales; treating it as
-        // "no transform" gives visibly incorrect lighting and parity.
-        let bot0 = qmul(u.mob_c, sp0) + u.mob_d;
-        let M0 = qmul(qmul(u.mob_a, sp0) + u.mob_b, qinv(bot0));
-        let a0 = u.mob_a - qmul(M0, u.mob_c);
-        let rn0 = qmul(qmul(a0, vec4<f32>(0.0, sn0)), qinv(bot0)).yzw;
-
-        let bot1 = qmul(u.mob_c, sp1) + u.mob_d;
-        let M1 = qmul(qmul(u.mob_a, sp1) + u.mob_b, qinv(bot1));
-        let a1 = u.mob_a - qmul(M1, u.mob_c);
-        let rn1 = qmul(qmul(a1, vec4<f32>(0.0, sn1)), qinv(bot1)).yzw;
-
-        let bot2 = qmul(u.mob_c, sp2) + u.mob_d;
-        let M2 = qmul(qmul(u.mob_a, sp2) + u.mob_b, qinv(bot2));
-        let a2 = u.mob_a - qmul(M2, u.mob_c);
-        let rn2 = qmul(qmul(a2, vec4<f32>(0.0, sn2)), qinv(bot2)).yzw;
-
-        // Each rnᵢ carries ~1/|botᵢ|² of conformal magnitude and reaches
-        // ~1e20 near a Möbius pole, where dot() inside normalize() would
-        // overflow to inf and NaN the normal. Rescale the blend by its
-        // largest component first — a positive scalar, so direction and
-        // blend weights are untouched. If the blend is degenerate, keep
-        // the analytic normal already in nrm.
-        let nsum = bary.x * rn0 + bary.y * rn1 + bary.z * rn2;
-        let nmax = max(max(abs(nsum.x), abs(nsum.y)), abs(nsum.z));
-        if nmax > 1e-20 {
-            nrm = normalize(nsum / nmax);
-        }
-    }
-
-    out.normal_vs = normalize((u.mv * vec4<f32>(nrm, 0.0)).xyz);
-
-    // Visualize the same local edge-density field Rust uses to sample atlas
-    // patches. Reconciliation makes shared edge resolutions equal. Scaling a
-    // leaf-local LoD by 2^depth converts it to absolute source-domain units,
-    // so coarse/fine boundaries and all S3 atlas permutations have the same
-    // trace without inventing hanging-node vertex state.
-    let absolute_edge_lods = max(in.lod_info.xyz * leaf_lod_scale, vec3<f32>(1.0));
-    var visual_log_density = edge_log2_density(bary, absolute_edge_lods);
-    // At a conforming physical corner, incident edges from several patches may
-    // disagree; the prepared compatibility field carries their welded maximum.
-    // At a nonconforming hanging corner it instead carries the containing
-    // coarse edge's resolution. Interior samples use the edge field above.
-    if bary.x > 0.999999 {
-        visual_log_density = log2(max(in.vert_lod.x, 1.0));
-    } else if bary.y > 0.999999 {
-        visual_log_density = log2(max(in.vert_lod.y, 1.0));
-    } else if bary.z > 0.999999 {
-        visual_log_density = log2(max(in.vert_lod.z, 1.0));
-    }
-    out.density = max(visual_log_density, 0.0) / 10.0;
-
-    let uv0 = in.uv01.xy;
-    let uv1 = in.uv01.zw;
-    let uv2 = in.uv2_pad.xy;
-    out.tex_uv = bary.x * uv0 + bary.y * uv1 + bary.z * uv2;
-
-    // Tangent frame from Möbius-transformed positions
-    let v0 = pos; // use evaluated position, not original
-    // For tangent frame, use original UVs — they're invariant under Möbius
-    let duv01 = uv1 - uv0;
-    let duv02 = uv2 - uv0;
-    let det = duv01.x * duv02.y - duv01.y * duv02.x;
-    var tangent = vec3<f32>(1.0, 0.0, 0.0);
-    var bitangent = vec3<f32>(0.0, 1.0, 0.0);
-    if abs(det) > 1e-6 {
-        // Use (possibly skinned) vertex positions for edge vectors
-        let edge01 = sp1.yzw - sp0.yzw;
-        let edge02 = sp2.yzw - sp0.yzw;
-        let inv_det = 1.0 / det;
-        tangent = normalize((edge01 * duv02.y - edge02 * duv01.y) * inv_det);
-        bitangent = normalize((edge02 * duv01.x - edge01 * duv02.x) * inv_det);
-    }
-    out.tangent_vs = normalize((u.mv * vec4<f32>(tangent, 0.0)).xyz);
-    out.bitangent_vs = normalize((u.mv * vec4<f32>(bitangent, 0.0)).xyz);
-
-    out.normal_ws = nrm;
-    out.position_ws = pos;
-    out.camera_pos_ws = u.camera_pos.xyz;
-    out.position_vs = (u.mv * vec4<f32>(pos, 1.0)).xyz;
-    out.clip_pos = u.mvp * vec4<f32>(pos, 1.0);
-    out.tess_bary = source_bary;
-    out.instance_id = in.vert_lod.w;
-    out.node_id = in.smooth_n0.w;
-
-    // Möbius conformal scale is |a - F(p)c| / |cp + d|. The historical
-    // 1/|cp+d|² shortcut only holds for normalized inversive generators and
-    // incorrectly reports every c=0 scale as neutral.
-    let mb0 = qmul(u.mob_c, sp0) + u.mob_d;
-    let mb1 = qmul(u.mob_c, sp1) + u.mob_d;
-    let mb2 = qmul(u.mob_c, sp2) + u.mob_d;
-    let mm0 = qmul(qmul(u.mob_a, sp0) + u.mob_b, qinv(mb0));
-    let mm1 = qmul(qmul(u.mob_a, sp1) + u.mob_b, qinv(mb1));
-    let mm2 = qmul(qmul(u.mob_a, sp2) + u.mob_b, qinv(mb2));
-    let ma0 = u.mob_a - qmul(mm0, u.mob_c);
-    let ma1 = u.mob_a - qmul(mm1, u.mob_c);
-    let ma2 = u.mob_a - qmul(mm2, u.mob_c);
-    let s0 = sqrt(max(dot(ma0, ma0), 1e-20) / max(dot(mb0, mb0), 1e-20));
-    let s1 = sqrt(max(dot(ma1, ma1), 1e-20) / max(dot(mb1, mb1), 1e-20));
-    let s2 = sqrt(max(dot(ma2, ma2), 1e-20) / max(dot(mb2, mb2), 1e-20));
-    let stretch = bary.x * s0 + bary.y * s1 + bary.z * s2;
-    // Signed log2, mapped to [0,1] via sigmoid for smooth falloff (no hard cutoff).
-    // 0.5 = no stretch, 0 = max squash, 1 = max expand.
-    let log_s = log2(max(stretch, 1e-20));
-    // Stretch is a diagnostic view, so make a one-octave change plainly
-    // visible while retaining a smooth, symmetric response around scale 1.
-    out.mobius_stretch = 1.0 / (1.0 + exp(-log_s));
-
-    return out;
+    let surface = evaluate_patch_surface(
+        PatchRenderTransform(
+            u.mvp,
+            u.mv,
+            u.use_qb,
+            u.mob_a,
+            u.mob_b,
+            u.mob_c,
+            u.mob_d,
+            u.camera_pos,
+        ),
+        PatchSurfaceInput(
+            in.bary,
+            control_a, control_b, control_c,
+            in.w0, in.w1, in.w2,
+            in.lod_info,
+            in.vert_lod,
+            in.uv01,
+            in.uv2_pad,
+            normal_a, normal_b, normal_c,
+            select(0u, 1u, prepared),
+        ),
+    );
+    return VertexOutput(
+        surface.clip_pos,
+        surface.normal_vs,
+        surface.density,
+        surface.tex_uv,
+        surface.position_vs,
+        surface.tangent_vs,
+        surface.bitangent_vs,
+        surface.normal_ws,
+        surface.position_ws,
+        surface.camera_pos_ws,
+        surface.fade,
+        surface.tess_bary,
+        surface.instance_id,
+        surface.mobius_stretch,
+        surface.source_position_ws,
+        surface.node_id,
+    );
 }

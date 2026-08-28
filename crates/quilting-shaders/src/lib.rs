@@ -25,6 +25,7 @@ pub mod sources {
     pub const QUATERNION: &str = include_str!("../shaders/math/quaternion.wgsl");
     pub const QB_EVAL: &str = include_str!("../shaders/surface/qb_eval.wgsl");
     pub const PATCH_PREPARE: &str = include_str!("../shaders/surface/patch_prepare.wgsl");
+    pub const PATCH_RENDER: &str = include_str!("../shaders/surface/patch_render.wgsl");
     pub const PBR: &str = include_str!("../shaders/lighting/pbr.wgsl");
     pub const MATCAP: &str = include_str!("../shaders/lighting/matcap.wgsl");
     pub const DENSITY: &str = include_str!("../shaders/viz/density.wgsl");
@@ -72,6 +73,7 @@ fn build_compiler_catalog_revision() -> Arc<str> {
         ("quilting::lighting::pbr", sources::PBR),
         ("quilting::lighting::matcap", sources::MATCAP),
         ("quilting::viz::density", sources::DENSITY),
+        ("quilting::surface::patch_render", sources::PATCH_RENDER),
         ("quilting::compute::lod_types", sources::LOD_TYPES),
         ("quilting::compute::pose", sources::POSE),
         (
@@ -111,6 +113,7 @@ pub fn create_composer() -> Result<Composer, Box<dyn std::error::Error>> {
         ("quilting::lighting::pbr", sources::PBR),
         ("quilting::lighting::matcap", sources::MATCAP),
         ("quilting::viz::density", sources::DENSITY),
+        ("quilting::surface::patch_render", sources::PATCH_RENDER),
         ("quilting::compute::lod_types", sources::LOD_TYPES),
         ("quilting::compute::pose", sources::POSE),
         (

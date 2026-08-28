@@ -517,13 +517,15 @@ mod tests {
 
     #[test]
     fn affine_conformal_maps_still_transform_normals_and_stretch() {
-        let source = quilting_shaders::sources::VERTEX_MAIN;
+        let source = quilting_shaders::sources::PATCH_RENDER;
         assert!(
             !source.contains("let is_mobius"),
             "c=0 includes rotations and signed scales, so it cannot bypass the differential"
         );
         assert!(
-            source.contains("let ma0 = u.mob_a - qmul(mm0, u.mob_c)"),
+            source.contains(
+                "let differential = uniforms.mob_a - qmul(mapped, uniforms.mob_c)"
+            ),
             "stretch must use the full fractional-linear differential"
         );
     }
@@ -534,7 +536,7 @@ mod tests {
         let main = source.find("fn vs_main").expect("main vertex entry point");
         let cull = source[main..].find("if patch_outside_frustum(")
             .expect("vertex shader must cull from current posed control points");
-        let evaluate = source[main + cull..].find("eval_mobius_qb(")
+        let evaluate = source[main + cull..].find("evaluate_patch_surface(")
             .expect("QB evaluation must follow current-pose culling");
         assert!(evaluate > 0);
         assert_eq!(
@@ -544,6 +546,9 @@ mod tests {
         );
         assert!(source.contains("origin_to_quaternion_triangle"));
         assert!(source.contains("rational_patch_outside_frustum"));
+        assert!(quilting_shaders::sources::PATCH_RENDER.contains(
+            "fn evaluate_mobius_qb_patch("
+        ));
     }
 
     #[test]
@@ -568,9 +573,11 @@ mod tests {
         assert_eq!(pass::batch_orientation_sign(-1, 1.0), -1);
         assert_eq!(pass::batch_orientation_sign(-1, -1.0), 1);
 
-        let source = quilting_shaders::sources::VERTEX_MAIN;
+        let source = quilting_shaders::sources::PATCH_RENDER;
         assert!(
-            source.contains("let bary = perm_bary(in.bary, perm_index)"),
+            source.contains(
+                "let bary = permute_patch_barycentric(input.atlas_bary, permutation)"
+            ),
             "canonical atlas barycentrics must be permuted per instance",
         );
         assert!(
