@@ -32,6 +32,8 @@ const PATCH_TOPOLOGY_RECORD_BYTES: u64 = 48;
 const PREPARED_PATCH_RECORD_WORDS: usize = 52;
 const PREPARED_PATCH_RECORD_BYTES: u64 = 208;
 const PATCH_SUBJECT_RECORD_BYTES: u64 = 128;
+const PATCH_RENDER_FRAME_WORDS: usize = 56;
+const PATCH_RENDER_FRAME_BYTES: u64 = 224;
 
 fn identity_matrix() -> [f32; 16] {
     [
@@ -206,6 +208,7 @@ pub struct LodDeviceConformance {
     pub full_pipeline_words: usize,
     pub coherence_words: usize,
     pub prepared_patch_words: usize,
+    pub rendered_patch_pixels: usize,
     pub compacted_source_words: usize,
     pub compacted_range_words: usize,
     pub indirect_argument_words: usize,
@@ -220,6 +223,55 @@ pub struct VisibilityCompactionOutput {
     pub compacted_source_instances: Vec<u32>,
     pub compacted_ranges: Vec<[u32; 5]>,
     pub indirect_arguments: Vec<[u32; 5]>,
+}
+
+/// Backend-neutral dynamic values consumed by the WebGPU prepared-surface
+/// evaluator. Matrices use the same column-major convention as WebGL2.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PatchRenderFrame {
+    pub mvp: [f32; 16],
+    pub mv: [f32; 16],
+    pub use_qb: bool,
+    pub mobius: [f32; 16],
+    pub camera_position: [f32; 3],
+}
+
+impl PatchRenderFrame {
+    fn to_words(self) -> Result<[u32; PATCH_RENDER_FRAME_WORDS], LodWebGpuError> {
+        if self
+            .mvp
+            .into_iter()
+            .chain(self.mv)
+            .chain(self.mobius)
+            .chain(self.camera_position)
+            .any(|value| !value.is_finite())
+        {
+            return Err(LodWebGpuError::Payload(
+                "patch render frame contains non-finite values".to_string(),
+            ));
+        }
+        let mut words = [0u32; PATCH_RENDER_FRAME_WORDS];
+        for (word, value) in words[..16].iter_mut().zip(self.mvp) {
+            *word = value.to_bits();
+        }
+        for (word, value) in words[16..32].iter_mut().zip(self.mv) {
+            *word = value.to_bits();
+        }
+        words[32] = u32::from(self.use_qb);
+        for (word, value) in words[36..52].iter_mut().zip(self.mobius) {
+            *word = value.to_bits();
+        }
+        for (word, value) in words[52..55].iter_mut().zip(self.camera_position) {
+            *word = value.to_bits();
+        }
+        Ok(words)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PatchWinding {
+    CounterClockwise,
+    Clockwise,
 }
 
 /// Device-local pipelines shared by every uploaded classifier model.
@@ -259,6 +311,21 @@ pub struct PatchPreparationScene {
     uniform_words: [u32; 4],
     uniform: wgpu::Buffer,
     prepared_records: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+}
+
+/// Retained WebGPU graphics pipelines for the first shared QB surface mode.
+/// Winding is pipeline state in WebGPU, so both variants share one explicit
+/// bind-group layout instead of recompiling or mutating state per batch.
+pub struct PatchRenderPipeline {
+    bind_group_layout: wgpu::BindGroupLayout,
+    counter_clockwise: wgpu::RenderPipeline,
+    clockwise: wgpu::RenderPipeline,
+}
+
+/// Scene/frame bindings shared by every atlas bucket and indirect batch draw.
+pub struct PatchRenderBindings {
+    frame: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
 }
 
@@ -508,6 +575,17 @@ impl LodClassifierDevice {
             )));
         }
         let prepared_patch_words = prepared_patches.len() * PREPARED_PATCH_RECORD_WORDS;
+        let rendered_patch_pixels = self
+            .validate_patch_render_conformance(
+                &patch_model,
+                &patch_scene,
+                LodPose {
+                    joint_matrices: &patch_joint,
+                    morph_weights: &[1.0],
+                },
+                1,
+            )
+            .await?;
 
         let batch_zero_count = 130u32;
         let mut source_visibility = Vec::with_capacity(137);
@@ -545,6 +623,7 @@ impl LodClassifierDevice {
             full_pipeline_words,
             coherence_words: actual.len(),
             prepared_patch_words,
+            rendered_patch_pixels,
             compacted_source_words: compacted.compacted_source_instances.len(),
             compacted_range_words: compacted.compacted_ranges.len() * 5,
             indirect_argument_words: compacted.indirect_arguments.len() * 5,
@@ -835,6 +914,191 @@ impl LodClassifierDevice {
         encoder.copy_buffer_to_buffer(&scene.prepared_records, 0, &readback, 0, prepared_bytes);
         self.queue.submit([encoder.finish()]);
         words_to_patch_records(self.readback_words(&readback, prepared_bytes).await?)
+    }
+
+    /// Create retained normals-mode QB graphics pipelines for one attachment
+    /// configuration. Both winding variants share an explicit layout, making
+    /// one scene bind group valid for every batch.
+    pub fn create_patch_render_pipeline(
+        &self,
+        color_format: wgpu::TextureFormat,
+        depth_format: Option<wgpu::TextureFormat>,
+        sample_count: u32,
+    ) -> Result<PatchRenderPipeline, LodWebGpuError> {
+        if sample_count == 0 {
+            return Err(LodWebGpuError::Payload(
+                "patch render sample count must be nonzero".to_string(),
+            ));
+        }
+        let source = quilting_shaders::compile_patch_render_device_wgsl()
+            .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
+        let module = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("quilting prepared QB render"),
+                source: wgpu::ShaderSource::Wgsl(Cow::Owned(source)),
+            });
+        let bind_group_layout =
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("quilting prepared QB render bindings"),
+                    entries: &[
+                        render_buffer_layout(
+                            0,
+                            wgpu::BufferBindingType::Uniform,
+                            PATCH_RENDER_FRAME_BYTES,
+                            false,
+                        ),
+                        render_buffer_layout(
+                            1,
+                            wgpu::BufferBindingType::Storage { read_only: true },
+                            PREPARED_PATCH_RECORD_BYTES,
+                            false,
+                        ),
+                        render_buffer_layout(
+                            2,
+                            wgpu::BufferBindingType::Storage { read_only: true },
+                            PACKED_RECORD_BYTES,
+                            false,
+                        ),
+                        render_buffer_layout(
+                            3,
+                            wgpu::BufferBindingType::Storage { read_only: true },
+                            VISIBILITY_RANGE_RECORD_BYTES,
+                            false,
+                        ),
+                        render_buffer_layout(
+                            4,
+                            wgpu::BufferBindingType::Uniform,
+                            DRAW_BATCH_INDEX_BYTES,
+                            true,
+                        ),
+                    ],
+                });
+        let pipeline_layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("quilting prepared QB render pipeline layout"),
+                bind_group_layouts: &[Some(&bind_group_layout)],
+                immediate_size: 0,
+            });
+        let depth_stencil = depth_format.map(|format| wgpu::DepthStencilState {
+            format,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        });
+        let attributes = wgpu::vertex_attr_array![0 => Float32x3];
+        let create = |front_face| {
+            self.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("quilting prepared QB normals"),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some(quilting_shaders::PATCH_RENDER_DEVICE_VERTEX_ENTRY_POINT),
+                        compilation_options: Default::default(),
+                        buffers: &[wgpu::VertexBufferLayout {
+                            array_stride: 12,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &attributes,
+                        }],
+                    },
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        front_face,
+                        cull_mode: None,
+                        ..Default::default()
+                    },
+                    depth_stencil: depth_stencil.clone(),
+                    multisample: wgpu::MultisampleState {
+                        count: sample_count,
+                        ..Default::default()
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some(
+                            quilting_shaders::PATCH_RENDER_DEVICE_NORMALS_ENTRY_POINT,
+                        ),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: color_format,
+                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
+        };
+        let counter_clockwise = create(wgpu::FrontFace::Ccw);
+        let clockwise = create(wgpu::FrontFace::Cw);
+        Ok(PatchRenderPipeline {
+            bind_group_layout,
+            counter_clockwise,
+            clockwise,
+        })
+    }
+
+    /// Bind the output of preparation and stable visibility compaction
+    /// directly. Empty scenes need no render bindings and are rejected here.
+    pub fn create_patch_render_bindings(
+        &self,
+        pipeline: &PatchRenderPipeline,
+        patches: &PatchPreparationScene,
+        visibility: &VisibilityCompactionScene,
+    ) -> Result<PatchRenderBindings, LodWebGpuError> {
+        if patches.patch_count == 0
+            || visibility.source_count == 0
+            || visibility.batch_count == 0
+            || patches.patch_count != visibility.source_count
+        {
+            return Err(LodWebGpuError::Payload(
+                "patch render bindings require one nonempty shared source-instance domain"
+                    .to_string(),
+            ));
+        }
+        let frame = gpu_buffer(
+            &self.device,
+            "patch render frame",
+            PATCH_RENDER_FRAME_BYTES,
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("quilting prepared QB render bindings"),
+            layout: &pipeline.bind_group_layout,
+            entries: &[
+                bind(0, &frame),
+                bind(1, &patches.prepared_records),
+                bind(2, &visibility.compacted_source_instances),
+                bind(3, &visibility.compacted_ranges),
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &visibility.batch_index_uniform,
+                        offset: 0,
+                        size: std::num::NonZeroU64::new(DRAW_BATCH_INDEX_BYTES),
+                    }),
+                },
+            ],
+        });
+        Ok(PatchRenderBindings { frame, bind_group })
+    }
+
+    pub fn write_patch_render_frame(
+        &self,
+        bindings: &PatchRenderBindings,
+        frame: PatchRenderFrame,
+    ) -> Result<(), LodWebGpuError> {
+        let words = frame.to_words()?;
+        debug_assert_eq!(
+            std::mem::size_of_val(&words) as u64,
+            PATCH_RENDER_FRAME_BYTES
+        );
+        self.queue
+            .write_buffer(&bindings.frame, 0, bytemuck::cast_slice(&words));
+        Ok(())
     }
 
     /// Upload retained batch shape and static eligibility once. Output buffers
@@ -1207,6 +1471,164 @@ impl LodClassifierDevice {
             compacted_ranges,
             indirect_arguments,
         })
+    }
+
+    /// Device proof that animated preparation, stable compaction, vertex
+    /// pulling, shared QB evaluation, rasterization, and indirect arguments
+    /// can execute in one submission without an intermediate CPU map.
+    async fn validate_patch_render_conformance(
+        &self,
+        model: &LodClassifierModel,
+        patches: &PatchPreparationScene,
+        pose: LodPose<'_>,
+        num_joints: u32,
+    ) -> Result<usize, LodWebGpuError> {
+        const WIDTH: u32 = 32;
+        const HEIGHT: u32 = 32;
+        const PADDED_BYTES_PER_ROW: u32 = 256;
+
+        let visibility_words = WgslVisibilityCompactionSceneWords {
+            uniform: [1, patches.patch_count, 0, 0],
+            batches: vec![[0, patches.patch_count, 3, 0]],
+            source_eligibility: vec![1; patches.patch_count as usize],
+        };
+        let visibility = self.upload_visibility_compaction_scene(visibility_words)?;
+        let pipeline =
+            self.create_patch_render_pipeline(wgpu::TextureFormat::Rgba8Unorm, None, 1)?;
+        let bindings = self.create_patch_render_bindings(&pipeline, patches, &visibility)?;
+        let mvp = [
+            0.5, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.75, -0.25, 0.5, 1.0,
+        ];
+        self.write_patch_render_frame(
+            &bindings,
+            PatchRenderFrame {
+                mvp,
+                mv: identity_matrix(),
+                use_qb: true,
+                mobius: identity_mobius(),
+                camera_position: [0.0, 0.0, 4.0],
+            },
+        )?;
+        self.write_patch_pose(model, patches, pose, num_joints)?;
+        let source_visibility = vec![1; patches.patch_count as usize];
+        self.write_source_visibility(&visibility, &source_visibility)?;
+
+        let barycentrics = [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let barycentric_buffer =
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("patch render conformance barycentrics"),
+                    contents: bytemuck::cast_slice(&barycentrics),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+        let indices = [0u32, 1, 2];
+        let index_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("patch render conformance indices"),
+                contents: bytemuck::cast_slice(&indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+        let target = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("patch render conformance target"),
+            size: wgpu::Extent3d {
+                width: WIDTH,
+                height: HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let readback_bytes = u64::from(PADDED_BYTES_PER_ROW) * u64::from(HEIGHT);
+        let readback = gpu_buffer(
+            &self.device,
+            "patch render conformance readback",
+            readback_bytes,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+
+        let error_scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("patch prepare compact render conformance"),
+            });
+        self.encode_patch_preparation(patches, &mut encoder);
+        self.encode_visibility_compaction(&visibility, &mut encoder);
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("patch render conformance pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pipeline.draw_batch(
+                &mut pass,
+                &bindings,
+                &visibility,
+                &barycentric_buffer,
+                &index_buffer,
+                wgpu::IndexFormat::Uint32,
+                0,
+                PatchWinding::CounterClockwise,
+            )?;
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(PADDED_BYTES_PER_ROW),
+                    rows_per_image: Some(HEIGHT),
+                },
+            },
+            wgpu::Extent3d {
+                width: WIDTH,
+                height: HEIGHT,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit([encoder.finish()]);
+        if let Some(error) = error_scope.pop().await {
+            return Err(LodWebGpuError::Conformance(format!(
+                "patch prepare/compact/render submission failed validation: {error}"
+            )));
+        }
+        let words_per_row = PADDED_BYTES_PER_ROW as usize / std::mem::size_of::<u32>();
+        let pixels = self.readback_words(&readback, readback_bytes).await?;
+        let rendered = pixels
+            .chunks_exact(words_per_row)
+            .take(HEIGHT as usize)
+            .flat_map(|row| &row[..WIDTH as usize])
+            .filter(|&&pixel| pixel != 0)
+            .count();
+        if !(8..WIDTH as usize * HEIGHT as usize).contains(&rendered) {
+            return Err(LodWebGpuError::Conformance(format!(
+                "patch render produced an implausible {rendered}-pixel footprint"
+            )));
+        }
+        Ok(rendered)
     }
 
     /// Prove that portable zero-based arguments emitted by compaction can be
@@ -1809,6 +2231,47 @@ impl PatchPreparationScene {
     }
 }
 
+impl PatchRenderPipeline {
+    /// Encode one compacted indirect QB batch. The caller selects the atlas
+    /// buffers corresponding to that batch's canonical LOD key.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_batch<'pass>(
+        &'pass self,
+        pass: &mut wgpu::RenderPass<'pass>,
+        bindings: &'pass PatchRenderBindings,
+        visibility: &'pass VisibilityCompactionScene,
+        barycentric_buffer: &'pass wgpu::Buffer,
+        index_buffer: &'pass wgpu::Buffer,
+        index_format: wgpu::IndexFormat,
+        batch_index: u32,
+        winding: PatchWinding,
+    ) -> Result<(), LodWebGpuError> {
+        if batch_index >= visibility.batch_count {
+            return Err(LodWebGpuError::Payload(
+                "patch render batch index is out of range".to_string(),
+            ));
+        }
+        let dynamic_offset = batch_index
+            .checked_mul(visibility.batch_index_uniform_stride)
+            .ok_or_else(|| {
+                LodWebGpuError::Payload("patch render batch offset exceeds u32".to_string())
+            })?;
+        let pipeline = match winding {
+            PatchWinding::CounterClockwise => &self.counter_clockwise,
+            PatchWinding::Clockwise => &self.clockwise,
+        };
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bindings.bind_group, &[dynamic_offset]);
+        pass.set_vertex_buffer(0, barycentric_buffer.slice(..));
+        pass.set_index_buffer(index_buffer.slice(..), index_format);
+        pass.draw_indexed_indirect(
+            &visibility.indirect_arguments,
+            u64::from(batch_index) * INDEXED_INDIRECT_RECORD_BYTES,
+        );
+        Ok(())
+    }
+}
+
 fn words_to_patch_records(
     words: Vec<u32>,
 ) -> Result<Vec<[u32; PREPARED_PATCH_RECORD_WORDS]>, LodWebGpuError> {
@@ -1839,6 +2302,24 @@ fn bind(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry {
         binding,
         resource: buffer.as_entire_binding(),
+    }
+}
+
+fn render_buffer_layout(
+    binding: u32,
+    ty: wgpu::BufferBindingType,
+    min_binding_size: u64,
+    has_dynamic_offset: bool,
+) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::VERTEX,
+        ty: wgpu::BindingType::Buffer {
+            ty,
+            has_dynamic_offset,
+            min_binding_size: std::num::NonZeroU64::new(min_binding_size),
+        },
+        count: None,
     }
 }
 
@@ -1912,13 +2393,14 @@ pub async fn run_browser_lod_conformance() -> Result<String, wasm_bindgen::JsVal
         .map_err(browser_error)?;
     Ok(format!(
         "adapter={} backend={:?} full_pipeline_words={} coherence_words={} \
-         prepared_patch_words={} compacted_source_words={} compacted_range_words={} \
-         indirect_argument_words={} indirect_draws={}",
+         prepared_patch_words={} rendered_patch_pixels={} compacted_source_words={} \
+         compacted_range_words={} indirect_argument_words={} indirect_draws={}",
         adapter_info.name,
         adapter_info.backend,
         report.full_pipeline_words,
         report.coherence_words,
         report.prepared_patch_words,
+        report.rendered_patch_pixels,
         report.compacted_source_words,
         report.compacted_range_words,
         report.indirect_argument_words,
