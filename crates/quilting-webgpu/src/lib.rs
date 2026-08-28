@@ -356,6 +356,18 @@ pub struct PatchRenderTarget<'a> {
     pub clear_depth: Option<f32>,
 }
 
+/// Backend-owned offscreen attachments for live shadow rendering. This keeps
+/// texture formats and raw `wgpu` handles out of the WASM/application layer;
+/// promotion can later replace this target with a surface view while reusing
+/// the same pipeline and frame executor.
+pub struct OffscreenPatchRenderTarget {
+    _color: wgpu::Texture,
+    color_view: wgpu::TextureView,
+    _depth: wgpu::Texture,
+    depth_view: wgpu::TextureView,
+    size: [u32; 2],
+}
+
 /// CPU-visible facts about encoding one shared frame. Compacted survivor
 /// counts deliberately remain device-local; delayed telemetry may observe
 /// them later without turning this result into a readback boundary.
@@ -1308,6 +1320,68 @@ impl LodClassifierDevice {
         })
     }
 
+    /// Create the fixed-format live shadow pipeline without leaking backend
+    /// texture enums into the application adapter.
+    pub fn create_offscreen_patch_render_pipeline(
+        &self,
+    ) -> Result<PatchRenderPipeline, LodWebGpuError> {
+        self.create_patch_render_pipeline(
+            wgpu::TextureFormat::Rgba8Unorm,
+            Some(wgpu::TextureFormat::Depth24Plus),
+            1,
+        )
+    }
+
+    pub fn create_offscreen_patch_render_target(
+        &self,
+        size: [u32; 2],
+    ) -> Result<OffscreenPatchRenderTarget, LodWebGpuError> {
+        if size[0] == 0 || size[1] == 0 {
+            return Err(LodWebGpuError::Payload(
+                "offscreen patch target dimensions must be nonzero".to_string(),
+            ));
+        }
+        let limit = self.device.limits().max_texture_dimension_2d;
+        if size[0] > limit || size[1] > limit {
+            return Err(LodWebGpuError::Payload(format!(
+                "offscreen patch target {}x{} exceeds device limit {limit}",
+                size[0], size[1],
+            )));
+        }
+        let extent = wgpu::Extent3d {
+            width: size[0],
+            height: size[1],
+            depth_or_array_layers: 1,
+        };
+        let color = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("quilting live shadow color"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let depth = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("quilting live shadow depth"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth24Plus,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        Ok(OffscreenPatchRenderTarget {
+            color_view: color.create_view(&wgpu::TextureViewDescriptor::default()),
+            depth_view: depth.create_view(&wgpu::TextureViewDescriptor::default()),
+            _color: color,
+            _depth: depth,
+            size,
+        })
+    }
+
     /// Bind the output of preparation and stable visibility compaction
     /// directly. Empty scenes need no render bindings and are rejected here.
     pub fn create_patch_render_bindings(
@@ -1449,6 +1523,49 @@ impl LodClassifierDevice {
             use_qb,
             encode_visibility,
         )
+    }
+
+    /// Submit one complete offscreen normals frame with no CPU readback. Pose
+    /// and visibility queue writes must already have been issued through
+    /// [`Self::write_patch_render_scene_state`].
+    pub fn render_offscreen_normals_patch_scene(
+        &self,
+        frame: &RenderFrame,
+        pipeline: &PatchRenderPipeline,
+        scene: &PatchRenderScene,
+        atlas: &PackedPatchAtlas,
+        target: &OffscreenPatchRenderTarget,
+        use_qb: bool,
+    ) -> Result<PatchFrameEncoding, LodWebGpuError> {
+        if frame.view.viewport != target.size {
+            return Err(LodWebGpuError::Payload(format!(
+                "offscreen target {:?} does not match frame viewport {:?}",
+                target.size, frame.view.viewport,
+            )));
+        }
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quilting live offscreen shadow frame"),
+            });
+        let encoding = self.encode_normals_patch_render_scene(
+            &mut encoder,
+            frame,
+            pipeline,
+            scene,
+            atlas,
+            PatchRenderTarget {
+                color_view: &target.color_view,
+                resolve_target: None,
+                depth_stencil_view: Some(&target.depth_view),
+                clear_color: Some(wgpu::Color::TRANSPARENT),
+                clear_depth: Some(1.0),
+            },
+            use_qb,
+            |_, _, _| Ok(()),
+        )?;
+        self.queue.submit([encoder.finish()]);
+        Ok(encoding)
     }
 
     /// Upload one exact frame record per retained batch. This table is written
@@ -2921,6 +3038,12 @@ impl PatchRenderScene {
 
     pub fn batch_count(&self) -> u32 {
         self.visibility.batch_count
+    }
+}
+
+impl OffscreenPatchRenderTarget {
+    pub fn size(&self) -> [u32; 2] {
+        self.size
     }
 }
 

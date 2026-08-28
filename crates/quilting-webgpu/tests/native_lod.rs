@@ -10,13 +10,12 @@ use quilting_core::render::{
 };
 use quilting_core::screen_partition::ScreenPatchLeafId;
 use quilting_renderer::compute::{
-    pack_lod_classification, pack_wgsl_visibility_compaction_scene_words,
-    prepare_lod_atlas_lookup,
+    pack_lod_classification, pack_wgsl_visibility_compaction_scene_words, prepare_lod_atlas_lookup,
     prepare_lod_dispatch_state, prepare_lod_model, unpack_lod_classification_fields,
     wgsl_visibility_compaction_oracle_words, LodAtlasLookup, LodDispatchState, LodModelData,
     LodSubjectState, PackedLodClassification, PreparedLodModel, WgslLodDispatchMetrics,
 };
-use quilting_webgpu::{LodClassifierDevice, LodPose, PatchRenderTarget};
+use quilting_webgpu::{LodClassifierDevice, LodPose};
 
 fn identity_matrix() -> [f32; 16] {
     [
@@ -281,9 +280,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         let model = classifier
             .upload_model(prepared, &complete_atlas())
             .unwrap();
-        let pipeline = classifier
-            .create_patch_render_pipeline(wgpu::TextureFormat::Rgba8Unorm, None, 1)
-            .unwrap();
+        let pipeline = classifier.create_offscreen_patch_render_pipeline().unwrap();
         let retained_scene = classifier
             .upload_patch_render_scene(
                 &pipeline,
@@ -330,47 +327,19 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             .to_string()
             .contains("range exceeds its index buffer"));
         let target = classifier
-            .device()
-            .create_texture(&wgpu::TextureDescriptor {
-                label: Some("shared frame target"),
-                size: wgpu::Extent3d {
-                    width: 32,
-                    height: 32,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            });
-        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+            .create_offscreen_patch_render_target([32, 32])
+            .unwrap();
         let error_scope = classifier
             .device()
             .push_error_scope(wgpu::ErrorFilter::Validation);
-        let mut encoder =
-            classifier
-                .device()
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("shared RenderFrame conformance"),
-                });
         let encoding = classifier
-            .encode_normals_patch_render_scene(
-                &mut encoder,
+            .render_offscreen_normals_patch_scene(
                 &render_frame,
                 &pipeline,
                 &retained_scene,
                 &packed_atlas,
-                PatchRenderTarget {
-                    color_view: &target_view,
-                    resolve_target: None,
-                    depth_stencil_view: None,
-                    clear_color: Some(wgpu::Color::TRANSPARENT),
-                    clear_depth: None,
-                },
+                &target,
                 true,
-                |_, _, _| Ok(()),
             )
             .unwrap();
         assert_eq!(
@@ -381,7 +350,6 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         );
         assert_eq!(encoding.indirect_draw_calls, 2);
         assert_eq!(encoding.source_instance_count, 2);
-        classifier.queue().submit([encoder.finish()]);
         classifier
             .device()
             .poll(wgpu::PollType::wait_indefinitely())
