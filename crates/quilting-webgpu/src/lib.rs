@@ -6,7 +6,9 @@
 //! semantic scene, FRP, replicated state, canvas, or presentation lifecycle.
 
 use futures_channel::oneshot;
-use quilting_core::batch::{RenderBatchId, RenderBatchKey, RenderBatchLayer, RenderBatchMember};
+use quilting_core::batch::{
+    FaceLodGrading, RenderBatchId, RenderBatchKey, RenderBatchLayer, RenderBatchMember,
+};
 use quilting_core::render::{
     FocusFieldPacket, PbrDrawClass, RenderBatchSnapshot, RenderCommand, RenderEntityTransform,
     RenderFrame, RenderFrameOptions, RenderGeometry, RenderPass, RenderPoseIdentity,
@@ -14,10 +16,11 @@ use quilting_core::render::{
 };
 use quilting_core::screen_partition::ScreenPatchLeafId;
 use quilting_renderer::compute::{
-    pack_wgsl_lod_atlas_words, pack_wgsl_lod_dispatch_words, pack_wgsl_lod_model_words,
-    pack_wgsl_lod_subject_words, pack_wgsl_patch_preparation_scene_words,
-    pack_wgsl_source_visibility_words, pack_wgsl_visibility_compaction_scene_words,
-    prepare_lod_atlas_lookup, prepare_lod_model, reconcile_and_pack_wgsl_lod_pass2, LodAtlasLookup,
+    pack_lod_classification, pack_wgsl_lod_atlas_words, pack_wgsl_lod_dispatch_words,
+    pack_wgsl_lod_model_words, pack_wgsl_lod_subject_words,
+    pack_wgsl_patch_preparation_scene_words, pack_wgsl_source_visibility_words,
+    pack_wgsl_visibility_compaction_scene_words, prepare_lod_atlas_lookup, prepare_lod_model,
+    reconcile_and_pack_wgsl_lod_pass2, reconcile_and_pack_wgsl_resident_lods, LodAtlasLookup,
     LodDispatchState, LodModelData, PreparedLodModel, WgslLodDispatchMetrics,
     WgslPatchPreparationSceneWords, WgslVisibilityCompactionSceneWords,
 };
@@ -27,6 +30,7 @@ use std::sync::Mutex;
 use wgpu::util::DeviceExt;
 
 const LOD_WORKGROUP_SIZE: u32 = 64;
+const RESIDENT_LOD_RECONCILIATION_PASSES: usize = 10;
 const DISPATCH_UNIFORM_BYTES: u64 = 272;
 const SUBJECT_RECORD_BYTES: u64 = 160;
 const JOINT_MATRIX_BYTES: u64 = 64;
@@ -217,6 +221,7 @@ pub struct LodPose<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LodDeviceConformance {
     pub full_pipeline_words: usize,
+    pub resident_lod_words: usize,
     pub coherence_words: usize,
     pub prepared_patch_words: usize,
     pub rendered_patch_pixels: usize,
@@ -385,6 +390,10 @@ pub struct LodClassifierDevice {
     queue: wgpu::Queue,
     pass1_pipeline: wgpu::ComputePipeline,
     pass2_pipeline: wgpu::ComputePipeline,
+    resident_seed_pipeline: wgpu::ComputePipeline,
+    resident_reconcile_2_to_1_pipeline: wgpu::ComputePipeline,
+    resident_reconcile_4_to_1_pipeline: wgpu::ComputePipeline,
+    resident_pack_pipeline: wgpu::ComputePipeline,
     patch_prepare_pipeline: wgpu::ComputePipeline,
     visibility_expand_pipeline: wgpu::ComputePipeline,
     visibility_count_pipeline: wgpu::ComputePipeline,
@@ -407,6 +416,17 @@ pub struct LodClassifierModel {
     packed_records: wgpu::Buffer,
     pass1_bind_group: wgpu::BindGroup,
     pass2_bind_group: wgpu::BindGroup,
+    resident: ResidentLodReconciliationBuffers,
+}
+
+struct ResidentLodReconciliationBuffers {
+    packed_records: wgpu::Buffer,
+    seed_bind_group: wgpu::BindGroup,
+    reconcile_2_to_1_forward_bind_group: wgpu::BindGroup,
+    reconcile_2_to_1_backward_bind_group: wgpu::BindGroup,
+    reconcile_4_to_1_forward_bind_group: wgpu::BindGroup,
+    reconcile_4_to_1_backward_bind_group: wgpu::BindGroup,
+    pack_bind_group: wgpu::BindGroup,
 }
 
 /// One encoded, device-resident LOD classification result. The packed words
@@ -414,14 +434,14 @@ pub struct LodClassifierModel {
 /// compute passes. The mutable model borrow prevents another classification
 /// from overwriting this epoch while a consumer is encoding against it.
 pub struct DeviceLodClassification<'model> {
-    packed_records: &'model wgpu::Buffer,
+    model: &'model LodClassifierModel,
     face_count: u32,
     epoch: u64,
 }
 
 impl DeviceLodClassification<'_> {
     pub fn packed_records_buffer(&self) -> &wgpu::Buffer {
-        self.packed_records
+        &self.model.packed_records
     }
 
     pub fn face_count(&self) -> u32 {
@@ -430,6 +450,33 @@ impl DeviceLodClassification<'_> {
 
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+}
+
+/// Crack-free, within-face-graded resident topology derived from one exact
+/// classifier epoch without a CPU publication or staging copy.
+pub struct DeviceResidentLod<'classification> {
+    packed_records: &'classification wgpu::Buffer,
+    face_count: u32,
+    classification_epoch: u64,
+    grading: FaceLodGrading,
+}
+
+impl DeviceResidentLod<'_> {
+    pub fn packed_records_buffer(&self) -> &wgpu::Buffer {
+        self.packed_records
+    }
+
+    pub fn face_count(&self) -> u32 {
+        self.face_count
+    }
+
+    pub fn classification_epoch(&self) -> u64 {
+        self.classification_epoch
+    }
+
+    pub fn grading(&self) -> FaceLodGrading {
+        self.grading
     }
 }
 
@@ -551,6 +598,8 @@ impl LodClassifierDevice {
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
         let pass2_source = quilting_shaders::compile_lod_pass2_wgsl()
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
+        let resident_source = quilting_shaders::compile_lod_resident_wgsl()
+            .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
         let patch_prepare_source = quilting_shaders::compile_patch_prepare_compute_wgsl()
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
         let visibility_expand_source = quilting_shaders::compile_visibility_expand_wgsl()
@@ -568,6 +617,10 @@ impl LodClassifierDevice {
         let pass2_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("quilting LOD pass two"),
             source: wgpu::ShaderSource::Wgsl(Cow::Owned(pass2_source)),
+        });
+        let resident_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("quilting resident LOD reconciliation"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(resident_source)),
         });
         let patch_prepare_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("quilting patch preparation"),
@@ -605,6 +658,32 @@ impl LodClassifierDevice {
             compilation_options: Default::default(),
             cache: None,
         });
+        let resident_pipeline = |label, entry_point| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(label),
+                layout: None,
+                module: &resident_module,
+                entry_point: Some(entry_point),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let resident_seed_pipeline = resident_pipeline(
+            "quilting resident LOD seed",
+            quilting_shaders::LOD_RESIDENT_SEED_DEVICE_ENTRY_POINT,
+        );
+        let resident_reconcile_2_to_1_pipeline = resident_pipeline(
+            "quilting resident LOD 2:1 reconciliation",
+            quilting_shaders::LOD_RESIDENT_RECONCILE_2_TO_1_DEVICE_ENTRY_POINT,
+        );
+        let resident_reconcile_4_to_1_pipeline = resident_pipeline(
+            "quilting resident LOD 4:1 reconciliation",
+            quilting_shaders::LOD_RESIDENT_RECONCILE_4_TO_1_DEVICE_ENTRY_POINT,
+        );
+        let resident_pack_pipeline = resident_pipeline(
+            "quilting resident LOD packing",
+            quilting_shaders::LOD_RESIDENT_PACK_DEVICE_ENTRY_POINT,
+        );
         let patch_prepare_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("quilting patch preparation"),
@@ -655,6 +734,10 @@ impl LodClassifierDevice {
             queue,
             pass1_pipeline,
             pass2_pipeline,
+            resident_seed_pipeline,
+            resident_reconcile_2_to_1_pipeline,
+            resident_reconcile_4_to_1_pipeline,
+            resident_pack_pipeline,
             patch_prepare_pipeline,
             visibility_expand_pipeline,
             visibility_count_pipeline,
@@ -793,11 +876,90 @@ impl LodClassifierDevice {
         })
     }
 
+    async fn run_resident_lod_conformance(&self) -> Result<usize, LodWebGpuError> {
+        let face_count = 10usize;
+        let mut positions = vec![0.0, 0.0, 0.0];
+        for point in 0..=face_count {
+            let angle = point as f32 * std::f32::consts::TAU / (face_count + 1) as f32;
+            positions.extend_from_slice(&[angle.cos(), angle.sin(), 0.0]);
+        }
+        let faces = (0..face_count)
+            .map(|face| [0, face as u32 + 1, face as u32 + 2])
+            .collect::<Vec<_>>();
+        let vertex_count = positions.len() / 3;
+        let prepared = prepare_lod_model(LodModelData {
+            positions,
+            faces,
+            joint_indices: vec![[0; 4]; vertex_count],
+            joint_weights: vec![[0.0; 4]; vertex_count],
+            morph_deltas: Vec::new(),
+            num_morph_targets: 0,
+            face_nodes: vec![0; face_count],
+        })
+        .map_err(LodWebGpuError::Payload)?;
+        let model_words = pack_wgsl_lod_model_words(&prepared).map_err(LodWebGpuError::Payload)?;
+        let mut atlas_keys = Vec::with_capacity(220);
+        for a in 0..=9 {
+            for b in a..=9 {
+                for c in b..=9 {
+                    atlas_keys.push([1u32 << a, 1u32 << b, 1u32 << c]);
+                }
+            }
+        }
+        let atlas = prepare_lod_atlas_lookup(atlas_keys).map_err(LodWebGpuError::Payload)?;
+        let atlas_words = pack_wgsl_lod_atlas_words(&atlas);
+        let request = |exponent: u32, visible: bool, priority| {
+            pack_lod_classification([exponent; 3], 0, visible.then_some(0), priority)
+                .expect("conformance request is inside the packed ABI")
+        };
+        let mut requested = vec![request(0, true, 0); face_count];
+        requested[0] = request(9, true, 17);
+        requested[2] = request(0, false, 23);
+
+        let mut model = self.upload_model(prepared, &atlas)?;
+        let mut dispatch_words = [0u32; 68];
+        dispatch_words[64] = face_count as u32;
+        self.queue
+            .write_buffer(&model.uniform, 0, bytemuck::cast_slice(&dispatch_words));
+        self.queue
+            .write_buffer(&model.packed_records, 0, bytemuck::cast_slice(&requested));
+        model.classification_epoch = 1;
+        let classification = DeviceLodClassification {
+            model: &model,
+            face_count: face_count as u32,
+            epoch: 1,
+        };
+        let mut compared_words = 0usize;
+        for grading in [FaceLodGrading::TwoToOne, FaceLodGrading::FourToOne] {
+            let expected = reconcile_and_pack_wgsl_resident_lods(
+                &requested,
+                &model_words.adjacency,
+                &atlas_words,
+                grading,
+            )
+            .map_err(LodWebGpuError::Conformance)?;
+            let resident = self.reconcile_resident_lod_on_device(&classification, grading);
+            let actual = self.read_resident_lod_for_diagnostics(&resident).await?;
+            if actual != expected {
+                let mismatch = actual
+                    .iter()
+                    .zip(&expected)
+                    .position(|(actual, expected)| actual != expected);
+                return Err(LodWebGpuError::Conformance(format!(
+                    "resident {grading:?} chain mismatch at {mismatch:?}: expected {expected:?}, got {actual:?}",
+                )));
+            }
+            compared_words += actual.len();
+        }
+        Ok(compared_words)
+    }
+
     /// Run the same minimum exact matrix on native and browser devices.
     ///
-    /// This covers one complete animated-capable two-pass dispatch plus all S3
-    /// permutations, visible-only neighbor promotion, invisible records,
-    /// priorities, and multiple atlas keys in the coherence pass.
+    /// This covers one complete animated-capable two-pass dispatch; exact 2:1
+    /// and 4:1 resident closure across a maximum-range ten-face chain; all S3
+    /// permutations; visible-only neighbor promotion; invisible records;
+    /// priorities; and multiple atlas keys in the coherence pass.
     pub async fn run_conformance_matrix(&self) -> Result<LodDeviceConformance, LodWebGpuError> {
         let prepared = prepare_lod_model(LodModelData {
             positions: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -856,8 +1018,27 @@ impl LodClassifierDevice {
                     output.epoch(),
                 )));
             }
-            self.read_lod_classification_for_diagnostics(&output)
-                .await?
+            let actual = self
+                .read_lod_classification_for_diagnostics(&output)
+                .await?;
+            for grading in [FaceLodGrading::TwoToOne, FaceLodGrading::FourToOne] {
+                let resident = self.reconcile_resident_lod_on_device(&output, grading);
+                if resident.face_count() != output.face_count()
+                    || resident.classification_epoch() != output.epoch()
+                    || resident.grading() != grading
+                {
+                    return Err(LodWebGpuError::Conformance(
+                        "device-resident LOD reconciliation identity mismatch".to_string(),
+                    ));
+                }
+                let resident_words = self.read_resident_lod_for_diagnostics(&resident).await?;
+                if resident_words != expected {
+                    return Err(LodWebGpuError::Conformance(format!(
+                        "resident {grading:?} mismatch: expected {expected:?}, got {resident_words:?}",
+                    )));
+                }
+            }
+            actual
         };
         if actual != expected {
             return Err(LodWebGpuError::Conformance(format!(
@@ -879,6 +1060,7 @@ impl LodClassifierDevice {
                 next_output.epoch(),
             )));
         }
+        let resident_lod_words = self.run_resident_lod_conformance().await?;
         let full_pipeline_words = actual.len();
 
         let pass1 = [
@@ -989,6 +1171,7 @@ impl LodClassifierDevice {
 
         Ok(LodDeviceConformance {
             full_pipeline_words,
+            resident_lod_words,
             coherence_words: actual.len(),
             prepared_patch_words,
             rendered_patch_pixels,
@@ -3089,12 +3272,33 @@ impl LodClassifierDevice {
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
-        let packed_records = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("LOD packed records"),
-            size: face_count as u64 * PACKED_RECORD_BYTES,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
+        let packed_record_bytes = face_count as u64 * PACKED_RECORD_BYTES;
+        let packed_records = gpu_buffer(
+            &self.device,
+            "LOD packed records",
+            packed_record_bytes,
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+        );
+        let resident_ping = gpu_buffer(
+            &self.device,
+            "LOD resident reconciliation ping",
+            packed_record_bytes,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let resident_pong = gpu_buffer(
+            &self.device,
+            "LOD resident reconciliation pong",
+            packed_record_bytes,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let resident_packed_records = gpu_buffer(
+            &self.device,
+            "LOD resident packed records",
+            packed_record_bytes,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        );
         let pass1_layout = self.pass1_pipeline.get_bind_group_layout(0);
         let pass1_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("LOD pass one bindings"),
@@ -3123,6 +3327,75 @@ impl LodClassifierDevice {
                 bind(4, &packed_records),
             ],
         });
+        let resident_seed_layout = self.resident_seed_pipeline.get_bind_group_layout(0);
+        let resident_seed_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("LOD resident seed bindings"),
+            layout: &resident_seed_layout,
+            entries: &[
+                bind(0, &uniform),
+                bind(1, &packed_records),
+                bind(4, &resident_ping),
+            ],
+        });
+        let resident_reconcile_bind_groups = |pipeline: &wgpu::ComputePipeline, label| {
+            let layout = pipeline.get_bind_group_layout(0);
+            let forward = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout: &layout,
+                entries: &[
+                    bind(0, &uniform),
+                    bind(2, &adjacency),
+                    bind(4, &resident_ping),
+                    bind(5, &resident_pong),
+                ],
+            });
+            let backward = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout: &layout,
+                entries: &[
+                    bind(0, &uniform),
+                    bind(2, &adjacency),
+                    bind(4, &resident_pong),
+                    bind(5, &resident_ping),
+                ],
+            });
+            (forward, backward)
+        };
+        let (
+            resident_reconcile_2_to_1_forward_bind_group,
+            resident_reconcile_2_to_1_backward_bind_group,
+        ) = resident_reconcile_bind_groups(
+            &self.resident_reconcile_2_to_1_pipeline,
+            "LOD resident 2:1 reconcile bindings",
+        );
+        let (
+            resident_reconcile_4_to_1_forward_bind_group,
+            resident_reconcile_4_to_1_backward_bind_group,
+        ) = resident_reconcile_bind_groups(
+            &self.resident_reconcile_4_to_1_pipeline,
+            "LOD resident 4:1 reconcile bindings",
+        );
+        let resident_pack_layout = self.resident_pack_pipeline.get_bind_group_layout(0);
+        let resident_pack_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("LOD resident pack bindings"),
+            layout: &resident_pack_layout,
+            entries: &[
+                bind(0, &uniform),
+                bind(1, &packed_records),
+                bind(3, &atlas_lut),
+                bind(4, &resident_ping),
+                bind(6, &resident_packed_records),
+            ],
+        });
+        let resident = ResidentLodReconciliationBuffers {
+            packed_records: resident_packed_records,
+            seed_bind_group: resident_seed_bind_group,
+            reconcile_2_to_1_forward_bind_group: resident_reconcile_2_to_1_forward_bind_group,
+            reconcile_2_to_1_backward_bind_group: resident_reconcile_2_to_1_backward_bind_group,
+            reconcile_4_to_1_forward_bind_group: resident_reconcile_4_to_1_forward_bind_group,
+            reconcile_4_to_1_backward_bind_group: resident_reconcile_4_to_1_backward_bind_group,
+            pack_bind_group: resident_pack_bind_group,
+        };
 
         Ok(LodClassifierModel {
             prepared,
@@ -3138,6 +3411,7 @@ impl LodClassifierDevice {
             packed_records,
             pass1_bind_group,
             pass2_bind_group,
+            resident,
         })
     }
 
@@ -3202,11 +3476,87 @@ impl LodClassifierDevice {
             pass.dispatch_workgroups(groups, 1, 1);
         }
         model.classification_epoch = epoch;
+        let face_count = model.prepared.residency.num_faces as u32;
         Ok(DeviceLodClassification {
-            packed_records: &model.packed_records,
-            face_count: model.prepared.residency.num_faces as u32,
+            model: &*model,
+            face_count,
             epoch,
         })
+    }
+
+    /// Append the exact resident shared-edge and within-face grading closure
+    /// after one classifier output. Ten bounded Jacobi passes reach the least
+    /// fixed point over the classifier's four-bit exponent lattice; the final
+    /// pass re-canonicalizes topology and performs the resident atlas lookup.
+    pub fn encode_resident_lod_reconciliation<'classification>(
+        &self,
+        classification: &'classification DeviceLodClassification<'_>,
+        grading: FaceLodGrading,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> DeviceResidentLod<'classification> {
+        let model = classification.model;
+        let groups = classification.face_count.div_ceil(LOD_WORKGROUP_SIZE);
+        if groups != 0 {
+            let (reconcile_pipeline, reconcile_forward_bind_group, reconcile_backward_bind_group) =
+                match grading {
+                    FaceLodGrading::TwoToOne => (
+                        &self.resident_reconcile_2_to_1_pipeline,
+                        &model.resident.reconcile_2_to_1_forward_bind_group,
+                        &model.resident.reconcile_2_to_1_backward_bind_group,
+                    ),
+                    FaceLodGrading::FourToOne => (
+                        &self.resident_reconcile_4_to_1_pipeline,
+                        &model.resident.reconcile_4_to_1_forward_bind_group,
+                        &model.resident.reconcile_4_to_1_backward_bind_group,
+                    ),
+                };
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("quilting resident LOD reconciliation"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.resident_seed_pipeline);
+            pass.set_bind_group(0, &model.resident.seed_bind_group, &[]);
+            pass.dispatch_workgroups(groups, 1, 1);
+
+            pass.set_pipeline(reconcile_pipeline);
+            for iteration in 0..RESIDENT_LOD_RECONCILIATION_PASSES {
+                let bind_group = if iteration.is_multiple_of(2) {
+                    reconcile_forward_bind_group
+                } else {
+                    reconcile_backward_bind_group
+                };
+                pass.set_bind_group(0, bind_group, &[]);
+                pass.dispatch_workgroups(groups, 1, 1);
+            }
+
+            pass.set_pipeline(&self.resident_pack_pipeline);
+            pass.set_bind_group(0, &model.resident.pack_bind_group, &[]);
+            pass.dispatch_workgroups(groups, 1, 1);
+        }
+        DeviceResidentLod {
+            packed_records: &model.resident.packed_records,
+            face_count: classification.face_count,
+            classification_epoch: classification.epoch,
+            grading,
+        }
+    }
+
+    /// Submit resident reconciliation without staging or readback. Callers
+    /// building a larger render graph should prefer
+    /// [`Self::encode_resident_lod_reconciliation`].
+    pub fn reconcile_resident_lod_on_device<'classification>(
+        &self,
+        classification: &'classification DeviceLodClassification<'_>,
+        grading: FaceLodGrading,
+    ) -> DeviceResidentLod<'classification> {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quilting resident LOD reconciliation"),
+            });
+        let output = self.encode_resident_lod_reconciliation(classification, grading, &mut encoder);
+        self.queue.submit([encoder.finish()]);
+        output
     }
 
     /// Upload state, execute both classifier passes, and leave their packed
@@ -3250,6 +3600,37 @@ impl LodClassifierDevice {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("quilting LOD diagnostic copy"),
+            });
+        encoder.copy_buffer_to_buffer(
+            output.packed_records_buffer(),
+            0,
+            &readback,
+            0,
+            readback_bytes,
+        );
+        self.queue.submit([encoder.finish()]);
+        self.readback_words(&readback, readback_bytes).await
+    }
+
+    /// Explicit full diagnostic readback of reconciled resident topology.
+    pub async fn read_resident_lod_for_diagnostics(
+        &self,
+        output: &DeviceResidentLod<'_>,
+    ) -> Result<Vec<u32>, LodWebGpuError> {
+        let readback_bytes = u64::from(output.face_count) * PACKED_RECORD_BYTES;
+        if readback_bytes == 0 {
+            return Ok(Vec::new());
+        }
+        let readback = gpu_buffer(
+            &self.device,
+            "LOD resident temporary diagnostic readback",
+            readback_bytes,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quilting resident LOD diagnostic copy"),
             });
         encoder.copy_buffer_to_buffer(
             output.packed_records_buffer(),
@@ -3716,12 +4097,13 @@ pub async fn run_browser_lod_conformance() -> Result<String, wasm_bindgen::JsVal
         .await
         .map_err(browser_error)?;
     Ok(format!(
-        "adapter={} backend={:?} full_pipeline_words={} coherence_words={} \
+        "adapter={} backend={:?} full_pipeline_words={} resident_lod_words={} coherence_words={} \
          prepared_patch_words={} rendered_patch_pixels={} shared_frame_draws={} compacted_source_words={} \
          compacted_range_words={} indirect_argument_words={} indirect_draws={}",
         adapter_info.name,
         adapter_info.backend,
         report.full_pipeline_words,
+        report.resident_lod_words,
         report.coherence_words,
         report.prepared_patch_words,
         report.rendered_patch_pixels,

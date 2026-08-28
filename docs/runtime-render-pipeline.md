@@ -446,6 +446,18 @@ source visibility, compacted range/survivor, aligned batch-index, and indirect
 buffers for an ordered device-only path. An authoritative backend should copy
 only bounded, delayed telemetry to the CPU.
 
+Resident crack-free topology now has the same device-only boundary. A seed
+pass decanonicalizes the classifier word into face-local edge exponents, ten
+ping-pong Jacobi passes restore shared-edge equality plus the selected 2:1 or
+4:1 within-face grading, and a final pass re-canonicalizes the result and
+selects its atlas entry. Ten passes are a bound, not a convergence guess: the
+input exponent lattice is `[0, 9]`, and propagation across another face loses
+at least one exponent through grading. The independent queue-based Rust oracle
+matches `quilting-core`'s retained fixed-point semantics, including invisible
+faces, and native/browser conformance covers a ten-face maximum-range chain for
+both policies. Visibility and adaptive priority remain unchanged in the final
+packed word. No resident pass uses a counter readback or CPU publication.
+
 Patch preparation now writes the exact 208-byte prepared record on-device, and
 the first production WGSL graphics pipeline pulls those records through the
 same pure rational-QB/Möbius evaluator used by WebGL2. A validated
@@ -516,12 +528,11 @@ backend enabled versus 7,458,547 bytes with the feature disabled: an 84,870-byte
 feature set reached roughly 50 MB before release optimization—so size gates
 must compare optimized outputs.
 
-The next cut is authoritative renderer integration: consume the new
-device-resident LOD output in same-device edge reconciliation, atlas selection,
-and batch/topology publication; stop rebuilding topology words from worker
-readback; attach the live shared frame executor to a browser surface; and add
-WebGL2 image/workload parity behind the existing explicit backend switch. PBR,
-wire, LOD color, stretch, picking,
+The next cut is authoritative renderer integration: consume the reconciled
+device-resident LOD and atlas selection in GPU batch/topology publication; stop
+rebuilding topology words from worker readback; attach the live shared frame
+executor to a browser surface; and add WebGL2 image/workload parity behind the
+existing explicit backend switch. PBR, wire, LOD color, stretch, picking,
 material/texture binding, and postprocess commands still reject explicitly
 rather than silently lowering to normals. That cut is what finally removes the
 live classifier readback, CPU topology repacking, and rejected atlas vertex

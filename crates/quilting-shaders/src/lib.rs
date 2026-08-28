@@ -14,6 +14,10 @@ pub enum EntryPointStage {
 /// source spelling while flattening and deterministically appends `_`.
 pub const LOD_PASS1_DEVICE_ENTRY_POINT: &str = "classify_lod_pass1_";
 pub const LOD_PASS2_DEVICE_ENTRY_POINT: &str = "classify_lod_pass2_";
+pub const LOD_RESIDENT_SEED_DEVICE_ENTRY_POINT: &str = "seed_resident_lod";
+pub const LOD_RESIDENT_RECONCILE_2_TO_1_DEVICE_ENTRY_POINT: &str = "reconcile_resident_lod_2_to_1_";
+pub const LOD_RESIDENT_RECONCILE_4_TO_1_DEVICE_ENTRY_POINT: &str = "reconcile_resident_lod_4_to_1_";
+pub const LOD_RESIDENT_PACK_DEVICE_ENTRY_POINT: &str = "pack_resident_lod";
 pub const VISIBILITY_COUNT_DEVICE_ENTRY_POINT: &str = "count_visible_instances";
 pub const VISIBILITY_EXPAND_DEVICE_ENTRY_POINT: &str = "expand_face_visibility";
 pub const VISIBILITY_SCAN_DEVICE_ENTRY_POINT: &str = "scan_visible_batches";
@@ -40,6 +44,7 @@ pub mod sources {
     pub const PATCH_RENDER_DEVICE: &str = include_str!("../shaders/render/patch.wgsl");
     pub const LOD_PASS1: &str = include_str!("../shaders/compute/lod_pass1.wgsl");
     pub const LOD_PASS2: &str = include_str!("../shaders/compute/lod_pass2.wgsl");
+    pub const LOD_RESIDENT: &str = include_str!("../shaders/compute/lod_resident.wgsl");
     pub const VISIBILITY_COMPACTION_TYPES: &str =
         include_str!("../shaders/compute/visibility_compaction_types.wgsl");
     pub const VISIBILITY_COUNT: &str = include_str!("../shaders/compute/visibility_count.wgsl");
@@ -341,6 +346,16 @@ pub fn compile_lod_pass1_wgsl() -> Result<String, Box<dyn std::error::Error>> {
 /// Standalone device WGSL for LOD pass two.
 pub fn compile_lod_pass2_wgsl() -> Result<String, Box<dyn std::error::Error>> {
     emit_wgsl(&compile_lod_pass2_module()?)
+}
+
+/// Compile and validate device-resident crack-free LOD closure and packing.
+pub fn compile_lod_resident_module() -> Result<naga::Module, Box<dyn std::error::Error>> {
+    compile_validated_compute_module(sources::LOD_RESIDENT)
+}
+
+/// Standalone device WGSL for retained LOD reconciliation.
+pub fn compile_lod_resident_wgsl() -> Result<String, Box<dyn std::error::Error>> {
+    emit_wgsl(&compile_lod_resident_module()?)
 }
 
 /// Compile and validate current-pose patch preparation for WebGPU storage.
@@ -892,6 +907,57 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
                 expected_bindings,
             );
         }
+    }
+
+    #[test]
+    fn resident_lod_compute_contract_is_valid_and_reparseable() {
+        let module = compile_lod_resident_module().unwrap();
+        for source_entry in [
+            "seed_resident_lod",
+            "reconcile_resident_lod_2_to_1",
+            "reconcile_resident_lod_4_to_1",
+            "pack_resident_lod",
+        ] {
+            let entry = module
+                .entry_points
+                .iter()
+                .find(|entry| entry.name == source_entry)
+                .unwrap_or_else(|| panic!("missing {source_entry}"));
+            assert_eq!(entry.stage, naga::ShaderStage::Compute);
+            assert_eq!(entry.workgroup_size, [64, 1, 1]);
+        }
+        assert_eq!(
+            module
+                .global_variables
+                .iter()
+                .filter(|(_, variable)| variable.binding.is_some())
+                .count(),
+            7,
+        );
+
+        let source = compile_lod_resident_wgsl().unwrap();
+        assert!(!source.contains("#import"));
+        assert!(!source.contains("#define_import_path"));
+        let flattened = naga::front::wgsl::parse_str(&source).unwrap();
+        assert_eq!(
+            flattened
+                .entry_points
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                LOD_RESIDENT_SEED_DEVICE_ENTRY_POINT,
+                LOD_RESIDENT_RECONCILE_2_TO_1_DEVICE_ENTRY_POINT,
+                LOD_RESIDENT_RECONCILE_4_TO_1_DEVICE_ENTRY_POINT,
+                LOD_RESIDENT_PACK_DEVICE_ENTRY_POINT,
+            ],
+        );
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&flattened)
+        .unwrap();
     }
 
     #[test]

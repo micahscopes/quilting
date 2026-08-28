@@ -266,6 +266,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         let classifier = LodClassifierDevice::new(device, queue).unwrap();
         let report = classifier.run_conformance_matrix().await.unwrap();
         assert_eq!(report.full_pipeline_words, 1);
+        assert_eq!(report.resident_lod_words, 20);
         assert_eq!(report.coherence_words, 10);
         assert_eq!(report.prepared_patch_words, 104);
         assert!(report.rendered_patch_pixels >= 8);

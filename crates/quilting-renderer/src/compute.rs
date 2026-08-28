@@ -18,7 +18,7 @@ use quilting_core::render::{
     RenderGeometry, RenderSceneSnapshot, VisibilityCompactionPlan,
 };
 use quilting_mesh::HalfEdgeMesh;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 #[cfg(target_arch = "wasm32")]
 fn log_info(msg: &str) {
@@ -1296,6 +1296,129 @@ pub fn reconcile_and_pack_wgsl_lod_pass2(
         )?);
     }
     Ok(packed)
+}
+
+/// Independent CPU oracle for the device-resident crack-free topology pass.
+///
+/// The classifier has already reconciled simultaneously visible neighbors.
+/// This second closure treats every retained request uniformly, restores exact
+/// shared-edge equality across culled faces, applies the selected within-face
+/// grading ratio, and then repeats canonical atlas selection. The queue reaches
+/// the least monotone fixed point; WebGPU reaches the same result through a
+/// bounded Jacobi sequence over the four-bit exponent lattice.
+pub fn reconcile_and_pack_wgsl_resident_lods(
+    requested_packed: &[u32],
+    adjacency: &[[u32; 4]],
+    atlas_lut: &[u32],
+    grading: batch::FaceLodGrading,
+) -> Result<Vec<u32>, String> {
+    let face_count = requested_packed.len();
+    if adjacency.len() != face_count.saturating_mul(3) {
+        return Err("resident LOD adjacency shape does not match faces".to_string());
+    }
+    if atlas_lut.len() < 1_200 || atlas_lut.iter().any(|&index| index > u8::MAX as u32) {
+        return Err("resident LOD atlas lookup is malformed".to_string());
+    }
+
+    let mut requested = Vec::with_capacity(face_count);
+    for &packed in requested_packed {
+        requested.push(
+            unpack_lod_classification_fields(packed)?
+                .into_face_lod_classification()
+                .requested
+                .edge_lods(),
+        );
+    }
+    for face in 0..face_count {
+        for edge in 0..3 {
+            let neighbor = adjacency[face * 3 + edge];
+            if neighbor[0] == u32::MAX {
+                continue;
+            }
+            let neighbor_face = neighbor[0] as usize;
+            let neighbor_edge = neighbor[1] as usize;
+            if neighbor_face >= face_count || neighbor_edge >= 3 {
+                return Err("resident LOD adjacency record is out of range".to_string());
+            }
+            let reverse = adjacency[neighbor_face * 3 + neighbor_edge];
+            if reverse[0] != face as u32 || reverse[1] != edge as u32 {
+                return Err("resident LOD adjacency is not reciprocal".to_string());
+            }
+        }
+    }
+
+    let ratio = grading.ratio();
+    let mut queue = (0..face_count).collect::<VecDeque<_>>();
+    let mut queued = vec![true; face_count];
+    while let Some(face) = queue.pop_front() {
+        queued[face] = false;
+        let mut face_lods = requested[face];
+        let mut face_changed = false;
+        for edge in 0..3 {
+            let neighbor = adjacency[face * 3 + edge];
+            if neighbor[0] == u32::MAX {
+                continue;
+            }
+            let neighbor_face = neighbor[0] as usize;
+            let neighbor_edge = neighbor[1] as usize;
+            if neighbor_face == face {
+                let shared = face_lods[edge].max(face_lods[neighbor_edge]);
+                if face_lods[edge] != shared || face_lods[neighbor_edge] != shared {
+                    face_lods[edge] = shared;
+                    face_lods[neighbor_edge] = shared;
+                    face_changed = true;
+                }
+                continue;
+            }
+            let shared = face_lods[edge].max(requested[neighbor_face][neighbor_edge]);
+            if face_lods[edge] != shared {
+                face_lods[edge] = shared;
+                face_changed = true;
+            }
+            if requested[neighbor_face][neighbor_edge] != shared {
+                requested[neighbor_face][neighbor_edge] = shared;
+                if !queued[neighbor_face] {
+                    queue.push_back(neighbor_face);
+                    queued[neighbor_face] = true;
+                }
+            }
+        }
+
+        let maximum = *face_lods.iter().max().unwrap_or(&1);
+        let minimum = (maximum / ratio).max(1);
+        for edge_lod in &mut face_lods {
+            if *edge_lod < minimum {
+                *edge_lod = minimum;
+                face_changed = true;
+            }
+        }
+        if face_changed && requested[face] != face_lods {
+            requested[face] = face_lods;
+            if !queued[face] {
+                queue.push_back(face);
+                queued[face] = true;
+            }
+        }
+    }
+
+    requested
+        .into_iter()
+        .zip(requested_packed.iter().copied())
+        .map(|(edge_lods, packed)| {
+            let original = unpack_lod_classification_fields(packed)?;
+            let resident = batch::ResidentLod::from_edge_lods(edge_lods);
+            let exponents = resident.canonical.map(u32::trailing_zeros);
+            let key = exponents[0] as usize
+                + exponents[1] as usize * 10
+                + exponents[2] as usize * 100;
+            pack_lod_classification(
+                exponents,
+                resident.perm_index as u32,
+                original.visible().then_some(atlas_lut[key]),
+                original.adaptation_priority,
+            )
+        })
+        .collect()
 }
 
 /// One exact mismatch between two backend LOD classification records.
@@ -3315,6 +3438,172 @@ mod tests {
             actual[2],
             pack_lod_classification([8, 8, 8], 0, None, 0).unwrap(),
         );
+    }
+
+    #[test]
+    fn resident_lod_oracle_reaches_the_exact_graded_chain_closure() {
+        let request = |edge_lods: [u32; 3], visible: bool, priority: u8| {
+            let resident = batch::ResidentLod::from_edge_lods(edge_lods);
+            pack_lod_classification(
+                resident.canonical.map(u32::trailing_zeros),
+                resident.perm_index as u32,
+                visible.then_some(0),
+                priority,
+            )
+            .unwrap()
+        };
+        let face_count = 10usize;
+        let mut requested = vec![request([1, 1, 1], true, 0); face_count];
+        requested[0] = request([512, 1, 1], true, 17);
+        requested[2] = request([1, 1, 1], false, 23);
+        let mut adjacency = vec![[u32::MAX, 0, 0, 0]; face_count * 3];
+        for face in 0..face_count - 1 {
+            adjacency[face * 3 + 1] = [(face + 1) as u32, 0, 0, 0];
+            adjacency[(face + 1) * 3] = [face as u32, 1, 0, 0];
+        }
+        let atlas = vec![0; 1_200];
+
+        let two_to_one = reconcile_and_pack_wgsl_resident_lods(
+            &requested,
+            &adjacency,
+            &atlas,
+            batch::FaceLodGrading::TwoToOne,
+        )
+        .unwrap();
+        let four_to_one = reconcile_and_pack_wgsl_resident_lods(
+            &requested,
+            &adjacency,
+            &atlas,
+            batch::FaceLodGrading::FourToOne,
+        )
+        .unwrap();
+        let local = |packed| {
+            unpack_lod_classification_fields(packed)
+                .unwrap()
+                .into_face_lod_classification()
+                .requested
+                .edge_lods()
+        };
+        assert_eq!(local(two_to_one[0]), [512, 256, 256]);
+        assert_eq!(local(two_to_one[1]), [256, 128, 128]);
+        assert_eq!(local(two_to_one[8]), [2, 1, 1]);
+        assert_eq!(local(two_to_one[9]), [1, 1, 1]);
+        assert_eq!(local(four_to_one[0]), [512, 128, 128]);
+        assert_eq!(local(four_to_one[1]), [128, 32, 32]);
+        assert_eq!(local(four_to_one[2]), [32, 8, 8]);
+        assert_eq!(local(four_to_one[4]), [2, 1, 1]);
+        assert_eq!(local(four_to_one[5]), [1, 1, 1]);
+        assert!(!unpack_lod_classification_fields(two_to_one[2])
+            .unwrap()
+            .visible());
+        assert_eq!(
+            unpack_lod_classification_fields(two_to_one[2])
+                .unwrap()
+                .adaptation_priority,
+            23,
+        );
+        assert_eq!(
+            unpack_lod_classification_fields(two_to_one[0])
+                .unwrap()
+                .adaptation_priority,
+            17,
+        );
+    }
+
+    #[test]
+    fn resident_lod_oracle_rejects_nonreciprocal_adjacency() {
+        let requested = [pack_lod_classification([0, 0, 0], 0, Some(0), 0).unwrap(); 2];
+        let mut adjacency = vec![[u32::MAX, 0, 0, 0]; 6];
+        adjacency[0] = [1, 0, 0, 0];
+        let atlas = vec![0; 1_200];
+        let error = reconcile_and_pack_wgsl_resident_lods(
+            &requested,
+            &adjacency,
+            &atlas,
+            batch::FaceLodGrading::TwoToOne,
+        )
+        .unwrap_err();
+        assert!(error.contains("not reciprocal"));
+    }
+
+    #[test]
+    fn resident_lod_oracle_matches_core_fixed_point_semantics() {
+        let face_count = 10usize;
+        let mut positions = vec![[0.0, 0.0, 0.0]];
+        for point in 0..=face_count {
+            let angle = point as f64 * std::f64::consts::TAU / (face_count + 1) as f64;
+            positions.push([angle.cos(), angle.sin(), 0.0]);
+        }
+        let faces = (0..face_count)
+            .map(|face| [0, face as u32 + 1, face as u32 + 2])
+            .collect::<Vec<_>>();
+        let face_nodes = vec![0; face_count];
+        let adjacency_values =
+            build_scoped_lod_adjacency(&positions, &faces, &face_nodes).unwrap();
+        let adjacency = adjacency_values
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|edge| [(edge[0] as i32) as u32, edge[1] as u32, 0, 0])
+            .collect::<Vec<_>>();
+        let request = |lod| {
+            let resident = batch::ResidentLod::uniform(lod);
+            pack_lod_classification(
+                resident.canonical.map(u32::trailing_zeros),
+                resident.perm_index as u32,
+                Some(0),
+                0,
+            )
+            .unwrap()
+        };
+        let mut packed = vec![request(1); face_count];
+        packed[0] = request(512);
+        let topology = HalfEdgeMesh::from_triangles((face_count + 2) as u32, &faces);
+        let atlas = vec![0; 1_200];
+        let dirty_faces = (0..face_count).collect::<Vec<_>>();
+
+        for grading in [batch::FaceLodGrading::TwoToOne, batch::FaceLodGrading::FourToOne] {
+            let mut residents = vec![None; face_count];
+            let requests = packed
+                .iter()
+                .map(|&word| {
+                    Some(
+                        unpack_lod_classification_fields(word)
+                            .unwrap()
+                            .into_face_lod_classification()
+                            .requested,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut scratch = batch::ResidentLodBalanceScratch::default();
+            batch::reconcile_resident_lods_from_requests_with_grading(
+                &requests,
+                &mut residents,
+                &topology,
+                &dirty_faces,
+                &mut scratch,
+                grading,
+            );
+            let oracle = reconcile_and_pack_wgsl_resident_lods(
+                &packed,
+                &adjacency,
+                &atlas,
+                grading,
+            )
+            .unwrap();
+            assert_eq!(
+                oracle
+                    .iter()
+                    .map(|&word| {
+                        unpack_lod_classification_fields(word)
+                            .unwrap()
+                            .into_face_lod_classification()
+                            .requested
+                    })
+                    .collect::<Vec<_>>(),
+                residents.into_iter().map(Option::unwrap).collect::<Vec<_>>(),
+            );
+        }
     }
 
     #[test]
