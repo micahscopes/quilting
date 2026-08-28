@@ -328,13 +328,7 @@ impl LodClassifierDevice {
 }
 
 fn preferred_color_format(formats: &[wgpu::TextureFormat]) -> Option<wgpu::TextureFormat> {
-    [
-        wgpu::TextureFormat::Bgra8Unorm,
-        wgpu::TextureFormat::Rgba8Unorm,
-    ]
-    .into_iter()
-    .find(|format| formats.contains(format))
-    .or_else(|| formats.first().copied())
+    formats.first().copied()
 }
 
 fn preferred_present_mode(modes: &[wgpu::PresentMode]) -> Option<wgpu::PresentMode> {
@@ -356,7 +350,7 @@ mod tests {
                 wgpu::TextureFormat::Rgba8Unorm,
                 wgpu::TextureFormat::Bgra8Unorm,
             ]),
-            Some(wgpu::TextureFormat::Bgra8Unorm),
+            Some(wgpu::TextureFormat::Rgba16Float),
         );
         assert_eq!(
             preferred_color_format(&[wgpu::TextureFormat::Rgba16Float]),

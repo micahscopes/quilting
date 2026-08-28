@@ -650,20 +650,25 @@ a million-scale material ID, and no console warning or error.
 
 The backend now owns a real presentation-surface lifecycle as a separate Rust
 resource. Browser creation requests an adapter compatible with a previously
-unclaimed canvas, chooses a supported linear eight-bit format and FIFO when
-available, configures a matching depth attachment, suspends cleanly at zero
-size, recreates attachments on resize, retries one outdated acquisition, skips
+unclaimed canvas, chooses the adapter-preferred surface format and FIFO when
+available, specializes the graphics pipelines to it, configures a matching
+depth attachment, suspends cleanly at zero size, recreates attachments on
+resize, retries one outdated acquisition, skips
 timeout/occlusion, and reports surface loss for canvas-level recreation. Frame
 ownership is a closure over the same `PatchRenderTarget` accepted by offscreen
 execution, so promotion does not introduce a second draw API. The browser gate
 uses the same device for the complete resident/adaptive matrix and a 256×256
-`Bgra8Unorm` canvas presentation; Chromium reports one presented frame and one
-configuration with no warning, error, or assertion.
+canvas presentation; Chromium selects its preferred `Rgba8Unorm`, reports one
+presented frame and one configuration, and emits no warning, error, or
+assertion. That frame is not a clear-color probe: the exact two-domain retained
+root plus sparse dyadic replacement fixture is classified, reconciled,
+prepared, bucketed, and drawn through the shared executor directly into the
+surface. Its root/overlay encoding must equal the separately raster-verified
+offscreen encoding before the browser gate can pass.
 
 Hyperscope does not yet claim that surface: its visible `cv` canvas is currently
 claimed as WebGL2 before the rollback-safe WebGPU shadow starts, and browser
-canvas context type cannot be changed afterward. The next cut gives the shared
-executor the live surface target in the standalone gate, then adds WebGL2
+canvas context type cannot be changed afterward. The next cut adds WebGL2
 image/workload parity and an explicit pre-context application cutover. PBR,
 wire, LOD color, stretch, picking,
 material/texture binding, and postprocess commands still reject explicitly

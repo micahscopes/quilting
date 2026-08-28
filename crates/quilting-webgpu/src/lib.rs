@@ -1266,6 +1266,7 @@ impl LodClassifierDevice {
     /// intermediate map or duplicated source-face buffer.
     async fn validate_resident_adaptive_render_conformance(
         &self,
+        presentation: Option<&mut PatchPresentationSurface>,
     ) -> Result<(usize, usize, usize, usize), LodWebGpuError> {
         const WIDTH: u32 = 32;
         const HEIGHT: u32 = 32;
@@ -1395,12 +1396,21 @@ impl LodClassifierDevice {
             &packed_atlas,
             &preparation.draw_domains,
         )?;
+        let color_format = presentation
+            .as_deref()
+            .map_or(wgpu::TextureFormat::Rgba8Unorm, |surface| {
+                surface.color_format()
+            });
         let pipeline = self.create_resident_root_render_pipeline(
-            wgpu::TextureFormat::Rgba8Unorm,
+            color_format,
             Some(wgpu::TextureFormat::Depth24Plus),
             1,
         )?;
-        let overlay_pipeline = self.create_offscreen_patch_render_pipeline()?;
+        let overlay_pipeline = self.create_patch_render_pipeline(
+            color_format,
+            Some(wgpu::TextureFormat::Depth24Plus),
+            1,
+        )?;
         let mut invalid_overlay_scene = render_scene.clone();
         invalid_overlay_scene.batches.pop();
         if self
@@ -1508,7 +1518,7 @@ impl LodClassifierDevice {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: color_format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
@@ -1541,36 +1551,38 @@ impl LodClassifierDevice {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("resident root direct render conformance"),
             });
-        let classification = self.encode_lod_classification(&mut model, &mut encoder)?;
-        let resident = self.encode_resident_lod_reconciliation(
-            &classification,
-            FaceLodGrading::TwoToOne,
-            &mut encoder,
-        );
-        let encoding = self.encode_resident_adaptive_normals(
-            &mut encoder,
-            &frame,
-            &render_scene,
-            classification.model,
-            &resident,
-            &preparation,
-            &geometry,
-            &pipeline,
-            &bindings,
-            &overlay_pipeline,
-            Some(&overlay),
-            &packed_atlas,
-            PatchRenderTarget {
-                color_view: &target_view,
-                resolve_target: None,
-                depth_stencil_view: Some(&depth_view),
-                clear_color: Some(wgpu::Color::TRANSPARENT),
-                clear_depth: Some(1.0),
-            },
-            LodPose::default(),
-            0,
-            true,
-        )?;
+        let encoding = {
+            let classification = self.encode_lod_classification(&mut model, &mut encoder)?;
+            let resident = self.encode_resident_lod_reconciliation(
+                &classification,
+                FaceLodGrading::TwoToOne,
+                &mut encoder,
+            );
+            self.encode_resident_adaptive_normals(
+                &mut encoder,
+                &frame,
+                &render_scene,
+                classification.model,
+                &resident,
+                &preparation,
+                &geometry,
+                &pipeline,
+                &bindings,
+                &overlay_pipeline,
+                Some(&overlay),
+                &packed_atlas,
+                PatchRenderTarget {
+                    color_view: &target_view,
+                    resolve_target: None,
+                    depth_stencil_view: Some(&depth_view),
+                    clear_color: Some(wgpu::Color::TRANSPARENT),
+                    clear_depth: Some(1.0),
+                },
+                LodPose::default(),
+                0,
+                true,
+            )?
+        };
         let overlay_encoding = encoding.overlay.ok_or_else(|| {
             LodWebGpuError::Conformance("adaptive overlay was not encoded".to_string())
         })?;
@@ -1628,6 +1640,106 @@ impl LodClassifierDevice {
             return Err(LodWebGpuError::Conformance(format!(
                 "resident root render produced an implausible {rendered}-pixel footprint",
             )));
+        }
+        if let Some(surface) = presentation {
+            let surface_size = surface.size();
+            if surface_size[0] == 0 || surface_size[1] == 0 {
+                return Err(LodWebGpuError::Conformance(
+                    "resident adaptive presentation surface is suspended".to_string(),
+                ));
+            }
+            self.write_lod_classification_state(
+                &model,
+                &LodDispatchState {
+                    subjects: Vec::new(),
+                    baseline_mobius: identity_mobius(),
+                    baseline_model: identity_matrix(),
+                    pole: [0.0; 4],
+                    mobius_power: 0.0,
+                    c_norm_sq: 0.0,
+                    has_pole: 0.0,
+                },
+                WgslLodDispatchMetrics {
+                    view_projection: identity_matrix(),
+                    density: 1.0,
+                    pixel_floor: 0.0,
+                    max_lod: atlas_lookup.max_lod,
+                    viewport: [surface_size[0] as f32, surface_size[1] as f32],
+                    num_joints: 0,
+                },
+                LodPose::default(),
+            )?;
+            let presentation_frame = RenderFrame::build(
+                18,
+                RenderPoseIdentity {
+                    asset_revision: 3,
+                    pose_revision: 6,
+                },
+                RenderStyle::Normals,
+                RenderView {
+                    viewport: surface_size,
+                    mvp: identity_matrix(),
+                    model_view: identity_matrix(),
+                    camera_position: [0.0, 0.0, 4.0],
+                    selected_node: None,
+                    focus: FocusFieldPacket::default(),
+                },
+                RenderFrameOptions::default(),
+                &render_scene,
+            )
+            .map_err(|error| LodWebGpuError::Conformance(error.to_string()))?;
+            let presented = surface.present_with(
+                self,
+                "resident adaptive browser presentation conformance",
+                |encoder, target| {
+                    let classification = self.encode_lod_classification(&mut model, encoder)?;
+                    let resident = self.encode_resident_lod_reconciliation(
+                        &classification,
+                        FaceLodGrading::TwoToOne,
+                        encoder,
+                    );
+                    self.encode_resident_adaptive_normals(
+                        encoder,
+                        &presentation_frame,
+                        &render_scene,
+                        classification.model,
+                        &resident,
+                        &preparation,
+                        &geometry,
+                        &pipeline,
+                        &bindings,
+                        &overlay_pipeline,
+                        Some(&overlay),
+                        &packed_atlas,
+                        PatchRenderTarget {
+                            color_view: target.color_view,
+                            resolve_target: target.resolve_target,
+                            depth_stencil_view: target.depth_stencil_view,
+                            clear_color: Some(wgpu::Color {
+                                r: 0.015,
+                                g: 0.02,
+                                b: 0.03,
+                                a: 1.0,
+                            }),
+                            clear_depth: Some(1.0),
+                        },
+                        LodPose::default(),
+                        0,
+                        true,
+                    )
+                },
+            )?;
+            let SurfacePresentation::Presented(presented_encoding) = presented else {
+                return Err(LodWebGpuError::Conformance(format!(
+                    "resident adaptive surface frame was not presented: {presented:?}",
+                )));
+            };
+            if presented_encoding != encoding {
+                return Err(LodWebGpuError::Conformance(format!(
+                    "offscreen/presentation encoding mismatch: offscreen={encoding:?}, \
+                     presentation={presented_encoding:?}",
+                )));
+            }
         }
         Ok((
             rendered,
@@ -1827,6 +1939,22 @@ impl LodClassifierDevice {
     /// priorities; multiple atlas keys in the coherence pass; and exact
     /// source-stable root bucketing across three 64-face chunks.
     pub async fn run_conformance_matrix(&self) -> Result<LodDeviceConformance, LodWebGpuError> {
+        self.run_conformance_matrix_impl(None).await
+    }
+
+    /// Run the exact matrix and direct its composed resident/adaptive case to
+    /// a real presentation surface using the same pipelines and device state.
+    pub async fn run_conformance_matrix_with_surface(
+        &self,
+        presentation: &mut PatchPresentationSurface,
+    ) -> Result<LodDeviceConformance, LodWebGpuError> {
+        self.run_conformance_matrix_impl(Some(presentation)).await
+    }
+
+    async fn run_conformance_matrix_impl(
+        &self,
+        presentation: Option<&mut PatchPresentationSurface>,
+    ) -> Result<LodDeviceConformance, LodWebGpuError> {
         let prepared = prepare_lod_model(LodModelData {
             positions: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             faces: vec![[0, 1, 2]],
@@ -1937,7 +2065,9 @@ impl LodClassifierDevice {
             resident_root_indirect_draws,
             adaptive_overlay_patches,
             adaptive_overlay_indirect_draws,
-        ) = self.validate_resident_adaptive_render_conformance().await?;
+        ) = self
+            .validate_resident_adaptive_render_conformance(presentation)
+            .await?;
         let resident_bucket_words = self.run_resident_geometry_bucket_conformance().await?;
         let full_pipeline_words = actual.len();
 
@@ -5157,53 +5287,9 @@ pub async fn run_browser_lod_conformance(
     .await
     .map_err(browser_error)?;
     let report = classifier
-        .run_conformance_matrix()
+        .run_conformance_matrix_with_surface(&mut presentation)
         .await
         .map_err(browser_error)?;
-    let presented = presentation
-        .present_with(
-            &classifier,
-            "quilting browser presentation conformance",
-            |encoder, target| {
-                let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("quilting browser presentation clear"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: target.color_view,
-                        depth_slice: None,
-                        resolve_target: target.resolve_target,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: 0.06,
-                                g: 0.24,
-                                b: 0.48,
-                                a: 1.0,
-                            }),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: target.depth_stencil_view.map(|view| {
-                        wgpu::RenderPassDepthStencilAttachment {
-                            view,
-                            depth_ops: Some(wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(1.0),
-                                store: wgpu::StoreOp::Store,
-                            }),
-                            stencil_ops: None,
-                        }
-                    }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-                Ok(())
-            },
-        )
-        .map_err(browser_error)?;
-    if presented != SurfacePresentation::Presented(()) {
-        return Err(browser_error(format!(
-            "browser presentation surface did not present: {presented:?}"
-        )));
-    }
     let surface = presentation.diagnostics();
     Ok(format!(
         "adapter={} backend={} surface={}x{} surface_format={} surface_presented={} surface_reconfigurations={} full_pipeline_words={} resident_lod_words={} resident_visibility_words={} resident_bucket_words={} resident_root_topology_words={} resident_root_prepared_words={} resident_root_domain_words={} resident_adaptive_rendered_pixels={} resident_root_indirect_draws={} adaptive_overlay_patches={} adaptive_overlay_indirect_draws={} coherence_words={} \
