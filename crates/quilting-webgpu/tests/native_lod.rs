@@ -20,7 +20,8 @@ use quilting_renderer::compute::{
     LodSubjectState, PackedLodClassification, PreparedLodModel, WgslLodDispatchMetrics,
 };
 use quilting_webgpu::{
-    supports_patch_presentation_style, LodClassifierDevice, LodPose, PatchRenderSceneUpdate,
+    supports_basic_pbr_frame, supports_patch_presentation_style, LodClassifierDevice, LodPose,
+    PatchRenderSceneUpdate,
 };
 
 #[test]
@@ -322,6 +323,23 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
 
         let (prepared, source_instances, render_scene, render_frame) =
             shared_render_frame_fixture();
+        assert!(supports_basic_pbr_frame(
+            &render_scene,
+            RenderFrameOptions::default(),
+        ));
+        let mut textured_scene = render_scene.clone();
+        textured_scene.materials[0].textures.base_color = Some(0);
+        assert!(!supports_basic_pbr_frame(
+            &textured_scene,
+            RenderFrameOptions::default(),
+        ));
+        assert!(!supports_basic_pbr_frame(
+            &render_scene,
+            RenderFrameOptions {
+                focus_postprocess: true,
+                ..RenderFrameOptions::default()
+            },
+        ));
         let foreign_prepared = prepared.clone();
         let atlas = complete_atlas();
         let mut model = classifier.upload_model(prepared, &atlas).unwrap();

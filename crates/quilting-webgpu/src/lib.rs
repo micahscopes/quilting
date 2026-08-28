@@ -28,7 +28,9 @@ use quilting_core::batch::{
     FaceLodGrading, RenderBatchId, RenderBatchKey, RenderBatchLayer, RenderBatchMember,
 };
 use quilting_core::instance_layout::InstanceWriter;
-use quilting_core::material::{pbr_material_for_index, PbrMaterial};
+use quilting_core::material::{
+    pbr_material_for_index, PbrAlphaMode, PbrMaterial, PbrTextureReferences,
+};
 use quilting_core::render::{
     FocusFieldPacket, PbrDrawClass, RenderBatchSnapshot, RenderCommand, RenderEntityTransform,
     RenderFrame, RenderFrameOptions, RenderGeometry, RenderPass, RenderPoseIdentity,
@@ -782,6 +784,62 @@ pub const fn supports_patch_presentation_style(style: RenderStyle) -> bool {
             | RenderStyle::Lod
             | RenderStyle::Stretch
     )
+}
+
+/// Whether the current texture-free PBR pipeline can render a shared scene
+/// exactly within its declared feature subset. This remains separate from the
+/// live-style predicate until environment IBL and browser image resources have
+/// backend-parity evidence.
+pub fn supports_basic_pbr_frame(scene: &RenderSceneSnapshot, options: RenderFrameOptions) -> bool {
+    validate_basic_pbr_frame(scene, options).is_ok()
+}
+
+fn validate_basic_pbr_frame(
+    scene: &RenderSceneSnapshot,
+    options: RenderFrameOptions,
+) -> Result<(), LodWebGpuError> {
+    scene
+        .validate()
+        .map_err(|error| LodWebGpuError::Payload(format!("render scene contract: {error}")))?;
+    if scene.batches.is_empty() {
+        return Err(LodWebGpuError::Payload(
+            "basic WebGPU PBR requires a nonempty scene".to_string(),
+        ));
+    }
+    if options.focus_postprocess {
+        return Err(LodWebGpuError::Payload(
+            "basic WebGPU PBR does not yet support focus post-processing".to_string(),
+        ));
+    }
+    let default_material = PbrMaterial::default();
+    for (batch_index, batch) in scene.batches.iter().enumerate() {
+        if batch.pbr_class != PbrDrawClass::Opaque {
+            return Err(LodWebGpuError::Payload(format!(
+                "basic WebGPU PBR batch {batch_index} is not opaque",
+            )));
+        }
+        let (_, material) = pbr_material_for_index(
+            &scene.materials,
+            &default_material,
+            batch.id.key.material_index,
+        );
+        if material.textures != PbrTextureReferences::default() {
+            return Err(LodWebGpuError::Payload(format!(
+                "basic WebGPU PBR batch {batch_index} references textures",
+            )));
+        }
+        if material.alpha_mode == PbrAlphaMode::Blend || material.transmission_factor > 0.0 {
+            return Err(LodWebGpuError::Payload(format!(
+                "basic WebGPU PBR batch {batch_index} requires blending or transmission",
+            )));
+        }
+        if material.has_sheen {
+            return Err(LodWebGpuError::Payload(format!(
+                "basic WebGPU PBR batch {batch_index} requires sheen",
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Scene/frame bindings shared by every atlas bucket and indirect batch draw.
@@ -4146,6 +4204,9 @@ impl LodClassifierDevice {
         frame
             .validate(scene)
             .map_err(|error| LodWebGpuError::Payload(format!("render frame contract: {error}")))?;
+        if frame.style == RenderStyle::Pbr {
+            validate_basic_pbr_frame(scene, frame.options)?;
+        }
         if scene.batches.is_empty() {
             return Err(LodWebGpuError::Payload(
                 "WebGPU patch renderer requires a nonempty retained scene".to_string(),
