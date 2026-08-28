@@ -5785,6 +5785,18 @@ pub fn mr_upload_tess_atlas(
                 .compute
                 .upload_atlas_lut(state.renderer.gl(), &lod_lookup.lut);
         }
+        #[cfg(feature = "webgpu-backend")]
+        if let Err(error) = crate::webgpu_backend::replace_atlas(
+            patches,
+            bary,
+            tri_idx,
+            line_idx,
+            &lod_lookup,
+        ) {
+            web_sys::console::warn_1(
+                &format!("WebGPU shadow atlas residency failed: {error}").into(),
+            );
+        }
         state.lod_atlas_lookup = Some(lod_lookup);
         true
     })
@@ -5793,6 +5805,22 @@ pub fn mr_upload_tess_atlas(
 /// Prepare a classifier on the renderer's own WebGL context without changing
 /// live LOD authority. The browser calls this only for explicit shadow/Rust
 /// candidates; the incumbent worker remains untouched and rollback-safe.
+fn build_current_prepared_lod_model(
+    state: &MainState,
+    total_vertices: usize,
+    primary_faces: usize,
+) -> Result<quilting_renderer::compute::PreparedLodModel, String> {
+    let animation = state.surface_runtime.lod_animation_source(total_vertices)?;
+    build_composed_lod_model(
+        &state.cached_instances,
+        &state.face_nodes,
+        total_vertices,
+        primary_faces,
+        animation,
+    )
+    .and_then(prepare_lod_model)
+}
+
 #[wasm_bindgen(js_name = "mr_uploadComposedLodModel")]
 pub fn mr_upload_composed_lod_model(
     total_vertices: u32,
@@ -5804,19 +5832,8 @@ pub fn mr_upload_composed_lod_model(
             .as_mut()
             .ok_or_else(|| JsValue::from_str("renderer is not initialized"))?;
         let total_vertices = total_vertices as usize;
-        let animation = state
-            .surface_runtime
-            .lod_animation_source(total_vertices)
+        let model = build_current_prepared_lod_model(state, total_vertices, primary_faces as usize)
             .map_err(|error| JsValue::from_str(&error))?;
-        let model = build_composed_lod_model(
-            &state.cached_instances,
-            &state.face_nodes,
-            total_vertices,
-            primary_faces as usize,
-            animation,
-        )
-        .and_then(prepare_lod_model)
-        .map_err(|error| JsValue::from_str(&error))?;
         let model_fingerprint = prepared_lod_model_fingerprint(&model).stable_text();
         if model.residency.num_faces != state.num_faces {
             return Err(JsValue::from_str(
@@ -5850,6 +5867,12 @@ pub fn mr_upload_composed_lod_model(
             batch_shadow,
             diagnostics: SameContextLodDiagnostics::default(),
         });
+        #[cfg(feature = "webgpu-backend")]
+        if let Err(error) = crate::webgpu_backend::replace_model(model, &atlas) {
+            web_sys::console::warn_1(
+                &format!("WebGPU shadow model residency failed: {error}").into(),
+            );
+        }
         let residency = &state
             .same_context_lod
             .as_ref()
@@ -5866,6 +5889,45 @@ pub fn mr_upload_composed_lod_model(
             atlas_max_lod: atlas.max_lod,
         })
         .map_err(|error| JsValue::from_str(&error.to_string()))
+    })
+}
+
+/// Upload only staged WebGPU model residency when the incumbent worker remains
+/// the live LOD authority. This avoids constructing a redundant WebGL2
+/// same-context classifier solely to feed the backend shadow.
+#[cfg(feature = "webgpu-backend")]
+#[wasm_bindgen(js_name = "mr_uploadWebGpuComposedModel")]
+pub fn mr_upload_webgpu_composed_model(
+    total_vertices: u32,
+    primary_faces: u32,
+) -> Result<JsValue, JsValue> {
+    STATE.with(|state| {
+        let state = state.borrow();
+        let state = state
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("renderer is not initialized"))?;
+        let model = build_current_prepared_lod_model(
+            state,
+            total_vertices as usize,
+            primary_faces as usize,
+        )
+        .map_err(|error| JsValue::from_str(&error))?;
+        if model.residency.num_faces != state.num_faces {
+            return Err(JsValue::from_str(
+                "WebGPU LOD residency does not match renderer topology",
+            ));
+        }
+        let atlas = state
+            .lod_atlas_lookup
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("renderer LOD atlas is not resident"))?;
+        let admitted = crate::webgpu_backend::replace_model(model, atlas)
+            .map_err(|error| JsValue::from_str(&error))?;
+        if !admitted {
+            return Err(JsValue::from_str("WebGPU backend is not ready"));
+        }
+        serde_wasm_bindgen::to_value(&crate::webgpu_backend::diagnostics())
+            .map_err(|error| JsValue::from_str(&error.to_string()))
     })
 }
 

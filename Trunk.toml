@@ -31,7 +31,7 @@ watch = [
 [[hooks]]
 stage = "pre_build"
 command = "wasm-pack"
-command_arguments = ["build", "--target", "web", "--out-dir", "../../pkg", "crates/quilting-wasm", "--features", "leptos-ui"]
+command_arguments = ["build", "--target", "web", "--out-dir", "../../pkg", "crates/quilting-wasm", "--features", "leptos-ui,webgpu-backend"]
 
 [[hooks]]
 stage = "pre_build"

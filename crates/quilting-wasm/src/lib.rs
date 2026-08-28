@@ -9,6 +9,8 @@ mod route_shadow;
 mod surface_walk;
 mod surface_runtime;
 mod timing;
+#[cfg(feature = "webgpu-backend")]
+mod webgpu_backend;
 
 pub use app_shadow::{
     encode_local_presence_envelope, map_pointer_turntable_frame, map_space_mouse_camera_frame,
@@ -34,6 +36,22 @@ use quilting_core::triangle;
 use std::cell::{Ref, RefCell};
 use std::collections::{HashMap, HashSet};
 use glow::HasContext;
+
+#[cfg(feature = "webgpu-backend")]
+#[wasm_bindgen(js_name = "mr_initWebGpuBackend")]
+pub async fn mr_init_webgpu_backend() -> Result<JsValue, JsValue> {
+    let diagnostics = webgpu_backend::initialize()
+        .await
+        .map_err(|error| JsValue::from_str(&error))?;
+    serde_wasm_bindgen::to_value(&diagnostics)
+        .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+#[cfg(feature = "webgpu-backend")]
+#[wasm_bindgen(js_name = "mr_webGpuBackendDiagnostics")]
+pub fn mr_webgpu_backend_diagnostics() -> JsValue {
+    serde_wasm_bindgen::to_value(&webgpu_backend::diagnostics()).unwrap_or(JsValue::NULL)
+}
 
 /// Performance.mark/measure helper for profiling in Chrome DevTools.
 /// Works in both Window and Worker contexts.

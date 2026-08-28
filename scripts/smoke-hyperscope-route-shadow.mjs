@@ -227,6 +227,21 @@ for (const navigationAuthorityStep of [
     `browser navigation authority adapter is missing ${navigationAuthorityStep}`,
   );
 }
+for (const graphicsBackendStep of [
+  "import * as quiltingWasmBackend from './pkg/quilting_wasm.js';",
+  "const GRAPHICS_BACKEND_REQUEST = graphicsBackendFromRoute(initialBrowserParams);",
+  "gfx: 'webgl2'",
+  "set('gfx', GRAPHICS_BACKEND_REQUEST, PARAM_DEFAULTS.gfx);",
+  'await quiltingWasmBackend.mr_initWebGpuBackend()',
+  'quiltingWasmBackend.mr_uploadWebGpuComposedModel(',
+  "graphicsBackendDiagnostics.state = 'presentation-fallback';",
+  "globalThis.__hyperscopeGraphicsBackend = graphicsBackendDiagnostics;",
+]) {
+  assert.ok(
+    browserSource.includes(graphicsBackendStep),
+    `browser graphics backend adapter is missing ${graphicsBackendStep}`,
+  );
+}
 const browserDefaultsSource = browserSource.match(
   /const PARAM_DEFAULTS = (\{[\s\S]*?\n\});/,
 )?.[1];

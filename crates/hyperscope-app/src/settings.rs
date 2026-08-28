@@ -7,6 +7,7 @@ pub enum ControlValueKind {
     Toggle,
     LodRatio,
     Implementation,
+    RenderBackend,
     OptionalUuid,
 }
 
@@ -18,6 +19,7 @@ impl ControlValueKind {
             Self::Toggle => "toggle",
             Self::LodRatio => "lod_ratio",
             Self::Implementation => "implementation",
+            Self::RenderBackend => "render_backend",
             Self::OptionalUuid => "optional_uuid",
         }
     }
@@ -29,6 +31,7 @@ impl ControlValueKind {
             Self::Toggle => matches!(value, "0" | "1"),
             Self::LodRatio => matches!(value, "2" | "4"),
             Self::Implementation => matches!(value, "js" | "shadow" | "rust"),
+            Self::RenderBackend => matches!(value, "webgl2" | "webgpu-shadow" | "webgpu"),
             Self::OptionalUuid => {
                 value.is_empty()
                     || uuid::Uuid::parse_str(value).is_ok_and(|identifier| !identifier.is_nil())
@@ -50,7 +53,11 @@ impl ControlValueKind {
                 (Ok(left), Ok(right)) => left == right,
                 _ => left == right,
             },
-            Self::Text | Self::Toggle | Self::LodRatio | Self::Implementation => left == right,
+            Self::Text
+            | Self::Toggle
+            | Self::LodRatio
+            | Self::Implementation
+            | Self::RenderBackend => left == right,
         }
     }
 }
@@ -85,6 +92,7 @@ macro_rules! spec {
 /// reaches parity, this ordering becomes the only serialization order.
 pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("glb", "horse.glb", Text),
+    spec!("gfx", "webgl2", RenderBackend),
     spec!("mode", "pbr", Text),
     spec!("xform", "identity", Text),
     spec!("mx", "5", Number),
@@ -327,6 +335,26 @@ mod tests {
             vec![("mode", "lod"), ("rx", "0.125"), ("routeimpl", "shadow")]
         );
         assert!(route.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn render_backend_route_is_explicit_and_closed() {
+        let default = HyperscopeRoute::from_pairs([("gfx", "webgl2")]);
+        assert!(default.canonical_pairs().is_empty());
+        assert!(default.diagnostics().is_empty());
+
+        for backend in ["webgpu-shadow", "webgpu"] {
+            let route = HyperscopeRoute::from_pairs([("gfx", backend)]);
+            assert_eq!(route.canonical_pairs(), vec![("gfx", backend)]);
+            assert!(route.diagnostics().is_empty());
+        }
+
+        let invalid = HyperscopeRoute::from_pairs([("gfx", "auto")]);
+        assert_eq!(invalid.diagnostics().len(), 1);
+        assert_eq!(
+            invalid.diagnostics()[0].code,
+            RouteDiagnosticCode::InvalidValue
+        );
     }
 
     #[test]

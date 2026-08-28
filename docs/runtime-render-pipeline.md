@@ -459,14 +459,37 @@ barycentric/triangle/line arrays directly, validates canonical keys, ranges,
 finite vertices, and global indices once, and resolves an extracted scene to
 borrowed batch views without copying geometry.
 
-The next cut is application residency and renderer integration: resolve the
-live canonical atlas cache into WebGPU buffers, feed the same-pose visibility
-producer without CPU upload, attach the extracted frame to a browser surface,
-and add WebGL2 image/workload parity behind an explicit backend switch. PBR,
-wire, LOD color, stretch, picking, material/texture binding, and postprocess
-commands still reject explicitly rather than silently lowering to normals.
-That cut is what finally removes the live four-byte-per-face readback and
-rejected atlas vertex invocations from an authoritative runtime.
+The application now has rollback-safe WebGPU residency behind the canonical
+`gfx` route. `gfx=webgl2` is the inert default. `gfx=webgpu-shadow` requests a
+headless browser device after the incumbent renderer initializes, mirrors each
+atomic packed-atlas replacement, and uploads the same prepared composed LOD
+model without constructing a redundant WebGL classifier when the worker
+remains authoritative. `gfx=webgpu` currently performs that same residency but
+reports `effective=webgl2`, `state=presentation-fallback`, and a concrete reason
+until presentation parity exists. A failed device, atlas, or model shadow is a
+diagnostic warning and never retires working WebGL resources.
+
+The first live Chrome residency check retained 22 canonical atlas entries,
+25,551 barycentric vertices, and the horse's 984-face prepared model through a
+`BrowserWebGpu` adapter with one initialization, atlas upload, and model upload.
+The canvas continued through WebGL2 with no console errors. The default route
+remained disabled and allocated no WebGPU residency; the explicit presentation
+request declared its fallback.
+
+The optimized monolithic WASM artifact measured 7,543,417 bytes with this
+backend enabled versus 7,458,547 bytes with the feature disabled: an 84,870-byte
+(1.14%) release delta. Debug artifacts are not representative here—the same
+feature set reached roughly 50 MB before release optimization—so size gates
+must compare optimized outputs.
+
+The next cut is authoritative renderer integration: feed the same-pose
+visibility producer without CPU upload, attach the already-proven shared frame
+executor to a browser surface, and add WebGL2 image/workload parity behind the
+existing explicit backend switch. PBR, wire, LOD color, stretch, picking,
+material/texture binding, and postprocess commands still reject explicitly
+rather than silently lowering to normals. That cut is what finally removes the
+live four-byte-per-face readback and rejected atlas vertex invocations from an
+authoritative runtime.
 
 The old JavaScript renderer's useful idea was memoizing tessellation topology
 and prepared meshes. The retained atlas, versioned browser cache, and stable

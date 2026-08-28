@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = ["console_error_panic_hook"]
 leptos-ui = ["dep:hyperscope-web", "hyperscope-web/csr"]
+webgpu-backend = ["dep:quilting-webgpu", "dep:wasm-bindgen-futures"]
 
 [dependencies]
 quilting-core = { version = "0.1.0", path = "../quilting-core" }
@@ -27,6 +28,7 @@ hyperscope-web = { version = "0.1.0", path = "../hyperscope-web", optional = tru
 quilting-remesh = { version = "0.1.0", path = "../quilting-remesh" }
 quilting-round-index = { version = "0.1.0", path = "../quilting-round-index" }
 wasm-bindgen = "=0.2.108"
+wasm-bindgen-futures = { version = "=0.4.58", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde-wasm-bindgen = "0.6"
@@ -41,6 +43,7 @@ web-sys = { version = "0.3", features = [
 ] }
 glow = "0.16"
 quilting-renderer = { version = "0.1.0", path = "../quilting-renderer" }
+quilting-webgpu = { version = "0.1.0", path = "../quilting-webgpu", optional = true }
 fuzzy-vision = { version = "0.1.0", path = "../fuzzy-vision" }
 tracing = "0.1"
 wasm-tracing = "2.1"

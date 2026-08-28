@@ -387,6 +387,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 </div>
 <button id="sidebar-toggle">▶</button>
 <script type="module">
+import * as quiltingWasmBackend from './pkg/quilting_wasm.js';
 import init, {
   HyperscopeAppShadow,
   HyperscopeNavigation,
@@ -508,6 +509,13 @@ function implementationFromRoute(params, key, defaultImplementation) {
     : defaultImplementation;
 }
 
+function graphicsBackendFromRoute(params) {
+  const requested = params.get('gfx') || 'webgl2';
+  return ['webgl2', 'webgpu-shadow', 'webgpu'].includes(requested)
+    ? requested
+    : 'webgl2';
+}
+
 const initialBrowserParams = new URLSearchParams(location.search);
 const initialNavigationParams = normalizeLegacyNavigationShadow(initialBrowserParams);
 const initialRouteParams = normalizeLegacyRouteShadow(initialNavigationParams);
@@ -552,6 +560,8 @@ const RUST_ROUTE_IMPLEMENTATION = implementationFromRoute(
 const RUST_ROUTE_SHADOW_ENABLED = RUST_ROUTE_IMPLEMENTATION !== 'js';
 const RUST_RENDER_SHADOW_ENABLED =
   initialBrowserParams.get('rendershadow') === '1';
+const GRAPHICS_BACKEND_REQUEST = graphicsBackendFromRoute(initialBrowserParams);
+const WEBGPU_SHADOW_ENABLED = GRAPHICS_BACKEND_REQUEST !== 'webgl2';
 const LOD_IMPLEMENTATION = implementationFromRoute(
   initialBrowserParams, 'lodimpl', 'js',
 );
@@ -562,6 +572,25 @@ const INCREMENTAL_ROOT_GROUP_SHADOW_ENABLED =
 const SURFACE_WALK_IMPLEMENTATION = implementationFromRoute(
   initialBrowserParams, 'walkimpl', 'js',
 );
+const graphicsBackendDiagnostics = {
+  requested: GRAPHICS_BACKEND_REQUEST,
+  effective: 'webgl2',
+  state: WEBGPU_SHADOW_ENABLED ? 'awaiting-wasm' : 'disabled',
+  fallbackReason: null,
+  residency: null,
+};
+globalThis.__hyperscopeGraphicsBackend = graphicsBackendDiagnostics;
+
+function refreshWebGpuBackendDiagnostics() {
+  if (!WEBGPU_SHADOW_ENABLED) return null;
+  try {
+    graphicsBackendDiagnostics.residency =
+      quiltingWasmBackend.mr_webGpuBackendDiagnostics();
+  } catch (error) {
+    graphicsBackendDiagnostics.fallbackReason = error?.message || String(error);
+  }
+  return graphicsBackendDiagnostics.residency;
+}
 const RUST_NAVIGATION_SHADOW_TOLERANCE = 2e-6;
 const rustRouteShadowDiagnostics = {
   enabled: RUST_ROUTE_SHADOW_ENABLED,
@@ -1426,7 +1455,7 @@ function bindNavigationAxisMask(id, hyperscopeSig, blenderSig, navigationSig) {
 // Reads on load, writes on change (bounded-rate replaceState).
 // ============================================================
 const PARAM_DEFAULTS = {
-  glb: 'horse.glb', mode: 'pbr', xform: 'identity',
+  glb: 'horse.glb', gfx: 'webgl2', mode: 'pbr', xform: 'identity',
   mx: '5', my: '0', mz: '0', mr: '20',
   env: 'rosendal_plains_1_1k', matcap: 'citric-acid',
   res: '0', density: '100', atten: '1', minpx: '16',
@@ -1454,6 +1483,7 @@ function readParams(p) {
   const get = (k) => p.get(k) ?? PARAM_DEFAULTS[k];
   return {
     glb: get('glb'),
+    gfx: get('gfx'),
     mode: get('mode'),
     xform: get('xform'),
     mx: get('mx'), my: get('my'), mz: get('mz'), mr: get('mr'),
@@ -1521,6 +1551,7 @@ function syncURL() {
     const p = new URLSearchParams();
     const set = (k, v, def) => { if (v !== def) p.set(k, v); };
     set('glb', currentGlb, PARAM_DEFAULTS.glb);
+    set('gfx', GRAPHICS_BACKEND_REQUEST, PARAM_DEFAULTS.gfx);
     // Signal-driven params — wrapped in try/catch to handle TDZ during early syncURL calls
     try {
       const ss = (k, sig, def) => set(k, String(sig.peek()), def);
@@ -4639,7 +4670,28 @@ const presentationComposition = {
 };
 
 function uploadSameContextLodResidency(totalVertices, primaryFaces) {
-  if (LOD_IMPLEMENTATION === 'js') return null;
+  if (LOD_IMPLEMENTATION === 'js') {
+    if (!WEBGPU_SHADOW_ENABLED) return null;
+    const started = performance.now();
+    try {
+      const residency = quiltingWasmBackend.mr_uploadWebGpuComposedModel(
+        totalVertices,
+        primaryFaces,
+      );
+      graphicsBackendDiagnostics.residency = residency;
+      if (GRAPHICS_BACKEND_REQUEST === 'webgpu-shadow') {
+        graphicsBackendDiagnostics.state = 'shadow-resident';
+      }
+      sameContextLodDiagnostics.uploadMs = performance.now() - started;
+      return residency;
+    } catch (error) {
+      graphicsBackendDiagnostics.state = 'fallback';
+      graphicsBackendDiagnostics.fallbackReason = error?.message || String(error);
+      refreshWebGpuBackendDiagnostics();
+      console.warn('WebGPU shadow model residency failed; using WebGL2', error);
+      return null;
+    }
+  }
   const started = performance.now();
   try {
     const residency = mr_uploadComposedLodModel(totalVertices, primaryFaces);
@@ -4663,6 +4715,7 @@ function uploadSameContextLodResidency(totalVertices, primaryFaces) {
       sameContextLodDiagnostics.state = 'model-fingerprint-mismatch';
       recordSameContextLodError('worker and renderer LoD model fingerprints do not match');
     }
+    refreshWebGpuBackendDiagnostics();
     return residency;
   } catch (error) {
     sameContextLodDiagnostics.state = 'unavailable';
@@ -10566,6 +10619,24 @@ phase('wasm', [], async () => {
   }
   $('stats').textContent = 'Initializing renderer...';
   if (!mr_init('cv')) throw 'renderer init failed';
+  if (WEBGPU_SHADOW_ENABLED) {
+    try {
+      graphicsBackendDiagnostics.residency =
+        await quiltingWasmBackend.mr_initWebGpuBackend();
+      if (GRAPHICS_BACKEND_REQUEST === 'webgpu') {
+        graphicsBackendDiagnostics.state = 'presentation-fallback';
+        graphicsBackendDiagnostics.fallbackReason =
+          'WebGPU presentation parity is incomplete; WebGL2 remains authoritative';
+        console.warn(graphicsBackendDiagnostics.fallbackReason);
+      } else {
+        graphicsBackendDiagnostics.state = 'shadow-ready';
+      }
+    } catch (error) {
+      graphicsBackendDiagnostics.state = 'fallback';
+      graphicsBackendDiagnostics.fallbackReason = error?.message || String(error);
+      console.warn('WebGPU shadow initialization failed; using WebGL2', error);
+    }
+  }
   updateRoundShadowDiagnostics(mr_setRoundShadowEnabled(RUST_ROUND_SHADOW_ENABLED));
   renderShadowDiagnostics.snapshot = mr_setRenderShadowEnabled(RUST_RENDER_SHADOW_ENABLED);
   adaptiveRootShadowDiagnostics.snapshot = mr_setAdaptiveRootShadowEnabled(
@@ -10704,6 +10775,7 @@ async function rebuildResidentAtlas() {
       if (!mr_uploadTessAtlas(packed.patches, packed.bary, packed.tris, packed.lines)) {
         throw new Error('renderer rejected the replacement tessellation atlas');
       }
+      refreshWebGpuBackendDiagnostics();
       const uploadMs = performance.now() - uploadStartedAt;
       residentAtlasExponent = exponent;
       residentAtlasDiagnostics.residentExponent = exponent;
@@ -10869,6 +10941,7 @@ phase('atlas', ['workers'], async () => {
   if (!mr_uploadTessAtlas(packed.patches, packed.bary, packed.tris, packed.lines)) {
     throw new Error('GPU rejected the packed tessellation atlas upload');
   }
+  refreshWebGpuBackendDiagnostics();
   const uploadMs = performance.now() - uploadStartedAt;
   residentAtlasExponent = ATLAS_EXP;
   residentAtlasDiagnostics.requestedExponent = ATLAS_EXP;
