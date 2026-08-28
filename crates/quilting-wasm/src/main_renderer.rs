@@ -38,7 +38,12 @@ use quilting_core::instance_layout;
 use quilting_core::render::{
     patch_preparation_needed, patch_visibility_needed, render_draw_passes, FocusFieldPacket,
     PbrDrawClass, RenderBatchSnapshot, RenderEntityTransform, RenderFrameOptions, RenderPass,
-    RenderSceneSnapshot, RenderStyle, RenderSubmissionStats, RenderView,
+    RenderSceneSnapshot, RenderStyle, RenderSubmissionMismatch, RenderSubmissionStats, RenderView,
+};
+#[cfg(feature = "webgpu-backend")]
+use quilting_core::render_evidence::{
+    compare_render_images, RenderImageChannelOrder, RenderImageComparison, RenderImageOrigin,
+    Rgba8ImageView,
 };
 use quilting_core::screen_partition::ScreenPartitionPolicy;
 use quilting_core::screen_leaf_lod::{
@@ -531,6 +536,29 @@ struct IncrementalRootGroupShadowSnapshot {
     last_error: Option<String>,
 }
 
+#[cfg(feature = "webgpu-backend")]
+struct WebGlFrameEvidenceCapture {
+    render_call: u64,
+    viewport: [u32; 2],
+    submission: RenderSubmissionStats,
+    rgba8_bottom_left: Vec<u8>,
+}
+
+#[cfg(feature = "webgpu-backend")]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackendFrameEvidenceReport {
+    webgl_render_call: u64,
+    webgpu_frame_revision: u64,
+    viewport: [u32; 2],
+    webgl_submission: RenderSubmissionStats,
+    webgpu_logical_submission: RenderSubmissionStats,
+    workload_mismatch: RenderSubmissionMismatch,
+    webgpu_indirect_draw_calls: u32,
+    webgpu_source_instances: u32,
+    image: RenderImageComparison,
+}
+
 struct MainState {
     renderer: Renderer,
     /// Authoritative drawable size, updated with the GL viewport by mr_resize.
@@ -571,6 +599,12 @@ struct MainState {
     last_render_submission: RenderSubmissionStats,
     /// Saturating session totals for explicit diagnostic queries.
     render_submission_totals: RenderSubmissionStats,
+    #[cfg(feature = "webgpu-backend")]
+    backend_evidence_requested: bool,
+    #[cfg(feature = "webgpu-backend")]
+    backend_evidence_capture: Option<WebGlFrameEvidenceCapture>,
+    #[cfg(feature = "webgpu-backend")]
+    backend_evidence_error: Option<String>,
     /// Opt-in comparison between backend-neutral frame commands and actual
     /// indexed WebGL patch submissions.
     render_shadow: RenderShadowObserver,
@@ -2033,6 +2067,12 @@ pub fn mr_init(canvas_id: &str) -> bool {
             pbr_vertex_uniform_updates: 0,
             last_render_submission: RenderSubmissionStats::default(),
             render_submission_totals: RenderSubmissionStats::default(),
+            #[cfg(feature = "webgpu-backend")]
+            backend_evidence_requested: false,
+            #[cfg(feature = "webgpu-backend")]
+            backend_evidence_capture: None,
+            #[cfg(feature = "webgpu-backend")]
+            backend_evidence_error: None,
             render_shadow: RenderShadowObserver::default(),
             render_shadow_scene_dirty: true,
             batch_groups: BTreeMap::new(),
@@ -2606,6 +2646,7 @@ fn submit_webgpu_shadow_frame(renderer: &MainState, camera: &Camera) {
         }
     };
     let _ = crate::webgpu_backend::submit_frame(
+        renderer.render_calls,
         renderer.render_style,
         RenderView {
             viewport: [
@@ -2629,6 +2670,247 @@ fn submit_webgpu_shadow_frame(renderer: &MainState, camera: &Camera) {
         joint_matrices,
         morph_weights,
     );
+}
+
+#[cfg(feature = "webgpu-backend")]
+fn capture_webgl_frame_evidence(
+    renderer: &Renderer,
+    viewport: (i32, i32),
+    render_call: u64,
+    camera: &Camera,
+    batches: &[RenderBatch],
+    incumbent_submission: RenderSubmissionStats,
+) -> Result<WebGlFrameEvidenceCapture, String> {
+    let (width, height) = viewport;
+    if width <= 0 || height <= 0 {
+        return Err("WebGL image evidence requires a nonzero viewport".to_string());
+    }
+    let byte_len = usize::try_from(width)
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+        .and_then(|row| usize::try_from(height).ok().and_then(|height| row.checked_mul(height)))
+        .ok_or_else(|| "WebGL image evidence dimensions overflowed".to_string())?;
+    let gl = renderer.gl();
+    let mut color = None;
+    let mut depth = None;
+    let mut framebuffer = None;
+    let result = unsafe {
+        (|| -> Result<WebGlFrameEvidenceCapture, String> {
+            let prior_error = gl.get_error();
+            if prior_error != glow::NO_ERROR {
+                return Err(format!(
+                    "WebGL image evidence found preexisting GL error 0x{prior_error:04x}",
+                ));
+            }
+            let color_texture = gl
+                .create_texture()
+                .map_err(|error| format!("WebGL evidence color texture: {error}"))?;
+            color = Some(color_texture);
+            gl.bind_texture(glow::TEXTURE_2D, color);
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA8 as i32,
+                width,
+                height,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(None),
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::NEAREST as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::NEAREST as i32,
+            );
+
+            let depth_buffer = gl
+                .create_renderbuffer()
+                .map_err(|error| format!("WebGL evidence depth buffer: {error}"))?;
+            depth = Some(depth_buffer);
+            gl.bind_renderbuffer(glow::RENDERBUFFER, depth);
+            gl.renderbuffer_storage(glow::RENDERBUFFER, glow::DEPTH_COMPONENT24, width, height);
+
+            let target = gl
+                .create_framebuffer()
+                .map_err(|error| format!("WebGL evidence framebuffer: {error}"))?;
+            framebuffer = Some(target);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, framebuffer);
+            gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                color,
+                0,
+            );
+            gl.framebuffer_renderbuffer(
+                glow::FRAMEBUFFER,
+                glow::DEPTH_ATTACHMENT,
+                glow::RENDERBUFFER,
+                depth,
+            );
+            let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+            if status != glow::FRAMEBUFFER_COMPLETE {
+                return Err(format!(
+                    "WebGL evidence framebuffer is incomplete: 0x{status:04x}",
+                ));
+            }
+
+            gl.viewport(0, 0, width, height);
+            // Preserve the incumbent RGB clear while leaving background alpha
+            // available as an explicit fragment-coverage mask for parity
+            // evidence.
+            gl.clear_color(0.2, 0.2, 0.3, 0.0);
+            gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+            gl.enable(glow::DEPTH_TEST);
+            gl.enable(glow::BLEND);
+            gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+            let submission = renderer.render(RenderStyle::Normals, camera, batches);
+            if submission != incumbent_submission {
+                return Err(format!(
+                    "WebGL evidence rerender changed submission work: incumbent={incumbent_submission:?}, evidence={submission:?}",
+                ));
+            }
+            let mut rgba8_bottom_left = vec![0u8; byte_len];
+            gl.read_buffer(glow::COLOR_ATTACHMENT0);
+            gl.read_pixels(
+                0,
+                0,
+                width,
+                height,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut rgba8_bottom_left)),
+            );
+            let error = gl.get_error();
+            if error != glow::NO_ERROR {
+                return Err(format!(
+                    "WebGL image evidence readback failed with GL error 0x{error:04x}",
+                ));
+            }
+            Ok(WebGlFrameEvidenceCapture {
+                render_call,
+                viewport: [width as u32, height as u32],
+                submission,
+                rgba8_bottom_left,
+            })
+        })()
+    };
+    unsafe {
+        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        gl.bind_renderbuffer(glow::RENDERBUFFER, None);
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        gl.viewport(0, 0, width, height);
+        if let Some(framebuffer) = framebuffer {
+            gl.delete_framebuffer(framebuffer);
+        }
+        if let Some(depth) = depth {
+            gl.delete_renderbuffer(depth);
+        }
+        if let Some(color) = color {
+            gl.delete_texture(color);
+        }
+    }
+    result
+}
+
+#[cfg(feature = "webgpu-backend")]
+#[wasm_bindgen(js_name = "mr_requestBackendFrameEvidence")]
+pub fn mr_request_backend_frame_evidence() -> Result<bool, JsValue> {
+    STATE.with(|slot| {
+        let mut state = slot.borrow_mut();
+        let state = state
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("renderer is not initialized"))?;
+        if state.render_style != RenderStyle::Normals {
+            return Err(JsValue::from_str(
+                "backend image evidence currently requires normals mode",
+            ));
+        }
+        if state.fuzzy_enabled || state.highlight_face >= 0 {
+            return Err(JsValue::from_str(
+                "backend image evidence requires focus postprocess and highlight to be disabled",
+            ));
+        }
+        if state.viewport_size.0 <= 0 || state.viewport_size.1 <= 0 {
+            return Err(JsValue::from_str(
+                "backend image evidence requires a nonzero viewport",
+            ));
+        }
+        state.backend_evidence_requested = true;
+        state.backend_evidence_capture = None;
+        state.backend_evidence_error = None;
+        crate::webgpu_backend::force_next_frame();
+        Ok(true)
+    })
+}
+
+#[cfg(feature = "webgpu-backend")]
+#[wasm_bindgen(js_name = "mr_compareBackendFrameEvidence")]
+pub async fn mr_compare_backend_frame_evidence() -> Result<JsValue, JsValue> {
+    let webgl = STATE.with(|slot| {
+        let mut state = slot.borrow_mut();
+        let state = state
+            .as_mut()
+            .ok_or_else(|| "renderer is not initialized".to_string())?;
+        if let Some(error) = state.backend_evidence_error.take() {
+            return Err(error);
+        }
+        state
+            .backend_evidence_capture
+            .take()
+            .ok_or_else(|| "backend frame evidence has not completed a render".to_string())
+    })
+    .map_err(|error| JsValue::from_str(&error))?;
+    let staged = crate::webgpu_backend::stage_frame_evidence()
+        .map_err(|error| JsValue::from_str(&error))?;
+    if staged.source_render_call != webgl.render_call || staged.viewport != webgl.viewport {
+        return Err(JsValue::from_str(&format!(
+            "backend evidence frame mismatch: WebGL call {} {:?}, WebGPU call {} {:?}",
+            webgl.render_call, webgl.viewport, staged.source_render_call, staged.viewport,
+        )));
+    }
+    let webgpu = staged
+        .image
+        .read()
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let webgl_row_bytes = usize::try_from(webgl.viewport[0])
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+        .ok_or_else(|| JsValue::from_str("WebGL evidence row size overflowed"))?;
+    let webgl_view = Rgba8ImageView::new(
+        webgl.viewport,
+        webgl_row_bytes,
+        RenderImageOrigin::BottomLeft,
+        RenderImageChannelOrder::Rgba,
+        &webgl.rgba8_bottom_left,
+    )
+    .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let webgpu_view = webgpu
+        .view()
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let image = compare_render_images(webgl_view, webgpu_view, 0)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let workload_mismatch =
+        RenderSubmissionMismatch::between(webgl.submission, staged.logical_submission);
+    serde_wasm_bindgen::to_value(&BackendFrameEvidenceReport {
+        webgl_render_call: webgl.render_call,
+        webgpu_frame_revision: staged.frame_revision,
+        viewport: webgl.viewport,
+        webgl_submission: webgl.submission,
+        webgpu_logical_submission: staged.logical_submission,
+        workload_mismatch,
+        webgpu_indirect_draw_calls: staged.indirect_draw_calls,
+        webgpu_source_instances: staged.source_instances,
+        image,
+    })
+    .map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
 fn refresh_render_shadow_scene(renderer: &mut MainState) {
@@ -8635,6 +8917,18 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         if state.batches.is_empty() { return; }
         state.render_calls += 1;
         let render_started_ms = browser_now_ms();
+        #[cfg(feature = "webgpu-backend")]
+        if state.backend_evidence_requested
+            && (state.render_style != RenderStyle::Normals
+                || state.fuzzy_enabled
+                || state.highlight_face >= 0)
+        {
+            state.backend_evidence_requested = false;
+            state.backend_evidence_error = Some(
+                "backend frame evidence became unsupported before its requested render"
+                    .to_string(),
+            );
+        }
 
         let camera = Camera {
             mvp: mvp[..16].try_into().unwrap_or([0.0; 16]),
@@ -9313,6 +9607,27 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         let submission_stats = state
             .renderer
             .render(state.render_style, &camera, render_batches);
+        #[cfg(feature = "webgpu-backend")]
+        if state.backend_evidence_requested {
+            state.backend_evidence_requested = false;
+            match capture_webgl_frame_evidence(
+                &state.renderer,
+                state.viewport_size,
+                state.render_calls,
+                &camera,
+                render_batches,
+                submission_stats,
+            ) {
+                Ok(capture) => {
+                    state.backend_evidence_capture = Some(capture);
+                    state.backend_evidence_error = None;
+                }
+                Err(error) => {
+                    state.backend_evidence_capture = None;
+                    state.backend_evidence_error = Some(error);
+                }
+            }
+        }
         observe_render_submission(state, &camera, submission_stats);
 
         // Highlight pass: overlay picked QB patch with cyan

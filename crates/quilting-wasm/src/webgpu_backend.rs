@@ -8,13 +8,13 @@
 
 use quilting_core::render::{
     RenderFrame, RenderFrameOptions, RenderPoseIdentity, RenderSceneSnapshot, RenderStyle,
-    RenderView,
+    RenderSubmissionStats, RenderView,
 };
 use quilting_renderer::compute::{LodAtlasLookup, PreparedLodModel};
 use quilting_webgpu::{
     LodClassifierDevice, LodClassifierModel, LodPose, OffscreenPatchRenderTarget, PackedPatchAtlas,
     PatchFrameEncoding, PatchRenderPipeline, PatchRenderScene, PatchRenderSceneUpdate,
-    WebGpuAdapterSummary,
+    StagedOffscreenImageReadback, WebGpuAdapterSummary,
 };
 use serde::Serialize;
 use std::cell::RefCell;
@@ -55,8 +55,10 @@ struct WebGpuBackend {
     visibility_uploads: u64,
     visibility_upload_bytes: u64,
     last_frame_revision: u64,
+    last_source_render_call: u64,
     last_indirect_draw_calls: u32,
     last_source_instances: u32,
+    last_logical_submission: RenderSubmissionStats,
     last_viewport: [u32; 2],
     last_frame_failure: Option<String>,
     last_error: Option<String>,
@@ -101,8 +103,10 @@ pub(crate) struct WebGpuBackendDiagnostics {
     visibility_uploads: u64,
     visibility_upload_bytes: u64,
     last_frame_revision: u64,
+    last_source_render_call: u64,
     last_indirect_draw_calls: u32,
     last_source_instances: u32,
+    last_logical_submission: RenderSubmissionStats,
     last_viewport: [u32; 2],
     last_frame_failure: Option<String>,
     last_error: Option<String>,
@@ -155,8 +159,10 @@ impl WebGpuBackend {
             visibility_uploads: self.visibility_uploads,
             visibility_upload_bytes: self.visibility_upload_bytes,
             last_frame_revision: self.last_frame_revision,
+            last_source_render_call: self.last_source_render_call,
             last_indirect_draw_calls: self.last_indirect_draw_calls,
             last_source_instances: self.last_source_instances,
+            last_logical_submission: self.last_logical_submission,
             last_viewport: self.last_viewport,
             last_frame_failure: self.last_frame_failure.clone(),
             last_error: self.last_error.clone(),
@@ -225,6 +231,7 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
                     backend.last_joint_matrices.clear();
                     backend.last_morph_weights.clear();
                     backend.next_morph_weights.clear();
+                    backend.last_logical_submission = RenderSubmissionStats::default();
                     backend.state = "ready";
                     backend.last_error = None;
                 });
@@ -444,6 +451,7 @@ pub(crate) fn replace_scene(
 /// occurs on the frame path.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn submit_frame(
+    source_render_call: u64,
     style: RenderStyle,
     view: RenderView,
     options: RenderFrameOptions,
@@ -625,16 +633,16 @@ pub(crate) fn submit_frame(
                     .map_err(|error| error.to_string())?;
             }
             device
-                .render_offscreen_normals_patch_scene_with_face_visibility(
+                .render_offscreen_normals_patch_scene_with_webgl_clear(
                     &frame, pipeline, scene, atlas, target, true,
                 )
                 .map_err(|error| error.to_string())
         })();
         match result {
             Ok(PatchFrameEncoding {
+                logical_submission,
                 indirect_draw_calls,
                 source_instance_count,
-                ..
             }) => {
                 backend.frames_submitted = backend.frames_submitted.saturating_add(1);
                 if visibility_upload_required {
@@ -644,8 +652,10 @@ pub(crate) fn submit_frame(
                         .saturating_add((face_visibility_bits.len() as u64).saturating_mul(4));
                 }
                 backend.last_frame_revision = frame_revision;
+                backend.last_source_render_call = source_render_call;
                 backend.last_indirect_draw_calls = indirect_draw_calls;
                 backend.last_source_instances = source_instance_count;
+                backend.last_logical_submission = logical_submission;
                 backend.last_viewport = view.viewport;
                 if visibility_upload_required {
                     std::mem::swap(
@@ -672,6 +682,63 @@ pub(crate) fn submit_frame(
             }
         }
     })
+}
+
+pub(crate) struct StagedWebGpuFrameEvidence {
+    pub(crate) frame_revision: u64,
+    pub(crate) source_render_call: u64,
+    pub(crate) viewport: [u32; 2],
+    pub(crate) logical_submission: RenderSubmissionStats,
+    pub(crate) indirect_draw_calls: u32,
+    pub(crate) source_instances: u32,
+    pub(crate) image: StagedOffscreenImageReadback,
+}
+
+/// Stage a one-shot copy of the latest completed shadow frame. Queue ordering
+/// guarantees that the copy follows its render submission. No thread-local
+/// borrow survives the async map performed by the caller.
+pub(crate) fn stage_frame_evidence() -> Result<StagedWebGpuFrameEvidence, String> {
+    BACKEND.with(|slot| {
+        let backend = slot.borrow();
+        if backend.state != "ready" || backend.last_frame_revision == 0 {
+            return Err("WebGPU image evidence requires one completed frame".to_string());
+        }
+        let device = backend
+            .device
+            .as_ref()
+            .ok_or_else(|| "ready WebGPU backend has no device".to_string())?;
+        let target = backend
+            .target
+            .as_ref()
+            .ok_or_else(|| "WebGPU image evidence requires an offscreen target".to_string())?;
+        if target.size() != backend.last_viewport {
+            return Err("WebGPU image evidence target does not match the last frame".to_string());
+        }
+        let image = device
+            .stage_offscreen_patch_render_target_image(target)
+            .map_err(|error| error.to_string())?;
+        Ok(StagedWebGpuFrameEvidence {
+            frame_revision: backend.last_frame_revision,
+            source_render_call: backend.last_source_render_call,
+            viewport: backend.last_viewport,
+            logical_submission: backend.last_logical_submission,
+            indirect_draw_calls: backend.last_indirect_draw_calls,
+            source_instances: backend.last_source_instances,
+            image,
+        })
+    })
+}
+
+/// Require the next semantically supported frame to execute even if all live
+/// inputs compare equal to the prior shadow. Used only by explicit one-shot
+/// parity capture so frame identity cannot accidentally refer to stale pixels.
+pub(crate) fn force_next_frame() {
+    BACKEND.with(|slot| {
+        let mut backend = slot.borrow_mut();
+        if backend.state == "ready" {
+            backend.last_frame_input = None;
+        }
+    });
 }
 
 pub(crate) fn diagnostics() -> WebGpuBackendDiagnostics {

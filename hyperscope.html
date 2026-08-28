@@ -581,6 +581,12 @@ const graphicsBackendDiagnostics = {
   refresh() {
     return refreshWebGpuBackendDiagnostics();
   },
+  requestFrameEvidence() {
+    return quiltingWasmBackend.mr_requestBackendFrameEvidence();
+  },
+  compareFrameEvidence() {
+    return quiltingWasmBackend.mr_compareBackendFrameEvidence();
+  },
 };
 globalThis.__hyperscopeGraphicsBackend = graphicsBackendDiagnostics;
 

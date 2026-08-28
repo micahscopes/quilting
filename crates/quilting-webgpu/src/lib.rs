@@ -418,11 +418,70 @@ pub struct PatchRenderTarget<'a> {
 /// promotion can later replace this target with a surface view while reusing
 /// the same pipeline and frame executor.
 pub struct OffscreenPatchRenderTarget {
-    _color: wgpu::Texture,
+    color: wgpu::Texture,
     color_view: wgpu::TextureView,
     _depth: wgpu::Texture,
     depth_view: wgpu::TextureView,
     size: [u32; 2],
+}
+
+/// One explicit, diagnostic-only copy of a completed offscreen frame. Staging
+/// is synchronous and ordered on the render queue; mapping remains async and
+/// owns all resources needed after the live backend borrow is released.
+pub struct StagedOffscreenImageReadback {
+    #[cfg(not(target_arch = "wasm32"))]
+    device: wgpu::Device,
+    buffer: wgpu::Buffer,
+    size: [u32; 2],
+    bytes_per_row: usize,
+    byte_len: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OffscreenRgba8Image {
+    pub size: [u32; 2],
+    pub bytes_per_row: usize,
+    pub bytes: Vec<u8>,
+}
+
+impl OffscreenRgba8Image {
+    pub fn view(&self) -> Result<Rgba8ImageView<'_>, LodWebGpuError> {
+        Rgba8ImageView::new(
+            self.size,
+            self.bytes_per_row,
+            RenderImageOrigin::TopLeft,
+            RenderImageChannelOrder::Rgba,
+            &self.bytes,
+        )
+        .map_err(|error| LodWebGpuError::Payload(error.to_string()))
+    }
+}
+
+impl StagedOffscreenImageReadback {
+    pub async fn read(self) -> Result<OffscreenRgba8Image, LodWebGpuError> {
+        let slice = self.buffer.slice(..self.byte_len);
+        let (sender, receiver) = oneshot::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|error| LodWebGpuError::Poll(error.to_string()))?;
+        receiver
+            .await
+            .map_err(|_| LodWebGpuError::Mapping("map callback was canceled".to_string()))?
+            .map_err(|error| LodWebGpuError::Mapping(error.to_string()))?;
+        let view = slice.get_mapped_range();
+        let bytes = view.to_vec();
+        drop(view);
+        self.buffer.unmap();
+        Ok(OffscreenRgba8Image {
+            size: self.size,
+            bytes_per_row: self.bytes_per_row,
+            bytes,
+        })
+    }
 }
 
 /// CPU-visible facts about encoding one shared frame. Compacted survivor
@@ -2742,9 +2801,72 @@ impl LodClassifierDevice {
         Ok(OffscreenPatchRenderTarget {
             color_view: color.create_view(&wgpu::TextureViewDescriptor::default()),
             depth_view: depth.create_view(&wgpu::TextureViewDescriptor::default()),
-            _color: color,
+            color,
             _depth: depth,
             size,
+        })
+    }
+
+    /// Stage an explicit parity/diagnostic image from the most recently
+    /// submitted offscreen frame. Ordinary rendering never calls this method.
+    pub fn stage_offscreen_patch_render_target_image(
+        &self,
+        target: &OffscreenPatchRenderTarget,
+    ) -> Result<StagedOffscreenImageReadback, LodWebGpuError> {
+        let unpadded_bytes_per_row = target.size[0].checked_mul(4).ok_or_else(|| {
+            LodWebGpuError::Payload("offscreen image row size overflowed".to_string())
+        })?;
+        let bytes_per_row = unpadded_bytes_per_row
+            .div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            .checked_mul(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            .ok_or_else(|| {
+                LodWebGpuError::Payload("offscreen image padded row size overflowed".to_string())
+            })?;
+        let byte_len = u64::from(bytes_per_row)
+            .checked_mul(u64::from(target.size[1]))
+            .ok_or_else(|| {
+                LodWebGpuError::Payload("offscreen image readback size overflowed".to_string())
+            })?;
+        let buffer = gpu_buffer(
+            &self.device,
+            "quilting offscreen image evidence readback",
+            byte_len,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quilting offscreen image evidence copy"),
+            });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target.color,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(target.size[1]),
+                },
+            },
+            wgpu::Extent3d {
+                width: target.size[0],
+                height: target.size[1],
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit([encoder.finish()]);
+        Ok(StagedOffscreenImageReadback {
+            #[cfg(not(target_arch = "wasm32"))]
+            device: self.device.clone(),
+            buffer,
+            size: target.size,
+            bytes_per_row: bytes_per_row as usize,
+            byte_len,
         })
     }
 
@@ -3233,7 +3355,14 @@ impl LodClassifierDevice {
         use_qb: bool,
     ) -> Result<PatchFrameEncoding, LodWebGpuError> {
         self.render_offscreen_normals_patch_scene_impl(
-            frame, pipeline, scene, atlas, target, use_qb, false,
+            frame,
+            pipeline,
+            scene,
+            atlas,
+            target,
+            use_qb,
+            false,
+            wgpu::Color::TRANSPARENT,
         )
     }
 
@@ -3249,7 +3378,68 @@ impl LodClassifierDevice {
         use_qb: bool,
     ) -> Result<PatchFrameEncoding, LodWebGpuError> {
         self.render_offscreen_normals_patch_scene_impl(
-            frame, pipeline, scene, atlas, target, use_qb, true,
+            frame,
+            pipeline,
+            scene,
+            atlas,
+            target,
+            use_qb,
+            true,
+            wgpu::Color::TRANSPARENT,
+        )
+    }
+
+    /// Live parity variant whose clear color matches the incumbent WebGL2
+    /// framebuffer. It remains a no-readback render call.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_offscreen_normals_patch_scene_with_face_visibility_and_clear(
+        &self,
+        frame: &RenderFrame,
+        pipeline: &PatchRenderPipeline,
+        scene: &PatchRenderScene,
+        atlas: &PackedPatchAtlas,
+        target: &OffscreenPatchRenderTarget,
+        use_qb: bool,
+        clear_color: wgpu::Color,
+    ) -> Result<PatchFrameEncoding, LodWebGpuError> {
+        self.render_offscreen_normals_patch_scene_impl(
+            frame,
+            pipeline,
+            scene,
+            atlas,
+            target,
+            use_qb,
+            true,
+            clear_color,
+        )
+    }
+
+    /// Incumbent-parity convenience for the WebGL2 renderer's canonical RGB
+    /// clear. Transparent alpha makes the diagnostic background an explicit
+    /// fragment-coverage mask without changing the visible RGB comparison.
+    pub fn render_offscreen_normals_patch_scene_with_webgl_clear(
+        &self,
+        frame: &RenderFrame,
+        pipeline: &PatchRenderPipeline,
+        scene: &PatchRenderScene,
+        atlas: &PackedPatchAtlas,
+        target: &OffscreenPatchRenderTarget,
+        use_qb: bool,
+    ) -> Result<PatchFrameEncoding, LodWebGpuError> {
+        self.render_offscreen_normals_patch_scene_impl(
+            frame,
+            pipeline,
+            scene,
+            atlas,
+            target,
+            use_qb,
+            true,
+            wgpu::Color {
+                r: 0.2,
+                g: 0.2,
+                b: 0.3,
+                a: 0.0,
+            },
         )
     }
 
@@ -3263,6 +3453,7 @@ impl LodClassifierDevice {
         target: &OffscreenPatchRenderTarget,
         use_qb: bool,
         expand_face_visibility: bool,
+        clear_color: wgpu::Color,
     ) -> Result<PatchFrameEncoding, LodWebGpuError> {
         if frame.view.viewport != target.size {
             return Err(LodWebGpuError::Payload(format!(
@@ -3285,7 +3476,7 @@ impl LodClassifierDevice {
                 color_view: &target.color_view,
                 resolve_target: None,
                 depth_stencil_view: Some(&target.depth_view),
-                clear_color: Some(wgpu::Color::TRANSPARENT),
+                clear_color: Some(clear_color),
                 clear_depth: Some(1.0),
             },
             use_qb,

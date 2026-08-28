@@ -673,9 +673,25 @@ channel order.
 
 Hyperscope does not yet claim that surface: its visible `cv` canvas is currently
 claimed as WebGL2 before the rollback-safe WebGPU shadow starts, and browser
-canvas context type cannot be changed afterward. The next cut adds WebGL2
-image/workload parity and an explicit pre-context application cutover. PBR,
-wire, LOD color, stretch, picking,
+canvas context type cannot be changed afterward. The live shadow now draws the
+same extracted normals frame into its retained offscreen target. An explicit
+one-shot diagnostic rerenders the incumbent WebGL2 frame into a single-sample
+RGBA8/depth target, tags both backends with the same source render call, and
+rejects stale frames or viewport mismatches before readback. This keeps all
+readback and duplicate WebGL work outside the ordinary frame path.
+
+The first live Chromium comparison covered a 496×826 horse frame. Both paths
+submitted exactly 5 draws, 984 instances, and 1,160 triangles with draw-sequence
+hash `9227089913e7d75c`; WebGPU physically issued 5 indirect draws over the same
+984 source instances. After origin/row normalization, 170 of 409,696 pixels
+differed (414 ppm), with a normalized mean absolute error of 3 millionths. Only
+2 silhouette pixels disagreed in coverage (4 ppm); the remaining differences
+were predominantly one-channel rounding at shared covered pixels. The
+diagnostic background preserves the incumbent RGB clear but uses transparent
+alpha so coverage is measured rather than inferred from color. Chromium logged
+no warning, error, assertion, or failed request. This is measured parity
+evidence, not yet authority promotion: an explicit pre-context application
+cutover is still required. PBR, wire, LOD color, stretch, picking,
 material/texture binding, and postprocess commands still reject explicitly
 rather than silently lowering to normals. Those cuts are what remove the live
 classifier readback, CPU topology repacking, and rejected atlas vertex
@@ -688,8 +704,9 @@ order, and padded GPU-copy rows, then produces a canonical RGBA8 hash, coverage
 and channel moments. Pairwise comparison reports exact mismatched/coverage
 rates, normalized mean error, per-channel maxima, and at most eight pixel
 examples against an explicit tolerance. The contract is intentionally absent
-from the warm frame path. WebGL2 and WebGPU still need to feed the same
-diagnostic fixture into it before the application cutover is justified.
+from the warm frame path. The live one-shot diagnostic now feeds the same
+source frame to both backends; a broader route/asset matrix and the remaining
+render modes are still required before application cutover is justified.
 
 The old JavaScript renderer's useful idea was memoizing tessellation topology
 and prepared meshes. The retained atlas, versioned browser cache, and stable
