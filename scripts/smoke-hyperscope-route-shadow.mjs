@@ -233,8 +233,12 @@ for (const graphicsBackendStep of [
   "gfx: 'webgl2'",
   "set('gfx', GRAPHICS_BACKEND_REQUEST, PARAM_DEFAULTS.gfx);",
   'await quiltingWasmBackend.mr_initWebGpuBackend()',
+  'await quiltingWasmBackend.mr_initWebGpuPresentation(',
   'quiltingWasmBackend.mr_uploadWebGpuComposedModel(',
-  "graphicsBackendDiagnostics.state = 'presentation-fallback';",
+  "graphicsBackendDiagnostics.state = 'presentation-ready';",
+  "graphicsBackendDiagnostics.state = 'presenting';",
+  "presentationCanvas.classList.toggle('webgpu-presenting', presenting);",
+  "webglCanvas.classList.toggle('webgpu-input-layer', presenting);",
   "globalThis.__hyperscopeGraphicsBackend = graphicsBackendDiagnostics;",
   'return refreshWebGpuBackendDiagnostics();',
 ]) {

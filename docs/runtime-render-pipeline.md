@@ -483,18 +483,21 @@ model without constructing a redundant WebGL classifier when the worker
 remains authoritative. The backend now replaces preparation/compaction/binding
 resources as one atomic `PatchRenderScene`, resolves packed-atlas slices during
 encoding without a per-frame draw-view allocation, and executes supported live
-normals frames into a depth-backed offscreen target. `gfx=webgpu` currently
-performs that same residency and shadow execution but
-reports `effective=webgl2`, `state=presentation-fallback`, and a concrete reason
-until presentation parity exists. A failed device, atlas, or model shadow is a
-diagnostic warning and never retires working WebGL resources.
+normals frames into a depth-backed offscreen target. `gfx=webgpu` instead
+claims a separately supplied presentation canvas on a surface-compatible
+adapter before that canvas has any context. It specializes the same normals
+pipeline to the surface format and presents the same extracted live frame.
+The original WebGL2 canvas remains a transparent input/picking and rollback
+layer; it becomes visible for unsupported modes or any presentation failure.
+No code attempts to repurpose a claimed canvas context. A failed device, atlas,
+model, or surface never retires working WebGL resources.
 
 The first live Chrome residency check retained 22 canonical atlas entries,
 25,551 barycentric vertices, and the horse's 984-face prepared model through a
 `BrowserWebGpu` adapter with one initialization, atlas upload, and model upload.
-The canvas continued through WebGL2 with no console errors. The default route
-remained disabled and allocated no WebGPU residency; the explicit presentation
-request declared its fallback.
+The default route remains disabled and allocates no WebGPU residency. Shadow
+mode keeps WebGL2 visible; direct mode can now make WebGPU normals visibly
+authoritative after its first successful presentation.
 
 The first live normals gate extracted five real horse batches and 984 source
 instances at a 496×770 viewport, then submitted five compacted indirect draws
@@ -671,14 +674,22 @@ pixels and canonical RGBA8 hash `3fe933548a480845`; native Radeon/Vulkan passes
 the same coverage/signature construction without assuming byte origin or
 channel order.
 
-Hyperscope does not yet claim that surface: its visible `cv` canvas is currently
-claimed as WebGL2 before the rollback-safe WebGPU shadow starts, and browser
-canvas context type cannot be changed afterward. The live shadow now draws the
-same extracted normals frame into its retained offscreen target. An explicit
-one-shot diagnostic rerenders the incumbent WebGL2 frame into a single-sample
-RGBA8/depth target, tags both backends with the same source render call, and
-rejects stale frames or viewport mismatches before readback. This keeps all
-readback and duplicate WebGL work outside the ordinary frame path.
+Hyperscope now has an opt-in presentation cut at `gfx=webgpu`. Browser layout
+supplies an unclaimed `cv-webgpu`; Rust owns its adapter/device, surface format,
+depth attachment, resize, acquisition, encoding, submission, and presentation.
+The existing `cv` remains the event target and hidden WebGL2 oracle while
+normals is supported. The adapter reveals it synchronously when the mode is not
+normals, and reveals WebGPU only after a successful fresh presentation. This
+dual-canvas interval is deliberate migration debt: visible pixel authority has
+moved, but eliminating the hidden WebGL draw/classifier work requires the
+remaining input, picking, and LOD cuts.
+
+The live shadow still draws the same extracted normals frame into its retained
+offscreen target. An explicit one-shot diagnostic rerenders the incumbent
+WebGL2 frame into a single-sample RGBA8/depth target, tags both backends with the
+same source render call, and rejects stale frames or viewport mismatches before
+readback. This keeps all readback and duplicate diagnostic work outside the
+ordinary frame path.
 
 The first live Chromium comparison covered a 496×826 horse frame. Both paths
 submitted exactly 5 draws, 984 instances, and 1,160 triangles with draw-sequence
@@ -689,9 +700,13 @@ differed (414 ppm), with a normalized mean absolute error of 3 millionths. Only
 were predominantly one-channel rounding at shared covered pixels. The
 diagnostic background preserves the incumbent RGB clear but uses transparent
 alpha so coverage is measured rather than inferred from color. Chromium logged
-no warning, error, assertion, or failed request. This is measured parity
-evidence, not yet authority promotion: an explicit pre-context application
-cutover is still required. PBR, wire, LOD color, stretch, picking,
+no warning, error, assertion, or failed request. That evidence admitted the
+explicit normals cutover. A fresh 496×770 direct run visibly rendered the horse,
+reported `effective=webgpu`, 5 physical indirect draws over 984 instances, and
+no surface loss or frame failure. Switching to PBR exposed WebGL2 with
+`state=unsupported-mode`; switching back advanced the surface presentation
+counter from 4 to 5 before WebGPU became visible again. No warning, error,
+assertion, or failed request occurred. PBR, wire, LOD color, stretch, picking,
 material/texture binding, and postprocess commands still reject explicitly
 rather than silently lowering to normals. Those cuts are what remove the live
 classifier readback, CPU topology repacking, and rejected atlas vertex
@@ -705,8 +720,8 @@ and channel moments. Pairwise comparison reports exact mismatched/coverage
 rates, normalized mean error, per-channel maxima, and at most eight pixel
 examples against an explicit tolerance. The contract is intentionally absent
 from the warm frame path. The live one-shot diagnostic now feeds the same
-source frame to both backends; a broader route/asset matrix and the remaining
-render modes are still required before application cutover is justified.
+source frame to both backends. A broader route/asset matrix and the remaining
+render modes are still required before WebGPU can become the default.
 
 The old JavaScript renderer's useful idea was memoizing tessellation topology
 and prepared meshes. The retained atlas, versioned browser cache, and stable

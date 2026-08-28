@@ -28,7 +28,11 @@
 html,body{height:100%}
 body{background:#0d1117;color:#e6edf3;font-family:system-ui;overflow:hidden;display:flex}
 #wrap{flex:1;position:relative}
-canvas{width:100%;height:100%;display:block}
+#cv,#cv-webgpu{position:absolute;inset:0;width:100%;height:100%;display:block}
+#cv{z-index:1}
+#cv.webgpu-input-layer{opacity:0}
+#cv-webgpu{z-index:0;visibility:hidden;pointer-events:none}
+#cv-webgpu.webgpu-presenting{visibility:visible}
 #sidebar{width:260px;padding:14px;background:rgba(22,27,34,0.96);border-left:1px solid #30363d;display:flex;flex-direction:column;gap:10px;flex-shrink:0;overflow-y:auto;order:1;transition:margin-right 0.2s}
 #sidebar.collapsed{margin-right:-260px}
 #sidebar-toggle{position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:100;background:rgba(22,27,34,0.9);border:1px solid #30363d;border-right:none;color:#58a6ff;cursor:pointer;padding:8px 4px;font-size:14px;border-radius:4px 0 0 4px}
@@ -95,6 +99,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 <body>
 <div id="wrap">
   <canvas id="cv"></canvas>
+  <canvas id="cv-webgpu" aria-hidden="true"></canvas>
   <div id="drop-overlay"><span>Drop .glb / .gltf file here</span></div>
   <div id="presentation-card-rust" hidden></div>
   <div class="asset-credit-footer" id="asset-credit-footer" aria-live="polite"></div>
@@ -578,6 +583,9 @@ const graphicsBackendDiagnostics = {
   state: WEBGPU_SHADOW_ENABLED ? 'awaiting-wasm' : 'disabled',
   fallbackReason: null,
   residency: null,
+  renderMode: 'pbr',
+  presentationArmed: false,
+  lastRefreshAt: -Infinity,
   refresh() {
     return refreshWebGpuBackendDiagnostics();
   },
@@ -590,6 +598,41 @@ const graphicsBackendDiagnostics = {
 };
 globalThis.__hyperscopeGraphicsBackend = graphicsBackendDiagnostics;
 
+function synchronizeGraphicsBackendPresentation() {
+  const presentationCanvas = $('cv-webgpu');
+  const webglCanvas = $('cv');
+  const residency = graphicsBackendDiagnostics.residency;
+  const failed = residency?.state === 'failed'
+    || (residency?.frameFailures || 0) > 0
+    || (residency?.presentationLosses || 0) > 0;
+  const presenting = GRAPHICS_BACKEND_REQUEST === 'webgpu'
+    && graphicsBackendDiagnostics.renderMode === 'normals'
+    && graphicsBackendDiagnostics.presentationArmed
+    && residency?.state === 'ready'
+    && residency?.presentationReady === true
+    && (residency?.presentationFrames || 0) > 0
+    && !failed;
+  presentationCanvas.classList.toggle('webgpu-presenting', presenting);
+  webglCanvas.classList.toggle('webgpu-input-layer', presenting);
+  graphicsBackendDiagnostics.effective = presenting ? 'webgpu' : 'webgl2';
+  if (GRAPHICS_BACKEND_REQUEST === 'webgpu') {
+    if (failed) {
+      graphicsBackendDiagnostics.state = 'fallback';
+      graphicsBackendDiagnostics.fallbackReason = residency?.lastFrameFailure
+        || residency?.lastError
+        || 'WebGPU presentation failed';
+    } else if (presenting) {
+      graphicsBackendDiagnostics.state = 'presenting';
+      graphicsBackendDiagnostics.fallbackReason = null;
+    } else if (residency?.presentationReady) {
+      graphicsBackendDiagnostics.state = graphicsBackendDiagnostics.renderMode === 'normals'
+        ? 'presentation-ready' : 'unsupported-mode';
+      graphicsBackendDiagnostics.fallbackReason = null;
+    }
+  }
+  return presenting;
+}
+
 function refreshWebGpuBackendDiagnostics() {
   if (!WEBGPU_SHADOW_ENABLED) return null;
   try {
@@ -598,6 +641,7 @@ function refreshWebGpuBackendDiagnostics() {
   } catch (error) {
     graphicsBackendDiagnostics.fallbackReason = error?.message || String(error);
   }
+  synchronizeGraphicsBackendPresentation();
   return graphicsBackendDiagnostics.residency;
 }
 const RUST_NAVIGATION_SHADOW_TOLERANCE = 2e-6;
@@ -5047,6 +5091,7 @@ function rebuildNodeFocusRecords() {
 
 // --- Pick debugger: ctrl-click to inspect face ---
 const canvas = $('cv');
+const webgpuCanvas = $('cv-webgpu');
 let pendingCanvasSize = null;
 let canvasSizeApplied = false;
 const canvasResizeObserver = new ResizeObserver(entries => {
@@ -5063,11 +5108,14 @@ function applyPendingCanvasSize() {
   if (!pendingCanvasSize) return;
   const [width, height] = pendingCanvasSize;
   pendingCanvasSize = null;
-  const changed = canvas.width !== width || canvas.height !== height;
+  const changed = canvas.width !== width || canvas.height !== height
+    || webgpuCanvas.width !== width || webgpuCanvas.height !== height;
   if (!changed && canvasSizeApplied) return;
   if (changed) {
     canvas.width = width;
     canvas.height = height;
+    webgpuCanvas.width = width;
+    webgpuCanvas.height = height;
   }
   mr_resize(width, height);
   canvasSizeApplied = true;
@@ -6320,6 +6368,9 @@ const renderMode = signal('pbr', 'mode');
 bindBtnGroup('render-btns', renderMode);
 effect(() => {
   const v = renderMode.get();
+  graphicsBackendDiagnostics.renderMode = v;
+  graphicsBackendDiagnostics.presentationArmed = false;
+  synchronizeGraphicsBackendPresentation();
   if (!wasmOk.get()) return;
   // Fuzzy debug views: render PBR underneath, then debug blit replaces output
   const fzDebug = { 'fz-weight': 1, 'fz-jfa': 2, 'fz-firmness': 3 }[v];
@@ -9311,6 +9362,14 @@ function frame(ts) {
   frameCameraPos[0] = ex; frameCameraPos[1] = ey; frameCameraPos[2] = ez;
 
   mr_render(mvp, view, frameCameraPos);
+  if (GRAPHICS_BACKEND_REQUEST === 'webgpu') {
+    graphicsBackendDiagnostics.presentationArmed = renderMode.peek() === 'normals';
+    const refreshDue = ts - graphicsBackendDiagnostics.lastRefreshAt >= 250;
+    if (graphicsBackendDiagnostics.effective !== 'webgpu' || refreshDue) {
+      graphicsBackendDiagnostics.lastRefreshAt = ts;
+      refreshWebGpuBackendDiagnostics();
+    }
+  }
 }
 
 // --- Load model ---
@@ -10627,19 +10686,34 @@ phase('wasm', [], async () => {
     }
   }
   $('stats').textContent = 'Initializing renderer...';
+  if (GRAPHICS_BACKEND_REQUEST === 'webgpu') {
+    try {
+      const bounds = $('wrap').getBoundingClientRect();
+      const width = Math.max(1, Math.round(bounds.width));
+      const height = Math.max(1, Math.round(bounds.height));
+      canvas.width = width;
+      canvas.height = height;
+      webgpuCanvas.width = width;
+      webgpuCanvas.height = height;
+      graphicsBackendDiagnostics.residency =
+        await quiltingWasmBackend.mr_initWebGpuPresentation(
+          'cv-webgpu',
+          width,
+          height,
+        );
+      graphicsBackendDiagnostics.state = 'presentation-ready';
+    } catch (error) {
+      graphicsBackendDiagnostics.state = 'fallback';
+      graphicsBackendDiagnostics.fallbackReason = error?.message || String(error);
+      console.warn('WebGPU presentation initialization failed; using WebGL2', error);
+    }
+  }
   if (!mr_init('cv')) throw 'renderer init failed';
-  if (WEBGPU_SHADOW_ENABLED) {
+  if (GRAPHICS_BACKEND_REQUEST === 'webgpu-shadow') {
     try {
       graphicsBackendDiagnostics.residency =
         await quiltingWasmBackend.mr_initWebGpuBackend();
-      if (GRAPHICS_BACKEND_REQUEST === 'webgpu') {
-        graphicsBackendDiagnostics.state = 'presentation-fallback';
-        graphicsBackendDiagnostics.fallbackReason =
-          'WebGPU presentation parity is incomplete; WebGL2 remains authoritative';
-        console.warn(graphicsBackendDiagnostics.fallbackReason);
-      } else {
-        graphicsBackendDiagnostics.state = 'shadow-ready';
-      }
+      graphicsBackendDiagnostics.state = 'shadow-ready';
     } catch (error) {
       graphicsBackendDiagnostics.state = 'fallback';
       graphicsBackendDiagnostics.fallbackReason = error?.message || String(error);

@@ -38,8 +38,10 @@ use quilting_core::instance_layout;
 use quilting_core::render::{
     patch_preparation_needed, patch_visibility_needed, render_draw_passes, FocusFieldPacket,
     PbrDrawClass, RenderBatchSnapshot, RenderEntityTransform, RenderFrameOptions, RenderPass,
-    RenderSceneSnapshot, RenderStyle, RenderSubmissionMismatch, RenderSubmissionStats, RenderView,
+    RenderSceneSnapshot, RenderStyle, RenderSubmissionStats, RenderView,
 };
+#[cfg(feature = "webgpu-backend")]
+use quilting_core::render::RenderSubmissionMismatch;
 #[cfg(feature = "webgpu-backend")]
 use quilting_core::render_evidence::{
     compare_render_images, RenderImageChannelOrder, RenderImageComparison, RenderImageOrigin,
@@ -2207,17 +2209,29 @@ pub fn mr_reset_runtime_timing_diagnostics() -> Result<(), JsValue> {
 
 #[wasm_bindgen(js_name = "mr_setRenderMode")]
 pub fn mr_set_render_mode(mode: &str) {
+    #[cfg(feature = "webgpu-backend")]
+    let mut entered_normals = false;
     STATE.with(|s| {
         if let Some(ref mut st) = *s.borrow_mut() {
-            st.render_style = match mode {
+            let next = match mode {
                 "pbr" => RenderStyle::Pbr, "matcap" => RenderStyle::Matcap,
                 "wire" => RenderStyle::Wire, "normals" => RenderStyle::Normals,
                 "both" => RenderStyle::MatcapWire, "lod" => RenderStyle::Lod,
                 "stretch" => RenderStyle::Stretch,
                 _ => RenderStyle::Pbr,
             };
+            #[cfg(feature = "webgpu-backend")]
+            {
+                entered_normals = st.render_style != RenderStyle::Normals
+                    && next == RenderStyle::Normals;
+            }
+            st.render_style = next;
         }
     });
+    #[cfg(feature = "webgpu-backend")]
+    if entered_normals {
+        crate::webgpu_backend::force_next_frame();
+    }
 }
 
 #[wasm_bindgen(js_name = "mr_setMatcapStyle")]
