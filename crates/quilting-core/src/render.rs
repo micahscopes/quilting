@@ -8,7 +8,7 @@
 use crate::batch::{RenderBatchId, RenderBatchLayer, RenderBatchMember};
 use crate::permutation::perm_sign;
 use serde::{Serialize, Serializer};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
@@ -77,6 +77,160 @@ pub struct RenderSceneSnapshot {
     /// compact them away.
     pub suppressed_root_faces: Vec<u32>,
     pub batches: Vec<RenderBatchSnapshot>,
+}
+
+/// Immutable render state shared by every retained source root in one draw
+/// domain. Atlas topology and permutation parity are deliberately absent:
+/// those change with LOD and are appended to this domain on the GPU.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResidentRootDrawDomain {
+    pub material_index: usize,
+    pub render_node_index: usize,
+    pub pbr_class: PbrDrawClass,
+    pub transform: RenderEntityTransform,
+    pub enabled: bool,
+}
+
+/// Dense rows for only the material/render domains actually present in a
+/// retained root scene. The row per source face is immutable across LOD
+/// changes, avoiding an atlas × material × node Cartesian allocation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResidentRootDrawDomains {
+    pub domains: Vec<ResidentRootDrawDomain>,
+    pub face_domain_rows: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResidentRootDrawDomainError {
+    InvalidScene(String),
+    FaceCountOverflow,
+    FaceOutOfBounds { face_index: u32, face_count: usize },
+    DuplicateRootFace(u32),
+    MissingRootFace(u32),
+    ConflictingDomainState {
+        material_index: usize,
+        render_node_index: usize,
+    },
+}
+
+impl fmt::Display for ResidentRootDrawDomainError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidScene(error) => write!(formatter, "invalid render scene: {error}"),
+            Self::FaceCountOverflow => write!(formatter, "resident root face count exceeds u32"),
+            Self::FaceOutOfBounds {
+                face_index,
+                face_count,
+            } => write!(
+                formatter,
+                "resident root face {face_index} exceeds the {face_count}-face domain",
+            ),
+            Self::DuplicateRootFace(face_index) => {
+                write!(formatter, "resident root face {face_index} appears more than once")
+            }
+            Self::MissingRootFace(face_index) => {
+                write!(formatter, "resident root face {face_index} has no draw domain")
+            }
+            Self::ConflictingDomainState {
+                material_index,
+                render_node_index,
+            } => write!(
+                formatter,
+                "resident root domain material {material_index}, render node {render_node_index} has conflicting state",
+            ),
+        }
+    }
+}
+
+impl Error for ResidentRootDrawDomainError {}
+
+impl ResidentRootDrawDomains {
+    /// Extract a complete source-face mapping while retaining only observed
+    /// material/render domains. Adaptive leaves do not create root domains;
+    /// their sparse draw layer is planned independently.
+    pub fn build(
+        scene: &RenderSceneSnapshot,
+        face_count: usize,
+    ) -> Result<Self, ResidentRootDrawDomainError> {
+        scene
+            .validate()
+            .map_err(|error| ResidentRootDrawDomainError::InvalidScene(error.to_string()))?;
+        u32::try_from(face_count).map_err(|_| ResidentRootDrawDomainError::FaceCountOverflow)?;
+
+        type DomainKey = (usize, usize);
+        let mut states = BTreeMap::<DomainKey, ResidentRootDrawDomain>::new();
+        let mut face_keys = vec![None::<DomainKey>; face_count];
+        for batch in &scene.batches {
+            if batch.id.layer == RenderBatchLayer::AdaptiveOverlay {
+                continue;
+            }
+            let key = (
+                batch.id.key.material_index,
+                batch.id.key.render_node_index,
+            );
+            let domain = ResidentRootDrawDomain {
+                material_index: key.0,
+                render_node_index: key.1,
+                pbr_class: batch.pbr_class,
+                transform: batch.transform,
+                enabled: batch.enabled,
+            };
+            match states.entry(key) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(domain);
+                }
+                std::collections::btree_map::Entry::Occupied(entry)
+                    if entry.get() != &domain =>
+                {
+                    return Err(ResidentRootDrawDomainError::ConflictingDomainState {
+                        material_index: key.0,
+                        render_node_index: key.1,
+                    });
+                }
+                std::collections::btree_map::Entry::Occupied(_) => {}
+            }
+            for member in &batch.members {
+                if member.leaf_id != crate::screen_partition::ScreenPatchLeafId::ROOT {
+                    continue;
+                }
+                let face = member.face_index as usize;
+                let Some(destination) = face_keys.get_mut(face) else {
+                    return Err(ResidentRootDrawDomainError::FaceOutOfBounds {
+                        face_index: member.face_index,
+                        face_count,
+                    });
+                };
+                if destination.replace(key).is_some() {
+                    return Err(ResidentRootDrawDomainError::DuplicateRootFace(
+                        member.face_index,
+                    ));
+                }
+            }
+        }
+
+        let domains = states.values().copied().collect::<Vec<_>>();
+        if domains.len() > u32::MAX as usize {
+            return Err(ResidentRootDrawDomainError::FaceCountOverflow);
+        }
+        let rows = states
+            .keys()
+            .copied()
+            .enumerate()
+            .map(|(row, key)| (key, row as u32))
+            .collect::<BTreeMap<_, _>>();
+        let face_domain_rows = face_keys
+            .into_iter()
+            .enumerate()
+            .map(|(face, key)| {
+                let key = key.ok_or(ResidentRootDrawDomainError::MissingRootFace(face as u32))?;
+                Ok(rows[&key])
+            })
+            .collect::<Result<Vec<_>, ResidentRootDrawDomainError>>()?;
+        Ok(Self {
+            domains,
+            face_domain_rows,
+        })
+    }
 }
 
 impl RenderSceneSnapshot {
@@ -1780,6 +1934,73 @@ mod tests {
         assert_eq!(
             mixed.validate(),
             Err(RenderContractError::MixedBatchLayers),
+        );
+    }
+
+    #[test]
+    fn resident_root_draw_domains_are_sparse_and_source_complete() {
+        let mut low = batch(7, 0, PbrDrawClass::Opaque, true);
+        low.id.layer = RenderBatchLayer::RetainedRoot;
+        low.id.key.render_node_index = 2;
+        low.id.key.lod = [1; 3];
+        low.members[0].edge_lods = [1; 3];
+        low.members[0].vertex_lods = [1; 3];
+
+        let mut high = batch(7, 2, PbrDrawClass::Opaque, true);
+        high.id.layer = RenderBatchLayer::RetainedRoot;
+        high.id.key.render_node_index = 2;
+        high.id.key.lod = [4; 3];
+        high.members[0].edge_lods = [4; 3];
+        high.members[0].vertex_lods = [4; 3];
+
+        let mut sparse_material = batch(1_000_000, 1, PbrDrawClass::Blend, false);
+        sparse_material.id.layer = RenderBatchLayer::RetainedRoot;
+        sparse_material.id.key.render_node_index = 9;
+
+        let scene = RenderSceneSnapshot {
+            revision: 11,
+            suppressed_root_faces: Vec::new(),
+            batches: vec![low, high, sparse_material],
+        };
+        let extracted = ResidentRootDrawDomains::build(&scene, 3).unwrap();
+        assert_eq!(extracted.domains.len(), 2);
+        assert_eq!(extracted.face_domain_rows, [0, 1, 0]);
+        assert_eq!(extracted.domains[0].material_index, 7);
+        assert_eq!(extracted.domains[0].render_node_index, 2);
+        assert_eq!(extracted.domains[1].material_index, 1_000_000);
+        assert!(!extracted.domains[1].enabled);
+    }
+
+    #[test]
+    fn resident_root_draw_domains_reject_conflicting_state_and_missing_faces() {
+        let mut first = batch(3, 0, PbrDrawClass::Opaque, true);
+        first.id.layer = RenderBatchLayer::RetainedRoot;
+        let mut conflicting = batch(3, 1, PbrDrawClass::Blend, true);
+        conflicting.id.layer = RenderBatchLayer::RetainedRoot;
+        conflicting.id.key.lod = [4; 3];
+        conflicting.members[0].edge_lods = [4; 3];
+        conflicting.members[0].vertex_lods = [4; 3];
+        let conflict_scene = RenderSceneSnapshot {
+            revision: 12,
+            suppressed_root_faces: Vec::new(),
+            batches: vec![first.clone(), conflicting],
+        };
+        assert_eq!(
+            ResidentRootDrawDomains::build(&conflict_scene, 2),
+            Err(ResidentRootDrawDomainError::ConflictingDomainState {
+                material_index: 3,
+                render_node_index: 0,
+            })
+        );
+
+        let missing_scene = RenderSceneSnapshot {
+            revision: 13,
+            suppressed_root_faces: Vec::new(),
+            batches: vec![first],
+        };
+        assert_eq!(
+            ResidentRootDrawDomains::build(&missing_scene, 2),
+            Err(ResidentRootDrawDomainError::MissingRootFace(1))
         );
     }
 

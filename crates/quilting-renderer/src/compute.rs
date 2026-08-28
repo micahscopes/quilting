@@ -15,7 +15,8 @@ use quilting_core::{batch, instance_layout};
 use quilting_core::batch::RenderBatchLayer;
 use quilting_core::quaternion::{Mobius, Quat};
 use quilting_core::render::{
-    RenderEntityTransform, RenderGeometry, RenderSceneSnapshot, VisibilityCompactionPlan,
+    RenderEntityTransform, RenderGeometry, RenderSceneSnapshot, ResidentRootDrawDomains,
+    VisibilityCompactionPlan,
 };
 use quilting_mesh::HalfEdgeMesh;
 use std::collections::{HashMap, VecDeque};
@@ -1109,6 +1110,18 @@ pub struct WgslResidentGeometryBucketOracleWords {
     pub indirect_arguments: Vec<[u32; 5]>,
 }
 
+/// Sparse material/render-domain root runs expected from WebGPU. Only keys
+/// observed among eligible visible roots appear; absent atlas/domain pairs do
+/// not consume a range or indirect record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WgslResidentRootSparseDrawOracleWords {
+    pub compacted_faces: Vec<u32>,
+    /// `(domain_row, atlas, parity, compacted_first, compacted_count)`.
+    pub draw_ranges: Vec<[u32; 5]>,
+    pub triangle_indirect_arguments: Vec<[u32; 5]>,
+    pub line_indirect_arguments: Vec<[u32; 5]>,
+}
+
 /// Exact 48-byte root topology records reconstructed from packed resident LOD.
 /// Records remain source-face indexed so the compacted root list can pull the
 /// same prepared record without another permutation or scatter stage.
@@ -1234,6 +1247,102 @@ pub fn wgsl_resident_geometry_bucket_oracle_words(
         compacted_faces,
         bucket_ranges,
         indirect_arguments,
+    })
+}
+
+/// Freeze a scalable root draw plan ordered by immutable material/render
+/// domain and current atlas/parity. This is the normative sparse result for a
+/// future GPU radix/run pipeline; memory is O(faces + observed runs), never the
+/// Cartesian product of domains and atlas entries.
+pub fn wgsl_resident_root_sparse_draw_oracle_words(
+    domains: &ResidentRootDrawDomains,
+    packed_residents: &[u32],
+    atlas_draws: &[[u32; 4]],
+    root_eligibility: &[u32],
+) -> Result<WgslResidentRootSparseDrawOracleWords, String> {
+    u32::try_from(packed_residents.len())
+        .map_err(|_| "resident root draw face count exceeds u32".to_string())?;
+    if domains.face_domain_rows.len() != packed_residents.len() {
+        return Err(format!(
+            "resident root draw has {} face-domain rows; expected {}",
+            domains.face_domain_rows.len(),
+            packed_residents.len(),
+        ));
+    }
+    if atlas_draws.is_empty() || atlas_draws.len() > u8::MAX as usize {
+        return Err("resident root draws require 1..=255 atlas entries".to_string());
+    }
+    validate_wgsl_root_eligibility_bits(packed_residents.len(), root_eligibility)?;
+
+    let mut keyed_faces = Vec::<(u32, u8, u8, u32)>::with_capacity(packed_residents.len());
+    for (face, (&packed, &domain_row)) in packed_residents
+        .iter()
+        .zip(&domains.face_domain_rows)
+        .enumerate()
+    {
+        let domain = domains.domains.get(domain_row as usize).ok_or_else(|| {
+            format!(
+                "resident root face {face} references missing draw domain {domain_row}",
+            )
+        })?;
+        if !domain.enabled || root_eligibility[face / 32] & (1u32 << (face % 32)) == 0 {
+            continue;
+        }
+        let fields = unpack_lod_classification_fields(packed)?;
+        let Some(atlas_index) = fields.atlas_index else {
+            continue;
+        };
+        if atlas_index as usize >= atlas_draws.len() {
+            return Err(format!(
+                "resident root face {face} references atlas index {atlas_index}, but only {} entries exist",
+                atlas_draws.len(),
+            ));
+        }
+        keyed_faces.push((
+            domain_row,
+            atlas_index,
+            fields.parity_bucket,
+            face as u32,
+        ));
+    }
+    keyed_faces.sort_unstable();
+
+    let mut compacted_faces = Vec::with_capacity(keyed_faces.len());
+    let mut draw_ranges = Vec::new();
+    let mut triangle_indirect_arguments = Vec::new();
+    let mut line_indirect_arguments = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < keyed_faces.len() {
+        let (domain_row, atlas_index, parity, _) = keyed_faces[cursor];
+        let compacted_first = u32::try_from(compacted_faces.len())
+            .map_err(|_| "resident root compacted prefix exceeds u32".to_string())?;
+        let start = cursor;
+        while cursor < keyed_faces.len()
+            && keyed_faces[cursor].0 == domain_row
+            && keyed_faces[cursor].1 == atlas_index
+            && keyed_faces[cursor].2 == parity
+        {
+            compacted_faces.push(keyed_faces[cursor].3);
+            cursor += 1;
+        }
+        let compacted_count = u32::try_from(cursor - start)
+            .map_err(|_| "resident root draw count exceeds u32".to_string())?;
+        draw_ranges.push([
+            domain_row,
+            u32::from(atlas_index),
+            u32::from(parity),
+            compacted_first,
+            compacted_count,
+        ]);
+        let draw = atlas_draws[atlas_index as usize];
+        triangle_indirect_arguments.push([draw[1], compacted_count, draw[0], 0, 0]);
+        line_indirect_arguments.push([draw[3], compacted_count, draw[2], 0, 0]);
+    }
+    Ok(WgslResidentRootSparseDrawOracleWords {
+        compacted_faces,
+        draw_ranges,
+        triangle_indirect_arguments,
+        line_indirect_arguments,
     })
 }
 
@@ -3214,7 +3323,9 @@ mod tests {
     use super::*;
     use quilting_core::batch::{RenderBatchId, RenderBatchKey, RenderBatchMember};
     use quilting_core::instance_layout::InstanceWriter;
-    use quilting_core::render::{PbrDrawClass, RenderBatchSnapshot, RenderEntityTransform};
+    use quilting_core::render::{
+        PbrDrawClass, RenderBatchSnapshot, RenderEntityTransform, ResidentRootDrawDomain,
+    };
     use quilting_core::screen_partition::ScreenPatchLeafId;
     use std::cell::RefCell;
 
@@ -3548,6 +3659,76 @@ mod tests {
                 [18, 0, 40, 0, 0],
             ],
         );
+    }
+
+    #[test]
+    fn resident_root_sparse_draw_oracle_emits_only_observed_domain_runs() {
+        let transform = RenderEntityTransform {
+            mobius: IDENTITY_MOBIUS,
+            orientation_sign: 1,
+            euclidean_model: IDENTITY,
+            euclidean_normal: IDENTITY,
+        };
+        let domains = ResidentRootDrawDomains {
+            domains: vec![
+                ResidentRootDrawDomain {
+                    material_index: 3,
+                    render_node_index: 1,
+                    pbr_class: PbrDrawClass::Opaque,
+                    transform,
+                    enabled: true,
+                },
+                ResidentRootDrawDomain {
+                    material_index: 500_000,
+                    render_node_index: 8,
+                    pbr_class: PbrDrawClass::Blend,
+                    transform,
+                    enabled: false,
+                },
+                ResidentRootDrawDomain {
+                    material_index: 900_000,
+                    render_node_index: 13,
+                    pbr_class: PbrDrawClass::Transmission,
+                    transform,
+                    enabled: true,
+                },
+            ],
+            face_domain_rows: vec![2, 0, 1, 0, 2, 0, 2],
+        };
+        let packed = [
+            pack_lod_classification([1, 2, 4], 4, Some(2), 0).unwrap(),
+            pack_lod_classification([1, 1, 2], 0, Some(0), 0).unwrap(),
+            pack_lod_classification([1, 2, 4], 0, Some(2), 0).unwrap(),
+            pack_lod_classification([1, 1, 2], 0, Some(0), 0).unwrap(),
+            pack_lod_classification([1, 2, 4], 4, Some(2), 0).unwrap(),
+            pack_lod_classification([1, 2, 4], 1, Some(2), 0).unwrap(),
+            pack_lod_classification([1, 2, 4], 0, None, 0).unwrap(),
+        ];
+        let atlas_draws = [[10, 6, 100, 8], [20, 12, 108, 16], [40, 18, 124, 24]];
+        let eligibility = pack_wgsl_root_eligibility_bits(packed.len(), &[3]).unwrap();
+        let oracle = wgsl_resident_root_sparse_draw_oracle_words(
+            &domains,
+            &packed,
+            &atlas_draws,
+            &eligibility,
+        )
+        .unwrap();
+
+        assert_eq!(oracle.compacted_faces, [1, 5, 0, 4]);
+        assert_eq!(
+            oracle.draw_ranges,
+            [[0, 0, 0, 0, 1], [0, 2, 1, 1, 1], [2, 2, 0, 2, 2]],
+        );
+        assert_eq!(
+            oracle.triangle_indirect_arguments,
+            [[6, 1, 10, 0, 0], [18, 1, 40, 0, 0], [18, 2, 40, 0, 0]],
+        );
+        assert_eq!(
+            oracle.line_indirect_arguments,
+            [[8, 1, 100, 0, 0], [24, 1, 124, 0, 0], [24, 2, 124, 0, 0]],
+        );
+        assert_eq!(oracle.draw_ranges.len(), 3);
+        assert!(oracle.draw_ranges.len() < domains.domains.len() * atlas_draws.len() * 2);
     }
 
     #[test]

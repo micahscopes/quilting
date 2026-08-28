@@ -590,6 +590,18 @@ backend enabled versus 7,461,219 bytes with the feature disabled: a
 tree with `wasm-pack --release` and `wasm-opt`; debug artifacts are not
 representative, so size gates must continue to compare optimized outputs.
 
+The shared render contract now extracts one immutable draw-domain row per
+source root from only the `(material, render node)` pairs actually present in
+the scene. Equal pairs must agree on enabled state, PBR class, transform, and
+orientation; every source face must resolve exactly once, including a root
+temporarily suppressed by the adaptive overlay. Sparse or very large material
+IDs therefore do not inflate the domain table. An independent draw oracle
+sorts eligible resident roots by `(domain row, atlas, parity, source face)` and
+emits only occupied ranges plus exact triangle and line indirect records. Its
+memory contract is O(source faces + observed runs), not a fixed material ×
+atlas Cartesian product. This is the semantic gate for the device radix/run
+implementation; it does not add a CPU operation to the live frame path.
+
 The next cut binds the source-indexed prepared records, compacted face IDs,
 bucket ranges, and global-atlas indirect arguments into actual graphics
 execution. It must extend the root key with material/render domains without a
