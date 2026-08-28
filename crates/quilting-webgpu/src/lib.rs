@@ -222,6 +222,7 @@ pub struct LodPose<'a> {
 pub struct LodDeviceConformance {
     pub full_pipeline_words: usize,
     pub resident_lod_words: usize,
+    pub resident_visibility_words: usize,
     pub coherence_words: usize,
     pub prepared_patch_words: usize,
     pub rendered_patch_pixels: usize,
@@ -388,6 +389,7 @@ pub struct PatchFrameEncoding {
 pub struct LodClassifierDevice {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    next_model_identity: Mutex<u64>,
     pass1_pipeline: wgpu::ComputePipeline,
     pass2_pipeline: wgpu::ComputePipeline,
     resident_seed_pipeline: wgpu::ComputePipeline,
@@ -396,6 +398,7 @@ pub struct LodClassifierDevice {
     resident_pack_pipeline: wgpu::ComputePipeline,
     patch_prepare_pipeline: wgpu::ComputePipeline,
     visibility_expand_pipeline: wgpu::ComputePipeline,
+    lod_visibility_expand_pipeline: wgpu::ComputePipeline,
     visibility_count_pipeline: wgpu::ComputePipeline,
     visibility_scan_pipeline: wgpu::ComputePipeline,
     visibility_scatter_pipeline: wgpu::ComputePipeline,
@@ -403,6 +406,7 @@ pub struct LodClassifierDevice {
 
 /// Retained device buffers for one immutable prepared model and atlas lookup.
 pub struct LodClassifierModel {
+    identity: u64,
     prepared: PreparedLodModel,
     classification_epoch: u64,
     joint_capacity: usize,
@@ -457,6 +461,7 @@ impl DeviceLodClassification<'_> {
 /// classifier epoch without a CPU publication or staging copy.
 pub struct DeviceResidentLod<'classification> {
     packed_records: &'classification wgpu::Buffer,
+    model_identity: u64,
     face_count: u32,
     classification_epoch: u64,
     grading: FaceLodGrading,
@@ -516,6 +521,7 @@ pub struct PatchRenderBindings {
 /// frame code cannot accidentally combine preparation, compaction, and bind
 /// groups from different scene epochs.
 pub struct PatchRenderScene {
+    model_identity: u64,
     scene: RenderSceneSnapshot,
     patches: PatchPreparationScene,
     visibility: VisibilityCompactionScene,
@@ -539,6 +545,7 @@ struct FaceVisibilityExpansionScene {
     word_count: u32,
     bits: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    lod_bind_group: wgpu::BindGroup,
 }
 
 /// Retained scene shape and output buffers for deterministic visibility
@@ -604,6 +611,9 @@ impl LodClassifierDevice {
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
         let visibility_expand_source = quilting_shaders::compile_visibility_expand_wgsl()
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
+        let lod_visibility_expand_source =
+            quilting_shaders::compile_lod_visibility_expand_wgsl()
+                .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
         let visibility_count_source = quilting_shaders::compile_visibility_count_wgsl()
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
         let visibility_scan_source = quilting_shaders::compile_visibility_scan_wgsl()
@@ -630,6 +640,11 @@ impl LodClassifierDevice {
             label: Some("quilting face visibility expansion"),
             source: wgpu::ShaderSource::Wgsl(Cow::Owned(visibility_expand_source)),
         });
+        let lod_visibility_expand_module =
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("quilting resident LOD visibility expansion"),
+                source: wgpu::ShaderSource::Wgsl(Cow::Owned(lod_visibility_expand_source)),
+            });
         let visibility_count_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("quilting visibility count"),
             source: wgpu::ShaderSource::Wgsl(Cow::Owned(visibility_count_source)),
@@ -702,6 +717,15 @@ impl LodClassifierDevice {
                 compilation_options: Default::default(),
                 cache: None,
             });
+        let lod_visibility_expand_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("quilting resident LOD visibility expansion"),
+                layout: None,
+                module: &lod_visibility_expand_module,
+                entry_point: Some(quilting_shaders::LOD_VISIBILITY_EXPAND_DEVICE_ENTRY_POINT),
+                compilation_options: Default::default(),
+                cache: None,
+            });
         let visibility_count_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("quilting visibility count"),
@@ -732,6 +756,7 @@ impl LodClassifierDevice {
         Ok(Self {
             device,
             queue,
+            next_model_identity: Mutex::new(1),
             pass1_pipeline,
             pass2_pipeline,
             resident_seed_pipeline,
@@ -740,6 +765,7 @@ impl LodClassifierDevice {
             resident_pack_pipeline,
             patch_prepare_pipeline,
             visibility_expand_pipeline,
+            lod_visibility_expand_pipeline,
             visibility_count_pipeline,
             visibility_scan_pipeline,
             visibility_scatter_pipeline,
@@ -954,6 +980,146 @@ impl LodClassifierDevice {
         Ok(compared_words)
     }
 
+    async fn run_resident_visibility_conformance(
+        &self,
+        model: &mut LodClassifierModel,
+        atlas: &LodAtlasLookup,
+        patches: &PatchPreparationScene,
+    ) -> Result<usize, LodWebGpuError> {
+        let source_count = patches.patch_count;
+        let visibility =
+            self.upload_visibility_compaction_scene(WgslVisibilityCompactionSceneWords {
+                uniform: [1, source_count, 0, 0],
+                batches: vec![[0, source_count, 3, 0]],
+                source_eligibility: vec![1; source_count as usize],
+            })?;
+        let expansion = self.create_face_visibility_expansion_scene(
+            model,
+            patches,
+            &visibility,
+            model.prepared.residency.num_faces,
+        )?;
+        let output_bytes = u64::from(source_count)
+            .checked_mul(PACKED_RECORD_BYTES)
+            .ok_or_else(|| {
+                LodWebGpuError::Conformance(
+                    "resident visibility conformance output is too large".to_string(),
+                )
+            })?;
+        let readback = gpu_buffer(
+            &self.device,
+            "resident visibility conformance readback",
+            output_bytes,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let range_readback = gpu_buffer(
+            &self.device,
+            "resident visibility range conformance readback",
+            VISIBILITY_RANGE_RECORD_BYTES,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let indirect_readback = gpu_buffer(
+            &self.device,
+            "resident visibility indirect conformance readback",
+            INDEXED_INDIRECT_RECORD_BYTES,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let metrics = WgslLodDispatchMetrics {
+            view_projection: identity_matrix(),
+            density: 1.0,
+            pixel_floor: 0.0,
+            max_lod: atlas.max_lod,
+            viewport: [1024.0, 1024.0],
+            num_joints: 0,
+        };
+        let visible_dispatch = LodDispatchState {
+            subjects: Vec::new(),
+            baseline_mobius: identity_mobius(),
+            baseline_model: identity_matrix(),
+            pole: [0.0; 4],
+            mobius_power: 0.0,
+            c_norm_sq: 0.0,
+            has_pole: 0.0,
+        };
+        let mut hidden_dispatch = visible_dispatch.clone();
+        hidden_dispatch.baseline_model = translation_matrix(100.0, 0.0, 0.0);
+        let mut compared_words = 0usize;
+        for (dispatch, expected) in [(&visible_dispatch, 1u32), (&hidden_dispatch, 0u32)] {
+            let classification = self.classify_on_device(
+                model,
+                dispatch,
+                metrics,
+                LodPose {
+                    joint_matrices: &[],
+                    morph_weights: &[0.0],
+                },
+            )?;
+            let _resident =
+                self.reconcile_resident_lod_on_device(&classification, FaceLodGrading::TwoToOne);
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("resident visibility conformance encoder"),
+                });
+            self.encode_resident_lod_visibility_expansion(
+                &expansion,
+                patches.patch_count,
+                &mut encoder,
+            );
+            self.encode_visibility_compaction(&visibility, &mut encoder);
+            encoder.copy_buffer_to_buffer(
+                &visibility.source_visibility,
+                0,
+                &readback,
+                0,
+                output_bytes,
+            );
+            encoder.copy_buffer_to_buffer(
+                &visibility.compacted_ranges,
+                0,
+                &range_readback,
+                0,
+                VISIBILITY_RANGE_RECORD_BYTES,
+            );
+            encoder.copy_buffer_to_buffer(
+                &visibility.indirect_arguments,
+                0,
+                &indirect_readback,
+                0,
+                INDEXED_INDIRECT_RECORD_BYTES,
+            );
+            self.queue.submit([encoder.finish()]);
+            let actual = self.readback_words(&readback, output_bytes).await?;
+            let expected_words = vec![expected; source_count as usize];
+            if actual != expected_words {
+                return Err(LodWebGpuError::Conformance(format!(
+                    "resident visibility expansion mismatch: expected {expected_words:?}, got {actual:?}",
+                )));
+            }
+            let survivor_count = expected.saturating_mul(source_count);
+            let range = self
+                .readback_words(&range_readback, VISIBILITY_RANGE_RECORD_BYTES)
+                .await?;
+            let expected_range = [0, 0, source_count, 0, survivor_count];
+            if range != expected_range {
+                return Err(LodWebGpuError::Conformance(format!(
+                    "resident visibility compacted range mismatch: expected {expected_range:?}, got {range:?}",
+                )));
+            }
+            let indirect = self
+                .readback_words(&indirect_readback, INDEXED_INDIRECT_RECORD_BYTES)
+                .await?;
+            let expected_indirect = [3, survivor_count, 0, 0, 0];
+            if indirect != expected_indirect {
+                return Err(LodWebGpuError::Conformance(format!(
+                    "resident visibility indirect arguments mismatch: expected {expected_indirect:?}, got {indirect:?}",
+                )));
+            }
+            compared_words += actual.len();
+        }
+        Ok(compared_words)
+    }
+
     /// Run the same minimum exact matrix on native and browser devices.
     ///
     /// This covers one complete animated-capable two-pass dispatch; exact 2:1
@@ -1103,7 +1269,7 @@ impl LodClassifierDevice {
             face_nodes: vec![0],
         })
         .map_err(LodWebGpuError::Payload)?;
-        let patch_model = self.upload_model(patch_prepared, &atlas)?;
+        let mut patch_model = self.upload_model(patch_prepared, &atlas)?;
         let (patch_words, expected_patches) = patch_preparation_conformance_words();
         let patch_scene = self.upload_patch_preparation_scene(&patch_model, patch_words)?;
         let patch_joint = translation_matrix(1.0, -0.5, 2.0);
@@ -1125,6 +1291,9 @@ impl LodClassifierDevice {
             )));
         }
         let prepared_patch_words = prepared_patches.len() * PREPARED_PATCH_RECORD_WORDS;
+        let resident_visibility_words = self
+            .run_resident_visibility_conformance(&mut patch_model, &atlas, &patch_scene)
+            .await?;
         let (rendered_patch_pixels, shared_frame_draws) = self
             .validate_patch_render_conformance(
                 &patch_model,
@@ -1172,6 +1341,7 @@ impl LodClassifierDevice {
         Ok(LodDeviceConformance {
             full_pipeline_words,
             resident_lod_words,
+            resident_visibility_words,
             coherence_words: actual.len(),
             prepared_patch_words,
             rendered_patch_pixels,
@@ -1725,6 +1895,7 @@ impl LodClassifierDevice {
 
     fn create_face_visibility_expansion_scene(
         &self,
+        model: &LodClassifierModel,
         patches: &PatchPreparationScene,
         visibility: &VisibilityCompactionScene,
         face_count: usize,
@@ -1761,11 +1932,23 @@ impl LodClassifierDevice {
                 bind(3, &visibility.source_visibility),
             ],
         });
+        let lod_layout = self.lod_visibility_expand_pipeline.get_bind_group_layout(0);
+        let lod_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("resident LOD visibility expansion bindings"),
+            layout: &lod_layout,
+            entries: &[
+                bind(0, &uniform),
+                bind(1, &patches.topology),
+                bind(2, &model.resident.packed_records),
+                bind(3, &visibility.source_visibility),
+            ],
+        });
         Ok(FaceVisibilityExpansionScene {
             face_count,
             word_count,
             bits,
             bind_group,
+            lod_bind_group,
         })
     }
 
@@ -1790,12 +1973,14 @@ impl LodClassifierDevice {
         let patches = self.upload_patch_preparation_scene(model, patch_words)?;
         let visibility = self.upload_visibility_compaction_scene(visibility_words)?;
         let face_visibility = self.create_face_visibility_expansion_scene(
+            model,
             &patches,
             &visibility,
             model.prepared.residency.num_faces,
         )?;
         let bindings = self.create_patch_render_bindings(pipeline, &patches, &visibility)?;
         Ok(PatchRenderScene {
+            model_identity: model.identity,
             scene,
             patches,
             visibility,
@@ -1824,7 +2009,8 @@ impl LodClassifierDevice {
             pack_wgsl_visibility_compaction_scene_words(&scene, RenderGeometry::Triangles)
                 .map_err(LodWebGpuError::Payload)?;
 
-        let same_shape = patch_words.uniform[0] == retained.patches.patch_count
+        let same_shape = model.identity == retained.model_identity
+            && patch_words.uniform[0] == retained.patches.patch_count
             && patch_words.topology.len() == retained.patches.patch_count as usize
             && patch_words.subjects.len() == retained.patches.subject_count as usize
             && visibility_words.uniform[0] == retained.visibility.batch_count
@@ -1895,6 +2081,11 @@ impl LodClassifierDevice {
         pose: LodPose<'_>,
         num_joints: u32,
     ) -> Result<(), LodWebGpuError> {
+        if model.identity != scene.model_identity {
+            return Err(LodWebGpuError::Payload(
+                "patch render scene belongs to a different WebGPU model".to_string(),
+            ));
+        }
         self.write_patch_pose(model, &scene.patches, pose, num_joints)
     }
 
@@ -1946,6 +2137,55 @@ impl LodClassifierDevice {
         pass.dispatch_workgroups(scene.patches.patch_count.div_ceil(LOD_WORKGROUP_SIZE), 1, 1);
     }
 
+    fn encode_resident_lod_visibility_expansion(
+        &self,
+        scene: &FaceVisibilityExpansionScene,
+        patch_count: u32,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        if patch_count == 0 {
+            return;
+        }
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("quilting resident LOD visibility expansion"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.lod_visibility_expand_pipeline);
+        pass.set_bind_group(0, &scene.lod_bind_group, &[]);
+        pass.dispatch_workgroups(patch_count.div_ceil(LOD_WORKGROUP_SIZE), 1, 1);
+    }
+
+    /// Project the final device-resident classifier visibility into the
+    /// retained scene's current flattened patch order. The scene and result
+    /// must originate from the same uploaded model; this prevents a bind group
+    /// retained for one model from silently consuming another model's face
+    /// domain. The resulting storage buffer feeds visibility compaction
+    /// directly and is never mapped in production.
+    pub fn encode_patch_render_resident_lod_visibility(
+        &self,
+        scene: &PatchRenderScene,
+        resident: &DeviceResidentLod<'_>,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<(), LodWebGpuError> {
+        if scene.model_identity != resident.model_identity {
+            return Err(LodWebGpuError::Payload(
+                "resident LOD visibility belongs to a different WebGPU model".to_string(),
+            ));
+        }
+        if scene.face_visibility.face_count != resident.face_count {
+            return Err(LodWebGpuError::Payload(format!(
+                "resident LOD visibility has {} faces; render scene expects {}",
+                resident.face_count, scene.face_visibility.face_count,
+            )));
+        }
+        self.encode_resident_lod_visibility_expansion(
+            &scene.face_visibility,
+            scene.patches.patch_count,
+            encoder,
+        );
+        Ok(())
+    }
+
     /// Diagnostic-only exact readback for validating the compact visibility
     /// adapter. Production rendering encodes the same pass directly into
     /// compaction and never calls this method.
@@ -1975,6 +2215,46 @@ impl LodClassifierDevice {
                 label: Some("expanded face visibility diagnostic encoder"),
             });
         self.encode_face_visibility_expansion(scene, &mut encoder);
+        encoder.copy_buffer_to_buffer(
+            &scene.visibility.source_visibility,
+            0,
+            &readback,
+            0,
+            output_bytes,
+        );
+        self.queue.submit([encoder.finish()]);
+        self.readback_words(&readback, output_bytes).await
+    }
+
+    /// Diagnostic-only readback of the direct resident-LOD visibility adapter.
+    /// Production rendering calls
+    /// [`Self::encode_patch_render_resident_lod_visibility`] inside its frame
+    /// encoder and leaves the result device-resident for compaction.
+    pub async fn expand_resident_lod_visibility_for_diagnostics(
+        &self,
+        scene: &PatchRenderScene,
+        resident: &DeviceResidentLod<'_>,
+    ) -> Result<Vec<u32>, LodWebGpuError> {
+        let output_bytes = u64::from(scene.visibility.source_count)
+            .checked_mul(PACKED_RECORD_BYTES)
+            .ok_or_else(|| {
+                LodWebGpuError::Payload("resident LOD visibility readback is too large".to_string())
+            })?;
+        if output_bytes == 0 {
+            return Ok(Vec::new());
+        }
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("resident LOD visibility diagnostic readback"),
+            size: output_bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("resident LOD visibility diagnostic encoder"),
+            });
+        self.encode_patch_render_resident_lod_visibility(scene, resident, &mut encoder)?;
         encoder.copy_buffer_to_buffer(
             &scene.visibility.source_visibility,
             0,
@@ -3201,6 +3481,17 @@ impl LodClassifierDevice {
         Ok(scene.batch_count as usize)
     }
 
+    fn allocate_model_identity(&self) -> Result<u64, LodWebGpuError> {
+        let mut next = self.next_model_identity.lock().map_err(|_| {
+            LodWebGpuError::Payload("WebGPU model identity lock was poisoned".to_string())
+        })?;
+        let identity = *next;
+        *next = next.checked_add(1).ok_or_else(|| {
+            LodWebGpuError::Payload("WebGPU model identity overflowed".to_string())
+        })?;
+        Ok(identity)
+    }
+
     /// Upload immutable geometry/topology once and allocate retained dynamic
     /// buffers. Diagnostic readback is allocated only by an explicit
     /// conformance call; the resident model owns device-local results.
@@ -3209,6 +3500,7 @@ impl LodClassifierDevice {
         prepared: PreparedLodModel,
         atlas: &LodAtlasLookup,
     ) -> Result<LodClassifierModel, LodWebGpuError> {
+        let identity = self.allocate_model_identity()?;
         let words = pack_wgsl_lod_model_words(&prepared).map_err(LodWebGpuError::Payload)?;
         let atlas_words = pack_wgsl_lod_atlas_words(atlas);
         let face_count = prepared.residency.num_faces;
@@ -3398,6 +3690,7 @@ impl LodClassifierDevice {
         };
 
         Ok(LodClassifierModel {
+            identity,
             prepared,
             classification_epoch: 0,
             joint_capacity,
@@ -3535,6 +3828,7 @@ impl LodClassifierDevice {
         }
         DeviceResidentLod {
             packed_records: &model.resident.packed_records,
+            model_identity: model.identity,
             face_count: classification.face_count,
             classification_epoch: classification.epoch,
             grading,
@@ -4097,13 +4391,14 @@ pub async fn run_browser_lod_conformance() -> Result<String, wasm_bindgen::JsVal
         .await
         .map_err(browser_error)?;
     Ok(format!(
-        "adapter={} backend={:?} full_pipeline_words={} resident_lod_words={} coherence_words={} \
+        "adapter={} backend={:?} full_pipeline_words={} resident_lod_words={} resident_visibility_words={} coherence_words={} \
          prepared_patch_words={} rendered_patch_pixels={} shared_frame_draws={} compacted_source_words={} \
          compacted_range_words={} indirect_argument_words={} indirect_draws={}",
         adapter_info.name,
         adapter_info.backend,
         report.full_pipeline_words,
         report.resident_lod_words,
+        report.resident_visibility_words,
         report.coherence_words,
         report.prepared_patch_words,
         report.rendered_patch_pixels,

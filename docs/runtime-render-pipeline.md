@@ -522,16 +522,35 @@ bytes total with zero failures; the earlier 1,220-frame flattened run uploaded
 4,801,920 bytes. The shadow still repacks topology on the CPU from worker
 readback, which remains instrumentation rather than the intended authority.
 
+The retained scene now also binds the final packed resident-LOD buffer directly
+to that same flattened visibility destination. A 64-lane adapter projects the
+packed face visibility bit through current root/adaptive topology, after which
+the existing count/scan/scatter passes consume it without a copy, map, or CPU
+publication. Every uploaded model receives a monotonic device-local identity;
+the encoder rejects a resident result from another model even when both models
+have the same face count, and separately checks the exact face domain. Native
+conformance classifies a two-face scene with one authored subject translated
+offscreen and proves both `[1, 0]` source order and `[0, 1]` reordered topology.
+The shared native/browser matrix runs real visible and offscreen
+classifier/reconciliation chains and projects both over two adaptive leaves;
+Chromium reports `resident_visibility_words=4` with no console warning or
+error. The current live WebGL2-authoritative shadow deliberately keeps the
+compact CPU bitset adapter until its classifier and draw construction are moved
+onto this same device; the direct resident path is ready for that cut and does
+not introduce a diagnostic readback into production.
+
 The optimized monolithic WASM artifact measured 7,543,417 bytes with this
 backend enabled versus 7,458,547 bytes with the feature disabled: an 84,870-byte
 (1.14%) release delta. Debug artifacts are not representative here—the same
 feature set reached roughly 50 MB before release optimization—so size gates
 must compare optimized outputs.
 
-The next cut is authoritative renderer integration: consume the reconciled
-device-resident LOD and atlas selection in GPU batch/topology publication; stop
-rebuilding topology words from worker readback; attach the live shared frame
-executor to a browser surface; and add WebGL2 image/workload parity behind the
+The next cut is authoritative GPU draw construction: deterministically bucket
+the reconciled resident faces by atlas entry and S3 parity, scan/scatter stable
+source-face instances into those buckets, and issue indirect draws without
+rebuilding batch/topology words from worker readback. Material/render domains
+then extend the same key for PBR. After that, attach the live shared frame
+executor to a browser surface and add WebGL2 image/workload parity behind the
 existing explicit backend switch. PBR, wire, LOD color, stretch, picking,
 material/texture binding, and postprocess commands still reject explicitly
 rather than silently lowering to normals. That cut is what finally removes the

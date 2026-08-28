@@ -1,6 +1,8 @@
 #![cfg(not(target_arch = "wasm32"))]
 
-use quilting_core::batch::{RenderBatchId, RenderBatchKey, RenderBatchLayer, RenderBatchMember};
+use quilting_core::batch::{
+    FaceLodGrading, RenderBatchId, RenderBatchKey, RenderBatchLayer, RenderBatchMember,
+};
 use quilting_core::instance_layout::{self, InstanceWriter};
 use quilting_core::quaternion::{Mobius, Quat};
 use quilting_core::render::{
@@ -267,6 +269,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         let report = classifier.run_conformance_matrix().await.unwrap();
         assert_eq!(report.full_pipeline_words, 1);
         assert_eq!(report.resident_lod_words, 20);
+        assert_eq!(report.resident_visibility_words, 4);
         assert_eq!(report.coherence_words, 10);
         assert_eq!(report.prepared_patch_words, 104);
         assert!(report.rendered_patch_pixels >= 8);
@@ -278,9 +281,10 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
 
         let (prepared, source_instances, render_scene, render_frame) =
             shared_render_frame_fixture();
-        let model = classifier
-            .upload_model(prepared, &complete_atlas())
-            .unwrap();
+        let foreign_prepared = prepared.clone();
+        let atlas = complete_atlas();
+        let mut model = classifier.upload_model(prepared, &atlas).unwrap();
+        let mut foreign_model = classifier.upload_model(foreign_prepared, &atlas).unwrap();
         let pipeline = classifier.create_offscreen_patch_render_pipeline().unwrap();
         let mut retained_scene = classifier
             .upload_patch_render_scene(
@@ -297,6 +301,86 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         let (first, second) = reordered_scene.batches.split_at_mut(1);
         std::mem::swap(&mut first[0].members, &mut second[0].members);
         reordered_scene.revision += 1;
+        let reordered_retained_scene = classifier
+            .upload_patch_render_scene(
+                &pipeline,
+                &model,
+                reordered_scene.clone(),
+                &source_instances,
+                reordered_scene.revision,
+            )
+            .unwrap();
+        let mut visibility_dispatch = identity_dispatch();
+        visibility_dispatch.subjects.push(LodSubjectState {
+            node: 1,
+            mobius: identity_mobius(),
+            model: translation_matrix(100.0, 0.0, 0.0),
+            pole: [0.0; 4],
+            mobius_power: 0.0,
+            c_norm_sq: 0.0,
+            has_pole: 0.0,
+        });
+        {
+            let classification = classifier
+                .classify_on_device(
+                    &mut model,
+                    &visibility_dispatch,
+                    metrics(&atlas, 1.0, 0),
+                    LodPose::default(),
+                )
+                .unwrap();
+            let resident_lod = classifier
+                .reconcile_resident_lod_on_device(&classification, FaceLodGrading::TwoToOne);
+            assert_eq!(
+                classifier
+                    .expand_resident_lod_visibility_for_diagnostics(&retained_scene, &resident_lod,)
+                    .await
+                    .unwrap(),
+                [1, 0],
+            );
+            assert_eq!(
+                classifier
+                    .expand_resident_lod_visibility_for_diagnostics(
+                        &reordered_retained_scene,
+                        &resident_lod,
+                    )
+                    .await
+                    .unwrap(),
+                [0, 1],
+            );
+            let foreign_classification = classifier
+                .classify_on_device(
+                    &mut foreign_model,
+                    &visibility_dispatch,
+                    metrics(&atlas, 1.0, 0),
+                    LodPose::default(),
+                )
+                .unwrap();
+            let foreign_resident = classifier.reconcile_resident_lod_on_device(
+                &foreign_classification,
+                FaceLodGrading::TwoToOne,
+            );
+            let mut encoder =
+                classifier
+                    .device()
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("foreign resident LOD visibility rejection"),
+                    });
+            assert!(classifier
+                .encode_patch_render_resident_lod_visibility(
+                    &retained_scene,
+                    &foreign_resident,
+                    &mut encoder,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("different WebGPU model"));
+        }
+        assert!(classifier
+            .write_patch_render_pose_state(&foreign_model, &retained_scene, LodPose::default(), 0,)
+            .unwrap_err()
+            .to_string()
+            .contains("different WebGPU model"));
         assert!(matches!(
             classifier
                 .update_patch_render_scene_in_place(
