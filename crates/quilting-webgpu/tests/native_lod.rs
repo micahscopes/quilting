@@ -6,9 +6,9 @@ use quilting_core::batch::{
 use quilting_core::instance_layout::{self, InstanceWriter};
 use quilting_core::quaternion::{Mobius, Quat};
 use quilting_core::render::{
-    FocusFieldPacket, PbrDrawClass, RenderBatchSnapshot, RenderEntityTransform, RenderFrame,
-    RenderFrameOptions, RenderGeometry, RenderPoseIdentity, RenderSceneSnapshot, RenderStyle,
-    RenderView,
+    FocusFieldPacket, MatcapStyle, PbrDrawClass, RenderBatchSnapshot, RenderEntityTransform,
+    RenderFrame, RenderFrameOptions, RenderGeometry, RenderPoseIdentity, RenderSceneSnapshot,
+    RenderStyle, RenderView,
 };
 use quilting_core::render_evidence::render_image_signature;
 use quilting_core::screen_partition::ScreenPatchLeafId;
@@ -593,16 +593,20 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             .write_patch_render_face_visibility_bits(&diagnostic_scene, &[0b11])
             .unwrap();
         let mut diagnostic_hashes = Vec::new();
-        for (revision, style) in [RenderStyle::Lod, RenderStyle::Stretch]
+        for (revision, style) in [RenderStyle::Matcap, RenderStyle::Lod, RenderStyle::Stretch]
             .into_iter()
             .enumerate()
         {
+            let options = RenderFrameOptions {
+                matcap_style: MatcapStyle::GoldenSoft,
+                ..render_frame.options
+            };
             let frame = RenderFrame::build(
                 20 + revision as u64,
                 render_frame.pose,
                 style,
                 render_frame.view,
-                render_frame.options,
+                options,
                 &render_scene,
             )
             .unwrap();
@@ -642,6 +646,8 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             }
         }
         assert_ne!(diagnostic_hashes[0], diagnostic_hashes[1]);
+        assert_ne!(diagnostic_hashes[0], diagnostic_hashes[2]);
+        assert_ne!(diagnostic_hashes[1], diagnostic_hashes[2]);
 
         let compaction_scene = RenderSceneSnapshot {
             revision: 19,

@@ -2,12 +2,12 @@
 
 #import quilting::surface::patch_prepare::PreparedPatchRecord
 #import quilting::surface::patch_render::{PatchRenderTransform, PatchSurfaceInput, evaluate_patch_surface}
-#import quilting::lighting::matcap::matcap_shade
+#import quilting::lighting::matcap::{matcap_shade, procedural_matcap}
 
 struct PatchRenderFrame {
     mvp: mat4x4<f32>,
     mv: mat4x4<f32>,
-    // x = use rational QB; y/z/w reserved.
+    // x = use rational QB; y = procedural matcap style; z/w reserved.
     modes: vec4<i32>,
     mob_a: vec4<f32>,
     mob_b: vec4<f32>,
@@ -26,7 +26,10 @@ struct PatchVertexOutput {
     @location(5) bitangent_vs: vec3<f32>,
     @location(6) normal_ws: vec3<f32>,
     @location(7) position_ws: vec3<f32>,
-    @location(8) camera_pos_ws: vec3<f32>,
+    // xyz = world-space camera; w = procedural matcap style. Packing the
+    // frame-global scalar here preserves the WebGPU minimum inter-stage
+    // variable limit without allocating another binding.
+    @location(8) camera_pos_ws_and_style: vec4<f32>,
     @location(9) fade: f32,
     @location(10) tess_bary: vec3<f32>,
     @location(11) instance_id: f32,
@@ -79,7 +82,7 @@ fn evaluate_prepared_patch_vertex(
         surface.bitangent_vs,
         surface.normal_ws,
         surface.position_ws,
-        surface.camera_pos_ws,
+        vec4<f32>(surface.camera_pos_ws, f32(frame.modes.y)),
         surface.fade,
         surface.tess_bary,
         surface.instance_id,
@@ -139,4 +142,15 @@ fn shade_patch_stretch(input: PatchVertexOutput) -> vec4<f32> {
         0.25 + squash * 0.75,
         input.fade,
     );
+}
+
+fn shade_patch_matcap(input: PatchVertexOutput) -> vec4<f32> {
+    if input.fade < 0.001 {
+        discard;
+    }
+    var normal = normalize(input.normal_vs);
+    if normal.z < 0.0 {
+        normal = -normal;
+    }
+    return vec4<f32>(procedural_matcap(normal, input.camera_pos_ws_and_style.w), input.fade);
 }

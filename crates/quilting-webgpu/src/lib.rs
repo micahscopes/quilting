@@ -299,6 +299,7 @@ pub struct PatchRenderFrame {
     pub mvp: [f32; 16],
     pub mv: [f32; 16],
     pub use_qb: bool,
+    pub matcap_style: quilting_core::render::MatcapStyle,
     pub mobius: [f32; 16],
     pub camera_position: [f32; 3],
 }
@@ -324,6 +325,7 @@ impl PatchRenderFrame {
             mvp: frame.view.mvp,
             mv: frame.view.model_view,
             use_qb,
+            matcap_style: frame.options.matcap_style,
             mobius: transform.mobius,
             camera_position: frame.view.camera_position,
         }
@@ -350,6 +352,7 @@ impl PatchRenderFrame {
             *word = value.to_bits();
         }
         words[32] = u32::from(self.use_qb);
+        words[33] = self.matcap_style.as_u32();
         for (word, value) in words[36..52].iter_mut().zip(self.mobius) {
             *word = value.to_bits();
         }
@@ -633,6 +636,7 @@ pub struct PatchRenderPipeline {
 /// bindings or duplicating geometry residency.
 pub struct DiagnosticPatchRenderPipelines {
     normals: PatchRenderPipeline,
+    matcap: PatchRenderPipeline,
     lod: PatchRenderPipeline,
     stretch: PatchRenderPipeline,
 }
@@ -2678,16 +2682,23 @@ impl LodClassifierDevice {
         sample_count: u32,
     ) -> Result<DiagnosticPatchRenderPipelines, LodWebGpuError> {
         let mut pipelines = self.create_diagnostic_patch_render_pipelines_for(
-            &[RenderStyle::Normals, RenderStyle::Lod, RenderStyle::Stretch],
+            &[
+                RenderStyle::Normals,
+                RenderStyle::Matcap,
+                RenderStyle::Lod,
+                RenderStyle::Stretch,
+            ],
             color_format,
             depth_format,
             sample_count,
         )?;
         let stretch = pipelines.pop().expect("requested stretch pipeline");
         let lod = pipelines.pop().expect("requested LOD pipeline");
+        let matcap = pipelines.pop().expect("requested matcap pipeline");
         let normals = pipelines.pop().expect("requested normals pipeline");
         Ok(DiagnosticPatchRenderPipelines {
             normals,
+            matcap,
             lod,
             stretch,
         })
@@ -2714,6 +2725,9 @@ impl LodClassifierDevice {
                 let entry_point = match style {
                     RenderStyle::Normals => {
                         quilting_shaders::PATCH_RENDER_DEVICE_NORMALS_ENTRY_POINT
+                    }
+                    RenderStyle::Matcap => {
+                        quilting_shaders::PATCH_RENDER_DEVICE_MATCAP_ENTRY_POINT
                     }
                     RenderStyle::Lod => quilting_shaders::PATCH_RENDER_DEVICE_LOD_ENTRY_POINT,
                     RenderStyle::Stretch => {
@@ -3800,6 +3814,7 @@ impl LodClassifierDevice {
         }
         let expected_pass = match frame.style {
             RenderStyle::Normals => RenderPass::Normals,
+            RenderStyle::Matcap => RenderPass::Matcap,
             RenderStyle::Lod => RenderPass::Lod,
             RenderStyle::Stretch => RenderPass::Stretch,
             unsupported => {
@@ -5677,6 +5692,7 @@ impl DiagnosticPatchRenderPipelines {
     pub fn get(&self, style: RenderStyle) -> Option<&PatchRenderPipeline> {
         match style {
             RenderStyle::Normals => Some(&self.normals),
+            RenderStyle::Matcap => Some(&self.matcap),
             RenderStyle::Lod => Some(&self.lod),
             RenderStyle::Stretch => Some(&self.stretch),
             _ => None,

@@ -1,4 +1,4 @@
-#import quilting::render::patch_vertex::{PatchRenderFrame, PatchVertexOutput, evaluate_prepared_patch_vertex, shade_patch_lod, shade_patch_normals, shade_patch_stretch}
+#import quilting::render::patch_vertex::{PatchRenderFrame, PatchVertexOutput, evaluate_prepared_patch_vertex, shade_patch_lod, shade_patch_matcap, shade_patch_normals, shade_patch_stretch}
 #import quilting::surface::patch_prepare::PreparedPatchRecord
 #import quilting::compute::visibility_compaction_types::CompactedBatchRangeRecord
 
@@ -54,4 +54,9 @@ fn render_patch_lod(input: PatchVertexOutput) -> @location(0) vec4<f32> {
 @fragment
 fn render_patch_stretch(input: PatchVertexOutput) -> @location(0) vec4<f32> {
     return shade_patch_stretch(input);
+}
+
+@fragment
+fn render_patch_matcap(input: PatchVertexOutput) -> @location(0) vec4<f32> {
+    return shade_patch_matcap(input);
 }

@@ -37,8 +37,8 @@ use quilting_core::batch;
 use quilting_core::instance_layout;
 use quilting_core::render::{
     patch_preparation_needed, patch_visibility_needed, render_draw_passes, FocusFieldPacket,
-    PbrDrawClass, RenderBatchSnapshot, RenderEntityTransform, RenderFrameOptions, RenderPass,
-    RenderSceneSnapshot, RenderStyle, RenderSubmissionStats, RenderView,
+    MatcapStyle, PbrDrawClass, RenderBatchSnapshot, RenderEntityTransform, RenderFrameOptions,
+    RenderPass, RenderSceneSnapshot, RenderStyle, RenderSubmissionStats, RenderView,
 };
 #[cfg(feature = "webgpu-backend")]
 use quilting_core::render::RenderSubmissionMismatch;
@@ -712,7 +712,7 @@ struct MainState {
     num_faces: usize,
     render_style: RenderStyle,
     /// Analytic character-matcap profile selected by the browser shell.
-    matcap_style: f32,
+    matcap_style: MatcapStyle,
     mobius: [f32; 16],
     /// Explicit parity from the authoring generator word. Legacy direct matrix
     /// input falls back to the old `c != 0` heuristic.
@@ -2129,7 +2129,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             materials: Vec::new(),
             num_faces: 0,
             render_style: RenderStyle::Pbr,
-            matcap_style: 1.0,
+            matcap_style: MatcapStyle::default(),
             mobius: IDENTITY_MOBIUS,
             mobius_orientation: 1,
             hyperscape_packets: BTreeMap::new(),
@@ -2256,11 +2256,11 @@ pub fn mr_set_matcap_style(style: &str) {
     STATE.with(|state| {
         if let Some(renderer) = state.borrow_mut().as_mut() {
             renderer.matcap_style = match style {
-                "aqua" => 0.0,
-                "citric-acid" => 1.0,
-                "golden-soft" => 2.0,
-                "soft-studio" => 3.0,
-                _ => 1.0,
+                "aqua" => MatcapStyle::Aqua,
+                "citric-acid" => MatcapStyle::CitricAcid,
+                "golden-soft" => MatcapStyle::GoldenSoft,
+                "soft-studio" => MatcapStyle::SoftStudio,
+                _ => MatcapStyle::default(),
             };
         }
     });
@@ -2704,6 +2704,7 @@ fn submit_webgpu_frame(
         RenderFrameOptions {
             focus_postprocess: renderer.fuzzy_enabled,
             highlight_face: u32::try_from(renderer.highlight_face).ok(),
+            matcap_style: renderer.matcap_style,
         },
         &renderer.classified_face_visibility,
         joint_matrices,
@@ -2994,6 +2995,7 @@ fn observe_render_submission(
         RenderFrameOptions {
             focus_postprocess: renderer.fuzzy_enabled,
             highlight_face,
+            matcap_style: renderer.matcap_style,
         },
         actual,
     );
@@ -9690,11 +9692,14 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 state
                     .renderer
                     .matcap_ubo()
-                    .upload(gl, 0.0, state.matcap_style); // heatmap
+                    .upload(gl, 0.0, state.matcap_style.as_f32()); // heatmap
                 state.renderer.matcap_ubo().bind(gl);
             }
             _ => {
-                state.renderer.matcap_ubo().upload(gl, 1.0, state.matcap_style);
+                state
+                    .renderer
+                    .matcap_ubo()
+                    .upload(gl, 1.0, state.matcap_style.as_f32());
                 state.renderer.matcap_ubo().bind(gl);
             }
         }

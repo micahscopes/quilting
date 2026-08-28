@@ -1053,10 +1053,32 @@ pub enum RenderCommand {
     },
 }
 
+/// Texture-free matcap profiles shared by render backends and route adapters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum MatcapStyle {
+    Aqua = 0,
+    #[default]
+    CitricAcid = 1,
+    GoldenSoft = 2,
+    SoftStudio = 3,
+}
+
+impl MatcapStyle {
+    pub const fn as_u32(self) -> u32 {
+        self as u32
+    }
+
+    pub const fn as_f32(self) -> f32 {
+        self.as_u32() as f32
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RenderFrameOptions {
     pub focus_postprocess: bool,
     pub highlight_face: Option<u32>,
+    pub matcap_style: MatcapStyle,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1669,6 +1691,7 @@ mod tests {
             RenderFrameOptions {
                 focus_postprocess: true,
                 highlight_face: Some(0),
+                ..RenderFrameOptions::default()
             },
             &scene,
         )
@@ -1751,6 +1774,7 @@ mod tests {
             RenderFrameOptions {
                 focus_postprocess: false,
                 highlight_face: Some(4),
+                ..RenderFrameOptions::default()
             },
             &scene,
         )
