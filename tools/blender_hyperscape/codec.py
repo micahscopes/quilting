@@ -51,6 +51,43 @@ def _vector(value: Any, size: int, context: str) -> list[float]:
     return [_finite_number(component, context) for component in value]
 
 
+def _stable_uuid(value: Any, context: str) -> uuid.UUID:
+    try:
+        parsed = uuid.UUID(value)
+    except (AttributeError, TypeError, ValueError) as error:
+        raise HyperscapeCodecError(f"{context} must be a UUID") from error
+    if parsed.int == 0:
+        raise HyperscapeCodecError(f"{context} must not be nil")
+    return parsed
+
+
+def _generator_word(value: Any, context: str) -> None:
+    if not isinstance(value, list):
+        raise HyperscapeCodecError(f"{context} must be an array")
+    for generator_index, generator in enumerate(value):
+        generator_context = f"{context} generator {generator_index}"
+        if not isinstance(generator, Mapping):
+            raise HyperscapeCodecError(f"{generator_context} must be an object")
+        kind = generator.get("type")
+        if kind == "translation":
+            _vector(generator.get("offset"), 3, f"{generator_context} offset")
+        elif kind == "rotation":
+            quaternion = _vector(
+                generator.get("quaternion_wxyz"), 4, f"{generator_context} quaternion"
+            )
+            if sum(component * component for component in quaternion) <= 1.0e-24:
+                raise HyperscapeCodecError(f"{generator_context} quaternion must be nonzero")
+        elif kind == "uniform_scale":
+            if _finite_number(generator.get("factor"), f"{generator_context} factor") == 0.0:
+                raise HyperscapeCodecError(f"{generator_context} factor must be nonzero")
+        elif kind == "sphere_reflection":
+            _vector(generator.get("center"), 3, f"{generator_context} center")
+            if _finite_number(generator.get("radius"), f"{generator_context} radius") <= 0.0:
+                raise HyperscapeCodecError(f"{generator_context} radius must be positive")
+        else:
+            raise HyperscapeCodecError(f"{generator_context} has unknown type {kind!r}")
+
+
 def validate_payload(
     payload: Mapping[str, Any],
     node_count: int,
@@ -77,6 +114,7 @@ def validate_payload(
         if not isinstance(values, list):
             raise HyperscapeCodecError(f"{name} must be an array")
 
+    stable_frame_ids: set[uuid.UUID] = set()
     for frame_index, frame in enumerate(frames):
         if not isinstance(frame, Mapping):
             raise HyperscapeCodecError(f"frame {frame_index} must be an object")
@@ -87,29 +125,14 @@ def validate_payload(
             isinstance(parent, bool) or not isinstance(parent, int) or parent < 0 or parent >= frame_index
         ):
             raise HyperscapeCodecError(f"frame {frame_index} parent must precede its child")
-        generators = frame.get("generators", [])
-        if not isinstance(generators, list):
-            raise HyperscapeCodecError(f"frame {frame_index} generators must be an array")
-        for generator_index, generator in enumerate(generators):
-            context = f"frame {frame_index} generator {generator_index}"
-            if not isinstance(generator, Mapping):
-                raise HyperscapeCodecError(f"{context} must be an object")
-            kind = generator.get("type")
-            if kind == "translation":
-                _vector(generator.get("offset"), 3, f"{context} offset")
-            elif kind == "rotation":
-                quaternion = _vector(generator.get("quaternion_wxyz"), 4, f"{context} quaternion")
-                if sum(component * component for component in quaternion) <= 1.0e-24:
-                    raise HyperscapeCodecError(f"{context} quaternion must be nonzero")
-            elif kind == "uniform_scale":
-                if _finite_number(generator.get("factor"), f"{context} factor") == 0.0:
-                    raise HyperscapeCodecError(f"{context} factor must be nonzero")
-            elif kind == "sphere_reflection":
-                _vector(generator.get("center"), 3, f"{context} center")
-                if _finite_number(generator.get("radius"), f"{context} radius") <= 0.0:
-                    raise HyperscapeCodecError(f"{context} radius must be positive")
-            else:
-                raise HyperscapeCodecError(f"{context} has unknown type {kind!r}")
+        if "stable_id" in frame:
+            stable_id = _stable_uuid(frame["stable_id"], f"frame {frame_index} stable_id")
+            if stable_id in stable_frame_ids:
+                raise HyperscapeCodecError(
+                    f"frame {frame_index} repeats stable UUID {stable_id}"
+                )
+            stable_frame_ids.add(stable_id)
+        _generator_word(frame.get("generators", []), f"frame {frame_index}")
 
     for wall_index, wall in enumerate(walls):
         if not isinstance(wall, Mapping):
@@ -205,16 +228,76 @@ def validate_payload(
                         f"path {path_index} transition {transition_index} anchor frame must match"
                     )
 
+    surface_pin_targets: list[tuple[int, int, uuid.UUID]] = []
+    pinned_frames: set[int] = set()
     for constraint_index, constraint in enumerate(constraints):
         if not isinstance(constraint, Mapping):
             raise HyperscapeCodecError(f"constraint {constraint_index} must be an object")
         kind = constraint.get("type")
-        _index(constraint.get("node"), node_count, f"constraint {constraint_index} node")
         if kind == "track":
+            _index(constraint.get("node"), node_count, f"constraint {constraint_index} node")
             _index(constraint.get("target_node"), node_count, f"constraint {constraint_index} target")
             _vector(constraint.get("local_offset", [0, 0, 0]), 3, f"constraint {constraint_index} offset")
         elif kind == "projection_camera":
+            _index(constraint.get("node"), node_count, f"constraint {constraint_index} node")
             _index(constraint.get("frame"), len(frames), f"constraint {constraint_index} frame")
+        elif kind == "surface_pin":
+            frame = _index(
+                constraint.get("frame"), len(frames), f"constraint {constraint_index} frame"
+            )
+            if "stable_id" not in frames[frame]:
+                raise HyperscapeCodecError(
+                    f"constraint {constraint_index} pinned frame needs a stable_id"
+                )
+            if frame in pinned_frames:
+                raise HyperscapeCodecError(
+                    f"constraint {constraint_index} repeats a surface pin for frame {frame}"
+                )
+            pinned_frames.add(frame)
+            target = _stable_uuid(
+                constraint.get("target_entity"),
+                f"constraint {constraint_index} target_entity",
+            )
+            face = constraint.get("face")
+            if isinstance(face, bool) or not isinstance(face, int) or face < 0 or face > 0xFFFF_FFFF:
+                raise HyperscapeCodecError(
+                    f"constraint {constraint_index} face must be a nonnegative 32-bit integer"
+                )
+            barycentric = _vector(
+                constraint.get("barycentric"), 3, f"constraint {constraint_index} barycentric"
+            )
+            if any(value < -1.0e-12 for value in barycentric) or sum(barycentric) <= 1.0e-12:
+                raise HyperscapeCodecError(
+                    f"constraint {constraint_index} barycentric address must lie on the face"
+                )
+            if constraint.get("normal_sign", 1) not in (-1, 1):
+                raise HyperscapeCodecError(
+                    f"constraint {constraint_index} normal_sign must be -1 or 1"
+                )
+            _finite_number(
+                constraint.get("heading_radians", 0.0),
+                f"constraint {constraint_index} heading",
+            )
+            if _finite_number(
+                constraint.get("uniform_scale", 1.0),
+                f"constraint {constraint_index} scale",
+            ) <= 0.0:
+                raise HyperscapeCodecError(
+                    f"constraint {constraint_index} scale must be positive"
+                )
+            if constraint.get("orientation", "inherit") not in (
+                "inherit",
+                "right_side_in",
+                "inside_out",
+            ):
+                raise HyperscapeCodecError(
+                    f"constraint {constraint_index} has invalid orientation"
+                )
+            _generator_word(
+                constraint.get("local_offset", []),
+                f"constraint {constraint_index} local offset",
+            )
+            surface_pin_targets.append((constraint_index, frame, target))
         else:
             raise HyperscapeCodecError(f"constraint {constraint_index} has unknown type {kind!r}")
 
@@ -222,26 +305,19 @@ def validate_payload(
         bindings = list(bindings)
         if len(bindings) != node_count:
             raise HyperscapeCodecError("node binding count must match the glTF node array")
-        stable_ids: set[uuid.UUID] = set()
+        nodes_by_stable_id: dict[uuid.UUID, Mapping[str, Any]] = {}
         for node, binding in enumerate(bindings):
             if binding is None:
                 continue
             if not isinstance(binding, Mapping):
                 raise HyperscapeCodecError(f"node {node} binding must be an object")
             if "stable_id" in binding:
-                try:
-                    stable_id = uuid.UUID(binding["stable_id"])
-                except (AttributeError, TypeError, ValueError) as error:
-                    raise HyperscapeCodecError(
-                        f"node {node} stable_id must be a UUID"
-                    ) from error
-                if stable_id.int == 0:
-                    raise HyperscapeCodecError(f"node {node} stable_id must not be nil")
-                if stable_id in stable_ids:
+                stable_id = _stable_uuid(binding["stable_id"], f"node {node} stable_id")
+                if stable_id in nodes_by_stable_id:
                     raise HyperscapeCodecError(
                         f"node {node} repeats stable UUID {stable_id}"
                     )
-                stable_ids.add(stable_id)
+                nodes_by_stable_id[stable_id] = binding
             _index(binding.get("frame"), len(frames), f"node {node} frame")
             if "anchor" in binding:
                 anchor = _index(binding["anchor"], len(anchors), f"node {node} anchor")
@@ -264,6 +340,18 @@ def validate_payload(
                 raise HyperscapeCodecError(
                     f"path {path_index} is referenced by more than its authored node"
                 )
+        for constraint_index, frame, target in surface_pin_targets:
+            target_binding = nodes_by_stable_id.get(target)
+            if target_binding is None:
+                raise HyperscapeCodecError(
+                    f"constraint {constraint_index} targets unknown stable entity {target}"
+                )
+            if frames[frame].get("parent") != target_binding["frame"]:
+                raise HyperscapeCodecError(
+                    f"constraint {constraint_index} pinned frame parent must be target entity frame"
+                )
+    elif surface_pin_targets:
+        raise HyperscapeCodecError("surface pin validation requires node bindings")
 
 
 def decode_gltf(data: bytes) -> tuple[dict[str, Any], GltfContainer]:

@@ -177,6 +177,63 @@ class CodecTests(unittest.TestCase):
         with self.assertRaisesRegex(codec.HyperscapeCodecError, "strictly increase"):
             codec.validate_payload(unordered, 1)
 
+    def test_surface_pin_uses_stable_target_and_single_frame_parent(self) -> None:
+        target = "22222222-2222-4222-8222-222222222222"
+        payload = sample_payload()
+        payload["frames"][1]["stable_id"] = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        payload["constraints"] = [
+            {
+                "type": "surface_pin",
+                "frame": 1,
+                "target_entity": target,
+                "face": 7,
+                "barycentric": [0.5, 0.25, 0.25],
+                "normal_sign": -1,
+                "heading_radians": 0.4,
+                "uniform_scale": 1.5,
+                "orientation": "right_side_in",
+                "local_offset": [
+                    {
+                        "type": "sphere_reflection",
+                        "center": [0.0, 0.0, 0.0],
+                        "radius": 2.0,
+                    }
+                ],
+            }
+        ]
+        bindings = [
+            {
+                "stable_id": "11111111-1111-4111-8111-111111111111",
+                "frame": 1,
+                "anchor": 0,
+                "path": 0,
+            },
+            {"stable_id": target, "frame": 0},
+        ]
+        codec.validate_payload(payload, 2, bindings)
+
+        duplicate = copy.deepcopy(payload)
+        duplicate["constraints"].append(copy.deepcopy(duplicate["constraints"][0]))
+        with self.assertRaisesRegex(codec.HyperscapeCodecError, "repeats a surface pin"):
+            codec.validate_payload(duplicate, 2, bindings)
+
+        unknown = copy.deepcopy(payload)
+        unknown["constraints"][0]["target_entity"] = (
+            "99999999-9999-4999-8999-999999999999"
+        )
+        with self.assertRaisesRegex(codec.HyperscapeCodecError, "unknown stable entity"):
+            codec.validate_payload(unknown, 2, bindings)
+
+        wrong_parent = copy.deepcopy(bindings)
+        wrong_parent[1]["frame"] = 1
+        with self.assertRaisesRegex(codec.HyperscapeCodecError, "parent must be target"):
+            codec.validate_payload(payload, 2, wrong_parent)
+
+        invalid_address = copy.deepcopy(payload)
+        invalid_address["constraints"][0]["barycentric"] = [1.0, -0.5, 0.5]
+        with self.assertRaisesRegex(codec.HyperscapeCodecError, "must lie on the face"):
+            codec.validate_payload(invalid_address, 2, bindings)
+
     def test_injection_is_copying_not_aliasing(self) -> None:
         payload = sample_payload()
         encoded = codec.inject_asset(
