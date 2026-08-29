@@ -4713,11 +4713,18 @@ function compareAppPresentationPose(expected, actual) {
 
 function dispatchAppPresentation(direction, cueId) {
   if (!rustAppShadow) throw new Error('Rust application boundary is unavailable');
-  const commit = rustAppShadow.present(
-    ++rustAppShadowSequence,
-    direction,
-    cueId || '',
-  );
+  let commit;
+  if (presentationAppAuthority()) {
+    const receipt = rustAppShadow.dispatchPresentation(direction, cueId || '');
+    observeRustAppShadowSequence(receipt.sequence, 'Rust presentation adapter');
+    commit = receipt.commit;
+  } else {
+    commit = rustAppShadow.present(
+      ++rustAppShadowSequence,
+      direction,
+      cueId || '',
+    );
+  }
   rustAppShadowDiagnostics.lastCommit = commit;
   const active = refreshAppShadowSnapshot()?.presentation?.active;
   return { commit, active };

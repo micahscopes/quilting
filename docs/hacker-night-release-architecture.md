@@ -111,6 +111,11 @@ The first application boundary is now explicit:
   navigation, render, animation, and composition projections. Shadow and JS
   modes deliberately retain the HTML card so their standalone controller
   remains the incumbent rollback authority.
+  Keyboard, startup, and deep-link cue inputs now use the same store-allocated
+  semantic sequence through a direct generated-WASM boundary. The older
+  explicitly sequenced `present` method remains only for shadow/replay parity,
+  so switching rollback lanes cannot erase that oracle while JavaScript no
+  longer allocates Rust-authority cue sequence numbers.
   Active cue snapshots also resolve exclusive presentation overlays to
   Quilting's shared backend-neutral `RenderStyle`. The browser no longer owns
   an overlay-to-render-mode policy; it only adapts the legacy `matcap_wire`

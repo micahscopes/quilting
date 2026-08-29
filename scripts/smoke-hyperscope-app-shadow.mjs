@@ -739,6 +739,40 @@ assert.equal(app.snapshot().presentation.cueCount, presentation.cues.length);
 assert.deepEqual(app.snapshot().presentation.assets, presentation.assets);
 assert.equal(app.snapshot().presentation.active, undefined);
 
+const directPresentationApp = new HyperscopeAppShadow();
+directPresentationApp.loadPresentation(presentationDocument);
+const directPresentationStart = directPresentationApp.dispatchPresentation('start', '');
+assert.equal(directPresentationStart.sequence, '0');
+assert.equal(directPresentationStart.commit.disposition, 'applied');
+assert.equal(
+  directPresentationApp.snapshot().presentation.active.cue_id,
+  presentation.cues[0].id,
+);
+const directPresentationAdvance = directPresentationApp.dispatchPresentation('advance', '');
+assert.equal(directPresentationAdvance.sequence, '1');
+assert.equal(directPresentationAdvance.commit.disposition, 'applied');
+assert.equal(
+  directPresentationApp.snapshot().presentation.active.cue_id,
+  presentation.cues[1].id,
+);
+const beforeRejectedDirectPresentation = directPresentationApp.snapshot();
+assert.throws(
+  () => directPresentationApp.dispatchPresentation('jump', 'not-a-uuid'),
+  /cue ID must be a UUID/,
+);
+assert.deepEqual(
+  directPresentationApp.snapshot(),
+  beforeRejectedDirectPresentation,
+  'rejected direct cue input must preserve state and sequence authority',
+);
+const directPresentationReverse = directPresentationApp.dispatchPresentation('reverse', '');
+assert.equal(
+  directPresentationReverse.sequence,
+  '2',
+  'rejected direct cue input must not consume a sequence number',
+);
+directPresentationApp.free();
+
 const eye = new Float64Array([0, 0, 3]);
 const forward = new Float64Array([0, 0, -1]);
 const up = new Float64Array([0, 1, 0]);

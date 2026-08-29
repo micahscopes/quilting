@@ -566,6 +566,17 @@ assert.ok(
     < activationAdapter.indexOf('return applyRustPresentationCommit(snapshot, navigation);'),
   'AppStore cue authority must commit before active-scene extraction during rendering',
 );
+const directPresentationAdapter = browserSource.slice(
+  browserSource.indexOf('function dispatchAppPresentation('),
+  browserSource.indexOf('function mirrorAppPresentation('),
+);
+assert.ok(
+  directPresentationAdapter.includes('if (presentationAppAuthority())')
+    && directPresentationAdapter.includes('rustAppShadow.dispatchPresentation(direction, cueId || \'\')')
+    && directPresentationAdapter.includes("observeRustAppShadowSequence(receipt.sequence, 'Rust presentation adapter')")
+    && directPresentationAdapter.includes('rustAppShadow.present('),
+  'Rust presentation adapters must allocate inside AppStore while shadow replay stays explicitly sequenced',
+);
 const presentationCommitAdapter = browserSource.slice(
   browserSource.indexOf('function applyRustPresentationCommit('),
   browserSource.indexOf('function consumeRustPresentationCardCommit('),

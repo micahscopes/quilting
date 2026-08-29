@@ -967,14 +967,7 @@ impl HyperscopeAppShadow {
     /// a separate pose-parity gate is enabled.
     #[wasm_bindgen(js_name = present)]
     pub fn present(&self, sequence: u32, action: &str, cue_id: &str) -> Result<JsValue, JsValue> {
-        let action = match action {
-            "start" => PresentationAction::Start,
-            "advance" => PresentationAction::Advance,
-            "reverse" => PresentationAction::Reverse,
-            "jump" => PresentationAction::JumpToCue(parse_uuid(cue_id, "cue ID")?),
-            "clear" => PresentationAction::Clear,
-            _ => return Err(JsValue::from_str("unknown presentation action")),
-        };
+        let action = presentation_action_from_wire(action, cue_id)?;
         let commit = self
             .store
             .dispatch(AppEvent::Input(Timed {
@@ -984,6 +977,24 @@ impl HyperscopeAppShadow {
             }))
             .map_err(js_error)?;
         commit_to_js(&commit)
+    }
+
+    /// Commit local presentation intent through AppStore's sequence authority.
+    /// The explicitly sequenced `present` method remains available to replay
+    /// and shadow adapters; ordinary Rust-authority browser input uses this
+    /// boundary so JavaScript cannot race or reuse application input sequence.
+    #[wasm_bindgen(js_name = dispatchPresentation)]
+    pub fn dispatch_presentation(&self, action: &str, cue_id: &str) -> Result<JsValue, JsValue> {
+        let (sequence, commit) = self
+            .store
+            .dispatch_semantic(SemanticAction::Present(presentation_action_from_wire(
+                action, cue_id,
+            )?))
+            .map_err(js_error)?;
+        to_js(&ShadowDirectSemanticReceipt {
+            sequence: sequence.to_string(),
+            commit: shadow_commit(&commit),
+        })
     }
 
     /// Commit explicit playback intent from a browser control or restored URL.
@@ -1590,6 +1601,13 @@ struct ShadowCommit {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ShadowDirectSemanticReceipt {
+    sequence: String,
+    commit: ShadowCommit,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ShadowLocalPeerReceipt {
     lane: &'static str,
     disposition: &'static str,
@@ -2079,6 +2097,20 @@ fn asset_id_from_str(value: &str) -> Result<AssetId, JsValue> {
 
 fn entity_id_from_str(value: &str) -> Result<EntityId, JsValue> {
     EntityId::new(parse_uuid(value, "entity ID")?).map_err(js_error)
+}
+
+fn presentation_action_from_wire(
+    action: &str,
+    cue_id: &str,
+) -> Result<PresentationAction, JsValue> {
+    match action {
+        "start" => Ok(PresentationAction::Start),
+        "advance" => Ok(PresentationAction::Advance),
+        "reverse" => Ok(PresentationAction::Reverse),
+        "jump" => Ok(PresentationAction::JumpToCue(parse_uuid(cue_id, "cue ID")?)),
+        "clear" => Ok(PresentationAction::Clear),
+        _ => Err(JsValue::from_str("unknown presentation action")),
+    }
 }
 
 fn packed_node_source(node: ShadowPackedNodeInput) -> Result<PackedNodeSource, JsValue> {
