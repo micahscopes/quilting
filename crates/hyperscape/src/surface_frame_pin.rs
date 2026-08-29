@@ -5,8 +5,11 @@
 //! a pinned object can itself contain reflected, inverted, or further pinned
 //! coordinate frames without introducing a second transform hierarchy.
 
-use crate::{SurfaceAnchorError, SurfaceAttachment, SurfaceSample, SurfaceTangentFrame};
-use bevy_ecs::prelude::Resource;
+use crate::{
+    ConformalScene, HyperscapeDiagnostics, SurfaceAnchorError, SurfaceAttachment, SurfaceSample,
+    SurfaceTangentFrame,
+};
+use bevy_ecs::prelude::{Local, Res, ResMut, Resource};
 pub use hyperscape_protocol::SurfaceFrameOrientation;
 use quilting_core::{
     ConformalError, ConformalFrameForest, ConformalGenerator, ConformalTransformChain, FrameId,
@@ -157,6 +160,111 @@ impl SurfaceFramePinSet {
             .ok_or(SurfaceFramePinError::UnknownBinding(index))?;
         binding.pin.apply_sample(frames, binding.frame, sample)
     }
+
+    /// Apply one coherent external pose sample across the constraint graph.
+    ///
+    /// Parent frames are resolved before pinned descendants even when the
+    /// authored constraint array is in another order. All mappings are staged
+    /// on a clone, so one invalid differential publishes none of the frame
+    /// changes from that pose revision.
+    pub fn apply_samples_atomically(
+        &self,
+        frames: &mut ConformalFrameForest,
+        samples: &[Option<SurfaceSample>],
+    ) -> Result<Vec<(usize, ResolvedSurfaceFramePin)>, SurfaceFramePinError> {
+        let mut order = self
+            .0
+            .iter()
+            .enumerate()
+            .filter_map(|(index, binding)| {
+                samples
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .map(|_| (index, binding.frame))
+            })
+            .map(|(index, frame)| Ok((frame_depth(frames, frame)?, frame.0, index)))
+            .collect::<Result<Vec<_>, SurfaceFramePinError>>()?;
+        order.sort_unstable();
+
+        let mut staged = frames.clone();
+        let mut resolved = Vec::with_capacity(order.len());
+        for (_, _, index) in order {
+            let sample = samples[index].expect("sampled pin was filtered above");
+            let binding = &self.0[index];
+            resolved.push((
+                index,
+                binding
+                    .pin
+                    .apply_sample(&mut staged, binding.frame, sample)?,
+            ));
+        }
+        *frames = staged;
+        Ok(resolved)
+    }
+}
+
+fn frame_depth(
+    frames: &ConformalFrameForest,
+    frame: FrameId,
+) -> Result<usize, SurfaceFramePinError> {
+    let mut depth = 0;
+    let mut cursor = Some(frame);
+    while let Some(current) = cursor {
+        depth += 1;
+        if depth > frames.frames().len() {
+            return Err(ConformalError::Cycle(current).into());
+        }
+        cursor = frames.frame(current)?.parent;
+    }
+    Ok(depth)
+}
+
+/// Latest renderer/geometry samples aligned with [`SurfaceFramePinSet`].
+///
+/// Geometry adapters replace this resource only after a complete pose has
+/// been accepted. The monotonic revision lets the ECS consume each coherent
+/// pose once without polling or replaying stale asynchronous results.
+#[derive(Resource, Debug, Clone, Default, PartialEq)]
+pub struct SurfaceFramePinSamples {
+    revision: u64,
+    samples: Vec<Option<SurfaceSample>>,
+}
+
+impl SurfaceFramePinSamples {
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn samples(&self) -> &[Option<SurfaceSample>] {
+        &self.samples
+    }
+
+    pub fn replace(&mut self, samples: Vec<Option<SurfaceSample>>) -> u64 {
+        self.revision = self.revision.wrapping_add(1).max(1);
+        self.samples = samples;
+        self.revision
+    }
+}
+
+/// Resolve an externally supplied posed-surface revision before paths,
+/// coordinates, constraints, and render extraction observe the frame graph.
+pub(crate) fn apply_surface_frame_pin_samples(
+    mut scene: ResMut<ConformalScene>,
+    pins: Res<SurfaceFramePinSet>,
+    samples: Res<SurfaceFramePinSamples>,
+    mut diagnostics: ResMut<HyperscapeDiagnostics>,
+    mut applied_revision: Local<u64>,
+) {
+    if samples.revision() == 0 || samples.revision() == *applied_revision {
+        return;
+    }
+    if let Err(error) = pins.apply_samples_atomically(&mut scene.frames, samples.samples()) {
+        diagnostics.0.push(format!(
+            "could not apply surface-pin pose revision {}: {error}",
+            samples.revision()
+        ));
+    }
+    *applied_revision = samples.revision();
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -358,6 +466,79 @@ mod tests {
             .unwrap();
         assert_point_close(first, [2.5, 0.0, 0.0]);
         assert_point_close(second, [5.5, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn coherent_samples_sort_parent_pins_first() {
+        let mut frames = ConformalFrameForest::new();
+        let parent = frames
+            .add_frame("parent", None, ConformalTransformChain::identity())
+            .unwrap();
+        let child = frames
+            .add_frame("child", Some(parent), ConformalTransformChain::identity())
+            .unwrap();
+
+        let mut parent_pin = SurfaceFramePin::new(attachment());
+        parent_pin.orientation = SurfaceFrameOrientation::InsideOut;
+        let mut child_pin = SurfaceFramePin::new(attachment());
+        child_pin.orientation = SurfaceFrameOrientation::RightSideIn;
+        let pins = SurfaceFramePinSet(vec![
+            SurfaceFramePinBinding {
+                frame: child,
+                pin: child_pin,
+            },
+            SurfaceFramePinBinding {
+                frame: parent,
+                pin: parent_pin,
+            },
+        ]);
+
+        let resolved = pins
+            .apply_samples_atomically(
+                &mut frames,
+                &[Some(sample([3.0, 0.0, 0.0])), Some(sample([1.0, 0.0, 0.0]))],
+            )
+            .unwrap();
+
+        assert_eq!(
+            resolved.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+            [1, 0]
+        );
+        assert_eq!(frames.world_chain(parent).unwrap().orientation_sign(), -1);
+        assert_eq!(frames.world_chain(child).unwrap().orientation_sign(), 1);
+    }
+
+    #[test]
+    fn invalid_coherent_sample_publishes_no_partial_frame_updates() {
+        let mut frames = ConformalFrameForest::new();
+        let first = frames
+            .add_frame("first", None, ConformalTransformChain::identity())
+            .unwrap();
+        let second = frames
+            .add_frame("second", None, ConformalTransformChain::identity())
+            .unwrap();
+        let pins = SurfaceFramePinSet(vec![
+            SurfaceFramePinBinding {
+                frame: first,
+                pin: SurfaceFramePin::new(attachment()),
+            },
+            SurfaceFramePinBinding {
+                frame: second,
+                pin: SurfaceFramePin::new(attachment()),
+            },
+        ]);
+        let before = frames.clone();
+        let invalid = SurfaceSample {
+            output_position: [4.0, 0.0, 0.0],
+            tangent_u: [0.0; 3],
+            tangent_v: [0.0; 3],
+            surface_velocity: [0.0; 3],
+        };
+
+        assert!(pins
+            .apply_samples_atomically(&mut frames, &[Some(sample([2.0, 0.0, 0.0])), Some(invalid)],)
+            .is_err());
+        assert_eq!(frames, before);
     }
 
     #[test]

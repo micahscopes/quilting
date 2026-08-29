@@ -69,7 +69,7 @@ pub use surface::{
 };
 pub use surface_frame_pin::{
     ResolvedSurfaceFramePin, SurfaceFrameOrientation, SurfaceFramePin, SurfaceFramePinBinding,
-    SurfaceFramePinError, SurfaceFramePinSet,
+    SurfaceFramePinError, SurfaceFramePinSamples, SurfaceFramePinSet,
 };
 
 /// Shared conformal scene topology. Ordinary entity parenting remains in the
@@ -401,6 +401,8 @@ impl Plugin for HyperscapePlugin {
             .init_resource::<NavigationActionQueue>()
             .init_resource::<NavigationRuntime>()
             .init_resource::<SurfaceWalkRuntime>()
+            .init_resource::<SurfaceFramePinSet>()
+            .init_resource::<SurfaceFramePinSamples>()
             .init_resource::<HyperscopeExtraction>()
             .init_resource::<HyperscapeDiagnostics>()
             .configure_sets(
@@ -422,7 +424,12 @@ impl Plugin for HyperscapePlugin {
             )
             .add_systems(
                 Update,
-                apply_frame_reparents.in_set(HyperscapeSet::FrameMutation),
+                (
+                    apply_frame_reparents,
+                    surface_frame_pin::apply_surface_frame_pin_samples,
+                )
+                    .chain()
+                    .in_set(HyperscapeSet::FrameMutation),
             )
             .add_systems(
                 Update,
