@@ -421,7 +421,11 @@ The first application boundary is now explicit:
   so a high-rate browser parity lane need not allocate or serialize a frame
   object. Browser clip wrapping remains the incumbent until that lane is
   measured and cut over. `animclockimpl=js|shadow|rust` is that independent
-  rollback boundary; the default remains `js`. Live ordinary-horse evidence
+  rollback boundary; the default remains `js`. The Leptos playback toggle now
+  allocates and commits `TogglePlaying` through `AppStore` directly. Its
+  browser callbacks observe only the committed playing value, sequence, and
+  revision—or a rejection—so renderer adaptation and diagnostics remain thin
+  effects without regaining action authority. Live ordinary-horse evidence
   recorded 416 shadow comparisons with zero mismatches and `9.45e-14` maximum
   error, then 432 Rust authority writes with no fallback or errors, including
   pause and seek. Reverse playback, presentation cue switching, and background

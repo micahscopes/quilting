@@ -3896,6 +3896,14 @@ function ensureRustAppShadow(reason = 'shadow') {
   return rustAppShadow;
 }
 
+function observeRustAppShadowSequence(sequence, context) {
+  const sequenceNumber = Number(sequence);
+  if (!Number.isSafeInteger(sequenceNumber) || sequenceNumber < 0) {
+    throw new Error(`${context} sequence is not a safe browser integer`);
+  }
+  rustAppShadowSequence = Math.max(rustAppShadowSequence, sequenceNumber);
+}
+
 function setAnimationPlaybackIntent(playing) {
   const requested = Boolean(playing);
   if (!wasmOk.peek()) {
@@ -4078,9 +4086,36 @@ function ensureRustAnimationControlView() {
     return false;
   }
   try {
-    rustAppShadow.mountAnimationControl(host, action => {
-      if (action === 'toggle') toggleAnimationPlaybackIntent();
-    });
+    rustAppShadow.mountAnimationControl(
+      host,
+      (playing, sequence, revision) => {
+        try {
+          observeRustAppShadowSequence(sequence, 'Rust animation control');
+          rustAppShadowDiagnostics.lastCommit = {
+            revision: String(revision),
+            disposition: 'applied',
+            publishedUi: true,
+            effects: [],
+          };
+          rustAppShadowDiagnostics.animationPlaybackDispatches += 1;
+          if (ANIMATION_CLOCK_IMPLEMENTATION !== 'js') {
+            animationClockDiagnostics.dispatches += 1;
+          }
+          animating_sig.set(Boolean(playing));
+          refreshAppShadowSnapshot();
+        } catch (error) {
+          rustAppShadowDiagnostics.animationPlaybackErrors += 1;
+          recordAppShadowMismatch(
+            'animation_control_projection',
+            error?.message || String(error),
+          );
+        }
+      },
+      error => {
+        rustAppShadowDiagnostics.animationPlaybackErrors += 1;
+        recordAppShadowMismatch('animation_control_rejection', String(error));
+      },
+    );
     host.hidden = false;
     fallback.hidden = true;
     rustAnimationControlMounted = true;
@@ -4162,11 +4197,7 @@ function ensureRustRenderSettingsView() {
         sequence,
       ) => {
         try {
-          const sequenceNumber = Number(sequence);
-          if (!Number.isSafeInteger(sequenceNumber) || sequenceNumber < 0) {
-            throw new Error('Rust render-control sequence is not a safe browser integer');
-          }
-          rustAppShadowSequence = Math.max(rustAppShadowSequence, sequenceNumber);
+          observeRustAppShadowSequence(sequence, 'Rust render control');
           const rust = {
             style,
             resolutionLevel,

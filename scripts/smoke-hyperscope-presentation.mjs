@@ -7,6 +7,13 @@ const packageUrl = pathToFileURL(`${repository}/pkg/quilting_wasm.js`).href;
 const wasmPath = `${repository}/pkg/quilting_wasm_bg.wasm`;
 const manifestPath = `${repository}/crates/hyperscape/fixtures/hacker-night.presentation.json`;
 const browserSource = readFileSync(`${repository}/hyperscope.html`, 'utf8');
+const animationControlSource = [
+  'animation_control.rs',
+  'animation_control/csr.rs',
+].map(path => readFileSync(
+  `${repository}/crates/hyperscope-web/src/${path}`,
+  'utf8',
+)).join('\n');
 const workerSource = readFileSync(`${repository}/hyperscope_worker.js`, 'utf8');
 const mainRendererSource = readFileSync(
   `${repository}/crates/quilting-wasm/src/main_renderer.rs`,
@@ -257,6 +264,31 @@ for (const requiredAnimationAdapterStep of [
   assert.ok(
     browserSource.includes(requiredAnimationAdapterStep),
     `browser animation adapter is missing ${requiredAnimationAdapterStep}`,
+  );
+}
+const animationControlMountBoundary = browserSource.slice(
+  browserSource.indexOf('rustAppShadow.mountAnimationControl('),
+  browserSource.indexOf(
+    'host.hidden = false;',
+    browserSource.indexOf('rustAppShadow.mountAnimationControl('),
+  ),
+);
+assert.ok(
+  !animationControlMountBoundary.includes('toggleAnimationPlaybackIntent()')
+    && animationControlMountBoundary.includes("observeRustAppShadowSequence(sequence, 'Rust animation control');")
+    && animationControlMountBoundary.includes('animating_sig.set(Boolean(playing));')
+    && animationControlMountBoundary.includes("'animation_control_rejection'"),
+  'the Leptos animation callback must adapt committed Rust state without dispatching browser intent',
+);
+for (const directAnimationStep of [
+  '.dispatch_semantic(SemanticAction::Animate(AnimationAction::TogglePlaying))',
+  'store.frame_snapshot().animation.playing',
+  'arguments.push(&JsValue::from(committed.sequence));',
+  'arguments.push(&JsValue::from(committed.revision));',
+]) {
+  assert.ok(
+    animationControlSource.includes(directAnimationStep),
+    `Leptos animation control is missing direct Rust dispatch step: ${directAnimationStep}`,
   );
 }
 
