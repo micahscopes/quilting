@@ -424,6 +424,8 @@ The first application boundary is now explicit:
   time. The four-`f64` WASM packet omits repeated IDs but derives entirely from
   that snapshot; measured clip lanes no longer need to pass a browser-owned
   `{time_min, duration}` pair back into Rust every frame.
+  The exact multi-clip shadow/Rust soak and acceptance counters are frozen in
+  the [2026-08-29 animation clip cutover model](benchmarks/2026-08-29-animation-clip-cutover-model.md).
   Version 0.20 separates a successfully fetched/decoded primary candidate from
   a renderer-resident primary scene. Decode emits an explicit
   `InstallPrimaryScene` effect; only a matching, validated completion can
