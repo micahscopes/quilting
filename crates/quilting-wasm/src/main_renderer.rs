@@ -7621,6 +7621,19 @@ pub fn mr_upload_env_maps(
                 info!("Uploaded env maps: prefiltered {}x{} ({} mips), irradiance {}x{}",
                     pf_size, pf_size, st.env_maps.mip_count as u32, ir_size, ir_size);
             }
+            match crate::webgpu_backend::replace_environment_maps(
+                prefiltered,
+                pf_size,
+                irradiance,
+                ir_size,
+            ) {
+                Ok(true) => debug!("Mirrored environment maps into WebGPU"),
+                Ok(false) => {}
+                Err(error) => warn!(
+                    "WebGPU environment mirror rejected; retained incumbent state: {}",
+                    error
+                ),
+            }
         }
     });
 }

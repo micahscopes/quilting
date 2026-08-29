@@ -6,7 +6,9 @@
 //! application-supplied canvas. Canvas selection remains an explicit startup
 //! decision; a claimed context is never silently repurposed.
 
-use quilting_core::material::{TextureAssetDescriptor, TextureWrapMode};
+use quilting_core::material::{
+    EnvironmentMapAsset, EnvironmentMapDescriptor, TextureAssetDescriptor, TextureWrapMode,
+};
 use quilting_core::render::{
     RenderFrame, RenderFrameOptions, RenderPoseIdentity, RenderSceneSnapshot, RenderStyle,
     RenderSubmissionStats, RenderView,
@@ -15,8 +17,8 @@ use quilting_renderer::compute::{LodAtlasLookup, PreparedLodModel};
 use quilting_webgpu::{
     DiagnosticPatchRenderPipelines, LodClassifierDevice, LodClassifierModel, LodPose,
     OffscreenPatchRenderTarget, PackedPatchAtlas, PatchFrameEncoding, PatchPresentationSurface,
-    PatchRenderScene, PatchRenderSceneUpdate, PbrTextureTable, StagedOffscreenImageReadback,
-    SurfacePresentation, WebGpuAdapterSummary,
+    PatchRenderScene, PatchRenderSceneUpdate, PbrEnvironmentMap, PbrTextureTable,
+    StagedOffscreenImageReadback, SurfacePresentation, WebGpuAdapterSummary,
 };
 use serde::Serialize;
 use std::cell::RefCell;
@@ -32,6 +34,7 @@ struct WebGpuBackend {
     adapter: Option<WebGpuAdapterSummary>,
     atlas: Option<PackedPatchAtlas>,
     textures: Option<PbrTextureTable>,
+    environment: Option<PbrEnvironmentMap>,
     model: Option<LodClassifierModel>,
     model_source: Option<PreparedLodModel>,
     pipelines: Option<DiagnosticPatchRenderPipelines>,
@@ -48,6 +51,7 @@ struct WebGpuBackend {
     initialization_attempts: u64,
     atlas_uploads: u64,
     texture_uploads: u64,
+    environment_uploads: u64,
     model_uploads: u64,
     scene_uploads: u64,
     scene_rebuilds: u64,
@@ -101,6 +105,10 @@ pub(crate) struct WebGpuBackendDiagnostics {
     textures_ready: bool,
     texture_slots: usize,
     texture_images: usize,
+    environment_ready: bool,
+    environment_prefiltered_size: u32,
+    environment_prefiltered_mips: u32,
+    environment_irradiance_size: u32,
     pbr_texture_materials: usize,
     pbr_texture_references: usize,
     pbr_texture_resident_references: usize,
@@ -122,6 +130,7 @@ pub(crate) struct WebGpuBackendDiagnostics {
     initialization_attempts: u64,
     atlas_uploads: u64,
     texture_uploads: u64,
+    environment_uploads: u64,
     model_uploads: u64,
     scene_uploads: u64,
     scene_rebuilds: u64,
@@ -178,6 +187,17 @@ impl WebGpuBackend {
                 .textures
                 .as_ref()
                 .map_or(0, PbrTextureTable::occupied_len),
+            environment_ready: self.environment.is_some(),
+            environment_prefiltered_size: self.environment.as_ref().map_or(0, |environment| {
+                environment.descriptor().prefiltered_face_size
+            }),
+            environment_prefiltered_mips: self
+                .environment
+                .as_ref()
+                .map_or(0, PbrEnvironmentMap::prefiltered_mip_count),
+            environment_irradiance_size: self.environment.as_ref().map_or(0, |environment| {
+                environment.descriptor().irradiance_face_size
+            }),
             pbr_texture_materials: pbr_texture_residency.len(),
             pbr_texture_references: pbr_texture_residency
                 .iter()
@@ -229,6 +249,7 @@ impl WebGpuBackend {
             initialization_attempts: self.initialization_attempts,
             atlas_uploads: self.atlas_uploads,
             texture_uploads: self.texture_uploads,
+            environment_uploads: self.environment_uploads,
             model_uploads: self.model_uploads,
             scene_uploads: self.scene_uploads,
             scene_rebuilds: self.scene_rebuilds,
@@ -302,6 +323,7 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
                     backend.adapter = Some(adapter);
                     backend.atlas = None;
                     backend.textures = None;
+                    backend.environment = None;
                     backend.model = None;
                     backend.model_source = None;
                     backend.pipelines = Some(pipelines);
@@ -386,6 +408,7 @@ pub(crate) async fn initialize_presentation(
         backend.adapter = Some(adapter);
         backend.atlas = None;
         backend.textures = None;
+        backend.environment = None;
         backend.model = None;
         backend.model_source = None;
         backend.pipelines = Some(pipelines);
@@ -475,6 +498,79 @@ pub(crate) fn replace_image_bitmaps(
             Ok(textures) => {
                 backend.textures = Some(textures);
                 backend.texture_uploads = backend.texture_uploads.saturating_add(1);
+                backend.last_error = None;
+                Ok(true)
+            }
+            Err(error) => {
+                backend.last_error = Some(error.clone());
+                Err(error)
+            }
+        }
+    })
+}
+
+/// Mirror the incumbent RGBA32F IBL payload into one retained WebGPU
+/// environment epoch. Validation and both cube uploads complete before either
+/// the asset or a replacement scene bind group is published.
+pub(crate) fn replace_environment_maps(
+    prefiltered: &[f32],
+    prefiltered_face_size: u32,
+    irradiance: &[f32],
+    irradiance_face_size: u32,
+) -> Result<bool, String> {
+    BACKEND.with(|slot| {
+        let mut backend = slot.borrow_mut();
+        if backend.state != "ready" {
+            return Ok(false);
+        }
+        let prefiltered_mip_count = prefiltered_face_size
+            .checked_ilog2()
+            .map_or(0, |maximum_mip| maximum_mip + 1);
+        let descriptor = EnvironmentMapDescriptor {
+            prefiltered_face_size,
+            prefiltered_mip_count,
+            irradiance_face_size,
+        };
+        let asset = match EnvironmentMapAsset::new(descriptor, prefiltered, irradiance) {
+            Ok(asset) => asset,
+            Err(error) => {
+                let error = error.to_string();
+                backend.last_error = Some(error.clone());
+                return Err(error);
+            }
+        };
+        let result = {
+            let WebGpuBackend {
+                device,
+                pipelines,
+                scene,
+                ..
+            } = &mut *backend;
+            let device = device
+                .as_ref()
+                .ok_or_else(|| "ready WebGPU backend has no device".to_string())?;
+            let environment = device
+                .upload_pbr_environment_map(asset)
+                .map_err(|error| error.to_string())?;
+            if let Some(scene) = scene.as_mut() {
+                let pipeline = pipelines
+                    .as_ref()
+                    .and_then(|pipelines| pipelines.get(RenderStyle::Pbr))
+                    .ok_or_else(|| "ready WebGPU backend has no PBR pipeline".to_string())?;
+                device
+                    .replace_patch_render_scene_environment_bindings(
+                        pipeline,
+                        scene,
+                        Some(&environment),
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok::<_, String>(environment)
+        };
+        match result {
+            Ok(environment) => {
+                backend.environment = Some(environment);
+                backend.environment_uploads = backend.environment_uploads.saturating_add(1);
                 backend.last_error = None;
                 Ok(true)
             }
@@ -671,7 +767,7 @@ pub(crate) fn replace_scene(
                 .model
                 .as_ref()
                 .ok_or_else(|| "WebGPU render scene requires model residency".to_string())?;
-            device
+            let mut candidate = device
                 .upload_patch_render_scene(
                     pipeline,
                     model,
@@ -680,7 +776,17 @@ pub(crate) fn replace_scene(
                     next_revision,
                     backend.textures.as_ref(),
                 )
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())?;
+            if let Some(environment) = backend.environment.as_ref() {
+                device
+                    .replace_patch_render_scene_environment_bindings(
+                        pipeline,
+                        &mut candidate,
+                        Some(environment),
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok::<_, String>(candidate)
         };
         match result {
             Ok(scene) => {
