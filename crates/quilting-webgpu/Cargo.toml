@@ -32,7 +32,7 @@ wgpu = { version = "=29.0.1", default-features = false, features = ["std", "park
 getrandom = { version = "0.2", features = ["js"] }
 wasm-bindgen = { version = "=0.2.108", optional = true }
 wasm-bindgen-futures = { version = "=0.4.58", optional = true }
-web-sys = { version = "0.3", features = ["HtmlCanvasElement"], optional = true }
+web-sys = { version = "0.3", features = ["HtmlCanvasElement", "ImageBitmap"], optional = true }
 wgpu = { version = "=29.0.1", default-features = false, features = ["std", "wgsl", "webgpu"] }
 
 [dev-dependencies]

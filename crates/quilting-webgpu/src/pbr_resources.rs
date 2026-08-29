@@ -75,14 +75,77 @@ impl LodClassifierDevice {
         &self,
         assets: &[Rgba8TextureAsset<'_>],
     ) -> Result<PbrTextureTable, LodWebGpuError> {
-        validate_texture_assets(&self.device, assets)?;
-        let descriptors = assets.iter().map(|asset| Some(asset.descriptor)).collect();
-        let resources = assets
+        let slots = assets.iter().copied().map(Some).collect::<Vec<_>>();
+        self.upload_pbr_texture_slot_table(&slots)
+    }
+
+    /// Upload a texture-index-preserving table where an unavailable decoded
+    /// image remains an explicit empty slot rather than shifting later glTF
+    /// indices. Material binding resolves those slots through placeholders.
+    pub fn upload_pbr_texture_slot_table(
+        &self,
+        assets: &[Option<Rgba8TextureAsset<'_>>],
+    ) -> Result<PbrTextureTable, LodWebGpuError> {
+        validate_texture_asset_slots(&self.device, assets)?;
+        let descriptors = assets
             .iter()
-            .map(|asset| Some(create_texture_resource(&self.device, asset.descriptor)))
+            .map(|asset| asset.map(|asset| asset.descriptor))
             .collect::<Vec<_>>();
-        for (resource, asset) in resources.iter().flatten().zip(assets) {
-            write_texture_asset(&self.queue, resource, *asset)?;
+        let resources = descriptors
+            .iter()
+            .map(|descriptor| {
+                descriptor.map(|descriptor| create_texture_resource(&self.device, descriptor))
+            })
+            .collect::<Vec<_>>();
+        for (resource, asset) in resources.iter().zip(assets) {
+            if let (Some(resource), Some(asset)) = (resource.as_ref(), *asset) {
+                write_texture_asset(&self.queue, resource, asset)?;
+            }
+        }
+        Ok(PbrTextureTable {
+            descriptors,
+            resources,
+        })
+    }
+
+    /// Upload browser-decoded images directly into WebGPU texture storage.
+    /// The external-image copy captures each bitmap synchronously, so the web
+    /// adapter may close its handles after this method returns.
+    #[cfg(target_arch = "wasm32")]
+    pub fn upload_pbr_image_bitmap_table(
+        &self,
+        assets: &[Option<(TextureAssetDescriptor, web_sys::ImageBitmap)>],
+    ) -> Result<PbrTextureTable, LodWebGpuError> {
+        validate_image_bitmap_slots(&self.device, assets)?;
+        let descriptors = assets
+            .iter()
+            .map(|asset| asset.as_ref().map(|(descriptor, _)| *descriptor))
+            .collect::<Vec<_>>();
+        let resources = descriptors
+            .iter()
+            .map(|descriptor| {
+                descriptor.map(|descriptor| create_texture_resource(&self.device, descriptor))
+            })
+            .collect::<Vec<_>>();
+        for (resource, asset) in resources.iter().zip(assets) {
+            if let (Some(resource), Some((descriptor, bitmap))) = (resource.as_ref(), asset) {
+                self.queue.copy_external_image_to_texture(
+                    &wgpu::CopyExternalImageSourceInfo {
+                        source: wgpu::ExternalImageSource::ImageBitmap(bitmap.clone()),
+                        origin: wgpu::Origin2d::ZERO,
+                        flip_y: false,
+                    },
+                    wgpu::CopyExternalImageDestInfo {
+                        texture: &resource.texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                        color_space: wgpu::PredefinedColorSpace::Srgb,
+                        premultiplied_alpha: false,
+                    },
+                    texture_extent(*descriptor),
+                );
+            }
         }
         Ok(PbrTextureTable {
             descriptors,
@@ -201,8 +264,19 @@ fn validate_texture_assets(
     device: &wgpu::Device,
     assets: &[Rgba8TextureAsset<'_>],
 ) -> Result<(), LodWebGpuError> {
+    let slots = assets.iter().copied().map(Some).collect::<Vec<_>>();
+    validate_texture_asset_slots(device, &slots)
+}
+
+fn validate_texture_asset_slots(
+    device: &wgpu::Device,
+    assets: &[Option<Rgba8TextureAsset<'_>>],
+) -> Result<(), LodWebGpuError> {
     let maximum_dimension = device.limits().max_texture_dimension_2d;
     for (index, asset) in assets.iter().enumerate() {
+        let Some(asset) = asset else {
+            continue;
+        };
         Rgba8TextureAsset::new(asset.descriptor, asset.pixels)
             .map_err(|error| LodWebGpuError::Payload(format!("PBR texture {index}: {error}")))?;
         if asset.descriptor.width > maximum_dimension || asset.descriptor.height > maximum_dimension
@@ -210,6 +284,38 @@ fn validate_texture_assets(
             return Err(LodWebGpuError::Payload(format!(
                 "PBR texture {index} is {}x{}, exceeding device limit {maximum_dimension}",
                 asset.descriptor.width, asset.descriptor.height,
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn validate_image_bitmap_slots(
+    device: &wgpu::Device,
+    assets: &[Option<(TextureAssetDescriptor, web_sys::ImageBitmap)>],
+) -> Result<(), LodWebGpuError> {
+    let maximum_dimension = device.limits().max_texture_dimension_2d;
+    for (index, asset) in assets.iter().enumerate() {
+        let Some((descriptor, bitmap)) = asset else {
+            continue;
+        };
+        descriptor
+            .validate()
+            .map_err(|error| LodWebGpuError::Payload(format!("PBR texture {index}: {error}")))?;
+        if bitmap.width() != descriptor.width || bitmap.height() != descriptor.height {
+            return Err(LodWebGpuError::Payload(format!(
+                "PBR texture {index} descriptor is {}x{}, but its ImageBitmap is {}x{}",
+                descriptor.width,
+                descriptor.height,
+                bitmap.width(),
+                bitmap.height(),
+            )));
+        }
+        if descriptor.width > maximum_dimension || descriptor.height > maximum_dimension {
+            return Err(LodWebGpuError::Payload(format!(
+                "PBR texture {index} is {}x{}, exceeding device limit {maximum_dimension}",
+                descriptor.width, descriptor.height,
             )));
         }
     }

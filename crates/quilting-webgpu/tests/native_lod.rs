@@ -339,6 +339,25 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             initial_a,
         );
 
+        let sparse_assets = [Some(initial_assets[0]), None, Some(initial_assets[1])];
+        let sparse_table = classifier
+            .upload_pbr_texture_slot_table(&sparse_assets)
+            .unwrap();
+        assert_eq!(sparse_table.len(), 3);
+        assert_eq!(sparse_table.occupied_len(), 2);
+        assert_eq!(
+            sparse_table.descriptors(),
+            &[Some(texture_a), None, Some(texture_b)]
+        );
+        assert!(sparse_table.linear_view(1).is_none());
+        assert_eq!(
+            classifier
+                .read_pbr_texture_rgba8_for_diagnostics(&sparse_table, 2)
+                .await
+                .unwrap(),
+            initial_b,
+        );
+
         let updated_a = [7; 16];
         let updated_b = [11; 8];
         let updated_assets = [
