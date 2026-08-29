@@ -232,6 +232,13 @@ The first application boundary is now explicit:
   explicitly linked `animtime` or `animspeed` may arm deferred clock
   restoration. A resolved default can populate state without masquerading as
   authored URL intent.
+  Once that complete route passes Rust admission, bounded camera, conformal
+  sphere, animation clock, SpaceMouse, walk, focus, and Patch Lab numbers are
+  converted without another fallback, clamp, or rounding policy. The legacy
+  helpers now run only for explicit JavaScript authority or recorded Rust
+  fallback. Patch Lab installs the admitted atlas maximum before assigning its
+  exponent controls, preventing the DOM's old maximum of seven from silently
+  truncating an atlas-nine link.
   Camera links carry explicit `aim=1` when `px/py/pz` is a finite semantic
   target; omitting it means the same visible pose has a free sight tangent.
   Rust validates and canonically orders that policy, and selection or model

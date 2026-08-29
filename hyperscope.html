@@ -251,7 +251,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
       <label style="margin-top:5px">Requested exponent range</label>
       <div class="sr"><span style="font-size:10px;color:#8b949e;width:32px">Min</span><input type="range" id="patch-lab-min" min="0" max="7" value="1" step="1"><span class="v" id="patch-lab-min-v">2</span></div>
       <div class="sr"><span style="font-size:10px;color:#8b949e;width:32px">Max</span><input type="range" id="patch-lab-max" min="0" max="7" value="6" step="1"><span class="v" id="patch-lab-max-v">64</span></div>
-      <div class="sr"><span style="font-size:10px;color:#8b949e;width:32px">Phase</span><input type="range" id="patch-lab-phase" min="0" max="6.283" value="0" step="0.001"><span class="v" id="patch-lab-phase-v">0.00</span></div>
+      <div class="sr"><span style="font-size:10px;color:#8b949e;width:32px">Phase</span><input type="range" id="patch-lab-phase" min="0" max="6.283185307179586" value="0" step="0.001"><span class="v" id="patch-lab-phase-v">0.00</span></div>
     </div>
     <div id="patch-lab-bend" style="margin-top:5px">
       <label>QB corner-weight bend</label>
@@ -7887,7 +7887,7 @@ effect(() => {
 });
 
 // --- applyParams: set all signals from URL params (defined after all signals exist) ---
-applyParams = function(params, validatedRenderSettings = null) {
+applyParams = function(params, validatedRenderSettings = null, rustRouteAdmitted = false) {
   const finite = (value, fallback, minimum, maximum) => {
     const parsed = Number(value);
     if (!Number.isFinite(parsed)) return fallback;
@@ -7895,6 +7895,10 @@ applyParams = function(params, validatedRenderSettings = null) {
   };
   const integer = (value, fallback, minimum, maximum) =>
     Math.round(finite(value, fallback, minimum, maximum));
+  const admittedNumber = (value, fallback, minimum, maximum) =>
+    rustRouteAdmitted ? Number(value) : finite(value, fallback, minimum, maximum);
+  const admittedInteger = (value, fallback, minimum, maximum) =>
+    rustRouteAdmitted ? Number(value) : integer(value, fallback, minimum, maximum);
   const routeRenderMode = validatedRenderSettings?.style === 'matcap_wire'
     ? 'both' : validatedRenderSettings?.style;
   renderMode.set(routeRenderMode ?? params.mode ?? 'pbr');
@@ -7904,10 +7908,10 @@ applyParams = function(params, validatedRenderSettings = null) {
   // identity chart. Geometry is staged first, then the mode, and effects see
   // only the complete transaction when the batch commits.
   batchSignals(() => {
-    mob.mx.set(finite(params.mx, 5, -30, 30));
-    mob.my.set(finite(params.my, 0, -30, 30));
-    mob.mz.set(finite(params.mz, 0, -30, 30));
-    mob.mr.set(finite(params.mr, 20, 0.11, 50));
+    mob.mx.set(admittedNumber(params.mx, 5, -30, 30));
+    mob.my.set(admittedNumber(params.my, 0, -30, 30));
+    mob.mz.set(admittedNumber(params.mz, 0, -30, 30));
+    mob.mr.set(admittedNumber(params.mr, 20, 0.11, 50));
     mob.xform.set(params.xform || 'identity');
   });
   focusSphere.center = [mob.mx.peek() / 10, mob.my.peek() / 10, mob.mz.peek() / 10];
@@ -7938,46 +7942,49 @@ applyParams = function(params, validatedRenderSettings = null) {
   pendingRouteAnimationClock = params.animtimeProvided || params.animspeedProvided
     ? Object.freeze({
       timeSeconds: params.animtimeProvided
-        ? finite(params.animtime, 0, -1e9, 1e9)
+        ? admittedNumber(params.animtime, 0, -1e9, 1e9)
         : null,
       speed: params.animspeedProvided
-        ? finite(params.animspeed, 1, -1e6, 1e6)
+        ? admittedNumber(params.animspeed, 1, -1e6, 1e6)
         : null,
     })
     : null;
-  zoom = finite(params.zoom, 3, 0.1, 1000);
-  rotX = finite(params.rx, 0.3, -Math.PI / 2 + 0.01, Math.PI / 2 - 0.01);
-  rotY = finite(params.ry, 0.5, -1e6, 1e6);
-  cameraRoll = finite(params.rz, 0, -Math.PI, Math.PI);
-  panX = finite(params.px, 0, -1e6, 1e6);
-  panY = finite(params.py, 0, -1e6, 1e6);
-  panZ = finite(params.pz, 0, -1e6, 1e6);
+  zoom = admittedNumber(params.zoom, 3, 0.1, 1000);
+  rotX = admittedNumber(params.rx, 0.3, -Math.PI / 2 + 0.01, Math.PI / 2 - 0.01);
+  rotY = admittedNumber(params.ry, 0.5, -1e6, 1e6);
+  cameraRoll = admittedNumber(params.rz, 0, -Math.PI, Math.PI);
+  panX = admittedNumber(params.px, 0, -1e6, 1e6);
+  panY = admittedNumber(params.py, 0, -1e6, 1e6);
+  panZ = admittedNumber(params.pz, 0, -1e6, 1e6);
   manualCameraSemanticTargetEnabled = params.aim === '1';
   pendingRouteSelection = routeSelectionFromParams(params);
   routeSelectionDiagnostics.requested = pendingRouteSelection;
   routeSelectionDiagnostics.state = pendingRouteSelection ? 'pending' : 'none';
   setManualCameraBasisFromEuler();
-  spaceMouseMove.set(finite(params.smmove, 300, 10, 900));
-  spaceMouseRotate.set(finite(params.smrotate, 300, 10, 900));
-  spaceMouseNavigation.set(['hyperscope', 'object', 'fly', 'drone'].includes(params.smnav)
-    ? params.smnav : 'hyperscope');
+  spaceMouseMove.set(admittedNumber(params.smmove, 300, 10, 900));
+  spaceMouseRotate.set(admittedNumber(params.smrotate, 300, 10, 900));
+  spaceMouseNavigation.set(rustRouteAdmitted
+    ? params.smnav
+    : ['hyperscope', 'object', 'fly', 'drone'].includes(params.smnav)
+      ? params.smnav : 'hyperscope');
   spaceMouseLockHorizon.set(params.smlock === '1');
   spaceMouseSwapYZ.set(params.smswap === '1');
   spaceMouseBackground.set(params.smbackground === '1');
-  spaceMouseHyperscopePanInvert.set(integer(params.smpinv, 2, 0, 7));
-  spaceMouseHyperscopeRotateInvert.set(integer(params.smrinv, 1, 0, 7));
-  spaceMouseBlenderPanInvert.set(integer(params.smbpinv, 0, 0, 7));
-  spaceMouseBlenderRotateInvert.set(integer(params.smbrinv, 0, 0, 7));
-  cameraFovDegrees.set(integer(params.fov, 75, 35, 110));
-  focusTransitionCentiseconds.set(integer(params.interp, 70, 5, 500));
-  walkSmoothingCentiseconds.set(integer(params.walksmooth, 18, 0, 150));
-  walkTangentPullPercent.set(integer(params.walkalign, 70, 0, 100));
-  walkSpeedSteps.set(finite(params.walkspeed, 0, -400, 400));
-  walkScaleSteps.set(finite(params.walkscale, 0, -800, 800));
-  walkHeightSteps.set(finite(params.walkheight, 0, -400, 400));
+  spaceMouseHyperscopePanInvert.set(admittedInteger(params.smpinv, 2, 0, 7));
+  spaceMouseHyperscopeRotateInvert.set(admittedInteger(params.smrinv, 1, 0, 7));
+  spaceMouseBlenderPanInvert.set(admittedInteger(params.smbpinv, 0, 0, 7));
+  spaceMouseBlenderRotateInvert.set(admittedInteger(params.smbrinv, 0, 0, 7));
+  cameraFovDegrees.set(admittedInteger(params.fov, 75, 35, 110));
+  focusTransitionCentiseconds.set(admittedInteger(params.interp, 70, 5, 500));
+  walkSmoothingCentiseconds.set(admittedInteger(params.walksmooth, 18, 0, 150));
+  walkTangentPullPercent.set(admittedInteger(params.walkalign, 70, 0, 100));
+  walkSpeedSteps.set(admittedNumber(params.walkspeed, 0, -400, 400));
+  walkScaleSteps.set(admittedNumber(params.walkscale, 0, -800, 800));
+  walkHeightSteps.set(admittedNumber(params.walkheight, 0, -400, 400));
   patchLab.shape = patchLabShape(params.lab) || 'triangle';
-  $('patch-lab-field').value = PATCH_LAB_FIELDS.has(params.labfield)
-    ? params.labfield : 'edges';
+  $('patch-lab-field').value = rustRouteAdmitted
+    ? params.labfield
+    : PATCH_LAB_FIELDS.has(params.labfield) ? params.labfield : 'edges';
   const atlasExp = validatedRenderSettings?.atlasExponent
     ?? integer(params.atlas, 7, 3, 9);
   for (const [id, value, fallback] of [
@@ -7987,30 +7994,31 @@ applyParams = function(params, validatedRenderSettings = null) {
     ['patch-lab-min', params.labmin, 1],
     ['patch-lab-max', params.labmax, 6],
   ]) {
-    $(id).value = integer(value, fallback, 0, atlasExp);
+    $(id).max = atlasExp;
+    $(id).value = admittedInteger(value, fallback, 0, atlasExp);
     patchLabPowerLabel(id);
   }
-  $('patch-lab-phase').value = finite(params.labphase, 0, 0, Math.PI * 2);
+  $('patch-lab-phase').value = admittedNumber(params.labphase, 0, 0, Math.PI * 2);
   $('patch-lab-phase-v').textContent = Number($('patch-lab-phase').value).toFixed(2);
-  $('patch-lab-bend-slider').value = integer(params.labbend, 55, 0, 100);
+  $('patch-lab-bend-slider').value = admittedInteger(params.labbend, 55, 0, 100);
   $('patch-lab-bend-slider-v').textContent =
     (Number($('patch-lab-bend-slider').value) / 100).toFixed(2);
-  $('patch-lab-grid-slider').value = integer(params.labgrid, 8, 2, 16);
+  $('patch-lab-grid-slider').value = admittedInteger(params.labgrid, 8, 2, 16);
   $('patch-lab-grid-slider-v').textContent = `${$('patch-lab-grid-slider').value}²`;
   patchLab.animate = params.labanimate === '1';
   patchLab.lastAnimatedAt = performance.now();
   $('patch-lab-animate').classList.toggle('on', patchLab.animate);
   updatePatchLabControlVisibility();
   fz.enabled.set(params.fuzzy === '1');
-  fz.mode.set(params.fmode || '0');
-  fz.radius.set(integer(params.fradius, 11, 4, 128));
-  fz.strength.set(finite(params.fstr, 30, 1, 30));
-  fz.focus.set(finite(params.ffocus, 62, 0, 100));
-  fz.bandwidth.set(finite(params.fbw, 10, 1, 50));
+  fz.mode.set(rustRouteAdmitted ? params.fmode : params.fmode || '0');
+  fz.radius.set(admittedInteger(params.fradius, 11, 4, 128));
+  fz.strength.set(admittedNumber(params.fstr, 30, 1, 30));
+  fz.focus.set(admittedNumber(params.ffocus, 62, 0, 100));
+  fz.bandwidth.set(admittedNumber(params.fbw, 10, 1, 50));
   fz.normalize.set(params.fnorm === '1');
-  fz.quality.set(integer(params.fqual, 1, 1, 4));
-  fz.kawase.set(integer(params.fkaw, 3, 0, 4));
-  fz.kawaseOff.set(finite(params.fkoff, 15, 1, 30));
+  fz.quality.set(admittedInteger(params.fqual, 1, 1, 4));
+  fz.kawase.set(admittedInteger(params.fkaw, 3, 0, 4));
+  fz.kawaseOff.set(admittedNumber(params.fkoff, 15, 1, 30));
 };
 
 // --- IndexedDB for dropped GLBs and versioned generated assets ---
@@ -10902,6 +10910,7 @@ globalThis.__hyperscopeLocalPeer = Object.freeze({
 // Rust route mode re-decodes valid pairs before any application state is set.
 let initParams = readParams(initialRouteParams);
 let initRenderSettings = null;
+let initRustRouteAdmitted = false;
 currentGlb = initParams.glb;
 let initialPatchLabShape = patchLabShape(initParams.lab);
 // Set camera early (not WASM-dependent)
@@ -10948,6 +10957,7 @@ phase('wasm', [], async () => {
           new URLSearchParams(startupRoute.pairs),
         );
         initRenderSettings = startupRoute.renderSettings;
+        initRustRouteAdmitted = true;
         currentGlb = initParams.glb;
         initialPatchLabShape = patchLabShape(initParams.lab);
         rustRouteShadowDiagnostics.startupSource = 'rust';
@@ -11013,7 +11023,7 @@ phase('wasm', [], async () => {
     rendererInitMs: rendererFinished - instantiateFinished,
     sharedCompiledModule: true,
   };
-  applyParams(initParams, initRenderSettings); // Set signal values first
+  applyParams(initParams, initRenderSettings, initRustRouteAdmitted); // Set signal values first
   activeLodGradingRatio = Number(lod.grading.peek());
   if (!mr_setLodGradingRatio(activeLodGradingRatio)) {
     throw new Error(`renderer rejected ${activeLodGradingRatio}:1 LOD grading`);

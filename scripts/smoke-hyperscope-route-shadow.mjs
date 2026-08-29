@@ -619,9 +619,10 @@ for (const startupStep of [
   'new URLSearchParams(startupRoute.resolvedPairs),',
   'new URLSearchParams(startupRoute.pairs),',
   'initRenderSettings = startupRoute.renderSettings;',
+  'initRustRouteAdmitted = true;',
   "rustRouteShadowDiagnostics.startupSource = 'browser-fallback';",
   "'missing-typed-render-settings'",
-  'applyParams(initParams, initRenderSettings);',
+  'applyParams(initParams, initRenderSettings, initRustRouteAdmitted);',
 ]) {
   assert.ok(
     startupAdapter.includes(startupStep),
@@ -630,7 +631,7 @@ for (const startupStep of [
 }
 assert.ok(
   startupAdapter.indexOf('new URLSearchParams(startupRoute.resolvedPairs),')
-    < startupAdapter.indexOf('applyParams(initParams, initRenderSettings);'),
+    < startupAdapter.indexOf('applyParams(initParams, initRenderSettings, initRustRouteAdmitted);'),
   'Rust startup decoding must finish before browser state is applied',
 );
 assert.ok(
@@ -663,7 +664,7 @@ assert.equal(explicitClock.animtimeProvided, true);
 assert.equal(explicitClock.animspeedProvided, true);
 
 const applyParamsSource = browserSource.match(
-  /applyParams = function\(params, validatedRenderSettings = null\) \{([\s\S]*?)\n\};\n\n\/\/ --- IndexedDB/,
+  /applyParams = function\(params, validatedRenderSettings = null, rustRouteAdmitted = false\) \{([\s\S]*?)\n\};\n\n\/\/ --- IndexedDB/,
 )?.[1];
 assert.ok(applyParamsSource, 'could not locate browser startup state adapter');
 for (const exactProjection of [
@@ -678,6 +679,20 @@ for (const exactProjection of [
   assert.ok(
     applyParamsSource.includes(exactProjection),
     `Rust-admitted startup render state is missing exact projection: ${exactProjection}`,
+  );
+}
+for (const exactAdmissionStep of [
+  'rustRouteAdmitted ? Number(value) : finite(value, fallback, minimum, maximum);',
+  'rustRouteAdmitted ? Number(value) : integer(value, fallback, minimum, maximum);',
+  'mob.mx.set(admittedNumber(params.mx, 5, -30, 30));',
+  'cameraFovDegrees.set(admittedInteger(params.fov, 75, 35, 110));',
+  '$(id).max = atlasExp;',
+  '$(id).value = admittedInteger(value, fallback, 0, atlasExp);',
+  'fz.radius.set(admittedInteger(params.fradius, 11, 4, 128));',
+]) {
+  assert.ok(
+    applyParamsSource.includes(exactAdmissionStep),
+    `Rust-admitted startup values are missing exact projection: ${exactAdmissionStep}`,
   );
 }
 
