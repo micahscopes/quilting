@@ -637,10 +637,40 @@ FNV-1a-128 receipt is drift detection, not signing or adversarial integrity.
 
 1. The **ownership graph** describes entities, ordinary node parenting,
    assets, and presentation grouping.
-2. The **conformal frame forest** describes charts and composable Möbius maps.
-   A subject/view pair receives one relative map; shared ancestry cancels.
+2. The **conformal-frame graph** describes charts and composable Möbius maps.
+   Each evaluated revision has exactly one active spatial parent per frame, so
+   it reduces to a forest with a unique local-to-world map. Stable authored
+   frame IDs map to dense runtime `FrameId` values; array positions are never
+   durable identity. A subject/view pair receives one relative map and shared
+   ancestry cancels.
 3. The **constraint graph** describes tracking, paths, focus anchors, surface
    attachment, and authored relationships between entities or frames.
+
+This separation still supports deeply nested conformal scenes. A typed
+frame-to-surface pin references a stable source entity plus face/barycentric
+address, normal side, tangent direction, scale, and local conformal offset.
+At each animation pose it evaluates the surface point and differential into a
+conformal tangent similarity, which becomes the pinned frame's active
+local-to-parent edge before descendants are extracted. Descendants therefore
+inherit animation and every ancestor's conformal map without baking geometry.
+Composed `orientation_sign` and attachment `normal_sign` remain distinct:
+authoring can request an inherited chart side or an ambient right-side-in
+orientation without confusing either choice with material back-face policy.
+
+For example, a reflected outer object supplies one frame; a second frame can
+be pinned to a stable material point on its animated reflected surface; an
+inside-out child surface occupies that frame; and a final right-side-in object
+can occupy a descendant frame with an explicit orientation/side policy. LOD,
+culling, selection, and walking evaluate the same complete frame path and its
+differential. Blender should expose this as frame parenting, surface picking,
+and side/orientation controls rather than requiring authors to edit generator
+arrays manually.
+
+Constraint/reference edges may cross-link this evaluated forest. Multiple
+simultaneously active spatial parents are rejected as ambiguous; an authored
+cycle is admitted only if a future solver explicitly validates its holonomy
+and publishes one deterministic evaluation tree. Until then cycles fail
+atomically with a path diagnostic.
 
 An ordinary non-uniform glTF scale is a leaf deformation, not a conformal frame
 edge. Möbius transitions animate meaningful generators, control geometry, or
