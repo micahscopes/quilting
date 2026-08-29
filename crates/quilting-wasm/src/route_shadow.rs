@@ -26,6 +26,8 @@ struct RouteControlSpec {
     kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     numeric_domain: Option<RouteNumericControlDomain>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    choices: Option<&'static [&'static str]>,
 }
 
 #[derive(Serialize)]
@@ -33,6 +35,7 @@ struct RouteNumericControlDomain {
     minimum: f64,
     maximum: f64,
     integral: bool,
+    step: f64,
 }
 
 #[derive(Serialize)]
@@ -106,7 +109,9 @@ pub fn hyperscope_control_specs() -> Result<JsValue, JsValue> {
                     minimum: domain.minimum,
                     maximum: domain.maximum,
                     integral: domain.integral,
+                    step: domain.step,
                 }),
+                choices: (!spec.choices.is_empty()).then_some(spec.choices),
             })
             .collect::<Vec<_>>(),
     )

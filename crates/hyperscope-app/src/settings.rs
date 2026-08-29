@@ -8,6 +8,7 @@ pub enum ControlValueKind {
     Text,
     Number,
     Toggle,
+    Choice,
     RenderMode,
     ResolutionLevel,
     TessellationDensity,
@@ -25,6 +26,7 @@ impl ControlValueKind {
             Self::Text => "text",
             Self::Number => "number",
             Self::Toggle => "toggle",
+            Self::Choice => "choice",
             Self::RenderMode => "render_mode",
             Self::ResolutionLevel => "resolution_level",
             Self::TessellationDensity => "tessellation_density",
@@ -42,6 +44,7 @@ impl ControlValueKind {
             Self::Text => !value.is_empty(),
             Self::Number => value.parse::<f64>().is_ok_and(|number| number.is_finite()),
             Self::Toggle => matches!(value, "0" | "1"),
+            Self::Choice => !value.is_empty(),
             Self::RenderMode => matches!(
                 value,
                 "pbr" | "matcap" | "wire" | "normals" | "both" | "lod" | "stretch"
@@ -49,9 +52,7 @@ impl ControlValueKind {
             Self::ResolutionLevel | Self::TessellationDensity | Self::AtlasExponent => {
                 value.parse::<i64>().is_ok()
             }
-            Self::PixelFloor => value
-                .parse::<f64>()
-                .is_ok_and(|number| number.is_finite()),
+            Self::PixelFloor => value.parse::<f64>().is_ok_and(|number| number.is_finite()),
             Self::LodRatio => matches!(value, "2" | "4"),
             Self::Implementation => matches!(value, "js" | "shadow" | "rust"),
             Self::RenderBackend => matches!(value, "webgl2" | "webgpu-shadow" | "webgpu"),
@@ -82,6 +83,7 @@ impl ControlValueKind {
             },
             Self::Text
             | Self::Toggle
+            | Self::Choice
             | Self::RenderMode
             | Self::LodRatio
             | Self::Implementation
@@ -95,6 +97,9 @@ pub struct NumericControlDomain {
     pub minimum: f64,
     pub maximum: f64,
     pub integral: bool,
+    /// Preferred view increment. Admission validates the domain and numeric
+    /// shape, not quantization, so copied high-precision values remain exact.
+    pub step: f64,
 }
 
 impl NumericControlDomain {
@@ -121,6 +126,7 @@ pub struct ControlSpec {
     pub default_value: &'static str,
     pub kind: ControlValueKind,
     pub numeric_domain: Option<NumericControlDomain>,
+    pub choices: &'static [&'static str],
 }
 
 impl ControlSpec {
@@ -129,6 +135,7 @@ impl ControlSpec {
             && self
                 .numeric_domain
                 .is_none_or(|domain| domain.accepts(value))
+            && (self.choices.is_empty() || self.choices.contains(&value))
     }
 
     pub fn is_default(self, value: &str) -> bool {
@@ -143,12 +150,13 @@ macro_rules! spec {
             default_value: $default,
             kind: ControlValueKind::$kind,
             numeric_domain: None,
+            choices: &[],
         }
     };
 }
 
 macro_rules! numeric_spec {
-    ($key:literal, $default:literal, $kind:ident, $minimum:expr, $maximum:expr, $integral:literal) => {
+    ($key:literal, $default:literal, $kind:ident, $minimum:expr, $maximum:expr, $integral:literal, $step:expr) => {
         ControlSpec {
             key: $key,
             default_value: $default,
@@ -157,7 +165,21 @@ macro_rules! numeric_spec {
                 minimum: $minimum,
                 maximum: $maximum,
                 integral: $integral,
+                step: $step,
             }),
+            choices: &[],
+        }
+    };
+}
+
+macro_rules! choice_spec {
+    ($key:literal, $default:literal, [$($choice:literal),+ $(,)?]) => {
+        ControlSpec {
+            key: $key,
+            default_value: $default,
+            kind: ControlValueKind::Choice,
+            numeric_domain: None,
+            choices: &[$($choice),+],
         }
     };
 }
@@ -168,72 +190,108 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("glb", "horse.glb", Text),
     spec!("gfx", "webgl2", RenderBackend),
     spec!("mode", "pbr", RenderMode),
-    spec!("xform", "identity", Text),
-    spec!("mx", "5", Number),
-    spec!("my", "0", Number),
-    spec!("mz", "0", Number),
-    spec!("mr", "20", Number),
+    choice_spec!(
+        "xform",
+        "identity",
+        ["identity", "sphere_reflection", "rotation", "translation"]
+    ),
+    numeric_spec!("mx", "5", Number, -30.0, 30.0, false, 0.1),
+    numeric_spec!("my", "0", Number, -30.0, 30.0, false, 0.1),
+    numeric_spec!("mz", "0", Number, -30.0, 30.0, false, 0.1),
+    numeric_spec!("mr", "20", Number, 0.11, 50.0, false, 0.01),
     spec!("env", "rosendal_plains_1_1k", Text),
     spec!("matcap", "citric-acid", Text),
-    numeric_spec!("res", "0", ResolutionLevel, 0.0, 6.0, true),
-    numeric_spec!("density", "100", TessellationDensity, 1.0, 500.0, true),
+    numeric_spec!("res", "0", ResolutionLevel, 0.0, 6.0, true, 1.0),
+    numeric_spec!("density", "100", TessellationDensity, 1.0, 500.0, true, 1.0),
     spec!("atten", "1", Toggle),
-    numeric_spec!("minpx", "16", PixelFloor, 1.0, 64.0, false),
-    numeric_spec!("atlas", "7", AtlasExponent, 3.0, 9.0, true),
+    numeric_spec!("minpx", "16", PixelFloor, 1.0, 64.0, false, 0.1),
+    numeric_spec!("atlas", "7", AtlasExponent, 3.0, 9.0, true, 1.0),
     spec!("lodratio", "2", LodRatio),
     spec!("animate", "1", Toggle),
     spec!("anim", "-1", Number),
-    spec!("animtime", "0", Number),
-    spec!("animspeed", "1", Number),
+    numeric_spec!("animtime", "0", Number, -1e9, 1e9, false, 0.001),
+    numeric_spec!("animspeed", "1", Number, -1e6, 1e6, false, 0.01),
     spec!("animclockimpl", "js", Implementation),
     spec!("fuzzy", "0", Toggle),
-    spec!("fmode", "1", Number),
-    spec!("fradius", "11", Number),
-    spec!("fstr", "30", Number),
-    spec!("ffocus", "62", Number),
-    spec!("fbw", "10", Number),
+    choice_spec!("fmode", "1", ["0", "1", "2", "3"]),
+    numeric_spec!("fradius", "11", Number, 4.0, 128.0, true, 1.0),
+    numeric_spec!("fstr", "30", Number, 1.0, 30.0, false, 0.1),
+    numeric_spec!("ffocus", "62", Number, 0.0, 100.0, false, 0.1),
+    numeric_spec!("fbw", "10", Number, 1.0, 50.0, false, 0.1),
     spec!("fnorm", "0", Toggle),
-    spec!("fqual", "1", Number),
-    spec!("fkaw", "3", Number),
-    spec!("fkoff", "15", Number),
-    spec!("smmove", "300", Number),
-    spec!("smrotate", "300", Number),
-    spec!("smnav", "hyperscope", Text),
+    numeric_spec!("fqual", "1", Number, 1.0, 4.0, true, 1.0),
+    numeric_spec!("fkaw", "3", Number, 0.0, 4.0, true, 1.0),
+    numeric_spec!("fkoff", "15", Number, 1.0, 30.0, false, 0.1),
+    numeric_spec!("smmove", "300", Number, 10.0, 900.0, false, 1.0),
+    numeric_spec!("smrotate", "300", Number, 10.0, 900.0, false, 1.0),
+    choice_spec!(
+        "smnav",
+        "hyperscope",
+        ["hyperscope", "object", "fly", "drone"]
+    ),
     spec!("smlock", "1", Toggle),
     spec!("smswap", "0", Toggle),
     spec!("smbackground", "0", Toggle),
-    spec!("smpinv", "2", Number),
-    spec!("smrinv", "1", Number),
-    spec!("smbpinv", "0", Number),
-    spec!("smbrinv", "0", Number),
-    spec!("fov", "75", Number),
-    spec!("interp", "70", Number),
-    spec!("walksmooth", "18", Number),
-    spec!("walkalign", "70", Number),
-    spec!("walkspeed", "0", Number),
-    spec!("walkscale", "0", Number),
-    spec!("walkheight", "0", Number),
+    numeric_spec!("smpinv", "2", Number, 0.0, 7.0, true, 1.0),
+    numeric_spec!("smrinv", "1", Number, 0.0, 7.0, true, 1.0),
+    numeric_spec!("smbpinv", "0", Number, 0.0, 7.0, true, 1.0),
+    numeric_spec!("smbrinv", "0", Number, 0.0, 7.0, true, 1.0),
+    numeric_spec!("fov", "75", Number, 35.0, 110.0, true, 1.0),
+    numeric_spec!("interp", "70", Number, 5.0, 500.0, true, 1.0),
+    numeric_spec!("walksmooth", "18", Number, 0.0, 150.0, true, 1.0),
+    numeric_spec!("walkalign", "70", Number, 0.0, 100.0, true, 1.0),
+    numeric_spec!("walkspeed", "0", Number, -400.0, 400.0, false, 1.0),
+    numeric_spec!("walkscale", "0", Number, -800.0, 800.0, false, 1.0),
+    numeric_spec!("walkheight", "0", Number, -400.0, 400.0, false, 1.0),
     spec!("walkimpl", "js", Implementation),
     spec!("navimpl", "js", Implementation),
     spec!("selectionimpl", "rust", Implementation),
-    spec!("lab", "0", Text),
-    spec!("labfield", "edges", Text),
-    spec!("laba", "3", Number),
-    spec!("labb", "4", Number),
-    spec!("labc", "4", Number),
-    spec!("labmin", "1", Number),
-    spec!("labmax", "6", Number),
-    spec!("labphase", "0", Number),
-    spec!("labbend", "55", Number),
-    spec!("labgrid", "8", Number),
+    choice_spec!("lab", "0", ["0", "triangle", "plane", "cube"]),
+    choice_spec!(
+        "labfield",
+        "edges",
+        ["edges", "wave", "radial", "sweep", "uniform"]
+    ),
+    numeric_spec!("laba", "3", Number, 0.0, 9.0, true, 1.0),
+    numeric_spec!("labb", "4", Number, 0.0, 9.0, true, 1.0),
+    numeric_spec!("labc", "4", Number, 0.0, 9.0, true, 1.0),
+    numeric_spec!("labmin", "1", Number, 0.0, 9.0, true, 1.0),
+    numeric_spec!("labmax", "6", Number, 0.0, 9.0, true, 1.0),
+    numeric_spec!(
+        "labphase",
+        "0",
+        Number,
+        0.0,
+        std::f64::consts::TAU,
+        false,
+        0.001
+    ),
+    numeric_spec!("labbend", "55", Number, 0.0, 100.0, true, 1.0),
+    numeric_spec!("labgrid", "8", Number, 2.0, 16.0, true, 1.0),
     spec!("labanimate", "0", Toggle),
-    spec!("zoom", "3", Number),
-    spec!("rx", "0.3", Number),
-    spec!("ry", "0.5", Number),
-    spec!("rz", "0", Number),
-    spec!("px", "0", Number),
-    spec!("py", "0", Number),
-    spec!("pz", "0", Number),
+    numeric_spec!("zoom", "3", Number, 0.1, 1000.0, false, 0.01),
+    numeric_spec!(
+        "rx",
+        "0.3",
+        Number,
+        -std::f64::consts::FRAC_PI_2 + 0.01,
+        std::f64::consts::FRAC_PI_2 - 0.01,
+        false,
+        0.001
+    ),
+    numeric_spec!("ry", "0.5", Number, -1e6, 1e6, false, 0.001),
+    numeric_spec!(
+        "rz",
+        "0",
+        Number,
+        -std::f64::consts::PI,
+        std::f64::consts::PI,
+        false,
+        0.001
+    ),
+    numeric_spec!("px", "0", Number, -1e6, 1e6, false, 0.001),
+    numeric_spec!("py", "0", Number, -1e6, 1e6, false, 0.001),
+    numeric_spec!("pz", "0", Number, -1e6, 1e6, false, 0.001),
     spec!("aim", "0", Toggle),
     spec!("selasset", "", OptionalUuid),
     spec!("selentity", "", OptionalUuid),
@@ -326,6 +384,7 @@ impl HyperscopeRoute {
             route.values.insert(spec.key, value);
         }
         route.validate_selection_pair();
+        route.validate_patch_lab_atlas();
         route
     }
 
@@ -347,6 +406,30 @@ impl HyperscopeRoute {
             key: missing_key.to_owned(),
             value: String::new(),
         });
+    }
+
+    fn validate_patch_lab_atlas(&mut self) {
+        let Some(atlas_exponent) = self
+            .value("atlas")
+            .and_then(|value| value.parse::<u8>().ok())
+        else {
+            return;
+        };
+        for key in ["laba", "labb", "labc", "labmin", "labmax"] {
+            let Some(value) = self.values.get(key) else {
+                continue;
+            };
+            if value
+                .parse::<u8>()
+                .is_ok_and(|exponent| exponent > atlas_exponent)
+            {
+                self.diagnostics.push(RouteDiagnostic {
+                    code: RouteDiagnosticCode::InvalidValue,
+                    key: key.to_owned(),
+                    value: value.clone(),
+                });
+            }
+        }
     }
 
     pub fn value(&self, key: &str) -> Option<&str> {
@@ -463,6 +546,13 @@ mod tests {
                 "invalid default for {}",
                 spec.key
             );
+            if let Some(domain) = spec.numeric_domain {
+                assert!(domain.minimum.is_finite());
+                assert!(domain.maximum.is_finite());
+                assert!(domain.minimum <= domain.maximum);
+                assert!(domain.step.is_finite() && domain.step > 0.0);
+            }
+            assert!(spec.choices.is_empty() || spec.choices.contains(&spec.default_value));
         }
     }
 
@@ -714,6 +804,65 @@ mod tests {
         assert!(HyperscopeRoute::from_pairs([("mode", "matcap_wire")])
             .render_settings()
             .is_err());
+    }
+
+    #[test]
+    fn startup_control_contracts_match_browser_ranges_and_closed_choices() {
+        for (key, accepted, rejected) in [
+            ("xform", "sphere_reflection", "reflection"),
+            ("fmode", "3", "4"),
+            ("smnav", "drone", "turntable"),
+            ("lab", "cube", "sphere"),
+            ("labfield", "radial", "noise"),
+        ] {
+            assert!(HyperscopeRoute::from_pairs([(key, accepted)])
+                .diagnostics()
+                .is_empty());
+            assert_eq!(
+                HyperscopeRoute::from_pairs([(key, rejected)])
+                    .diagnostics()
+                    .len(),
+                1,
+            );
+        }
+
+        for (key, accepted, rejected) in [
+            ("mx", "-30", "-30.01"),
+            ("mr", "0.11", "0.10"),
+            ("animtime", "1000000000", "1000000001"),
+            ("fradius", "128", "128.5"),
+            ("smmove", "10.5", "9.99"),
+            ("smpinv", "7", "7.1"),
+            ("fov", "110", "111"),
+            ("walkscale", "-800", "-801"),
+            ("labphase", "6.283", "6.284"),
+            ("labgrid", "16", "17"),
+            ("zoom", "1000", "1001"),
+            ("rx", "1.5", "1.57"),
+            ("rz", "-3.14", "-3.15"),
+            ("px", "1000000", "1000001"),
+        ] {
+            assert!(
+                HyperscopeRoute::from_pairs([(key, accepted)])
+                    .diagnostics()
+                    .is_empty(),
+                "{key}={accepted}"
+            );
+            assert_eq!(
+                HyperscopeRoute::from_pairs([(key, rejected)])
+                    .diagnostics()
+                    .len(),
+                1,
+                "{key}={rejected}",
+            );
+        }
+
+        assert!(HyperscopeRoute::from_pairs([("atlas", "9"), ("laba", "9")])
+            .diagnostics()
+            .is_empty());
+        let over_resident_atlas = HyperscopeRoute::from_pairs([("atlas", "7"), ("laba", "8")]);
+        assert_eq!(over_resident_atlas.diagnostics().len(), 1);
+        assert_eq!(over_resident_atlas.diagnostics()[0].key, "laba");
     }
 
     #[test]

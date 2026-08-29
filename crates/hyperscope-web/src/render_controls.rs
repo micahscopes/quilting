@@ -17,6 +17,7 @@ pub struct NumericControlViewDomain {
     pub minimum: f64,
     pub maximum: f64,
     pub integral: bool,
+    pub step: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -119,6 +120,7 @@ fn numeric_domain(key: &str) -> NumericControlViewDomain {
         minimum: domain.minimum,
         maximum: domain.maximum,
         integral: domain.integral,
+        step: domain.step,
     }
 }
 
@@ -150,9 +152,11 @@ mod tests {
         assert_eq!(view.resolution.minimum, 0.0);
         assert_eq!(view.resolution.maximum, 6.0);
         assert!(view.resolution.integral);
+        assert_eq!(view.resolution.step, 1.0);
         assert_eq!(view.pixel_floor.minimum, 1.0);
         assert_eq!(view.pixel_floor.maximum, 64.0);
         assert!(!view.pixel_floor.integral);
+        assert_eq!(view.pixel_floor.step, 0.1);
         assert_eq!(view.with_density(125.0).density, 125.0);
         assert_eq!(view.with_style("lod").style, "lod");
         assert_eq!(view.with_grading(2).max_face_edge_ratio, 2);

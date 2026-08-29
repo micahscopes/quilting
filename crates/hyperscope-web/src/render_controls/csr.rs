@@ -65,7 +65,7 @@ fn RenderControls(
                     type="range"
                     min=move || controls.read().resolution.minimum
                     max=move || controls.read().resolution.maximum
-                    step="1"
+                    step=move || controls.read().resolution.step
                     prop:value=move || controls.read().value.resolution_level
                     on:input={
                         let on_action = on_action.clone();
@@ -86,7 +86,7 @@ fn RenderControls(
                     type="range"
                     min=move || controls.read().density.minimum
                     max=move || controls.read().density.maximum
-                    step="1"
+                    step=move || controls.read().density.step
                     prop:value=move || controls.read().value.density
                     on:input={
                         let on_action = on_action.clone();
@@ -120,7 +120,7 @@ fn RenderControls(
                     type="range"
                     min=move || controls.read().pixel_floor.minimum
                     max=move || controls.read().pixel_floor.maximum
-                    step="0.1"
+                    step=move || controls.read().pixel_floor.step
                     prop:value=move || controls.read().value.min_pixels_per_subdivision
                     on:input={
                         let on_action = on_action.clone();
@@ -140,7 +140,7 @@ fn RenderControls(
                     type="range"
                     min=move || controls.read().atlas.minimum
                     max=move || controls.read().atlas.maximum
-                    step="1"
+                    step=move || controls.read().atlas.step
                     prop:value=move || controls.read().value.atlas_exponent
                     on:change={
                         let on_action = on_action.clone();

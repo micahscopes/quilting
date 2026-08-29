@@ -217,10 +217,13 @@ The first application boundary is now explicit:
   Rust startup fallback. A missing typed projection fails over visibly rather
   than being mistaken for successful Rust authority.
   `ControlSpec` now exposes reusable numeric-domain metadata—minimum, maximum,
-  and integrality—rather than burying those constraints in route-specific
-  validators. Render URL admission and future Leptos controls therefore share
-  one range contract; additional control families can migrate onto the same
-  representation without adding bespoke validator code.
+  integrality, and preferred view step—rather than burying those constraints
+  in route-specific validators. It also carries closed choice vocabularies for
+  transform, focus, SpaceMouse, and Patch Lab modes. Render URL admission and
+  Leptos controls share one range contract, while camera, focus, walk,
+  SpaceMouse, animation-clock, and Patch Lab startup values use the same
+  machinery. Patch Lab exponent requests are additionally validated against
+  the resolved resident-atlas exponent as one cross-field route rule.
   The same successful result carries all 85 resolved control values in
   registry order, so omitted URL controls no longer regain authority through
   the browser's duplicate default table after WASM starts. That table remains
