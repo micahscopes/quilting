@@ -201,7 +201,7 @@ The first application boundary is now explicit:
   tests additionally cover both walkers, one-shot velocity rebasing, and the
   first real animated-pose sample; native replay proves that an animated chart
   edit cancels an old-chart anchor independently of tick partition.
-- `hyperscope-app::ControlSpec` is the canonical registry for all 85 currently
+- `hyperscope-app::ControlSpec` is the canonical registry for all currently
   linkable controls and migration flags. `HyperscopeRoute` owns default
   equivalence, first-value duplicate semantics, stable ordering, and explicit
   malformed/unknown diagnostics. `routeimpl=js|shadow|rust` is the rollback
@@ -236,10 +236,16 @@ The first application boundary is now explicit:
   SpaceMouse, animation-clock, and Patch Lab startup values use the same
   machinery. Patch Lab exponent requests are additionally validated against
   the resolved resident-atlas exponent as one cross-field route rule.
-  The same successful result carries all 85 resolved control values in
+  The same successful result carries every resolved control value in
   registry order, so omitted URL controls no longer regain authority through
-  the browser's duplicate default table after WASM starts. That table remains
-  only for the inert pre-WASM preview and the serialized JavaScript fallback.
+  a browser projection default after WASM starts. The browser retains ten
+  values for its inert pre-WASM model/Patch-Lab/camera preview, verifies them
+  against the Rust registry during initialization, and then installs Rust's
+  complete defaults even for the explicit JavaScript route rollback. The
+  separately parity-gated implementation/backend switches remain explicit
+  bootstrap policy until WASM startup itself moves ahead of those decisions.
+  After initialization, the route rollback therefore preserves the incumbent
+  parser and serializer, not a second application-default table.
   Compact canonical pairs remain a separate provenance channel: only an
   explicitly linked `animtime` or `animspeed` may arm deferred clock
   restoration. A resolved default can populate state without masquerading as

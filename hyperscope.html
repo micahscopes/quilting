@@ -1530,30 +1530,55 @@ function bindNavigationAxisMask(id, hyperscopeSig, blenderSig, navigationSig) {
 // URL Router — bidirectional sync between controls and URL params.
 // Reads on load, writes on change (bounded-rate replaceState).
 // ============================================================
-const PARAM_DEFAULTS = {
-  glb: 'horse.glb', gfx: 'webgl2', mode: 'pbr', xform: 'identity',
-  mx: '5', my: '0', mz: '0', mr: '20',
-  env: 'rosendal_plains_1_1k', matcap: 'citric-acid',
-  res: '0', density: '100', atten: '1', minpx: '16',
-  animate: '1', anim: '-1', animtime: '0', animspeed: '1',
-  animclockimpl: 'js', animclipimpl: 'js', atlas: '7', lodratio: '2',
-  zoom: '3', rx: '0.3', ry: '0.5', rz: '0', px: '0', py: '0', pz: '0',
+// These values exist only to draw an inert preview before WASM can expose the
+// authoritative ControlSpec registry. The compatibility check below prevents
+// that preview from drifting from Rust startup state.
+const BOOTSTRAP_PARAM_DEFAULTS = Object.freeze({
+  glb: 'horse.glb',
+  lab: '0',
+  zoom: '3',
+  rx: '0.3',
+  ry: '0.5',
+  rz: '0',
+  px: '0',
+  py: '0',
+  pz: '0',
   aim: '0',
-  selasset: '', selentity: '',
-  smmove: '300', smrotate: '300', smnav: 'hyperscope',
-  smlock: '1', smswap: '0', smbackground: '0', smpinv: '2', smrinv: '1',
-  smbpinv: '0', smbrinv: '0',
-  fov: '75', interp: '70', walksmooth: '18', walkalign: '70',
-  walkspeed: '0', walkscale: '0', walkheight: '0', walkimpl: 'js', navimpl: 'js',
-  selectionimpl: 'rust',
-  presentimpl: 'rust', assetimpl: 'rust', sceneimpl: 'rust', routeimpl: 'rust',
-  renderstateimpl: 'js', lodimpl: 'js',
-  cue: '',
-  lab: '0', labfield: 'edges', laba: '3', labb: '4', labc: '4',
-  labmin: '1', labmax: '6', labphase: '0', labbend: '55', labgrid: '8', labanimate: '0',
-  fuzzy: '0', fmode: '1', fradius: '11', fstr: '30', ffocus: '62', fbw: '10', fnorm: '0',
-  fqual: '1', fkaw: '3', fkoff: '15',
-};
+});
+let PARAM_DEFAULTS = BOOTSTRAP_PARAM_DEFAULTS;
+
+function installRustControlDefaults(specs) {
+  if (!Array.isArray(specs) || specs.length === 0) {
+    throw new Error('Rust returned an empty control registry');
+  }
+  const defaults = Object.create(null);
+  for (const spec of specs) {
+    const key = spec?.key;
+    const value = spec?.defaultValue;
+    if (typeof key !== 'string' || key.length === 0) {
+      throw new Error('Rust returned a control with no key');
+    }
+    if (Object.hasOwn(defaults, key)) {
+      throw new Error(`Rust returned duplicate control key '${key}'`);
+    }
+    if (typeof value !== 'string') {
+      throw new Error(`Rust returned a non-string default for '${key}'`);
+    }
+    defaults[key] = value;
+  }
+  for (const [key, value] of Object.entries(BOOTSTRAP_PARAM_DEFAULTS)) {
+    if (!Object.hasOwn(defaults, key)) {
+      throw new Error(`Rust control registry omitted bootstrap key '${key}'`);
+    }
+    if (defaults[key] !== value) {
+      throw new Error(
+        `Rust default for '${key}' drifted from bootstrap '${value}' to '${defaults[key]}'`,
+      );
+    }
+  }
+  PARAM_DEFAULTS = Object.freeze(defaults);
+  return PARAM_DEFAULTS;
+}
 
 function readParams(p, explicitParams = p) {
   const get = (k) => p.get(k) ?? PARAM_DEFAULTS[k];
@@ -11706,8 +11731,13 @@ phase('wasm', [], async () => {
   const compileFinished = performance.now();
   await init({ module_or_path: runtimeWasmModule });
   const instantiateFinished = performance.now();
+  const controlSpecs = hyperscopeControlSpecs();
+  installRustControlDefaults(controlSpecs);
+  rustRouteShadowDiagnostics.specs = controlSpecs;
+  initParams = readParams(initialRouteParams);
+  currentGlb = initParams.glb;
+  initialPatchLabShape = patchLabShape(initParams.lab);
   if (RUST_ROUTE_SHADOW_ENABLED) {
-    rustRouteShadowDiagnostics.specs = hyperscopeControlSpecs();
     const startupBrowserParams = new URLSearchParams(initialRouteParams);
     const startupRoute = evaluateRustRoute(startupBrowserParams, false);
     rustRouteShadowDiagnostics.startupBrowserQuery = startupBrowserParams.toString();

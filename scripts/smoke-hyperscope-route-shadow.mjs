@@ -284,7 +284,6 @@ assert.equal(canonicalFixedRouteNumber(-0.0006, 3), '-0.001');
 assert.equal(canonicalFixedRouteNumber(1.25, 2), '1.25');
 for (const routeDefaultStep of [
   "implementationFromRoute(\n  initialRouteParams, 'routeimpl', 'rust',\n)",
-  "routeimpl: 'rust'",
 ]) {
   assert.ok(
     browserSource.includes(routeDefaultStep),
@@ -293,7 +292,6 @@ for (const routeDefaultStep of [
 }
 for (const selectionDefaultStep of [
   "implementationFromRoute(\n  initialBrowserParams, 'selectionimpl', 'rust',\n)",
-  "selectionimpl: 'rust'",
 ]) {
   assert.ok(
     browserSource.includes(selectionDefaultStep),
@@ -302,9 +300,7 @@ for (const selectionDefaultStep of [
 }
 for (const animationClockDefaultStep of [
   "implementationFromRoute(\n  initialBrowserParams, 'animclockimpl', 'js',\n)",
-  "animclockimpl: 'js'",
   "implementationFromRoute(\n  initialBrowserParams, 'animclipimpl', 'js',\n)",
-  "animclipimpl: 'js'",
 ]) {
   assert.ok(
     browserSource.includes(animationClockDefaultStep),
@@ -369,7 +365,6 @@ for (const animationClipAuthorityStep of [
 }
 for (const navigationAuthorityStep of [
   "implementationFromRoute(\n  initialNavigationParams, 'navimpl', 'js',\n)",
-  "navimpl: 'js'",
   "RUST_NAVIGATION_IMPLEMENTATION !== 'js'",
   'rustAppShadow.stepSpaceMouseCamera(',
   'rustAppShadow.stepPointerCamera(',
@@ -396,7 +391,6 @@ for (const navigationAuthorityStep of [
 for (const graphicsBackendStep of [
   "import * as quiltingWasmBackend from './pkg/quilting_wasm.js';",
   "const GRAPHICS_BACKEND_REQUEST = graphicsBackendFromRoute(initialBrowserParams);",
-  "gfx: 'webgl2'",
   "set('gfx', GRAPHICS_BACKEND_REQUEST, PARAM_DEFAULTS.gfx);",
   'await quiltingWasmBackend.mr_initWebGpuBackend()',
   'await quiltingWasmBackend.mr_initWebGpuPresentation(',
@@ -428,23 +422,78 @@ for (const mode of ['matcap', 'wire', 'normals', 'both', 'lod', 'stretch']) {
 for (const mode of ['pbr']) {
   assert.equal(webGpuPresentationSupportsRenderMode(mode), false, `${mode} should use WebGL2`);
 }
-const browserDefaultsSource = browserSource.match(
-  /const PARAM_DEFAULTS = (\{[\s\S]*?\n\});/,
-)?.[1];
-assert.ok(browserDefaultsSource, 'could not locate browser URL defaults');
-const browserDefaults = JSON.parse(JSON.stringify(
-  runInNewContext(`(${browserDefaultsSource})`),
-));
 const rustDefaults = Object.fromEntries(
   specs.map(spec => [spec.key, spec.defaultValue]),
 );
-for (const [key, value] of Object.entries(browserDefaults)) {
+const routeDefaultsAdapterSource = browserSource.match(
+  /const BOOTSTRAP_PARAM_DEFAULTS = Object\.freeze\(\{[\s\S]*?\n\}\);\nlet PARAM_DEFAULTS = BOOTSTRAP_PARAM_DEFAULTS;\n\nfunction installRustControlDefaults\(specs\) \{[\s\S]*?\n\}/,
+)?.[0];
+assert.ok(routeDefaultsAdapterSource, 'could not locate Rust-default installation adapter');
+assert.equal(
+  browserSource.includes('const PARAM_DEFAULTS = {'),
+  false,
+  'the browser must not retain a complete route-default authority',
+);
+const installRouteDefaults = specsInput => runInNewContext(
+  `${routeDefaultsAdapterSource}; input => {
+    const installed = installRustControlDefaults(input);
+    return { frozen: Object.isFrozen(installed), entries: Object.entries(installed) };
+  }`,
+)(specsInput);
+const installedDefaults = installRouteDefaults(specs);
+assert.equal(installedDefaults.frozen, true);
+assert.deepEqual(
+  Object.fromEntries(JSON.parse(JSON.stringify(installedDefaults.entries))),
+  rustDefaults,
+  'the browser must install every Rust control default without another policy',
+);
+const bootstrapDefaultsSource = browserSource.match(
+  /const BOOTSTRAP_PARAM_DEFAULTS = Object\.freeze\((\{[\s\S]*?\n\})\);/,
+)?.[1];
+assert.ok(bootstrapDefaultsSource, 'could not locate pre-WASM bootstrap defaults');
+const bootstrapDefaults = JSON.parse(JSON.stringify(
+  runInNewContext(`(${bootstrapDefaultsSource})`),
+));
+assert.equal(Object.keys(bootstrapDefaults).length, 10);
+const preWasmStartup = browserSource.slice(
+  browserSource.indexOf('// --- Init ---'),
+  browserSource.indexOf("phase('wasm', [], async () =>"),
+);
+assert.deepEqual(
+  Array.from(new Set(
+    Array.from(preWasmStartup.matchAll(/initParams\.([A-Za-z0-9_]+)/g), match => match[1]),
+  )),
+  Object.keys(bootstrapDefaults),
+  'the pre-WASM preview must consume only its explicit bootstrap defaults',
+);
+for (const [key, value] of Object.entries(bootstrapDefaults)) {
   assert.equal(
     rustDefaults[key],
     value,
-    `Rust route default for ${key} drifted from the browser rollback`,
+    `Rust route default for ${key} drifted from the inert browser preview`,
   );
 }
+assert.throws(() => installRouteDefaults([]), /empty control registry/);
+assert.throws(
+  () => installRouteDefaults(specs.concat(specs[0])),
+  /duplicate control key/,
+);
+assert.throws(
+  () => installRouteDefaults(specs.filter(spec => spec.key !== 'glb')),
+  /omitted bootstrap key/,
+);
+assert.throws(
+  () => installRouteDefaults(specs.map(spec => (
+    spec.key === 'gfx' ? { ...spec, defaultValue: 2 } : spec
+  ))),
+  /non-string default/,
+);
+assert.throws(
+  () => installRouteDefaults(specs.map(spec => (
+    spec.key === 'zoom' ? { ...spec, defaultValue: '4' } : spec
+  ))),
+  /drifted from bootstrap/,
+);
 const implicitBrowserDefaults = {
   presentation: '0',
   roundshadow: '0',
@@ -459,11 +508,6 @@ assert.deepEqual(
   ),
   implicitBrowserDefaults,
   'Rust implicit flag defaults drifted from the browser rollback',
-);
-assert.equal(
-  Object.keys(browserDefaults).length + Object.keys(implicitBrowserDefaults).length,
-  specs.length,
-  'the browser/Rust default parity oracle does not cover every route control',
 );
 const syncSource = browserSource.match(
   /function syncURL\(\) \{([\s\S]*?)\/\/ Apply URL params to controls on load/,
@@ -496,7 +540,6 @@ for (const authorityStep of [
 }
 for (const sceneExtractionStep of [
   "implementationFromRoute(\n  initialBrowserParams, 'sceneimpl', 'rust',\n)",
-  "sceneimpl: 'rust'",
   'rustAppShadow.extractActivePresentationScene(',
   'JSON.stringify(presentationBindings)',
   "rustNode.source === 'authored_absolute'",
@@ -511,7 +554,6 @@ for (const sceneExtractionStep of [
 }
 for (const renderSettingsStep of [
   "implementationFromRoute(\n  initialBrowserParams, 'renderstateimpl', 'js',\n)",
-  "renderstateimpl: 'js'",
   'function browserRenderSettingsState()',
   "const style = mode === 'both' ? 'matcap_wire' : String(mode);",
   'app.setRenderSettings(',
@@ -564,7 +606,6 @@ for (const directDispatchStep of [
 }
 for (const assetAuthorityStep of [
   "implementationFromRoute(\n  initialBrowserParams, 'assetimpl', 'rust',\n)",
-  "assetimpl: 'rust'",
   "RUST_ASSET_IMPLEMENTATION !== 'js'",
   'EXPLICIT_RUST_APP_SHADOW_ENABLED',
   "import { BrowserAssetEffectHost } from './asset_effect_host.mjs",
@@ -724,6 +765,10 @@ const startupAdapter = browserSource.slice(
   browserSource.indexOf("phase('workers', ['wasm'], async () =>"),
 );
 for (const startupStep of [
+  'const controlSpecs = hyperscopeControlSpecs();',
+  'installRustControlDefaults(controlSpecs);',
+  'rustRouteShadowDiagnostics.specs = controlSpecs;',
+  'initParams = readParams(initialRouteParams);',
   'const startupRoute = evaluateRustRoute(startupBrowserParams, false);',
   'startupRoute.diagnostics.length === 0',
   '&& startupRoute.renderSettings',
@@ -746,6 +791,11 @@ for (const startupStep of [
   );
 }
 assert.ok(
+  startupAdapter.indexOf('installRustControlDefaults(controlSpecs);')
+    < startupAdapter.indexOf('const startupRoute = evaluateRustRoute(startupBrowserParams, false);'),
+  'Rust defaults must be installed before either startup authority decodes state',
+);
+assert.ok(
   startupAdapter.indexOf('new URLSearchParams(startupRoute.resolvedPairs),')
     < startupAdapter.indexOf('initRouteSelection,'),
   'Rust startup decoding must finish before browser state is applied',
@@ -756,15 +806,14 @@ assert.ok(
     && browserSource.includes("animspeedProvided: explicitParams.has('animspeed')"),
   'resolved Rust defaults must not masquerade as explicitly linked animation-clock values',
 );
-const defaultsDeclaration = browserSource.match(
-  /const PARAM_DEFAULTS = \{[\s\S]*?\n\};/,
-)?.[0];
 const readParamsDeclaration = browserSource.match(
   /function readParams\(p, explicitParams = p\) \{[\s\S]*?\n\}/,
 )?.[0];
-assert.ok(defaultsDeclaration && readParamsDeclaration, 'could not isolate route decoder');
+assert.ok(readParamsDeclaration, 'could not isolate route decoder');
 const decodeRoute = Function(
-  `${defaultsDeclaration}\n${readParamsDeclaration}\nreturn readParams;`,
+  `${routeDefaultsAdapterSource}\n`
+    + `installRustControlDefaults(${JSON.stringify(specs)});\n`
+    + `${readParamsDeclaration}\nreturn readParams;`,
 )();
 const resolvedDefaults = new URLSearchParams(
   canonicalizeHyperscopeRoute([]).resolvedPairs,

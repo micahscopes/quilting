@@ -81,6 +81,10 @@ assert.deepEqual(
   hyperscopeControlSpecs().find(spec => spec.key === 'lodimpl'),
   { key: 'lodimpl', defaultValue: 'js', kind: 'implementation' },
 );
+assert.deepEqual(
+  hyperscopeControlSpecs().find(spec => spec.key === 'presentimpl'),
+  { key: 'presentimpl', defaultValue: 'rust', kind: 'implementation' },
+);
 
 assert.equal(mr_acceptLodDeltaSequence(91, 0, 1, true), true);
 assert.equal(mr_acceptLodDeltaSequence(91, 1, 2, false), false);
@@ -583,7 +587,6 @@ for (const requiredAnimatedAnchorStep of [
 
 for (const requiredAuthorityStep of [
   "implementationFromRoute(\n  initialBrowserParams, 'presentimpl', 'rust',\n)",
-  "presentimpl: 'rust'",
   "RUST_PRESENTATION_IMPLEMENTATION === 'rust'",
   "ensureRustAppShadow('presentation-authority')",
   'rustPresentationController = null;',
