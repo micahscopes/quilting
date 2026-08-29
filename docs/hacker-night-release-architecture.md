@@ -714,6 +714,35 @@ versioned scene/presentation description with stable IDs. HHHS 0.4 then adds
 offline-repairable replication to the same operation vocabulary; it does not
 replace it.
 
+### Blender conformal preview and sync dependency
+
+Blender conformal visualization is a separate reusable dependency, not hidden
+inside the Hyperscope bridge or made conditional on HHHS. Its stable boundary
+is a backend-neutral conformal/GA expression IR plus an explicit LOD contract.
+A Blender-side compiler may lower that versioned IR into managed Geometry Node
+groups, while Quilting/Hyperscape evaluate the same operations through their
+runtime renderer. The compiler owns generated-node identity, upgrades, and
+capability diagnostics; authored parameters and stable scene identities remain
+the synchronized values rather than generated meshes or transient node IDs.
+
+The Blender preview must share fixtures for transforms, conservative patch
+bounds, projected error, shared-edge grading, and animation time with the
+runtime LOD implementation. Geometry Nodes need not reproduce the renderer's
+atlas or submission strategy, but an advertised LOD-aware result must satisfy
+the same visible error and crack-free edge invariants. Unsupported operations
+fall back visibly to bounds, control cages, or a baked preview instead of
+quietly claiming conformal/LOD parity.
+
+Before the low-latency sync API is frozen, inspect the then-current HHHS work
+used by Tutti and Walkie Songie. In particular, measure its worker-owned state,
+batched projection, event notification, transaction, persistence, reset, and
+recovery paths against Blender's main-thread constraints and interactive edit
+cadence. Reuse generic mechanisms where the evidence supports them and improve
+HHHS upstream where the need is shared. The versioned operation protocol must
+still pass a dependency-free one-way Blender/Hyperscope fixture first, and
+camera, selection, focus, cue, and time presence remain ephemeral even when an
+HHHS carrier is active.
+
 ## Presentation model
 
 A presentation is data consumed by Hyperscape, not imperative JavaScript. The
