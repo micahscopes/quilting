@@ -576,6 +576,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         ));
         let mut textured_scene = render_scene.clone();
         textured_scene.materials[0].textures.base_color = Some(0);
+        textured_scene.materials[0].textures.normal = Some(0);
         assert!(supports_basic_pbr_frame(
             &textured_scene,
             RenderFrameOptions::default(),
@@ -1023,7 +1024,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             .unwrap();
         assert_eq!(
             textured_diagnostic_scene.pbr_texture_residency().unwrap()[0].unresolved_mask(),
-            1,
+            0b101,
         );
         classifier
             .replace_patch_render_scene_texture_bindings(
@@ -1034,8 +1035,15 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             .unwrap();
         assert_eq!(
             textured_diagnostic_scene.pbr_texture_residency().unwrap()[0].resident_mask(),
-            1,
+            0b101,
         );
+        classifier
+            .replace_patch_render_scene_environment_bindings(
+                diagnostic_pipelines.get(RenderStyle::Pbr).unwrap(),
+                &mut textured_diagnostic_scene,
+                Some(&environment),
+            )
+            .unwrap();
         classifier
             .write_patch_render_pose_state(
                 &model,

@@ -60,6 +60,41 @@ fn pbr_rotated_uv(uv: vec2<f32>, scale: vec2<f32>, rotation: f32) -> vec2<f32> {
     );
 }
 
+// Reconstruct a world-space cotangent frame from the actually rasterized
+// conformal surface. This keeps image-based lighting aligned with a normal map
+// without spending two additional inter-stage locations on world tangents.
+fn pbr_mapped_world_normal(
+    geometric_normal: vec3<f32>,
+    position_ws: vec3<f32>,
+    uv: vec2<f32>,
+    normal_texel: vec4<f32>,
+    normal_scale: f32,
+    enabled: bool,
+) -> vec3<f32> {
+    let normal = normalize(geometric_normal);
+    let position_dx = dpdx(position_ws);
+    let position_dy = dpdy(position_ws);
+    let uv_dx = dpdx(uv);
+    let uv_dy = dpdy(uv);
+    let position_dy_perp = cross(position_dy, normal);
+    let position_dx_perp = cross(normal, position_dx);
+    let tangent = position_dy_perp * uv_dx.x + position_dx_perp * uv_dy.x;
+    let bitangent = position_dy_perp * uv_dx.y + position_dx_perp * uv_dy.y;
+    let basis_scale_squared = max(dot(tangent, tangent), dot(bitangent, bitangent));
+    if !enabled || basis_scale_squared <= 1e-14 {
+        return normal;
+    }
+    let inverse_basis_scale = inverseSqrt(basis_scale_squared);
+    var tangent_normal = normal_texel.xyz * 2.0 - vec3<f32>(1.0);
+    tangent_normal.x = tangent_normal.x * normal_scale;
+    tangent_normal.y = tangent_normal.y * normal_scale;
+    return normalize(
+        tangent * (tangent_normal.x * inverse_basis_scale)
+        + bitangent * (tangent_normal.y * inverse_basis_scale)
+        + normal * tangent_normal.z,
+    );
+}
+
 struct PatchVertexInput {
     @location(0) bary: vec3<f32>,
 }
@@ -155,6 +190,14 @@ fn render_patch_pbr(
     if material.flags.y != 0u && !front_facing {
         normal_ws = -normal_ws;
     }
+    normal_ws = pbr_mapped_world_normal(
+        normal_ws,
+        input.position_ws,
+        normal_uv,
+        normal_texel,
+        material.specular_color_normal_scale.w,
+        has_normal_texture,
+    );
     let camera_delta_ws = input.camera_pos_ws_and_style.xyz - input.position_ws;
     let camera_distance_ws = length(camera_delta_ws);
     let view_dir_ws = select(
