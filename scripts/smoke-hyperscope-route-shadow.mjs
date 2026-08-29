@@ -170,6 +170,10 @@ for (const [key, value] of [
 }
 
 const browserSource = readFileSync(`${repository}/hyperscope.html`, 'utf8');
+const renderControlsSource = readFileSync(
+  `${repository}/crates/hyperscope-web/src/render_controls/csr.rs`,
+  'utf8',
+);
 const legacyRouteNormalizerSource = browserSource.match(
   /function normalizeLegacyRouteShadow\(params\) \{[\s\S]*?\n\}/,
 )?.[0];
@@ -476,9 +480,11 @@ for (const renderSettingsStep of [
   'applyRustRenderSettingsProjection(app.snapshot().renderSettings);',
   'scheduleRustRenderSettingsSynchronization();',
   'rustAppShadow.mountRenderControls(',
+  'rustAppShadowSequence = Math.max(rustAppShadowSequence, sequenceNumber);',
   "rustRenderSettingsDiagnostics.viewAuthority = 'hyperscope-web';",
   "RUST_RENDER_SETTINGS_IMPLEMENTATION !== 'rust'",
-  "'render_settings_view_action'",
+  "'render_settings_view_projection'",
+  "'render_settings_view_rejection'",
 ]) {
   assert.ok(
     browserSource.includes(renderSettingsStep),
@@ -494,6 +500,27 @@ assert.equal(
   1,
   'all browser render-setting dispatches must share one sequence/effect adapter',
 );
+const renderControlMountBoundary = browserSource.slice(
+  browserSource.indexOf('rustAppShadow.mountRenderControls('),
+  browserSource.indexOf('host.hidden = false;', browserSource.indexOf('rustAppShadow.mountRenderControls(')),
+);
+assert.ok(
+  !renderControlMountBoundary.includes('dispatchRustRenderSettings(')
+    && renderControlMountBoundary.includes('applyRustRenderSettingsProjection(rust);'),
+  'the Leptos callback must adapt an already committed Rust projection, not dispatch browser intent',
+);
+for (const directDispatchStep of [
+  '.dispatch_semantic(SemanticAction::SetRenderSettings(settings))',
+  'project_render_controls(&store.render_snapshot())',
+  'emit_committed(',
+  'emit_error(error_callback,',
+  'arguments.push(&JsValue::from(sequence));',
+]) {
+  assert.ok(
+    renderControlsSource.includes(directDispatchStep),
+    `Leptos render controls are missing direct Rust dispatch step: ${directDispatchStep}`,
+  );
+}
 for (const assetAuthorityStep of [
   "implementationFromRoute(\n  initialBrowserParams, 'assetimpl', 'rust',\n)",
   "assetimpl: 'rust'",

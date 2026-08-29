@@ -395,16 +395,22 @@ The first application boundary is now explicit:
   intent back to the preceding Rust value. Neither measured lane is canonical
   until live browser parity evidence is recorded.
   The explicit Rust lane now mounts a Leptos control island directly over the
-  reducer's `render_signal`. Each edit sends one complete replacement value
-  through a temporary sequence adapter and the committed projection drives
-  both renderer signals and the view. The incumbent HTML controls remain
-  visible for the default JavaScript lane and automatically reappear if the
-  Rust view cannot mount.
+  reducer's `render_signal`. Each edit reads the current reducer snapshot,
+  allocates a direct semantic-input sequence under the same application lock,
+  and commits one complete replacement value without returning action intent
+  through JavaScript. Only the resulting committed projection crosses the
+  platform-effect callback to drive the incumbent renderer signals; its
+  allocated sequence also advances the compatibility counter so a later
+  rollback-path input cannot reuse it. A separate read-only error callback
+  retains browser diagnostics if Rust rejects an edit. The incumbent HTML
+  controls remain visible for the default JavaScript lane and automatically
+  reappear if the Rust view cannot mount.
   Shadow/Rust startup no longer seeds the reducer by reading those projected
   browser signals back. The admitted typed route value is committed directly
   to `AppStore` before WASM readiness publishes control effects; controls then
-  consume the same commit. Route startup, browser shadow synchronization, and
-  Leptos edits share one sequence/effect adapter, eliminating three duplicate
+  consume the same commit. Route startup and browser shadow synchronization
+  share the one compatibility sequence/effect adapter; Leptos dispatches
+  directly through `AppStore`. This eliminates duplicate browser
   `setRenderSettings` call sites without weakening the rollback lane.
   Version 0.17 added the renderer-independent primary animation clock: playing,
   unwrapped scene time, and signed finite speed. Frame events advance it from

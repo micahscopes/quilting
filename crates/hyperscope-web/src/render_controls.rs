@@ -5,7 +5,7 @@
 //! replacement intent, so a view never performs a split read/modify/write over
 //! independently ordered browser signals.
 
-use hyperscope_app::{hyperscope_control_spec, AppRenderSnapshot};
+use hyperscope_app::{hyperscope_control_spec, AppRenderSnapshot, RenderSettings};
 
 #[cfg(all(feature = "csr", target_arch = "wasm32"))]
 mod csr;
@@ -29,6 +29,22 @@ pub struct RenderControlIntent {
     pub min_pixels_per_subdivision: f64,
     pub atlas_exponent: u8,
     pub max_face_edge_ratio: u8,
+}
+
+impl RenderControlIntent {
+    /// Convert a complete view intent through the application's canonical
+    /// parser and validation boundary before it reaches the reducer.
+    pub fn into_settings(self) -> Result<RenderSettings, &'static str> {
+        RenderSettings::from_wire_values(
+            self.style,
+            self.resolution_level,
+            self.density,
+            self.screen_attenuation,
+            self.min_pixels_per_subdivision,
+            self.atlas_exponent,
+            self.max_face_edge_ratio,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -160,5 +176,14 @@ mod tests {
         assert_eq!(view.with_density(125.0).density, 125.0);
         assert_eq!(view.with_style("lod").style, "lod");
         assert_eq!(view.with_grading(2).max_face_edge_ratio, 2);
+        assert_eq!(view.value.into_settings().unwrap(), snapshot.settings);
+        assert_eq!(
+            RenderControlIntent {
+                style: "browser_magic",
+                ..view.value
+            }
+            .into_settings(),
+            Err("unknown backend-neutral render style"),
+        );
     }
 }

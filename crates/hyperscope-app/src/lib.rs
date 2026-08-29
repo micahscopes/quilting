@@ -117,6 +117,33 @@ impl Default for RenderSettings {
 }
 
 impl RenderSettings {
+    /// Decode the backend-neutral control vocabulary into one validated
+    /// semantic value. Browser, Leptos, route, and future Blender adapters use
+    /// this constructor instead of maintaining parallel style parsing.
+    pub fn from_wire_values(
+        style: &str,
+        resolution_level: u8,
+        density: f64,
+        screen_attenuation: bool,
+        min_pixels_per_subdivision: f64,
+        atlas_exponent: u8,
+        max_face_edge_ratio: u8,
+    ) -> Result<Self, &'static str> {
+        Self {
+            style: RenderStyle::from_wire_name(style)
+                .ok_or("unknown backend-neutral render style")?,
+            resolution_level,
+            tessellation: PresentationTessellation {
+                density,
+                screen_attenuation,
+                min_pixels_per_subdivision,
+            },
+            atlas_exponent,
+            max_face_edge_ratio,
+        }
+        .validate()
+    }
+
     pub fn validate(self) -> Result<Self, &'static str> {
         if self.resolution_level > 6 {
             return Err("render resolution level must be in [0,6]");
@@ -555,6 +582,11 @@ struct PresenceRecord {
 pub struct AppState {
     revision: u64,
     frame_elapsed_seconds: f64,
+    /// Next locally allocated sequence for semantic inputs that commit at the
+    /// current application time. Navigation retains its own queue sequence
+    /// because presentation activation and navigation synchronization also
+    /// participate in that ordering domain.
+    next_direct_input_sequence: Option<u64>,
     navigation: NavigationController,
     presentation: Option<PresentationRuntime>,
     active_presentation: Option<PresentationSnapshot>,
@@ -574,6 +606,7 @@ impl Default for AppState {
         Self {
             revision: 0,
             frame_elapsed_seconds: 0.0,
+            next_direct_input_sequence: Some(0),
             navigation: NavigationController::default(),
             presentation: None,
             active_presentation: None,
@@ -638,6 +671,14 @@ impl AppState {
     }
 
     pub fn reduce(&mut self, event: AppEvent) -> Result<AppCommit, ReduceError> {
+        let direct_input_sequence = match &event {
+            AppEvent::Input(Timed {
+                value: SemanticAction::Navigate(_),
+                ..
+            }) => None,
+            AppEvent::Input(Timed { sequence, .. }) => Some(*sequence),
+            _ => None,
+        };
         let mut effects = Vec::new();
         let mut disposition = CommitDisposition::Applied;
         let mut publish_ui = true;
@@ -934,6 +975,15 @@ impl AppState {
             }
         }
 
+        if let Some(sequence) = direct_input_sequence {
+            self.next_direct_input_sequence = match (
+                self.next_direct_input_sequence,
+                sequence.checked_add(1),
+            ) {
+                (_, None) | (None, _) => None,
+                (Some(current), Some(next)) => Some(current.max(next)),
+            };
+        }
         self.revision = self.revision.saturating_add(1);
         for diagnostic in &mut self.diagnostics {
             if diagnostic.revision == u64::MAX {
@@ -1177,6 +1227,41 @@ impl AppStore {
         Ok(commit)
     }
 
+    /// Dispatch one locally authored semantic action at the current virtual
+    /// application time and allocate its sequence under the reducer lock.
+    ///
+    /// Immediately applied actions share one monotonically increasing direct
+    /// input sequence. Explicitly sequenced replay or adapter inputs advance
+    /// that allocator when admitted. Navigation delegates to its queue-owned
+    /// allocator instead, preserving presentation ordering and the deliberate
+    /// reset performed by [`AppEvent::NavigationSynchronized`].
+    pub fn dispatch_semantic(
+        &self,
+        action: SemanticAction,
+    ) -> Result<(u64, AppCommit), ReduceError> {
+        if let SemanticAction::Navigate(action) = action {
+            return self.dispatch_navigation(action);
+        }
+
+        let (sequence, commit) = {
+            let mut state = self.lock_state();
+            let sequence = state
+                .next_direct_input_sequence
+                .ok_or(ReduceError::InputSequenceExhausted)?;
+            let at_seconds = state.frame_elapsed_seconds;
+            let commit = state.reduce(AppEvent::Input(Timed {
+                sequence,
+                at_seconds,
+                value: action,
+            }))?;
+            (sequence, commit)
+        };
+        if commit.published_ui {
+            self.flush_read_models();
+        }
+        Ok((sequence, commit))
+    }
+
     /// Queue a local semantic navigation action at the current virtual frame
     /// time, allocating its sequence from the same authority used by
     /// presentation and explicitly sequenced replay input.
@@ -1369,6 +1454,7 @@ pub enum ReduceError {
     InvalidTime,
     InvalidAnimationClock,
     InvalidRenderSettings(&'static str),
+    InputSequenceExhausted,
     FutureEffectInput,
     FuturePresentationInput,
     FutureAnimationInput,
@@ -1391,6 +1477,9 @@ impl fmt::Display for ReduceError {
                 .write_str("animation time and speed must remain finite"),
             Self::InvalidRenderSettings(message) => {
                 write!(formatter, "render settings failed validation: {message}")
+            }
+            Self::InputSequenceExhausted => {
+                formatter.write_str("local semantic input sequence is exhausted")
             }
             Self::FutureEffectInput => formatter.write_str(
                 "effect-producing input cannot be scheduled beyond the current app frame",
@@ -1981,6 +2070,74 @@ mod tests {
         assert_eq!(applied.navigation_preset, controller.runtime.preset);
         assert_eq!(applied.camera, controller.camera);
         assert_eq!(applied.focus, controller.focus);
+    }
+
+    #[test]
+    fn direct_semantic_dispatch_allocates_atomically_without_stealing_navigation_order() {
+        let store = AppStore::default();
+        let first_settings = RenderSettings {
+            resolution_level: 1,
+            ..RenderSettings::default()
+        };
+        let (first_sequence, first_commit) = store
+            .dispatch_semantic(SemanticAction::SetRenderSettings(first_settings))
+            .unwrap();
+        assert_eq!(first_sequence, 0);
+        assert!(first_commit.published_ui);
+
+        store
+            .dispatch(AppEvent::Input(Timed {
+                sequence: 7,
+                at_seconds: 0.0,
+                value: SemanticAction::Animate(AnimationAction::SetPlaying(false)),
+            }))
+            .unwrap();
+        let (next_sequence, _) = store
+            .dispatch_semantic(SemanticAction::Animate(AnimationAction::TogglePlaying))
+            .unwrap();
+        assert_eq!(next_sequence, 8);
+
+        let invalid = RenderSettings {
+            tessellation: PresentationTessellation {
+                density: f64::NAN,
+                ..PresentationTessellation::default()
+            },
+            ..RenderSettings::default()
+        };
+        assert!(matches!(
+            store.dispatch_semantic(SemanticAction::SetRenderSettings(invalid)),
+            Err(ReduceError::InvalidRenderSettings(_)),
+        ));
+        let (after_rejection, _) = store
+            .dispatch_semantic(SemanticAction::SetRenderSettings(RenderSettings::default()))
+            .unwrap();
+        assert_eq!(after_rejection, 9);
+
+        let (navigation_sequence, navigation_commit) = store
+            .dispatch_semantic(SemanticAction::Navigate(NavigationAction::SetPreset(
+                NavigationPreset::Fly,
+            )))
+            .unwrap();
+        assert_eq!(navigation_sequence, 0);
+        assert!(!navigation_commit.published_ui);
+    }
+
+    #[test]
+    fn direct_semantic_sequence_exhaustion_is_explicit() {
+        let store = AppStore::default();
+        store
+            .dispatch(AppEvent::Input(Timed {
+                sequence: u64::MAX,
+                at_seconds: 0.0,
+                value: SemanticAction::SetRenderSettings(RenderSettings::default()),
+            }))
+            .unwrap();
+
+        assert_eq!(
+            store.dispatch_semantic(SemanticAction::Animate(AnimationAction::TogglePlaying)),
+            Err(ReduceError::InputSequenceExhausted),
+        );
+        assert_eq!(store.summary_snapshot().revision, 1);
     }
 
     #[test]

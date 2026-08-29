@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 
 use crate::RenderSettings;
-use hyperscape::{PresentationTessellation, RenderStyle};
 use hyperscape_protocol::{AssetEntityId, AssetId, EntityId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -486,13 +485,10 @@ impl HyperscopeRoute {
     /// must not apply another default or range policy after route admission.
     pub fn render_settings(&self) -> Result<RenderSettings, &'static str> {
         let style = match self.value("mode") {
-            Some("pbr") => RenderStyle::Pbr,
-            Some("matcap") => RenderStyle::Matcap,
-            Some("wire") => RenderStyle::Wire,
-            Some("normals") => RenderStyle::Normals,
-            Some("both") => RenderStyle::MatcapWire,
-            Some("lod") => RenderStyle::Lod,
-            Some("stretch") => RenderStyle::Stretch,
+            Some("both") => "matcap_wire",
+            Some(style @ ("pbr" | "matcap" | "wire" | "normals" | "lod" | "stretch")) => {
+                style
+            }
             _ => return Err("route render mode is invalid"),
         };
         let resolution_level = self
@@ -521,18 +517,15 @@ impl HyperscopeRoute {
             .and_then(|value| value.parse::<u8>().ok())
             .ok_or("route face-edge ratio is invalid")?;
 
-        RenderSettings {
+        RenderSettings::from_wire_values(
             style,
             resolution_level,
-            tessellation: PresentationTessellation {
-                density,
-                screen_attenuation,
-                min_pixels_per_subdivision,
-            },
+            density,
+            screen_attenuation,
+            min_pixels_per_subdivision,
             atlas_exponent,
             max_face_edge_ratio,
-        }
-        .validate()
+        )
     }
 
     /// Resolve the optional stable asset-scoped selection carried by a route.
@@ -606,6 +599,7 @@ impl HyperscopeRoute {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hyperscape::{PresentationTessellation, RenderStyle};
     use std::collections::BTreeSet;
 
     #[test]

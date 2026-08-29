@@ -4159,31 +4159,45 @@ function ensureRustRenderSettingsView() {
         minPixelsPerSubdivision,
         atlasExponent,
         maxFaceEdgeRatio,
+        sequence,
       ) => {
         try {
-          const rust = dispatchRustRenderSettings(
-            rustAppShadow,
-            {
-              style,
-              resolutionLevel,
-              density,
-              screenAttenuation,
-              minPixelsPerSubdivision,
-              atlasExponent,
-              maxFaceEdgeRatio,
-            },
-            'leptos-control',
-          );
+          const sequenceNumber = Number(sequence);
+          if (!Number.isSafeInteger(sequenceNumber) || sequenceNumber < 0) {
+            throw new Error('Rust render-control sequence is not a safe browser integer');
+          }
+          rustAppShadowSequence = Math.max(rustAppShadowSequence, sequenceNumber);
+          const rust = {
+            style,
+            resolutionLevel,
+            density,
+            screenAttenuation,
+            minPixelsPerSubdivision,
+            atlasExponent,
+            maxFaceEdgeRatio,
+          };
+          rustRenderSettingsDiagnostics.dispatches += 1;
+          rustRenderSettingsDiagnostics.lastRust = rust;
+          rustRenderSettingsDiagnostics.lastDispatchSource = 'leptos-control';
           applyRustRenderSettingsProjection(rust);
           rustRenderSettingsDiagnostics.authorityWrites += 1;
         } catch (error) {
           rustRenderSettingsDiagnostics.errors += 1;
           rustRenderSettingsDiagnostics.lastError = error?.message || String(error);
           recordAppShadowMismatch(
-            'render_settings_view_action',
+            'render_settings_view_projection',
             rustRenderSettingsDiagnostics.lastError,
           );
         }
+      },
+      error => {
+        rustRenderSettingsDiagnostics.errors += 1;
+        rustRenderSettingsDiagnostics.lastError = String(error);
+        rustRenderSettingsDiagnostics.lastDispatchSource = 'leptos-control-rejected';
+        recordAppShadowMismatch(
+          'render_settings_view_rejection',
+          rustRenderSettingsDiagnostics.lastError,
+        );
       },
     );
     host.hidden = false;

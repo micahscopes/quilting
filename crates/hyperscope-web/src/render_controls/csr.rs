@@ -1,6 +1,6 @@
 use super::{project_render_controls, RenderControlIntent, RenderControlsViewModel};
 use futures_signals::signal::SignalExt as _;
-use hyperscope_app::AppStore;
+use hyperscope_app::{AppStore, SemanticAction};
 use js_sys::{Array, Function};
 use leptos::mount::mount_to;
 use leptos::prelude::*;
@@ -18,9 +18,15 @@ const RENDER_STYLES: &[(&str, &str)] = &[
 ];
 
 /// Mount the explicit Rust-authority render controls over the committed
-/// AppStore render signal. Every user edit emits one complete replacement
-/// value through the temporary platform callback.
-pub fn mount_render_controls(parent: web_sys::HtmlElement, store: AppStore, on_action: Function) {
+/// AppStore render signal. Every user edit dispatches one complete replacement
+/// value directly through the reducer; the platform callback only receives the
+/// resulting committed projection for renderer adaptation.
+pub fn mount_render_controls(
+    parent: web_sys::HtmlElement,
+    store: AppStore,
+    on_commit: Function,
+    on_error: Function,
+) {
     mount_to(parent, move || {
         let (controls, set_controls) = signal(project_render_controls(&store.render_snapshot()));
         let updates = store.render_signal().for_each(move |render| {
@@ -28,7 +34,7 @@ pub fn mount_render_controls(parent: web_sys::HtmlElement, store: AppStore, on_a
             async {}
         });
         wasm_bindgen_futures::spawn_local(updates);
-        view! { <RenderControls controls on_action /> }
+        view! { <RenderControls controls store on_commit on_error /> }
     })
     .forget();
 }
@@ -36,19 +42,26 @@ pub fn mount_render_controls(parent: web_sys::HtmlElement, store: AppStore, on_a
 #[component]
 fn RenderControls(
     controls: ReadSignal<RenderControlsViewModel>,
-    on_action: Function,
+    store: AppStore,
+    on_commit: Function,
+    on_error: Function,
 ) -> impl IntoView {
-    let on_action = SendWrapper::new(on_action);
+    let on_commit = SendWrapper::new(on_commit);
+    let on_error = SendWrapper::new(on_error);
     let style_buttons = RENDER_STYLES
         .iter()
         .map(|&(style, label)| {
-            let on_action = on_action.clone();
+            let store = store.clone();
+            let on_commit = on_commit.clone();
+            let on_error = on_error.clone();
             view! {
                 <button
                     type="button"
                     class:a=move || controls.read().value.style == style
                     aria-pressed=move || (controls.read().value.style == style).to_string()
-                    on:click=move |_| emit(&on_action, controls.get_untracked().with_style(style))
+                    on:click=move |_| submit_intent(&store, &on_commit, &on_error, |current| {
+                        current.with_style(style)
+                    })
                 >{label}</button>
             }
         })
@@ -68,9 +81,13 @@ fn RenderControls(
                     step=move || controls.read().resolution.step
                     prop:value=move || controls.read().value.resolution_level
                     on:input={
-                        let on_action = on_action.clone();
+                        let store = store.clone();
+                        let on_commit = on_commit.clone();
+                        let on_error = on_error.clone();
                         move |event| if let Ok(value) = event_target_value(&event).parse::<u8>() {
-                            emit(&on_action, controls.get_untracked().with_resolution(value));
+                            submit_intent(&store, &on_commit, &on_error, |current| {
+                                current.with_resolution(value)
+                            });
                         }
                     }
                 />
@@ -89,9 +106,13 @@ fn RenderControls(
                     step=move || controls.read().density.step
                     prop:value=move || controls.read().value.density
                     on:input={
-                        let on_action = on_action.clone();
+                        let store = store.clone();
+                        let on_commit = on_commit.clone();
+                        let on_error = on_error.clone();
                         move |event| if let Ok(value) = event_target_value(&event).parse::<f64>() {
-                            emit(&on_action, controls.get_untracked().with_density(value));
+                            submit_intent(&store, &on_commit, &on_error, |current| {
+                                current.with_density(value)
+                            });
                         }
                     }
                 />
@@ -104,11 +125,12 @@ fn RenderControls(
                     role="switch"
                     prop:checked=move || controls.read().value.screen_attenuation
                     on:change={
-                        let on_action = on_action.clone();
-                        move |event| emit(
-                            &on_action,
-                            controls.get_untracked().with_screen_attenuation(event_target_checked(&event)),
-                        )
+                        let store = store.clone();
+                        let on_commit = on_commit.clone();
+                        let on_error = on_error.clone();
+                        move |event| submit_intent(&store, &on_commit, &on_error, |current| {
+                            current.with_screen_attenuation(event_target_checked(&event))
+                        })
                     }
                 />
                 <span class="toggle-label">"Screen-space attenuation"</span>
@@ -123,9 +145,13 @@ fn RenderControls(
                     step=move || controls.read().pixel_floor.step
                     prop:value=move || controls.read().value.min_pixels_per_subdivision
                     on:input={
-                        let on_action = on_action.clone();
+                        let store = store.clone();
+                        let on_commit = on_commit.clone();
+                        let on_error = on_error.clone();
                         move |event| if let Ok(value) = event_target_value(&event).parse::<f64>() {
-                            emit(&on_action, controls.get_untracked().with_pixel_floor(value));
+                            submit_intent(&store, &on_commit, &on_error, |current| {
+                                current.with_pixel_floor(value)
+                            });
                         }
                     }
                 />
@@ -143,9 +169,13 @@ fn RenderControls(
                     step=move || controls.read().atlas.step
                     prop:value=move || controls.read().value.atlas_exponent
                     on:change={
-                        let on_action = on_action.clone();
+                        let store = store.clone();
+                        let on_commit = on_commit.clone();
+                        let on_error = on_error.clone();
                         move |event| if let Ok(value) = event_target_value(&event).parse::<u8>() {
-                            emit(&on_action, controls.get_untracked().with_atlas(value));
+                            submit_intent(&store, &on_commit, &on_error, |current| {
+                                current.with_atlas(value)
+                            });
                         }
                     }
                 />
@@ -155,7 +185,9 @@ fn RenderControls(
             <label>"Within-face grading"</label>
             <div class="btns">
                 {[2_u8, 4_u8].into_iter().map(|ratio| {
-                    let on_action = on_action.clone();
+                    let store = store.clone();
+                    let on_commit = on_commit.clone();
+                    let on_error = on_error.clone();
                     view! {
                         <button
                             type="button"
@@ -163,10 +195,9 @@ fn RenderControls(
                             aria-pressed=move || {
                                 (controls.read().value.max_face_edge_ratio == ratio).to_string()
                             }
-                            on:click=move |_| emit(
-                                &on_action,
-                                controls.get_untracked().with_grading(ratio),
-                            )
+                            on:click=move |_| submit_intent(&store, &on_commit, &on_error, |current| {
+                                current.with_grading(ratio)
+                            })
                         >{format!("{ratio}:1")}</button>
                     }
                 }).collect_view()}
@@ -175,7 +206,42 @@ fn RenderControls(
     }
 }
 
-fn emit(callback: &Function, intent: RenderControlIntent) {
+fn submit_intent(
+    store: &AppStore,
+    callback: &Function,
+    error_callback: &Function,
+    update: impl FnOnce(RenderControlsViewModel) -> RenderControlIntent,
+) {
+    // Read the reducer directly at the event boundary. The asynchronously
+    // published Leptos signal is a view projection and may legitimately lag a
+    // rapid sequence of input events by one microtask.
+    let intent = update(project_render_controls(&store.render_snapshot()));
+    let settings = match intent.into_settings() {
+        Ok(settings) => settings,
+        Err(error) => {
+            emit_error(error_callback, error);
+            return;
+        }
+    };
+    let (sequence, _) = match store.dispatch_semantic(SemanticAction::SetRenderSettings(settings)) {
+        Ok(committed) => committed,
+        Err(error) => {
+            emit_error(error_callback, &error.to_string());
+            return;
+        }
+    };
+    emit_committed(
+        callback,
+        sequence,
+        project_render_controls(&store.render_snapshot()).value,
+    );
+}
+
+fn emit_error(callback: &Function, message: &str) {
+    let _ = callback.call1(&JsValue::UNDEFINED, &JsValue::from_str(message));
+}
+
+fn emit_committed(callback: &Function, sequence: u64, intent: RenderControlIntent) {
     let arguments = Array::new();
     arguments.push(&JsValue::from_str(intent.style));
     arguments.push(&JsValue::from_f64(f64::from(intent.resolution_level)));
@@ -184,5 +250,6 @@ fn emit(callback: &Function, intent: RenderControlIntent) {
     arguments.push(&JsValue::from_f64(intent.min_pixels_per_subdivision));
     arguments.push(&JsValue::from_f64(f64::from(intent.atlas_exponent)));
     arguments.push(&JsValue::from_f64(f64::from(intent.max_face_edge_ratio)));
+    arguments.push(&JsValue::from(sequence));
     let _ = callback.apply(&JsValue::UNDEFINED, &arguments);
 }

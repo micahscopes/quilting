@@ -7,8 +7,8 @@ use hyperscape::{
     FocusSphere, LayerTransform, MappedSpaceMouseFrame, NavigationAction, NavigationFrame,
     NavigationPreset, PackedAssetInstance, PackedNodeSource, PackedNodeTransformSource,
     PackedPresentationLayerBinding, PointerTurntableGesture, PointerTurntableInput, Presentation,
-    PresentationAsset, PresentationSnapshot, PresentationTessellation, RenderStyle,
-    SpaceMouseCameraInput, SpaceMouseMapping, SurfaceAnchorTarget, TurntableFrame,
+    PresentationAsset, PresentationSnapshot, SpaceMouseCameraInput, SpaceMouseMapping,
+    SurfaceAnchorTarget, TurntableFrame,
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredEnvelope, CameraPresence, EntityId, EphemeralPresence,
@@ -217,19 +217,22 @@ impl HyperscopeAppShadow {
     }
 
     /// Mount the explicit Rust-authority render controls over the AppStore's
-    /// committed render projection. The callback is a temporary platform
-    /// sequence/effect adapter and receives one complete render value.
+    /// committed render projection. The view dispatches directly through the
+    /// reducer; the callback receives only the committed value needed by the
+    /// incumbent renderer adapter.
     #[cfg(feature = "leptos-ui")]
     #[wasm_bindgen(js_name = mountRenderControls)]
     pub fn mount_render_controls(
         &self,
         parent: web_sys::HtmlElement,
-        on_action: js_sys::Function,
+        on_commit: js_sys::Function,
+        on_error: js_sys::Function,
     ) {
         hyperscope_web::render_controls::mount_render_controls(
             parent,
             self.store.clone(),
-            on_action,
+            on_commit,
+            on_error,
         );
     }
 
@@ -1041,17 +1044,16 @@ impl HyperscopeAppShadow {
         atlas_exponent: u8,
         max_face_edge_ratio: u8,
     ) -> Result<JsValue, JsValue> {
-        let settings = RenderSettings {
-            style: parse_render_style(style)?,
+        let settings = RenderSettings::from_wire_values(
+            style,
             resolution_level,
-            tessellation: PresentationTessellation {
-                density,
-                screen_attenuation,
-                min_pixels_per_subdivision,
-            },
+            density,
+            screen_attenuation,
+            min_pixels_per_subdivision,
             atlas_exponent,
             max_face_edge_ratio,
-        };
+        )
+        .map_err(js_error)?;
         let commit = self
             .store
             .dispatch(AppEvent::Input(Timed {
@@ -2039,11 +2041,6 @@ fn shadow_commit(commit: &AppCommit) -> ShadowCommit {
         published_ui: commit.published_ui,
         effects,
     }
-}
-
-fn parse_render_style(style: &str) -> Result<RenderStyle, JsValue> {
-    RenderStyle::from_wire_name(style)
-        .ok_or_else(|| JsValue::from_str("unknown backend-neutral render style"))
 }
 
 fn peer_receipt_to_js(receipt: &LocalPeerReceipt) -> Result<JsValue, JsValue> {
