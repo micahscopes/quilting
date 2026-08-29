@@ -63,6 +63,41 @@ fn pbr_apply_tangent_normal(
     );
 }
 
+// Reconstruct a cotangent frame from the actually rasterized conformal
+// surface. This avoids consuming two additional inter-stage locations for
+// world tangents while keeping environment lookup aligned to normal maps.
+fn pbr_apply_world_tangent_normal(
+    geometric_normal: vec3<f32>,
+    position_ws: vec3<f32>,
+    uv: vec2<f32>,
+    texel: vec4<f32>,
+    normal_scale: f32,
+    enabled: bool,
+) -> vec3<f32> {
+    let normal = normalize(geometric_normal);
+    let position_dx = dpdx(position_ws);
+    let position_dy = dpdy(position_ws);
+    let uv_dx = dpdx(uv);
+    let uv_dy = dpdy(uv);
+    let position_dy_perp = cross(position_dy, normal);
+    let position_dx_perp = cross(normal, position_dx);
+    let tangent = position_dy_perp * uv_dx.x + position_dx_perp * uv_dy.x;
+    let bitangent = position_dy_perp * uv_dx.y + position_dx_perp * uv_dy.y;
+    let basis_scale_squared = max(dot(tangent, tangent), dot(bitangent, bitangent));
+    if !enabled || basis_scale_squared <= 1e-14 {
+        return normal;
+    }
+    let inverse_basis_scale = inverseSqrt(basis_scale_squared);
+    var tangent_normal = texel.xyz * 2.0 - vec3<f32>(1.0);
+    tangent_normal.x = tangent_normal.x * normal_scale;
+    tangent_normal.y = tangent_normal.y * normal_scale;
+    return normalize(
+        tangent * (tangent_normal.x * inverse_basis_scale)
+        + bitangent * (tangent_normal.y * inverse_basis_scale)
+        + normal * tangent_normal.z,
+    );
+}
+
 // GGX/Trowbridge-Reitz normal distribution
 fn distribution_ggx(n_dot_h: f32, roughness: f32) -> f32 {
     let a = roughness * roughness;

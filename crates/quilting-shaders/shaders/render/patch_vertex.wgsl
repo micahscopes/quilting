@@ -204,8 +204,6 @@ fn shade_patch_pbr(
     has_environment: bool,
     irradiance: vec3<f32>,
     environment_color: vec3<f32>,
-    normal_ws: vec3<f32>,
-    view_dir_ws: vec3<f32>,
 ) -> vec4<f32> {
     if input.fade < 0.001 {
         discard;
@@ -286,8 +284,8 @@ fn shade_patch_pbr(
             base.rgb,
             metallic,
             roughness,
-            normal_ws,
-            view_dir_ws,
+            normal,
+            view_dir,
             irradiance,
             environment_color,
             f0,

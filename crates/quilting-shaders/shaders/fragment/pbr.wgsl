@@ -1,6 +1,6 @@
 #define_import_path quilting::fragment::pbr
 
-#import quilting::lighting::pbr::{pbr_direct, pbr_ambient, pbr_apply_tangent_normal, pbr_evaluate_base_color, pbr_evaluate_emissive, pbr_tone_map, PBRInput, env_dfg, fresnel_schlick_roughness, sh_irradiance_fallback, env_specular_fallback}
+#import quilting::lighting::pbr::{pbr_direct, pbr_ambient, pbr_apply_tangent_normal, pbr_apply_world_tangent_normal, pbr_evaluate_base_color, pbr_evaluate_emissive, pbr_tone_map, PBRInput, env_dfg, fresnel_schlick_roughness, sh_irradiance_fallback, env_specular_fallback}
 
 struct PbrUniforms {
     base_color: vec4<f32>,
@@ -288,6 +288,17 @@ fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> PbrOutput
     if pbr.has_env_map > 0.5 {
         var n_ws = normalize(in.normal_ws);
         let view_dir_ws = normalize(in.camera_pos_ws - in.position_ws);
+        if dot(n_ws, view_dir_ws) < 0.0 {
+            n_ws = -n_ws;
+        }
+        n_ws = pbr_apply_world_tangent_normal(
+            n_ws,
+            in.position_ws,
+            normal_uv,
+            normal_texel,
+            pbr.normal_scale,
+            pbr.has_normal_tex > 0.5,
+        );
         if dot(n_ws, view_dir_ws) < 0.0 {
             n_ws = -n_ws;
         }
