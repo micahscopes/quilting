@@ -309,6 +309,40 @@ assert.equal(
 assert.equal(directResume.commit.disposition, 'applied');
 assert.equal(directResume.playing, false);
 directAnimationApp.free();
+
+const reverseAnimationApp = new HyperscopeAppShadow();
+reverseAnimationApp.dispatchAnimationClock(true, 0.1, -1);
+reverseAnimationApp.advanceFrameQuiet(0.25, 0.25);
+const reverseAnimationPacket = new Float64Array(3);
+reverseAnimationApp.writeAnimationClock(reverseAnimationPacket);
+assert.deepEqual(Array.from(reverseAnimationPacket), [1, -0.15, -1]);
+reverseAnimationApp.writeAnimationSample(0, 2, reverseAnimationPacket);
+assert.deepEqual(
+  Array.from(reverseAnimationPacket),
+  [1, 1.85, -1],
+  'reverse playback must wrap across zero with Euclidean remainder',
+);
+reverseAnimationApp.free();
+
+function animationClockAfter(deltas) {
+  const candidate = new HyperscopeAppShadow();
+  candidate.dispatchAnimationClock(true, 0.75, -1.25);
+  let elapsed = 0;
+  for (const delta of deltas) {
+    elapsed += delta;
+    candidate.advanceFrameQuiet(elapsed, delta);
+  }
+  const packet = new Float64Array(3);
+  candidate.writeAnimationClock(packet);
+  candidate.free();
+  return Array.from(packet);
+}
+
+assert.deepEqual(
+  animationClockAfter([3]),
+  animationClockAfter([0.25, 0.5, 0.75, 1.5]),
+  'one background-sized frame must match the same elapsed time partitioned',
+);
 const animationClockApp = new HyperscopeAppShadow();
 const restoredAnimation = animationClockApp.setAnimationClock(1, true, 2, -0.5);
 assert.deepEqual(
@@ -799,6 +833,40 @@ assert.equal(
   'rejected direct cue input must not consume a sequence number',
 );
 directPresentationApp.free();
+
+const cueClockPresentation = structuredClone(presentation);
+Object.assign(cueClockPresentation.cues[0].animations[0], {
+  playing: true,
+  time_seconds: 0.375,
+  speed: -0.5,
+});
+Object.assign(cueClockPresentation.cues[1].animations[0], {
+  playing: false,
+  time_seconds: 1.25,
+  speed: 0.25,
+});
+const cueClockApp = new HyperscopeAppShadow();
+cueClockApp.loadPresentation(JSON.stringify(cueClockPresentation));
+cueClockApp.dispatchPresentation('start', '');
+assert.deepEqual(
+  {
+    playing: cueClockApp.snapshot().animationPlaying,
+    timeSeconds: cueClockApp.snapshot().animationTimeSeconds,
+    speed: cueClockApp.snapshot().animationSpeed,
+  },
+  { playing: true, timeSeconds: 0.375, speed: -0.5 },
+);
+cueClockApp.dispatchPresentation('advance', '');
+assert.deepEqual(
+  {
+    playing: cueClockApp.snapshot().animationPlaying,
+    timeSeconds: cueClockApp.snapshot().animationTimeSeconds,
+    speed: cueClockApp.snapshot().animationSpeed,
+  },
+  { playing: false, timeSeconds: 1.25, speed: 0.25 },
+  'cue activation must replace the complete animation clock atomically',
+);
+cueClockApp.free();
 
 const eye = new Float64Array([0, 0, 3]);
 const forward = new Float64Array([0, 0, -1]);

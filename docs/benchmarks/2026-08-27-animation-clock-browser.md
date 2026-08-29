@@ -36,6 +36,8 @@ horse tab was closed without selecting or modifying the user's chess tab.
 ## Remaining cutover work
 
 This gate proves forward playback, multiple loop crossings, pause, and seek for
-one ordinary clip. Reverse speed, presentation cue switching under an active
-clock, background-throttled cadence, and a representative long clip remain
-required before changing the default from `js`.
+one ordinary clip. Generated-WASM model gates now cover reverse wrapping,
+transactional cue clock replacement, and cadence partition invariance; see
+`2026-08-29-animation-clock-cutover-model.md`. Live background throttling and
+a representative long clip remain required before changing the default from
+`js`.
