@@ -34,6 +34,20 @@ function validateEffect(effect) {
       assetId: requiredString(effect.asset_id, 'cancellation asset ID'),
     });
   }
+  if (effect.type === 'install_primary_scene') {
+    return Object.freeze({
+      type: effect.type,
+      requestId: requiredString(effect.request_id, 'install request ID'),
+      assetId: requiredString(effect.asset_id, 'install asset ID'),
+    });
+  }
+  if (effect.type === 'cancel_primary_scene_install') {
+    return Object.freeze({
+      type: effect.type,
+      requestId: requiredString(effect.request_id, 'install cancellation request ID'),
+      assetId: requiredString(effect.asset_id, 'install cancellation asset ID'),
+    });
+  }
   throw new TypeError(`unsupported Rust asset effect ${JSON.stringify(effect.type)}`);
 }
 
@@ -86,6 +100,32 @@ export class BrowserAssetEffectHost {
         if (matchingFetch.uri !== uri) mismatches.push('fetch URI diverged');
       }
     }
+    const cancellations = observedEffects.filter(effect =>
+      effect.type === 'cancel_asset_load'
+      || effect.type === 'cancel_primary_scene_install');
+    for (const effect of cancellations) {
+      const cancelled = this.jobs.get(effect.requestId);
+      if (!cancelled || cancelled.assetId !== effect.assetId) {
+        mismatches.push(`cancellation did not match active request ${effect.requestId}`);
+      }
+    }
+    const previousPrimary = scope === 'primary_scene' ? this.primary : null;
+    if (this.implementation !== 'js' && previousPrimary) {
+      let expectedCancellation = null;
+      if (previousPrimary.disposition === null) {
+        expectedCancellation = 'cancel_asset_load';
+      } else if (previousPrimary.disposition === 'applied'
+          && previousPrimary.installRequested
+          && previousPrimary.installDisposition === null) {
+        expectedCancellation = 'cancel_primary_scene_install';
+      }
+      if (expectedCancellation && !cancellations.some(effect =>
+        effect.type === expectedCancellation
+        && effect.requestId === previousPrimary.requestId
+        && effect.assetId === previousPrimary.assetId)) {
+        mismatches.push(`request commit omitted ${expectedCancellation} for the active primary job`);
+      }
+    }
     if (this.implementation === 'rust' && mismatches.length > 0) {
       throw new Error(mismatches.join('; '));
     }
@@ -102,6 +142,8 @@ export class BrowserAssetEffectHost {
       controller,
       superseded: false,
       disposition: null,
+      installRequested: false,
+      installDisposition: null,
     };
 
     if (scope === 'primary_scene') {
@@ -115,11 +157,9 @@ export class BrowserAssetEffectHost {
       this.primary = token;
     }
 
-    for (const effect of observedEffects) {
-      if (effect.type !== 'cancel_asset_load') continue;
+    for (const effect of cancellations) {
       const cancelled = this.jobs.get(effect.requestId);
       if (!cancelled || cancelled.assetId !== effect.assetId) {
-        mismatches.push(`cancellation did not match active request ${effect.requestId}`);
         continue;
       }
       cancelled.superseded = true;
@@ -131,10 +171,43 @@ export class BrowserAssetEffectHost {
     return { token, mismatches };
   }
 
+  beginInstall(token, commit) {
+    if (!token || this.jobs.get(token.requestId) !== token) {
+      if (this.implementation === 'rust') {
+        throw new Error('primary scene install has no matching active asset job');
+      }
+      return { mismatches: ['primary scene install has no matching active asset job'] };
+    }
+    const observedEffects = this.implementation === 'js'
+      ? []
+      : commitEffects(commit).map(validateEffect);
+    const installs = observedEffects.filter(effect => effect.type === 'install_primary_scene');
+    const matchingInstall = installs.find(effect => effect.requestId === token.requestId);
+    const mismatches = [];
+    if (this.implementation !== 'js') {
+      if (installs.length !== 1 || !matchingInstall) {
+        mismatches.push('completion commit must contain exactly one matching install effect');
+      } else if (matchingInstall.assetId !== token.assetId) {
+        mismatches.push('install asset ID diverged');
+      }
+    }
+    if (this.implementation === 'rust' && mismatches.length > 0) {
+      throw new Error(mismatches.join('; '));
+    }
+    token.installRequested = this.implementation === 'js' || !!matchingInstall;
+    return { mismatches };
+  }
+
   recordCompletion(token, disposition) {
     if (!token || this.jobs.get(token.requestId) !== token) return 'unobserved';
     token.disposition = requiredString(disposition, 'completion disposition');
     return token.disposition;
+  }
+
+  recordInstallCompletion(token, disposition) {
+    if (!token || this.jobs.get(token.requestId) !== token) return 'unobserved';
+    token.installDisposition = requiredString(disposition, 'install completion disposition');
+    return token.installDisposition;
   }
 
   mayProcess(token) {
@@ -148,6 +221,7 @@ export class BrowserAssetEffectHost {
     if (!this.mayProcess(token)) return false;
     if (this.implementation !== 'rust') return true;
     if (token.disposition !== 'applied') return false;
+    if (token.scope === 'primary_scene' && !token.installRequested) return false;
     return true;
   }
 

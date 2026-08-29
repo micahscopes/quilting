@@ -476,9 +476,11 @@ assert.equal(
 );
 primarySnapshot = primaryApp.snapshot();
 assert.equal(primarySnapshot.loadingPrimarySceneRequest, primarySecond);
-assert.equal(
-  primaryApp.completeAssetLoaded(primarySecond, primaryChess, 200_000).disposition,
-  'applied',
+const primaryDecoded = primaryApp.completeAssetLoaded(primarySecond, primaryChess, 200_000);
+assert.equal(primaryDecoded.disposition, 'applied');
+assert.deepEqual(
+  primaryDecoded.effects.map(effect => effect.type),
+  ['install_primary_scene'],
 );
 primarySnapshot = primaryApp.snapshot();
 assert.equal(primarySnapshot.loadingPrimarySceneAsset, undefined);
@@ -497,6 +499,47 @@ assert.deepEqual(
     uri: 'local-glbs/chess.glb',
     mediaType: 'model/gltf-binary',
     byteLength: 200_000,
+  },
+);
+assert.equal(primarySnapshot.installingPrimarySceneAsset, primaryChess);
+assert.equal(primarySnapshot.installingPrimarySceneRequest, primarySecond);
+assert.equal(primarySnapshot.installedPrimaryScene, undefined);
+assert.equal(
+  primaryApp.completePrimarySceneInstalled(
+    primarySecond,
+    primaryChess,
+    796,
+    984,
+    JSON.stringify([{
+      index: 0,
+      name: 'gallop',
+      timeMinSeconds: 0,
+      timeMaxSeconds: 1.5,
+    }]),
+  ).disposition,
+  'applied',
+);
+primarySnapshot = primaryApp.snapshot();
+assert.equal(primarySnapshot.installingPrimarySceneAsset, undefined);
+assert.deepEqual(
+  {
+    requestId: primarySnapshot.installedPrimaryScene.asset.requestId,
+    assetId: primarySnapshot.installedPrimaryScene.asset.assetId,
+    numVertices: primarySnapshot.installedPrimaryScene.numVertices,
+    numFaces: primarySnapshot.installedPrimaryScene.numFaces,
+    animationClips: primarySnapshot.installedPrimaryScene.animationClips,
+  },
+  {
+    requestId: primarySecond,
+    assetId: primaryChess,
+    numVertices: 796,
+    numFaces: 984,
+    animationClips: [{
+      index: 0,
+      name: 'gallop',
+      timeMinSeconds: 0,
+      timeMaxSeconds: 1.5,
+    }],
   },
 );
 const failedPrimaryReplacement = 'e0000000-0000-4000-8000-000000000012';
@@ -522,6 +565,11 @@ assert.equal(
   primaryApp.snapshot().readyPrimaryAsset.requestId,
   primarySecond,
   'a failed primary replacement must preserve the preceding decoded candidate',
+);
+assert.equal(
+  primaryApp.snapshot().installedPrimaryScene.asset.requestId,
+  primarySecond,
+  'a failed replacement must preserve the preceding renderer-resident scene',
 );
 
 const sessionNodeIdentities = app.sessionNodeIdentities(

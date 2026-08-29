@@ -315,9 +315,27 @@ pub struct AssetLoadCompletion {
     pub outcome: AssetLoadOutcome,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum PrimarySceneInstallOutcome {
+    Installed(PrimarySceneInstallMetadata),
+    Failed {
+        code: String,
+        message: String,
+        retryable: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrimarySceneInstallCompletion {
+    pub request_id: RequestId,
+    pub asset_id: AssetId,
+    pub outcome: PrimarySceneInstallOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum EffectCompletion {
     AssetLoad(AssetLoadCompletion),
+    PrimarySceneInstall(PrimarySceneInstallCompletion),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -338,6 +356,14 @@ pub enum AppEffect {
         asset: AssetDescriptor,
     },
     CancelAssetLoad {
+        request_id: RequestId,
+        asset_id: AssetId,
+    },
+    InstallPrimaryScene {
+        request_id: RequestId,
+        asset_id: AssetId,
+    },
+    CancelPrimarySceneInstall {
         request_id: RequestId,
         asset_id: AssetId,
     },
@@ -519,6 +545,10 @@ pub struct AppSummary {
     pub loading_primary_scene_request: Option<RequestId>,
     pub ready_primary_asset: Option<AssetId>,
     pub ready_primary_request: Option<RequestId>,
+    pub installing_primary_scene_asset: Option<AssetId>,
+    pub installing_primary_scene_request: Option<RequestId>,
+    pub installed_primary_scene_asset: Option<AssetId>,
+    pub installed_primary_scene_request: Option<RequestId>,
     pub active_peers: usize,
     pub authored_assets: usize,
     pub authored_entities: usize,
@@ -712,6 +742,8 @@ pub struct AppState {
     assets: BTreeMap<AssetId, AssetRecord>,
     primary_scene_load: Option<(RequestId, AssetId)>,
     ready_primary_asset: Option<PrimaryAssetReadModel>,
+    primary_scene_install: Option<(RequestId, AssetId)>,
+    installed_primary_scene: Option<InstalledPrimarySceneReadModel>,
     presence: BTreeMap<PeerId, PresenceRecord>,
     authored_projection_revision: Option<u64>,
     authored_assets: BTreeMap<AssetId, AssetDescriptor>,
@@ -733,6 +765,8 @@ impl Default for AppState {
             assets: BTreeMap::new(),
             primary_scene_load: None,
             ready_primary_asset: None,
+            primary_scene_install: None,
+            installed_primary_scene: None,
             presence: BTreeMap::new(),
             authored_projection_revision: None,
             authored_assets: BTreeMap::new(),
@@ -874,6 +908,14 @@ impl AppState {
                             .map_err(|error| ReduceError::Wire(error.to_string()))?;
                         let mut cancelled = Vec::new();
                         if scope == AssetLoadScope::PrimaryScene {
+                            if let Some((request_id, asset_id)) =
+                                self.primary_scene_install.take()
+                            {
+                                effects.push(AppEffect::CancelPrimarySceneInstall {
+                                    request_id,
+                                    asset_id,
+                                });
+                            }
                             if let Some((previous_request, previous_asset)) =
                                 self.primary_scene_load.take()
                             {
@@ -939,6 +981,19 @@ impl AppState {
                             if self.primary_scene_load == Some((request_id, asset_id)) {
                                 self.primary_scene_load = None;
                             }
+                        }
+                        if self
+                            .primary_scene_install
+                            .is_some_and(|(_, pending_asset)| pending_asset == asset_id)
+                        {
+                            let (request_id, asset_id) = self
+                                .primary_scene_install
+                                .take()
+                                .expect("matching primary install remains pending");
+                            effects.push(AppEffect::CancelPrimarySceneInstall {
+                                request_id,
+                                asset_id,
+                            });
                         }
                         record.status = AssetStatus::Cancelled;
                     }
@@ -1017,6 +1072,12 @@ impl AppState {
                                     content_digest,
                                     metadata: metadata.clone(),
                                 });
+                                self.primary_scene_install =
+                                    Some((completion.request_id, completion.asset_id));
+                                effects.push(AppEffect::InstallPrimaryScene {
+                                    request_id: completion.request_id,
+                                    asset_id: completion.asset_id,
+                                });
                             }
                             AssetStatus::Ready {
                                 byte_length,
@@ -1038,6 +1099,56 @@ impl AppState {
                         .get_mut(&completion.asset_id)
                         .expect("active request implies asset record")
                         .status = status;
+                }
+            }
+            AppEvent::EffectCompleted(EffectCompletion::PrimarySceneInstall(completion)) => {
+                let active = self.primary_scene_install
+                    == Some((completion.request_id, completion.asset_id));
+                if !active {
+                    disposition = CommitDisposition::IgnoredStale;
+                    self.push_diagnostic(
+                        "stale_primary_scene_install_completion",
+                        format!(
+                            "ignored primary scene install completion {} for inactive request {}",
+                            completion.asset_id, completion.request_id
+                        ),
+                    );
+                } else {
+                    let validated_outcome = match completion.outcome {
+                        PrimarySceneInstallOutcome::Installed(metadata) => {
+                            PrimarySceneInstallOutcome::Installed(metadata.validate().map_err(
+                                ReduceError::InvalidPrimarySceneInstallMetadata,
+                            )?)
+                        }
+                        failed @ PrimarySceneInstallOutcome::Failed { .. } => failed,
+                    };
+                    self.primary_scene_install = None;
+                    match validated_outcome {
+                        PrimarySceneInstallOutcome::Installed(install) => {
+                            let asset = self
+                                .ready_primary_asset
+                                .as_ref()
+                                .filter(|asset| {
+                                    asset.request_id == completion.request_id
+                                        && asset.descriptor.id == completion.asset_id
+                                })
+                                .cloned()
+                                .expect("an active primary install has a decoded asset candidate");
+                            self.installed_primary_scene =
+                                Some(InstalledPrimarySceneReadModel { asset, install });
+                        }
+                        PrimarySceneInstallOutcome::Failed {
+                            code,
+                            message,
+                            retryable,
+                        } => self.push_diagnostic(
+                            "primary_scene_install_failed",
+                            format!(
+                                "primary scene {} install failed ({code}, retryable={retryable}): {message}",
+                                completion.asset_id
+                            ),
+                        ),
+                    }
                 }
             }
             AppEvent::RemotePresence(received) => {
@@ -1253,6 +1364,20 @@ impl AppState {
                 .ready_primary_asset
                 .as_ref()
                 .map(|scene| scene.request_id),
+            installing_primary_scene_asset: self
+                .primary_scene_install
+                .map(|(_, asset)| asset),
+            installing_primary_scene_request: self
+                .primary_scene_install
+                .map(|(request, _)| request),
+            installed_primary_scene_asset: self
+                .installed_primary_scene
+                .as_ref()
+                .map(|scene| scene.asset.descriptor.id),
+            installed_primary_scene_request: self
+                .installed_primary_scene
+                .as_ref()
+                .map(|scene| scene.asset.request_id),
             active_peers: self.presence.len(),
             authored_assets: self.authored_assets.len(),
             authored_entities: self.authored_entities.len(),
@@ -1295,6 +1420,10 @@ impl AppState {
         self.ready_primary_asset.clone()
     }
 
+    fn installed_primary_scene_read_model(&self) -> Option<InstalledPrimarySceneReadModel> {
+        self.installed_primary_scene.clone()
+    }
+
     fn diagnostic_read_models(&self) -> Vec<DiagnosticReadModel> {
         self.diagnostics.iter().cloned().collect()
     }
@@ -1334,6 +1463,7 @@ pub struct AppStore {
     render: Mutable<AppRenderSnapshot>,
     assets: MutableVec<AssetReadModel>,
     primary_asset: Mutable<Option<PrimaryAssetReadModel>>,
+    installed_primary_scene: Mutable<Option<InstalledPrimarySceneReadModel>>,
     authored_assets: MutableVec<AssetDescriptor>,
     authored_entities: MutableVec<AuthoredEntityReadModel>,
     diagnostics: MutableVec<DiagnosticReadModel>,
@@ -1353,6 +1483,7 @@ impl AppStore {
         let render = state.render_snapshot();
         let assets = state.asset_read_models();
         let primary_asset = state.primary_asset_read_model();
+        let installed_primary_scene = state.installed_primary_scene_read_model();
         let authored = state.authored_scene_read_model();
         let diagnostics = state.diagnostic_read_models();
         let presentation = state.presentation_read_model();
@@ -1363,6 +1494,7 @@ impl AppStore {
             render: Mutable::new(render),
             assets: MutableVec::new_with_values(assets),
             primary_asset: Mutable::new(primary_asset),
+            installed_primary_scene: Mutable::new(installed_primary_scene),
             authored_assets: MutableVec::new_with_values(authored.assets),
             authored_entities: MutableVec::new_with_values(authored.entities),
             diagnostics: MutableVec::new_with_values(diagnostics),
@@ -1450,6 +1582,7 @@ impl AppStore {
         let state = self.lock_state();
         let assets = state.asset_read_models();
         let primary_asset = state.primary_asset_read_model();
+        let installed_primary_scene = state.installed_primary_scene_read_model();
         let authored = state.authored_scene_read_model();
         let diagnostics = state.diagnostic_read_models();
         let presentation = state.presentation_read_model();
@@ -1460,6 +1593,8 @@ impl AppStore {
         drop(state);
         self.assets.lock_mut().replace_cloned(assets);
         self.primary_asset.set_neq(primary_asset);
+        self.installed_primary_scene
+            .set_neq(installed_primary_scene);
         self.authored_assets
             .lock_mut()
             .replace_cloned(authored.assets);
@@ -1516,6 +1651,10 @@ impl AppStore {
 
     pub fn primary_asset_snapshot(&self) -> Option<PrimaryAssetReadModel> {
         self.primary_asset.get_cloned()
+    }
+
+    pub fn installed_primary_scene_snapshot(&self) -> Option<InstalledPrimarySceneReadModel> {
+        self.installed_primary_scene.get_cloned()
     }
 
     pub fn authored_scene_snapshot(&self) -> AuthoredSceneReadModel {
@@ -1587,6 +1726,12 @@ impl AppStore {
         self.primary_asset.signal_cloned()
     }
 
+    pub fn installed_primary_scene_signal(
+        &self,
+    ) -> MutableSignalCloned<Option<InstalledPrimarySceneReadModel>> {
+        self.installed_primary_scene.signal_cloned()
+    }
+
     pub fn authored_asset_signal_vec(&self) -> MutableSignalVec<AssetDescriptor> {
         self.authored_assets.signal_vec_cloned()
     }
@@ -1614,6 +1759,7 @@ impl AppStore {
 pub enum ReduceError {
     InvalidTime,
     InvalidAnimationClock,
+    InvalidPrimarySceneInstallMetadata(PrimarySceneInstallMetadataError),
     InvalidRenderSettings(&'static str),
     InputSequenceExhausted,
     FutureEffectInput,
@@ -1636,6 +1782,9 @@ impl fmt::Display for ReduceError {
             }
             Self::InvalidAnimationClock => formatter
                 .write_str("animation time and speed must remain finite"),
+            Self::InvalidPrimarySceneInstallMetadata(error) => {
+                write!(formatter, "primary scene installation failed validation: {error}")
+            }
             Self::InvalidRenderSettings(message) => {
                 write!(formatter, "render settings failed validation: {message}")
             }
@@ -1666,7 +1815,14 @@ impl fmt::Display for ReduceError {
     }
 }
 
-impl Error for ReduceError {}
+impl Error for ReduceError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidPrimarySceneInstallMetadata(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -2066,6 +2222,19 @@ mod tests {
             .unwrap()
     }
 
+    fn install_metadata() -> PrimarySceneInstallMetadata {
+        PrimarySceneInstallMetadata {
+            num_vertices: 796,
+            num_faces: 984,
+            animation_clips: vec![AnimationClipDescriptor {
+                index: 0,
+                name: "gallop".to_owned(),
+                time_min_seconds: 0.0,
+                time_max_seconds: 1.5,
+            }],
+        }
+    }
+
     #[test]
     fn reducer_emits_effect_then_rejects_a_stale_completion() {
         let store = AppStore::default();
@@ -2197,9 +2366,21 @@ mod tests {
             )))
             .unwrap();
         assert_eq!(applied.disposition, CommitDisposition::Applied);
+        assert_eq!(
+            applied.effects,
+            vec![AppEffect::InstallPrimaryScene {
+                request_id: second,
+                asset_id: chess.id,
+            }]
+        );
         assert_eq!(store.summary_snapshot().loading_primary_scene_asset, None);
         assert_eq!(store.summary_snapshot().ready_primary_asset, Some(chess.id));
         assert_eq!(store.summary_snapshot().ready_primary_request, Some(second));
+        assert_eq!(
+            store.summary_snapshot().installing_primary_scene_asset,
+            Some(chess.id)
+        );
+        assert_eq!(store.installed_primary_scene_snapshot(), None);
         assert_eq!(
             store.primary_asset_snapshot(),
             Some(PrimaryAssetReadModel {
@@ -2220,6 +2401,28 @@ mod tests {
                 content_digest: None,
                 metadata: AssetMetadata::default(),
             }
+        );
+
+        let installed = store
+            .dispatch(AppEvent::EffectCompleted(
+                EffectCompletion::PrimarySceneInstall(PrimarySceneInstallCompletion {
+                    request_id: second,
+                    asset_id: chess.id,
+                    outcome: PrimarySceneInstallOutcome::Installed(install_metadata()),
+                }),
+            ))
+            .unwrap();
+        assert_eq!(installed.disposition, CommitDisposition::Applied);
+        assert_eq!(
+            store.summary_snapshot().installed_primary_scene_asset,
+            Some(chess.id)
+        );
+        assert_eq!(
+            store.installed_primary_scene_snapshot(),
+            Some(InstalledPrimarySceneReadModel {
+                asset: store.primary_asset_snapshot().unwrap(),
+                install: install_metadata(),
+            })
         );
     }
 
@@ -2253,12 +2456,25 @@ mod tests {
             .unwrap();
         let resident = store.primary_asset_snapshot().unwrap();
 
-        dispatch_scoped_request(
+        let replacement = dispatch_scoped_request(
             &store,
             2,
             chess_request,
             chess.clone(),
             AssetLoadScope::PrimaryScene,
+        );
+        assert_eq!(
+            replacement.effects,
+            vec![
+                AppEffect::CancelPrimarySceneInstall {
+                    request_id: horse_request,
+                    asset_id: horse.id,
+                },
+                AppEffect::FetchAsset {
+                    request_id: chess_request,
+                    asset: chess.clone(),
+                },
+            ]
         );
         assert_eq!(store.primary_asset_snapshot(), Some(resident.clone()));
         store
@@ -2281,6 +2497,142 @@ mod tests {
         assert_eq!(
             store.summary_snapshot().ready_primary_request,
             Some(horse_request)
+        );
+        assert_eq!(
+            store.summary_snapshot().installing_primary_scene_request,
+            None
+        );
+    }
+
+    #[test]
+    fn failed_or_invalid_install_preserves_the_resident_scene_atomically() {
+        let store = AppStore::default();
+        let horse = asset(1, "horse.glb");
+        let chess = asset(2, "chess.glb");
+        let horse_request = request(10);
+        let chess_request = request(11);
+
+        dispatch_scoped_request(
+            &store,
+            1,
+            horse_request,
+            horse.clone(),
+            AssetLoadScope::PrimaryScene,
+        );
+        store
+            .dispatch(AppEvent::EffectCompleted(EffectCompletion::AssetLoad(
+                AssetLoadCompletion {
+                    request_id: horse_request,
+                    asset_id: horse.id,
+                    outcome: AssetLoadOutcome::Loaded {
+                        byte_length: 100,
+                        content_digest: None,
+                        metadata: AssetMetadata::default(),
+                    },
+                },
+            )))
+            .unwrap();
+        store
+            .dispatch(AppEvent::EffectCompleted(
+                EffectCompletion::PrimarySceneInstall(PrimarySceneInstallCompletion {
+                    request_id: horse_request,
+                    asset_id: horse.id,
+                    outcome: PrimarySceneInstallOutcome::Installed(install_metadata()),
+                }),
+            ))
+            .unwrap();
+        let resident = store.installed_primary_scene_snapshot().unwrap();
+
+        dispatch_scoped_request(
+            &store,
+            2,
+            chess_request,
+            chess.clone(),
+            AssetLoadScope::PrimaryScene,
+        );
+        store
+            .dispatch(AppEvent::EffectCompleted(EffectCompletion::AssetLoad(
+                AssetLoadCompletion {
+                    request_id: chess_request,
+                    asset_id: chess.id,
+                    outcome: AssetLoadOutcome::Loaded {
+                        byte_length: 200,
+                        content_digest: None,
+                        metadata: AssetMetadata::default(),
+                    },
+                },
+            )))
+            .unwrap();
+        let revision_before_invalid = store.summary_snapshot().revision;
+        let invalid = store.dispatch(AppEvent::EffectCompleted(
+            EffectCompletion::PrimarySceneInstall(PrimarySceneInstallCompletion {
+                request_id: chess_request,
+                asset_id: chess.id,
+                outcome: PrimarySceneInstallOutcome::Installed(PrimarySceneInstallMetadata {
+                    num_vertices: 0,
+                    num_faces: 1,
+                    animation_clips: Vec::new(),
+                }),
+            }),
+        ));
+        assert_eq!(
+            invalid,
+            Err(ReduceError::InvalidPrimarySceneInstallMetadata(
+                PrimarySceneInstallMetadataError::EmptyGeometry,
+            ))
+        );
+        assert_eq!(store.summary_snapshot().revision, revision_before_invalid);
+        assert_eq!(
+            store.installed_primary_scene_snapshot(),
+            Some(resident.clone())
+        );
+
+        store
+            .dispatch(AppEvent::EffectCompleted(
+                EffectCompletion::PrimarySceneInstall(PrimarySceneInstallCompletion {
+                    request_id: chess_request,
+                    asset_id: chess.id,
+                    outcome: PrimarySceneInstallOutcome::Failed {
+                        code: "gpu_upload".to_owned(),
+                        message: "allocation rejected".to_owned(),
+                        retryable: true,
+                    },
+                }),
+            ))
+            .unwrap();
+        assert_eq!(
+            store.installed_primary_scene_snapshot(),
+            Some(resident.clone())
+        );
+        assert_eq!(
+            store.summary_snapshot().installed_primary_scene_asset,
+            Some(horse.id)
+        );
+        assert_eq!(
+            store.diagnostic_snapshot().last().unwrap().code,
+            "primary_scene_install_failed"
+        );
+
+        let stale_invalid = store
+            .dispatch(AppEvent::EffectCompleted(
+                EffectCompletion::PrimarySceneInstall(PrimarySceneInstallCompletion {
+                    request_id: chess_request,
+                    asset_id: chess.id,
+                    outcome: PrimarySceneInstallOutcome::Installed(
+                        PrimarySceneInstallMetadata {
+                            num_vertices: 0,
+                            num_faces: 0,
+                            animation_clips: Vec::new(),
+                        },
+                    ),
+                }),
+            ))
+            .unwrap();
+        assert_eq!(stale_invalid.disposition, CommitDisposition::IgnoredStale);
+        assert_eq!(store.installed_primary_scene_snapshot(), Some(resident));
+        assert_eq!(
+            store.diagnostic_snapshot().last().unwrap().code,
+            "stale_primary_scene_install_completion"
         );
     }
 

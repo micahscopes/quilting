@@ -16,11 +16,13 @@ use hyperscape_protocol::{
     RequestId, CURRENT_PROTOCOL_VERSION,
 };
 use hyperscope_app::{
-    session_node_identity, AnimationAction, AnimationClock, AppCommit, AppEffect, AppEvent,
-    AppFrameSnapshot, AppStore, AssetLoadCompletion, AssetLoadOutcome, AssetLoadScope,
-    AssetMetadata, AssetStatus, AuthoredRevision, CommitDisposition, EffectCompletion, FrameTick,
-    LocalPeerDisposition, LocalPeerIngress, LocalPeerLane, LocalPeerReceipt,
-    NavigationSynchronization, PresentationAction, RenderSettings, SemanticAction, Timed,
+    session_node_identity, AnimationAction, AnimationClipDescriptor, AnimationClock, AppCommit,
+    AppEffect, AppEvent, AppFrameSnapshot, AppStore, AssetLoadCompletion, AssetLoadOutcome,
+    AssetLoadScope, AssetMetadata, AssetStatus, AuthoredRevision, CommitDisposition,
+    EffectCompletion, FrameTick, LocalPeerDisposition, LocalPeerIngress, LocalPeerLane,
+    LocalPeerReceipt, NavigationSynchronization, PresentationAction,
+    PrimarySceneInstallCompletion, PrimarySceneInstallMetadata, PrimarySceneInstallOutcome,
+    RenderSettings, SemanticAction, Timed,
 };
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -361,6 +363,63 @@ impl HyperscopeAppShadow {
             request_id,
             asset_id,
             AssetLoadOutcome::Failed {
+                code: code.to_owned(),
+                message: message.to_owned(),
+                retryable,
+            },
+        )
+    }
+
+    /// Complete the distinct renderer-install job emitted after a primary
+    /// asset has decoded. The browser supplies backend-neutral facts only
+    /// after upload and activation have both succeeded.
+    #[wasm_bindgen(js_name = completePrimarySceneInstalled)]
+    pub fn complete_primary_scene_installed(
+        &self,
+        request_id: &str,
+        asset_id: &str,
+        num_vertices: u32,
+        num_faces: u32,
+        animation_clips_json: &str,
+    ) -> Result<JsValue, JsValue> {
+        let clips = serde_json::from_str::<Vec<ShadowAnimationClipInput>>(animation_clips_json)
+            .map_err(|error| {
+                js_error(format!(
+                    "primary scene animation clips are invalid JSON: {error}"
+                ))
+            })?
+            .into_iter()
+            .map(|clip| AnimationClipDescriptor {
+                index: clip.index,
+                name: clip.name,
+                time_min_seconds: clip.time_min_seconds,
+                time_max_seconds: clip.time_max_seconds,
+            })
+            .collect();
+        self.complete_primary_scene_install(
+            request_id,
+            asset_id,
+            PrimarySceneInstallOutcome::Installed(PrimarySceneInstallMetadata {
+                num_vertices,
+                num_faces,
+                animation_clips: clips,
+            }),
+        )
+    }
+
+    #[wasm_bindgen(js_name = completePrimarySceneInstallFailed)]
+    pub fn complete_primary_scene_install_failed(
+        &self,
+        request_id: &str,
+        asset_id: &str,
+        code: &str,
+        message: &str,
+        retryable: bool,
+    ) -> Result<JsValue, JsValue> {
+        self.complete_primary_scene_install(
+            request_id,
+            asset_id,
+            PrimarySceneInstallOutcome::Failed {
                 code: code.to_owned(),
                 message: message.to_owned(),
                 retryable,
@@ -1413,6 +1472,32 @@ impl HyperscopeAppShadow {
                 metadata: asset.metadata,
             }
         });
+        let installed_primary_scene = self.store.installed_primary_scene_snapshot().map(|scene| {
+            ShadowInstalledPrimaryScene {
+                asset: ShadowReadyPrimaryAsset {
+                    request_id: scene.asset.request_id.to_string(),
+                    asset_id: scene.asset.descriptor.id.to_string(),
+                    uri: scene.asset.descriptor.uri,
+                    media_type: scene.asset.descriptor.media_type,
+                    byte_length: scene.asset.byte_length,
+                    content_digest: scene.asset.content_digest,
+                    metadata: scene.asset.metadata,
+                },
+                num_vertices: scene.install.num_vertices,
+                num_faces: scene.install.num_faces,
+                animation_clips: scene
+                    .install
+                    .animation_clips
+                    .into_iter()
+                    .map(|clip| ShadowAnimationClip {
+                        index: clip.index,
+                        name: clip.name,
+                        time_min_seconds: clip.time_min_seconds,
+                        time_max_seconds: clip.time_max_seconds,
+                    })
+                    .collect(),
+            }
+        });
         let authored = self.store.authored_scene_snapshot();
         let assets = self
             .store
@@ -1459,6 +1544,13 @@ impl HyperscopeAppShadow {
                 .loading_primary_scene_request
                 .map(|request| request.to_string()),
             ready_primary_asset,
+            installing_primary_scene_asset: summary
+                .installing_primary_scene_asset
+                .map(|asset| asset.to_string()),
+            installing_primary_scene_request: summary
+                .installing_primary_scene_request
+                .map(|request| request.to_string()),
+            installed_primary_scene,
             authored_projection_revision: authored
                 .projection_revision
                 .map(|revision| revision.to_string()),
@@ -1653,6 +1745,35 @@ impl HyperscopeAppShadow {
             .map_err(js_error)?;
         commit_to_js(&commit)
     }
+
+    fn complete_primary_scene_install(
+        &self,
+        request_id: &str,
+        asset_id: &str,
+        outcome: PrimarySceneInstallOutcome,
+    ) -> Result<JsValue, JsValue> {
+        let commit = self
+            .store
+            .dispatch(AppEvent::EffectCompleted(
+                EffectCompletion::PrimarySceneInstall(PrimarySceneInstallCompletion {
+                    request_id: request_id_from_str(request_id)?,
+                    asset_id: asset_id_from_str(asset_id)?,
+                    outcome,
+                }),
+            ))
+            .map_err(js_error)?;
+        commit_to_js(&commit)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowAnimationClipInput {
+    index: u32,
+    #[serde(default)]
+    name: String,
+    time_min_seconds: f64,
+    time_max_seconds: f64,
 }
 
 #[derive(Serialize)]
@@ -1717,6 +1838,14 @@ enum ShadowEffect {
         request_id: String,
         asset_id: String,
     },
+    InstallPrimaryScene {
+        request_id: String,
+        asset_id: String,
+    },
+    CancelPrimarySceneInstall {
+        request_id: String,
+        asset_id: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -1732,6 +1861,9 @@ struct ShadowSnapshot {
     loading_primary_scene_asset: Option<String>,
     loading_primary_scene_request: Option<String>,
     ready_primary_asset: Option<ShadowReadyPrimaryAsset>,
+    installing_primary_scene_asset: Option<String>,
+    installing_primary_scene_request: Option<String>,
+    installed_primary_scene: Option<ShadowInstalledPrimaryScene>,
     authored_projection_revision: Option<String>,
     authored_assets: Vec<ShadowAuthoredAsset>,
     authored_entities: Vec<ShadowAuthoredEntity>,
@@ -1752,6 +1884,24 @@ struct ShadowReadyPrimaryAsset {
     content_digest: Option<[u8; 32]>,
     #[serde(skip_serializing_if = "AssetMetadata::is_empty")]
     metadata: AssetMetadata,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowInstalledPrimaryScene {
+    asset: ShadowReadyPrimaryAsset,
+    num_vertices: u32,
+    num_faces: u32,
+    animation_clips: Vec<ShadowAnimationClip>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowAnimationClip {
+    index: u32,
+    name: String,
+    time_min_seconds: f64,
+    time_max_seconds: f64,
 }
 
 #[derive(Serialize)]
@@ -2143,6 +2293,20 @@ fn shadow_commit(commit: &AppCommit) -> ShadowCommit {
                 request_id,
                 asset_id,
             } => ShadowEffect::CancelAssetLoad {
+                request_id: request_id.to_string(),
+                asset_id: asset_id.to_string(),
+            },
+            AppEffect::InstallPrimaryScene {
+                request_id,
+                asset_id,
+            } => ShadowEffect::InstallPrimaryScene {
+                request_id: request_id.to_string(),
+                asset_id: asset_id.to_string(),
+            },
+            AppEffect::CancelPrimarySceneInstall {
+                request_id,
+                asset_id,
+            } => ShadowEffect::CancelPrimarySceneInstall {
                 request_id: request_id.to_string(),
                 asset_id: asset_id.to_string(),
             },

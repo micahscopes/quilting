@@ -15,6 +15,24 @@ const cancelEffect = (requestId, assetId) => ({
   asset_id: assetId,
 });
 
+const installEffect = (requestId, assetId) => ({
+  type: 'install_primary_scene',
+  request_id: requestId,
+  asset_id: assetId,
+});
+
+const cancelInstallEffect = (requestId, assetId) => ({
+  type: 'cancel_primary_scene_install',
+  request_id: requestId,
+  asset_id: assetId,
+});
+
+function authorizeInstall(host, token) {
+  return host.beginInstall(token, {
+    effects: [installEffect(token.requestId, token.assetId)],
+  });
+}
+
 function begin(host, {
   requestId,
   assetId,
@@ -51,6 +69,8 @@ test('rust mode aborts and fences a superseded primary scene', () => {
   assert.equal(host.mayProcess(first), true);
   assert.equal(host.mayInstall(first), false);
   host.recordCompletion(first, 'applied');
+  assert.equal(host.mayInstall(first), false);
+  authorizeInstall(host, first);
   assert.equal(host.mayInstall(first), true);
 
   const second = begin(host, {
@@ -59,7 +79,7 @@ test('rust mode aborts and fences a superseded primary scene', () => {
     uri: 'chess.glb',
     scope: 'primary_scene',
     effects: [
-      cancelEffect('request-1', 'horse'),
+      cancelInstallEffect('request-1', 'horse'),
       fetchEffect('request-2', 'chess', 'chess.glb'),
     ],
   }).token;
@@ -69,6 +89,7 @@ test('rust mode aborts and fences a superseded primary scene', () => {
   assert.equal(host.mayProcess(second), true);
   assert.equal(host.mayInstall(second), false);
   host.recordCompletion(second, 'applied');
+  authorizeInstall(host, second);
   assert.equal(host.mayInstall(second), true);
 });
 
@@ -113,6 +134,45 @@ test('rust mode validates a full commit before superseding the current job', () 
   assert.equal(host.primary, first);
 });
 
+test('rust mode requires the decoded completion to authorize primary installation', () => {
+  const host = new BrowserAssetEffectHost('rust');
+  const token = begin(host, {
+    requestId: 'request-1', assetId: 'horse', uri: 'horse.glb', scope: 'primary_scene',
+  }).token;
+  host.recordCompletion(token, 'applied');
+  assert.equal(host.mayInstall(token), false);
+  assert.throws(
+    () => host.beginInstall(token, { effects: [] }),
+    /exactly one matching install effect/,
+  );
+  assert.equal(host.mayInstall(token), false);
+  authorizeInstall(host, token);
+  assert.equal(host.mayInstall(token), true);
+  assert.equal(host.recordInstallCompletion(token, 'applied'), 'applied');
+  assert.equal(token.installDisposition, 'applied');
+});
+
+test('rust mode rejects a replacement that omits the active install cancellation', () => {
+  const host = new BrowserAssetEffectHost('rust');
+  const first = begin(host, {
+    requestId: 'request-1', assetId: 'horse', uri: 'horse.glb', scope: 'primary_scene',
+  }).token;
+  host.recordCompletion(first, 'applied');
+  authorizeInstall(host, first);
+  assert.throws(
+    () => begin(host, {
+      requestId: 'request-2',
+      assetId: 'chess',
+      uri: 'chess.glb',
+      scope: 'primary_scene',
+      effects: [fetchEffect('request-2', 'chess', 'chess.glb')],
+    }),
+    /omitted cancel_primary_scene_install/,
+  );
+  assert.equal(first.signal.aborted, false);
+  assert.equal(host.primary, first);
+});
+
 test('Rust cancellation effects abort independent same-asset jobs', () => {
   const host = new BrowserAssetEffectHost('rust');
   const first = begin(host, {
@@ -151,6 +211,7 @@ test('rust mode serializes primary installations and skips a queued stale job', 
     requestId: 'request-1', assetId: 'horse', uri: 'horse.glb', scope: 'primary_scene',
   }).token;
   host.recordCompletion(first, 'applied');
+  authorizeInstall(host, first);
   let releaseFirst;
   const firstBlocked = new Promise(resolve => { releaseFirst = resolve; });
   const order = [];
@@ -168,11 +229,12 @@ test('rust mode serializes primary installations and skips a queued stale job', 
     uri: 'chess.glb',
     scope: 'primary_scene',
     effects: [
-      cancelEffect('request-1', 'horse'),
+      cancelInstallEffect('request-1', 'horse'),
       fetchEffect('request-2', 'chess', 'chess.glb'),
     ],
   }).token;
   host.recordCompletion(second, 'applied');
+  authorizeInstall(host, second);
   const secondInstall = host.runInstall(second, async () => {
     order.push('second');
     return true;

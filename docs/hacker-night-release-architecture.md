@@ -388,11 +388,22 @@ The first application boundary is now explicit:
   events, device reports, renderer handles, or wall clock. Decimal JSON uses
   exact `f64` round trips.
   The native `replay` feature is excluded from browser builds;
-  `hyperscope-replay` version 0.19 walks every checked-in cue, every current
+  `hyperscope-replay` version 0.20 walks every checked-in cue, every current
   semantic navigation action, and every current application event lane. It
   records the key-sorted authored asset/entity materialization as well as its
   atomic projection revision, so stale or invalid Blender-style checkpoints
   cannot silently mutate the scene oracle.
+  Version 0.20 separates a successfully fetched/decoded primary candidate from
+  a renderer-resident primary scene. Decode emits an explicit
+  `InstallPrimaryScene` effect; only a matching, validated completion can
+  publish topology and animation-clip facts as installed. A newer request
+  cancels an in-flight installation, stale results are diagnostic-only, and a
+  failed replacement preserves the preceding resident scene. The replay
+  adapter removes this new job when reading 0.19 and older scripts, so opening
+  an old trace does not manufacture renderer work that its schema never had.
+  Version 0.19 added the last successfully decoded primary candidate, including
+  exact request/asset identity, byte length, digest, and provenance, without
+  claiming that candidate had reached a renderer.
   Version 0.18 makes render style, resolution override, tessellation policy,
   resident-atlas exponent, and face-edge grading one atomic reducer value and
   includes it in every committed replay state. Cue activation replaces only
@@ -466,7 +477,7 @@ The first application boundary is now explicit:
   semantic-target-presence policy without inferring aim mode from inversion.
   Version 0.5 retains selected source bounds and clicked pivots and derives
   output-chart pivots/radii in the application snapshot; a projection pole
-  clears only those derived values. The reader accepts 0.4 through 0.18 inputs,
+  clears only those derived values. The reader accepts 0.4 through 0.19 inputs,
   but only 0.4 migrates an omitted source pivot to the bound center.
   Versions 0.4 and 0.5 reject 0.6-only actions rather than silently changing
   their meaning; every pre-0.7 unscoped focus anchor is rejected. Action

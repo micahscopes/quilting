@@ -6,10 +6,11 @@
 //! future render backends can consume the same oracle.
 
 use crate::{
-    AnimationAction, AppCommit, AppEffect, AppEvent, AppStore, AssetLoadCompletion,
-    AssetLoadOutcome, AssetLoadScope, AssetMetadata, AssetStatus, AuthoredRevision,
-    CommitDisposition, EffectCompletion, FrameTick, NavigationSynchronization, PresentationAction,
-    ReceivedPresence, RenderSettings, SemanticAction, Timed,
+    AnimationAction, AnimationClipDescriptor, AppCommit, AppEffect, AppEvent, AppStore,
+    AssetLoadCompletion, AssetLoadOutcome, AssetLoadScope, AssetMetadata, AssetStatus,
+    AuthoredRevision, CommitDisposition, EffectCompletion, FrameTick, NavigationSynchronization,
+    PresentationAction, PrimarySceneInstallCompletion, PrimarySceneInstallMetadata,
+    PrimarySceneInstallOutcome, ReceivedPresence, RenderSettings, SemanticAction, Timed,
 };
 use hyperscape::{
     AuthoredCamera, AuthoredFocus, FocusSphere, NavigationAction, NavigationFrame,
@@ -25,7 +26,8 @@ use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
 
-pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.19";
+pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.20";
+pub const LEGACY_APP_REPLAY_VERSION_0_19: &str = "hyperscope-app-replay/0.19";
 pub const LEGACY_APP_REPLAY_VERSION_0_18: &str = "hyperscope-app-replay/0.18";
 pub const LEGACY_APP_REPLAY_VERSION_0_17: &str = "hyperscope-app-replay/0.17";
 pub const LEGACY_APP_REPLAY_VERSION_0_16: &str = "hyperscope-app-replay/0.16";
@@ -60,6 +62,7 @@ enum ReplaySchema {
     V0_17,
     V0_18,
     V0_19,
+    V0_20,
 }
 pub const APP_REPLAY_FINGERPRINT_ALGORITHM: &str = "fnv1a-128-json";
 const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
@@ -128,6 +131,11 @@ pub enum AppReplayEvent {
         request_id: RequestId,
         asset_id: AssetId,
         outcome: ReplayAssetLoadOutcome,
+    },
+    CompletePrimarySceneInstall {
+        request_id: RequestId,
+        asset_id: AssetId,
+        outcome: ReplayPrimarySceneInstallOutcome,
     },
     ReceivePresence {
         envelope: PresenceEnvelope,
@@ -241,6 +249,105 @@ impl TryFrom<ReplayAssetLoadOutcome> for AssetLoadOutcome {
                 message,
                 retryable,
             }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayAnimationClipDescriptor {
+    pub index: u32,
+    pub name: String,
+    pub time_min_seconds: f64,
+    pub time_max_seconds: f64,
+}
+
+impl From<AnimationClipDescriptor> for ReplayAnimationClipDescriptor {
+    fn from(clip: AnimationClipDescriptor) -> Self {
+        Self {
+            index: clip.index,
+            name: clip.name,
+            time_min_seconds: clip.time_min_seconds,
+            time_max_seconds: clip.time_max_seconds,
+        }
+    }
+}
+
+impl From<ReplayAnimationClipDescriptor> for AnimationClipDescriptor {
+    fn from(clip: ReplayAnimationClipDescriptor) -> Self {
+        Self {
+            index: clip.index,
+            name: clip.name,
+            time_min_seconds: clip.time_min_seconds,
+            time_max_seconds: clip.time_max_seconds,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayPrimarySceneInstallMetadata {
+    pub num_vertices: u32,
+    pub num_faces: u32,
+    pub animation_clips: Vec<ReplayAnimationClipDescriptor>,
+}
+
+impl From<PrimarySceneInstallMetadata> for ReplayPrimarySceneInstallMetadata {
+    fn from(metadata: PrimarySceneInstallMetadata) -> Self {
+        Self {
+            num_vertices: metadata.num_vertices,
+            num_faces: metadata.num_faces,
+            animation_clips: metadata
+                .animation_clips
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}
+
+impl From<ReplayPrimarySceneInstallMetadata> for PrimarySceneInstallMetadata {
+    fn from(metadata: ReplayPrimarySceneInstallMetadata) -> Self {
+        Self {
+            num_vertices: metadata.num_vertices,
+            num_faces: metadata.num_faces,
+            animation_clips: metadata
+                .animation_clips
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ReplayPrimarySceneInstallOutcome {
+    Installed {
+        metadata: ReplayPrimarySceneInstallMetadata,
+    },
+    Failed {
+        code: String,
+        message: String,
+        retryable: bool,
+    },
+}
+
+impl From<ReplayPrimarySceneInstallOutcome> for PrimarySceneInstallOutcome {
+    fn from(outcome: ReplayPrimarySceneInstallOutcome) -> Self {
+        match outcome {
+            ReplayPrimarySceneInstallOutcome::Installed { metadata } => {
+                Self::Installed(metadata.into())
+            }
+            ReplayPrimarySceneInstallOutcome::Failed {
+                code,
+                message,
+                retryable,
+            } => Self::Failed {
+                code,
+                message,
+                retryable,
+            },
         }
     }
 }
@@ -769,6 +876,14 @@ pub enum AppReplayEffect {
         request_id: RequestId,
         asset_id: AssetId,
     },
+    InstallPrimaryScene {
+        request_id: RequestId,
+        asset_id: AssetId,
+    },
+    CancelPrimarySceneInstall {
+        request_id: RequestId,
+        asset_id: AssetId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -790,6 +905,12 @@ pub struct AppReplayState {
     pub loading_primary_scene_request: Option<RequestId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ready_primary_asset: Option<AppReplayPrimaryAssetState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installing_primary_scene_asset: Option<AssetId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installing_primary_scene_request: Option<RequestId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_primary_scene: Option<AppReplayInstalledPrimarySceneState>,
     pub assets: Vec<AppReplayAssetState>,
     pub authored_assets: Vec<AssetDescriptor>,
     pub authored_entities: Vec<AppReplayAuthoredEntityState>,
@@ -825,6 +946,13 @@ pub struct AppReplayPrimaryAssetState {
     pub content_digest: Option<[u8; 32]>,
     #[serde(default, skip_serializing_if = "AssetMetadata::is_empty")]
     pub metadata: AssetMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppReplayInstalledPrimarySceneState {
+    pub asset: AppReplayPrimaryAssetState,
+    pub install: ReplayPrimarySceneInstallMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -966,7 +1094,8 @@ pub fn run_app_replay(script: &AppReplayScript) -> Result<AppReplayTrace, AppRep
         LEGACY_APP_REPLAY_VERSION_0_16 => ReplaySchema::V0_16,
         LEGACY_APP_REPLAY_VERSION_0_17 => ReplaySchema::V0_17,
         LEGACY_APP_REPLAY_VERSION_0_18 => ReplaySchema::V0_18,
-        APP_REPLAY_VERSION => ReplaySchema::V0_19,
+        LEGACY_APP_REPLAY_VERSION_0_19 => ReplaySchema::V0_19,
+        APP_REPLAY_VERSION => ReplaySchema::V0_20,
         _ => return Err(AppReplayError::UnsupportedVersion(script.version.clone())),
     };
     let store = AppStore::default();
@@ -1065,7 +1194,37 @@ fn replay_event(
     schema: ReplaySchema,
 ) -> AppReplayOutcome {
     let result: Result<AppCommit, String> = replay_app_event(event, schema)
-        .and_then(|event| store.dispatch(event).map_err(|error| error.to_string()));
+        .and_then(|event| store.dispatch(event).map_err(|error| error.to_string()))
+        .map(|mut commit| {
+            // Schemas through 0.19 ended primary loading at decoded bytes. A
+            // current reducer emits the new renderer-install effect after the
+            // same completion, so erase that newly introduced job/effect when
+            // interpreting an old script. This is an adapter migration fence,
+            // not a second application mutation path: only replay can request
+            // historical reducer semantics.
+            if schema != ReplaySchema::V0_20 {
+                let pending_install = commit.effects.iter().find_map(|effect| match effect {
+                    AppEffect::InstallPrimaryScene {
+                        request_id,
+                        asset_id,
+                    } => Some((*request_id, *asset_id)),
+                    _ => None,
+                });
+                if let Some(pending_install) = pending_install {
+                    {
+                        let mut state = store.lock_state();
+                        if state.primary_scene_install == Some(pending_install) {
+                            state.primary_scene_install = None;
+                        }
+                    }
+                    store.flush_read_models();
+                    commit.effects.retain(|effect| {
+                        !matches!(effect, AppEffect::InstallPrimaryScene { .. })
+                    });
+                }
+            }
+            commit
+        });
     match result {
         Ok(commit) => AppReplayOutcome::Committed {
             revision: commit.revision,
@@ -1130,12 +1289,16 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_17
                     | ReplaySchema::V0_18
                     | ReplaySchema::V0_19
+                    | ReplaySchema::V0_20
             ) {
                 return Err("animation playback actions require app replay 0.11".to_owned());
             }
             if !matches!(
                 schema,
-                ReplaySchema::V0_17 | ReplaySchema::V0_18 | ReplaySchema::V0_19
+                ReplaySchema::V0_17
+                    | ReplaySchema::V0_18
+                    | ReplaySchema::V0_19
+                    | ReplaySchema::V0_20
             )
                 && matches!(
                     action,
@@ -1157,7 +1320,10 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
             at_seconds,
             settings,
         } => {
-            if !matches!(schema, ReplaySchema::V0_18 | ReplaySchema::V0_19) {
+            if !matches!(
+                schema,
+                ReplaySchema::V0_18 | ReplaySchema::V0_19 | ReplaySchema::V0_20
+            ) {
                 return Err("render settings actions require app replay 0.18".to_owned());
             }
             Ok(AppEvent::Input(Timed {
@@ -1189,7 +1355,8 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_16
                     | ReplaySchema::V0_17
                     | ReplaySchema::V0_18
-                    | ReplaySchema::V0_19 => (*scope).into(),
+                    | ReplaySchema::V0_19
+                    | ReplaySchema::V0_20 => (*scope).into(),
                     _ if *scope == ReplayAssetLoadScope::Asset => AssetLoadScope::Asset,
                     _ => {
                         return Err(
@@ -1226,6 +1393,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_17
                     | ReplaySchema::V0_18
                     | ReplaySchema::V0_19
+                    | ReplaySchema::V0_20
             ) {
                 return Err("asset provenance requires app replay 0.12".to_owned());
             }
@@ -1236,6 +1404,22 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     outcome: outcome.clone().try_into()?,
                 },
             )))
+        }
+        AppReplayEvent::CompletePrimarySceneInstall {
+            request_id,
+            asset_id,
+            outcome,
+        } => {
+            if schema != ReplaySchema::V0_20 {
+                return Err("primary scene installation requires app replay 0.20".to_owned());
+            }
+            Ok(AppEvent::EffectCompleted(
+                EffectCompletion::PrimarySceneInstall(PrimarySceneInstallCompletion {
+                    request_id: *request_id,
+                    asset_id: *asset_id,
+                    outcome: outcome.clone().into(),
+                }),
+            ))
         }
         AppReplayEvent::ReceivePresence {
             envelope,
@@ -1274,6 +1458,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_17
             | ReplaySchema::V0_18
             | ReplaySchema::V0_19
+            | ReplaySchema::V0_20
     )
         && matches!(action, ReplayNavigationAction::ApplyCameraIntent { .. })
     {
@@ -1287,6 +1472,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_17
             | ReplaySchema::V0_18
             | ReplaySchema::V0_19
+            | ReplaySchema::V0_20
     )
         && matches!(action, ReplayNavigationAction::ApplyTurntableIntent { .. })
     {
@@ -1299,6 +1485,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_17
             | ReplaySchema::V0_18
             | ReplaySchema::V0_19
+            | ReplaySchema::V0_20
     )
         && matches!(action, ReplayNavigationAction::ReframeSelection { .. })
     {
@@ -1310,6 +1497,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_17
             | ReplaySchema::V0_18
             | ReplaySchema::V0_19
+            | ReplaySchema::V0_20
     )
         && matches!(action, ReplayNavigationAction::AimAtSelection { .. })
     {
@@ -1336,6 +1524,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_17
             | ReplaySchema::V0_18
             | ReplaySchema::V0_19
+            | ReplaySchema::V0_20
     ) && matches!(
         action,
         ReplayNavigationAction::RefitFocusAndToggleInversion { .. }
@@ -1369,6 +1558,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_17
             | ReplaySchema::V0_18
             | ReplaySchema::V0_19
+            | ReplaySchema::V0_20
     ) && matches!(
         action,
         ReplayNavigationAction::AnchorFocus { asset_id: None, .. }
@@ -1391,6 +1581,20 @@ fn replay_effect(effect: &AppEffect) -> AppReplayEffect {
             request_id,
             asset_id,
         } => AppReplayEffect::CancelAssetLoad {
+            request_id: *request_id,
+            asset_id: *asset_id,
+        },
+        AppEffect::InstallPrimaryScene {
+            request_id,
+            asset_id,
+        } => AppReplayEffect::InstallPrimaryScene {
+            request_id: *request_id,
+            asset_id: *asset_id,
+        },
+        AppEffect::CancelPrimarySceneInstall {
+            request_id,
+            asset_id,
+        } => AppReplayEffect::CancelPrimarySceneInstall {
             request_id: *request_id,
             asset_id: *asset_id,
         },
@@ -1428,6 +1632,25 @@ fn replay_state(store: &AppStore) -> AppReplayState {
                     .expect("supported Rust targets have at most 64-bit usize"),
                 content_digest: asset.content_digest,
                 metadata: asset.metadata.clone(),
+            }
+        }),
+        installing_primary_scene_asset: state
+            .primary_scene_install
+            .map(|(_, asset)| asset),
+        installing_primary_scene_request: state
+            .primary_scene_install
+            .map(|(request, _)| request),
+        installed_primary_scene: state.installed_primary_scene.as_ref().map(|scene| {
+            AppReplayInstalledPrimarySceneState {
+                asset: AppReplayPrimaryAssetState {
+                    request_id: scene.asset.request_id,
+                    descriptor: scene.asset.descriptor.clone(),
+                    byte_length: u64::try_from(scene.asset.byte_length)
+                        .expect("supported Rust targets have at most 64-bit usize"),
+                    content_digest: scene.asset.content_digest,
+                    metadata: scene.asset.metadata.clone(),
+                },
+                install: scene.install.clone().into(),
             }
         }),
         assets: state
@@ -1576,6 +1799,18 @@ mod tests {
             right.loading_primary_scene_request
         );
         assert_eq!(left.ready_primary_asset, right.ready_primary_asset);
+        assert_eq!(
+            left.installing_primary_scene_asset,
+            right.installing_primary_scene_asset
+        );
+        assert_eq!(
+            left.installing_primary_scene_request,
+            right.installing_primary_scene_request
+        );
+        assert_eq!(
+            left.installed_primary_scene,
+            right.installed_primary_scene
+        );
         assert_eq!(
             left.authored_projection_revision,
             right.authored_projection_revision
@@ -1797,6 +2032,9 @@ mod tests {
             AppEvent::Frame(_) => "frame",
             AppEvent::EffectCompleted(completion) => match completion {
                 EffectCompletion::AssetLoad(_) => "effect_completed_asset_load",
+                EffectCompletion::PrimarySceneInstall(_) => {
+                    "effect_completed_primary_scene_install"
+                }
             },
             AppEvent::RemotePresence(_) => "remote_presence",
             AppEvent::AuthoredRevision(_) => "authored_revision",
@@ -1816,12 +2054,24 @@ mod tests {
         let navigation: AppReplayScript = serde_json::from_str(NAVIGATION_FIXTURE).unwrap();
         let orchestration: AppReplayScript = serde_json::from_str(ORCHESTRATION_FIXTURE).unwrap();
         let presentation = presentation_walkthrough_replay(fixture());
+        let install_completion = [AppReplayEvent::CompletePrimarySceneInstall {
+            request_id: RequestId::from_u128(0xb0).unwrap(),
+            asset_id: AssetId::from_u128(0xa0).unwrap(),
+            outcome: ReplayPrimarySceneInstallOutcome::Installed {
+                metadata: ReplayPrimarySceneInstallMetadata {
+                    num_vertices: 3,
+                    num_faces: 1,
+                    animation_clips: Vec::new(),
+                },
+            },
+        }];
         let covered = presentation
             .events
             .iter()
             .chain(navigation.events.iter())
             .chain(orchestration.events.iter())
-            .filter_map(|event| replay_app_event(event, ReplaySchema::V0_19).ok())
+            .chain(install_completion.iter())
+            .filter_map(|event| replay_app_event(event, ReplaySchema::V0_20).ok())
             .map(|event| authoritative_app_event_name(&event))
             .collect::<std::collections::BTreeSet<_>>();
         let authored_covered = orchestration
@@ -1840,6 +2090,7 @@ mod tests {
                 "authored_revision",
                 "cancel_asset",
                 "effect_completed_asset_load",
+                "effect_completed_primary_scene_install",
                 "frame",
                 "navigate",
                 "navigation_synchronized",
@@ -2256,7 +2507,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_0_19_projects_ready_primary_asset_without_reinterpreting_0_18() {
+    fn replay_0_20_records_renderer_install_without_reinterpreting_0_19() {
         let asset = AssetDescriptor {
             id: AssetId::from_u128(1).unwrap(),
             uri: "horse.glb".to_owned(),
@@ -2264,7 +2515,7 @@ mod tests {
             content_digest: None,
         };
         let request_id = RequestId::from_u128(10).unwrap();
-        let events = vec![
+        let decoded_events = vec![
             AppReplayEvent::RequestAsset {
                 sequence: 1,
                 at_seconds: 0.0,
@@ -2283,28 +2534,65 @@ mod tests {
             },
         ];
 
-        let current = run_app_replay(&AppReplayScript::new(events.clone())).unwrap();
+        let mut current_events = decoded_events.clone();
+        current_events.push(AppReplayEvent::CompletePrimarySceneInstall {
+            request_id,
+            asset_id: asset.id,
+            outcome: ReplayPrimarySceneInstallOutcome::Installed {
+                metadata: ReplayPrimarySceneInstallMetadata {
+                    num_vertices: 796,
+                    num_faces: 984,
+                    animation_clips: vec![ReplayAnimationClipDescriptor {
+                        index: 0,
+                        name: "gallop".to_owned(),
+                        time_min_seconds: 0.0,
+                        time_max_seconds: 1.5,
+                    }],
+                },
+            },
+        });
+        let current = run_app_replay(&AppReplayScript::new(current_events)).unwrap();
         assert_eq!(
             current.records[1].state.ready_primary_asset,
             Some(AppReplayPrimaryAssetState {
                 request_id,
-                descriptor: asset,
+                descriptor: asset.clone(),
                 byte_length: 123,
                 content_digest: Some([9; 32]),
                 metadata: AssetMetadata::default(),
             })
         );
+        assert_eq!(
+            committed_effects(&current.records[1]),
+            &[AppReplayEffect::InstallPrimaryScene {
+                request_id,
+                asset_id: asset.id,
+            }]
+        );
+        assert_eq!(
+            current.records[1].state.installing_primary_scene_request,
+            Some(request_id)
+        );
+        assert_eq!(
+            current.records[2]
+                .state
+                .installed_primary_scene
+                .as_ref()
+                .unwrap()
+                .asset
+                .descriptor,
+            asset
+        );
 
         let legacy = run_app_replay(&AppReplayScript {
-            version: LEGACY_APP_REPLAY_VERSION_0_18.to_owned(),
-            events,
+            version: LEGACY_APP_REPLAY_VERSION_0_19.to_owned(),
+            events: decoded_events,
         })
         .unwrap();
-        assert_semantic_state_eq(&current.records[1].state, &legacy.records[1].state);
-        assert!(matches!(
-            legacy.records[1].outcome,
-            AppReplayOutcome::Committed { .. }
-        ));
+        assert_eq!(legacy.records[1].state.ready_primary_asset, current.records[1].state.ready_primary_asset);
+        assert_eq!(legacy.records[1].state.installing_primary_scene_asset, None);
+        assert_eq!(legacy.records[1].state.installed_primary_scene, None);
+        assert!(committed_effects(&legacy.records[1]).is_empty());
     }
 
     #[test]

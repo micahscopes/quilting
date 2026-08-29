@@ -4820,6 +4820,12 @@ function completeAppAssetShadow(token, bufferOrByteLength, metadata = null) {
     rustAppShadowDiagnostics.lastCommit = commit;
     if (commit.disposition === 'ignored_stale') rustAppShadowDiagnostics.staleCompletions += 1;
     browserAssetEffectHost.recordCompletion(token, commit.disposition);
+    if (token.scope === 'primary_scene' && commit.disposition === 'applied') {
+      const hosted = browserAssetEffectHost.beginInstall(token, commit);
+      for (const mismatch of hosted.mismatches) {
+        recordAppShadowMismatch('install_effect', `${token.uri}: ${mismatch}`);
+      }
+    }
     const snapshot = refreshAppShadowSnapshot();
     const asset = snapshot?.assets.find(candidate => candidate.id === token.assetId);
     if (commit.disposition === 'applied'
@@ -4835,6 +4841,92 @@ function completeAppAssetShadow(token, bufferOrByteLength, metadata = null) {
     recordAppShadowMismatch(
       'completion_exception',
       `${token.uri}: ${error?.message || String(error)}`,
+    );
+    return 'error';
+  }
+}
+
+function primarySceneInstallFacts(info) {
+  const animationClips = (info?.animations || []).map((clip, index) => {
+    const timeMin = Number(clip.time_min ?? clip.t_min ?? 0);
+    const explicitTimeMax = Number(clip.time_max ?? clip.t_max);
+    const duration = Number(clip.duration);
+    const timeMax = Number.isFinite(explicitTimeMax)
+      ? explicitTimeMax
+      : timeMin + (Number.isFinite(duration) ? Math.max(0, duration) : 0);
+    return {
+      index,
+      name: String(clip.name || ''),
+      timeMinSeconds: timeMin,
+      timeMaxSeconds: timeMax,
+    };
+  });
+  return {
+    numVertices: Number(currentSkinData?.numVertices || info?.num_vertices) || 0,
+    numFaces: Number(currentPrimaryFaceCount || info?.num_faces) || 0,
+    animationClips,
+  };
+}
+
+function completeAppPrimarySceneInstall(token, info) {
+  if (!token || token.scope !== 'primary_scene' || token.installCompleted || !rustAppShadow) {
+    return 'unobserved';
+  }
+  const facts = primarySceneInstallFacts(info);
+  try {
+    const commit = rustAppShadow.completePrimarySceneInstalled(
+      token.requestId,
+      token.assetId,
+      facts.numVertices,
+      facts.numFaces,
+      JSON.stringify(facts.animationClips),
+    );
+    token.installCompleted = true;
+    rustAppShadowDiagnostics.lastCommit = commit;
+    if (commit.disposition === 'ignored_stale') rustAppShadowDiagnostics.staleCompletions += 1;
+    browserAssetEffectHost.recordInstallCompletion(token, commit.disposition);
+    const snapshot = refreshAppShadowSnapshot();
+    if (commit.disposition === 'applied'
+        && snapshot?.installedPrimaryScene?.asset?.assetId !== token.assetId) {
+      recordAppShadowMismatch(
+        'installed_projection',
+        `Rust installed-scene projection diverged for ${token.uri}`,
+      );
+    }
+    return commit.disposition;
+  } catch (error) {
+    recordAppShadowMismatch(
+      'install_completion_exception',
+      `${token.uri}: ${error?.message || String(error)}`,
+    );
+    if (RUST_ASSET_IMPLEMENTATION === 'rust') throw error;
+    return 'error';
+  }
+}
+
+function failAppPrimarySceneInstall(token, code, error, retryable = false) {
+  if (!token || token.scope !== 'primary_scene' || token.installCompleted || !rustAppShadow) {
+    return 'unobserved';
+  }
+  const message = error?.message || String(error);
+  try {
+    const commit = rustAppShadow.completePrimarySceneInstallFailed(
+      token.requestId,
+      token.assetId,
+      code,
+      message,
+      retryable,
+    );
+    token.installCompleted = true;
+    rustAppShadowDiagnostics.lastCommit = commit;
+    if (commit.disposition === 'ignored_stale') rustAppShadowDiagnostics.staleCompletions += 1;
+    browserAssetEffectHost.recordInstallCompletion(token, commit.disposition);
+    refreshAppShadowSnapshot();
+    return commit.disposition;
+  } catch (shadowError) {
+    recordAppShadowMismatch(
+      'install_failure_exception',
+      `${token.uri}: ${shadowError?.message || String(shadowError)}`,
     );
     return 'error';
   }
@@ -9217,7 +9309,7 @@ async function loadModel(
   sessionAssetId = null,
   assetToken = null,
 ) {
-  return browserAssetEffectHost.runProcess(assetToken, async () => {
+  const decoded = await browserAssetEffectHost.runProcess(assetToken, async () => {
     if (!appAssetMayProcess(assetToken)) return false;
     const byteLength = Number(buffer?.byteLength ?? 0);
     patchLab.active = false;
@@ -9233,18 +9325,30 @@ async function loadModel(
       byteLength,
       resp.result?.asset_metadata || {},
     );
+    return { resp, disposition };
+  });
+  if (!decoded) return false;
+  return browserAssetEffectHost.runInstall(assetToken, async () => {
     if (!appAssetMayInstall(assetToken)) return false;
-    meshInfo = resp.result;
-    const uploaded = await finishModelUpload(
-      resp.result,
-      filename,
-      durableAssetId,
-      disposition === 'applied' ? assetToken?.assetId : sessionAssetId,
-      assetToken,
-    );
-    if (!uploaded || !appAssetMayInstall(assetToken)) return false;
-    activateHyperscape(resp.hyperscapeBytes);
-    return true;
+    meshInfo = decoded.resp.result;
+    try {
+      const uploaded = await finishModelUpload(
+        decoded.resp.result,
+        filename,
+        durableAssetId,
+        decoded.disposition === 'applied' ? assetToken?.assetId : sessionAssetId,
+        assetToken,
+      );
+      if (!uploaded || !appAssetMayInstall(assetToken)) return false;
+      activateHyperscape(decoded.resp.hyperscapeBytes);
+      completeAppPrimarySceneInstall(assetToken, decoded.resp.result);
+      return true;
+    } catch (error) {
+      if (appAssetMayInstall(assetToken)) {
+        failAppPrimarySceneInstall(assetToken, 'renderer_install_failed', error, true);
+      }
+      throw error;
+    }
   });
 }
 
@@ -11617,29 +11721,44 @@ phase('render', ['wasm', 'atlas', 'model'], async () => {
       fromUrl: true,
     });
   } else if (modelData?.result && appAssetMayInstall(modelData.assetToken)) {
-    meshInfo = modelData.result;
-    const installed = await finishModelUpload(
-      modelData.result,
-      modelData.filename,
-      modelData.durableAssetId,
-      modelData.sessionAssetId,
-      modelData.assetToken,
-    );
-    if (installed && appAssetMayInstall(modelData.assetToken)) {
-      activateHyperscape(modelData.buffer);
-      if (RUST_PRESENTATION_ENABLED && rustPresentationSnapshot) {
-        await applyPresentationAnimationState(rustPresentationSnapshot);
-      } else {
-        const animIdx = initRustRouteAdmitted
-          ? Number(initParams.anim)
-          : parseInt(initParams.anim);
-        if (animIdx >= 0 && $('anim-sel').querySelector(`option[value="${animIdx}"]`)) {
-          await selectAnimationIndex(animIdx);
-        } else if (gpuSkinned && restorePendingRouteAnimationClock('startup-animation')) {
-          tickAnimation(animTime, animationPoseClockSeconds);
+    await browserAssetEffectHost.runInstall(modelData.assetToken, async () => {
+      meshInfo = modelData.result;
+      try {
+        const installed = await finishModelUpload(
+          modelData.result,
+          modelData.filename,
+          modelData.durableAssetId,
+          modelData.sessionAssetId,
+          modelData.assetToken,
+        );
+        if (installed && appAssetMayInstall(modelData.assetToken)) {
+          activateHyperscape(modelData.buffer);
+          completeAppPrimarySceneInstall(modelData.assetToken, modelData.result);
+          if (RUST_PRESENTATION_ENABLED && rustPresentationSnapshot) {
+            await applyPresentationAnimationState(rustPresentationSnapshot);
+          } else {
+            const animIdx = initRustRouteAdmitted
+              ? Number(initParams.anim)
+              : parseInt(initParams.anim);
+            if (animIdx >= 0 && $('anim-sel').querySelector(`option[value="${animIdx}"]`)) {
+              await selectAnimationIndex(animIdx);
+            } else if (gpuSkinned && restorePendingRouteAnimationClock('startup-animation')) {
+              tickAnimation(animTime, animationPoseClockSeconds);
+            }
+          }
         }
+      } catch (error) {
+        if (appAssetMayInstall(modelData.assetToken)) {
+          failAppPrimarySceneInstall(
+            modelData.assetToken,
+            'renderer_install_failed',
+            error,
+            true,
+          );
+        }
+        throw error;
       }
-    }
+    });
   } else {
     $('stats').textContent = 'Drop a .glb file to load';
   }
