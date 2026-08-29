@@ -128,6 +128,10 @@ On Rust-authoritative startup the route result contains this complete typed
 render policy, including canonical defaults. JavaScript only converts the
 backend-neutral combined-style name to its legacy control spelling; it does
 not default, round, or clamp an admitted value.
+With `renderstateimpl=rust`, the render and tessellation controls themselves
+are a Leptos view over the committed Rust render signal. A control gesture
+emits the complete policy rather than independently mutating browser signals;
+the legacy HTML controls remain the default and rollback view.
 
 The polytope fixtures are deterministic static GLBs generated from
 `quilting_core::polytope4`. Their closed 3-cell shells are separated before 4D

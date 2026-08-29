@@ -156,18 +156,21 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
   </div>
 
   <div class="section">
-    <label>Render</label>
-    <div class="btns" id="render-btns">
-      <button data-v="pbr" class="a">PBR</button>
-      <button data-v="matcap">Matcap</button>
-      <button data-v="lod">LOD</button>
-      <button data-v="wire">Wire</button>
-      <button data-v="both">Both</button>
-      <button data-v="normals">Normals</button>
-      <button data-v="stretch">Stretch</button>
-      <button data-v="fz-weight">Weight</button>
-      <button data-v="fz-jfa">JFA</button>
-      <button data-v="fz-firmness">Firmness</button>
+    <div id="render-controls-rust" hidden></div>
+    <div id="render-mode-browser">
+      <label>Render</label>
+      <div class="btns" id="render-btns">
+        <button data-v="pbr" class="a">PBR</button>
+        <button data-v="matcap">Matcap</button>
+        <button data-v="lod">LOD</button>
+        <button data-v="wire">Wire</button>
+        <button data-v="both">Both</button>
+        <button data-v="normals">Normals</button>
+        <button data-v="stretch">Stretch</button>
+        <button data-v="fz-weight">Weight</button>
+        <button data-v="fz-jfa">JFA</button>
+        <button data-v="fz-firmness">Firmness</button>
+      </div>
     </div>
   </div>
 
@@ -204,7 +207,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
     </select>
   </div>
 
-  <div class="section">
+  <div class="section" id="render-settings-browser">
     <label>Resolution (0=auto)</label>
     <div class="sr"><input type="range" id="res" min="0" max="6" value="0"><span class="v" id="res-v">auto</span></div>
     <label>Tess density</label>
@@ -3746,6 +3749,9 @@ const rustRenderSettingsDiagnostics = {
   lastBrowser: null,
   lastRust: null,
   lastError: null,
+  viewAuthority: 'browser-fallback',
+  viewMountAttempts: 0,
+  viewMountErrors: 0,
 };
 globalThis.__hyperscopeRenderSettings = rustRenderSettingsDiagnostics;
 
@@ -3826,6 +3832,7 @@ function synchronizeRustRenderSettings() {
     if (RUST_RENDER_SETTINGS_IMPLEMENTATION === 'rust' && app) {
       applyRustRenderSettingsProjection(rust);
       rustRenderSettingsDiagnostics.authorityWrites += 1;
+      ensureRustRenderSettingsView();
     }
     rustRenderSettingsDiagnostics.state =
       RUST_RENDER_SETTINGS_IMPLEMENTATION === 'rust' ? 'authoritative' : 'observing';
@@ -4098,6 +4105,94 @@ function ensureRustNavigationStatusView() {
     host.hidden = true;
     rustAppShadowDiagnostics.navigationStatusMountErrors += 1;
     recordAppShadowMismatch('navigation_status_mount', error?.message || String(error));
+    return false;
+  }
+}
+
+function useBrowserRenderSettingsView() {
+  const host = $('render-controls-rust');
+  const modeFallback = $('render-mode-browser');
+  const settingsFallback = $('render-settings-browser');
+  if (host) host.hidden = true;
+  if (modeFallback) modeFallback.hidden = false;
+  if (settingsFallback) settingsFallback.hidden = false;
+  rustRenderSettingsDiagnostics.viewAuthority = 'browser-fallback';
+}
+
+let rustRenderSettingsViewMounted = false;
+let rustRenderSettingsViewMountAttempted = false;
+function ensureRustRenderSettingsView() {
+  if (RUST_RENDER_SETTINGS_IMPLEMENTATION !== 'rust') return false;
+  const host = $('render-controls-rust');
+  const modeFallback = $('render-mode-browser');
+  const settingsFallback = $('render-settings-browser');
+  if (rustRenderSettingsViewMounted) {
+    host.hidden = false;
+    modeFallback.hidden = true;
+    settingsFallback.hidden = true;
+    rustRenderSettingsDiagnostics.viewAuthority = 'hyperscope-web';
+    return true;
+  }
+  if (rustRenderSettingsViewMountAttempted || !rustAppShadow) return false;
+  rustRenderSettingsViewMountAttempted = true;
+  rustRenderSettingsDiagnostics.viewMountAttempts += 1;
+  if (!host || !modeFallback || !settingsFallback
+      || typeof rustAppShadow.mountRenderControls !== 'function') {
+    useBrowserRenderSettingsView();
+    return false;
+  }
+  try {
+    rustAppShadow.mountRenderControls(
+      host,
+      (
+        style,
+        resolutionLevel,
+        density,
+        screenAttenuation,
+        minPixelsPerSubdivision,
+        atlasExponent,
+        maxFaceEdgeRatio,
+      ) => {
+        try {
+          const receipt = rustAppShadow.setRenderSettings(
+            ++rustAppShadowSequence,
+            style,
+            resolutionLevel,
+            density,
+            screenAttenuation,
+            minPixelsPerSubdivision,
+            atlasExponent,
+            maxFaceEdgeRatio,
+          );
+          rustAppShadowDiagnostics.lastCommit = receipt.commit;
+          rustRenderSettingsDiagnostics.dispatches += 1;
+          rustRenderSettingsDiagnostics.lastRust = receipt.render;
+          applyRustRenderSettingsProjection(receipt.render);
+          rustRenderSettingsDiagnostics.authorityWrites += 1;
+        } catch (error) {
+          rustRenderSettingsDiagnostics.errors += 1;
+          rustRenderSettingsDiagnostics.lastError = error?.message || String(error);
+          recordAppShadowMismatch(
+            'render_settings_view_action',
+            rustRenderSettingsDiagnostics.lastError,
+          );
+        }
+      },
+    );
+    host.hidden = false;
+    modeFallback.hidden = true;
+    settingsFallback.hidden = true;
+    rustRenderSettingsViewMounted = true;
+    rustRenderSettingsDiagnostics.viewAuthority = 'hyperscope-web';
+    return true;
+  } catch (error) {
+    rustRenderSettingsDiagnostics.viewMountErrors += 1;
+    rustRenderSettingsDiagnostics.lastError = error?.message || String(error);
+    recordAppShadowMismatch(
+      'render_settings_view_mount',
+      rustRenderSettingsDiagnostics.lastError,
+    );
+    useBrowserRenderSettingsView();
     return false;
   }
 }

@@ -24,6 +24,7 @@ struct RouteControlSpec {
     key: &'static str,
     default_value: &'static str,
     kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
     numeric_domain: Option<RouteNumericControlDomain>,
 }
 

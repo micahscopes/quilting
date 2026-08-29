@@ -23,3 +23,6 @@ pub mod navigation_status;
 
 #[cfg(feature = "presentation-card")]
 pub mod presentation_card;
+
+#[cfg(feature = "render-controls")]
+pub mod render_controls;

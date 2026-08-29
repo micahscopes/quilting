@@ -367,6 +367,12 @@ The first application boundary is now explicit:
   explicit Rust lane reapplies the committed projection and rolls invalid
   intent back to the preceding Rust value. Neither measured lane is canonical
   until live browser parity evidence is recorded.
+  The explicit Rust lane now mounts a Leptos control island directly over the
+  reducer's `render_signal`. Each edit sends one complete replacement value
+  through a temporary sequence adapter and the committed projection drives
+  both renderer signals and the view. The incumbent HTML controls remain
+  visible for the default JavaScript lane and automatically reappear if the
+  Rust view cannot mount.
   Version 0.17 added the renderer-independent primary animation clock: playing,
   unwrapped scene time, and signed finite speed. Frame events advance it from
   explicit deltas, cue activation replaces all three fields atomically, and

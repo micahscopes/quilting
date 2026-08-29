@@ -216,6 +216,23 @@ impl HyperscopeAppShadow {
         );
     }
 
+    /// Mount the explicit Rust-authority render controls over the AppStore's
+    /// committed render projection. The callback is a temporary platform
+    /// sequence/effect adapter and receives one complete render value.
+    #[cfg(feature = "leptos-ui")]
+    #[wasm_bindgen(js_name = mountRenderControls)]
+    pub fn mount_render_controls(
+        &self,
+        parent: web_sys::HtmlElement,
+        on_action: js_sys::Function,
+    ) {
+        hyperscope_web::render_controls::mount_render_controls(
+            parent,
+            self.store.clone(),
+            on_action,
+        );
+    }
+
     #[wasm_bindgen(js_name = requestAsset)]
     #[allow(clippy::too_many_arguments)]
     pub fn request_asset(

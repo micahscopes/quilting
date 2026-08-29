@@ -432,6 +432,10 @@ for (const renderSettingsStep of [
   "RUST_RENDER_SETTINGS_IMPLEMENTATION === 'rust'",
   'applyRustRenderSettingsProjection(app.snapshot().renderSettings);',
   'scheduleRustRenderSettingsSynchronization();',
+  'rustAppShadow.mountRenderControls(',
+  "rustRenderSettingsDiagnostics.viewAuthority = 'hyperscope-web';",
+  "RUST_RENDER_SETTINGS_IMPLEMENTATION !== 'rust'",
+  "'render_settings_view_action'",
 ]) {
   assert.ok(
     browserSource.includes(renderSettingsStep),
