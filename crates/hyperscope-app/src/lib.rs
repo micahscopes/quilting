@@ -400,6 +400,104 @@ pub struct PrimaryAssetReadModel {
     pub metadata: AssetMetadata,
 }
 
+/// One animation clip made available by an installed primary scene.
+///
+/// The index is the renderer-facing glTF animation index. Clip times retain
+/// their authored range; the application clock remains unwrapped and maps
+/// into this range only when extracting a renderer frame.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnimationClipDescriptor {
+    pub index: u32,
+    pub name: String,
+    pub time_min_seconds: f64,
+    pub time_max_seconds: f64,
+}
+
+impl AnimationClipDescriptor {
+    pub fn duration_seconds(&self) -> f64 {
+        self.time_max_seconds - self.time_min_seconds
+    }
+}
+
+/// Renderer-independent facts proven only after a decoded primary asset has
+/// been uploaded and activated successfully.
+///
+/// These values deliberately exclude GPU handles and backend-specific batch
+/// layouts. They are stable application inputs shared by WebGL2, WebGPU,
+/// replay, presentation, and future Blender adapters.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrimarySceneInstallMetadata {
+    pub num_vertices: u32,
+    pub num_faces: u32,
+    pub animation_clips: Vec<AnimationClipDescriptor>,
+}
+
+impl PrimarySceneInstallMetadata {
+    pub fn validate(self) -> Result<Self, PrimarySceneInstallMetadataError> {
+        if self.num_vertices == 0 || self.num_faces == 0 {
+            return Err(PrimarySceneInstallMetadataError::EmptyGeometry);
+        }
+        for (expected, clip) in self.animation_clips.iter().enumerate() {
+            let expected = u32::try_from(expected)
+                .map_err(|_| PrimarySceneInstallMetadataError::TooManyAnimationClips)?;
+            if clip.index != expected {
+                return Err(PrimarySceneInstallMetadataError::NonCanonicalClipIndex {
+                    expected,
+                    actual: clip.index,
+                });
+            }
+            if !clip.time_min_seconds.is_finite()
+                || !clip.time_max_seconds.is_finite()
+                || clip.time_max_seconds < clip.time_min_seconds
+            {
+                return Err(PrimarySceneInstallMetadataError::InvalidClipRange {
+                    index: clip.index,
+                });
+            }
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrimarySceneInstallMetadataError {
+    EmptyGeometry,
+    TooManyAnimationClips,
+    NonCanonicalClipIndex { expected: u32, actual: u32 },
+    InvalidClipRange { index: u32 },
+}
+
+impl fmt::Display for PrimarySceneInstallMetadataError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyGeometry => {
+                formatter.write_str("installed primary scene must contain vertices and faces")
+            }
+            Self::TooManyAnimationClips => {
+                formatter.write_str("installed primary scene has more than u32::MAX clips")
+            }
+            Self::NonCanonicalClipIndex { expected, actual } => write!(
+                formatter,
+                "animation clip index must be canonical: expected {expected}, got {actual}",
+            ),
+            Self::InvalidClipRange { index } => write!(
+                formatter,
+                "animation clip {index} must have a finite, nondecreasing authored time range",
+            ),
+        }
+    }
+}
+
+impl Error for PrimarySceneInstallMetadataError {}
+
+/// The renderer-resident primary scene. A newer decoded candidate does not
+/// replace this read model until its own installation completion is accepted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InstalledPrimarySceneReadModel {
+    pub asset: PrimaryAssetReadModel,
+    pub install: PrimarySceneInstallMetadata,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiagnosticReadModel {
     pub revision: u64,
@@ -1645,6 +1743,69 @@ mod tests {
         assert_ne!(first.entity, later.entity);
         assert_eq!(first.entity, other_asset.entity);
         assert_ne!(first, other_asset);
+    }
+
+    #[test]
+    fn primary_scene_install_metadata_requires_canonical_renderer_facts() {
+        let metadata = PrimarySceneInstallMetadata {
+            num_vertices: 796,
+            num_faces: 984,
+            animation_clips: vec![
+                AnimationClipDescriptor {
+                    index: 0,
+                    name: "idle".to_owned(),
+                    time_min_seconds: 0.0,
+                    time_max_seconds: 1.5,
+                },
+                AnimationClipDescriptor {
+                    index: 1,
+                    name: String::new(),
+                    time_min_seconds: 2.0,
+                    time_max_seconds: 2.0,
+                },
+            ],
+        };
+        assert_eq!(metadata.clone().validate(), Ok(metadata));
+        assert_eq!(
+            PrimarySceneInstallMetadata {
+                num_vertices: 0,
+                num_faces: 984,
+                animation_clips: Vec::new(),
+            }
+            .validate(),
+            Err(PrimarySceneInstallMetadataError::EmptyGeometry),
+        );
+        assert_eq!(
+            PrimarySceneInstallMetadata {
+                num_vertices: 3,
+                num_faces: 1,
+                animation_clips: vec![AnimationClipDescriptor {
+                    index: 1,
+                    name: "misindexed".to_owned(),
+                    time_min_seconds: 0.0,
+                    time_max_seconds: 1.0,
+                }],
+            }
+            .validate(),
+            Err(PrimarySceneInstallMetadataError::NonCanonicalClipIndex {
+                expected: 0,
+                actual: 1,
+            }),
+        );
+        assert_eq!(
+            PrimarySceneInstallMetadata {
+                num_vertices: 3,
+                num_faces: 1,
+                animation_clips: vec![AnimationClipDescriptor {
+                    index: 0,
+                    name: "broken".to_owned(),
+                    time_min_seconds: 1.0,
+                    time_max_seconds: 0.0,
+                }],
+            }
+            .validate(),
+            Err(PrimarySceneInstallMetadataError::InvalidClipRange { index: 0 }),
+        );
     }
 
     fn presentation_fixture() -> Presentation {
