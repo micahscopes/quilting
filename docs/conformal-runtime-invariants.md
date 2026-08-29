@@ -16,8 +16,9 @@ semantics are separate structures:
 3. Round walls form complementary open sides.  An anchor chooses which side is
    interpreted as the active inside; changing the anchor changes orientation
    and chamber coordinates, not the underlying wall/contact skeleton.
-4. Tracking and projection constraints refer to entities and frames without
-   becoming parents in either graph.
+4. Tracking, projection, and surface-pin constraints refer to entities and
+   frames without adding a second spatial parent. A surface pin updates the
+   pinned frame's one local-to-parent edge from a stable material address.
 
 An unrestricted multi-parent conformal DAG is intentionally deferred.  Two
 paths between the same frames need not compose to the same map; deciding what
@@ -39,6 +40,7 @@ detail.
 | Honest anchor transport is semantic chamber reassignment, not reversal of wall labels | `ChamberReassignment`, the `Z_new * R * M_old` law, and `honest_reanchor_differs_from_naive` | Preserve the three-wall/four-chamber regression: honest totals `(14,12,8)` differ from the naive `(7,6,4)` result |
 | Laminar incidence inversion is sparse | `mu_eq_identityKernel_sub_coverKernel` | Aggregate invalidation touches changed covers/chambers; geometric occlusion remains separately conservative |
 | Authored animation time is deterministic and platform-independent | No additional Lean claim; time parameterizes the already-defined coordinate maps | Hyperscape advances `Time<Virtual>` explicitly before an ECS update and never needs a native wall-clock instant; native and wasm builds exercise the same tick API |
+| A posed material attachment remains one compositional frame edge | No additional Lean claim; this is an evaluation discipline above conformal automorphisms | Surface pins use stable entity/face/barycentric identity, reject duplicate frame drivers, evaluate a conformal similarity in parent coordinates, and atomically replace one validated local-to-parent chain; descendants inherit it through the unique frame path |
 | Chamber/contact information is not an occlusion proof | The formal development concerns round-side incidence and payload transport, not projective depth visibility | Runtime visibility hints expose separating walls and a one-contact-edge frontier but always set `can_cull = false`; only transform or chamber-epoch changes invalidate browser LOD work |
 
 ## Numeric conventions

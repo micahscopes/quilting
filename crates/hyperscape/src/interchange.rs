@@ -5,6 +5,7 @@ use crate::{
     ConformalPathTimeline, ConformalScene, ContactRecord, ContactState, CrossFrameTarget,
     EntityFrame, EuclideanCoordinates, EuclideanModelMatrix, LocalCoordinates, PathKeyframe,
     PathTransition, ProjectionCamera, RenderSubject, StableEntityId, TrackedCoordinates,
+    SurfaceAddress, SurfaceAttachment, SurfaceFramePin, SurfaceFramePinBinding, SurfaceFramePinSet,
     TransformHistory, TransformHistorySample,
 };
 use bevy_app::App;
@@ -137,24 +138,58 @@ pub fn spawn_hyperscape_asset(
         entities.push(entity);
     }
 
+    let mut surface_frame_pins = Vec::new();
     for constraint in &asset.payload.constraints {
-        match *constraint {
+        match constraint {
             HyperscapeConstraint::Track {
                 node,
                 target_node,
                 local_offset,
             } => {
-                world.entity_mut(entities[node]).insert((
+                world.entity_mut(entities[*node]).insert((
                     CrossFrameTarget {
-                        target: entities[target_node],
-                        local_offset,
+                        target: entities[*target_node],
+                        local_offset: *local_offset,
                     },
                     TrackedCoordinates([0.0; 3]),
                 ));
             }
             HyperscapeConstraint::ProjectionCamera { node, frame } => {
-                world.entity_mut(entities[node]).insert(ProjectionCamera {
-                    frame: quilting_core::FrameId(frame),
+                world.entity_mut(entities[*node]).insert(ProjectionCamera {
+                    frame: quilting_core::FrameId(*frame),
+                });
+            }
+            HyperscapeConstraint::SurfacePin {
+                frame,
+                target_entity,
+                face,
+                barycentric,
+                normal_sign,
+                heading_radians,
+                uniform_scale,
+                orientation,
+                local_offset,
+            } => {
+                let address = SurfaceAddress::new(
+                    StableEntityId::from(*target_entity),
+                    *face,
+                    *barycentric,
+                )
+                .expect("validated surface address");
+                let attachment = SurfaceAttachment::with_normal_sign(address, *normal_sign)
+                    .expect("validated surface side");
+                surface_frame_pins.push(SurfaceFramePinBinding {
+                    frame: quilting_core::FrameId(*frame),
+                    pin: SurfaceFramePin {
+                        attachment,
+                        heading_radians: *heading_radians,
+                        uniform_scale: *uniform_scale,
+                        orientation: *orientation,
+                        local_offset: quilting_core::ConformalTransformChain::new(
+                            local_offset.clone(),
+                        )
+                        .expect("validated surface-pin offset"),
+                    },
                 });
             }
         }
@@ -164,6 +199,7 @@ pub fn spawn_hyperscape_asset(
         frames: runtime.frames,
         walls: runtime.walls,
     });
+    world.insert_resource(SurfaceFramePinSet(surface_frame_pins));
     Ok(entities)
 }
 
@@ -504,8 +540,10 @@ impl Error for HyperscapeImportError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{HyperscapePlugin, HyperscopeExtraction};
+    use crate::{HyperscapePlugin, HyperscopeExtraction, SurfaceFrameOrientation};
     use bevy_app::App;
+    use hyperscape_protocol::{ConformalFrameId, EntityId};
+    use quilting_core::ConformalGenerator;
 
     #[test]
     fn checked_in_gltf_spawns_paths_anchors_constraints_and_extraction() {
@@ -614,6 +652,36 @@ mod tests {
                 .0[12],
             -9.0
         );
+    }
+
+    #[test]
+    fn gltf_surface_pin_imports_as_a_typed_constraint_edge() {
+        let (nodes, asset) =
+            quilting_gltf::load_hyperscape_graph(quilting_gltf::HYPERSCAPE_TRACK_GLTF).unwrap();
+        let mut asset = asset.unwrap();
+        asset.payload.frames[1].stable_id = Some(ConformalFrameId::from_u128(42).unwrap());
+        asset.payload.constraints.push(HyperscapeConstraint::SurfacePin {
+            frame: 1,
+            target_entity: EntityId::from_u128(0x1111_1111_1111_4111_8111_1111_1111_1111)
+                .unwrap(),
+            face: 5,
+            barycentric: [0.2, 0.3, 0.5],
+            normal_sign: -1,
+            heading_radians: 0.25,
+            uniform_scale: 0.75,
+            orientation: SurfaceFrameOrientation::RightSideIn,
+            local_offset: vec![ConformalGenerator::sphere_reflection([0.0; 3], 2.0)],
+        });
+
+        let mut world = World::new();
+        spawn_hyperscape_asset(&mut world, &nodes, &asset).unwrap();
+        let pins = world.resource::<SurfaceFramePinSet>();
+        assert_eq!(pins.0.len(), 1);
+        assert_eq!(pins.0[0].frame, quilting_core::FrameId(1));
+        assert_eq!(pins.0[0].pin.attachment.address.face, 5);
+        assert_eq!(pins.0[0].pin.attachment.normal_sign, -1);
+        assert_eq!(pins.0[0].pin.orientation, SurfaceFrameOrientation::RightSideIn);
+        assert_eq!(pins.0[0].pin.local_offset.orientation_sign(), -1);
     }
 
 }

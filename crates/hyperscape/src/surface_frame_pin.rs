@@ -6,27 +6,13 @@
 //! coordinate frames without introducing a second transform hierarchy.
 
 use crate::{SurfaceAnchorError, SurfaceAttachment, SurfaceSample, SurfaceTangentFrame};
+use bevy_ecs::prelude::Resource;
+pub use hyperscape_protocol::SurfaceFrameOrientation;
 use quilting_core::{
     ConformalError, ConformalFrameForest, ConformalGenerator, ConformalTransformChain, FrameId,
 };
 use std::error::Error;
 use std::fmt;
-
-/// Ambient orientation requested for a surface-pinned frame.
-///
-/// This is conformal chart parity, not the selected surface side and not PBR
-/// back-face policy. [`SurfaceAttachment::normal_sign`] independently chooses
-/// which normal side is "up" for the pin.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum SurfaceFrameOrientation {
-    /// Retain the parity contributed by the parent and authored local offset.
-    #[default]
-    Inherit,
-    /// Ensure the resulting ambient world chain is orientation-preserving.
-    RightSideIn,
-    /// Ensure the resulting ambient world chain is orientation-reversing.
-    InsideOut,
-}
 
 /// A durable surface constraint for one conformal frame.
 #[derive(Debug, Clone, PartialEq)]
@@ -144,11 +130,41 @@ pub struct ResolvedSurfaceFramePin {
     pub world_orientation_sign: i8,
 }
 
+/// One constraint-graph edge from an authored conformal frame to a stable
+/// material point on another entity.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SurfaceFramePinBinding {
+    pub frame: FrameId,
+    pub pin: SurfaceFramePin,
+}
+
+/// Authored surface-pin constraints kept separate from the spatial frame
+/// forest. A pose/geometry adapter supplies samples after animation and before
+/// coordinate extraction.
+#[derive(Resource, Debug, Clone, Default, PartialEq)]
+pub struct SurfaceFramePinSet(pub Vec<SurfaceFramePinBinding>);
+
+impl SurfaceFramePinSet {
+    pub fn apply_sample(
+        &self,
+        index: usize,
+        frames: &mut ConformalFrameForest,
+        sample: SurfaceSample,
+    ) -> Result<ResolvedSurfaceFramePin, SurfaceFramePinError> {
+        let binding = self
+            .0
+            .get(index)
+            .ok_or(SurfaceFramePinError::UnknownBinding(index))?;
+        binding.pin.apply_sample(frames, binding.frame, sample)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SurfaceFramePinError {
     InvalidHeading,
     InvalidScale,
     InvalidParentOrientation,
+    UnknownBinding(usize),
     Surface(SurfaceAnchorError),
     Conformal(ConformalError),
 }
@@ -163,6 +179,7 @@ impl fmt::Display for SurfaceFramePinError {
             Self::InvalidParentOrientation => {
                 formatter.write_str("parent world orientation must be +1 or -1")
             }
+            Self::UnknownBinding(index) => write!(formatter, "unknown surface pin {index}"),
             Self::Surface(error) => write!(formatter, "surface pin sample: {error}"),
             Self::Conformal(error) => write!(formatter, "surface pin transform: {error}"),
         }
@@ -174,7 +191,10 @@ impl Error for SurfaceFramePinError {
         match self {
             Self::Surface(error) => Some(error),
             Self::Conformal(error) => Some(error),
-            _ => None,
+            Self::InvalidHeading
+            | Self::InvalidScale
+            | Self::InvalidParentOrientation
+            | Self::UnknownBinding(_) => None,
         }
     }
 }

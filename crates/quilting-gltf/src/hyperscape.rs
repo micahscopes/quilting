@@ -4,7 +4,7 @@
 //! registered vendor extension can reuse it, but version 0.1 does not claim a
 //! reserved Khronos or multi-vendor prefix.
 
-use hyperscape_protocol::{ConformalFrameId, EntityId};
+use hyperscape_protocol::{ConformalFrameId, EntityId, SurfaceFrameOrientation};
 use quilting_core::{
     AnchorState, ConformalFrameForest, ConformalGenerator, ConformalTransformChain, FrameId,
     RoundWall, RoundWallGeometry, RoundWallSet, WallId,
@@ -117,6 +117,33 @@ pub enum HyperscapeConstraint {
         node: usize,
         frame: usize,
     },
+    /// Drive one conformal frame from a stable material point on a posed QB
+    /// surface. The target entity is durable; its glTF node index is only a
+    /// container lookup.
+    SurfacePin {
+        frame: usize,
+        target_entity: EntityId,
+        face: u32,
+        barycentric: [f64; 3],
+        #[serde(default = "default_normal_sign")]
+        normal_sign: i8,
+        #[serde(default)]
+        heading_radians: f64,
+        #[serde(default = "default_uniform_scale")]
+        uniform_scale: f64,
+        #[serde(default)]
+        orientation: SurfaceFrameOrientation,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        local_offset: Vec<ConformalGenerator>,
+    },
+}
+
+const fn default_normal_sign() -> i8 {
+    1
+}
+
+const fn default_uniform_scale() -> f64 {
+    1.0
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,7 +191,7 @@ impl HyperscapeAsset {
                 self.payload.version, HYPERSCAPE_INTERCHANGE_VERSION
             )));
         }
-        let mut stable_ids = BTreeSet::new();
+        let mut nodes_by_stable_id = BTreeMap::new();
         for (node, binding) in self.node_bindings.iter().enumerate() {
             let Some(stable_id) = binding.as_ref().and_then(|binding| binding.stable_id) else {
                 continue;
@@ -172,7 +199,7 @@ impl HyperscapeAsset {
             stable_id
                 .validate()
                 .map_err(|error| validation(format!("node {node}: {error}")))?;
-            if !stable_ids.insert(stable_id) {
+            if nodes_by_stable_id.insert(stable_id, node).is_some() {
                 return Err(validation(format!(
                     "node {node} repeats stable entity ID {stable_id}"
                 )));
@@ -334,25 +361,88 @@ impl HyperscapeAsset {
                 previous_transition = Some(transition.time_seconds);
             }
         }
+        let mut pinned_frames = BTreeSet::new();
         for (index, constraint) in self.payload.constraints.iter().enumerate() {
-            match *constraint {
+            match constraint {
                 HyperscapeConstraint::Track {
                     node,
                     target_node,
                     local_offset,
                 } => {
-                    require_node(node, node_count, &format!("constraint {index}"))?;
-                    require_node(target_node, node_count, &format!("constraint {index}"))?;
-                    if local_offset.into_iter().any(|x| !x.is_finite()) {
+                    require_node(*node, node_count, &format!("constraint {index}"))?;
+                    require_node(*target_node, node_count, &format!("constraint {index}"))?;
+                    if local_offset.iter().any(|x| !x.is_finite()) {
                         return Err(validation(format!(
                             "constraint {index} offset must be finite"
                         )));
                     }
                 }
                 HyperscapeConstraint::ProjectionCamera { node, frame } => {
-                    require_node(node, node_count, &format!("constraint {index}"))?;
-                    frames.frame(FrameId(frame)).map_err(|error| {
+                    require_node(*node, node_count, &format!("constraint {index}"))?;
+                    frames.frame(FrameId(*frame)).map_err(|error| {
                         validation(format!("constraint {index} has invalid frame: {error}"))
+                    })?;
+                }
+                HyperscapeConstraint::SurfacePin {
+                    frame,
+                    target_entity,
+                    barycentric,
+                    normal_sign,
+                    heading_radians,
+                    uniform_scale,
+                    local_offset,
+                    ..
+                } => {
+                    let pinned_frame = frames.frame(FrameId(*frame)).map_err(|error| {
+                        validation(format!("constraint {index} has invalid frame: {error}"))
+                    })?;
+                    if self.payload.frames[*frame].stable_id.is_none() {
+                        return Err(validation(format!(
+                            "constraint {index} pinned frame needs a stable ID"
+                        )));
+                    }
+                    if !pinned_frames.insert(*frame) {
+                        return Err(validation(format!(
+                            "constraint {index} repeats a surface pin for frame {frame}"
+                        )));
+                    }
+                    target_entity
+                        .validate()
+                        .map_err(|error| validation(format!("constraint {index}: {error}")))?;
+                    let target_node = nodes_by_stable_id.get(target_entity).ok_or_else(|| {
+                        validation(format!(
+                            "constraint {index} targets unknown stable entity {target_entity}"
+                        ))
+                    })?;
+                    let target_binding = self.node_bindings[*target_node]
+                        .as_ref()
+                        .expect("stable IDs exist only on bindings");
+                    if pinned_frame.parent != Some(FrameId(target_binding.frame)) {
+                        return Err(validation(format!(
+                            "constraint {index} pinned frame parent must be target entity frame {}",
+                            target_binding.frame
+                        )));
+                    }
+                    validate_barycentric(*barycentric).map_err(|message| {
+                        validation(format!("constraint {index} barycentric address {message}"))
+                    })?;
+                    if !matches!(normal_sign, -1 | 1) {
+                        return Err(validation(format!(
+                            "constraint {index} normal sign must be +1 or -1"
+                        )));
+                    }
+                    if !heading_radians.is_finite() {
+                        return Err(validation(format!(
+                            "constraint {index} heading must be finite"
+                        )));
+                    }
+                    if !uniform_scale.is_finite() || *uniform_scale <= 0.0 {
+                        return Err(validation(format!(
+                            "constraint {index} scale must be finite and positive"
+                        )));
+                    }
+                    ConformalTransformChain::new(local_offset.clone()).map_err(|error| {
+                        validation(format!("constraint {index} local offset: {error}"))
                     })?;
                 }
             }
@@ -390,6 +480,19 @@ fn require_node(node: usize, node_count: usize, context: &str) -> Result<(), Hyp
             "{context} references node {node}, but there are {node_count} nodes"
         )))
     }
+}
+
+fn validate_barycentric(barycentric: [f64; 3]) -> Result<(), &'static str> {
+    const EPSILON: f64 = 1.0e-12;
+    if barycentric.into_iter().any(|value| !value.is_finite()) {
+        return Err("must be finite");
+    }
+    if barycentric.into_iter().any(|value| value < -EPSILON)
+        || barycentric.into_iter().sum::<f64>() <= EPSILON
+    {
+        return Err("must lie on the source face");
+    }
+    Ok(())
 }
 
 fn validate_keyframes(
@@ -877,6 +980,64 @@ mod tests {
         let runtime = asset.validate().unwrap();
         assert_eq!(runtime.frame_stable_ids, vec![None, None]);
         assert!(runtime.frames_by_stable_id.is_empty());
+    }
+
+    fn surface_pin_constraint() -> HyperscapeConstraint {
+        HyperscapeConstraint::SurfacePin {
+            frame: 1,
+            target_entity: EntityId::from_u128(2).unwrap(),
+            face: 17,
+            barycentric: [0.5, 0.25, 0.25],
+            normal_sign: -1,
+            heading_radians: 0.4,
+            uniform_scale: 1.5,
+            orientation: SurfaceFrameOrientation::RightSideIn,
+            local_offset: vec![ConformalGenerator::sphere_reflection([0.0; 3], 2.0)],
+        }
+    }
+
+    #[test]
+    fn surface_pins_use_stable_targets_and_a_single_spatial_parent() {
+        let mut asset = sample_asset();
+        asset.payload.constraints.push(surface_pin_constraint());
+        asset.validate().unwrap();
+        let encoded = serde_json::to_value(&asset.payload).unwrap();
+        assert_eq!(
+            encoded["constraints"][1]["target_entity"],
+            EntityId::from_u128(2).unwrap().to_string()
+        );
+        assert_eq!(encoded["constraints"][1]["orientation"], "right_side_in");
+
+        let mut duplicate = asset.clone();
+        duplicate.payload.constraints.push(surface_pin_constraint());
+        assert!(duplicate.validate().is_err());
+
+        let mut unknown_target = asset.clone();
+        let HyperscapeConstraint::SurfacePin { target_entity, .. } =
+            &mut unknown_target.payload.constraints[1]
+        else {
+            unreachable!()
+        };
+        *target_entity = EntityId::from_u128(99).unwrap();
+        assert!(unknown_target.validate().is_err());
+
+        let mut wrong_parent = asset.clone();
+        let HyperscapeConstraint::SurfacePin { target_entity, .. } =
+            &mut wrong_parent.payload.constraints[1]
+        else {
+            unreachable!()
+        };
+        *target_entity = EntityId::from_u128(1).unwrap();
+        assert!(wrong_parent.validate().is_err());
+
+        let mut invalid_address = asset;
+        let HyperscapeConstraint::SurfacePin { barycentric, .. } =
+            &mut invalid_address.payload.constraints[1]
+        else {
+            unreachable!()
+        };
+        *barycentric = [1.0, -0.5, 0.5];
+        assert!(invalid_address.validate().is_err());
     }
 
     #[test]

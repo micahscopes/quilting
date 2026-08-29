@@ -68,7 +68,8 @@ pub use surface::{
     SurfaceWalkerStatus, TriangleAdjacency, TriangleAdjacencyReport,
 };
 pub use surface_frame_pin::{
-    ResolvedSurfaceFramePin, SurfaceFrameOrientation, SurfaceFramePin, SurfaceFramePinError,
+    ResolvedSurfaceFramePin, SurfaceFrameOrientation, SurfaceFramePin, SurfaceFramePinBinding,
+    SurfaceFramePinError, SurfaceFramePinSet,
 };
 
 /// Shared conformal scene topology. Ordinary entity parenting remains in the

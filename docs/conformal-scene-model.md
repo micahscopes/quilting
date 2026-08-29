@@ -51,11 +51,14 @@ nesting; its absolute value preserves only their union.
 
 ### Constraint graph
 
-Path following, look-at, target tracking, projection alignment, and other
-control relationships are directed constraints between entities and frames.
-They do not create entity or frame parents.  A deterministic schedule evaluates
-animation, frame worlds, constraint targets, anchors/chambers, and render
-extraction in that order.
+Path following, look-at, target tracking, projection alignment, surface pins,
+and other control relationships are directed constraints between entities and
+frames. They do not add a second spatial parent. A surface pin drives the
+existing local-to-parent map from one stable material address; the pinned
+frame's one parent must be the target entity's conformal frame. A deterministic
+schedule evaluates animation, surface samples and pinned local maps, frame
+worlds, other constraint targets, anchors/chambers, and render extraction in
+that order.
 
 ## Focus and navigation are runtime interaction state
 
@@ -133,11 +136,12 @@ highlight draw selects that subject/view packet's Möbius coefficients and
 explicit orientation parity. The lowest projection-camera node is selected
 deterministically by default; `mr_setHyperscapeCameraNode` switches views.
 
-An entity binding may also carry `stable_id`, a non-nil UUID unique within the
-asset. Hyperscape installs it as `StableEntityId` and provides UUID-to-entity
-lookup while retaining the glTF node index only as a container handle. Blender,
-presentation cues, and future HHHS operations should store this UUID rather
-than a Bevy entity value, face index, draw-batch index, or glTF array position.
+An entity binding and conformal frame may each carry a typed `stable_id`: a
+non-nil UUID unique in its identity domain. Hyperscape installs entity identity
+as `StableEntityId` and provides UUID-to-entity lookup while retaining glTF
+node and frame array indices only as container/runtime handles. Blender,
+presentation cues, and future HHHS operations should store these typed UUIDs
+rather than Bevy entity values, draw-batch indices, or glTF array positions.
 
 The diagnostic snapshot exposes the complete `packets` array as well as the
 legacy first-packet fields. For Hyperscape assets, mesh control points remain
@@ -220,6 +224,7 @@ Root shape:
       "version": "0.1",
       "frames": [
         {
+          "stable_id": "44444444-4444-4444-8444-444444444444",
           "name": "reflection-room",
           "parent": null,
           "generators": [
@@ -250,6 +255,40 @@ Root shape:
   }
 }
 ```
+
+A surface pin is an authored constraint edge. It addresses a stable source
+entity plus source face and barycentric material point, then drives one frame's
+local-to-parent mapping from the posed QB position and differential:
+
+```json
+{
+  "type": "surface_pin",
+  "frame": 1,
+  "target_entity": "11111111-1111-4111-8111-111111111111",
+  "face": 17,
+  "barycentric": [0.5, 0.25, 0.25],
+  "normal_sign": 1,
+  "heading_radians": 0.0,
+  "uniform_scale": 1.0,
+  "orientation": "right_side_in",
+  "local_offset": [
+    {
+      "type": "sphere_reflection",
+      "center": [0, 0, 0],
+      "radius": 2
+    }
+  ]
+}
+```
+
+`normal_sign` chooses which surface side is up. `orientation` independently
+controls conformal world parity; `right_side_in` can therefore sit on an
+inside-out parent without changing the chosen normal side. The surface metric
+supplies a position and orthonormal heading only. `uniform_scale` is explicit,
+so anisotropic skinning or QB parameterization never leaks into the conformal
+frame as an accidental nonconformal deformation. `local_offset` acts before
+the surface similarity and may itself contain nested inversions/reflections.
+At most one surface pin may drive a frame in one evaluated scene revision.
 
 An entity node refers to a conformal frame without changing its ordinary glTF
 parenting:
@@ -317,12 +356,14 @@ chunks.
 2. Spawn entity nodes, conformal frames, walls, anchors, paths, and constraints.
 3. Select the current path frame/anchor state, then sample control points in
    their stable coordinate frame and convert them to that state.
-4. Evaluate frame-world chains and reject cycles or invalid generators.
-5. Solve tracking/projection constraints in their declared target frames.
-6. Apply requested preserve-world structural reparent operations.
-7. Update side bits, chamber membership, and sparse payload aggregates.
-8. Extract relative Möbius transforms and conservative visibility/LoD hints.
-9. Render with Hyperscope and expose transform/contact/pole diagnostics.
+4. Evaluate posed QB samples for surface pins in each pinned frame's parent
+   chart and atomically update those local-to-parent maps.
+5. Evaluate frame-world chains and reject cycles or invalid generators.
+6. Solve tracking/projection constraints in their declared target frames.
+7. Apply requested preserve-world structural reparent operations.
+8. Update side bits, chamber membership, and sparse payload aggregates.
+9. Extract relative Möbius transforms and conservative visibility/LoD hints.
+10. Render with Hyperscope and expose transform/contact/pole diagnostics.
 
 The demonstrator must exercise Euclidean travel, conformal entry, cross-frame
 tracking, continuous re-anchoring, conformal exit, and a Blender → GLB →

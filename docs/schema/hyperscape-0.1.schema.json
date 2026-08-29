@@ -101,6 +101,7 @@
       "type": "object",
       "required": ["name", "parent", "generators"],
       "properties": {
+        "stable_id": { "type": "string", "format": "uuid" },
         "name": { "type": "string" },
         "parent": {
           "oneOf": [
@@ -224,6 +225,31 @@
             "type": { "const": "projection_camera" },
             "node": { "$ref": "#/$defs/nonnegativeIndex" },
             "frame": { "$ref": "#/$defs/nonnegativeIndex" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "frame", "target_entity", "face", "barycentric"],
+          "properties": {
+            "type": { "const": "surface_pin" },
+            "frame": { "$ref": "#/$defs/nonnegativeIndex" },
+            "target_entity": { "type": "string", "format": "uuid" },
+            "face": { "$ref": "#/$defs/nonnegativeIndex" },
+            "barycentric": { "$ref": "#/$defs/vec3" },
+            "normal_sign": { "type": "integer", "enum": [-1, 1], "default": 1 },
+            "heading_radians": { "$ref": "#/$defs/finiteNumber", "default": 0 },
+            "uniform_scale": { "type": "number", "exclusiveMinimum": 0, "default": 1 },
+            "orientation": {
+              "type": "string",
+              "enum": ["inherit", "right_side_in", "inside_out"],
+              "default": "inherit"
+            },
+            "local_offset": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/generator" },
+              "default": []
+            }
           },
           "additionalProperties": false
         }

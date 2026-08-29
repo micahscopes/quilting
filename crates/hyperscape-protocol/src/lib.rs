@@ -75,6 +75,18 @@ stable_id!(AssetId, "asset");
 stable_id!(EntityId, "entity");
 stable_id!(ConformalFrameId, "conformal frame");
 
+/// Authored ambient orientation policy for a surface-pinned conformal frame.
+/// This is chart parity, independent of material sidedness or the selected
+/// surface normal side.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SurfaceFrameOrientation {
+    #[default]
+    Inherit,
+    RightSideIn,
+    InsideOut,
+}
+
 /// Stable identity of one entity within a particular source asset.
 ///
 /// A glTF node index and a renderer node offset are container/runtime handles,
