@@ -4,9 +4,12 @@
 //! WebGPU stores them as baseline-filterable RGBA16F, converting one face at a
 //! time so upload does not duplicate the complete environment in host memory.
 
-use crate::{LodClassifierDevice, LodWebGpuError};
+use crate::{buffer_init_or_zero, LodClassifierDevice, LodWebGpuError, PatchRenderPipeline};
 use futures_channel::oneshot;
 use quilting_core::material::{EnvironmentMapAsset, EnvironmentMapDescriptor};
+use quilting_core::render::RenderStyle;
+
+const PBR_ENVIRONMENT_UNIFORM_BYTES: u64 = 16;
 
 /// One coherent prefiltered-specular plus diffuse-irradiance device epoch.
 pub struct PbrEnvironmentMap {
@@ -16,6 +19,31 @@ pub struct PbrEnvironmentMap {
     irradiance: wgpu::Texture,
     irradiance_view: wgpu::TextureView,
     sampler: wgpu::Sampler,
+}
+
+/// One complete PBR environment bind group. A nonresident binding contains a
+/// valid black cube so the pipeline layout remains portable while the shader
+/// deliberately follows its analytical fallback path.
+pub struct PbrEnvironmentBindings {
+    resident: bool,
+    descriptor: Option<EnvironmentMapDescriptor>,
+    bind_group: wgpu::BindGroup,
+    _uniform: wgpu::Buffer,
+    _placeholder: Option<wgpu::Texture>,
+}
+
+impl PbrEnvironmentBindings {
+    pub fn is_resident(&self) -> bool {
+        self.resident
+    }
+
+    pub fn descriptor(&self) -> Option<EnvironmentMapDescriptor> {
+        self.descriptor
+    }
+
+    pub(crate) fn bind_group(&self) -> &wgpu::BindGroup {
+        &self.bind_group
+    }
 }
 
 impl PbrEnvironmentMap {
@@ -41,6 +69,111 @@ impl PbrEnvironmentMap {
 }
 
 impl LodClassifierDevice {
+    /// Resolve one environment epoch to the fixed PBR group-two ABI. Missing
+    /// IBL remains an explicit nonresident state rather than an absent group.
+    pub fn create_pbr_environment_bindings(
+        &self,
+        pipeline: &PatchRenderPipeline,
+        environment: Option<&PbrEnvironmentMap>,
+    ) -> Result<PbrEnvironmentBindings, LodWebGpuError> {
+        if pipeline.style != RenderStyle::Pbr {
+            return Err(LodWebGpuError::Payload(
+                "PBR environment bindings require the PBR render pipeline".to_string(),
+            ));
+        }
+        let layout = pipeline
+            .pbr_environment_bind_group_layout
+            .as_ref()
+            .ok_or_else(|| {
+                LodWebGpuError::Payload(
+                    "PBR environment layout is not available on this pipeline".to_string(),
+                )
+            })?;
+        let resident = environment.is_some();
+        let descriptor = environment.map(PbrEnvironmentMap::descriptor);
+        let placeholder = if environment.is_none() {
+            let placeholder =
+                create_cube_texture(&self.device, "quilting PBR environment placeholder", 1, 1);
+            let zero_face = [0.0f32; 4];
+            for face in 0..6 {
+                write_cube_face_rgba16f(&self.queue, &placeholder, 0, face, 1, &zero_face)?;
+            }
+            Some(placeholder)
+        } else {
+            None
+        };
+        let placeholder_view = placeholder.as_ref().map(|placeholder| {
+            cube_view(
+                placeholder,
+                "quilting PBR environment placeholder cube view",
+            )
+        });
+        let placeholder_sampler = placeholder
+            .as_ref()
+            .map(|_| create_environment_sampler(&self.device));
+        let prefiltered_view = environment
+            .map(PbrEnvironmentMap::prefiltered_view)
+            .or(placeholder_view.as_ref())
+            .expect("resident or placeholder PBR environment view");
+        let irradiance_view = environment
+            .map(PbrEnvironmentMap::irradiance_view)
+            .or(placeholder_view.as_ref())
+            .expect("resident or placeholder PBR irradiance view");
+        let sampler = environment
+            .map(PbrEnvironmentMap::sampler)
+            .or(placeholder_sampler.as_ref())
+            .expect("resident or placeholder PBR environment sampler");
+        let uniform_words = [
+            u32::from(resident),
+            descriptor.map_or(1, |descriptor| descriptor.prefiltered_mip_count),
+            0,
+            0,
+        ];
+        let uniform = buffer_init_or_zero(
+            &self.device,
+            "quilting PBR environment uniform",
+            bytemuck::cast_slice(&uniform_words),
+            wgpu::BufferUsages::UNIFORM,
+        );
+        debug_assert_eq!(
+            std::mem::size_of_val(&uniform_words) as u64,
+            PBR_ENVIRONMENT_UNIFORM_BYTES,
+        );
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("quilting PBR environment bindings"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &uniform,
+                        offset: 0,
+                        size: std::num::NonZeroU64::new(PBR_ENVIRONMENT_UNIFORM_BYTES),
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(prefiltered_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(irradiance_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        });
+        Ok(PbrEnvironmentBindings {
+            resident,
+            descriptor,
+            bind_group,
+            _uniform: uniform,
+            _placeholder: placeholder,
+        })
+    }
+
     /// Validate and upload one complete environment before returning it for
     /// publication. No resource or queue write occurs until both CPU payloads
     /// and device limits have been checked.
@@ -113,16 +246,7 @@ impl LodClassifierDevice {
         );
         let irradiance_view =
             cube_view(&irradiance, "quilting PBR irradiance environment cube view");
-        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("quilting PBR environment sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Linear,
-            ..Default::default()
-        });
+        let sampler = create_environment_sampler(&self.device);
         Ok(PbrEnvironmentMap {
             descriptor: asset.descriptor,
             prefiltered,
@@ -245,6 +369,60 @@ impl LodClassifierDevice {
         buffer.unmap();
         Ok(output)
     }
+}
+
+pub(crate) fn create_pbr_environment_bind_group_layout(
+    device: &wgpu::Device,
+) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("quilting PBR environment binding layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: std::num::NonZeroU64::new(PBR_ENVIRONMENT_UNIFORM_BYTES),
+                },
+                count: None,
+            },
+            cube_texture_layout(1),
+            cube_texture_layout(2),
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    })
+}
+
+fn cube_texture_layout(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::Cube,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+fn create_environment_sampler(device: &wgpu::Device) -> wgpu::Sampler {
+    device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("quilting PBR environment sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Linear,
+        ..Default::default()
+    })
 }
 
 fn validate_environment_for_device(

@@ -871,13 +871,14 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
                 .iter()
                 .filter(|(_, variable)| variable.binding.is_some())
                 .count(),
-            18,
+            22,
         );
         let mut layouter = naga::proc::Layouter::default();
         layouter.update(module.to_ctx()).expect("patch render layouts");
         for (name, expected_size) in [
             ("PatchRenderFrame", 224),
             ("PatchPbrMaterial", 160),
+            ("PbrEnvironmentUniform", 16),
             ("DrawBatchIndex", 16),
         ] {
             let (handle, _) = module

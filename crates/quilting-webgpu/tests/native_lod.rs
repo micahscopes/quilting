@@ -873,7 +873,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 1,
             )
             .unwrap();
-        let diagnostic_scene = classifier
+        let mut diagnostic_scene = classifier
             .upload_patch_render_scene(
                 diagnostic_pipelines.get(RenderStyle::Pbr).unwrap(),
                 &model,
@@ -883,6 +883,10 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 None,
             )
             .unwrap();
+        assert!(!diagnostic_scene
+            .pbr_environment_bindings()
+            .unwrap()
+            .is_resident());
         classifier
             .write_patch_render_pose_state(&model, &diagnostic_scene, LodPose::default(), 0)
             .unwrap();
@@ -959,6 +963,53 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 assert_ne!(left_hash, right_hash);
             }
         }
+
+        classifier
+            .replace_patch_render_scene_environment_bindings(
+                diagnostic_pipelines.get(RenderStyle::Pbr).unwrap(),
+                &mut diagnostic_scene,
+                Some(&environment),
+            )
+            .unwrap();
+        assert!(diagnostic_scene
+            .pbr_environment_bindings()
+            .unwrap()
+            .is_resident());
+        assert_eq!(
+            diagnostic_scene
+                .pbr_environment_bindings()
+                .unwrap()
+                .descriptor(),
+            Some(environment_descriptor),
+        );
+        let environment_frame = RenderFrame::build(
+            90,
+            render_frame.pose,
+            RenderStyle::Pbr,
+            render_frame.view,
+            render_frame.options,
+            &render_scene,
+        )
+        .unwrap();
+        classifier
+            .render_offscreen_supported_patch_scene_with_face_visibility(
+                &environment_frame,
+                &diagnostic_pipelines,
+                &diagnostic_scene,
+                &packed_atlas,
+                &target,
+                true,
+            )
+            .unwrap();
+        let environment_image = classifier
+            .stage_offscreen_patch_render_target_image(&target)
+            .unwrap()
+            .read()
+            .await
+            .unwrap();
+        let environment_signature = render_image_signature(environment_image.view().unwrap(), 0);
+        assert!(environment_signature.covered_pixels > 0);
+        assert_ne!(environment_signature.rgba8_hash, diagnostic_hashes[0]);
 
         let mut textured_diagnostic_scene = classifier
             .upload_patch_render_scene(

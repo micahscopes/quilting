@@ -3,7 +3,7 @@
 #import quilting::surface::patch_prepare::PreparedPatchRecord
 #import quilting::surface::patch_render::{PatchRenderTransform, PatchSurfaceInput, evaluate_patch_surface}
 #import quilting::lighting::matcap::{matcap_shade, procedural_matcap}
-#import quilting::lighting::pbr::{PBRInput, pbr_direct}
+#import quilting::lighting::pbr::{PBRInput, pbr_ambient, pbr_direct}
 
 struct PatchRenderFrame {
     mvp: mat4x4<f32>,
@@ -201,6 +201,11 @@ fn shade_patch_pbr(
     emissive_texel: vec4<f32>,
     occlusion_texel: vec4<f32>,
     has_normal_texture: bool,
+    has_environment: bool,
+    irradiance: vec3<f32>,
+    environment_color: vec3<f32>,
+    normal_ws: vec3<f32>,
+    view_dir_ws: vec3<f32>,
 ) -> vec4<f32> {
     if input.fade < 0.001 {
         discard;
@@ -261,7 +266,12 @@ fn shade_patch_pbr(
     let ior = material.surface.w;
     let ior_f0 = pow((ior - 1.0) / (ior + 1.0), 2.0);
     let f0 = mix(vec3<f32>(ior_f0) * f0_mod, base.rgb, metallic);
-    let view_dir = vec3<f32>(0.0, 0.0, 1.0);
+    let view_distance = length(input.position_vs);
+    let view_dir = select(
+        vec3<f32>(0.0, 0.0, 1.0),
+        -input.position_vs / max(view_distance, 1e-7),
+        view_distance > 1e-7,
+    );
     let key_dir = normalize(vec3<f32>(0.5, 0.8, 0.6));
     let key_color = vec3<f32>(3.0, 2.9, 2.7);
     let key = pbr_direct(PBRInput(
@@ -279,13 +289,27 @@ fn shade_patch_pbr(
     ));
     let sky = vec3<f32>(0.25, 0.28, 0.40);
     let ground = vec3<f32>(0.10, 0.08, 0.06);
-    let hemisphere = mix(
+    var ambient = base.rgb * mix(
         ground,
         sky,
         dot(normal, vec3<f32>(0.0, 1.0, 0.0)) * 0.5 + 0.5,
-    ) * mix(1.0, occlusion_texel.r, clamp(material.normal_occlusion_base_scale.y, 0.0, 1.0));
+    ) * (1.0 - metallic);
+    if has_environment {
+        ambient = pbr_ambient(
+            base.rgb,
+            metallic,
+            roughness,
+            normal_ws,
+            view_dir_ws,
+            irradiance,
+            environment_color,
+            f0,
+        );
+    }
+    ambient = ambient
+        * mix(1.0, occlusion_texel.r, clamp(material.normal_occlusion_base_scale.y, 0.0, 1.0));
     var color = key.color + fill.color
-        + base.rgb * hemisphere * (1.0 - metallic)
+        + ambient
         + material.emissive_metallic.rgb * emissive_texel.rgb;
     let aces_a = color * 2.51 + vec3<f32>(0.03);
     let aces_b = color * 2.43 + vec3<f32>(0.59);

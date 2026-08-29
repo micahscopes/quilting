@@ -15,7 +15,7 @@ mod resident_roots;
 pub use adaptive_overlay::{
     AdaptiveOverlayFrameEncoding, AdaptiveOverlayScene, ResidentAdaptiveFrameEncoding,
 };
-pub use pbr_environment::PbrEnvironmentMap;
+pub use pbr_environment::{PbrEnvironmentBindings, PbrEnvironmentMap};
 pub use pbr_resources::{
     PbrMaterialTextureBindings, PbrMaterialTextureResidency, PbrTextureTable, PbrTextureTableUpdate,
 };
@@ -832,6 +832,7 @@ pub struct PatchRenderPipeline {
     geometry: RenderGeometry,
     bind_group_layout: wgpu::BindGroupLayout,
     pbr_texture_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    pbr_environment_bind_group_layout: Option<wgpu::BindGroupLayout>,
     counter_clockwise: wgpu::RenderPipeline,
     clockwise: wgpu::RenderPipeline,
 }
@@ -922,6 +923,7 @@ pub struct PatchRenderBindings {
     frames: wgpu::Buffer,
     materials: wgpu::Buffer,
     material_textures: Option<PbrMaterialTextureBindings>,
+    pbr_environment: Option<PbrEnvironmentBindings>,
     frame_words: Mutex<Vec<u32>>,
     bind_group: wgpu::BindGroup,
 }
@@ -3110,6 +3112,10 @@ impl LodClassifierDevice {
             .iter()
             .any(|(style, _, _)| *style == RenderStyle::Pbr)
             .then(|| pbr_resources::create_pbr_texture_bind_group_layout(&self.device));
+        let pbr_environment_bind_group_layout = fragment_entry_points
+            .iter()
+            .any(|(style, _, _)| *style == RenderStyle::Pbr)
+            .then(|| pbr_environment::create_pbr_environment_bind_group_layout(&self.device));
         let depth_stencil = depth_format.map(|format| wgpu::DepthStencilState {
             format,
             depth_write_enabled: Some(true),
@@ -3124,12 +3130,16 @@ impl LodClassifierDevice {
                 let pbr_texture_bind_group_layout = pbr_texture_bind_group_layout
                     .as_ref()
                     .expect("PBR pipeline request creates its texture layout");
+                let pbr_environment_bind_group_layout = pbr_environment_bind_group_layout
+                    .as_ref()
+                    .expect("PBR pipeline request creates its environment layout");
                 self.device
                     .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                         label: Some("quilting prepared QB PBR pipeline layout"),
                         bind_group_layouts: &[
                             Some(&bind_group_layout),
                             Some(pbr_texture_bind_group_layout),
+                            Some(pbr_environment_bind_group_layout),
                         ],
                         immediate_size: 0,
                     })
@@ -3199,6 +3209,12 @@ impl LodClassifierDevice {
                     pbr_texture_bind_group_layout
                         .as_ref()
                         .expect("PBR pipeline request creates its texture layout")
+                        .clone()
+                }),
+                pbr_environment_bind_group_layout: (style == RenderStyle::Pbr).then(|| {
+                    pbr_environment_bind_group_layout
+                        .as_ref()
+                        .expect("PBR pipeline request creates its environment layout")
                         .clone()
                 }),
                 counter_clockwise,
@@ -3398,6 +3414,11 @@ impl LodClassifierDevice {
         } else {
             None
         };
+        let pbr_environment = if pipeline.style == RenderStyle::Pbr {
+            Some(self.create_pbr_environment_bindings(pipeline, None)?)
+        } else {
+            None
+        };
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("quilting prepared QB render bindings"),
             layout: &pipeline.bind_group_layout,
@@ -3423,6 +3444,7 @@ impl LodClassifierDevice {
             frames,
             materials,
             material_textures,
+            pbr_environment,
             frame_words: Mutex::new(vec![0; frame_word_count]),
             bind_group,
         })
@@ -3631,6 +3653,20 @@ impl LodClassifierDevice {
             ));
         }
         retained.bindings.material_textures = Some(candidate);
+        Ok(())
+    }
+
+    /// Atomically refresh only the PBR image-based-lighting bind group. A
+    /// missing environment deliberately publishes the analytical fallback
+    /// binding instead of leaving group two unbound.
+    pub fn replace_patch_render_scene_environment_bindings(
+        &self,
+        pipeline: &PatchRenderPipeline,
+        retained: &mut PatchRenderScene,
+        environment: Option<&PbrEnvironmentMap>,
+    ) -> Result<(), LodWebGpuError> {
+        retained.bindings.pbr_environment =
+            Some(self.create_pbr_environment_bindings(pipeline, environment)?);
         Ok(())
     }
 
@@ -6241,6 +6277,10 @@ impl PatchRenderScene {
             .as_ref()
             .map(PbrMaterialTextureBindings::residency)
     }
+
+    pub fn pbr_environment_bindings(&self) -> Option<&PbrEnvironmentBindings> {
+        self.bindings.pbr_environment.as_ref()
+    }
 }
 
 impl OffscreenPatchRenderTarget {
@@ -6393,6 +6433,10 @@ impl PatchRenderPipeline {
                     ))
                 })?;
             pass.set_bind_group(1, material_textures, &[]);
+            let environment = bindings.pbr_environment.as_ref().ok_or_else(|| {
+                LodWebGpuError::Payload("PBR environment bindings are not resident".to_string())
+            })?;
+            pass.set_bind_group(2, environment.bind_group(), &[]);
         }
         pass.set_vertex_buffer(0, atlas.barycentric_buffer.slice(..));
         let index_width = match atlas.index_format {
