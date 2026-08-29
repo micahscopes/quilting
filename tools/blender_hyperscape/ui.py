@@ -13,6 +13,19 @@ def _collection_header(layout, settings, collection: str) -> None:
     remove.collection = collection
 
 
+def _draw_generator(layout, generator) -> None:
+    layout.prop(generator, "kind")
+    if generator.kind == "TRANSLATION":
+        layout.prop(generator, "offset")
+    elif generator.kind == "ROTATION":
+        layout.prop(generator, "quaternion_wxyz")
+    elif generator.kind == "UNIFORM_SCALE":
+        layout.prop(generator, "factor")
+    else:
+        layout.prop(generator, "center")
+        layout.prop(generator, "radius")
+
+
 class HYPERSCAPE_PT_scene(bpy.types.Panel):
     bl_label = "Hyperscape"
     bl_idname = "HYPERSCAPE_PT_scene"
@@ -134,6 +147,9 @@ class HYPERSCAPE_PT_frames(bpy.types.Panel):
             return
         frame = settings.frames[min(settings.active_frame, len(settings.frames) - 1)]
         layout.prop(frame, "name")
+        row = layout.row(align=True)
+        row.prop(frame, "stable_id")
+        row.operator("hyperscape.generate_frame_stable_id", text="", icon="FILE_REFRESH")
         layout.prop(frame, "parent")
         layout.label(text="Generator word (application order)")
         layout.template_list(
@@ -144,16 +160,7 @@ class HYPERSCAPE_PT_frames(bpy.types.Panel):
         row.operator("hyperscape.generator_remove", text="", icon="REMOVE")
         if frame.generators:
             generator = frame.generators[min(frame.active_generator, len(frame.generators) - 1)]
-            layout.prop(generator, "kind")
-            if generator.kind == "TRANSLATION":
-                layout.prop(generator, "offset")
-            elif generator.kind == "ROTATION":
-                layout.prop(generator, "quaternion_wxyz")
-            elif generator.kind == "UNIFORM_SCALE":
-                layout.prop(generator, "factor")
-            else:
-                layout.prop(generator, "center")
-                layout.prop(generator, "radius")
+            _draw_generator(layout, generator)
         layout.prop(settings, "frame_reparent_target")
         layout.operator("hyperscape.reparent_frame", icon="OUTLINER_DATA_EMPTY")
 
@@ -251,7 +258,7 @@ class HYPERSCAPE_PT_paths(bpy.types.Panel):
 
 
 class HYPERSCAPE_PT_constraints(bpy.types.Panel):
-    bl_label = "Cross-frame Constraints"
+    bl_label = "Constraint Graph"
     bl_parent_id = "HYPERSCAPE_PT_scene"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -267,12 +274,44 @@ class HYPERSCAPE_PT_constraints(bpy.types.Panel):
             return
         constraint = settings.constraints[min(settings.active_constraint, len(settings.constraints) - 1)]
         layout.prop(constraint, "kind")
-        layout.prop(constraint, "subject")
         if constraint.kind == "TRACK":
+            layout.prop(constraint, "subject")
             layout.prop(constraint, "target")
             layout.prop(constraint, "local_offset")
-        else:
+        elif constraint.kind == "PROJECTION_CAMERA":
+            layout.prop(constraint, "subject")
             layout.prop(constraint, "frame")
+        else:
+            layout.prop(constraint, "frame", text="Pinned Frame")
+            layout.prop(constraint, "target", text="Surface Entity")
+            layout.prop(constraint, "face")
+            layout.prop(constraint, "barycentric")
+            layout.prop(constraint, "normal_sign")
+            layout.prop(constraint, "heading_radians")
+            layout.prop(constraint, "uniform_scale")
+            layout.prop(constraint, "orientation")
+            layout.label(text="Pinned frame parent must equal target entity frame")
+            layout.label(text="Local conformal offset (application order)")
+            layout.template_list(
+                "UI_UL_list",
+                "hyperscape_surface_pin_generators",
+                constraint,
+                "local_generators",
+                constraint,
+                "active_local_generator",
+                rows=3,
+            )
+            row = layout.row(align=True)
+            row.operator("hyperscape.surface_pin_generator_add", text="", icon="ADD")
+            row.operator("hyperscape.surface_pin_generator_remove", text="", icon="REMOVE")
+            if constraint.local_generators:
+                generator = constraint.local_generators[
+                    min(
+                        constraint.active_local_generator,
+                        len(constraint.local_generators) - 1,
+                    )
+                ]
+                _draw_generator(layout, generator)
 
 
 CLASSES = (

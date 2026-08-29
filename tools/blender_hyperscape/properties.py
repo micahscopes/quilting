@@ -53,6 +53,10 @@ class HyperscapeGenerator(bpy.types.PropertyGroup):
 
 
 class HyperscapeFrame(bpy.types.PropertyGroup):
+    stable_id: StringProperty(
+        name="Stable Frame ID",
+        description="Durable UUID used by Blender, glTF, Hyperscape, and authored edits",
+    )
     name: StringProperty(name="Name", default="frame")
     parent: IntProperty(name="Parent", default=-1, min=-1)
     generators: CollectionProperty(type=HyperscapeGenerator)
@@ -115,12 +119,47 @@ class HyperscapeConstraint(bpy.types.PropertyGroup):
         items=(
             ("TRACK", "Cross-frame Track", "Aim at a target resolved across conformal frames"),
             ("PROJECTION_CAMERA", "Projection Camera", "Use this camera and conformal frame for extraction"),
+            (
+                "SURFACE_PIN",
+                "Animated Surface Pin",
+                "Drive a conformal frame from a stable point on a posed QB surface",
+            ),
         ),
     )
     subject: PointerProperty(name="Subject", type=bpy.types.Object)
     target: PointerProperty(name="Target", type=bpy.types.Object)
     local_offset: FloatVectorProperty(name="Target Offset", size=3, subtype="TRANSLATION")
-    frame: IntProperty(name="Projection Frame", default=0, min=0)
+    frame: IntProperty(name="Conformal Frame", default=0, min=0)
+    face: IntProperty(name="Source Face", default=0, min=0)
+    barycentric: FloatVectorProperty(
+        name="Barycentric Point",
+        description="Stable source-face weights; values are normalized on load",
+        size=3,
+        default=(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0),
+        min=0.0,
+        max=1.0,
+    )
+    normal_sign: EnumProperty(
+        name="Surface Side",
+        items=(
+            ("1", "Positive Normal", "Use the authored surface normal"),
+            ("-1", "Negative Normal", "Use the opposite surface normal"),
+        ),
+        default="1",
+    )
+    heading_radians: FloatProperty(name="Material Heading", default=0.0, subtype="ANGLE")
+    uniform_scale: FloatProperty(name="Conformal Scale", default=1.0, min=1.0e-6)
+    orientation: EnumProperty(
+        name="World Orientation",
+        items=(
+            ("INHERIT", "Inherit", "Keep parent and local-offset chart parity"),
+            ("RIGHT_SIDE_IN", "Right-side-in", "Force orientation-preserving ambient parity"),
+            ("INSIDE_OUT", "Inside-out", "Force orientation-reversing ambient parity"),
+        ),
+        default="INHERIT",
+    )
+    local_generators: CollectionProperty(type=HyperscapeGenerator)
+    active_local_generator: IntProperty(default=0, min=0)
 
 
 class HyperscapeObjectBinding(bpy.types.PropertyGroup):

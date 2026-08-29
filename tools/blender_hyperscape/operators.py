@@ -47,14 +47,17 @@ def _set_generator(generator, authored: dict[str, Any]) -> None:
 
 
 def _frames_dict(settings) -> list[dict[str, Any]]:
-    return [
-        {
+    frames = []
+    for frame in settings.frames:
+        encoded = {
             "name": frame.name,
             "parent": None if frame.parent < 0 else frame.parent,
             "generators": [_generator_dict(generator) for generator in frame.generators],
         }
-        for frame in settings.frames
-    ]
+        if frame.stable_id.strip():
+            encoded["stable_id"] = frame.stable_id.strip()
+        frames.append(encoded)
+    return frames
 
 
 def _parse_indices(value: str) -> list[int]:
@@ -114,22 +117,58 @@ def build_asset(
             paths[-1]["coordinate_frame"] = path.coordinate_frame
     constraints = []
     for constraint in settings.constraints:
-        if constraint.subject is None or constraint.subject.name not in node_indices:
-            raise codec.HyperscapeCodecError("constraint needs an exported subject")
-        node = node_indices[constraint.subject.name]
         if constraint.kind == "TRACK":
+            if constraint.subject is None or constraint.subject.name not in node_indices:
+                raise codec.HyperscapeCodecError("track constraint needs an exported subject")
             if constraint.target is None or constraint.target.name not in node_indices:
                 raise codec.HyperscapeCodecError("track constraint needs an exported target")
             constraints.append(
                 {
                     "type": "track",
-                    "node": node,
+                    "node": node_indices[constraint.subject.name],
                     "target_node": node_indices[constraint.target.name],
                     "local_offset": list(constraint.local_offset),
                 }
             )
+        elif constraint.kind == "PROJECTION_CAMERA":
+            if constraint.subject is None or constraint.subject.name not in node_indices:
+                raise codec.HyperscapeCodecError(
+                    "projection-camera constraint needs an exported camera"
+                )
+            constraints.append(
+                {
+                    "type": "projection_camera",
+                    "node": node_indices[constraint.subject.name],
+                    "frame": constraint.frame,
+                }
+            )
         else:
-            constraints.append({"type": "projection_camera", "node": node, "frame": constraint.frame})
+            if constraint.target is None or constraint.target.name not in node_indices:
+                raise codec.HyperscapeCodecError(
+                    "surface pin needs an exported target mesh"
+                )
+            target_binding = constraint.target.hyperscape
+            if not target_binding.enabled or not target_binding.stable_id.strip():
+                raise codec.HyperscapeCodecError(
+                    "surface-pin target needs a Conformal Binding and stable entity ID"
+                )
+            constraints.append(
+                {
+                    "type": "surface_pin",
+                    "frame": constraint.frame,
+                    "target_entity": target_binding.stable_id.strip(),
+                    "face": constraint.face,
+                    "barycentric": list(constraint.barycentric),
+                    "normal_sign": int(constraint.normal_sign),
+                    "heading_radians": constraint.heading_radians,
+                    "uniform_scale": constraint.uniform_scale,
+                    "orientation": constraint.orientation.lower(),
+                    "local_offset": [
+                        _generator_dict(generator)
+                        for generator in constraint.local_generators
+                    ],
+                }
+            )
     payload = {
         "version": codec.VERSION,
         "frames": frames,
@@ -151,7 +190,11 @@ def build_asset(
         if binding.path >= 0:
             encoded["path"] = binding.path
         bindings[node_indices[obj.name]] = encoded
-    codec.validate_payload(payload, node_count, None)
+    codec.validate_payload(
+        payload,
+        node_count,
+        [bindings.get(node) for node in range(node_count)],
+    )
     return payload, bindings
 
 
@@ -165,6 +208,7 @@ def load_asset(settings, payload: dict[str, Any], bindings, node_objects: dict[i
         _clear_collection(collection)
     for authored in payload.get("frames", []):
         frame = settings.frames.add()
+        frame.stable_id = authored.get("stable_id", "")
         frame.name = authored["name"]
         frame.parent = -1 if authored.get("parent") is None else authored["parent"]
         for encoded in authored.get("generators", []):
@@ -201,15 +245,34 @@ def load_asset(settings, payload: dict[str, Any], bindings, node_objects: dict[i
             transition.time_seconds = encoded["time_seconds"]
             transition.frame = encoded["frame"]
             transition.anchor = encoded.get("anchor", -1)
+    objects_by_stable_id = {
+        binding["stable_id"]: node_objects.get(node)
+        for node, binding in enumerate(bindings)
+        if binding is not None and "stable_id" in binding
+    }
     for authored in payload.get("constraints", []):
         constraint = settings.constraints.add()
         constraint.kind = authored["type"].upper()
-        constraint.subject = node_objects.get(authored["node"])
         if authored["type"] == "track":
+            constraint.subject = node_objects.get(authored["node"])
             constraint.target = node_objects.get(authored["target_node"])
             constraint.local_offset = authored.get("local_offset", (0.0, 0.0, 0.0))
+        elif authored["type"] == "projection_camera":
+            constraint.subject = node_objects.get(authored["node"])
+            constraint.frame = authored["frame"]
         else:
             constraint.frame = authored["frame"]
+            constraint.target = objects_by_stable_id.get(authored["target_entity"])
+            constraint.face = authored["face"]
+            barycentric = authored["barycentric"]
+            total = sum(barycentric)
+            constraint.barycentric = tuple(value / total for value in barycentric)
+            constraint.normal_sign = str(authored.get("normal_sign", 1))
+            constraint.heading_radians = authored.get("heading_radians", 0.0)
+            constraint.uniform_scale = authored.get("uniform_scale", 1.0)
+            constraint.orientation = authored.get("orientation", "inherit").upper()
+            for encoded in authored.get("local_offset", []):
+                _set_generator(constraint.local_generators.add(), encoded)
     for node, binding in enumerate(bindings):
         obj = node_objects.get(node)
         if obj is None or binding is None:
@@ -256,9 +319,17 @@ def _required_object_nodes(payload: dict[str, Any], bindings) -> set[int]:
     nodes = {index for index, binding in enumerate(bindings) if binding is not None}
     nodes.update(path["node"] for path in payload.get("paths", []))
     for constraint in payload.get("constraints", []):
-        nodes.add(constraint["node"])
+        if constraint["type"] in ("track", "projection_camera"):
+            nodes.add(constraint["node"])
         if constraint["type"] == "track":
             nodes.add(constraint["target_node"])
+        elif constraint["type"] == "surface_pin":
+            target = constraint["target_entity"]
+            nodes.update(
+                node
+                for node, binding in enumerate(bindings)
+                if binding is not None and binding.get("stable_id") == target
+            )
     return nodes
 
 
@@ -279,6 +350,7 @@ class HYPERSCAPE_OT_collection_add(bpy.types.Operator):
         if self.collection == "frames":
             item.name = f"frame-{len(values) - 1}"
             item.parent = len(values) - 2
+            item.stable_id = str(uuid.uuid4())
         elif self.collection == "walls":
             item.name = f"wall-{len(values) - 1}"
         elif self.collection == "anchors":
@@ -333,6 +405,49 @@ class HYPERSCAPE_OT_generator_remove(bpy.types.Operator):
             frame = settings.frames[min(settings.active_frame, len(settings.frames) - 1)]
             if frame.generators:
                 frame.generators.remove(min(frame.active_generator, len(frame.generators) - 1))
+        return {"FINISHED"}
+
+
+class HYPERSCAPE_OT_surface_pin_generator_add(bpy.types.Operator):
+    bl_idname = "hyperscape.surface_pin_generator_add"
+    bl_label = "Add Surface-pin Local Generator"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        settings = context.scene.hyperscape
+        if not settings.constraints:
+            return {"CANCELLED"}
+        constraint = settings.constraints[
+            min(settings.active_constraint, len(settings.constraints) - 1)
+        ]
+        if constraint.kind != "SURFACE_PIN":
+            return {"CANCELLED"}
+        constraint.local_generators.add()
+        constraint.active_local_generator = len(constraint.local_generators) - 1
+        return {"FINISHED"}
+
+
+class HYPERSCAPE_OT_surface_pin_generator_remove(bpy.types.Operator):
+    bl_idname = "hyperscape.surface_pin_generator_remove"
+    bl_label = "Remove Surface-pin Local Generator"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        settings = context.scene.hyperscape
+        if not settings.constraints:
+            return {"CANCELLED"}
+        constraint = settings.constraints[
+            min(settings.active_constraint, len(settings.constraints) - 1)
+        ]
+        if constraint.kind == "SURFACE_PIN" and constraint.local_generators:
+            index = min(
+                constraint.active_local_generator,
+                len(constraint.local_generators) - 1,
+            )
+            constraint.local_generators.remove(index)
+            constraint.active_local_generator = min(
+                index, max(len(constraint.local_generators) - 1, 0)
+            )
         return {"FINISHED"}
 
 
@@ -710,6 +825,22 @@ class HYPERSCAPE_OT_generate_stable_id(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class HYPERSCAPE_OT_generate_frame_stable_id(bpy.types.Operator):
+    bl_idname = "hyperscape.generate_frame_stable_id"
+    bl_label = "Generate Stable Conformal Frame ID"
+    bl_description = "Assign a new durable UUID to the active conformal frame"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        settings = context.scene.hyperscape
+        if not settings.frames:
+            self.report({"ERROR"}, "add a conformal frame first")
+            return {"CANCELLED"}
+        frame = settings.frames[min(settings.active_frame, len(settings.frames) - 1)]
+        frame.stable_id = str(uuid.uuid4())
+        return {"FINISHED"}
+
+
 class HYPERSCAPE_OT_import(bpy.types.Operator, ImportHelper):
     bl_idname = "hyperscape.import"
     bl_label = "Import Hyperscape glTF/GLB"
@@ -748,6 +879,8 @@ CLASSES = (
     HYPERSCAPE_OT_collection_remove,
     HYPERSCAPE_OT_generator_add,
     HYPERSCAPE_OT_generator_remove,
+    HYPERSCAPE_OT_surface_pin_generator_add,
+    HYPERSCAPE_OT_surface_pin_generator_remove,
     HYPERSCAPE_OT_keyframe_add,
     HYPERSCAPE_OT_keyframe_remove,
     HYPERSCAPE_OT_transition_add,
@@ -758,6 +891,7 @@ CLASSES = (
     HYPERSCAPE_OT_refresh_guides,
     HYPERSCAPE_OT_sync_guides,
     HYPERSCAPE_OT_generate_stable_id,
+    HYPERSCAPE_OT_generate_frame_stable_id,
     HYPERSCAPE_OT_export,
     HYPERSCAPE_OT_import,
 )
