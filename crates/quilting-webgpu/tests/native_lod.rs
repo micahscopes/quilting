@@ -323,7 +323,11 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         let mut texture_table = classifier
             .upload_pbr_texture_table(&initial_assets)
             .unwrap();
-        assert_eq!(texture_table.descriptors(), &[texture_a, texture_b]);
+        assert_eq!(
+            texture_table.descriptors(),
+            &[Some(texture_a), Some(texture_b)]
+        );
+        assert_eq!(texture_table.occupied_len(), 2);
         assert!(texture_table.linear_view(0).is_some());
         assert!(texture_table.srgb_view(0).is_some());
         assert!(texture_table.sampler(1).is_some());
@@ -392,11 +396,14 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 .unwrap(),
             PbrTextureTableUpdate::ShapeChanged,
         );
-        assert_eq!(texture_table.descriptors(), &[texture_a, texture_b]);
+        assert_eq!(
+            texture_table.descriptors(),
+            &[Some(texture_a), Some(texture_b)]
+        );
         texture_table = classifier
             .upload_pbr_texture_table(&replacement_assets)
             .unwrap();
-        assert_eq!(texture_table.descriptors(), &[replacement_descriptor]);
+        assert_eq!(texture_table.descriptors(), &[Some(replacement_descriptor)]);
         assert_eq!(
             classifier
                 .read_pbr_texture_rgba8_for_diagnostics(&texture_table, 0)

@@ -19,8 +19,8 @@ pub(crate) struct PbrTextureResource {
 /// has both linear and sRGB views over the same allocation so a material can
 /// interpret color and data channels correctly without duplicating pixels.
 pub struct PbrTextureTable {
-    descriptors: Vec<TextureAssetDescriptor>,
-    resources: Vec<PbrTextureResource>,
+    descriptors: Vec<Option<TextureAssetDescriptor>>,
+    resources: Vec<Option<PbrTextureResource>>,
 }
 
 impl PbrTextureTable {
@@ -32,7 +32,11 @@ impl PbrTextureTable {
         self.resources.len()
     }
 
-    pub fn descriptors(&self) -> &[TextureAssetDescriptor] {
+    pub fn occupied_len(&self) -> usize {
+        self.resources.iter().flatten().count()
+    }
+
+    pub fn descriptors(&self) -> &[Option<TextureAssetDescriptor>] {
         &self.descriptors
     }
 
@@ -40,6 +44,7 @@ impl PbrTextureTable {
         usize::try_from(index)
             .ok()
             .and_then(|index| self.resources.get(index))
+            .and_then(Option::as_ref)
     }
 
     pub fn linear_view(&self, index: u32) -> Option<&wgpu::TextureView> {
@@ -71,12 +76,12 @@ impl LodClassifierDevice {
         assets: &[Rgba8TextureAsset<'_>],
     ) -> Result<PbrTextureTable, LodWebGpuError> {
         validate_texture_assets(&self.device, assets)?;
-        let descriptors = assets.iter().map(|asset| asset.descriptor).collect();
+        let descriptors = assets.iter().map(|asset| Some(asset.descriptor)).collect();
         let resources = assets
             .iter()
-            .map(|asset| create_texture_resource(&self.device, asset.descriptor))
+            .map(|asset| Some(create_texture_resource(&self.device, asset.descriptor)))
             .collect::<Vec<_>>();
-        for (resource, asset) in resources.iter().zip(assets) {
+        for (resource, asset) in resources.iter().flatten().zip(assets) {
             write_texture_asset(&self.queue, resource, *asset)?;
         }
         Ok(PbrTextureTable {
@@ -97,12 +102,12 @@ impl LodClassifierDevice {
         validate_texture_assets(&self.device, assets)?;
         if !assets
             .iter()
-            .map(|asset| asset.descriptor)
+            .map(|asset| Some(asset.descriptor))
             .eq(retained.descriptors.iter().copied())
         {
             return Ok(PbrTextureTableUpdate::ShapeChanged);
         }
-        for (resource, asset) in retained.resources.iter().zip(assets) {
+        for (resource, asset) in retained.resources.iter().flatten().zip(assets) {
             write_texture_asset(&self.queue, resource, *asset)?;
         }
         Ok(PbrTextureTableUpdate::Updated)
@@ -118,7 +123,9 @@ impl LodClassifierDevice {
         let resource = table.resource(index).ok_or_else(|| {
             LodWebGpuError::Payload(format!("PBR texture index {index} is out of range"))
         })?;
-        let descriptor = table.descriptors[index as usize];
+        let descriptor = table.descriptors[index as usize].ok_or_else(|| {
+            LodWebGpuError::Payload(format!("PBR texture index {index} is an empty slot"))
+        })?;
         let unpadded_bytes_per_row = descriptor.width.checked_mul(4).ok_or_else(|| {
             LodWebGpuError::Payload("PBR texture row byte length overflowed u32".to_string())
         })?;
