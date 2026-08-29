@@ -1233,6 +1233,11 @@ assert.equal(
   'matcap_wire',
   'the AppStore presentation projection must retain Rust render semantics',
 );
+assert.deepEqual(
+  app.snapshot().presentation.active.tessellation,
+  incumbentStart.tessellation,
+  'the AppStore presentation projection must retain Rust tessellation policy exactly',
+);
 const activePresentation = app.snapshot().presentation.active;
 const activePresentationBindings = activePresentation.layers.map((layer, index) => ({
   layer: layer.id,

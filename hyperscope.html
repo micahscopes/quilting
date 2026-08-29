@@ -3153,13 +3153,15 @@ function applyPresentationVisualization(renderStyle, overlays = []) {
   return mode;
 }
 
-function applyPresentationTessellation(tessellation = {}) {
-  const density = Math.max(1, Math.min(500, Number(tessellation.density) || 100));
-  const minPixels = Math.max(
-    1,
-    Math.min(64, Number(tessellation.min_pixels_per_subdivision) || 16),
-  );
-  const screenAttenuation = tessellation.screen_attenuation !== false;
+function applyPresentationTessellation(tessellation) {
+  const density = tessellation?.density;
+  const minPixels = tessellation?.min_pixels_per_subdivision;
+  const screenAttenuation = tessellation?.screen_attenuation;
+  if (!Number.isFinite(density)
+      || !Number.isFinite(minPixels)
+      || typeof screenAttenuation !== 'boolean') {
+    throw new Error('invalid Rust presentation tessellation snapshot');
+  }
   batchSignals(() => {
     lod.density.set(density);
     lod.screenAtten.set(screenAttenuation);

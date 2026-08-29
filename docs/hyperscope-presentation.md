@@ -113,6 +113,10 @@ resolved in Rust to Quilting's backend-neutral `RenderStyle` and carried in the
 active application snapshot; ambiguous combinations are rejected. The browser
 only translates the incumbent `matcap_wire` control spelling to `both` and
 reports the separately orthogonal, not-yet-rendered `control_net` capability.
+The same snapshot carries Rust-validated density, attenuation enablement, and
+pixel-floor values. The browser applies those values exactly; malformed bridge
+data fails visibly instead of being silently defaulted or clamped a second
+time.
 
 The polytope fixtures are deterministic static GLBs generated from
 `quilting_core::polytope4`. Their closed 3-cell shells are separated before 4D

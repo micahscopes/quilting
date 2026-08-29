@@ -108,6 +108,9 @@ The first application boundary is now explicit:
   Quilting's shared backend-neutral `RenderStyle`. The browser no longer owns
   an overlay-to-render-mode policy; it only adapts the legacy `matcap_wire`
   control spelling and reports unsupported orthogonal overlay capabilities.
+  Rust likewise owns cue tessellation defaults and bounds. The browser applies
+  the complete validated policy without coercion or clamping and fails visibly
+  if the generated bridge violates that typed snapshot boundary.
 - Effective spheroidal-focus authority now crosses that same ordered boundary.
   Rust `focus_enabled` denotes fuzzy post-processing enabled specifically in
   mode 3; modes 0–2 remain renderer-only blur choices, and the retained shared

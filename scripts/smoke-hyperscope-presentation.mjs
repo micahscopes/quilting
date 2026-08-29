@@ -187,6 +187,13 @@ assert.deepEqual(
 );
 controller.startPresentation();
 
+assert.deepEqual(
+  presentation.cues.map(cue => controller.jumpToPresentationCue(cue.id).tessellation),
+  presentation.cues.map(cue => cue.tessellation),
+  'Rust presentation snapshots must preserve every validated tessellation policy exactly',
+);
+controller.startPresentation();
+
 const presentationVisualizationAdapter = browserSource.slice(
   browserSource.indexOf('const PRESENTATION_RENDER_MODES = Object.freeze({'),
   browserSource.indexOf('function applyPresentationTessellation('),
@@ -213,6 +220,29 @@ assert.equal(
   false,
   'the browser must not retain an overlay-to-render-style policy table',
 );
+
+const presentationTessellationAdapter = browserSource.slice(
+  browserSource.indexOf('function applyPresentationTessellation('),
+  browserSource.indexOf('function applyPresentationLayerState('),
+);
+for (const exactAdapterStep of [
+  'const density = tessellation?.density;',
+  'const minPixels = tessellation?.min_pixels_per_subdivision;',
+  'const screenAttenuation = tessellation?.screen_attenuation;',
+  "throw new Error('invalid Rust presentation tessellation snapshot')",
+]) {
+  assert.ok(
+    presentationTessellationAdapter.includes(exactAdapterStep),
+    `presentation tessellation adapter is missing ${exactAdapterStep}`,
+  );
+}
+for (const forbiddenBrowserPolicy of ['Math.max(', 'Math.min(', '|| 100', '|| 16']) {
+  assert.equal(
+    presentationTessellationAdapter.includes(forbiddenBrowserPolicy),
+    false,
+    `presentation tessellation adapter retained browser policy ${forbiddenBrowserPolicy}`,
+  );
+}
 
 for (const requiredAnimationAdapterStep of [
   'primaryPresentationAnimation(snapshot)',
