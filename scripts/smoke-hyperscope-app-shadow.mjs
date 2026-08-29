@@ -483,6 +483,46 @@ assert.equal(
 primarySnapshot = primaryApp.snapshot();
 assert.equal(primarySnapshot.loadingPrimarySceneAsset, undefined);
 assert.equal(primarySnapshot.loadingPrimarySceneRequest, undefined);
+assert.deepEqual(
+  {
+    requestId: primarySnapshot.readyPrimaryAsset.requestId,
+    assetId: primarySnapshot.readyPrimaryAsset.assetId,
+    uri: primarySnapshot.readyPrimaryAsset.uri,
+    mediaType: primarySnapshot.readyPrimaryAsset.mediaType,
+    byteLength: primarySnapshot.readyPrimaryAsset.byteLength,
+  },
+  {
+    requestId: primarySecond,
+    assetId: primaryChess,
+    uri: 'local-glbs/chess.glb',
+    mediaType: 'model/gltf-binary',
+    byteLength: 200_000,
+  },
+);
+const failedPrimaryReplacement = 'e0000000-0000-4000-8000-000000000012';
+primaryApp.requestPrimaryAsset(
+  3,
+  0,
+  failedPrimaryReplacement,
+  primaryHorse,
+  'broken-horse.glb',
+  'model/gltf-binary',
+);
+assert.equal(
+  primaryApp.completeAssetFailed(
+    failedPrimaryReplacement,
+    primaryHorse,
+    'parse',
+    'invalid glTF',
+    false,
+  ).disposition,
+  'applied',
+);
+assert.equal(
+  primaryApp.snapshot().readyPrimaryAsset.requestId,
+  primarySecond,
+  'a failed primary replacement must preserve the preceding decoded candidate',
+);
 
 const sessionNodeIdentities = app.sessionNodeIdentities(
   asset,

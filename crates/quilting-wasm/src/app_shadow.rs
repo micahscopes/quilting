@@ -1402,6 +1402,17 @@ impl HyperscopeAppShadow {
     pub fn snapshot(&self) -> Result<JsValue, JsValue> {
         let summary = self.store.summary_snapshot();
         let render = self.store.render_snapshot();
+        let ready_primary_asset = self.store.primary_asset_snapshot().map(|asset| {
+            ShadowReadyPrimaryAsset {
+                request_id: asset.request_id.to_string(),
+                asset_id: asset.descriptor.id.to_string(),
+                uri: asset.descriptor.uri,
+                media_type: asset.descriptor.media_type,
+                byte_length: asset.byte_length,
+                content_digest: asset.content_digest,
+                metadata: asset.metadata,
+            }
+        });
         let authored = self.store.authored_scene_snapshot();
         let assets = self
             .store
@@ -1447,6 +1458,7 @@ impl HyperscopeAppShadow {
             loading_primary_scene_request: summary
                 .loading_primary_scene_request
                 .map(|request| request.to_string()),
+            ready_primary_asset,
             authored_projection_revision: authored
                 .projection_revision
                 .map(|revision| revision.to_string()),
@@ -1719,11 +1731,27 @@ struct ShadowSnapshot {
     loading_assets: usize,
     loading_primary_scene_asset: Option<String>,
     loading_primary_scene_request: Option<String>,
+    ready_primary_asset: Option<ShadowReadyPrimaryAsset>,
     authored_projection_revision: Option<String>,
     authored_assets: Vec<ShadowAuthoredAsset>,
     authored_entities: Vec<ShadowAuthoredEntity>,
     diagnostics: Vec<ShadowDiagnostic>,
     presentation: Option<ShadowPresentation>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowReadyPrimaryAsset {
+    request_id: String,
+    asset_id: String,
+    uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    media_type: Option<String>,
+    byte_length: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_digest: Option<[u8; 32]>,
+    #[serde(skip_serializing_if = "AssetMetadata::is_empty")]
+    metadata: AssetMetadata,
 }
 
 #[derive(Serialize)]
