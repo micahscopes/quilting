@@ -175,8 +175,11 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
   </div>
 
   <div class="section">
-    <label>Animation</label>
-    <select id="anim-sel"><option value="-1">None</option></select>
+    <div id="animation-clip-control-rust" hidden></div>
+    <div id="animation-clip-control-browser">
+      <label>Animation</label>
+      <select id="anim-sel"><option value="-1">None</option></select>
+    </div>
   </div>
 
   <div class="section" id="local-peer-section">
@@ -3709,6 +3712,8 @@ let rustAssetCreditsMountAttempted = false;
 let rustAssetCreditsMounted = false;
 let rustAnimationControlMountAttempted = false;
 let rustAnimationControlMounted = false;
+let rustAnimationClipControlMountAttempted = false;
+let rustAnimationClipControlMounted = false;
 let rustNavigationStatusMountAttempted = false;
 let rustNavigationStatusMounted = false;
 const rustAppShadowAssetIds = new Map();
@@ -3730,6 +3735,9 @@ const rustAppShadowDiagnostics = {
   animationControlAuthority: 'browser-fallback',
   animationControlMountAttempts: 0,
   animationControlMountErrors: 0,
+  animationClipControlAuthority: 'browser-fallback',
+  animationClipControlMountAttempts: 0,
+  animationClipControlMountErrors: 0,
   navigationStatusAuthority: 'unmounted',
   navigationStatusMountAttempts: 0,
   navigationStatusMountErrors: 0,
@@ -4201,6 +4209,77 @@ function ensureRustAnimationControlView() {
   }
 }
 
+function ensureRustAnimationClipControlView() {
+  if (ANIMATION_CLIP_IMPLEMENTATION !== 'rust') return false;
+  if (rustAnimationClipControlMounted) return true;
+  if (rustAnimationClipControlMountAttempted || !rustAppShadow) return false;
+  rustAnimationClipControlMountAttempted = true;
+  rustAppShadowDiagnostics.animationClipControlMountAttempts += 1;
+  const host = $('animation-clip-control-rust');
+  const fallback = $('animation-clip-control-browser');
+  if (!host || !fallback || typeof rustAppShadow.mountAnimationClipControl !== 'function') {
+    return false;
+  }
+  try {
+    rustAppShadow.mountAnimationClipControl(
+      host,
+      (index, sequence, revision, effect, cancellations) => {
+        try {
+          if (effect != null && effect.type !== 'select_animation_clip') {
+            throw new Error('Rust animation clip view emitted an invalid selection effect');
+          }
+          if (!Array.isArray(cancellations)
+              || cancellations.some(item => item?.type !== 'cancel_animation_clip_selection')) {
+            throw new Error('Rust animation clip view emitted invalid cancellation effects');
+          }
+          observeRustAppShadowSequence(sequence, 'Rust animation clip control');
+          const effects = effect == null ? [...cancellations] : [...cancellations, effect];
+          rustAppShadowDiagnostics.lastCommit = {
+            revision: String(revision),
+            disposition: 'applied',
+            publishedUi: true,
+            effects,
+          };
+          animationClipDiagnostics.dispatches += 1;
+          animationClipDiagnostics.effects += effect == null ? 0 : 1;
+          animationClipDiagnostics.noops += effect == null ? 1 : 0;
+          animationClipDiagnostics.cancellationEffects += cancellations.length;
+          animationClipDiagnostics.lastRequestedClip = Number(index);
+          animationClipDiagnostics.lastJobId = effect?.job_id ?? null;
+          const snapshot = refreshAppShadowSnapshot();
+          observeAnimationClipResidency(
+            effect == null ? 'control-noop' : 'control-pending',
+            snapshot,
+          );
+          void selectAnimationIndex(Number(index), {
+            committedClipJob: { effect, cancellations },
+          });
+        } catch (error) {
+          animationClipDiagnostics.errors += 1;
+          animationClipDiagnostics.lastError = error?.message || String(error);
+          recordAppShadowMismatch('animation_clip_control_projection', animationClipDiagnostics.lastError);
+        }
+      },
+      error => {
+        animationClipDiagnostics.errors += 1;
+        animationClipDiagnostics.lastError = String(error);
+        recordAppShadowMismatch('animation_clip_control_rejection', String(error));
+      },
+    );
+    host.hidden = false;
+    fallback.hidden = true;
+    rustAnimationClipControlMounted = true;
+    rustAppShadowDiagnostics.animationClipControlAuthority = 'hyperscope-web';
+    return true;
+  } catch (error) {
+    host.hidden = true;
+    fallback.hidden = false;
+    rustAppShadowDiagnostics.animationClipControlMountErrors += 1;
+    recordAppShadowMismatch('animation_clip_control_mount', error?.message || String(error));
+    return false;
+  }
+}
+
 function ensureRustNavigationStatusView() {
   if (rustNavigationStatusMounted) return true;
   if (rustNavigationStatusMountAttempted || !rustAppShadow) return false;
@@ -4328,6 +4407,7 @@ function refreshAppShadowSnapshot() {
   const snapshot = rustAppShadow.snapshot();
   rustAppShadowDiagnostics.snapshot = snapshot;
   ensureRustAnimationControlView();
+  ensureRustAnimationClipControlView();
   ensureRustNavigationStatusView();
   if (!ensureRustAssetCreditsView()) renderAssetCredits(snapshot);
   return snapshot;
@@ -7595,12 +7675,18 @@ function completeAppAnimationClipSelection(job, error = null) {
   }
 }
 
-async function selectAnimationIndex(idx, { restoreRouteClock = true } = {}) {
+async function selectAnimationIndex(
+  idx,
+  { restoreRouteClock = true, committedClipJob = null } = {},
+) {
   if (idx < 0 || !meshInfo) return false;
   let clipJob = null;
   let rendererSwitched = false;
   try {
-    clipJob = beginAppAnimationClipSelection(idx);
+    if (committedClipJob && ANIMATION_CLIP_IMPLEMENTATION !== 'rust') {
+      throw new Error('only Rust clip authority may supply a committed clip job');
+    }
+    clipJob = committedClipJob || beginAppAnimationClipSelection(idx);
     if (ANIMATION_CLIP_IMPLEMENTATION === 'rust' && clipJob?.effect) {
       idx = clipJob.effect.clip_index;
       animationClipDiagnostics.authorityWrites += 1;

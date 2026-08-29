@@ -195,6 +195,25 @@ impl HyperscopeAppShadow {
         );
     }
 
+    /// Mount the explicit Rust-authority installed-animation selector. The
+    /// view dispatches through AppStore; the browser receives only the exact
+    /// committed selection/cancellation effects needed to update resources.
+    #[cfg(feature = "leptos-ui")]
+    #[wasm_bindgen(js_name = mountAnimationClipControl)]
+    pub fn mount_animation_clip_control(
+        &self,
+        parent: web_sys::HtmlElement,
+        on_commit: js_sys::Function,
+        on_error: js_sys::Function,
+    ) {
+        hyperscope_web::animation_control::mount_animation_clip_control(
+            parent,
+            self.store.clone(),
+            on_commit,
+            on_error,
+        );
+    }
+
     /// Mount the read-only Leptos navigation/focus status over the AppStore's
     /// throttled navigation projection. Renderer frames remain on the direct
     /// snapshot lane and never wait for this view.

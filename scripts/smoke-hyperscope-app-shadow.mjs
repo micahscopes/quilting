@@ -229,6 +229,7 @@ assert.equal(
 );
 
 const app = new HyperscopeAppShadow();
+assert.equal(typeof app.mountAnimationClipControl, 'function');
 assert.equal(app.snapshot().animationPlaying, true);
 assert.deepEqual(app.snapshot().renderSettings, {
   revision: '0',

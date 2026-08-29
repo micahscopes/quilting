@@ -413,6 +413,12 @@ The first application boundary is now explicit:
   switch is in flight consumes Rust's cancellation effect and performs an
   ordered incumbent reinstall, so the already-dispatched worker request cannot
   make a canceled clip resident later.
+  Under explicit `animclipimpl=rust`, a Leptos selector projects the installed
+  catalog and active/pending clip through the application summary revision
+  fence. It dispatches directly through `AppStore`; the platform callback
+  receives the exact committed selection and cancellation effects rather than
+  returning user intent to JavaScript. The incumbent HTML selector remains the
+  default and the shadow oracle remains available until live parity is green.
   Version 0.20 separates a successfully fetched/decoded primary candidate from
   a renderer-resident primary scene. Decode emits an explicit
   `InstallPrimaryScene` effect; only a matching, validated completion can

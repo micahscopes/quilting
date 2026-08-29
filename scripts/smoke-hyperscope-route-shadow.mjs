@@ -355,6 +355,10 @@ for (const animationClipAuthorityStep of [
   'animationClipDiagnostics.repairs += 1;',
   'rendererAnimationClipIndex = null;',
   'rendererAnimationClipIndex = idx;',
+  'rustAppShadow.mountAnimationClipControl(',
+  "rustAppShadowDiagnostics.animationClipControlAuthority = 'hyperscope-web';",
+  'committedClipJob: { effect, cancellations },',
+  "throw new Error('only Rust clip authority may supply a committed clip job');",
 ]) {
   assert.ok(
     browserSource.includes(animationClipAuthorityStep),
