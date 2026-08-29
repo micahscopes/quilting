@@ -44,6 +44,20 @@ impl SurfaceTangentFrame {
         }
     }
 
+    /// Rotate the material heading within the tangent plane while preserving
+    /// the selected normal side and origin.
+    pub fn with_heading(self, heading_radians: f64) -> Result<Self, SurfaceAnchorError> {
+        if !heading_radians.is_finite() {
+            return Err(SurfaceAnchorError::NonFinite);
+        }
+        let (sin, cos) = heading_radians.sin_cos();
+        let tangent_forward = add(
+            scale(self.tangent_forward, cos),
+            scale(self.tangent_right, sin),
+        );
+        Self::from_origin_forward_normal(self.origin, tangent_forward, self.normal)
+    }
+
     pub fn world_point(self, local: [f64; 3]) -> Option<[f64; 3]> {
         self.world_direction(local)
             .map(|direction| add(self.origin, direction))

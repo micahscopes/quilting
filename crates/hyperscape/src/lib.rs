@@ -23,6 +23,7 @@ pub mod packed_scene;
 pub mod preflight;
 pub mod presentation;
 pub mod surface;
+pub mod surface_frame_pin;
 
 pub use navigation::{
     compose_surface_relative_forward, decompose_surface_relative_forward, framed_sphere_distance,
@@ -65,6 +66,9 @@ pub use surface::{
     SurfaceAddress, SurfaceAddressError, SurfaceAdvance, SurfaceAttachment, SurfaceContact,
     SurfaceDetachReason, SurfaceField, SurfaceSample, SurfaceWalker, SurfaceWalkerConfig,
     SurfaceWalkerStatus, TriangleAdjacency, TriangleAdjacencyReport,
+};
+pub use surface_frame_pin::{
+    ResolvedSurfaceFramePin, SurfaceFrameOrientation, SurfaceFramePin, SurfaceFramePinError,
 };
 
 /// Shared conformal scene topology. Ordinary entity parenting remains in the

@@ -103,7 +103,7 @@ impl CameraBasis {
         ]
     }
 
-    fn orientation(self) -> Result<Quat, CameraError> {
+    pub(crate) fn orientation(self) -> Result<Quat, CameraError> {
         // Rotation matrix columns are right, up, and camera-local +Z. The
         // camera looks down local -Z, so the final column is -forward.
         let m00 = self.right[0];

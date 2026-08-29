@@ -53,12 +53,14 @@ pub enum SurfaceAddressError {
     InvalidNormalSign,
 }
 
-/// A posed surface sample in the displayed Euclidean output chart.
+/// A posed surface sample in the Euclidean chart selected by its consumer.
 ///
 /// `tangent_u` differentiates along `barycentric[1]` and `tangent_v` along
 /// `barycentric[2]`; `barycentric[0] = 1 - u - v`. `surface_velocity` is the
 /// output-chart velocity caused by animation and conformal-frame motion while
-/// the source address remains fixed.
+/// the source address remains fixed. Navigation samples in the displayed
+/// ambient chart; a surface-frame pin samples in its conformal parent's chart
+/// so ancestor transforms remain ordinary frame-graph composition.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SurfaceSample {
     pub output_position: [f64; 3],
