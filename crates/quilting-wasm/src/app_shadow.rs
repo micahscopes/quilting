@@ -7,8 +7,8 @@ use hyperscape::{
     FocusSphere, LayerTransform, MappedSpaceMouseFrame, NavigationAction, NavigationFrame,
     NavigationPreset, PackedAssetInstance, PackedNodeSource, PackedNodeTransformSource,
     PackedPresentationLayerBinding, PointerTurntableGesture, PointerTurntableInput, Presentation,
-    PresentationAsset, PresentationSnapshot, SpaceMouseCameraInput, SpaceMouseMapping,
-    SurfaceAnchorTarget, TurntableFrame,
+    PresentationAsset, PresentationSnapshot, PresentationTessellation, RenderStyle,
+    SpaceMouseCameraInput, SpaceMouseMapping, SurfaceAnchorTarget, TurntableFrame,
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredEnvelope, CameraPresence, EntityId, EphemeralPresence,
@@ -17,11 +17,10 @@ use hyperscape_protocol::{
 };
 use hyperscope_app::{
     session_node_identity, AnimationAction, AnimationClock, AppCommit, AppEffect, AppEvent,
-    AppFrameSnapshot,
-    AppStore, AssetLoadCompletion, AssetLoadOutcome, AssetLoadScope, AssetMetadata, AssetStatus,
-    AuthoredRevision, CommitDisposition, EffectCompletion, FrameTick, LocalPeerDisposition,
-    LocalPeerIngress, LocalPeerLane, LocalPeerReceipt, NavigationSynchronization,
-    PresentationAction, SemanticAction, Timed,
+    AppFrameSnapshot, AppStore, AssetLoadCompletion, AssetLoadOutcome, AssetLoadScope,
+    AssetMetadata, AssetStatus, AuthoredRevision, CommitDisposition, EffectCompletion, FrameTick,
+    LocalPeerDisposition, LocalPeerIngress, LocalPeerLane, LocalPeerReceipt,
+    NavigationSynchronization, PresentationAction, RenderSettings, SemanticAction, Timed,
 };
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -1009,6 +1008,47 @@ impl HyperscopeAppShadow {
         )
     }
 
+    /// Replace the complete semantic render policy as one application event.
+    /// Browser controls may shadow this boundary before consuming its value;
+    /// backend resources and environment selection remain outside it.
+    #[wasm_bindgen(js_name = setRenderSettings)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_render_settings(
+        &self,
+        sequence: u32,
+        style: &str,
+        resolution_level: u8,
+        density: f64,
+        screen_attenuation: bool,
+        min_pixels_per_subdivision: f64,
+        atlas_exponent: u8,
+        max_face_edge_ratio: u8,
+    ) -> Result<JsValue, JsValue> {
+        let settings = RenderSettings {
+            style: parse_render_style(style)?,
+            resolution_level,
+            tessellation: PresentationTessellation {
+                density,
+                screen_attenuation,
+                min_pixels_per_subdivision,
+            },
+            atlas_exponent,
+            max_face_edge_ratio,
+        };
+        let commit = self
+            .store
+            .dispatch(AppEvent::Input(Timed {
+                sequence: u64::from(sequence),
+                at_seconds: self.store.frame_snapshot().elapsed_seconds,
+                value: SemanticAction::SetRenderSettings(settings),
+            }))
+            .map_err(js_error)?;
+        to_js(&ShadowRenderSettingsReceipt {
+            commit: shadow_commit(&commit),
+            render: self.store.render_snapshot().into(),
+        })
+    }
+
     /// Write `[playing, unwrapped_time_seconds, speed]` without allocating a
     /// per-frame JavaScript object. The browser can shadow or consume this
     /// packet after `advanceFrameQuiet`.
@@ -1286,6 +1326,7 @@ impl HyperscopeAppShadow {
     /// revision commit fence.
     pub fn snapshot(&self) -> Result<JsValue, JsValue> {
         let summary = self.store.summary_snapshot();
+        let render = self.store.render_snapshot();
         let authored = self.store.authored_scene_snapshot();
         let assets = self
             .store
@@ -1322,6 +1363,7 @@ impl HyperscopeAppShadow {
             animation_playing: summary.animation_playing,
             animation_time_seconds: summary.animation_time_seconds,
             animation_speed: summary.animation_speed,
+            render_settings: render.into(),
             assets,
             loading_assets: summary.loading_assets,
             loading_primary_scene_asset: summary
@@ -1575,6 +1617,7 @@ struct ShadowSnapshot {
     animation_playing: bool,
     animation_time_seconds: f64,
     animation_speed: f64,
+    render_settings: ShadowRenderSettings,
     assets: Vec<ShadowAsset>,
     loading_assets: usize,
     loading_primary_scene_asset: Option<String>,
@@ -1584,6 +1627,41 @@ struct ShadowSnapshot {
     authored_entities: Vec<ShadowAuthoredEntity>,
     diagnostics: Vec<ShadowDiagnostic>,
     presentation: Option<ShadowPresentation>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowRenderSettingsReceipt {
+    commit: ShadowCommit,
+    render: ShadowRenderSettings,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowRenderSettings {
+    revision: String,
+    style: &'static str,
+    resolution_level: u8,
+    density: f64,
+    screen_attenuation: bool,
+    min_pixels_per_subdivision: f64,
+    atlas_exponent: u8,
+    max_face_edge_ratio: u8,
+}
+
+impl From<hyperscope_app::AppRenderSnapshot> for ShadowRenderSettings {
+    fn from(snapshot: hyperscope_app::AppRenderSnapshot) -> Self {
+        Self {
+            revision: snapshot.revision.to_string(),
+            style: snapshot.settings.style.wire_name(),
+            resolution_level: snapshot.settings.resolution_level,
+            density: snapshot.settings.tessellation.density,
+            screen_attenuation: snapshot.settings.tessellation.screen_attenuation,
+            min_pixels_per_subdivision: snapshot.settings.tessellation.min_pixels_per_subdivision,
+            atlas_exponent: snapshot.settings.atlas_exponent,
+            max_face_edge_ratio: snapshot.settings.max_face_edge_ratio,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -1944,6 +2022,11 @@ fn shadow_commit(commit: &AppCommit) -> ShadowCommit {
         published_ui: commit.published_ui,
         effects,
     }
+}
+
+fn parse_render_style(style: &str) -> Result<RenderStyle, JsValue> {
+    RenderStyle::from_wire_name(style)
+        .ok_or_else(|| JsValue::from_str("unknown backend-neutral render style"))
 }
 
 fn peer_receipt_to_js(receipt: &LocalPeerReceipt) -> Result<JsValue, JsValue> {

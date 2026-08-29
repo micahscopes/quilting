@@ -643,6 +643,33 @@ pub enum RenderStyle {
     Stretch,
 }
 
+impl RenderStyle {
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Pbr => "pbr",
+            Self::Matcap => "matcap",
+            Self::Wire => "wire",
+            Self::Normals => "normals",
+            Self::MatcapWire => "matcap_wire",
+            Self::Lod => "lod",
+            Self::Stretch => "stretch",
+        }
+    }
+
+    pub fn from_wire_name(name: &str) -> Option<Self> {
+        match name {
+            "pbr" => Some(Self::Pbr),
+            "matcap" => Some(Self::Matcap),
+            "wire" => Some(Self::Wire),
+            "normals" => Some(Self::Normals),
+            "matcap_wire" => Some(Self::MatcapWire),
+            "lod" => Some(Self::Lod),
+            "stretch" => Some(Self::Stretch),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderPass {
     PbrOpaque,
@@ -2180,17 +2207,22 @@ mod tests {
     #[test]
     fn render_style_has_a_stable_backend_neutral_wire_spelling() {
         let styles = [
-            (RenderStyle::Pbr, "\"pbr\""),
-            (RenderStyle::Matcap, "\"matcap\""),
-            (RenderStyle::Wire, "\"wire\""),
-            (RenderStyle::Normals, "\"normals\""),
-            (RenderStyle::MatcapWire, "\"matcap_wire\""),
-            (RenderStyle::Lod, "\"lod\""),
-            (RenderStyle::Stretch, "\"stretch\""),
+            (RenderStyle::Pbr, "pbr"),
+            (RenderStyle::Matcap, "matcap"),
+            (RenderStyle::Wire, "wire"),
+            (RenderStyle::Normals, "normals"),
+            (RenderStyle::MatcapWire, "matcap_wire"),
+            (RenderStyle::Lod, "lod"),
+            (RenderStyle::Stretch, "stretch"),
         ];
-        for (style, encoded) in styles {
+        for (style, name) in styles {
+            let encoded = format!("\"{name}\"");
+            assert_eq!(style.wire_name(), name);
+            assert_eq!(RenderStyle::from_wire_name(name), Some(style));
             assert_eq!(serde_json::to_string(&style).unwrap(), encoded);
-            assert_eq!(serde_json::from_str::<RenderStyle>(encoded).unwrap(), style);
+            assert_eq!(serde_json::from_str::<RenderStyle>(&encoded).unwrap(), style);
         }
+        assert_eq!(RenderStyle::from_wire_name("both"), None);
+        assert_eq!(RenderStyle::from_wire_name("browser_magic"), None);
     }
 }

@@ -338,8 +338,11 @@ The first application boundary is now explicit:
   resident-atlas exponent, and face-edge grading one atomic reducer value and
   includes it in every committed replay state. Cue activation replaces only
   its authored style and tessellation subset while preserving session atlas
-  and grading policy. Version 0.17 added the renderer-independent primary
-  animation clock: playing,
+  and grading policy. The generated application facade admits the same
+  complete value, rejects unknown backend-neutral styles and invalid ranges
+  atomically, and exposes its revision-fenced projection; browser control
+  signals remain the incumbent until a separate shadow/cutover gate lands.
+  Version 0.17 added the renderer-independent primary animation clock: playing,
   unwrapped scene time, and signed finite speed. Frame events advance it from
   explicit deltas, cue activation replaces all three fields atomically, and
   invalid clock edits preserve the preceding application revision. Version

@@ -230,6 +230,51 @@ assert.equal(
 
 const app = new HyperscopeAppShadow();
 assert.equal(app.snapshot().animationPlaying, true);
+assert.deepEqual(app.snapshot().renderSettings, {
+  revision: '0',
+  style: 'pbr',
+  resolutionLevel: 0,
+  density: 100,
+  screenAttenuation: true,
+  minPixelsPerSubdivision: 16,
+  atlasExponent: 7,
+  maxFaceEdgeRatio: 2,
+});
+const renderSettingsReceipt = app.setRenderSettings(
+  80, 'stretch', 6, 12, false, 64, 9, 4,
+);
+assert.equal(renderSettingsReceipt.commit.disposition, 'applied');
+assert.deepEqual(renderSettingsReceipt.render, app.snapshot().renderSettings);
+assert.deepEqual(
+  {
+    style: renderSettingsReceipt.render.style,
+    resolutionLevel: renderSettingsReceipt.render.resolutionLevel,
+    density: renderSettingsReceipt.render.density,
+    screenAttenuation: renderSettingsReceipt.render.screenAttenuation,
+    minPixelsPerSubdivision: renderSettingsReceipt.render.minPixelsPerSubdivision,
+    atlasExponent: renderSettingsReceipt.render.atlasExponent,
+    maxFaceEdgeRatio: renderSettingsReceipt.render.maxFaceEdgeRatio,
+  },
+  {
+    style: 'stretch',
+    resolutionLevel: 6,
+    density: 12,
+    screenAttenuation: false,
+    minPixelsPerSubdivision: 64,
+    atlasExponent: 9,
+    maxFaceEdgeRatio: 4,
+  },
+);
+const beforeRejectedRenderSettings = app.snapshot();
+assert.throws(
+  () => app.setRenderSettings(81, 'browser_magic', 0, 100, true, 16, 7, 2),
+  /unknown backend-neutral render style/,
+);
+assert.throws(
+  () => app.setRenderSettings(82, 'pbr', 0, 100, true, 16, 10, 2),
+  /resident atlas exponent must be in \[3,9\]/,
+);
+assert.deepEqual(app.snapshot(), beforeRejectedRenderSettings);
 const pausedAnimation = app.setAnimationPlaying(90, false);
 assert.equal(pausedAnimation.playing, false);
 assert.equal(pausedAnimation.commit.disposition, 'applied');
@@ -1237,6 +1282,20 @@ assert.deepEqual(
   app.snapshot().presentation.active.tessellation,
   incumbentStart.tessellation,
   'the AppStore presentation projection must retain Rust tessellation policy exactly',
+);
+assert.deepEqual(
+  app.snapshot().renderSettings,
+  {
+    revision: app.snapshot().revision,
+    style: incumbentStart.render_style,
+    resolutionLevel: 6,
+    density: incumbentStart.tessellation.density,
+    screenAttenuation: incumbentStart.tessellation.screen_attenuation,
+    minPixelsPerSubdivision: incumbentStart.tessellation.min_pixels_per_subdivision,
+    atlasExponent: 9,
+    maxFaceEdgeRatio: 4,
+  },
+  'cue activation must replace only authored render policy in the AppStore',
 );
 const activePresentation = app.snapshot().presentation.active;
 const activePresentationBindings = activePresentation.layers.map((layer, index) => ({
