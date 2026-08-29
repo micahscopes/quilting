@@ -216,6 +216,10 @@ The first application boundary is now explicit:
   defaults and clamps run only for explicit JavaScript authority or a recorded
   Rust startup fallback. A missing typed projection fails over visibly rather
   than being mistaken for successful Rust authority.
+  The same successful result carries all 85 resolved control values in
+  registry order, so omitted URL controls no longer regain authority through
+  the browser's duplicate default table after WASM starts. That table remains
+  only for the inert pre-WASM preview and the serialized JavaScript fallback.
   Camera links carry explicit `aim=1` when `px/py/pz` is a finite semantic
   target; omitting it means the same visible pose has a free sight tangent.
   Rust validates and canonically orders that policy, and selection or model

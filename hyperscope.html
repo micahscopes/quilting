@@ -10848,7 +10848,7 @@ phase('wasm', [], async () => {
       if (startupRoute
           && startupRoute.diagnostics.length === 0
           && startupRoute.renderSettings) {
-        initParams = readParams(new URLSearchParams(startupRoute.pairs));
+        initParams = readParams(new URLSearchParams(startupRoute.resolvedPairs));
         initRenderSettings = startupRoute.renderSettings;
         currentGlb = initParams.glb;
         initialPatchLabShape = patchLabShape(initParams.lab);

@@ -80,6 +80,19 @@ assert.deepEqual(typedRenderRoute.renderSettings, {
   atlasExponent: 9,
   maxFaceEdgeRatio: 4,
 });
+assert.equal(typedRenderRoute.resolvedPairs.length, specs.length);
+assert.deepEqual(
+  Object.fromEntries(typedRenderRoute.resolvedPairs),
+  Object.fromEntries(specs.map(spec => [spec.key, spec.defaultValue]).concat([
+    ['mode', 'both'],
+    ['res', '4'],
+    ['density', '237'],
+    ['atten', '0'],
+    ['minpx', '48.25'],
+    ['atlas', '9'],
+    ['lodratio', '4'],
+  ])),
+);
 assert.equal(canonicalizeHyperscopeRoute([['mode', 'matcap_wire']]).renderSettings, undefined);
 for (const [key, value] of [
   ['res', '7'], ['res', '3.5'],
@@ -565,7 +578,7 @@ for (const startupStep of [
   'const startupRoute = evaluateRustRoute(startupBrowserParams, false);',
   'startupRoute.diagnostics.length === 0',
   '&& startupRoute.renderSettings',
-  'initParams = readParams(new URLSearchParams(startupRoute.pairs));',
+  'initParams = readParams(new URLSearchParams(startupRoute.resolvedPairs));',
   'initRenderSettings = startupRoute.renderSettings;',
   "rustRouteShadowDiagnostics.startupSource = 'browser-fallback';",
   "'missing-typed-render-settings'",
@@ -577,7 +590,7 @@ for (const startupStep of [
   );
 }
 assert.ok(
-  startupAdapter.indexOf('initParams = readParams(new URLSearchParams(startupRoute.pairs));')
+  startupAdapter.indexOf('initParams = readParams(new URLSearchParams(startupRoute.resolvedPairs));')
     < startupAdapter.indexOf('applyParams(initParams, initRenderSettings);'),
   'Rust startup decoding must finish before browser state is applied',
 );

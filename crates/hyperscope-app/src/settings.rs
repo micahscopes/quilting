@@ -334,6 +334,23 @@ impl HyperscopeRoute {
             .collect()
     }
 
+    /// Return every canonical control value in registry order, including
+    /// defaults for omitted controls. This is the authoritative startup read
+    /// model; unlike `canonical_pairs`, it is not intended for compact URLs.
+    pub fn resolved_pairs(&self) -> Vec<(&'static str, &str)> {
+        HYPERSCOPE_CONTROL_SPECS
+            .iter()
+            .map(|spec| {
+                (
+                    spec.key,
+                    self.values
+                        .get(spec.key)
+                        .map_or(spec.default_value, String::as_str),
+                )
+            })
+            .collect()
+    }
+
     /// Resolve the route's complete renderer-independent render policy.
     ///
     /// Omitted values come from the canonical Rust control registry. Browser
@@ -429,6 +446,17 @@ mod tests {
             route.canonical_pairs(),
             vec![("mode", "lod"), ("rx", "0.125"), ("routeimpl", "shadow")]
         );
+        let resolved = route.resolved_pairs();
+        assert_eq!(resolved.len(), HYPERSCOPE_CONTROL_SPECS.len());
+        assert_eq!(resolved[0], ("glb", "horse.glb"));
+        assert_eq!(
+            resolved
+                .iter()
+                .copied()
+                .find(|(key, _)| *key == "mode"),
+            Some(("mode", "lod")),
+        );
+        assert_eq!(resolved.last(), Some(&("rootgroupshadow", "0")));
         assert!(route.diagnostics().is_empty());
     }
 

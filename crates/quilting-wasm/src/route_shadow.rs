@@ -6,6 +6,7 @@ use wasm_bindgen::prelude::*;
 #[serde(rename_all = "camelCase")]
 struct RouteShadowResult {
     pairs: Vec<[String; 2]>,
+    resolved_pairs: Vec<[String; 2]>,
     diagnostics: Vec<RouteShadowDiagnostic>,
     render_settings: Option<RouteRenderSettings>,
 }
@@ -49,6 +50,11 @@ pub fn canonicalize_hyperscope_route(pairs: JsValue) -> Result<JsValue, JsValue>
         .into_iter()
         .map(|(key, value)| [key.to_owned(), value.to_owned()])
         .collect();
+    let resolved_pairs = route
+        .resolved_pairs()
+        .into_iter()
+        .map(|(key, value)| [key.to_owned(), value.to_owned()])
+        .collect();
     let diagnostics = route
         .diagnostics()
         .iter()
@@ -72,6 +78,7 @@ pub fn canonicalize_hyperscope_route(pairs: JsValue) -> Result<JsValue, JsValue>
         });
     to_js(&RouteShadowResult {
         pairs,
+        resolved_pairs,
         diagnostics,
         render_settings,
     })
