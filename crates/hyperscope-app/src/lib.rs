@@ -383,6 +383,23 @@ pub struct AssetReadModel {
     pub status: AssetStatus,
 }
 
+/// The last primary-scene asset whose load/decode completed successfully.
+///
+/// A replacement request does not erase this ready candidate while it is in
+/// flight or if it fails. Renderer installation is a later asynchronous
+/// boundary and must not be inferred from this read model. Keeping the
+/// successful request and metadata separate from the mutable asset-load record
+/// also represents same-asset reloads without pretending pending bytes are
+/// already decoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrimaryAssetReadModel {
+    pub request_id: RequestId,
+    pub descriptor: AssetDescriptor,
+    pub byte_length: usize,
+    pub content_digest: Option<[u8; 32]>,
+    pub metadata: AssetMetadata,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiagnosticReadModel {
     pub revision: u64,
@@ -402,6 +419,8 @@ pub struct AppSummary {
     /// scene. This is ephemeral job state, not rendered-scene identity.
     pub loading_primary_scene_asset: Option<AssetId>,
     pub loading_primary_scene_request: Option<RequestId>,
+    pub ready_primary_asset: Option<AssetId>,
+    pub ready_primary_request: Option<RequestId>,
     pub active_peers: usize,
     pub authored_assets: usize,
     pub authored_entities: usize,
@@ -594,6 +613,7 @@ pub struct AppState {
     render_settings: RenderSettings,
     assets: BTreeMap<AssetId, AssetRecord>,
     primary_scene_load: Option<(RequestId, AssetId)>,
+    ready_primary_asset: Option<PrimaryAssetReadModel>,
     presence: BTreeMap<PeerId, PresenceRecord>,
     authored_projection_revision: Option<u64>,
     authored_assets: BTreeMap<AssetId, AssetDescriptor>,
@@ -614,6 +634,7 @@ impl Default for AppState {
             render_settings: RenderSettings::default(),
             assets: BTreeMap::new(),
             primary_scene_load: None,
+            ready_primary_asset: None,
             presence: BTreeMap::new(),
             authored_projection_revision: None,
             authored_assets: BTreeMap::new(),
@@ -873,25 +894,38 @@ impl AppState {
                         ),
                     );
                 } else {
-                    if self.primary_scene_load
-                        == Some((completion.request_id, completion.asset_id))
-                    {
+                    let completed_primary = self.primary_scene_load
+                        == Some((completion.request_id, completion.asset_id));
+                    if completed_primary {
                         self.primary_scene_load = None;
                     }
-                    let record = self
+                    let descriptor = self
                         .assets
-                        .get_mut(&completion.asset_id)
-                        .expect("active request implies asset record");
-                    record.status = match completion.outcome {
+                        .get(&completion.asset_id)
+                        .expect("active request implies asset record")
+                        .descriptor
+                        .clone();
+                    let status = match completion.outcome {
                         AssetLoadOutcome::Loaded {
                             byte_length,
                             content_digest,
                             metadata,
-                        } => AssetStatus::Ready {
-                            byte_length,
-                            content_digest,
-                            metadata,
-                        },
+                        } => {
+                            if completed_primary {
+                                self.ready_primary_asset = Some(PrimaryAssetReadModel {
+                                    request_id: completion.request_id,
+                                    descriptor,
+                                    byte_length,
+                                    content_digest,
+                                    metadata: metadata.clone(),
+                                });
+                            }
+                            AssetStatus::Ready {
+                                byte_length,
+                                content_digest,
+                                metadata,
+                            }
+                        }
                         AssetLoadOutcome::Failed {
                             code,
                             message,
@@ -902,6 +936,10 @@ impl AppState {
                             retryable,
                         },
                     };
+                    self.assets
+                        .get_mut(&completion.asset_id)
+                        .expect("active request implies asset record")
+                        .status = status;
                 }
             }
             AppEvent::RemotePresence(received) => {
@@ -1109,6 +1147,14 @@ impl AppState {
                 .count(),
             loading_primary_scene_asset: self.primary_scene_load.map(|(_, asset)| asset),
             loading_primary_scene_request: self.primary_scene_load.map(|(request, _)| request),
+            ready_primary_asset: self
+                .ready_primary_asset
+                .as_ref()
+                .map(|scene| scene.descriptor.id),
+            ready_primary_request: self
+                .ready_primary_asset
+                .as_ref()
+                .map(|scene| scene.request_id),
             active_peers: self.presence.len(),
             authored_assets: self.authored_assets.len(),
             authored_entities: self.authored_entities.len(),
@@ -1145,6 +1191,10 @@ impl AppState {
                 status: record.status.clone(),
             })
             .collect()
+    }
+
+    fn primary_asset_read_model(&self) -> Option<PrimaryAssetReadModel> {
+        self.ready_primary_asset.clone()
     }
 
     fn diagnostic_read_models(&self) -> Vec<DiagnosticReadModel> {
@@ -1185,6 +1235,7 @@ pub struct AppStore {
     navigation: Mutable<AppFrameSnapshot>,
     render: Mutable<AppRenderSnapshot>,
     assets: MutableVec<AssetReadModel>,
+    primary_asset: Mutable<Option<PrimaryAssetReadModel>>,
     authored_assets: MutableVec<AssetDescriptor>,
     authored_entities: MutableVec<AuthoredEntityReadModel>,
     diagnostics: MutableVec<DiagnosticReadModel>,
@@ -1203,6 +1254,7 @@ impl AppStore {
         let navigation = state.frame_snapshot();
         let render = state.render_snapshot();
         let assets = state.asset_read_models();
+        let primary_asset = state.primary_asset_read_model();
         let authored = state.authored_scene_read_model();
         let diagnostics = state.diagnostic_read_models();
         let presentation = state.presentation_read_model();
@@ -1212,6 +1264,7 @@ impl AppStore {
             navigation: Mutable::new(navigation),
             render: Mutable::new(render),
             assets: MutableVec::new_with_values(assets),
+            primary_asset: Mutable::new(primary_asset),
             authored_assets: MutableVec::new_with_values(authored.assets),
             authored_entities: MutableVec::new_with_values(authored.entities),
             diagnostics: MutableVec::new_with_values(diagnostics),
@@ -1298,6 +1351,7 @@ impl AppStore {
     pub fn flush_read_models(&self) -> u64 {
         let state = self.lock_state();
         let assets = state.asset_read_models();
+        let primary_asset = state.primary_asset_read_model();
         let authored = state.authored_scene_read_model();
         let diagnostics = state.diagnostic_read_models();
         let presentation = state.presentation_read_model();
@@ -1307,6 +1361,7 @@ impl AppStore {
         let revision = summary.revision;
         drop(state);
         self.assets.lock_mut().replace_cloned(assets);
+        self.primary_asset.set_neq(primary_asset);
         self.authored_assets
             .lock_mut()
             .replace_cloned(authored.assets);
@@ -1359,6 +1414,10 @@ impl AppStore {
 
     pub fn asset_snapshot(&self) -> Vec<AssetReadModel> {
         self.assets.lock_ref().to_vec()
+    }
+
+    pub fn primary_asset_snapshot(&self) -> Option<PrimaryAssetReadModel> {
+        self.primary_asset.get_cloned()
     }
 
     pub fn authored_scene_snapshot(&self) -> AuthoredSceneReadModel {
@@ -1424,6 +1483,10 @@ impl AppStore {
 
     pub fn asset_signal_vec(&self) -> MutableSignalVec<AssetReadModel> {
         self.assets.signal_vec_cloned()
+    }
+
+    pub fn primary_asset_signal(&self) -> MutableSignalCloned<Option<PrimaryAssetReadModel>> {
+        self.primary_asset.signal_cloned()
     }
 
     pub fn authored_asset_signal_vec(&self) -> MutableSignalVec<AssetDescriptor> {
@@ -1953,6 +2016,7 @@ mod tests {
             )))
             .unwrap();
         assert_eq!(stale.disposition, CommitDisposition::IgnoredStale);
+        assert_eq!(store.primary_asset_snapshot(), None);
         assert_eq!(
             store.summary_snapshot().loading_primary_scene_request,
             Some(second)
@@ -1973,6 +2037,18 @@ mod tests {
             .unwrap();
         assert_eq!(applied.disposition, CommitDisposition::Applied);
         assert_eq!(store.summary_snapshot().loading_primary_scene_asset, None);
+        assert_eq!(store.summary_snapshot().ready_primary_asset, Some(chess.id));
+        assert_eq!(store.summary_snapshot().ready_primary_request, Some(second));
+        assert_eq!(
+            store.primary_asset_snapshot(),
+            Some(PrimaryAssetReadModel {
+                request_id: second,
+                descriptor: chess.clone(),
+                byte_length: 200,
+                content_digest: None,
+                metadata: AssetMetadata::default(),
+            })
+        );
 
         let assets = store.asset_snapshot();
         assert_eq!(assets[0].status, AssetStatus::Cancelled);
@@ -1983,6 +2059,67 @@ mod tests {
                 content_digest: None,
                 metadata: AssetMetadata::default(),
             }
+        );
+    }
+
+    #[test]
+    fn failed_primary_asset_replacement_preserves_the_ready_candidate() {
+        let store = AppStore::default();
+        let horse = asset(1, "horse.glb");
+        let chess = asset(2, "chess.glb");
+        let horse_request = request(10);
+        let chess_request = request(11);
+
+        dispatch_scoped_request(
+            &store,
+            1,
+            horse_request,
+            horse.clone(),
+            AssetLoadScope::PrimaryScene,
+        );
+        store
+            .dispatch(AppEvent::EffectCompleted(EffectCompletion::AssetLoad(
+                AssetLoadCompletion {
+                    request_id: horse_request,
+                    asset_id: horse.id,
+                    outcome: AssetLoadOutcome::Loaded {
+                        byte_length: 100,
+                        content_digest: Some([7; 32]),
+                        metadata: AssetMetadata::default(),
+                    },
+                },
+            )))
+            .unwrap();
+        let resident = store.primary_asset_snapshot().unwrap();
+
+        dispatch_scoped_request(
+            &store,
+            2,
+            chess_request,
+            chess.clone(),
+            AssetLoadScope::PrimaryScene,
+        );
+        assert_eq!(store.primary_asset_snapshot(), Some(resident.clone()));
+        store
+            .dispatch(AppEvent::EffectCompleted(EffectCompletion::AssetLoad(
+                AssetLoadCompletion {
+                    request_id: chess_request,
+                    asset_id: chess.id,
+                    outcome: AssetLoadOutcome::Failed {
+                        code: "parse".to_owned(),
+                        message: "invalid glTF".to_owned(),
+                        retryable: false,
+                    },
+                },
+            )))
+            .unwrap();
+
+        assert_eq!(store.primary_asset_snapshot(), Some(resident));
+        assert_eq!(store.summary_snapshot().loading_primary_scene_asset, None);
+        assert_eq!(store.summary_snapshot().ready_primary_asset, Some(horse.id));
+        assert_eq!(
+            store.summary_snapshot().ready_primary_request,
+            Some(horse_request)
         );
     }
 
