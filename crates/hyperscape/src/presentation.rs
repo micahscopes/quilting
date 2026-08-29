@@ -10,6 +10,7 @@ use crate::{
     PerspectiveLens, SphereReflectionState, TransitionEasing,
 };
 use bevy_ecs::prelude::Resource;
+pub use quilting_core::render::RenderStyle;
 use quilting_core::Quat;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -286,6 +287,32 @@ pub enum PresentationOverlay {
     Stretch,
 }
 
+impl PresentationOverlay {
+    /// Resolve an exclusive surface visualization to Quilting's
+    /// backend-neutral render vocabulary. Orthogonal overlays return `None`;
+    /// a presentation with no surface visualization uses PBR.
+    pub const fn render_style(self) -> Option<RenderStyle> {
+        match self {
+            Self::Wireframe => Some(RenderStyle::Wire),
+            Self::Lod => Some(RenderStyle::Lod),
+            Self::PatchBoundaries => Some(RenderStyle::MatcapWire),
+            Self::ControlNet => None,
+            Self::Normals => Some(RenderStyle::Normals),
+            Self::Stretch => Some(RenderStyle::Stretch),
+        }
+    }
+}
+
+/// Resolve the one exclusive surface visualization admitted by presentation
+/// validation. This is semantic presentation state, not a browser button
+/// spelling or backend pipeline selection.
+pub fn presentation_render_style(overlays: &[PresentationOverlay]) -> RenderStyle {
+    overlays
+        .iter()
+        .find_map(|overlay| overlay.render_style())
+        .unwrap_or(RenderStyle::Pbr)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PresentationTessellation {
     #[serde(default = "default_tessellation_density")]
@@ -336,6 +363,7 @@ pub struct PresentationSnapshot {
     pub required_assets: Vec<PresentationAsset>,
     pub layers: Vec<PresentationLayerState>,
     pub animations: Vec<CueAnimation>,
+    pub render_style: RenderStyle,
     pub overlays: Vec<PresentationOverlay>,
     pub tessellation: PresentationTessellation,
 }
@@ -524,7 +552,7 @@ impl Presentation {
                         "cue {cue_index} repeats presentation overlay {overlay:?}"
                     )));
                 }
-                if !matches!(overlay, PresentationOverlay::ControlNet) {
+                if overlay.render_style().is_some() {
                     surface_visualizations += 1;
                 }
             }
@@ -824,6 +852,7 @@ impl PresentationRuntime {
             required_assets,
             layers,
             animations: cue.animations.clone(),
+            render_style: presentation_render_style(&cue.overlays),
             overlays: cue.overlays.clone(),
             tessellation: cue.tessellation,
         })
@@ -977,6 +1006,31 @@ mod tests {
     use super::*;
 
     const FIXTURE: &str = HACKER_NIGHT_PRESENTATION_JSON;
+
+    #[test]
+    fn presentation_visualizations_resolve_to_shared_render_styles() {
+        assert_eq!(presentation_render_style(&[]), RenderStyle::Pbr);
+        assert_eq!(
+            presentation_render_style(&[PresentationOverlay::ControlNet]),
+            RenderStyle::Pbr,
+        );
+        for (overlay, style) in [
+            (PresentationOverlay::Wireframe, RenderStyle::Wire),
+            (PresentationOverlay::Lod, RenderStyle::Lod),
+            (
+                PresentationOverlay::PatchBoundaries,
+                RenderStyle::MatcapWire,
+            ),
+            (PresentationOverlay::Normals, RenderStyle::Normals),
+            (PresentationOverlay::Stretch, RenderStyle::Stretch),
+        ] {
+            assert_eq!(presentation_render_style(&[overlay]), style);
+            assert_eq!(
+                presentation_render_style(&[PresentationOverlay::ControlNet, overlay]),
+                style,
+            );
+        }
+    }
 
     fn assert_camera_near(actual: CameraRig, expected: CameraRig) {
         for (actual, expected) in actual.eye.into_iter().zip(expected.eye) {

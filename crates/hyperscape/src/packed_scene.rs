@@ -646,6 +646,7 @@ mod tests {
             required_assets: Vec::new(),
             layers,
             animations: Vec::new(),
+            render_style: crate::RenderStyle::Pbr,
             overlays: Vec::new(),
             tessellation: crate::PresentationTessellation::default(),
         }

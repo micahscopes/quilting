@@ -111,6 +111,7 @@ mod tests {
                 required_assets: Vec::new(),
                 layers: vec![layer(20), layer(21)],
                 animations: Vec::new(),
+                render_style: hyperscape::RenderStyle::Pbr,
                 overlays: Vec::new(),
                 tessellation: PresentationTessellation::default(),
             }),

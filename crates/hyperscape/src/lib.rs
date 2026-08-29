@@ -54,11 +54,12 @@ pub use preflight::{
     OfflinePreflightReport,
 };
 pub use presentation::{
-    AssetLoadPolicy, AuthoredCamera, AuthoredFocus, CueAnimation, CueText, LayerTransform,
-    Presentation, PresentationAsset, PresentationCue, PresentationError, PresentationLayer,
-    PresentationLayerState, PresentationOverlay, PresentationRuntime, PresentationScene,
-    PresentationSnapshot, PresentationTessellation, PresentationTransition, PresentationView,
-    ViewLayerOverride, HACKER_NIGHT_PRESENTATION_JSON, PRESENTATION_VERSION,
+    presentation_render_style, AssetLoadPolicy, AuthoredCamera, AuthoredFocus, CueAnimation,
+    CueText, LayerTransform, Presentation, PresentationAsset, PresentationCue, PresentationError,
+    PresentationLayer, PresentationLayerState, PresentationOverlay, PresentationRuntime,
+    PresentationScene, PresentationSnapshot, PresentationTessellation, PresentationTransition,
+    PresentationView, RenderStyle, ViewLayerOverride, HACKER_NIGHT_PRESENTATION_JSON,
+    PRESENTATION_VERSION,
 };
 pub use surface::{
     SurfaceAddress, SurfaceAddressError, SurfaceAdvance, SurfaceAttachment, SurfaceContact,

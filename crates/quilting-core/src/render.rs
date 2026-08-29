@@ -8,7 +8,7 @@
 use crate::batch::{RenderBatchId, RenderBatchLayer, RenderBatchMember};
 use crate::material::PbrMaterial;
 use crate::permutation::perm_sign;
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
@@ -631,7 +631,8 @@ pub fn patch_visibility_needed(
         || last_residency_revision != residency_revision
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RenderStyle {
     Pbr,
     Matcap,
@@ -2174,5 +2175,22 @@ mod tests {
 
         observer.set_enabled(false);
         assert_eq!(observer.diagnostics(), RenderParityDiagnostics::default());
+    }
+
+    #[test]
+    fn render_style_has_a_stable_backend_neutral_wire_spelling() {
+        let styles = [
+            (RenderStyle::Pbr, "\"pbr\""),
+            (RenderStyle::Matcap, "\"matcap\""),
+            (RenderStyle::Wire, "\"wire\""),
+            (RenderStyle::Normals, "\"normals\""),
+            (RenderStyle::MatcapWire, "\"matcap_wire\""),
+            (RenderStyle::Lod, "\"lod\""),
+            (RenderStyle::Stretch, "\"stretch\""),
+        ];
+        for (style, encoded) in styles {
+            assert_eq!(serde_json::to_string(&style).unwrap(), encoded);
+            assert_eq!(serde_json::from_str::<RenderStyle>(encoded).unwrap(), style);
+        }
     }
 }
