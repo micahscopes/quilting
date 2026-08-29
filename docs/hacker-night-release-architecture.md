@@ -104,6 +104,13 @@ The first application boundary is now explicit:
   metadata from its low-rate read model, dispatches cue intent through
   `AppEvent`, and consumes the application frame snapshot; it performs no
   standalone controller tick or semantic manifest parse in the browser.
+  In that Rust-authority lane, the Leptos presentation card first asks the
+  platform adapter to clear transient selection and synchronize incumbent
+  camera/focus state, then commits `Advance` or `Reverse` directly through
+  `AppStore`. Its commit callback only adapts the already-committed cue,
+  navigation, render, animation, and composition projections. Shadow and JS
+  modes deliberately retain the HTML card so their standalone controller
+  remains the incumbent rollback authority.
   Active cue snapshots also resolve exclusive presentation overlays to
   Quilting's shared backend-neutral `RenderStyle`. The browser no longer owns
   an overlay-to-render-mode policy; it only adapts the legacy `matcap_wire`

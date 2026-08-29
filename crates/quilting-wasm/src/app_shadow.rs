@@ -202,19 +202,24 @@ impl HyperscopeAppShadow {
     }
 
     /// Mount the opt-in Leptos presentation card over the committed
-    /// presentation signal. Cue intent returns through the supplied browser
-    /// effect adapter until renderer adaptation also moves behind AppStore.
+    /// presentation signal. A platform callback synchronizes incumbent input
+    /// state, then the view dispatches through AppStore and exposes only
+    /// committed renderer adaptation or rejection effects.
     #[cfg(feature = "leptos-ui")]
     #[wasm_bindgen(js_name = mountPresentationCard)]
     pub fn mount_presentation_card(
         &self,
         parent: web_sys::HtmlElement,
-        on_action: js_sys::Function,
+        on_prepare: js_sys::Function,
+        on_commit: js_sys::Function,
+        on_error: js_sys::Function,
     ) {
         hyperscope_web::presentation_card::mount_presentation_card(
             parent,
             self.store.clone(),
-            on_action,
+            on_prepare,
+            on_commit,
+            on_error,
         );
     }
 

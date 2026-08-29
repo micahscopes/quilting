@@ -4,7 +4,9 @@
 //! a platform effect. This module only derives stable display state from the
 //! committed low-rate [`hyperscope_app::PresentationReadModel`].
 
-use hyperscope_app::PresentationReadModel;
+use hyperscope_app::{
+    AppStore, PresentationAction, PresentationReadModel, ReduceError, SemanticAction,
+};
 
 #[cfg(all(feature = "csr", target_arch = "wasm32"))]
 mod csr;
@@ -22,6 +24,47 @@ pub struct PresentationCardViewModel {
     pub can_advance: bool,
     pub desired_assets: usize,
     pub layers: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentationCardAction {
+    Reverse,
+    Advance,
+}
+
+impl PresentationCardAction {
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Reverse => "reverse",
+            Self::Advance => "advance",
+        }
+    }
+
+    const fn semantic(self) -> PresentationAction {
+        match self {
+            Self::Reverse => PresentationAction::Reverse,
+            Self::Advance => PresentationAction::Advance,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresentationCardCommit {
+    pub sequence: u64,
+    pub revision: u64,
+}
+
+/// Commit one card navigation action through the application reducer after a
+/// platform adapter has synchronized its incumbent camera/focus state.
+pub fn activate_presentation_card(
+    store: &AppStore,
+    action: PresentationCardAction,
+) -> Result<PresentationCardCommit, ReduceError> {
+    let (sequence, commit) = store.dispatch_semantic(SemanticAction::Present(action.semantic()))?;
+    Ok(PresentationCardCommit {
+        sequence,
+        revision: commit.revision,
+    })
 }
 
 impl PresentationCardViewModel {
@@ -128,5 +171,52 @@ mod tests {
         assert_eq!(card.desired_assets, 0);
         assert_eq!(card.layers, 2);
         assert_eq!(card.adapter_status(), "0 desired assets · 2 layers");
+    }
+
+    #[test]
+    fn card_navigation_commits_through_the_application_sequence_authority() {
+        let store = AppStore::default();
+        let presentation =
+            hyperscape::Presentation::from_json(hyperscape::HACKER_NIGHT_PRESENTATION_JSON)
+                .unwrap();
+        store
+            .dispatch(hyperscope_app::AppEvent::PresentationLoaded(presentation))
+            .unwrap();
+        store
+            .dispatch_semantic(SemanticAction::Present(PresentationAction::Start))
+            .unwrap();
+
+        assert_eq!(
+            activate_presentation_card(&store, PresentationCardAction::Advance).unwrap(),
+            PresentationCardCommit {
+                sequence: 1,
+                revision: 3,
+            },
+        );
+        assert_eq!(
+            store
+                .presentation_snapshot()
+                .unwrap()
+                .active
+                .unwrap()
+                .cue_index,
+            1,
+        );
+        assert_eq!(
+            activate_presentation_card(&store, PresentationCardAction::Reverse).unwrap(),
+            PresentationCardCommit {
+                sequence: 2,
+                revision: 4,
+            },
+        );
+        assert_eq!(
+            store
+                .presentation_snapshot()
+                .unwrap()
+                .active
+                .unwrap()
+                .cue_index,
+            0,
+        );
     }
 }

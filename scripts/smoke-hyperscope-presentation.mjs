@@ -14,6 +14,13 @@ const animationControlSource = [
   `${repository}/crates/hyperscope-web/src/${path}`,
   'utf8',
 )).join('\n');
+const presentationCardSource = [
+  'presentation_card.rs',
+  'presentation_card/csr.rs',
+].map(path => readFileSync(
+  `${repository}/crates/hyperscope-web/src/${path}`,
+  'utf8',
+)).join('\n');
 const workerSource = readFileSync(`${repository}/hyperscope_worker.js`, 'utf8');
 const mainRendererSource = readFileSync(
   `${repository}/crates/quilting-wasm/src/main_renderer.rs`,
@@ -57,16 +64,18 @@ assert.throws(
 );
 assert.equal(mr_acceptLodDeltaSequence(92, 0, 1, true), true);
 
-const cueActivation = browserSource.slice(
-  browserSource.indexOf('function activateRustPresentation('),
-  browserSource.indexOf('async function initializeRustPresentation('),
+const cuePreparation = browserSource.slice(
+  browserSource.indexOf('function prepareRustPresentationAction('),
+  browserSource.indexOf('function applyRustPresentationCommit('),
 );
-const guardedSelectionClear = cueActivation.indexOf(
+const guardedSelectionClear = cuePreparation.indexOf(
   'if (selectedObject || rustAppShadowSelectionQueued)',
 );
 assert.ok(guardedSelectionClear >= 0);
 assert.ok(
-  guardedSelectionClear < cueActivation.indexOf('synchronizeRustApplicationPresentationFromBrowser();'),
+  guardedSelectionClear < cuePreparation.indexOf(
+    'const applicationSynchronized = synchronizeRustApplicationPresentationFromBrowser();',
+  ),
   'a cue must detach a real selection before synchronizing its free-focus start state',
 );
 
@@ -504,6 +513,33 @@ for (const requiredAuthorityStep of [
     `browser presentation authority gate is missing ${requiredAuthorityStep}`,
   );
 }
+const presentationCardMountBoundary = browserSource.slice(
+  browserSource.indexOf('rustAppShadow.mountPresentationCard('),
+  browserSource.indexOf(
+    'rustPresentationViewMounted = true;',
+    browserSource.indexOf('rustAppShadow.mountPresentationCard('),
+  ),
+);
+assert.ok(
+  browserSource.includes('if (!presentationAppAuthority()) {\n    useBrowserPresentationView();')
+    && !presentationCardMountBoundary.includes('activateRustPresentation(')
+    && presentationCardMountBoundary.includes('() => prepareRustPresentationAction()')
+    && presentationCardMountBoundary.includes('consumeRustPresentationCardCommit(direction, sequence, revision);')
+    && presentationCardMountBoundary.includes("'presentation_view_rejection'"),
+  'the Rust-authority Leptos card must dispatch directly while rollback lanes retain HTML controls',
+);
+for (const directPresentationStep of [
+  '.dispatch_semantic(SemanticAction::Present(action.semantic()))',
+  'prepare_callback.call1(',
+  'activate_presentation_card(store, action)',
+  'arguments.push(&JsValue::from(committed.sequence));',
+  'arguments.push(&JsValue::from(committed.revision));',
+]) {
+  assert.ok(
+    presentationCardSource.includes(directPresentationStep),
+    `Leptos presentation card is missing direct Rust dispatch step: ${directPresentationStep}`,
+  );
+}
 
 for (const requiredBakedSecondaryStep of [
   'function bakedPresentationNodeWorldTransforms(faceNodes)',
@@ -527,8 +563,17 @@ const activationAdapter = browserSource.slice(
 );
 assert.ok(
   activationAdapter.indexOf('mirrorAppPresentation(direction, cueId, snapshot)')
-    < activationAdapter.indexOf('renderRustPresentationSnapshot(snapshot)'),
+    < activationAdapter.indexOf('return applyRustPresentationCommit(snapshot, navigation);'),
   'AppStore cue authority must commit before active-scene extraction during rendering',
+);
+const presentationCommitAdapter = browserSource.slice(
+  browserSource.indexOf('function applyRustPresentationCommit('),
+  browserSource.indexOf('function consumeRustPresentationCardCommit('),
+);
+assert.ok(
+  presentationCommitAdapter.includes('renderRustPresentationSnapshot(snapshot);')
+    && presentationCommitAdapter.includes('applyRustPresentationNavigation(navigation);'),
+  'all cue paths must share one committed renderer/navigation adapter',
 );
 
 const layerAdapter = browserSource.slice(

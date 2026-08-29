@@ -2709,6 +2709,8 @@ const rustPresentationDiagnostics = {
   viewAuthority: 'browser-fallback',
   viewMountAttempts: 0,
   viewMountErrors: 0,
+  viewDispatches: 0,
+  viewErrors: 0,
   ready: false,
   assetsReady: false,
   assetPreflight: [],
@@ -2902,7 +2904,8 @@ function resolvePresentationNodeMatrices(nodeStates, presentationBindings, snaps
 }
 
 function synchronizeRustApplicationPresentationFromBrowser() {
-  if (!rustPresentationController && !rustAppShadow) return;
+  if (!rustPresentationController && !rustAppShadow) return false;
+  let applicationSynchronized = !rustAppShadow;
   const state = manualNavigationState();
   const eye = new Float64Array(state.eye);
   const forward = new Float64Array(state.forward);
@@ -2949,6 +2952,7 @@ function synchronizeRustApplicationPresentationFromBrowser() {
         angularAperture,
       );
       rustAppShadowDiagnostics.navigationSynchronizations += 1;
+      applicationSynchronized = true;
     } catch (error) {
       recordAppShadowMismatch(
         'presentation_navigation_sync',
@@ -2956,6 +2960,7 @@ function synchronizeRustApplicationPresentationFromBrowser() {
       );
     }
   }
+  return applicationSynchronized;
 }
 
 function renderRustPresentationSnapshot(snapshot) {
@@ -2997,6 +3002,10 @@ function useBrowserPresentationView() {
 function ensureRustPresentationView() {
   const host = $('presentation-card-rust');
   const fallback = $('presentation-card');
+  if (!presentationAppAuthority()) {
+    useBrowserPresentationView();
+    return false;
+  }
   if (rustPresentationViewMounted) {
     host.hidden = false;
     fallback.hidden = true;
@@ -3010,7 +3019,30 @@ function ensureRustPresentationView() {
     return false;
   }
   try {
-    rustAppShadow.mountPresentationCard(host, action => activateRustPresentation(action));
+    rustAppShadow.mountPresentationCard(
+      host,
+      () => prepareRustPresentationAction(),
+      (direction, sequence, revision) => {
+        try {
+          consumeRustPresentationCardCommit(direction, sequence, revision);
+        } catch (error) {
+          rustPresentationDiagnostics.viewErrors += 1;
+          rustPresentationDiagnostics.error = error?.message || String(error);
+          recordAppShadowMismatch(
+            'presentation_view_projection',
+            rustPresentationDiagnostics.error,
+          );
+        }
+      },
+      error => {
+        rustPresentationDiagnostics.viewErrors += 1;
+        rustPresentationDiagnostics.error = String(error);
+        recordAppShadowMismatch(
+          'presentation_view_rejection',
+          rustPresentationDiagnostics.error,
+        );
+      },
+    );
     rustPresentationViewMounted = true;
     host.hidden = false;
     fallback.hidden = true;
@@ -3441,17 +3473,52 @@ function tickRustPresentation(deltaSeconds, nowMs, appFrame = null) {
   }
 }
 
+function prepareRustPresentationAction() {
+  // Authored cue focus is deliberately free. Clear transient selection before
+  // committing the cue so browser highlight and AppStore ownership cross the
+  // same semantic boundary in the same order.
+  if (selectedObject || rustAppShadowSelectionQueued) {
+    clearSelectedObject('Selection cleared by presentation cue');
+  }
+  const applicationSynchronized = synchronizeRustApplicationPresentationFromBrowser();
+  if (presentationAppAuthority() && !applicationSynchronized) {
+    throw new Error('presentation navigation could not be synchronized');
+  }
+  resetRustApplicationFrameClock();
+}
+
+function applyRustPresentationCommit(snapshot, navigation) {
+  renderRustPresentationSnapshot(snapshot);
+  rustPresentationDiagnostics.error = null;
+  void applyPresentationAnimationState(snapshot);
+  rustPresentationTransitionActive = true;
+  applyRustPresentationNavigation(navigation);
+  syncURL();
+  return snapshot;
+}
+
+function consumeRustPresentationCardCommit(direction, sequence, revision) {
+  if (!presentationAppAuthority() || !rustAppShadow) {
+    throw new Error('Rust presentation application authority is unavailable');
+  }
+  observeRustAppShadowSequence(sequence, 'Rust presentation control');
+  rustAppShadowDiagnostics.lastCommit = {
+    revision: String(revision),
+    disposition: 'applied',
+    publishedUi: true,
+    effects: [],
+  };
+  const snapshot = refreshAppShadowSnapshot()?.presentation?.active;
+  if (!snapshot) throw new Error(`presentation action ${direction} produced no active cue`);
+  rustAppPresentationPoseReady = true;
+  rustPresentationDiagnostics.viewDispatches += 1;
+  return applyRustPresentationCommit(snapshot, rustAppShadow.navigationSnapshot());
+}
+
 function activateRustPresentation(direction, cueId) {
   if (presentationAppAuthority() ? !rustAppShadow : !rustPresentationController) return null;
   try {
-    // Authored cue focus is deliberately free. Clear the incumbent selection
-    // before mirroring `present`, so browser highlight and AppStore ownership
-    // cross the same semantic boundary in the same order.
-    if (selectedObject || rustAppShadowSelectionQueued) {
-      clearSelectedObject('Selection cleared by presentation cue');
-    }
-    synchronizeRustApplicationPresentationFromBrowser();
-    resetRustApplicationFrameClock();
+    prepareRustPresentationAction();
     let snapshot;
     let navigation;
     if (presentationAppAuthority()) {
@@ -3475,13 +3542,7 @@ function activateRustPresentation(direction, cueId) {
     // can never compose the newly selected browser cue against the previous
     // application cue.
     if (!presentationAppAuthority()) mirrorAppPresentation(direction, cueId, snapshot);
-    renderRustPresentationSnapshot(snapshot);
-    rustPresentationDiagnostics.error = null;
-    void applyPresentationAnimationState(snapshot);
-    rustPresentationTransitionActive = true;
-    applyRustPresentationNavigation(navigation);
-    syncURL();
-    return snapshot;
+    return applyRustPresentationCommit(snapshot, navigation);
   } catch (error) {
     rustPresentationDiagnostics.error = error?.message || String(error);
     console.warn('Rust presentation cue failed:', error);
