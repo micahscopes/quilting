@@ -451,6 +451,7 @@ for (const renderSettingsStep of [
   'function browserRenderSettingsState()',
   "const style = mode === 'both' ? 'matcap_wire' : String(mode);",
   'app.setRenderSettings(',
+  'function dispatchRustRenderSettings(app, settings, source)',
   'function renderSettingsContentEqual(left, right)',
   "RUST_RENDER_SETTINGS_IMPLEMENTATION === 'rust'",
   'applyRustRenderSettingsProjection(app.snapshot().renderSettings);',
@@ -465,6 +466,15 @@ for (const renderSettingsStep of [
     `browser render-settings boundary is missing ${renderSettingsStep}`,
   );
 }
+const renderSettingsBoundary = browserSource.slice(
+  browserSource.indexOf('const rustRenderSettingsDiagnostics = {'),
+  browserSource.indexOf('function ensureRustAppShadow('),
+);
+assert.equal(
+  Array.from(renderSettingsBoundary.matchAll(/\.setRenderSettings\(/g)).length,
+  1,
+  'all browser render-setting dispatches must share one sequence/effect adapter',
+);
 for (const assetAuthorityStep of [
   "implementationFromRoute(\n  initialBrowserParams, 'assetimpl', 'rust',\n)",
   "assetimpl: 'rust'",
@@ -633,6 +643,8 @@ for (const startupStep of [
   "rustRouteShadowDiagnostics.startupSource = 'browser-fallback';",
   "'missing-typed-render-settings'",
   'initRouteSelection,',
+  "dispatchRustRenderSettings(\n        app,\n        initRenderSettings,\n        'route-startup',",
+  "rustRenderSettingsDiagnostics.state = 'route-committed';",
 ]) {
   assert.ok(
     startupAdapter.includes(startupStep),

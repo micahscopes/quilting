@@ -2762,6 +2762,7 @@ const rustSceneExtractionDiagnostics = {
   lastCue: null,
   unmatchedAuthoredEntities: [],
   lastError: null,
+  lastDispatchSource: null,
 };
 globalThis.__hyperscopeSceneExtraction = rustSceneExtractionDiagnostics;
 
@@ -3799,6 +3800,24 @@ function applyRustRenderSettingsProjection(render) {
   });
 }
 
+function dispatchRustRenderSettings(app, settings, source) {
+  const receipt = app.setRenderSettings(
+    ++rustAppShadowSequence,
+    settings.style,
+    settings.resolutionLevel,
+    settings.density,
+    settings.screenAttenuation,
+    settings.minPixelsPerSubdivision,
+    settings.atlasExponent,
+    settings.maxFaceEdgeRatio,
+  );
+  rustAppShadowDiagnostics.lastCommit = receipt.commit;
+  rustRenderSettingsDiagnostics.dispatches += 1;
+  rustRenderSettingsDiagnostics.lastRust = receipt.render;
+  rustRenderSettingsDiagnostics.lastDispatchSource = source;
+  return receipt.render;
+}
+
 function synchronizeRustRenderSettings() {
   if (RUST_RENDER_SETTINGS_IMPLEMENTATION === 'js' || !wasmOk.peek()) return false;
   let app = null;
@@ -3809,19 +3828,7 @@ function synchronizeRustRenderSettings() {
     let rust = committed;
     rustRenderSettingsDiagnostics.comparisons += 1;
     if (!renderSettingsContentEqual(browser, committed)) {
-      const receipt = app.setRenderSettings(
-        ++rustAppShadowSequence,
-        browser.style,
-        browser.resolutionLevel,
-        browser.density,
-        browser.screenAttenuation,
-        browser.minPixelsPerSubdivision,
-        browser.atlasExponent,
-        browser.maxFaceEdgeRatio,
-      );
-      rustAppShadowDiagnostics.lastCommit = receipt.commit;
-      rustRenderSettingsDiagnostics.dispatches += 1;
-      rust = receipt.render;
+      rust = dispatchRustRenderSettings(app, browser, 'browser-synchronization');
     }
     rustRenderSettingsDiagnostics.lastBrowser = browser;
     rustRenderSettingsDiagnostics.lastRust = rust;
@@ -4154,20 +4161,20 @@ function ensureRustRenderSettingsView() {
         maxFaceEdgeRatio,
       ) => {
         try {
-          const receipt = rustAppShadow.setRenderSettings(
-            ++rustAppShadowSequence,
-            style,
-            resolutionLevel,
-            density,
-            screenAttenuation,
-            minPixelsPerSubdivision,
-            atlasExponent,
-            maxFaceEdgeRatio,
+          const rust = dispatchRustRenderSettings(
+            rustAppShadow,
+            {
+              style,
+              resolutionLevel,
+              density,
+              screenAttenuation,
+              minPixelsPerSubdivision,
+              atlasExponent,
+              maxFaceEdgeRatio,
+            },
+            'leptos-control',
           );
-          rustAppShadowDiagnostics.lastCommit = receipt.commit;
-          rustRenderSettingsDiagnostics.dispatches += 1;
-          rustRenderSettingsDiagnostics.lastRust = receipt.render;
-          applyRustRenderSettingsProjection(receipt.render);
+          applyRustRenderSettingsProjection(rust);
           rustRenderSettingsDiagnostics.authorityWrites += 1;
         } catch (error) {
           rustRenderSettingsDiagnostics.errors += 1;
@@ -11038,6 +11045,29 @@ phase('wasm', [], async () => {
     initRustRouteAdmitted,
     initRouteSelection,
   ); // Set signal values first
+  if (RUST_RENDER_SETTINGS_IMPLEMENTATION !== 'js'
+      && initRustRouteAdmitted
+      && initRenderSettings) {
+    try {
+      const app = ensureRustAppShadow('render-route-startup');
+      const committedRender = dispatchRustRenderSettings(
+        app,
+        initRenderSettings,
+        'route-startup',
+      );
+      if (!renderSettingsContentEqual(committedRender, initRenderSettings)) {
+        throw new Error('Rust route render commit changed admitted settings');
+      }
+      rustRenderSettingsDiagnostics.state = 'route-committed';
+    } catch (error) {
+      rustRenderSettingsDiagnostics.errors += 1;
+      rustRenderSettingsDiagnostics.lastError = error?.message || String(error);
+      recordAppShadowMismatch(
+        'render_settings_route_startup',
+        rustRenderSettingsDiagnostics.lastError,
+      );
+    }
+  }
   activeLodGradingRatio = Number(lod.grading.peek());
   if (!mr_setLodGradingRatio(activeLodGradingRatio)) {
     throw new Error(`renderer rejected ${activeLodGradingRatio}:1 LOD grading`);

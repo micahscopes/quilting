@@ -392,6 +392,12 @@ The first application boundary is now explicit:
   both renderer signals and the view. The incumbent HTML controls remain
   visible for the default JavaScript lane and automatically reappear if the
   Rust view cannot mount.
+  Shadow/Rust startup no longer seeds the reducer by reading those projected
+  browser signals back. The admitted typed route value is committed directly
+  to `AppStore` before WASM readiness publishes control effects; controls then
+  consume the same commit. Route startup, browser shadow synchronization, and
+  Leptos edits share one sequence/effect adapter, eliminating three duplicate
+  `setRenderSettings` call sites without weakening the rollback lane.
   Version 0.17 added the renderer-independent primary animation clock: playing,
   unwrapped scene time, and signed finite speed. Frame events advance it from
   explicit deltas, cue activation replaces all three fields atomically, and
