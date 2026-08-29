@@ -1581,56 +1581,14 @@ function installRustControlDefaults(specs) {
 }
 
 function readParams(p, explicitParams = p) {
-  const get = (k) => p.get(k) ?? PARAM_DEFAULTS[k];
-  return {
-    glb: get('glb'),
-    gfx: get('gfx'),
-    mode: get('mode'),
-    xform: get('xform'),
-    mx: get('mx'), my: get('my'), mz: get('mz'), mr: get('mr'),
-    env: get('env'),
-    matcap: get('matcap'),
-    res: get('res'),
-    density: get('density'),
-    atten: get('atten'),
-    minpx: get('minpx'),
-    animate: get('animate'),
-    anim: get('anim'),
-    animtime: get('animtime'),
-    animspeed: get('animspeed'),
-    animtimeProvided: explicitParams.has('animtime'),
-    animspeedProvided: explicitParams.has('animspeed'),
-    animclockimpl: get('animclockimpl'),
-    animclipimpl: get('animclipimpl'),
-    atlas: get('atlas'),
-    lodratio: get('lodratio'),
-    zoom: get('zoom'),
-    rx: get('rx'),
-    ry: get('ry'),
-    rz: get('rz'),
-    px: get('px'), py: get('py'), pz: get('pz'),
-    aim: get('aim'),
-    selasset: get('selasset'), selentity: get('selentity'),
-    smmove: get('smmove'), smrotate: get('smrotate'), smnav: get('smnav'),
-    smlock: get('smlock'), smswap: get('smswap'), smbackground: get('smbackground'),
-    smpinv: get('smpinv'), smrinv: get('smrinv'),
-    smbpinv: get('smbpinv'), smbrinv: get('smbrinv'),
-    fov: get('fov'), interp: get('interp'), walksmooth: get('walksmooth'),
-    walkalign: get('walkalign'), walkspeed: get('walkspeed'),
-    walkscale: get('walkscale'), walkheight: get('walkheight'), walkimpl: get('walkimpl'),
-    selectionimpl: get('selectionimpl'),
-    assetimpl: get('assetimpl'),
-    renderstateimpl: get('renderstateimpl'),
-    lodimpl: get('lodimpl'),
-    cue: get('cue'),
-    lab: get('lab'), labfield: get('labfield'),
-    laba: get('laba'), labb: get('labb'), labc: get('labc'),
-    labmin: get('labmin'), labmax: get('labmax'), labphase: get('labphase'),
-    labbend: get('labbend'), labgrid: get('labgrid'), labanimate: get('labanimate'),
-    fuzzy: get('fuzzy'), fmode: get('fmode'), fradius: get('fradius'),
-    fstr: get('fstr'), ffocus: get('ffocus'), fbw: get('fbw'), fnorm: get('fnorm'),
-    fqual: get('fqual'), fkaw: get('fkaw'), fkoff: get('fkoff'),
-  };
+  const decoded = Object.create(null);
+  for (const [key, defaultValue] of Object.entries(PARAM_DEFAULTS)) {
+    decoded[key] = p.get(key) ?? defaultValue;
+  }
+  // Resolved defaults are state, while these bits retain authored URL intent.
+  decoded.animtimeProvided = explicitParams.has('animtime');
+  decoded.animspeedProvided = explicitParams.has('animspeed');
+  return decoded;
 }
 
 function canonicalFixedRouteNumber(value, fractionDigits) {

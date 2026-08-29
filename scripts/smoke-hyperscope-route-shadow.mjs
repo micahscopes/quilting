@@ -320,8 +320,8 @@ for (const animationClockAuthorityStep of [
   '{ restoreRouteClock: false },',
   'await selectAnimationIndex(animIdx);',
   "restorePendingRouteAnimationClock('startup-animation')",
-  'animtimeProvided:',
-  'animspeedProvided:',
+  "decoded.animtimeProvided = explicitParams.has('animtime');",
+  "decoded.animspeedProvided = explicitParams.has('animspeed');",
   "const receipt = app.dispatchAnimationClock(playing, timeSeconds, speed);",
   'observeRustAppShadowSequence(receipt.sequence, context);',
   'return app.setAnimationClock(',
@@ -802,8 +802,11 @@ assert.ok(
 );
 assert.ok(
   browserSource.includes('function readParams(p, explicitParams = p) {')
-    && browserSource.includes("animtimeProvided: explicitParams.has('animtime')")
-    && browserSource.includes("animspeedProvided: explicitParams.has('animspeed')"),
+    && browserSource.includes(
+      'for (const [key, defaultValue] of Object.entries(PARAM_DEFAULTS))',
+    )
+    && browserSource.includes("decoded.animtimeProvided = explicitParams.has('animtime')")
+    && browserSource.includes("decoded.animspeedProvided = explicitParams.has('animspeed')"),
   'resolved Rust defaults must not masquerade as explicitly linked animation-clock values',
 );
 const readParamsDeclaration = browserSource.match(
@@ -821,12 +824,25 @@ const resolvedDefaults = new URLSearchParams(
 const implicitClock = decodeRoute(resolvedDefaults, new URLSearchParams());
 assert.equal(implicitClock.animtimeProvided, false);
 assert.equal(implicitClock.animspeedProvided, false);
+assert.equal(Object.keys(implicitClock).length, specs.length + 2);
+for (const spec of specs) {
+  assert.equal(
+    implicitClock[spec.key],
+    spec.defaultValue,
+    `the registry-driven decoder omitted or changed ${spec.key}`,
+  );
+}
 const explicitClock = decodeRoute(
   resolvedDefaults,
   new URLSearchParams([['animtime', '0'], ['animspeed', '1']]),
 );
 assert.equal(explicitClock.animtimeProvided, true);
 assert.equal(explicitClock.animspeedProvided, true);
+assert.equal(
+  decodeRoute(new URLSearchParams('mode=wire&mode=pbr')).mode,
+  'wire',
+  'the browser decoder must retain Rust first-value duplicate semantics',
+);
 
 const applyParamsSource = browserSource.match(
   /applyParams = function\([\s\S]*?validatedRouteAnimationClock = null,[\s\S]*?\) \{([\s\S]*?)\n\};\n\n\/\/ --- IndexedDB/,

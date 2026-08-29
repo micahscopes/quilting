@@ -245,7 +245,9 @@ The first application boundary is now explicit:
   separately parity-gated implementation/backend switches remain explicit
   bootstrap policy until WASM startup itself moves ahead of those decisions.
   After initialization, the route rollback therefore preserves the incumbent
-  parser and serializer, not a second application-default table.
+  parser and serializer, not a second application-default table. Its decoded
+  startup object is likewise projected by iterating that installed registry;
+  the browser no longer repeats the control-key list merely to read values.
   Compact canonical pairs remain a separate provenance channel: only an
   explicitly linked `animtime` or `animspeed` may arm deferred clock
   restoration. A resolved default can populate state without masquerading as
