@@ -7009,6 +7009,115 @@ fn restore_renderer_after_lod_compute(gl: &glow::Context, viewport: (i32, i32)) 
     }
 }
 
+fn validated_lod_dispatch_payload(
+    mobius: &[f32],
+    subject_states: &[f32],
+    density: f32,
+    pixel_floor: f32,
+    view_projection: &[f32],
+    viewport: [f32; 2],
+) -> Result<([f32; 16], [f32; 16]), JsValue> {
+    if mobius.len() != 16 || view_projection.len() != 16 {
+        return Err(JsValue::from_str(
+            "LOD dispatch matrices must contain exactly 16 floats",
+        ));
+    }
+    if subject_states.len() % quilting_renderer::compute::SUBJECT_STATE_STRIDE != 0
+        || !mobius
+            .iter()
+            .chain(subject_states)
+            .chain(view_projection)
+            .all(|value| value.is_finite())
+        || !density.is_finite()
+        || density <= 0.0
+        || !pixel_floor.is_finite()
+        || pixel_floor < 0.0
+        || viewport.iter().any(|extent| !extent.is_finite() || *extent <= 0.0)
+    {
+        return Err(JsValue::from_str("LOD dispatch payload is malformed"));
+    }
+    let mut legacy_mobius = [0.0; 16];
+    legacy_mobius.copy_from_slice(mobius);
+    let mut view_projection_matrix = [0.0; 16];
+    view_projection_matrix.copy_from_slice(view_projection);
+    Ok((legacy_mobius, view_projection_matrix))
+}
+
+/// Dispatch one complete current-view classifier epoch directly on WebGPU.
+/// Partial primary-asset refreshes retire the device epoch until the composed
+/// scene is classified coherently; the incumbent worker remains the rollback
+/// authority throughout this migration boundary.
+#[cfg(feature = "webgpu-backend")]
+#[allow(clippy::too_many_arguments)]
+#[wasm_bindgen(js_name = "mr_dispatchWebGpuLod")]
+pub fn mr_dispatch_webgpu_lod(
+    animated: bool,
+    clip_time_seconds: f64,
+    sample_time_seconds: f64,
+    revision: u32,
+    continuity_epoch: u32,
+    mobius: &[f32],
+    subject_states: &[f32],
+    face_limit: u32,
+    density: f32,
+    min_px: f32,
+    vp_matrix: &[f32],
+    vp_width: f32,
+    vp_height: f32,
+) -> Result<bool, JsValue> {
+    let (legacy_mobius, view_projection) = validated_lod_dispatch_payload(
+        mobius,
+        subject_states,
+        density,
+        min_px,
+        vp_matrix,
+        [vp_width, vp_height],
+    )?;
+    if face_limit != 0 {
+        crate::webgpu_backend::invalidate_lod();
+        return Ok(false);
+    }
+    STATE.with(|state| {
+        let state = state.borrow();
+        let state = state
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("renderer is not initialized"))?;
+        let max_lod = state
+            .lod_atlas_lookup
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("renderer LOD atlas is not resident"))?
+            .max_lod;
+        let pose = if animated {
+            Some(
+                state
+                    .surface_runtime
+                    .lod_pose_source(
+                        clip_time_seconds,
+                        sample_time_seconds,
+                        revision,
+                        continuity_epoch,
+                    )
+                    .map_err(|error| JsValue::from_str(&error))?,
+            )
+        } else {
+            None
+        };
+        crate::webgpu_backend::dispatch_lod(
+            legacy_mobius,
+            subject_states,
+            density,
+            min_px,
+            max_lod,
+            view_projection,
+            [vp_width, vp_height],
+            pose.map_or(&[][..], |pose| pose.joint_matrices),
+            pose.map_or(&[][..], |pose| pose.morph_weights),
+            state.lod_grading,
+        )
+        .map_err(|error| JsValue::from_str(&error))
+    })
+}
+
 /// Dispatch the exact worker-equivalent classifier on the renderer WebGL
 /// context. This is shadow-only: its result never mutates resident batches.
 #[allow(clippy::too_many_arguments)]
@@ -7029,30 +7138,14 @@ pub fn mr_dispatch_same_context_lod(
     vp_width: f32,
     vp_height: f32,
 ) -> Result<bool, JsValue> {
-    if mobius.len() != 16 || vp_matrix.len() != 16 {
-        return Err(JsValue::from_str(
-            "same-context LOD matrices must contain exactly 16 floats",
-        ));
-    }
-    if subject_states.len() % quilting_renderer::compute::SUBJECT_STATE_STRIDE != 0
-        || !mobius
-            .iter()
-            .chain(subject_states)
-            .chain(vp_matrix)
-            .all(|value| value.is_finite())
-        || !density.is_finite()
-        || density <= 0.0
-        || !min_px.is_finite()
-        || min_px < 0.0
-        || !vp_width.is_finite()
-        || vp_width <= 0.0
-        || !vp_height.is_finite()
-        || vp_height <= 0.0
-    {
-        return Err(JsValue::from_str(
-            "same-context LOD dispatch payload is malformed",
-        ));
-    }
+    let (legacy_mobius, vp) = validated_lod_dispatch_payload(
+        mobius,
+        subject_states,
+        density,
+        min_px,
+        vp_matrix,
+        [vp_width, vp_height],
+    )?;
 
     STATE.with(|state| {
         let mut state = state.borrow_mut();
@@ -7135,10 +7228,6 @@ pub fn mr_dispatch_same_context_lod(
         let num_morph_targets = u32::try_from(morph_weights.len())
             .map_err(|_| JsValue::from_str("same-context morph count exceeds the ABI"))?;
 
-        let mut legacy_mobius = [0.0f32; 16];
-        legacy_mobius.copy_from_slice(mobius);
-        let mut vp = [0.0f32; 16];
-        vp.copy_from_slice(vp_matrix);
         let dispatch_state = prepare_lod_dispatch_state(
             subject_states,
             &lod.residency,

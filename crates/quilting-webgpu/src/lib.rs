@@ -60,6 +60,7 @@ use quilting_renderer::compute::{
     WgslVisibilityCompactionSceneWords,
 };
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use wgpu::util::DeviceExt;
@@ -745,6 +746,7 @@ pub struct LodClassifierModel {
     pass1_bind_group: wgpu::BindGroup,
     pass2_bind_group: wgpu::BindGroup,
     resident: ResidentLodReconciliationBuffers,
+    resident_epoch: Cell<Option<(u64, FaceLodGrading)>>,
 }
 
 struct ResidentLodReconciliationBuffers {
@@ -4329,6 +4331,31 @@ impl LodClassifierDevice {
         target: &OffscreenPatchRenderTarget,
         use_qb: bool,
     ) -> Result<PatchFrameEncoding, LodWebGpuError> {
+        self.render_offscreen_supported_patch_scene_with_resident_lod_visibility_and_clear(
+            frame,
+            pipelines,
+            scene,
+            resident,
+            atlas,
+            target,
+            use_qb,
+            wgpu::Color::TRANSPARENT,
+        )
+    }
+
+    /// Device-resident LOD variant with an explicit parity clear color.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_offscreen_supported_patch_scene_with_resident_lod_visibility_and_clear(
+        &self,
+        frame: &RenderFrame,
+        pipelines: &DiagnosticPatchRenderPipelines,
+        scene: &PatchRenderScene,
+        resident: &DeviceResidentLod<'_>,
+        atlas: &PackedPatchAtlas,
+        target: &OffscreenPatchRenderTarget,
+        use_qb: bool,
+        clear_color: wgpu::Color,
+    ) -> Result<PatchFrameEncoding, LodWebGpuError> {
         if frame.view.viewport != target.size {
             return Err(LodWebGpuError::Payload(format!(
                 "offscreen target {:?} does not match frame viewport {:?}",
@@ -4350,7 +4377,7 @@ impl LodClassifierDevice {
                 color_view: &target.color_view,
                 resolve_target: None,
                 depth_stencil_view: Some(&target.depth_view),
-                clear_color: Some(wgpu::Color::TRANSPARENT),
+                clear_color: Some(clear_color),
                 clear_depth: Some(1.0),
             },
             use_qb,
@@ -4360,6 +4387,35 @@ impl LodClassifierDevice {
         )?;
         self.queue.submit([encoder.finish()]);
         Ok(encoding)
+    }
+
+    /// Device-resident LOD convenience matching the incumbent WebGL2 clear.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_offscreen_supported_patch_scene_with_resident_lod_visibility_and_webgl_clear(
+        &self,
+        frame: &RenderFrame,
+        pipelines: &DiagnosticPatchRenderPipelines,
+        scene: &PatchRenderScene,
+        resident: &DeviceResidentLod<'_>,
+        atlas: &PackedPatchAtlas,
+        target: &OffscreenPatchRenderTarget,
+        use_qb: bool,
+    ) -> Result<PatchFrameEncoding, LodWebGpuError> {
+        self.render_offscreen_supported_patch_scene_with_resident_lod_visibility_and_clear(
+            frame,
+            pipelines,
+            scene,
+            resident,
+            atlas,
+            target,
+            use_qb,
+            wgpu::Color {
+                r: 0.2,
+                g: 0.2,
+                b: 0.3,
+                a: 0.0,
+            },
+        )
     }
 
     /// Submit a supported style with an explicit parity clear while preserving
@@ -6018,6 +6074,7 @@ impl LodClassifierDevice {
             pass1_bind_group,
             pass2_bind_group,
             resident,
+            resident_epoch: Cell::new(None),
         })
     }
 
@@ -6082,6 +6139,7 @@ impl LodClassifierDevice {
             pass.dispatch_workgroups(groups, 1, 1);
         }
         model.classification_epoch = epoch;
+        model.resident_epoch.set(None);
         let face_count = model.prepared.residency.num_faces as u32;
         Ok(DeviceLodClassification {
             model: &*model,
@@ -6139,6 +6197,9 @@ impl LodClassifierDevice {
             pass.set_bind_group(0, &model.resident.pack_bind_group, &[]);
             pass.dispatch_workgroups(groups, 1, 1);
         }
+        model
+            .resident_epoch
+            .set(Some((classification.epoch, grading)));
         DeviceResidentLod {
             packed_records: &model.resident.packed_records,
             model_identity: model.identity,
@@ -6146,6 +6207,29 @@ impl LodClassifierDevice {
             classification_epoch: classification.epoch,
             grading,
         }
+    }
+
+    /// Borrow the most recently reconciled classifier epoch without copying
+    /// its packed records. A subsequent classification invalidates this view
+    /// until reconciliation publishes another complete resident epoch.
+    pub fn latest_resident_lod<'model>(
+        &self,
+        model: &'model LodClassifierModel,
+    ) -> Option<DeviceResidentLod<'model>> {
+        let (classification_epoch, grading) = model.resident_epoch.get()?;
+        Some(DeviceResidentLod {
+            packed_records: &model.resident.packed_records,
+            model_identity: model.identity,
+            face_count: model.prepared.residency.num_faces as u32,
+            classification_epoch,
+            grading,
+        })
+    }
+
+    /// Retire a resident visibility epoch when its camera/pose request is no
+    /// longer coherent. Immutable model and scene residency stay intact.
+    pub fn invalidate_resident_lod(&self, model: &LodClassifierModel) {
+        model.resident_epoch.set(None);
     }
 
     /// Submit resident reconciliation without staging or readback. Callers

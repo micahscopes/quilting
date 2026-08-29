@@ -949,7 +949,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             .unwrap();
 
         let visible_dispatch = identity_dispatch();
-        let visible_signature = {
+        let (visible_signature, visible_epoch) = {
             let classification = classifier
                 .classify_on_device(
                     &mut model,
@@ -960,6 +960,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 .unwrap();
             let resident = classifier
                 .reconcile_resident_lod_on_device(&classification, FaceLodGrading::TwoToOne);
+            let epoch = resident.classification_epoch();
             classifier
                 .render_offscreen_diagnostic_patch_scene_with_resident_lod_visibility(
                     &render_frame,
@@ -971,9 +972,12 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                     true,
                 )
                 .unwrap();
-            offscreen_signature(&classifier, &target).await
+            (offscreen_signature(&classifier, &target).await, epoch)
         };
         assert!(visible_signature.covered_pixels > 0);
+        let latest = classifier.latest_resident_lod(&model).unwrap();
+        assert_eq!(latest.classification_epoch(), visible_epoch);
+        assert_eq!(latest.grading(), FaceLodGrading::TwoToOne);
 
         let mut hidden_dispatch = visible_dispatch;
         hidden_dispatch.baseline_model = translation_matrix(100.0, 0.0, 0.0);
@@ -1002,6 +1006,8 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             offscreen_signature(&classifier, &target).await
         };
         assert_eq!(hidden_signature.covered_pixels, 0);
+        classifier.invalidate_resident_lod(&model);
+        assert!(classifier.latest_resident_lod(&model).is_none());
 
         classifier
             .write_patch_render_face_visibility_bits(&retained_scene, &[0b11])

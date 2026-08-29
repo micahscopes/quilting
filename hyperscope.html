@@ -9542,6 +9542,31 @@ async function recomputeLods() {
         if (!absorbSameContextLodLifecycleGap(error)) recordSameContextLodError(error);
       }
     }
+    if (WEBGPU_SHADOW_ENABLED) {
+      try {
+        const deviceLodDispatched = quiltingWasmBackend.mr_dispatchWebGpuLod(
+          lodPoseAnimated,
+          lodPose?.t ?? 0,
+          lodPose?.sampleTime ?? 0,
+          lodPose?.revision ?? 0,
+          lodPose?.continuityEpoch ?? 0,
+          lodMobius,
+          primaryOnly ? presentationComposition.primaryLodStates : authoredLodStates,
+          primaryOnly ? currentPrimaryFaceCount : 0,
+          tp.density,
+          tp.minPx,
+          vp,
+          w,
+          h,
+        );
+        graphicsBackendDiagnostics.deviceLodState = deviceLodDispatched
+          ? 'resident' : (primaryOnly ? 'partial-fallback' : 'awaiting-residency');
+        graphicsBackendDiagnostics.deviceLodError = null;
+      } catch (error) {
+        graphicsBackendDiagnostics.deviceLodState = 'fallback';
+        graphicsBackendDiagnostics.deviceLodError = error?.message || String(error);
+      }
+    }
     if (LOD_IMPLEMENTATION === 'rust'
         && sameContextReady
         && !sameContextLodAuthorityFailed) {

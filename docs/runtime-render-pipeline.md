@@ -537,10 +537,15 @@ offscreen and proves both `[1, 0]` source order and `[0, 1]` reordered topology.
 The shared native/browser matrix runs real visible and offscreen
 classifier/reconciliation chains and projects both over two adaptive leaves;
 Chromium reports `resident_visibility_words=4` with no console warning or
-error. The current live WebGL2-authoritative shadow deliberately keeps the
-compact CPU bitset adapter until its classifier and draw construction are moved
-onto this same device; the direct resident path is ready for that cut and does
-not introduce a diagnostic readback into production.
+error. The browser now sends the same validated full-scene projection, density
+floor, subject table, and exact retained pose to a WebGPU classifier request. A
+successful epoch stays device-resident through crack-free reconciliation,
+visibility expansion, stable compaction, and indirect drawing; ordinary frames
+perform neither a visibility upload nor a readback. A partial animated-primary
+request explicitly retires that epoch and exposes the compact CPU-bitset
+adapter again, so it cannot combine a stale full-scene classification with a
+new pose. WebGL2 and the worker remain rollback authority while device-side
+root topology/bucket construction is promoted into the live path.
 
 The next device stage now derives a deterministic retained-root geometry plan
 from the packed resident words themselves. Its bounded bucket domain is sorted

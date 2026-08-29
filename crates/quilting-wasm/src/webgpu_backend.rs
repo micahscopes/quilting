@@ -6,6 +6,7 @@
 //! application-supplied canvas. Canvas selection remains an explicit startup
 //! decision; a claimed context is never silently repurposed.
 
+use quilting_core::batch::FaceLodGrading;
 use quilting_core::material::{
     EnvironmentMapAsset, EnvironmentMapDescriptor, TextureAssetDescriptor, TextureWrapMode,
 };
@@ -13,7 +14,9 @@ use quilting_core::render::{
     RenderFrame, RenderFrameOptions, RenderPoseIdentity, RenderSceneSnapshot, RenderStyle,
     RenderSubmissionStats, RenderView,
 };
-use quilting_renderer::compute::{LodAtlasLookup, PreparedLodModel};
+use quilting_renderer::compute::{
+    prepare_lod_dispatch_state, LodAtlasLookup, PreparedLodModel, WgslLodDispatchMetrics,
+};
 use quilting_webgpu::{
     DiagnosticPatchRenderPipelines, LodClassifierDevice, LodClassifierModel, LodPose,
     OffscreenPatchRenderTarget, PackedPatchAtlas, PatchFrameEncoding, PatchPresentationSurface,
@@ -63,6 +66,9 @@ struct WebGpuBackend {
     frame_failures: u64,
     visibility_uploads: u64,
     visibility_upload_bytes: u64,
+    device_lod_dispatches: u64,
+    device_lod_frames: u64,
+    last_device_lod_epoch: Option<u64>,
     last_frame_revision: u64,
     last_source_render_call: u64,
     last_indirect_draw_calls: u32,
@@ -76,6 +82,7 @@ struct WebGpuBackend {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct LiveFrameInput {
     source_revision: u64,
+    device_lod_epoch: Option<u64>,
     style: RenderStyle,
     view: RenderView,
     options: RenderFrameOptions,
@@ -143,6 +150,9 @@ pub(crate) struct WebGpuBackendDiagnostics {
     frame_failures: u64,
     visibility_uploads: u64,
     visibility_upload_bytes: u64,
+    device_lod_dispatches: u64,
+    device_lod_frames: u64,
+    last_device_lod_epoch: Option<u64>,
     last_frame_revision: u64,
     last_source_render_call: u64,
     last_indirect_draw_calls: u32,
@@ -262,6 +272,9 @@ impl WebGpuBackend {
             frame_failures: self.frame_failures,
             visibility_uploads: self.visibility_uploads,
             visibility_upload_bytes: self.visibility_upload_bytes,
+            device_lod_dispatches: self.device_lod_dispatches,
+            device_lod_frames: self.device_lod_frames,
+            last_device_lod_epoch: self.last_device_lod_epoch,
             last_frame_revision: self.last_frame_revision,
             last_source_render_call: self.last_source_render_call,
             last_indirect_draw_calls: self.last_indirect_draw_calls,
@@ -333,6 +346,7 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
                     backend.target = None;
                     backend.presentation = None;
                     backend.last_frame_input = None;
+                    backend.last_device_lod_epoch = None;
                     backend.last_face_visibility_bits.clear();
                     backend.next_face_visibility_bits.clear();
                     backend.last_joint_matrices.clear();
@@ -418,6 +432,7 @@ pub(crate) async fn initialize_presentation(
         backend.target = None;
         backend.presentation = Some(presentation);
         backend.last_frame_input = None;
+        backend.last_device_lod_epoch = None;
         backend.last_face_visibility_bits.clear();
         backend.next_face_visibility_bits.clear();
         backend.last_joint_matrices.clear();
@@ -620,6 +635,7 @@ pub(crate) fn replace_atlas(
                 backend.scene = None;
                 backend.scene_source_revision = None;
                 backend.last_frame_input = None;
+                backend.last_device_lod_epoch = None;
                 backend.last_face_visibility_bits.clear();
                 backend.next_face_visibility_bits.clear();
                 backend.next_morph_weights.clear();
@@ -662,6 +678,7 @@ pub(crate) fn replace_model(
                 backend.scene = None;
                 backend.scene_source_revision = None;
                 backend.last_frame_input = None;
+                backend.last_device_lod_epoch = None;
                 backend.last_face_visibility_bits.clear();
                 backend.next_face_visibility_bits.clear();
                 backend.next_morph_weights.clear();
@@ -672,6 +689,104 @@ pub(crate) fn replace_model(
             Err(error) => Err(backend.fail(error)),
         }
     })
+}
+
+/// Classify and reconcile one complete current-view LOD epoch entirely on the
+/// WebGPU device. The packed resident result remains owned by the model for a
+/// later presentation frame; no staging copy or map is created here.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dispatch_lod(
+    legacy_mobius: [f32; 16],
+    packed_subjects: &[f32],
+    density: f32,
+    pixel_floor: f32,
+    max_lod: f32,
+    view_projection: [f32; 16],
+    viewport: [f32; 2],
+    joint_matrices: &[f32],
+    morph_weights: &[f32],
+    grading: FaceLodGrading,
+) -> Result<bool, String> {
+    BACKEND.with(|slot| {
+        let mut backend = slot.borrow_mut();
+        if backend.state != "ready" || backend.model.is_none() {
+            return Ok(false);
+        }
+        if !joint_matrices.len().is_multiple_of(16) {
+            return Err("WebGPU LOD joint matrix payload is malformed".to_string());
+        }
+        let num_joints = u32::try_from(joint_matrices.len() / 16)
+            .map_err(|_| "WebGPU LOD joint count exceeds u32".to_string())?;
+        let source = backend
+            .model_source
+            .as_ref()
+            .ok_or_else(|| "WebGPU LOD dispatch requires immutable model source".to_string())?;
+        let dispatch = prepare_lod_dispatch_state(
+            packed_subjects,
+            &source.residency,
+            source.residency.num_faces,
+            legacy_mobius,
+        );
+        let metrics = WgslLodDispatchMetrics {
+            view_projection,
+            density,
+            pixel_floor,
+            max_lod,
+            viewport,
+            num_joints,
+        };
+        backend.last_device_lod_epoch = None;
+        backend.last_frame_input = None;
+        let epoch_result = (|| {
+            let WebGpuBackend { device, model, .. } = &mut *backend;
+            let device = device
+                .as_ref()
+                .ok_or_else(|| "ready WebGPU backend has no device".to_string())?;
+            let model = model
+                .as_mut()
+                .ok_or_else(|| "ready WebGPU backend has no model".to_string())?;
+            device.invalidate_resident_lod(model);
+            let classification = device
+                .classify_on_device(
+                    model,
+                    &dispatch,
+                    metrics,
+                    LodPose {
+                        joint_matrices,
+                        morph_weights,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            Ok::<_, String>(device
+                .reconcile_resident_lod_on_device(&classification, grading)
+                .classification_epoch())
+        })();
+        let epoch = match epoch_result {
+            Ok(epoch) => epoch,
+            Err(error) => {
+                backend.last_error = Some(error.clone());
+                return Err(error);
+            }
+        };
+        backend.device_lod_dispatches = backend.device_lod_dispatches.saturating_add(1);
+        backend.last_device_lod_epoch = Some(epoch);
+        backend.last_frame_input = None;
+        backend.last_error = None;
+        Ok(true)
+    })
+}
+
+/// Retire only the camera/pose-dependent device LOD epoch. This exposes the
+/// CPU visibility adapter again without disturbing immutable WebGPU residency.
+pub(crate) fn invalidate_lod() {
+    BACKEND.with(|slot| {
+        let mut backend = slot.borrow_mut();
+        if let (Some(device), Some(model)) = (backend.device.as_ref(), backend.model.as_ref()) {
+            device.invalidate_resident_lod(model);
+        }
+        backend.last_device_lod_epoch = None;
+        backend.last_frame_input = None;
+    });
 }
 
 pub(crate) fn needs_scene(source_revision: u64) -> bool {
@@ -877,20 +992,28 @@ pub(crate) fn submit_frame(
                 ));
             }
         };
-        if face_visibility.len() != resident_faces {
-            return Err(backend.reject_frame(
-                face_visibility_bits,
-                effective_morph_weights,
-                format!(
-                    "WebGPU face visibility has {} values; expected {resident_faces}",
-                    face_visibility.len(),
-                ),
-            ));
-        }
-        face_visibility_bits.resize(resident_faces.div_ceil(32), 0);
-        for (face, &visible) in face_visibility.iter().enumerate() {
-            if visible {
-                face_visibility_bits[face / 32] |= 1 << (face % 32);
+        let device_lod_epoch = backend
+            .device
+            .as_ref()
+            .zip(backend.model.as_ref())
+            .and_then(|(device, model)| device.latest_resident_lod(model))
+            .map(|resident| resident.classification_epoch());
+        if device_lod_epoch.is_none() {
+            if face_visibility.len() != resident_faces {
+                return Err(backend.reject_frame(
+                    face_visibility_bits,
+                    effective_morph_weights,
+                    format!(
+                        "WebGPU face visibility has {} values; expected {resident_faces}",
+                        face_visibility.len(),
+                    ),
+                ));
+            }
+            face_visibility_bits.resize(resident_faces.div_ceil(32), 0);
+            for (face, &visible) in face_visibility.iter().enumerate() {
+                if visible {
+                    face_visibility_bits[face / 32] |= 1 << (face % 32);
+                }
             }
         }
         if morph_weights.len() > resident_morph_targets {
@@ -923,12 +1046,14 @@ pub(crate) fn submit_frame(
         let scene_source_revision = backend.scene_source_revision.unwrap_or(0);
         let frame_input = LiveFrameInput {
             source_revision: scene_source_revision,
+            device_lod_epoch,
             style,
             view,
             options,
         };
         let unchanged = backend.last_frame_input == Some(frame_input)
-            && backend.last_face_visibility_bits == face_visibility_bits
+            && (device_lod_epoch.is_some()
+                || backend.last_face_visibility_bits == face_visibility_bits)
             && backend.last_joint_matrices == joint_matrices
             && backend.last_morph_weights == effective_morph_weights;
         if unchanged {
@@ -943,7 +1068,8 @@ pub(crate) fn submit_frame(
                 },
             );
         }
-        let visibility_upload_required = backend.last_face_visibility_bits != face_visibility_bits;
+        let visibility_upload_required = device_lod_epoch.is_none()
+            && backend.last_face_visibility_bits != face_visibility_bits;
 
         if backend.presentation.is_some() {
             let resize = {
@@ -1043,6 +1169,7 @@ pub(crate) fn submit_frame(
                 if backend.presentation.is_some() {
                     let WebGpuBackend {
                         device,
+                        model,
                         pipelines,
                         scene,
                         atlas,
@@ -1064,8 +1191,21 @@ pub(crate) fn submit_frame(
                     let presentation = presentation
                         .as_mut()
                         .ok_or_else(|| "WebGPU presentation surface disappeared".to_string())?;
-                    match device
-                        .present_supported_patch_scene_with_face_visibility(
+                    let presented = if let Some(resident) = model
+                        .as_ref()
+                        .and_then(|model| device.latest_resident_lod(model))
+                    {
+                        device.present_supported_patch_scene_with_resident_lod_visibility(
+                            presentation,
+                            &frame,
+                            pipelines,
+                            scene,
+                            &resident,
+                            atlas,
+                            true,
+                        )
+                    } else {
+                        device.present_supported_patch_scene_with_face_visibility(
                             presentation,
                             &frame,
                             pipelines,
@@ -1073,8 +1213,9 @@ pub(crate) fn submit_frame(
                             atlas,
                             true,
                         )
-                        .map_err(|error| error.to_string())?
-                    {
+                    }
+                    .map_err(|error| error.to_string())?;
+                    match presented {
                         SurfacePresentation::Presented(encoding) => Ok(Some(encoding)),
                         SurfacePresentation::Skipped(_) => Ok(None),
                         SurfacePresentation::RecreateRequired => Err(
@@ -1100,7 +1241,22 @@ pub(crate) fn submit_frame(
                         .target
                         .as_ref()
                         .ok_or_else(|| "WebGPU render frame requires a target".to_string())?;
-                    let encoding = if style == RenderStyle::Normals {
+                    let resident = backend
+                        .model
+                        .as_ref()
+                        .and_then(|model| device.latest_resident_lod(model));
+                    let encoding = if let Some(resident) = resident {
+                        device
+                            .render_offscreen_supported_patch_scene_with_resident_lod_visibility_and_webgl_clear(
+                                &frame,
+                                pipelines,
+                                scene,
+                                &resident,
+                                atlas,
+                                target,
+                                true,
+                            )
+                    } else if style == RenderStyle::Normals {
                         let pipeline = pipelines.get(RenderStyle::Normals).ok_or_else(|| {
                             "ready WebGPU backend has no normals pipeline".to_string()
                         })?;
@@ -1138,7 +1294,10 @@ pub(crate) fn submit_frame(
                 backend.last_source_instances = source_instance_count;
                 backend.last_logical_submission = logical_submission;
                 backend.last_viewport = view.viewport;
-                if visibility_upload_required {
+                if device_lod_epoch.is_some() {
+                    backend.device_lod_frames = backend.device_lod_frames.saturating_add(1);
+                    backend.last_face_visibility_bits.clear();
+                } else if visibility_upload_required {
                     std::mem::swap(
                         &mut backend.last_face_visibility_bits,
                         &mut face_visibility_bits,
