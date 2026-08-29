@@ -15,9 +15,12 @@ that the live gate has passed yet.
   `[playing, clip_index, wrapped_clip_time, speed]`. Measured clip lanes do not
   send a browser-owned clip range back into Rust each frame.
 - The browser owns worker calls and GPU resource installation. Its scalar
-  `rendererAnimationClipIndex` witness changes only after worker state,
-  skin/morph textures, rest instances, the LOD compute model, and same-context
-  residency are coherent.
+  `rendererAnimationClipIndex` witness changes only after the required worker
+  and GPU state is coherent. An ordinary model switch refreshes skin/morph
+  textures, rest instances, the LOD compute model, and same-context residency.
+  A packed presentation switch instead sends its exact retained primary
+  vertex/face witness to Rust; Rust checks it before replacing the evaluator,
+  and the adapter retains every composed buffer.
 - Explicit `animclipimpl=rust` mounts the Leptos selector. It dispatches through
   `AppStore` and sends only committed selection/cancellation effects to the
   platform adapter. `animclipimpl=js` remains the default rollback.
@@ -40,9 +43,11 @@ Presentation animation now has the same exact gate. Rust joins the authored
 presentation asset to the installed request/session asset through an ephemeral
 residency event, resolves the cue's clip name and relative time, and emits the
 ordinary clip selection effect. The browser binds before multi-asset packing
-and executes only that committed effect. A later unsupported clip change fails
-the job visibly instead of rebuilding only the primary prefix and corrupting
-the packed composition.
+and executes only that committed effect. Later clip changes preserve the
+packed scene: `set_active_animation_preserving_topology` rejects a stale
+vertex/primary-face witness before mutating the evaluator, while a successful
+switch retains skin/morph sources, composed instances, face domains, worker
+LOD residency, and same-context residency.
 
 The generated WASM smoke explicitly performs this race:
 
@@ -106,6 +111,10 @@ Acceptance requires:
   `__hyperscopeAppShadowDiagnostics.mismatches`;
 - no wrong-clip pose, rest-pose flash, stale texture/skin state, LOD blip, seam
   discontinuity, or stalled animation after settling.
+- for presentation cues that change clips after packing,
+  `__hyperscopePresentation.compositionPreservingClipSwitches` advances while
+  resident asset count, packed face count, and LOD topology domains remain
+  unchanged.
 
 ## Rust-authority gate
 

@@ -437,6 +437,12 @@ The first application boundary is now explicit:
   `{time_min, duration}` pair back into Rust every frame.
   The exact multi-clip shadow/Rust soak and acceptance counters are frozen in
   the [2026-08-29 animation clip cutover model](benchmarks/2026-08-29-animation-clip-cutover-model.md).
+  Packed presentations no longer rebuild the primary prefix when a cue changes
+  clips. The platform adapter supplies its exact retained primary vertex/face
+  witness to Rust; Rust validates it before replacing the evaluator, and a
+  successful switch retains the composed instance, face-domain, worker-LOD,
+  and same-context resources. This keeps secondary presentation assets intact
+  without moving renderer resource policy into the application reducer.
   Version 0.20 separates a successfully fetched/decoded primary candidate from
   a renderer-resident primary scene. Decode emits an explicit
   `InstallPrimaryScene` effect; only a matching, validated completion can

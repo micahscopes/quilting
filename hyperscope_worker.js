@@ -211,7 +211,13 @@ self.onmessage = async function(e) {
     lodJobGeneration += 1;
     wasm.cancel_animated_lods();
     wasm.reset_animated_lod_delta();
-    const result = wasm.set_active_animation(data.index);
+    const result = data.preserveTopology
+      ? wasm.set_active_animation_preserving_topology(
+          data.index,
+          data.expectedVertices,
+          data.expectedFaces,
+        )
+      : wasm.set_active_animation(data.index);
     self.postMessage({ type: 'animation_switched', id, result });
     return;
   }

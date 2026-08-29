@@ -1466,11 +1466,36 @@ pub fn list_animations() -> JsValue {
     })
 }
 
-/// Switch to a different animation by index and rebuild the retained evaluator.
-/// Returns a JS object with { time_min, time_max, num_vertices, num_faces }
-/// or null on failure.
+/// Switch to a different animation by index and rebuild only the retained
+/// evaluator.
+///
+/// The decoded mesh, skin weights, morph deltas, face topology, and any
+/// renderer/LOD buffers derived from them remain unchanged. Browser and native
+/// adapters may therefore retain a packed multi-asset scene across a clip
+/// switch as long as the returned vertex/face counts still match their exact
+/// residency witness.
+///
+/// Returns a JS object with
+/// `{ time_min, time_max, num_vertices, num_faces, topology_preserved }`, or
+/// null on failure.
 #[wasm_bindgen]
 pub fn set_active_animation(index: u32) -> JsValue {
+    set_active_animation_impl(index, None)
+}
+
+/// Switch clips only if an adapter's exact retained-topology witness still
+/// matches the decoded model. A mismatch returns null without replacing the
+/// active evaluator.
+#[wasm_bindgen]
+pub fn set_active_animation_preserving_topology(
+    index: u32,
+    expected_vertices: u32,
+    expected_faces: u32,
+) -> JsValue {
+    set_active_animation_impl(index, Some((expected_vertices, expected_faces)))
+}
+
+fn set_active_animation_impl(index: u32, expected_topology: Option<(u32, u32)>) -> JsValue {
     let index = index as usize;
 
     GLTF_DATA.with(|gd| {
@@ -1484,6 +1509,22 @@ pub fn set_active_animation(index: u32) -> JsValue {
             web_sys::console::warn_1(&format!(
                 "set_active_animation: index {} out of range ({})", index, data.animations.len()
             ).into());
+            return JsValue::NULL;
+        }
+
+        let n_verts = data.combined.positions.len();
+        let n_faces = data.combined.triangles.len();
+        if expected_topology.is_some_and(|(vertices, faces)| {
+            usize::try_from(vertices).ok() != Some(n_verts)
+                || usize::try_from(faces).ok() != Some(n_faces)
+        }) {
+            web_sys::console::warn_1(
+                &format!(
+                    "set_active_animation: retained topology mismatch for animation {} — expected {:?}, decoded ({}, {})",
+                    index, expected_topology, n_verts, n_faces,
+                )
+                .into(),
+            );
             return JsValue::NULL;
         }
 
@@ -1507,9 +1548,6 @@ pub fn set_active_animation(index: u32) -> JsValue {
         let (time_min, time_max) = anim_info.get(index)
             .map(|a| (a.t_min, a.t_max))
             .unwrap_or((0.0, 0.0));
-        let n_verts = data.combined.positions.len();
-        let n_faces = data.combined.triangles.len();
-
         FACE_MATERIALS.with(|fm| *fm.borrow_mut() = data.face_material_indices.clone());
         SENT_TESS.with(|s| s.borrow_mut().clear());
 
@@ -1523,6 +1561,12 @@ pub fn set_active_animation(index: u32) -> JsValue {
         js_sys::Reflect::set(&result, &"time_max".into(), &JsValue::from_f64(time_max)).unwrap();
         js_sys::Reflect::set(&result, &"num_vertices".into(), &JsValue::from_f64(n_verts as f64)).unwrap();
         js_sys::Reflect::set(&result, &"num_faces".into(), &JsValue::from_f64(n_faces as f64)).unwrap();
+        js_sys::Reflect::set(
+            &result,
+            &"topology_preserved".into(),
+            &JsValue::TRUE,
+        )
+        .unwrap();
         result.into()
     })
 }

@@ -26,10 +26,15 @@ const mainRendererSource = readFileSync(
   `${repository}/crates/quilting-wasm/src/main_renderer.rs`,
   'utf8',
 );
+const wasmFacadeSource = readFileSync(
+  `${repository}/crates/quilting-wasm/src/lib.rs`,
+  'utf8',
+);
 const {
   default: init,
   HyperscopeNavigation,
   hyperscopeControlSpecs,
+  load_gltf_data: loadGltfData,
   load_patch_lab,
   mr_acceptLodDeltaSequence,
   mr_measureRootGrouping,
@@ -38,11 +43,13 @@ const {
   mr_resetRuntimeTimingDiagnostics,
   mr_runtimeTimingDiagnostics,
   mr_uploadComposedLodModel,
+  set_active_animation_preserving_topology: setActiveAnimationPreservingTopology,
   update_patch_lab_lods,
 } = await import(packageUrl);
 await init({ module_or_path: readFileSync(wasmPath) });
 
 assert.equal(typeof mr_uploadComposedLodModel, 'function');
+assert.equal(typeof setActiveAnimationPreservingTopology, 'function');
 assert.equal(typeof mr_measureRootGrouping, 'function');
 assert.equal(typeof mr_incrementalRootGroupShadowDiagnostics, 'function');
 assert.equal(typeof mr_setIncrementalRootGroupShadowEnabled, 'function');
@@ -51,6 +58,25 @@ assert.equal(mr_measureRootGrouping(4), null);
 assert.equal(typeof mr_resetRuntimeTimingDiagnostics, 'function');
 assert.throws(() => mr_runtimeTimingDiagnostics(), /renderer is not initialized/);
 assert.throws(() => mr_resetRuntimeTimingDiagnostics(), /renderer is not initialized/);
+const animatedFixture = loadGltfData(new Uint8Array(readFileSync(`${repository}/horse.glb`)));
+assert.ok(animatedFixture.animations.length > 0);
+assert.equal(
+  setActiveAnimationPreservingTopology(
+    0,
+    animatedFixture.num_vertices + 1,
+    animatedFixture.num_faces,
+  ),
+  null,
+  'a stale packed-topology witness must reject the clip switch',
+);
+const retainedTopology = setActiveAnimationPreservingTopology(
+  0,
+  animatedFixture.num_vertices,
+  animatedFixture.num_faces,
+);
+assert.equal(retainedTopology.topology_preserved, true);
+assert.equal(retainedTopology.num_vertices, animatedFixture.num_vertices);
+assert.equal(retainedTopology.num_faces, animatedFixture.num_faces);
 assert.deepEqual(
   hyperscopeControlSpecs().find(spec => spec.key === 'lodimpl'),
   { key: 'lodimpl', defaultValue: 'js', kind: 'implementation' },
@@ -275,6 +301,41 @@ for (const requiredAnimationAdapterStep of [
     `browser animation adapter is missing ${requiredAnimationAdapterStep}`,
   );
 }
+const animationClipSwitchAdapter = browserSource.slice(
+  browserSource.indexOf('async function selectAnimationIndex('),
+  browserSource.indexOf("$('anim-sel').addEventListener('change'"),
+);
+for (const topologyPreservingStep of [
+  'const preservePackedComposition = presentationComposition.ready;',
+  'preserveTopology: preservePackedComposition,',
+  'expectedVertices: expectedPrimaryVertices,',
+  'expectedFaces: expectedPrimaryFaces,',
+  'result.topology_preserved !== true',
+  'rustPresentationDiagnostics.compositionPreservingClipSwitches += 1;',
+]) {
+  assert.ok(
+    animationClipSwitchAdapter.includes(topologyPreservingStep),
+    `packed presentation clip switching is missing ${topologyPreservingStep}`,
+  );
+}
+assert.equal(
+  browserSource.includes('presentation clip switching after scene packing is not supported'),
+  false,
+  'packed presentation composition must not reject a topology-preserving clip switch',
+);
+assert.ok(
+  workerSource.includes('wasm.set_active_animation_preserving_topology('),
+  'the worker must ask Rust to reject a stale packed-topology witness before mutation',
+);
+const topologyCheckedSwitch = wasmFacadeSource.slice(
+  wasmFacadeSource.indexOf('fn set_active_animation_impl('),
+  wasmFacadeSource.indexOf('pub fn evaluate_animation_frame('),
+);
+assert.ok(
+  topologyCheckedSwitch.indexOf('expected_topology.is_some_and(')
+    < topologyCheckedSwitch.indexOf('data.active_animation = index;'),
+  'Rust must validate retained topology before replacing the active evaluator',
+);
 const animationPlaybackAdapter = browserSource.slice(
   browserSource.indexOf('function setAnimationPlaybackIntent('),
   browserSource.indexOf('function appShadowUuid('),

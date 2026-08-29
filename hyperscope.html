@@ -2753,6 +2753,7 @@ const rustPresentationDiagnostics = {
   activeTessellation: null,
   activeAnimation: null,
   animationResidency: null,
+  compositionPreservingClipSwitches: 0,
   unsupportedOverlays: [],
   navigation: null,
   error: null,
@@ -3129,9 +3130,6 @@ async function applyPresentationAnimationState(snapshot = rustPresentationSnapsh
       throw new Error(`presentation animation clip ${animation.clip} is not resident`);
     }
     if (String(clipIndex) !== $('anim-sel').value) {
-      if (presentationComposition.ready) {
-        throw new Error('presentation clip switching after scene packing is not supported');
-      }
       const switched = await selectAnimationIndex(
         clipIndex,
         { restoreRouteClock: false },
@@ -3254,13 +3252,6 @@ async function applyCommittedPresentationAnimationEffects(
   if (job.effect || job.cancellations.length > 0) {
     if (!Number.isSafeInteger(requestedIndex) || requestedIndex < 0) {
       throw new Error(`${context}: Rust clip effects have no valid destination`);
-    }
-    if (presentationComposition.ready
-        && job.effect
-        && rendererAnimationClipIndex !== requestedIndex) {
-      const error = new Error('presentation clip switching after scene packing is not supported');
-      completeAppAnimationClipSelection(job, error);
-      throw error;
     }
     const switched = await selectAnimationIndex(requestedIndex, {
       restoreRouteClock: false,
@@ -3822,7 +3813,7 @@ let msgId = 0;
 function spawnWorker() {
   // Keep the worker protocol in lockstep with this page. Browsers may otherwise
   // reuse an older module worker after a hot reload while serving local builds.
-  const w = new Worker('./hyperscope_worker.js?rev=composed-scene-lod-v1', { type: 'module' });
+  const w = new Worker('./hyperscope_worker.js?rev=clip-topology-v2', { type: 'module' });
   w.onmessage = e => {
     const resolve = pending.get(e.data.id);
     if (resolve) { pending.delete(e.data.id); resolve(e.data); }
@@ -7912,14 +7903,34 @@ async function selectAnimationIndex(
   animationPoseBlocked = true;
   rebaseAnimationPoseContinuity();
   $('stats').textContent = 'Switching animation...';
+  const preservePackedComposition = presentationComposition.ready;
+  // `currentSkinData.numVertices` is extended to the whole composition so its
+  // GPU textures cover static secondary vertices. The decoded evaluator still
+  // owns only the primary prefix represented by `meshInfo.num_vertices`.
+  const expectedPrimaryVertices = Number(meshInfo?.num_vertices) || 0;
+  const expectedPrimaryFaces = currentPrimaryFaceCount;
   let switched = false;
   try {
-    const resp = await broadcastCall('set_active_animation', { index: idx });
+    const resp = await broadcastCall('set_active_animation', {
+      index: idx,
+      preserveTopology: preservePackedComposition,
+      expectedVertices: expectedPrimaryVertices,
+      expectedFaces: expectedPrimaryFaces,
+    });
     rendererAnimationClipIndex = null;
     animationClipDiagnostics.rendererResidentClip = null;
     if (blockGeneration !== animationPoseBlockGeneration) return;
     const result = resp.result;
     if (!result) throw new Error('animation worker returned no clip result');
+    if (preservePackedComposition
+        && (!presentationComposition.ready
+          || result.topology_preserved !== true
+          || result.num_vertices !== expectedPrimaryVertices
+          || result.num_faces !== expectedPrimaryFaces)) {
+      throw new Error(
+        'animation clip switch did not preserve the packed primary topology',
+      );
+    }
     meshInfo.time_min = result.time_min;
     meshInfo.time_max = result.time_max;
     meshInfo.num_vertices = result.num_vertices;
@@ -7933,41 +7944,49 @@ async function selectAnimationIndex(
     timeSlider.value = result.time_min;
     $('time-v').textContent = parseFloat(timeSlider.value).toFixed(2);
 
-    const skinResp = await workerCall('get_skinning_data', {});
-    if (blockGeneration !== animationPoseBlockGeneration) return;
-    const skinData = skinResp.skinData;
-    const nv = skinData ? (skinData.num_vertices || 0) : 0;
-    skinTexW = Math.min(nv, 4096);
-    if (skinData && skinData.joint_indices) {
-      mr_uploadSkinningTexture(
-        new Float32Array(skinData.joint_indices.buffer || skinData.joint_indices),
-        new Float32Array(skinData.joint_weights.buffer || skinData.joint_weights),
-        skinData.num_vertices,
-      );
-    }
-    if (skinData && skinData.morph_deltas) {
-      mr_uploadMorphTexture(
-        new Float32Array(skinData.morph_deltas.buffer || skinData.morph_deltas),
-        skinData.num_vertices,
-        skinData.num_morph_targets,
-      );
-    }
+    if (preservePackedComposition) {
+      // `set_active_animation` replaces only the Rust evaluator. Skin/morph
+      // source data, composed instances, face domains, worker LOD residency,
+      // and same-context residency are still exact, so re-uploading any of
+      // them would discard the packed secondary assets.
+      rustPresentationDiagnostics.compositionPreservingClipSwitches += 1;
+    } else {
+      const skinResp = await workerCall('get_skinning_data', {});
+      if (blockGeneration !== animationPoseBlockGeneration) return;
+      const skinData = skinResp.skinData;
+      const nv = skinData ? (skinData.num_vertices || 0) : 0;
+      skinTexW = Math.min(nv, 4096);
+      if (skinData && skinData.joint_indices) {
+        mr_uploadSkinningTexture(
+          new Float32Array(skinData.joint_indices.buffer || skinData.joint_indices),
+          new Float32Array(skinData.joint_weights.buffer || skinData.joint_weights),
+          skinData.num_vertices,
+        );
+      }
+      if (skinData && skinData.morph_deltas) {
+        mr_uploadMorphTexture(
+          new Float32Array(skinData.morph_deltas.buffer || skinData.morph_deltas),
+          skinData.num_vertices,
+          skinData.num_morph_targets,
+        );
+      }
 
-    const rpResp = await workerCall('get_rest_pose_instances', {});
-    if (blockGeneration !== animationPoseBlockGeneration) return;
-    const rp = rpResp.data || rpResp;
-    if (rp && rp.instances) {
-      const animationNodes = modelFaceNodes.length === rp.num_faces
-        ? modelFaceNodes
-        : new Int32Array(rp.num_faces);
-      mr_setFaceNodes(animationNodes);
-      setRendererInstanceData(new Float32Array(rp.instances.buffer || rp.instances), rp.num_faces);
-      mr_buildBatches(new Float32Array(rp.face_lods.buffer || rp.face_lods));
+      const rpResp = await workerCall('get_rest_pose_instances', {});
+      if (blockGeneration !== animationPoseBlockGeneration) return;
+      const rp = rpResp.data || rpResp;
+      if (rp && rp.instances) {
+        const animationNodes = modelFaceNodes.length === rp.num_faces
+          ? modelFaceNodes
+          : new Int32Array(rp.num_faces);
+        mr_setFaceNodes(animationNodes);
+        setRendererInstanceData(new Float32Array(rp.instances.buffer || rp.instances), rp.num_faces);
+        mr_buildBatches(new Float32Array(rp.face_lods.buffer || rp.face_lods));
+      }
+      const computeUpload = await workerCall('upload_model_to_compute', {});
+      if (blockGeneration !== animationPoseBlockGeneration) return;
+      workerLodModelFingerprint = computeUpload.modelFingerprint || '';
+      uploadSameContextLodResidency(nv, rp.num_faces);
     }
-    const computeUpload = await workerCall('upload_model_to_compute', {});
-    if (blockGeneration !== animationPoseBlockGeneration) return;
-    workerLodModelFingerprint = computeUpload.modelFingerprint || '';
-    uploadSameContextLodResidency(nv, rp.num_faces);
     $('stats').textContent = `Animation: ${$('anim-sel').selectedOptions[0].textContent}`;
     rendererAnimationClipIndex = idx;
     animationClipDiagnostics.rendererResidentClip = idx;
