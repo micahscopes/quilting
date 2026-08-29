@@ -67,7 +67,7 @@ pub fn spawn_hyperscape_asset(
 
         if let Some(binding) = &asset.node_bindings[node_index] {
             if let Some(stable_id) = binding.stable_id {
-                world.entity_mut(entity).insert(StableEntityId(stable_id));
+                world.entity_mut(entity).insert(StableEntityId::from(stable_id));
             }
             let local_point = binding
                 .path
