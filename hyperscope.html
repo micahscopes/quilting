@@ -5043,6 +5043,7 @@ const animationClipDiagnostics = {
   rustPendingClip: null,
   dispatches: 0,
   effects: 0,
+  cancellationEffects: 0,
   noops: 0,
   repairs: 0,
   completions: 0,
@@ -7513,6 +7514,13 @@ function beginAppAnimationClipSelection(index) {
   const selections = receipt.commit.effects.filter(
     effect => effect.type === 'select_animation_clip',
   );
+  const cancellations = receipt.commit.effects.filter(
+    effect => effect.type === 'cancel_animation_clip_selection',
+  );
+  if (cancellations.length > 1) {
+    throw new Error('Rust animation clip request emitted multiple cancellation effects');
+  }
+  animationClipDiagnostics.cancellationEffects += cancellations.length;
   if (selections.length === 0) {
     animationClipDiagnostics.noops += 1;
     const snapshot = refreshAppShadowSnapshot();
@@ -7521,7 +7529,7 @@ function beginAppAnimationClipSelection(index) {
       throw new Error('Rust animation clip request emitted no effect for a divergent clip');
     }
     observeAnimationClipResidency('selection-noop', snapshot);
-    return { receipt, effect: null };
+    return { receipt, effect: null, cancellations };
   }
   if (selections.length !== 1) {
     throw new Error('Rust animation clip request must emit exactly one selection effect');
@@ -7539,7 +7547,7 @@ function beginAppAnimationClipSelection(index) {
     }
   }
   observeAnimationClipResidency('selection-pending');
-  return { receipt, effect };
+  return { receipt, effect, cancellations };
 }
 
 function completeAppAnimationClipSelection(job, error = null) {
@@ -7597,7 +7605,8 @@ async function selectAnimationIndex(idx, { restoreRouteClock = true } = {}) {
       idx = clipJob.effect.clip_index;
       animationClipDiagnostics.authorityWrites += 1;
     }
-    if (clipJob && !clipJob.effect && rendererAnimationClipIndex === idx) {
+    if (clipJob && !clipJob.effect && clipJob.cancellations.length === 0
+        && rendererAnimationClipIndex === idx) {
       $('anim-sel').value = String(idx);
       const routeClockDeferred = !restoreRouteClock && Boolean(pendingRouteAnimationClock);
       const restoredRouteClock = restoreRouteClock

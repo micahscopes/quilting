@@ -409,7 +409,10 @@ The first application boundary is now explicit:
   not a second semantic controller. `__hyperscopeAnimationClipDiagnostics`
   compares it with Rust's active clip after install, pending selection,
   completion, failure, and explicit same-clip repair; a Rust no-op cannot hide
-  missing renderer residency.
+  missing renderer residency. Returning to the incumbent while another clip
+  switch is in flight consumes Rust's cancellation effect and performs an
+  ordered incumbent reinstall, so the already-dispatched worker request cannot
+  make a canceled clip resident later.
   Version 0.20 separates a successfully fetched/decoded primary candidate from
   a renderer-resident primary scene. Decode emits an explicit
   `InstallPrimaryScene` effect; only a matching, validated completion can
