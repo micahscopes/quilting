@@ -1228,6 +1228,11 @@ const incumbentStart = incumbent.startPresentation();
 assert.equal(startedPresentation.disposition, 'applied');
 assert.equal(app.snapshot().presentation.active.cue_id, presentation.cues[0].id);
 assert.deepEqual(app.snapshot().presentation.active, incumbentStart);
+assert.equal(
+  app.snapshot().presentation.active.render_style,
+  'matcap_wire',
+  'the AppStore presentation projection must retain Rust render semantics',
+);
 const activePresentation = app.snapshot().presentation.active;
 const activePresentationBindings = activePresentation.layers.map((layer, index) => ({
   layer: layer.id,

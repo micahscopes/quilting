@@ -177,6 +177,42 @@ const first = controller.startPresentation();
 assert.equal(first.cue_id, presentation.cues[0].id);
 assert.equal(first.cue_index, 0);
 assert.deepEqual(first.animations, presentation.cues[0].animations);
+assert.deepEqual(
+  presentation.cues.map(cue => controller.jumpToPresentationCue(cue.id).render_style),
+  [
+    'matcap_wire', 'wire', 'lod', 'normals',
+    'matcap_wire', 'lod', 'stretch', 'pbr',
+  ],
+  'Rust presentation snapshots must resolve the backend-neutral render style',
+);
+controller.startPresentation();
+
+const presentationVisualizationAdapter = browserSource.slice(
+  browserSource.indexOf('const PRESENTATION_RENDER_MODES = Object.freeze({'),
+  browserSource.indexOf('function applyPresentationTessellation('),
+);
+for (const thinAdapterStep of [
+  'function applyPresentationVisualization(renderStyle, overlays = [])',
+  'const mode = PRESENTATION_RENDER_MODES[renderStyle];',
+  "matcap_wire: 'both'",
+  "overlays.filter(overlay => overlay === 'control_net')",
+]) {
+  assert.ok(
+    presentationVisualizationAdapter.includes(thinAdapterStep),
+    `presentation render adapter is missing ${thinAdapterStep}`,
+  );
+}
+assert.ok(
+  browserSource.includes(
+    'applyPresentationVisualization(snapshot.render_style, snapshot.overlays || []);',
+  ),
+  'the browser must consume the Rust-owned presentation render style',
+);
+assert.equal(
+  browserSource.includes('PRESENTATION_SURFACE_VISUALIZATIONS'),
+  false,
+  'the browser must not retain an overlay-to-render-style policy table',
+);
 
 for (const requiredAnimationAdapterStep of [
   'primaryPresentationAnimation(snapshot)',

@@ -109,8 +109,10 @@ tesseract atlas wire topology, the same tesseract under screen-space LOD, and
 analytic normals on a projected 16-cell. Three horse cues then show animated
 QB patches, shared-edge LOD, and conformal stretch. An eighth cue returns to
 PBR and composes the Blender-authored scene. Each surface visualization is
-selected by the Rust-validated cue document and translated to one existing
-Hyperscope render mode; ambiguous combinations are rejected.
+resolved in Rust to Quilting's backend-neutral `RenderStyle` and carried in the
+active application snapshot; ambiguous combinations are rejected. The browser
+only translates the incumbent `matcap_wire` control spelling to `both` and
+reports the separately orthogonal, not-yet-rendered `control_net` capability.
 
 The polytope fixtures are deterministic static GLBs generated from
 `quilting_core::polytope4`. Their closed 3-cell shells are separated before 4D

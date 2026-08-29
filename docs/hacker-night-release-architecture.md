@@ -104,6 +104,10 @@ The first application boundary is now explicit:
   metadata from its low-rate read model, dispatches cue intent through
   `AppEvent`, and consumes the application frame snapshot; it performs no
   standalone controller tick or semantic manifest parse in the browser.
+  Active cue snapshots also resolve exclusive presentation overlays to
+  Quilting's shared backend-neutral `RenderStyle`. The browser no longer owns
+  an overlay-to-render-mode policy; it only adapts the legacy `matcap_wire`
+  control spelling and reports unsupported orthogonal overlay capabilities.
 - Effective spheroidal-focus authority now crosses that same ordered boundary.
   Rust `focus_enabled` denotes fuzzy post-processing enabled specifically in
   mode 3; modes 0–2 remain renderer-only blur choices, and the retained shared

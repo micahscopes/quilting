@@ -3131,21 +3131,22 @@ function presentationLayerMatrix(transform = {}) {
   ];
 }
 
-const PRESENTATION_SURFACE_VISUALIZATIONS = Object.freeze({
-  // Rust validation keeps these diagnostics mutually exclusive per cue.
-  wireframe: 'wire',
-  lod: 'lod',
-  patch_boundaries: 'both',
+const PRESENTATION_RENDER_MODES = Object.freeze({
+  // `render_style` is Rust-owned. Only `matcap_wire` needs translation to the
+  // incumbent browser control spelling while that view remains in HTML.
+  pbr: 'pbr',
+  matcap: 'matcap',
+  wire: 'wire',
   normals: 'normals',
+  matcap_wire: 'both',
+  lod: 'lod',
   stretch: 'stretch',
 });
 
-function applyPresentationVisualization(overlays = []) {
-  const selected = overlays.find(overlay => PRESENTATION_SURFACE_VISUALIZATIONS[overlay]);
-  const mode = selected ? PRESENTATION_SURFACE_VISUALIZATIONS[selected] : 'pbr';
-  const unsupported = overlays.filter(overlay =>
-    !PRESENTATION_SURFACE_VISUALIZATIONS[overlay] && overlay !== 'control_net');
-  if (overlays.includes('control_net')) unsupported.push('control_net');
+function applyPresentationVisualization(renderStyle, overlays = []) {
+  const mode = PRESENTATION_RENDER_MODES[renderStyle];
+  if (!mode) throw new Error(`unsupported Rust presentation render style ${renderStyle}`);
+  const unsupported = overlays.filter(overlay => overlay === 'control_net');
   rustPresentationDiagnostics.activeVisualization = mode;
   rustPresentationDiagnostics.unsupportedOverlays = unsupported;
   renderMode.set(mode);
@@ -3286,7 +3287,7 @@ function applyPresentationLayerState(snapshot = rustPresentationSnapshot) {
     + `${presentationComposition.totalFaces} packed faces`
     + (opacityPending ? ' · opacity adapter pending' : '');
   applyPresentationTessellation(snapshot.tessellation);
-  applyPresentationVisualization(snapshot.overlays || []);
+  applyPresentationVisualization(snapshot.render_style, snapshot.overlays || []);
   const authoredLayerResident = Array.from(presentationComposition.assets.entries())
     .some(([assetId, resident]) => assetId !== presentationComposition.primaryAssetId
       && activeLayers.get(assetId)?.visible && resident.nodes.length > 0);
