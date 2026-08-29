@@ -510,12 +510,20 @@ assert.equal(
     primaryChess,
     796,
     984,
-    JSON.stringify([{
-      index: 0,
-      name: 'gallop',
-      timeMinSeconds: 0,
-      timeMaxSeconds: 1.5,
-    }]),
+    JSON.stringify([
+      {
+        index: 0,
+        name: 'gallop',
+        timeMinSeconds: 0,
+        timeMaxSeconds: 1.5,
+      },
+      {
+        index: 1,
+        name: 'turn',
+        timeMinSeconds: 2,
+        timeMaxSeconds: 3,
+      },
+    ]),
   ).disposition,
   'applied',
 );
@@ -534,14 +542,41 @@ assert.deepEqual(
     assetId: primaryChess,
     numVertices: 796,
     numFaces: 984,
-    animationClips: [{
-      index: 0,
-      name: 'gallop',
-      timeMinSeconds: 0,
-      timeMaxSeconds: 1.5,
-    }],
+    animationClips: [
+      {
+        index: 0,
+        name: 'gallop',
+        timeMinSeconds: 0,
+        timeMaxSeconds: 1.5,
+      },
+      {
+        index: 1,
+        name: 'turn',
+        timeMinSeconds: 2,
+        timeMaxSeconds: 3,
+      },
+    ],
   },
 );
+assert.equal(primarySnapshot.animationClipSelection.active.clip.index, 0);
+const clipSelection = primaryApp.dispatchAnimationClip(1);
+assert.deepEqual(
+  clipSelection.commit.effects.map(effect => effect.type),
+  ['select_animation_clip'],
+);
+const clipEffect = clipSelection.commit.effects[0];
+assert.equal(primaryApp.snapshot().animationClipSelection.pending.clip.index, 1);
+assert.equal(
+  primaryApp.completeAnimationClipSelected(
+    clipEffect.job_id,
+    clipEffect.scene_request_id,
+    clipEffect.asset_id,
+    clipEffect.clip_index,
+  ).disposition,
+  'applied',
+);
+assert.equal(primaryApp.snapshot().animationClipSelection.active.clip.index, 1);
+assert.equal(primaryApp.snapshot().animationClipSelection.pending, undefined);
 const failedPrimaryReplacement = 'e0000000-0000-4000-8000-000000000012';
 primaryApp.requestPrimaryAsset(
   3,

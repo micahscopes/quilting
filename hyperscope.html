@@ -552,6 +552,9 @@ const RUST_ASSET_IMPLEMENTATION = implementationFromRoute(
 const ANIMATION_CLOCK_IMPLEMENTATION = implementationFromRoute(
   initialBrowserParams, 'animclockimpl', 'js',
 );
+const ANIMATION_CLIP_IMPLEMENTATION = implementationFromRoute(
+  initialBrowserParams, 'animclipimpl', 'js',
+);
 const RUST_RENDER_SETTINGS_IMPLEMENTATION = implementationFromRoute(
   initialBrowserParams, 'renderstateimpl', 'js',
 );
@@ -562,6 +565,7 @@ const RUST_APP_SHADOW_ENABLED =
   || RUST_NAVIGATION_IMPLEMENTATION !== 'js'
   || RUST_ASSET_IMPLEMENTATION !== 'js'
   || ANIMATION_CLOCK_IMPLEMENTATION !== 'js'
+  || ANIMATION_CLIP_IMPLEMENTATION !== 'js'
   || RUST_RENDER_SETTINGS_IMPLEMENTATION !== 'js'
   || RUST_SELECTION_IMPLEMENTATION !== 'js'
   || RUST_SCENE_IMPLEMENTATION !== 'js'
@@ -1529,7 +1533,7 @@ const PARAM_DEFAULTS = {
   env: 'rosendal_plains_1_1k', matcap: 'citric-acid',
   res: '0', density: '100', atten: '1', minpx: '16',
   animate: '1', anim: '-1', animtime: '0', animspeed: '1',
-  animclockimpl: 'js', atlas: '7', lodratio: '2',
+  animclockimpl: 'js', animclipimpl: 'js', atlas: '7', lodratio: '2',
   zoom: '3', rx: '0.3', ry: '0.5', rz: '0', px: '0', py: '0', pz: '0',
   aim: '0',
   selasset: '', selentity: '',
@@ -1569,6 +1573,7 @@ function readParams(p, explicitParams = p) {
     animtimeProvided: explicitParams.has('animtime'),
     animspeedProvided: explicitParams.has('animspeed'),
     animclockimpl: get('animclockimpl'),
+    animclipimpl: get('animclipimpl'),
     atlas: get('atlas'),
     lodratio: get('lodratio'),
     zoom: get('zoom'),
@@ -1656,6 +1661,11 @@ function syncURL() {
         'animclockimpl',
         ANIMATION_CLOCK_IMPLEMENTATION,
         PARAM_DEFAULTS.animclockimpl,
+      );
+      set(
+        'animclipimpl',
+        ANIMATION_CLIP_IMPLEMENTATION,
+        PARAM_DEFAULTS.animclipimpl,
       );
       set('fuzzy', fz.enabled.peek() ? '1' : '0', PARAM_DEFAULTS.fuzzy);
       ss('fmode', fz.mode, PARAM_DEFAULTS.fmode);
@@ -7441,8 +7451,99 @@ effect(() => {
   syncURL();
 });
 
+function beginAppAnimationClipSelection(index) {
+  if (ANIMATION_CLIP_IMPLEMENTATION === 'js') return null;
+  const app = ensureRustAppShadow('animation-clip-selection');
+  const receipt = app.dispatchAnimationClip(index);
+  observeRustAppShadowSequence(receipt.sequence, 'Rust animation clip adapter');
+  rustAppShadowDiagnostics.lastCommit = receipt.commit;
+  const selections = receipt.commit.effects.filter(
+    effect => effect.type === 'select_animation_clip',
+  );
+  if (selections.length === 0) {
+    const active = refreshAppShadowSnapshot()?.animationClipSelection?.active?.clip?.index;
+    if (active !== index) {
+      throw new Error('Rust animation clip request emitted no effect for a divergent clip');
+    }
+    return { receipt, effect: null };
+  }
+  if (selections.length !== 1) {
+    throw new Error('Rust animation clip request must emit exactly one selection effect');
+  }
+  const effect = selections[0];
+  if (effect.clip_index !== index) {
+    recordAppShadowMismatch(
+      'animation_clip_effect',
+      `requested clip ${index}, Rust selected ${effect.clip_index}`,
+    );
+    if (ANIMATION_CLIP_IMPLEMENTATION === 'rust') {
+      throw new Error('Rust animation clip effect diverged from browser intent');
+    }
+  }
+  return { receipt, effect };
+}
+
+function completeAppAnimationClipSelection(job, error = null) {
+  if (!job?.effect || !rustAppShadow) return 'unobserved';
+  const effect = job.effect;
+  try {
+    const commit = error
+      ? rustAppShadow.completeAnimationClipSelectionFailed(
+        effect.job_id,
+        effect.scene_request_id,
+        effect.asset_id,
+        effect.clip_index,
+        'renderer_clip_switch_failed',
+        error?.message || String(error),
+        true,
+      )
+      : rustAppShadow.completeAnimationClipSelected(
+        effect.job_id,
+        effect.scene_request_id,
+        effect.asset_id,
+        effect.clip_index,
+      );
+    rustAppShadowDiagnostics.lastCommit = commit;
+    if (commit.disposition === 'ignored_stale') rustAppShadowDiagnostics.staleCompletions += 1;
+    refreshAppShadowSnapshot();
+    return commit.disposition;
+  } catch (completionError) {
+    recordAppShadowMismatch(
+      'animation_clip_completion',
+      completionError?.message || String(completionError),
+    );
+    if (ANIMATION_CLIP_IMPLEMENTATION === 'rust') throw completionError;
+    return 'error';
+  }
+}
+
 async function selectAnimationIndex(idx, { restoreRouteClock = true } = {}) {
   if (idx < 0 || !meshInfo) return false;
+  let clipJob = null;
+  let rendererSwitched = false;
+  try {
+    clipJob = beginAppAnimationClipSelection(idx);
+    if (ANIMATION_CLIP_IMPLEMENTATION === 'rust' && clipJob?.effect) {
+      idx = clipJob.effect.clip_index;
+    }
+    if (clipJob && !clipJob.effect) {
+      $('anim-sel').value = String(idx);
+      const routeClockDeferred = !restoreRouteClock && Boolean(pendingRouteAnimationClock);
+      const restoredRouteClock = restoreRouteClock
+        ? restorePendingRouteAnimationClock('clip-switch-noop')
+        : false;
+      if (!routeClockDeferred && !restoredRouteClock
+          && (!RUST_PRESENTATION_ENABLED || !rustPresentationSnapshot)) {
+        synchronizeRustAnimationClockFromBrowser('clip-switch-noop');
+      }
+      if (!animating) tickAnimation(animTime, animationPoseClockSeconds);
+      syncURL();
+      return true;
+    }
+  } catch (error) {
+    $('stats').textContent = `Animation switch rejected: ${error.message}`;
+    return false;
+  }
   $('anim-sel').value = String(idx);
   const blockGeneration = ++animationPoseBlockGeneration;
   animationPoseBlocked = true;
@@ -7453,7 +7554,7 @@ async function selectAnimationIndex(idx, { restoreRouteClock = true } = {}) {
     const resp = await broadcastCall('set_active_animation', { index: idx });
     if (blockGeneration !== animationPoseBlockGeneration) return;
     const result = resp.result;
-    if (!result) { $('stats').textContent = 'Animation switch failed'; return; }
+    if (!result) throw new Error('animation worker returned no clip result');
     meshInfo.time_min = result.time_min;
     meshInfo.time_max = result.time_max;
     meshInfo.num_vertices = result.num_vertices;
@@ -7511,11 +7612,18 @@ async function selectAnimationIndex(idx, { restoreRouteClock = true } = {}) {
     workerLodModelFingerprint = computeUpload.modelFingerprint || '';
     uploadSameContextLodResidency(nv, rp.num_faces);
     $('stats').textContent = `Animation: ${$('anim-sel').selectedOptions[0].textContent}`;
+    rendererSwitched = true;
     switched = true;
+    completeAppAnimationClipSelection(clipJob);
     syncURL();
   } catch (error) {
     if (blockGeneration === animationPoseBlockGeneration) {
-      $('stats').textContent = `Animation switch failed: ${error.message}`;
+      if (!rendererSwitched) {
+        completeAppAnimationClipSelection(clipJob, error);
+      }
+      $('stats').textContent = rendererSwitched
+        ? `Animation switched, but Rust completion failed: ${error.message}`
+        : `Animation switch failed: ${error.message}`;
     }
   } finally {
     if (blockGeneration === animationPoseBlockGeneration) {

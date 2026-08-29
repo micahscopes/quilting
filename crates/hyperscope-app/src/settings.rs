@@ -212,6 +212,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     numeric_spec!("animtime", "0", Number, -1e9, 1e9, false, 0.001),
     numeric_spec!("animspeed", "1", Number, -1e6, 1e6, false, 0.01),
     spec!("animclockimpl", "js", Implementation),
+    spec!("animclipimpl", "js", Implementation),
     spec!("fuzzy", "0", Toggle),
     choice_spec!("fmode", "1", ["0", "1", "2", "3"]),
     numeric_spec!("fradius", "11", Number, 4.0, 128.0, true, 1.0),

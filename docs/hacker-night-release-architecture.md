@@ -388,11 +388,21 @@ The first application boundary is now explicit:
   events, device reports, renderer handles, or wall clock. Decimal JSON uses
   exact `f64` round trips.
   The native `replay` feature is excluded from browser builds;
-  `hyperscope-replay` version 0.20 walks every checked-in cue, every current
+  `hyperscope-replay` version 0.21 walks every checked-in cue, every current
   semantic navigation action, and every current application event lane. It
   records the key-sorted authored asset/entity materialization as well as its
   atomic projection revision, so stale or invalid Blender-style checkpoints
   cannot silently mutate the scene oracle.
+  Version 0.21 makes the installed animation catalog operational application
+  state. Installation derives the renderer's initial clip, selection allocates
+  a Rust job and emits an exact scene/request/asset-scoped effect, and only its
+  matching completion changes the active clip. Duplicate intent is inert,
+  returning to the incumbent cancels pending work, replacements cancel old
+  clip jobs, and stale or failed completions preserve the active clip. The
+  browser retains `animclipimpl=js|shadow|rust`; JavaScript remains the default
+  until live clip-switch parity is measured. A 0.20 replay retains its
+  historical installed catalog without gaining application-owned active-clip
+  state or asynchronous clip jobs.
   Version 0.20 separates a successfully fetched/decoded primary candidate from
   a renderer-resident primary scene. Decode emits an explicit
   `InstallPrimaryScene` effect; only a matching, validated completion can
@@ -477,7 +487,7 @@ The first application boundary is now explicit:
   semantic-target-presence policy without inferring aim mode from inversion.
   Version 0.5 retains selected source bounds and clicked pivots and derives
   output-chart pivots/radii in the application snapshot; a projection pole
-  clears only those derived values. The reader accepts 0.4 through 0.19 inputs,
+  clears only those derived values. The reader accepts 0.4 through 0.21 inputs,
   but only 0.4 migrates an omitted source pivot to the bound center.
   Versions 0.4 and 0.5 reject 0.6-only actions rather than silently changing
   their meaning; every pre-0.7 unscoped focus anchor is rejected. Action

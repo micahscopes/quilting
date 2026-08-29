@@ -72,6 +72,8 @@ assert.equal(specs.find(spec => spec.key === 'navimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'navimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'animclockimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'animclockimpl').defaultValue, 'js');
+assert.equal(specs.find(spec => spec.key === 'animclipimpl').kind, 'implementation');
+assert.equal(specs.find(spec => spec.key === 'animclipimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'animtime').kind, 'number');
 assert.equal(specs.find(spec => spec.key === 'animtime').defaultValue, '0');
 assert.equal(specs.find(spec => spec.key === 'animspeed').kind, 'number');
@@ -301,6 +303,8 @@ for (const selectionDefaultStep of [
 for (const animationClockDefaultStep of [
   "implementationFromRoute(\n  initialBrowserParams, 'animclockimpl', 'js',\n)",
   "animclockimpl: 'js'",
+  "implementationFromRoute(\n  initialBrowserParams, 'animclipimpl', 'js',\n)",
+  "animclipimpl: 'js'",
 ]) {
   assert.ok(
     browserSource.includes(animationClockDefaultStep),
@@ -329,6 +333,23 @@ for (const animationClockAuthorityStep of [
   assert.ok(
     browserSource.includes(animationClockAuthorityStep),
     `browser animation-clock adapter is missing ${animationClockAuthorityStep}`,
+  );
+}
+for (const animationClipAuthorityStep of [
+  "ANIMATION_CLIP_IMPLEMENTATION === 'rust'",
+  "const receipt = app.dispatchAnimationClip(index);",
+  "effect.type === 'select_animation_clip'",
+  'rustAppShadow.completeAnimationClipSelected(',
+  'rustAppShadow.completeAnimationClipSelectionFailed(',
+  'beginAppAnimationClipSelection(idx)',
+  'completeAppAnimationClipSelection(clipJob);',
+  'let rendererSwitched = false;',
+  'if (!rendererSwitched) {',
+  'Animation switched, but Rust completion failed:',
+]) {
+  assert.ok(
+    browserSource.includes(animationClipAuthorityStep),
+    `browser animation-clip authority is missing ${animationClipAuthorityStep}`,
   );
 }
 for (const navigationAuthorityStep of [

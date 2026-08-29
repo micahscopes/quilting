@@ -240,6 +240,7 @@ pub enum AnimationAction {
     Seek(f64),
     SetSpeed(f64),
     SetClock(AnimationClock),
+    SelectClip(u32),
 }
 
 /// Concurrency policy for an asset acquisition request.
@@ -332,10 +333,30 @@ pub struct PrimarySceneInstallCompletion {
     pub outcome: PrimarySceneInstallOutcome,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnimationClipSelectionOutcome {
+    Selected,
+    Failed {
+        code: String,
+        message: String,
+        retryable: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnimationClipSelectionCompletion {
+    pub job_id: u64,
+    pub scene_request_id: RequestId,
+    pub asset_id: AssetId,
+    pub clip_index: u32,
+    pub outcome: AnimationClipSelectionOutcome,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum EffectCompletion {
     AssetLoad(AssetLoadCompletion),
     PrimarySceneInstall(PrimarySceneInstallCompletion),
+    AnimationClipSelection(AnimationClipSelectionCompletion),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -366,6 +387,18 @@ pub enum AppEffect {
     CancelPrimarySceneInstall {
         request_id: RequestId,
         asset_id: AssetId,
+    },
+    SelectAnimationClip {
+        job_id: u64,
+        scene_request_id: RequestId,
+        asset_id: AssetId,
+        clip_index: u32,
+    },
+    CancelAnimationClipSelection {
+        job_id: u64,
+        scene_request_id: RequestId,
+        asset_id: AssetId,
+        clip_index: u32,
     },
 }
 
@@ -524,6 +557,27 @@ pub struct InstalledPrimarySceneReadModel {
     pub install: PrimarySceneInstallMetadata,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActiveAnimationClipReadModel {
+    pub scene_request_id: RequestId,
+    pub asset_id: AssetId,
+    pub clip: AnimationClipDescriptor,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingAnimationClipReadModel {
+    pub job_id: u64,
+    pub scene_request_id: RequestId,
+    pub asset_id: AssetId,
+    pub clip: AnimationClipDescriptor,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AnimationClipSelectionReadModel {
+    pub active: Option<ActiveAnimationClipReadModel>,
+    pub pending: Option<PendingAnimationClipReadModel>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiagnosticReadModel {
     pub revision: u64,
@@ -549,6 +603,9 @@ pub struct AppSummary {
     pub installing_primary_scene_request: Option<RequestId>,
     pub installed_primary_scene_asset: Option<AssetId>,
     pub installed_primary_scene_request: Option<RequestId>,
+    pub active_animation_clip: Option<u32>,
+    pub pending_animation_clip_job: Option<u64>,
+    pub pending_animation_clip: Option<u32>,
     pub active_peers: usize,
     pub authored_assets: usize,
     pub authored_entities: usize,
@@ -744,6 +801,9 @@ pub struct AppState {
     ready_primary_asset: Option<PrimaryAssetReadModel>,
     primary_scene_install: Option<(RequestId, AssetId)>,
     installed_primary_scene: Option<InstalledPrimarySceneReadModel>,
+    next_animation_clip_job: Option<u64>,
+    active_animation_clip: Option<ActiveAnimationClipReadModel>,
+    pending_animation_clip: Option<PendingAnimationClipReadModel>,
     presence: BTreeMap<PeerId, PresenceRecord>,
     authored_projection_revision: Option<u64>,
     authored_assets: BTreeMap<AssetId, AssetDescriptor>,
@@ -767,6 +827,9 @@ impl Default for AppState {
             ready_primary_asset: None,
             primary_scene_install: None,
             installed_primary_scene: None,
+            next_animation_clip_job: Some(0),
+            active_animation_clip: None,
+            pending_animation_clip: None,
             presence: BTreeMap::new(),
             authored_projection_revision: None,
             authored_assets: BTreeMap::new(),
@@ -862,27 +925,35 @@ impl AppState {
                         if !input_may_run_now {
                             return Err(ReduceError::FutureAnimationInput);
                         }
-                        let animation = match action {
-                            AnimationAction::SetPlaying(playing) => AnimationClock {
-                                playing,
-                                ..self.animation
-                            },
-                            AnimationAction::TogglePlaying => AnimationClock {
-                                playing: !self.animation.playing,
-                                ..self.animation
-                            },
-                            AnimationAction::Seek(time_seconds) => AnimationClock {
-                                time_seconds,
-                                ..self.animation
-                            },
-                            AnimationAction::SetSpeed(speed) => AnimationClock {
-                                speed,
-                                ..self.animation
-                            },
-                            AnimationAction::SetClock(clock) => clock,
+                        match action {
+                            AnimationAction::SelectClip(index) => {
+                                self.request_animation_clip(index, &mut effects)?;
+                            }
+                            action => {
+                                let animation = match action {
+                                    AnimationAction::SetPlaying(playing) => AnimationClock {
+                                        playing,
+                                        ..self.animation
+                                    },
+                                    AnimationAction::TogglePlaying => AnimationClock {
+                                        playing: !self.animation.playing,
+                                        ..self.animation
+                                    },
+                                    AnimationAction::Seek(time_seconds) => AnimationClock {
+                                        time_seconds,
+                                        ..self.animation
+                                    },
+                                    AnimationAction::SetSpeed(speed) => AnimationClock {
+                                        speed,
+                                        ..self.animation
+                                    },
+                                    AnimationAction::SetClock(clock) => clock,
+                                    AnimationAction::SelectClip(_) => unreachable!(),
+                                }
+                                .validate()?;
+                                self.animation = animation;
+                            }
                         }
-                        .validate()?;
-                        self.animation = animation;
                     }
                     SemanticAction::SetRenderSettings(settings) => {
                         if !input_may_run_now {
@@ -1134,6 +1205,22 @@ impl AppState {
                                 })
                                 .cloned()
                                 .expect("an active primary install has a decoded asset candidate");
+                            if let Some(pending) = self.pending_animation_clip.take() {
+                                effects.push(AppEffect::CancelAnimationClipSelection {
+                                    job_id: pending.job_id,
+                                    scene_request_id: pending.scene_request_id,
+                                    asset_id: pending.asset_id,
+                                    clip_index: pending.clip.index,
+                                });
+                            }
+                            self.active_animation_clip =
+                                install.animation_clips.first().cloned().map(|clip| {
+                                    ActiveAnimationClipReadModel {
+                                        scene_request_id: asset.request_id,
+                                        asset_id: asset.descriptor.id,
+                                        clip,
+                                    }
+                                });
                             self.installed_primary_scene =
                                 Some(InstalledPrimarySceneReadModel { asset, install });
                         }
@@ -1146,6 +1233,49 @@ impl AppState {
                             format!(
                                 "primary scene {} install failed ({code}, retryable={retryable}): {message}",
                                 completion.asset_id
+                            ),
+                        ),
+                    }
+                }
+            }
+            AppEvent::EffectCompleted(EffectCompletion::AnimationClipSelection(completion)) => {
+                let active = self.pending_animation_clip.as_ref().is_some_and(|pending| {
+                    pending.job_id == completion.job_id
+                        && pending.scene_request_id == completion.scene_request_id
+                        && pending.asset_id == completion.asset_id
+                        && pending.clip.index == completion.clip_index
+                });
+                if !active {
+                    disposition = CommitDisposition::IgnoredStale;
+                    self.push_diagnostic(
+                        "stale_animation_clip_completion",
+                        format!(
+                            "ignored animation clip {} completion for inactive job {}",
+                            completion.clip_index, completion.job_id
+                        ),
+                    );
+                } else {
+                    let pending = self
+                        .pending_animation_clip
+                        .take()
+                        .expect("matching animation clip selection remains pending");
+                    match completion.outcome {
+                        AnimationClipSelectionOutcome::Selected => {
+                            self.active_animation_clip = Some(ActiveAnimationClipReadModel {
+                                scene_request_id: pending.scene_request_id,
+                                asset_id: pending.asset_id,
+                                clip: pending.clip,
+                            });
+                        }
+                        AnimationClipSelectionOutcome::Failed {
+                            code,
+                            message,
+                            retryable,
+                        } => self.push_diagnostic(
+                            "animation_clip_selection_failed",
+                            format!(
+                                "animation clip {} selection failed ({code}, retryable={retryable}): {message}",
+                                pending.clip.index
                             ),
                         ),
                     }
@@ -1333,6 +1463,76 @@ impl AppState {
         Ok(())
     }
 
+    fn request_animation_clip(
+        &mut self,
+        index: u32,
+        effects: &mut Vec<AppEffect>,
+    ) -> Result<(), ReduceError> {
+        let scene = self
+            .installed_primary_scene
+            .as_ref()
+            .ok_or(ReduceError::NoInstalledPrimaryScene)?;
+        let clip = scene
+            .install
+            .animation_clips
+            .iter()
+            .find(|clip| clip.index == index)
+            .cloned()
+            .ok_or(ReduceError::UnknownAnimationClip(index))?;
+        let scene_request_id = scene.asset.request_id;
+        let asset_id = scene.asset.descriptor.id;
+
+        if self.pending_animation_clip.as_ref().is_some_and(|pending| {
+            pending.scene_request_id == scene_request_id
+                && pending.asset_id == asset_id
+                && pending.clip.index == index
+        }) {
+            return Ok(());
+        }
+
+        if self.active_animation_clip.as_ref().is_some_and(|active| {
+            active.scene_request_id == scene_request_id
+                && active.asset_id == asset_id
+                && active.clip.index == index
+        }) {
+            if let Some(pending) = self.pending_animation_clip.take() {
+                effects.push(AppEffect::CancelAnimationClipSelection {
+                    job_id: pending.job_id,
+                    scene_request_id: pending.scene_request_id,
+                    asset_id: pending.asset_id,
+                    clip_index: pending.clip.index,
+                });
+            }
+            return Ok(());
+        }
+
+        let job_id = self
+            .next_animation_clip_job
+            .ok_or(ReduceError::AnimationClipJobExhausted)?;
+        if let Some(pending) = self.pending_animation_clip.take() {
+            effects.push(AppEffect::CancelAnimationClipSelection {
+                job_id: pending.job_id,
+                scene_request_id: pending.scene_request_id,
+                asset_id: pending.asset_id,
+                clip_index: pending.clip.index,
+            });
+        }
+        self.next_animation_clip_job = job_id.checked_add(1);
+        self.pending_animation_clip = Some(PendingAnimationClipReadModel {
+            job_id,
+            scene_request_id,
+            asset_id,
+            clip,
+        });
+        effects.push(AppEffect::SelectAnimationClip {
+            job_id,
+            scene_request_id,
+            asset_id,
+            clip_index: index,
+        });
+        Ok(())
+    }
+
     fn push_diagnostic(&mut self, code: &'static str, message: String) {
         if self.diagnostics.len() == MAX_DIAGNOSTICS {
             self.diagnostics.pop_front();
@@ -1378,6 +1578,18 @@ impl AppState {
                 .installed_primary_scene
                 .as_ref()
                 .map(|scene| scene.asset.request_id),
+            active_animation_clip: self
+                .active_animation_clip
+                .as_ref()
+                .map(|active| active.clip.index),
+            pending_animation_clip_job: self
+                .pending_animation_clip
+                .as_ref()
+                .map(|pending| pending.job_id),
+            pending_animation_clip: self
+                .pending_animation_clip
+                .as_ref()
+                .map(|pending| pending.clip.index),
             active_peers: self.presence.len(),
             authored_assets: self.authored_assets.len(),
             authored_entities: self.authored_entities.len(),
@@ -1424,6 +1636,13 @@ impl AppState {
         self.installed_primary_scene.clone()
     }
 
+    fn animation_clip_selection_read_model(&self) -> AnimationClipSelectionReadModel {
+        AnimationClipSelectionReadModel {
+            active: self.active_animation_clip.clone(),
+            pending: self.pending_animation_clip.clone(),
+        }
+    }
+
     fn diagnostic_read_models(&self) -> Vec<DiagnosticReadModel> {
         self.diagnostics.iter().cloned().collect()
     }
@@ -1464,6 +1683,7 @@ pub struct AppStore {
     assets: MutableVec<AssetReadModel>,
     primary_asset: Mutable<Option<PrimaryAssetReadModel>>,
     installed_primary_scene: Mutable<Option<InstalledPrimarySceneReadModel>>,
+    animation_clip_selection: Mutable<AnimationClipSelectionReadModel>,
     authored_assets: MutableVec<AssetDescriptor>,
     authored_entities: MutableVec<AuthoredEntityReadModel>,
     diagnostics: MutableVec<DiagnosticReadModel>,
@@ -1484,6 +1704,7 @@ impl AppStore {
         let assets = state.asset_read_models();
         let primary_asset = state.primary_asset_read_model();
         let installed_primary_scene = state.installed_primary_scene_read_model();
+        let animation_clip_selection = state.animation_clip_selection_read_model();
         let authored = state.authored_scene_read_model();
         let diagnostics = state.diagnostic_read_models();
         let presentation = state.presentation_read_model();
@@ -1495,6 +1716,7 @@ impl AppStore {
             assets: MutableVec::new_with_values(assets),
             primary_asset: Mutable::new(primary_asset),
             installed_primary_scene: Mutable::new(installed_primary_scene),
+            animation_clip_selection: Mutable::new(animation_clip_selection),
             authored_assets: MutableVec::new_with_values(authored.assets),
             authored_entities: MutableVec::new_with_values(authored.entities),
             diagnostics: MutableVec::new_with_values(diagnostics),
@@ -1583,6 +1805,7 @@ impl AppStore {
         let assets = state.asset_read_models();
         let primary_asset = state.primary_asset_read_model();
         let installed_primary_scene = state.installed_primary_scene_read_model();
+        let animation_clip_selection = state.animation_clip_selection_read_model();
         let authored = state.authored_scene_read_model();
         let diagnostics = state.diagnostic_read_models();
         let presentation = state.presentation_read_model();
@@ -1595,6 +1818,8 @@ impl AppStore {
         self.primary_asset.set_neq(primary_asset);
         self.installed_primary_scene
             .set_neq(installed_primary_scene);
+        self.animation_clip_selection
+            .set_neq(animation_clip_selection);
         self.authored_assets
             .lock_mut()
             .replace_cloned(authored.assets);
@@ -1655,6 +1880,10 @@ impl AppStore {
 
     pub fn installed_primary_scene_snapshot(&self) -> Option<InstalledPrimarySceneReadModel> {
         self.installed_primary_scene.get_cloned()
+    }
+
+    pub fn animation_clip_selection_snapshot(&self) -> AnimationClipSelectionReadModel {
+        self.animation_clip_selection.get_cloned()
     }
 
     pub fn authored_scene_snapshot(&self) -> AuthoredSceneReadModel {
@@ -1732,6 +1961,12 @@ impl AppStore {
         self.installed_primary_scene.signal_cloned()
     }
 
+    pub fn animation_clip_selection_signal(
+        &self,
+    ) -> MutableSignalCloned<AnimationClipSelectionReadModel> {
+        self.animation_clip_selection.signal_cloned()
+    }
+
     pub fn authored_asset_signal_vec(&self) -> MutableSignalVec<AssetDescriptor> {
         self.authored_assets.signal_vec_cloned()
     }
@@ -1762,6 +1997,7 @@ pub enum ReduceError {
     InvalidPrimarySceneInstallMetadata(PrimarySceneInstallMetadataError),
     InvalidRenderSettings(&'static str),
     InputSequenceExhausted,
+    AnimationClipJobExhausted,
     FutureEffectInput,
     FuturePresentationInput,
     FutureAnimationInput,
@@ -1770,6 +2006,8 @@ pub enum ReduceError {
     NavigationState(String),
     Presentation(String),
     NoPresentation,
+    NoInstalledPrimaryScene,
+    UnknownAnimationClip(u32),
     Wire(String),
     UnknownAsset(AssetId),
 }
@@ -1791,6 +2029,9 @@ impl fmt::Display for ReduceError {
             Self::InputSequenceExhausted => {
                 formatter.write_str("local semantic input sequence is exhausted")
             }
+            Self::AnimationClipJobExhausted => {
+                formatter.write_str("animation clip selection job sequence is exhausted")
+            }
             Self::FutureEffectInput => formatter.write_str(
                 "effect-producing input cannot be scheduled beyond the current app frame",
             ),
@@ -1809,6 +2050,12 @@ impl fmt::Display for ReduceError {
                 write!(formatter, "presentation event failed: {message}")
             }
             Self::NoPresentation => formatter.write_str("no presentation is loaded"),
+            Self::NoInstalledPrimaryScene => {
+                formatter.write_str("no renderer-installed primary scene is available")
+            }
+            Self::UnknownAnimationClip(index) => {
+                write!(formatter, "installed primary scene has no animation clip {index}")
+            }
             Self::Wire(message) => write!(formatter, "wire value failed validation: {message}"),
             Self::UnknownAsset(asset) => write!(formatter, "unknown asset {asset}"),
         }
@@ -2226,12 +2473,20 @@ mod tests {
         PrimarySceneInstallMetadata {
             num_vertices: 796,
             num_faces: 984,
-            animation_clips: vec![AnimationClipDescriptor {
-                index: 0,
-                name: "gallop".to_owned(),
-                time_min_seconds: 0.0,
-                time_max_seconds: 1.5,
-            }],
+            animation_clips: vec![
+                AnimationClipDescriptor {
+                    index: 0,
+                    name: "gallop".to_owned(),
+                    time_min_seconds: 0.0,
+                    time_max_seconds: 1.5,
+                },
+                AnimationClipDescriptor {
+                    index: 1,
+                    name: "turn".to_owned(),
+                    time_min_seconds: 2.0,
+                    time_max_seconds: 3.0,
+                },
+            ],
         }
     }
 
@@ -2502,6 +2757,163 @@ mod tests {
             store.summary_snapshot().installing_primary_scene_request,
             None
         );
+    }
+
+    #[test]
+    fn animation_clip_jobs_are_catalog_validated_cancellable_and_stale_safe() {
+        let store = AppStore::default();
+        let before = store.summary_snapshot().revision;
+        assert_eq!(
+            store.dispatch_semantic(SemanticAction::Animate(
+                AnimationAction::SelectClip(0),
+            )),
+            Err(ReduceError::NoInstalledPrimaryScene),
+        );
+        assert_eq!(store.summary_snapshot().revision, before);
+
+        let horse = asset(1, "horse.glb");
+        let request_id = request(10);
+        dispatch_scoped_request(
+            &store,
+            1,
+            request_id,
+            horse.clone(),
+            AssetLoadScope::PrimaryScene,
+        );
+        store
+            .dispatch(AppEvent::EffectCompleted(EffectCompletion::AssetLoad(
+                AssetLoadCompletion {
+                    request_id,
+                    asset_id: horse.id,
+                    outcome: AssetLoadOutcome::Loaded {
+                        byte_length: 100,
+                        content_digest: None,
+                        metadata: AssetMetadata::default(),
+                    },
+                },
+            )))
+            .unwrap();
+        store
+            .dispatch(AppEvent::EffectCompleted(
+                EffectCompletion::PrimarySceneInstall(PrimarySceneInstallCompletion {
+                    request_id,
+                    asset_id: horse.id,
+                    outcome: PrimarySceneInstallOutcome::Installed(install_metadata()),
+                }),
+            ))
+            .unwrap();
+        assert_eq!(store.summary_snapshot().active_animation_clip, Some(0));
+        let installed_revision = store.summary_snapshot().revision;
+        assert_eq!(
+            store.dispatch_semantic(SemanticAction::Animate(
+                AnimationAction::SelectClip(99),
+            )),
+            Err(ReduceError::UnknownAnimationClip(99)),
+        );
+        assert_eq!(store.summary_snapshot().revision, installed_revision);
+
+        let (_, first) = store
+            .dispatch_semantic(SemanticAction::Animate(AnimationAction::SelectClip(1)))
+            .unwrap();
+        assert_eq!(
+            first.effects,
+            vec![AppEffect::SelectAnimationClip {
+                job_id: 0,
+                scene_request_id: request_id,
+                asset_id: horse.id,
+                clip_index: 1,
+            }]
+        );
+        assert_eq!(store.summary_snapshot().pending_animation_clip_job, Some(0));
+        let (_, duplicate) = store
+            .dispatch_semantic(SemanticAction::Animate(AnimationAction::SelectClip(1)))
+            .unwrap();
+        assert!(duplicate.effects.is_empty());
+
+        let (_, back_to_active) = store
+            .dispatch_semantic(SemanticAction::Animate(AnimationAction::SelectClip(0)))
+            .unwrap();
+        assert_eq!(
+            back_to_active.effects,
+            vec![AppEffect::CancelAnimationClipSelection {
+                job_id: 0,
+                scene_request_id: request_id,
+                asset_id: horse.id,
+                clip_index: 1,
+            }]
+        );
+        assert_eq!(store.summary_snapshot().pending_animation_clip_job, None);
+
+        let (_, second) = store
+            .dispatch_semantic(SemanticAction::Animate(AnimationAction::SelectClip(1)))
+            .unwrap();
+        assert_eq!(
+            second.effects,
+            vec![AppEffect::SelectAnimationClip {
+                job_id: 1,
+                scene_request_id: request_id,
+                asset_id: horse.id,
+                clip_index: 1,
+            }]
+        );
+        let stale = store
+            .dispatch(AppEvent::EffectCompleted(
+                EffectCompletion::AnimationClipSelection(AnimationClipSelectionCompletion {
+                    job_id: 0,
+                    scene_request_id: request_id,
+                    asset_id: horse.id,
+                    clip_index: 1,
+                    outcome: AnimationClipSelectionOutcome::Selected,
+                }),
+            ))
+            .unwrap();
+        assert_eq!(stale.disposition, CommitDisposition::IgnoredStale);
+        assert_eq!(store.summary_snapshot().pending_animation_clip_job, Some(1));
+
+        store
+            .dispatch(AppEvent::EffectCompleted(
+                EffectCompletion::AnimationClipSelection(AnimationClipSelectionCompletion {
+                    job_id: 1,
+                    scene_request_id: request_id,
+                    asset_id: horse.id,
+                    clip_index: 1,
+                    outcome: AnimationClipSelectionOutcome::Failed {
+                        code: "worker".to_owned(),
+                        message: "clip upload failed".to_owned(),
+                        retryable: true,
+                    },
+                }),
+            ))
+            .unwrap();
+        assert_eq!(store.summary_snapshot().active_animation_clip, Some(0));
+        assert_eq!(store.summary_snapshot().pending_animation_clip_job, None);
+
+        let (_, third) = store
+            .dispatch_semantic(SemanticAction::Animate(AnimationAction::SelectClip(1)))
+            .unwrap();
+        assert_eq!(
+            third.effects,
+            vec![AppEffect::SelectAnimationClip {
+                job_id: 2,
+                scene_request_id: request_id,
+                asset_id: horse.id,
+                clip_index: 1,
+            }]
+        );
+        store
+            .dispatch(AppEvent::EffectCompleted(
+                EffectCompletion::AnimationClipSelection(AnimationClipSelectionCompletion {
+                    job_id: 2,
+                    scene_request_id: request_id,
+                    asset_id: horse.id,
+                    clip_index: 1,
+                    outcome: AnimationClipSelectionOutcome::Selected,
+                }),
+            ))
+            .unwrap();
+        let selection = store.animation_clip_selection_snapshot();
+        assert_eq!(selection.active.unwrap().clip.index, 1);
+        assert_eq!(selection.pending, None);
     }
 
     #[test]
