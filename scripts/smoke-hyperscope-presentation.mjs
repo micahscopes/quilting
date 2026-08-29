@@ -429,7 +429,7 @@ assert.ok(
   'a rejected sparse publication must force a full worker snapshot',
 );
 for (const sameContextResidencyStep of [
-  "initialBrowserParams, 'lodimpl', 'js'",
+  "initialBrowserParams, 'lodimpl',",
   "effectiveAuthority: 'worker'",
   'function uploadSameContextLodResidency(totalVertices, primaryFaces)',
   'mr_uploadComposedLodModel(totalVertices, primaryFaces)',
@@ -586,7 +586,7 @@ for (const requiredAnimatedAnchorStep of [
 }
 
 for (const requiredAuthorityStep of [
-  "implementationFromRoute(\n  initialBrowserParams, 'presentimpl', 'rust',\n)",
+  "implementationFromRoute(\n  initialBrowserParams, 'presentimpl',\n)",
   "RUST_PRESENTATION_IMPLEMENTATION === 'rust'",
   "ensureRustAppShadow('presentation-authority')",
   'rustPresentationController = null;',

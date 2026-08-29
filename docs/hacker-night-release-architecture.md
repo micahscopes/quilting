@@ -242,8 +242,9 @@ The first application boundary is now explicit:
   values for its inert pre-WASM model/Patch-Lab/camera preview, verifies them
   against the Rust registry during initialization, and then installs Rust's
   complete defaults even for the explicit JavaScript route rollback. The
-  separately parity-gated implementation/backend switches remain explicit
-  bootstrap policy until WASM startup itself moves ahead of those decisions.
+  separately parity-gated implementation/backend switches remain one explicit,
+  registry-checked 18-entry bootstrap policy until WASM startup itself moves
+  ahead of those decisions.
   After initialization, the route rollback therefore preserves the incumbent
   parser and serializer, not a second application-default table. Its decoded
   startup object is likewise projected by iterating that installed registry;

@@ -14,6 +14,9 @@ const {
 await init({ module_or_path: readFileSync(wasmPath) });
 
 const specs = hyperscopeControlSpecs();
+const rustDefaults = Object.fromEntries(
+  specs.map(spec => [spec.key, spec.defaultValue]),
+);
 assert.equal(new Set(specs.map(spec => spec.key)).size, specs.length);
 assert.equal(specs.find(spec => spec.key === 'mode').kind, 'render_mode');
 assert.equal(specs.find(spec => spec.key === 'res').kind, 'resolution_level');
@@ -245,30 +248,87 @@ assert.equal(
   false,
   'the legacy navigation-shadow alias must not remain a canonical Rust control',
 );
+const policyDefaultsSource = browserSource.match(
+  /const BOOTSTRAP_POLICY_DEFAULTS = Object\.freeze\((\{[\s\S]*?\n\})\);/,
+)?.[1];
+assert.ok(policyDefaultsSource, 'could not locate pre-WASM adapter policy defaults');
+const policyDefaults = JSON.parse(JSON.stringify(
+  runInNewContext(`(${policyDefaultsSource})`),
+));
+assert.equal(Object.keys(policyDefaults).length, 18);
+for (const [key, value] of Object.entries(policyDefaults)) {
+  assert.equal(
+    rustDefaults[key],
+    value,
+    `Rust route default for ${key} drifted from pre-WASM adapter policy`,
+  );
+}
+const policyDefaultsDeclaration =
+  `const BOOTSTRAP_POLICY_DEFAULTS = Object.freeze(${policyDefaultsSource});`;
 const implementationFromRouteSource = browserSource.match(
-  /function implementationFromRoute\(params, key, defaultImplementation\) \{[\s\S]*?\n\}/,
+  /function implementationFromRoute\(params, key\) \{[\s\S]*?\n\}/,
 )?.[0];
 assert.ok(implementationFromRouteSource, 'could not locate implementation-mode parser');
 const implementationFromRoute = runInNewContext(
-  `${implementationFromRouteSource}; implementationFromRoute`,
+  `${policyDefaultsDeclaration}\n${implementationFromRouteSource}; implementationFromRoute`,
 );
 for (const implementation of ['js', 'shadow', 'rust']) {
   assert.equal(
     implementationFromRoute(
-      new URLSearchParams(`mode=${implementation}`),
-      'mode',
-      'rust',
+      new URLSearchParams(`navimpl=${implementation}`),
+      'navimpl',
     ),
     implementation,
   );
 }
 assert.equal(
-  implementationFromRoute(new URLSearchParams(), 'mode', 'js'),
+  implementationFromRoute(new URLSearchParams(), 'navimpl'),
   'js',
 );
 assert.equal(
-  implementationFromRoute(new URLSearchParams('mode=invalid'), 'mode', 'rust'),
+  implementationFromRoute(new URLSearchParams(), 'routeimpl'),
   'rust',
+);
+assert.equal(
+  implementationFromRoute(new URLSearchParams('navimpl=invalid'), 'navimpl'),
+  'js',
+);
+assert.throws(
+  () => implementationFromRoute(new URLSearchParams(), 'missingimpl'),
+  /No implementation bootstrap policy/,
+);
+const graphicsBackendFromRouteSource = browserSource.match(
+  /function graphicsBackendFromRoute\(params\) \{[\s\S]*?\n\}/,
+)?.[0];
+assert.ok(graphicsBackendFromRouteSource, 'could not locate graphics-backend parser');
+const graphicsBackendFromRoute = runInNewContext(
+  `${policyDefaultsDeclaration}\n${graphicsBackendFromRouteSource}; graphicsBackendFromRoute`,
+);
+assert.equal(graphicsBackendFromRoute(new URLSearchParams()), 'webgl2');
+assert.equal(
+  graphicsBackendFromRoute(new URLSearchParams('gfx=webgpu-shadow')),
+  'webgpu-shadow',
+);
+assert.equal(graphicsBackendFromRoute(new URLSearchParams('gfx=invalid')), 'webgl2');
+const bootstrapToggleFromRouteSource = browserSource.match(
+  /function bootstrapToggleFromRoute\(params, key\) \{[\s\S]*?\n\}/,
+)?.[0];
+assert.ok(bootstrapToggleFromRouteSource, 'could not locate bootstrap-toggle parser');
+const bootstrapToggleFromRoute = runInNewContext(
+  `${policyDefaultsDeclaration}\n${bootstrapToggleFromRouteSource}; bootstrapToggleFromRoute`,
+);
+assert.equal(bootstrapToggleFromRoute(new URLSearchParams(), 'presentation'), false);
+assert.equal(
+  bootstrapToggleFromRoute(new URLSearchParams('presentation=1'), 'presentation'),
+  true,
+);
+assert.equal(
+  bootstrapToggleFromRoute(new URLSearchParams('presentation=invalid'), 'presentation'),
+  false,
+);
+assert.throws(
+  () => bootstrapToggleFromRoute(new URLSearchParams(), 'gfx'),
+  /No toggle bootstrap policy/,
 );
 const canonicalFixedSource = browserSource.match(
   /function canonicalFixedRouteNumber\(value, fractionDigits\) \{[\s\S]*?\n\}/,
@@ -283,7 +343,7 @@ assert.equal(canonicalFixedRouteNumber(0.0004, 3), '0.000');
 assert.equal(canonicalFixedRouteNumber(-0.0006, 3), '-0.001');
 assert.equal(canonicalFixedRouteNumber(1.25, 2), '1.25');
 for (const routeDefaultStep of [
-  "implementationFromRoute(\n  initialRouteParams, 'routeimpl', 'rust',\n)",
+  "implementationFromRoute(\n  initialRouteParams, 'routeimpl',\n)",
 ]) {
   assert.ok(
     browserSource.includes(routeDefaultStep),
@@ -291,7 +351,7 @@ for (const routeDefaultStep of [
   );
 }
 for (const selectionDefaultStep of [
-  "implementationFromRoute(\n  initialBrowserParams, 'selectionimpl', 'rust',\n)",
+  "implementationFromRoute(\n  initialBrowserParams, 'selectionimpl',\n)",
 ]) {
   assert.ok(
     browserSource.includes(selectionDefaultStep),
@@ -299,8 +359,8 @@ for (const selectionDefaultStep of [
   );
 }
 for (const animationClockDefaultStep of [
-  "implementationFromRoute(\n  initialBrowserParams, 'animclockimpl', 'js',\n)",
-  "implementationFromRoute(\n  initialBrowserParams, 'animclipimpl', 'js',\n)",
+  "implementationFromRoute(\n  initialBrowserParams, 'animclockimpl',\n)",
+  "implementationFromRoute(\n  initialBrowserParams, 'animclipimpl',\n)",
 ]) {
   assert.ok(
     browserSource.includes(animationClockDefaultStep),
@@ -364,7 +424,7 @@ for (const animationClipAuthorityStep of [
   );
 }
 for (const navigationAuthorityStep of [
-  "implementationFromRoute(\n  initialNavigationParams, 'navimpl', 'js',\n)",
+  "implementationFromRoute(\n  initialNavigationParams, 'navimpl',\n)",
   "RUST_NAVIGATION_IMPLEMENTATION !== 'js'",
   'rustAppShadow.stepSpaceMouseCamera(',
   'rustAppShadow.stepPointerCamera(',
@@ -422,9 +482,6 @@ for (const mode of ['matcap', 'wire', 'normals', 'both', 'lod', 'stretch']) {
 for (const mode of ['pbr']) {
   assert.equal(webGpuPresentationSupportsRenderMode(mode), false, `${mode} should use WebGL2`);
 }
-const rustDefaults = Object.fromEntries(
-  specs.map(spec => [spec.key, spec.defaultValue]),
-);
 const routeDefaultsAdapterSource = browserSource.match(
   /const BOOTSTRAP_PARAM_DEFAULTS = Object\.freeze\(\{[\s\S]*?\n\}\);\nlet PARAM_DEFAULTS = BOOTSTRAP_PARAM_DEFAULTS;\n\nfunction installRustControlDefaults\(specs\) \{[\s\S]*?\n\}/,
 )?.[0];
@@ -435,7 +492,7 @@ assert.equal(
   'the browser must not retain a complete route-default authority',
 );
 const installRouteDefaults = specsInput => runInNewContext(
-  `${routeDefaultsAdapterSource}; input => {
+  `${policyDefaultsDeclaration}\n${routeDefaultsAdapterSource}; input => {
     const installed = installRustControlDefaults(input);
     return { frozen: Object.isFrozen(installed), entries: Object.entries(installed) };
   }`,
@@ -494,6 +551,12 @@ assert.throws(
   ))),
   /drifted from bootstrap/,
 );
+assert.throws(
+  () => installRouteDefaults(specs.map(spec => (
+    spec.key === 'navimpl' ? { ...spec, defaultValue: 'rust' } : spec
+  ))),
+  /drifted from bootstrap/,
+);
 const implicitBrowserDefaults = {
   presentation: '0',
   roundshadow: '0',
@@ -539,7 +602,7 @@ for (const authorityStep of [
   );
 }
 for (const sceneExtractionStep of [
-  "implementationFromRoute(\n  initialBrowserParams, 'sceneimpl', 'rust',\n)",
+  "implementationFromRoute(\n  initialBrowserParams, 'sceneimpl',\n)",
   'rustAppShadow.extractActivePresentationScene(',
   'JSON.stringify(presentationBindings)',
   "rustNode.source === 'authored_absolute'",
@@ -553,7 +616,7 @@ for (const sceneExtractionStep of [
   );
 }
 for (const renderSettingsStep of [
-  "implementationFromRoute(\n  initialBrowserParams, 'renderstateimpl', 'js',\n)",
+  "implementationFromRoute(\n  initialBrowserParams, 'renderstateimpl',\n)",
   'function browserRenderSettingsState()',
   "const style = mode === 'both' ? 'matcap_wire' : String(mode);",
   'app.setRenderSettings(',
@@ -605,7 +668,7 @@ for (const directDispatchStep of [
   );
 }
 for (const assetAuthorityStep of [
-  "implementationFromRoute(\n  initialBrowserParams, 'assetimpl', 'rust',\n)",
+  "implementationFromRoute(\n  initialBrowserParams, 'assetimpl',\n)",
   "RUST_ASSET_IMPLEMENTATION !== 'js'",
   'EXPLICIT_RUST_APP_SHADOW_ENABLED',
   "import { BrowserAssetEffectHost } from './asset_effect_host.mjs",
@@ -814,7 +877,7 @@ const readParamsDeclaration = browserSource.match(
 )?.[0];
 assert.ok(readParamsDeclaration, 'could not isolate route decoder');
 const decodeRoute = Function(
-  `${routeDefaultsAdapterSource}\n`
+  `${policyDefaultsDeclaration}\n${routeDefaultsAdapterSource}\n`
     + `installRustControlDefaults(${JSON.stringify(specs)});\n`
     + `${readParamsDeclaration}\nreturn readParams;`,
 )();

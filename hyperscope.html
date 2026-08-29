@@ -487,6 +487,30 @@ import {
 } from './local_peer_browser.mjs?rev=exact-frame-json-v1';
 import { BrowserAssetEffectHost } from './asset_effect_host.mjs?rev=decoded-provenance-v1';
 
+// These controls decide which adapters may exist before WASM can expose the
+// full Rust registry. installRustControlDefaults verifies this temporary
+// lifecycle boundary against ControlSpec before application state is applied.
+const BOOTSTRAP_POLICY_DEFAULTS = Object.freeze({
+  gfx: 'webgl2',
+  presentation: '0',
+  presentimpl: 'rust',
+  roundshadow: '0',
+  selectionimpl: 'rust',
+  sceneimpl: 'rust',
+  assetimpl: 'rust',
+  animclockimpl: 'js',
+  animclipimpl: 'js',
+  renderstateimpl: 'js',
+  appshadow: '0',
+  routeimpl: 'rust',
+  rendershadow: '0',
+  lodimpl: 'js',
+  adaptiveshadow: '0',
+  rootgroupshadow: '0',
+  walkimpl: 'js',
+  navimpl: 'js',
+});
+
 function normalizeLegacyRouteShadow(params) {
   const normalized = new URLSearchParams(params);
   const legacyShadow = normalized.get('routeshadow');
@@ -513,18 +537,30 @@ function normalizeLegacyNavigationShadow(params) {
   return normalized;
 }
 
-function implementationFromRoute(params, key, defaultImplementation) {
-  const requested = params.get(key) || defaultImplementation;
+function implementationFromRoute(params, key) {
+  const defaultImplementation = BOOTSTRAP_POLICY_DEFAULTS[key];
+  if (!['js', 'shadow', 'rust'].includes(defaultImplementation)) {
+    throw new Error(`No implementation bootstrap policy for '${key}'`);
+  }
+  const requested = params.get(key) ?? defaultImplementation;
   return ['js', 'shadow', 'rust'].includes(requested)
     ? requested
     : defaultImplementation;
 }
 
 function graphicsBackendFromRoute(params) {
-  const requested = params.get('gfx') || 'webgl2';
+  const defaultBackend = BOOTSTRAP_POLICY_DEFAULTS.gfx;
+  const requested = params.get('gfx') ?? defaultBackend;
   return ['webgl2', 'webgpu-shadow', 'webgpu'].includes(requested)
-    ? requested
-    : 'webgl2';
+    ? requested : defaultBackend;
+}
+
+function bootstrapToggleFromRoute(params, key) {
+  const defaultValue = BOOTSTRAP_POLICY_DEFAULTS[key];
+  if (defaultValue !== '0' && defaultValue !== '1') {
+    throw new Error(`No toggle bootstrap policy for '${key}'`);
+  }
+  return (params.get(key) ?? defaultValue) === '1';
 }
 
 const initialBrowserParams = new URLSearchParams(location.search);
@@ -532,37 +568,37 @@ const initialNavigationParams = normalizeLegacyNavigationShadow(initialBrowserPa
 const initialRouteParams = normalizeLegacyRouteShadow(initialNavigationParams);
 const $ = id => document.getElementById(id);
 const RUST_NAVIGATION_IMPLEMENTATION = implementationFromRoute(
-  initialNavigationParams, 'navimpl', 'js',
+  initialNavigationParams, 'navimpl',
 );
 const RUST_NAVIGATION_SHADOW_ENABLED =
   RUST_NAVIGATION_IMPLEMENTATION === 'shadow';
 const RUST_PRESENTATION_ENABLED =
-  initialBrowserParams.get('presentation') === '1';
+  bootstrapToggleFromRoute(initialBrowserParams, 'presentation');
 const RUST_PRESENTATION_IMPLEMENTATION = implementationFromRoute(
-  initialBrowserParams, 'presentimpl', 'rust',
+  initialBrowserParams, 'presentimpl',
 );
 const RUST_ROUND_SHADOW_ENABLED =
-  initialBrowserParams.get('roundshadow') === '1';
+  bootstrapToggleFromRoute(initialBrowserParams, 'roundshadow');
 const RUST_SELECTION_IMPLEMENTATION = implementationFromRoute(
-  initialBrowserParams, 'selectionimpl', 'rust',
+  initialBrowserParams, 'selectionimpl',
 );
 const RUST_SCENE_IMPLEMENTATION = implementationFromRoute(
-  initialBrowserParams, 'sceneimpl', 'rust',
+  initialBrowserParams, 'sceneimpl',
 );
 const RUST_ASSET_IMPLEMENTATION = implementationFromRoute(
-  initialBrowserParams, 'assetimpl', 'rust',
+  initialBrowserParams, 'assetimpl',
 );
 const ANIMATION_CLOCK_IMPLEMENTATION = implementationFromRoute(
-  initialBrowserParams, 'animclockimpl', 'js',
+  initialBrowserParams, 'animclockimpl',
 );
 const ANIMATION_CLIP_IMPLEMENTATION = implementationFromRoute(
-  initialBrowserParams, 'animclipimpl', 'js',
+  initialBrowserParams, 'animclipimpl',
 );
 const RUST_RENDER_SETTINGS_IMPLEMENTATION = implementationFromRoute(
-  initialBrowserParams, 'renderstateimpl', 'js',
+  initialBrowserParams, 'renderstateimpl',
 );
 const EXPLICIT_RUST_APP_SHADOW_ENABLED =
-  initialBrowserParams.get('appshadow') === '1';
+  bootstrapToggleFromRoute(initialBrowserParams, 'appshadow');
 const RUST_APP_SHADOW_ENABLED =
   EXPLICIT_RUST_APP_SHADOW_ENABLED
   || RUST_NAVIGATION_IMPLEMENTATION !== 'js'
@@ -574,22 +610,22 @@ const RUST_APP_SHADOW_ENABLED =
   || RUST_SCENE_IMPLEMENTATION !== 'js'
   || (RUST_PRESENTATION_ENABLED && RUST_PRESENTATION_IMPLEMENTATION !== 'js');
 const RUST_ROUTE_IMPLEMENTATION = implementationFromRoute(
-  initialRouteParams, 'routeimpl', 'rust',
+  initialRouteParams, 'routeimpl',
 );
 const RUST_ROUTE_SHADOW_ENABLED = RUST_ROUTE_IMPLEMENTATION !== 'js';
 const RUST_RENDER_SHADOW_ENABLED =
-  initialBrowserParams.get('rendershadow') === '1';
+  bootstrapToggleFromRoute(initialBrowserParams, 'rendershadow');
 const GRAPHICS_BACKEND_REQUEST = graphicsBackendFromRoute(initialBrowserParams);
 const WEBGPU_SHADOW_ENABLED = GRAPHICS_BACKEND_REQUEST !== 'webgl2';
 const LOD_IMPLEMENTATION = implementationFromRoute(
-  initialBrowserParams, 'lodimpl', 'js',
+  initialBrowserParams, 'lodimpl',
 );
 const RUST_ADAPTIVE_ROOT_SHADOW_ENABLED =
-  initialBrowserParams.get('adaptiveshadow') === '1';
+  bootstrapToggleFromRoute(initialBrowserParams, 'adaptiveshadow');
 const INCREMENTAL_ROOT_GROUP_SHADOW_ENABLED =
-  initialBrowserParams.get('rootgroupshadow') === '1';
+  bootstrapToggleFromRoute(initialBrowserParams, 'rootgroupshadow');
 const SURFACE_WALK_IMPLEMENTATION = implementationFromRoute(
-  initialBrowserParams, 'walkimpl', 'js',
+  initialBrowserParams, 'walkimpl',
 );
 const graphicsBackendDiagnostics = {
   requested: GRAPHICS_BACKEND_REQUEST,
@@ -1566,14 +1602,19 @@ function installRustControlDefaults(specs) {
     }
     defaults[key] = value;
   }
-  for (const [key, value] of Object.entries(BOOTSTRAP_PARAM_DEFAULTS)) {
-    if (!Object.hasOwn(defaults, key)) {
-      throw new Error(`Rust control registry omitted bootstrap key '${key}'`);
-    }
-    if (defaults[key] !== value) {
-      throw new Error(
-        `Rust default for '${key}' drifted from bootstrap '${value}' to '${defaults[key]}'`,
-      );
+  for (const bootstrapDefaults of [
+    BOOTSTRAP_POLICY_DEFAULTS,
+    BOOTSTRAP_PARAM_DEFAULTS,
+  ]) {
+    for (const [key, value] of Object.entries(bootstrapDefaults)) {
+      if (!Object.hasOwn(defaults, key)) {
+        throw new Error(`Rust control registry omitted bootstrap key '${key}'`);
+      }
+      if (defaults[key] !== value) {
+        throw new Error(
+          `Rust default for '${key}' drifted from bootstrap '${value}' to '${defaults[key]}'`,
+        );
+      }
     }
   }
   PARAM_DEFAULTS = Object.freeze(defaults);
