@@ -320,6 +320,11 @@ for (const animationClockAuthorityStep of [
   "restorePendingRouteAnimationClock('startup-animation')",
   'animtimeProvided:',
   'animspeedProvided:',
+  "const receipt = app.dispatchAnimationClock(playing, timeSeconds, speed);",
+  'observeRustAppShadowSequence(receipt.sequence, context);',
+  'return app.setAnimationClock(',
+  'const receipt = app.dispatchAnimationSeek(timeSeconds);',
+  'return app.seekAnimation(++rustAppShadowSequence, timeSeconds);',
 ]) {
   assert.ok(
     browserSource.includes(animationClockAuthorityStep),

@@ -446,6 +446,10 @@ The first application boundary is now explicit:
   semantic sequence inside `AppStore`; JavaScript consumes only the committed
   playback receipt. Explicitly sequenced WASM methods remain as replay/shadow
   oracles while the independent high-rate clock lane continues to soak.
+  In `animclockimpl=rust`, route/presentation clock restoration and paused
+  scrubbing likewise allocate inside the store. JavaScript/shadow modes retain
+  their explicit sequence path, so this narrows Rust authority without erasing
+  the comparison oracle or prematurely changing the default clock lane.
   Version 0.9 records whether an asset request is independent or replaces the
   primary scene. A 0.8 trace keeps its historical per-asset meaning; it cannot
   smuggle a `primary_scene` request into the older schema.

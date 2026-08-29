@@ -1036,6 +1036,13 @@ impl HyperscopeAppShadow {
         self.dispatch_animation(sequence, AnimationAction::Seek(time_seconds))
     }
 
+    /// Seek local Rust-authority animation time with a store-allocated input
+    /// sequence. The explicitly sequenced method remains the shadow oracle.
+    #[wasm_bindgen(js_name = dispatchAnimationSeek)]
+    pub fn dispatch_animation_seek(&self, time_seconds: f64) -> Result<JsValue, JsValue> {
+        self.dispatch_animation_semantic(AnimationAction::Seek(time_seconds))
+    }
+
     /// Change primary animation speed without changing time or playing state.
     #[wasm_bindgen(js_name = setAnimationSpeed)]
     pub fn set_animation_speed(&self, sequence: u32, speed: f64) -> Result<JsValue, JsValue> {
@@ -1059,6 +1066,22 @@ impl HyperscopeAppShadow {
                 speed,
             }),
         )
+    }
+
+    /// Restore local Rust-authority animation transport atomically with a
+    /// store-allocated input sequence.
+    #[wasm_bindgen(js_name = dispatchAnimationClock)]
+    pub fn dispatch_animation_clock(
+        &self,
+        playing: bool,
+        time_seconds: f64,
+        speed: f64,
+    ) -> Result<JsValue, JsValue> {
+        self.dispatch_animation_semantic(AnimationAction::SetClock(AnimationClock {
+            playing,
+            time_seconds,
+            speed,
+        }))
     }
 
     /// Replace the complete semantic render policy as one application event.

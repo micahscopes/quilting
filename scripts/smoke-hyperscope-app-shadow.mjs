@@ -287,10 +287,27 @@ const directPause = directAnimationApp.dispatchAnimationPlaying(false);
 assert.equal(directPause.sequence, '0');
 assert.equal(directPause.commit.disposition, 'applied');
 assert.equal(directPause.playing, false);
+const directClock = directAnimationApp.dispatchAnimationClock(true, 2, -0.5);
+assert.equal(directClock.sequence, '1');
+assert.equal(directClock.timeSeconds, 2);
+assert.equal(directClock.speed, -0.5);
+const directSeek = directAnimationApp.dispatchAnimationSeek(0.25);
+assert.equal(directSeek.sequence, '2');
+assert.equal(directSeek.timeSeconds, 0.25);
+const beforeRejectedDirectClock = directAnimationApp.snapshot();
+assert.throws(
+  () => directAnimationApp.dispatchAnimationClock(true, Number.NaN, 1),
+  /animation time and speed/,
+);
+assert.deepEqual(directAnimationApp.snapshot(), beforeRejectedDirectClock);
 const directResume = directAnimationApp.dispatchAnimationToggle();
-assert.equal(directResume.sequence, '1');
+assert.equal(
+  directResume.sequence,
+  '3',
+  'rejected direct animation input must not consume a sequence number',
+);
 assert.equal(directResume.commit.disposition, 'applied');
-assert.equal(directResume.playing, true);
+assert.equal(directResume.playing, false);
 directAnimationApp.free();
 const animationClockApp = new HyperscopeAppShadow();
 const restoredAnimation = animationClockApp.setAnimationClock(1, true, 2, -0.5);

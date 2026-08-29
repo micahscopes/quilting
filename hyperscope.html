@@ -4935,17 +4935,41 @@ function currentAnimationClipRange() {
   return { timeMin, duration };
 }
 
+function dispatchAnimationClockIntent(app, playing, timeSeconds, speed, context) {
+  if (ANIMATION_CLOCK_IMPLEMENTATION === 'rust') {
+    const receipt = app.dispatchAnimationClock(playing, timeSeconds, speed);
+    observeRustAppShadowSequence(receipt.sequence, context);
+    return receipt;
+  }
+  return app.setAnimationClock(
+    ++rustAppShadowSequence,
+    playing,
+    timeSeconds,
+    speed,
+  );
+}
+
+function dispatchAnimationSeekIntent(app, timeSeconds, context) {
+  if (ANIMATION_CLOCK_IMPLEMENTATION === 'rust') {
+    const receipt = app.dispatchAnimationSeek(timeSeconds);
+    observeRustAppShadowSequence(receipt.sequence, context);
+    return receipt;
+  }
+  return app.seekAnimation(++rustAppShadowSequence, timeSeconds);
+}
+
 function synchronizeRustAnimationClockFromBrowser(context) {
   if (ANIMATION_CLOCK_IMPLEMENTATION === 'js') return false;
   const range = currentAnimationClipRange();
   if (!range) return false;
   try {
     const app = ensureRustAppShadow('animation-clock');
-    const receipt = app.setAnimationClock(
-      ++rustAppShadowSequence,
+    const receipt = dispatchAnimationClockIntent(
+      app,
       animating_sig.peek(),
       animTime - range.timeMin,
       presentationAnimationSpeed,
+      'Rust animation clock synchronization',
     );
     rustAppShadowDiagnostics.lastCommit = receipt.commit;
     animationClockDiagnostics.synchronizations += 1;
@@ -4972,11 +4996,12 @@ function restorePendingRouteAnimationClock(context) {
       ?? (animTime - range.timeMin);
     const requestedSpeed = pendingRouteAnimationClock.speed
       ?? presentationAnimationSpeed;
-    const receipt = app.setAnimationClock(
-      ++rustAppShadowSequence,
+    const receipt = dispatchAnimationClockIntent(
+      app,
       animating_sig.peek(),
       requestedTime,
       requestedSpeed,
+      'Rust animation route restoration',
     );
     rustAppShadowDiagnostics.lastCommit = receipt.commit;
     app.writeAnimationSample(range.timeMin, range.duration, animationClockPacket);
@@ -7422,9 +7447,10 @@ $('time').addEventListener('input', () => {
       if (range) {
         try {
           const app = ensureRustAppShadow('animation-clock-seek');
-          const receipt = app.seekAnimation(
-            ++rustAppShadowSequence,
+          const receipt = dispatchAnimationSeekIntent(
+            app,
             animTime - range.timeMin,
+            'Rust animation seek',
           );
           rustAppShadowDiagnostics.lastCommit = receipt.commit;
           animationClockDiagnostics.dispatches += 1;
