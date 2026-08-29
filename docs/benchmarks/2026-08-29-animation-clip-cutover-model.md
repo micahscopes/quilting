@@ -34,7 +34,7 @@ The implementation checkpoints are `182e76e`, `b687968`, `c28f929`,
 - `quilting-wasm` with `leptos-ui,webgpu-backend` on
   `wasm32-unknown-unknown`.
 - generated application and route smokes.
-- all three replay `0.21` fingerprints.
+- all three replay `0.22` fingerprints.
 
 The generated WASM smoke explicitly performs this race:
 

@@ -365,6 +365,9 @@ pub enum EffectCompletion {
 pub enum AppEvent {
     Input(Timed<SemanticAction>),
     PresentationLoaded(Presentation),
+    /// Process-local evidence connecting an authored presentation asset to an
+    /// exact renderer residency. It is never durable or replicated.
+    PresentationAnimationResidencyChanged(Option<PresentationAnimationResidencyBinding>),
     NavigationSynchronized(NavigationSynchronization),
     Frame(FrameTick),
     EffectCompleted(EffectCompletion),
@@ -731,6 +734,7 @@ pub struct PresentationReadModel {
     pub cue_count: usize,
     pub assets: Vec<PresentationAsset>,
     pub active: Option<PresentationSnapshot>,
+    pub animation_residency: Option<PresentationAnimationResidencyBinding>,
 }
 
 /// One coherent application revision of the active presentation composition.
@@ -832,6 +836,7 @@ pub struct AppState {
     navigation: NavigationController,
     presentation: Option<PresentationRuntime>,
     active_presentation: Option<PresentationSnapshot>,
+    presentation_animation_residency: Option<PresentationAnimationResidencyBinding>,
     animation: AnimationClock,
     render_settings: RenderSettings,
     assets: BTreeMap<AssetId, AssetRecord>,
@@ -858,6 +863,7 @@ impl Default for AppState {
             navigation: NavigationController::default(),
             presentation: None,
             active_presentation: None,
+            presentation_animation_residency: None,
             animation: AnimationClock::default(),
             render_settings: RenderSettings::default(),
             assets: BTreeMap::new(),
@@ -961,7 +967,9 @@ impl AppState {
                         if !input_may_run_now {
                             return Err(ReduceError::FuturePresentationInput);
                         }
-                        self.apply_presentation_action(action)?;
+                        let mut staged = self.clone();
+                        staged.apply_presentation_action(action, &mut effects)?;
+                        *self = staged;
                     }
                     SemanticAction::Animate(action) => {
                         if !input_may_run_now {
@@ -1117,6 +1125,12 @@ impl AppState {
                     .map_err(|error| ReduceError::Presentation(error.to_string()))?;
                 self.presentation = Some(presentation);
                 self.active_presentation = None;
+                self.presentation_animation_residency = None;
+            }
+            AppEvent::PresentationAnimationResidencyChanged(binding) => {
+                let mut staged = self.clone();
+                staged.set_presentation_animation_residency(binding, &mut effects)?;
+                *self = staged;
             }
             AppEvent::NavigationSynchronized(synchronization) => {
                 self.synchronize_navigation(synchronization)?;
@@ -1263,6 +1277,12 @@ impl AppState {
                                         clip,
                                     }
                                 });
+                            if self.presentation_animation_residency.is_some_and(|binding| {
+                                binding.scene_request_id != asset.request_id
+                                    || binding.resident_asset_id != asset.descriptor.id
+                            }) {
+                                self.presentation_animation_residency = None;
+                            }
                             self.installed_primary_scene =
                                 Some(InstalledPrimarySceneReadModel { asset, install });
                         }
@@ -1417,10 +1437,15 @@ impl AppState {
         })
     }
 
-    fn apply_presentation_action(&mut self, action: PresentationAction) -> Result<(), ReduceError> {
+    fn apply_presentation_action(
+        &mut self,
+        action: PresentationAction,
+        effects: &mut Vec<AppEffect>,
+    ) -> Result<(), ReduceError> {
         if action == PresentationAction::Clear {
             self.presentation = None;
             self.active_presentation = None;
+            self.presentation_animation_residency = None;
             return Ok(());
         }
 
@@ -1454,12 +1479,84 @@ impl AppState {
             .render_settings
             .with_presentation(&snapshot)
             .map_err(ReduceError::InvalidRenderSettings)?;
+        let resolved_animation = self.resolve_presentation_animation(&snapshot)?;
         self.presentation = Some(presentation);
         self.navigation = navigation;
         self.animation = animation;
         self.render_settings = render_settings;
         self.active_presentation = Some(snapshot);
+        if let Some(resolved) = resolved_animation {
+            self.request_animation_clip(resolved.clip.index, effects)?;
+            self.animation = resolved.clock;
+        }
         Ok(())
+    }
+
+    fn set_presentation_animation_residency(
+        &mut self,
+        binding: Option<PresentationAnimationResidencyBinding>,
+        effects: &mut Vec<AppEffect>,
+    ) -> Result<(), ReduceError> {
+        let Some(binding) = binding else {
+            self.presentation_animation_residency = None;
+            return Ok(());
+        };
+        let presentation = self
+            .presentation
+            .as_ref()
+            .ok_or(ReduceError::NoPresentation)?;
+        let asset_exists = presentation.presentation().assets.iter().any(|asset| {
+            AssetId::new(asset.id).is_ok_and(|asset_id| asset_id == binding.presentation_asset_id)
+        });
+        if !asset_exists {
+            return Err(ReduceError::UnknownPresentationAnimationAsset(
+                binding.presentation_asset_id,
+            ));
+        }
+        let installed = self
+            .installed_primary_scene
+            .as_ref()
+            .ok_or(ReduceError::NoInstalledPrimaryScene)?;
+        if binding.scene_request_id != installed.asset.request_id
+            || binding.resident_asset_id != installed.asset.descriptor.id
+        {
+            return Err(ReduceError::PresentationAnimation(
+                PresentationAnimationResolutionError::ResidentSceneMismatch {
+                    expected_request: binding.scene_request_id,
+                    actual_request: installed.asset.request_id,
+                    expected_asset: binding.resident_asset_id,
+                    actual_asset: installed.asset.descriptor.id,
+                }
+                .to_string(),
+            ));
+        }
+        let resolved = self
+            .active_presentation
+            .as_ref()
+            .map(|snapshot| resolve_presentation_animation(snapshot, binding, installed))
+            .transpose()
+            .map_err(|error| ReduceError::PresentationAnimation(error.to_string()))?
+            .flatten();
+        self.presentation_animation_residency = Some(binding);
+        if let Some(resolved) = resolved {
+            self.request_animation_clip(resolved.clip.index, effects)?;
+            self.animation = resolved.clock;
+        }
+        Ok(())
+    }
+
+    fn resolve_presentation_animation(
+        &self,
+        snapshot: &PresentationSnapshot,
+    ) -> Result<Option<ResolvedPresentationAnimation>, ReduceError> {
+        let (Some(binding), Some(installed)) = (
+            self.presentation_animation_residency,
+            self.installed_primary_scene.as_ref(),
+        ) else {
+            return Ok(None);
+        };
+        resolve_presentation_animation(snapshot, binding, installed)
+            .map_err(|error| ReduceError::PresentationAnimation(error.to_string()))
     }
 
     fn synchronize_navigation(
@@ -1656,6 +1753,7 @@ impl AppState {
                 cue_count: presentation.cues.len(),
                 assets: presentation.assets.clone(),
                 active: self.active_presentation.clone(),
+                animation_residency: self.presentation_animation_residency,
             }
         })
     }
@@ -2047,7 +2145,9 @@ pub enum ReduceError {
     Navigation(&'static str),
     NavigationState(String),
     Presentation(String),
+    PresentationAnimation(String),
     NoPresentation,
+    UnknownPresentationAnimationAsset(AssetId),
     NoInstalledPrimaryScene,
     UnknownAnimationClip(u32),
     Wire(String),
@@ -2091,7 +2191,14 @@ impl fmt::Display for ReduceError {
             Self::Presentation(message) => {
                 write!(formatter, "presentation event failed: {message}")
             }
+            Self::PresentationAnimation(message) => {
+                write!(formatter, "presentation animation failed: {message}")
+            }
             Self::NoPresentation => formatter.write_str("no presentation is loaded"),
+            Self::UnknownPresentationAnimationAsset(asset_id) => write!(
+                formatter,
+                "presentation has no animation asset {asset_id}",
+            ),
             Self::NoInstalledPrimaryScene => {
                 formatter.write_str("no renderer-installed primary scene is available")
             }
@@ -3012,6 +3119,137 @@ mod tests {
                 .sample_time_seconds,
             2.75,
             "the installed clip frame must retain reverse Euclidean wrapping",
+        );
+    }
+
+    #[test]
+    fn presentation_animation_residency_defers_identity_and_dispatches_exact_clip_jobs() {
+        let store = AppStore::default();
+        store
+            .dispatch(AppEvent::PresentationLoaded(presentation_fixture()))
+            .unwrap();
+        dispatch_presentation(&store, 1, 0.0, PresentationAction::Start).unwrap();
+
+        let resident = asset(0x991, "cached-horse.glb");
+        let scene_request = request(0x992);
+        dispatch_scoped_request(
+            &store,
+            2,
+            scene_request,
+            resident.clone(),
+            AssetLoadScope::PrimaryScene,
+        );
+        store
+            .dispatch(AppEvent::EffectCompleted(EffectCompletion::AssetLoad(
+                AssetLoadCompletion {
+                    request_id: scene_request,
+                    asset_id: resident.id,
+                    outcome: AssetLoadOutcome::Loaded {
+                        byte_length: 100,
+                        content_digest: None,
+                        metadata: AssetMetadata::default(),
+                    },
+                },
+            )))
+            .unwrap();
+        store
+            .dispatch(AppEvent::EffectCompleted(
+                EffectCompletion::PrimarySceneInstall(PrimarySceneInstallCompletion {
+                    request_id: scene_request,
+                    asset_id: resident.id,
+                    outcome: PrimarySceneInstallOutcome::Installed(
+                        PrimarySceneInstallMetadata {
+                            num_vertices: 796,
+                            num_faces: 984,
+                            animation_clips: vec![
+                                AnimationClipDescriptor {
+                                    index: 0,
+                                    name: "idle".to_owned(),
+                                    time_min_seconds: 0.0,
+                                    time_max_seconds: 1.0,
+                                },
+                                AnimationClipDescriptor {
+                                    index: 1,
+                                    name: "horse_A_".to_owned(),
+                                    time_min_seconds: 2.0,
+                                    time_max_seconds: 3.5,
+                                },
+                            ],
+                        },
+                    ),
+                }),
+            ))
+            .unwrap();
+
+        let presentation_asset_id = AssetId::new(
+            Uuid::parse_str("a0000000-0000-4000-8000-000000000001").unwrap(),
+        )
+        .unwrap();
+        assert_ne!(presentation_asset_id, resident.id);
+        let binding = PresentationAnimationResidencyBinding {
+            presentation_asset_id,
+            scene_request_id: scene_request,
+            resident_asset_id: resident.id,
+        };
+        let bound = store
+            .dispatch(AppEvent::PresentationAnimationResidencyChanged(Some(
+                binding,
+            )))
+            .unwrap();
+        assert_eq!(
+            bound.effects,
+            vec![AppEffect::SelectAnimationClip {
+                job_id: 0,
+                scene_request_id: scene_request,
+                asset_id: resident.id,
+                clip_index: 1,
+            }],
+        );
+        assert_eq!(
+            store
+                .presentation_snapshot()
+                .unwrap()
+                .animation_residency,
+            Some(binding),
+        );
+        assert_eq!(store.summary_snapshot().pending_animation_clip, Some(1));
+
+        // The next cue uses a different layer instance of the same authored
+        // horse asset. Asset-level residency remains valid and the already
+        // pending exact clip job is not duplicated.
+        let next = dispatch_presentation(&store, 3, 0.0, PresentationAction::Advance).unwrap();
+        assert!(next.effects.is_empty());
+        assert_eq!(store.summary_snapshot().pending_animation_clip, Some(1));
+    }
+
+    #[test]
+    fn rejected_presentation_animation_binding_is_atomic() {
+        let store = AppStore::default();
+        store
+            .dispatch(AppEvent::PresentationLoaded(presentation_fixture()))
+            .unwrap();
+        let before = store.summary_snapshot().revision;
+        let presentation_asset_id = AssetId::new(
+            Uuid::parse_str("a0000000-0000-4000-8000-000000000001").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            store.dispatch(AppEvent::PresentationAnimationResidencyChanged(Some(
+                PresentationAnimationResidencyBinding {
+                    presentation_asset_id,
+                    scene_request_id: request(0x993),
+                    resident_asset_id: AssetId::from_u128(0x994).unwrap(),
+                },
+            ))),
+            Err(ReduceError::NoInstalledPrimaryScene),
+        );
+        assert_eq!(store.summary_snapshot().revision, before);
+        assert_eq!(
+            store
+                .presentation_snapshot()
+                .unwrap()
+                .animation_residency,
+            None,
         );
     }
 

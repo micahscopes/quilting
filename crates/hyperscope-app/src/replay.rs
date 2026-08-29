@@ -10,8 +10,9 @@ use crate::{
     AnimationClipSelectionOutcome, AppCommit, AppEffect, AppEvent, AppStore, AssetLoadCompletion,
     AssetLoadOutcome, AssetLoadScope, AssetMetadata, AssetStatus, AuthoredRevision,
     CommitDisposition, EffectCompletion, FrameTick, NavigationSynchronization, PresentationAction,
-    PrimarySceneInstallCompletion, PrimarySceneInstallMetadata, PrimarySceneInstallOutcome,
-    ReceivedPresence, RenderSettings, SemanticAction, Timed,
+    PresentationAnimationResidencyBinding, PrimarySceneInstallCompletion,
+    PrimarySceneInstallMetadata, PrimarySceneInstallOutcome, ReceivedPresence, RenderSettings,
+    SemanticAction, Timed,
 };
 use hyperscape::{
     AuthoredCamera, AuthoredFocus, FocusSphere, NavigationAction, NavigationFrame,
@@ -27,7 +28,8 @@ use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
 
-pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.21";
+pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.22";
+pub const LEGACY_APP_REPLAY_VERSION_0_21: &str = "hyperscope-app-replay/0.21";
 pub const LEGACY_APP_REPLAY_VERSION_0_20: &str = "hyperscope-app-replay/0.20";
 pub const LEGACY_APP_REPLAY_VERSION_0_19: &str = "hyperscope-app-replay/0.19";
 pub const LEGACY_APP_REPLAY_VERSION_0_18: &str = "hyperscope-app-replay/0.18";
@@ -66,6 +68,7 @@ enum ReplaySchema {
     V0_19,
     V0_20,
     V0_21,
+    V0_22,
 }
 pub const APP_REPLAY_FINGERPRINT_ALGORITHM: &str = "fnv1a-128-json";
 const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
@@ -92,6 +95,10 @@ impl AppReplayScript {
 pub enum AppReplayEvent {
     LoadPresentation {
         presentation: Presentation,
+    },
+    UpdatePresentationAnimationResidency {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        binding: Option<ReplayPresentationAnimationResidencyBinding>,
     },
     SynchronizeNavigation {
         camera: AuthoredCamera,
@@ -947,6 +954,8 @@ pub struct AppReplayState {
     pub active_cue: Option<Uuid>,
     pub active_scene: Option<Uuid>,
     pub active_view: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation_animation_residency: Option<ReplayPresentationAnimationResidencyBinding>,
     pub animation_playing: bool,
     pub animation_time_seconds: f64,
     pub animation_speed: f64,
@@ -976,6 +985,38 @@ pub struct AppReplayState {
     pub navigation: AppReplayNavigationState,
     pub camera: AppReplayCameraState,
     pub focus: AppReplayFocusState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayPresentationAnimationResidencyBinding {
+    pub presentation_asset_id: AssetId,
+    pub scene_request_id: RequestId,
+    pub resident_asset_id: AssetId,
+}
+
+impl From<ReplayPresentationAnimationResidencyBinding>
+    for PresentationAnimationResidencyBinding
+{
+    fn from(binding: ReplayPresentationAnimationResidencyBinding) -> Self {
+        Self {
+            presentation_asset_id: binding.presentation_asset_id,
+            scene_request_id: binding.scene_request_id,
+            resident_asset_id: binding.resident_asset_id,
+        }
+    }
+}
+
+impl From<PresentationAnimationResidencyBinding>
+    for ReplayPresentationAnimationResidencyBinding
+{
+    fn from(binding: PresentationAnimationResidencyBinding) -> Self {
+        Self {
+            presentation_asset_id: binding.presentation_asset_id,
+            scene_request_id: binding.scene_request_id,
+            resident_asset_id: binding.resident_asset_id,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -1169,7 +1210,8 @@ pub fn run_app_replay(script: &AppReplayScript) -> Result<AppReplayTrace, AppRep
         LEGACY_APP_REPLAY_VERSION_0_18 => ReplaySchema::V0_18,
         LEGACY_APP_REPLAY_VERSION_0_19 => ReplaySchema::V0_19,
         LEGACY_APP_REPLAY_VERSION_0_20 => ReplaySchema::V0_20,
-        APP_REPLAY_VERSION => ReplaySchema::V0_21,
+        LEGACY_APP_REPLAY_VERSION_0_21 => ReplaySchema::V0_21,
+        APP_REPLAY_VERSION => ReplaySchema::V0_22,
         _ => return Err(AppReplayError::UnsupportedVersion(script.version.clone())),
     };
     let store = AppStore::default();
@@ -1276,7 +1318,10 @@ fn replay_event(
             // interpreting an old script. This is an adapter migration fence,
             // not a second application mutation path: only replay can request
             // historical reducer semantics.
-            if !matches!(schema, ReplaySchema::V0_20 | ReplaySchema::V0_21) {
+            if !matches!(
+                schema,
+                ReplaySchema::V0_20 | ReplaySchema::V0_21 | ReplaySchema::V0_22
+            ) {
                 let pending_install = commit.effects.iter().find_map(|effect| match effect {
                     AppEffect::InstallPrimaryScene {
                         request_id,
@@ -1332,6 +1377,16 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
         AppReplayEvent::LoadPresentation { presentation } => {
             Ok(AppEvent::PresentationLoaded(presentation.clone()))
         }
+        AppReplayEvent::UpdatePresentationAnimationResidency { binding } => {
+            if schema != ReplaySchema::V0_22 {
+                return Err(
+                    "presentation animation residency requires app replay 0.22".to_owned(),
+                );
+            }
+            Ok(AppEvent::PresentationAnimationResidencyChanged(
+                binding.map(Into::into),
+            ))
+        }
         AppReplayEvent::SynchronizeNavigation { camera, focus } => camera
             .to_camera_rig()
             .and_then(|camera| {
@@ -1379,6 +1434,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_19
                     | ReplaySchema::V0_20
                     | ReplaySchema::V0_21
+                    | ReplaySchema::V0_22
             ) {
                 return Err("animation playback actions require app replay 0.11".to_owned());
             }
@@ -1389,6 +1445,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_19
                     | ReplaySchema::V0_20
                     | ReplaySchema::V0_21
+                    | ReplaySchema::V0_22
             )
                 && matches!(
                     action,
@@ -1399,7 +1456,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
             {
                 return Err("animation clock actions require app replay 0.17".to_owned());
             }
-            if schema != ReplaySchema::V0_21
+            if !matches!(schema, ReplaySchema::V0_21 | ReplaySchema::V0_22)
                 && matches!(action, ReplayAnimationAction::SelectClip { .. })
             {
                 return Err("animation clip selection requires app replay 0.21".to_owned());
@@ -1421,6 +1478,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_19
                     | ReplaySchema::V0_20
                     | ReplaySchema::V0_21
+                    | ReplaySchema::V0_22
             ) {
                 return Err("render settings actions require app replay 0.18".to_owned());
             }
@@ -1455,7 +1513,8 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_18
                     | ReplaySchema::V0_19
                     | ReplaySchema::V0_20
-                    | ReplaySchema::V0_21 => (*scope).into(),
+                    | ReplaySchema::V0_21
+                    | ReplaySchema::V0_22 => (*scope).into(),
                     _ if *scope == ReplayAssetLoadScope::Asset => AssetLoadScope::Asset,
                     _ => {
                         return Err(
@@ -1494,6 +1553,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_19
                     | ReplaySchema::V0_20
                     | ReplaySchema::V0_21
+                    | ReplaySchema::V0_22
             ) {
                 return Err("asset provenance requires app replay 0.12".to_owned());
             }
@@ -1510,7 +1570,10 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
             asset_id,
             outcome,
         } => {
-            if !matches!(schema, ReplaySchema::V0_20 | ReplaySchema::V0_21) {
+            if !matches!(
+                schema,
+                ReplaySchema::V0_20 | ReplaySchema::V0_21 | ReplaySchema::V0_22
+            ) {
                 return Err("primary scene installation requires app replay 0.20".to_owned());
             }
             Ok(AppEvent::EffectCompleted(
@@ -1528,7 +1591,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
             clip_index,
             outcome,
         } => {
-            if schema != ReplaySchema::V0_21 {
+            if !matches!(schema, ReplaySchema::V0_21 | ReplaySchema::V0_22) {
                 return Err("animation clip selection requires app replay 0.21".to_owned());
             }
             Ok(AppEvent::EffectCompleted(
@@ -1580,6 +1643,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_19
             | ReplaySchema::V0_20
             | ReplaySchema::V0_21
+            | ReplaySchema::V0_22
     )
         && matches!(action, ReplayNavigationAction::ApplyCameraIntent { .. })
     {
@@ -1595,6 +1659,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_19
             | ReplaySchema::V0_20
             | ReplaySchema::V0_21
+            | ReplaySchema::V0_22
     )
         && matches!(action, ReplayNavigationAction::ApplyTurntableIntent { .. })
     {
@@ -1609,6 +1674,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_19
             | ReplaySchema::V0_20
             | ReplaySchema::V0_21
+            | ReplaySchema::V0_22
     )
         && matches!(action, ReplayNavigationAction::ReframeSelection { .. })
     {
@@ -1622,6 +1688,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_19
             | ReplaySchema::V0_20
             | ReplaySchema::V0_21
+            | ReplaySchema::V0_22
     )
         && matches!(action, ReplayNavigationAction::AimAtSelection { .. })
     {
@@ -1650,6 +1717,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_19
             | ReplaySchema::V0_20
             | ReplaySchema::V0_21
+            | ReplaySchema::V0_22
     ) && matches!(
         action,
         ReplayNavigationAction::RefitFocusAndToggleInversion { .. }
@@ -1685,6 +1753,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_19
             | ReplaySchema::V0_20
             | ReplaySchema::V0_21
+            | ReplaySchema::V0_22
     ) && matches!(
         action,
         ReplayNavigationAction::AnchorFocus { asset_id: None, .. }
@@ -1766,6 +1835,9 @@ fn replay_state(store: &AppStore) -> AppReplayState {
         active_cue: active.map(|snapshot| snapshot.cue_id),
         active_scene: active.map(|snapshot| snapshot.scene_id),
         active_view: active.map(|snapshot| snapshot.view_id),
+        presentation_animation_residency: state
+            .presentation_animation_residency
+            .map(Into::into),
         animation_playing: state.animation.playing,
         animation_time_seconds: state.animation.time_seconds,
         animation_speed: state.animation.speed,
@@ -2193,6 +2265,9 @@ mod tests {
                 SemanticAction::CancelAsset(_) => "cancel_asset",
             },
             AppEvent::PresentationLoaded(_) => "presentation_loaded",
+            AppEvent::PresentationAnimationResidencyChanged(_) => {
+                "presentation_animation_residency_changed"
+            }
             AppEvent::NavigationSynchronized(_) => "navigation_synchronized",
             AppEvent::Frame(_) => "frame",
             AppEvent::EffectCompleted(completion) => match completion {
@@ -2246,6 +2321,13 @@ mod tests {
                 clip_index: 0,
                 outcome: ReplayAnimationClipSelectionOutcome::Selected,
             },
+            AppReplayEvent::UpdatePresentationAnimationResidency {
+                binding: Some(ReplayPresentationAnimationResidencyBinding {
+                    presentation_asset_id: AssetId::from_u128(0xc0).unwrap(),
+                    scene_request_id: RequestId::from_u128(0xb0).unwrap(),
+                    resident_asset_id: AssetId::from_u128(0xa0).unwrap(),
+                }),
+            },
         ];
         let covered = presentation
             .events
@@ -2253,7 +2335,7 @@ mod tests {
             .chain(navigation.events.iter())
             .chain(orchestration.events.iter())
             .chain(current_animation_events.iter())
-            .filter_map(|event| replay_app_event(event, ReplaySchema::V0_21).ok())
+            .filter_map(|event| replay_app_event(event, ReplaySchema::V0_22).ok())
             .map(|event| authoritative_app_event_name(&event))
             .collect::<std::collections::BTreeSet<_>>();
         let authored_covered = orchestration
@@ -2278,6 +2360,7 @@ mod tests {
                 "frame",
                 "navigate",
                 "navigation_synchronized",
+                "presentation_animation_residency_changed",
                 "presentation_loaded",
                 "present",
                 "remote_presence",
@@ -2905,6 +2988,109 @@ mod tests {
             AppReplayOutcome::Rejected { ref error }
                 if error.contains("requires app replay 0.21")
         ));
+    }
+
+    #[test]
+    fn replay_0_22_records_presentation_animation_residency_without_reinterpreting_0_21() {
+        let resident_asset = AssetDescriptor {
+            id: AssetId::from_u128(1).unwrap(),
+            uri: "cached-horse.glb".to_owned(),
+            media_type: Some("model/gltf-binary".to_owned()),
+            content_digest: None,
+        };
+        let presentation_asset_id = AssetId::new(
+            Uuid::parse_str("a0000000-0000-4000-8000-000000000001").unwrap(),
+        )
+        .unwrap();
+        let request_id = RequestId::from_u128(10).unwrap();
+        let binding = ReplayPresentationAnimationResidencyBinding {
+            presentation_asset_id,
+            scene_request_id: request_id,
+            resident_asset_id: resident_asset.id,
+        };
+        let events = vec![
+            AppReplayEvent::LoadPresentation {
+                presentation: fixture(),
+            },
+            AppReplayEvent::Present {
+                sequence: 1,
+                at_seconds: 0.0,
+                action: ReplayPresentationAction::Start,
+            },
+            AppReplayEvent::RequestAsset {
+                sequence: 2,
+                at_seconds: 0.0,
+                request_id,
+                asset: resident_asset.clone(),
+                scope: ReplayAssetLoadScope::PrimaryScene,
+            },
+            AppReplayEvent::CompleteAssetLoad {
+                request_id,
+                asset_id: resident_asset.id,
+                outcome: ReplayAssetLoadOutcome::Loaded {
+                    byte_length: 123,
+                    content_digest: None,
+                    metadata: AssetMetadata::default(),
+                },
+            },
+            AppReplayEvent::CompletePrimarySceneInstall {
+                request_id,
+                asset_id: resident_asset.id,
+                outcome: ReplayPrimarySceneInstallOutcome::Installed {
+                    metadata: ReplayPrimarySceneInstallMetadata {
+                        num_vertices: 796,
+                        num_faces: 984,
+                        animation_clips: vec![
+                            ReplayAnimationClipDescriptor {
+                                index: 0,
+                                name: "idle".to_owned(),
+                                time_min_seconds: 0.0,
+                                time_max_seconds: 1.0,
+                            },
+                            ReplayAnimationClipDescriptor {
+                                index: 1,
+                                name: "horse_A_".to_owned(),
+                                time_min_seconds: 0.0,
+                                time_max_seconds: 1.5,
+                            },
+                        ],
+                    },
+                },
+            },
+            AppReplayEvent::UpdatePresentationAnimationResidency {
+                binding: Some(binding),
+            },
+        ];
+
+        let current = run_app_replay(&AppReplayScript::new(events.clone())).unwrap();
+        assert_eq!(
+            current.records[5].state.presentation_animation_residency,
+            Some(binding),
+        );
+        assert_eq!(
+            committed_effects(&current.records[5]),
+            &[AppReplayEffect::SelectAnimationClip {
+                job_id: 0,
+                scene_request_id: request_id,
+                asset_id: resident_asset.id,
+                clip_index: 1,
+            }],
+        );
+
+        let legacy = run_app_replay(&AppReplayScript {
+            version: LEGACY_APP_REPLAY_VERSION_0_21.to_owned(),
+            events,
+        })
+        .unwrap();
+        assert!(matches!(
+            legacy.records[5].outcome,
+            AppReplayOutcome::Rejected { ref error }
+                if error.contains("requires app replay 0.22")
+        ));
+        assert_eq!(
+            legacy.records[5].state.presentation_animation_residency,
+            None,
+        );
     }
 
     #[test]

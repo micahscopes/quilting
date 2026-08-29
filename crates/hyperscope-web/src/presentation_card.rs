@@ -122,6 +122,7 @@ mod tests {
             cue_count: 3,
             assets: Vec::new(),
             active: None,
+            animation_residency: None,
         };
         assert_eq!(project_presentation_card(Some(&presentation)), None);
     }
@@ -158,6 +159,7 @@ mod tests {
                 overlays: Vec::new(),
                 tessellation: PresentationTessellation::default(),
             }),
+            animation_residency: None,
         };
 
         let card = project_presentation_card(Some(&presentation)).unwrap();
