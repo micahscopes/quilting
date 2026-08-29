@@ -334,7 +334,12 @@ The first application boundary is now explicit:
   records the key-sorted authored asset/entity materialization as well as its
   atomic projection revision, so stale or invalid Blender-style checkpoints
   cannot silently mutate the scene oracle.
-  Version 0.17 adds the renderer-independent primary animation clock: playing,
+  Version 0.18 makes render style, resolution override, tessellation policy,
+  resident-atlas exponent, and face-edge grading one atomic reducer value and
+  includes it in every committed replay state. Cue activation replaces only
+  its authored style and tessellation subset while preserving session atlas
+  and grading policy. Version 0.17 added the renderer-independent primary
+  animation clock: playing,
   unwrapped scene time, and signed finite speed. Frame events advance it from
   explicit deltas, cue activation replaces all three fields atomically, and
   invalid clock edits preserve the preceding application revision. Version
@@ -375,10 +380,10 @@ The first application boundary is now explicit:
   cancellation, presence TTL/order, authored revisions, and rejected wire
   input. Tests prove exhaustive current event/action coverage, JSON round trips,
   atomic rejection, and transition cadence invariance. The eight-cue golden is
-  `fnv1a-128-json:a9e80c56ba5cbb219b41405c70f84e21`;
+  `fnv1a-128-json:c1df294e32201bf7e0665b94848d3174`;
   the navigation golden is
-  `fnv1a-128-json:79d5531484ba00aee56d6666bab3cda9`; the orchestration
-  golden is `fnv1a-128-json:8607b176a788e02120433b9a8e56d74a`.
+  `fnv1a-128-json:23b8b3dbd4dbfda43dc11b9cc16c940e`; the orchestration
+  golden is `fnv1a-128-json:d4767df6646b8c20d53c48e91fd281ef`.
 - `hyperscape::StableEntityId` converts explicitly to the validated wire
   `EntityId`, so the protocol wrapper is an interchange type rather than a
   second identity authority.

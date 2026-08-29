@@ -23,7 +23,8 @@ use hyperscape::{
     extract_packed_presentation_scene, CameraRig, FocusNavigation, FocusSphere, NavigationAction,
     NavigationController, NavigationPreset, PackedPresentationLayerBinding,
     PackedPresentationNode, PackedPresentationSceneError, Presentation, PresentationAsset,
-    PresentationRuntime, PresentationSnapshot, ScheduledNavigationAction, SphereReflectionState,
+    PresentationRuntime, PresentationSnapshot, PresentationTessellation, RenderStyle,
+    ScheduledNavigationAction, SphereReflectionState,
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetEntityId, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId,
@@ -77,12 +78,76 @@ pub enum SemanticAction {
     Navigate(NavigationAction),
     Present(PresentationAction),
     Animate(AnimationAction),
+    SetRenderSettings(RenderSettings),
     RequestAsset {
         request_id: RequestId,
         asset: AssetDescriptor,
         scope: AssetLoadScope,
     },
     CancelAsset(AssetId),
+}
+
+/// One atomic, renderer-independent application rendering policy.
+///
+/// Environment assets and backend resource handles remain adapter concerns;
+/// these values determine semantic presentation and tessellation behavior and
+/// therefore must not be split across independently ordered browser signals.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "replay", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "replay", serde(rename_all = "camelCase"))]
+pub struct RenderSettings {
+    pub style: RenderStyle,
+    /// Zero selects adaptive resolution; positive values select `2^level`.
+    pub resolution_level: u8,
+    pub tessellation: PresentationTessellation,
+    pub atlas_exponent: u8,
+    pub max_face_edge_ratio: u8,
+}
+
+impl Default for RenderSettings {
+    fn default() -> Self {
+        Self {
+            style: RenderStyle::Pbr,
+            resolution_level: 0,
+            tessellation: PresentationTessellation::default(),
+            atlas_exponent: 7,
+            max_face_edge_ratio: 2,
+        }
+    }
+}
+
+impl RenderSettings {
+    pub fn validate(self) -> Result<Self, &'static str> {
+        if self.resolution_level > 6 {
+            return Err("render resolution level must be in [0,6]");
+        }
+        if !self.tessellation.density.is_finite()
+            || !(1.0..=500.0).contains(&self.tessellation.density)
+        {
+            return Err("tessellation density must be finite and in [1,500]");
+        }
+        if !self.tessellation.min_pixels_per_subdivision.is_finite()
+            || !(1.0..=64.0).contains(&self.tessellation.min_pixels_per_subdivision)
+        {
+            return Err("pixel floor must be finite and in [1,64]");
+        }
+        if !(3..=9).contains(&self.atlas_exponent) {
+            return Err("resident atlas exponent must be in [3,9]");
+        }
+        if !matches!(self.max_face_edge_ratio, 2 | 4) {
+            return Err("maximum face-edge ratio must be 2 or 4");
+        }
+        Ok(self)
+    }
+
+    fn with_presentation(self, snapshot: &PresentationSnapshot) -> Result<Self, &'static str> {
+        Self {
+            style: snapshot.render_style,
+            tessellation: snapshot.tessellation,
+            ..self
+        }
+        .validate()
+    }
 }
 
 /// Renderer-independent primary animation clock. The application owns scene
@@ -341,6 +406,14 @@ pub struct AppFrameSnapshot {
     pub surface_anchor_hop_height: Option<f64>,
 }
 
+/// Low-rate renderer/control projection published before the summary revision
+/// fence. Render extraction can sample the same value directly from AppState.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AppRenderSnapshot {
+    pub revision: u64,
+    pub settings: RenderSettings,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SelectedFocusSnapshot {
     pub identity: AssetEntityId,
@@ -486,6 +559,7 @@ pub struct AppState {
     presentation: Option<PresentationRuntime>,
     active_presentation: Option<PresentationSnapshot>,
     animation: AnimationClock,
+    render_settings: RenderSettings,
     assets: BTreeMap<AssetId, AssetRecord>,
     primary_scene_load: Option<(RequestId, AssetId)>,
     presence: BTreeMap<PeerId, PresenceRecord>,
@@ -504,6 +578,7 @@ impl Default for AppState {
             presentation: None,
             active_presentation: None,
             animation: AnimationClock::default(),
+            render_settings: RenderSettings::default(),
             assets: BTreeMap::new(),
             primary_scene_load: None,
             presence: BTreeMap::new(),
@@ -552,6 +627,13 @@ impl AppState {
                 .surface_walk
                 .anchor_transition()
                 .map(|transition| transition.hop_height),
+        }
+    }
+
+    pub fn render_snapshot(&self) -> AppRenderSnapshot {
+        AppRenderSnapshot {
+            revision: self.revision,
+            settings: self.render_settings,
         }
     }
 
@@ -607,6 +689,14 @@ impl AppState {
                         }
                         .validate()?;
                         self.animation = animation;
+                    }
+                    SemanticAction::SetRenderSettings(settings) => {
+                        if !input_may_run_now {
+                            return Err(ReduceError::FutureRenderSettingsInput);
+                        }
+                        self.render_settings = settings
+                            .validate()
+                            .map_err(ReduceError::InvalidRenderSettings)?;
                     }
                     SemanticAction::RequestAsset {
                         request_id,
@@ -891,9 +981,14 @@ impl AppState {
         } else {
             self.animation
         };
+        let render_settings = self
+            .render_settings
+            .with_presentation(&snapshot)
+            .map_err(ReduceError::InvalidRenderSettings)?;
         self.presentation = Some(presentation);
         self.navigation = navigation;
         self.animation = animation;
+        self.render_settings = render_settings;
         self.active_presentation = Some(snapshot);
         Ok(())
     }
@@ -1038,6 +1133,7 @@ pub struct AppStore {
     state: Arc<Mutex<AppState>>,
     summary: Mutable<AppSummary>,
     navigation: Mutable<AppFrameSnapshot>,
+    render: Mutable<AppRenderSnapshot>,
     assets: MutableVec<AssetReadModel>,
     authored_assets: MutableVec<AssetDescriptor>,
     authored_entities: MutableVec<AuthoredEntityReadModel>,
@@ -1055,6 +1151,7 @@ impl AppStore {
     pub fn new(state: AppState) -> Self {
         let summary = state.summary();
         let navigation = state.frame_snapshot();
+        let render = state.render_snapshot();
         let assets = state.asset_read_models();
         let authored = state.authored_scene_read_model();
         let diagnostics = state.diagnostic_read_models();
@@ -1063,6 +1160,7 @@ impl AppStore {
             state: Arc::new(Mutex::new(state)),
             summary: Mutable::new(summary),
             navigation: Mutable::new(navigation),
+            render: Mutable::new(render),
             assets: MutableVec::new_with_values(assets),
             authored_assets: MutableVec::new_with_values(authored.assets),
             authored_entities: MutableVec::new_with_values(authored.entities),
@@ -1119,6 +1217,7 @@ impl AppStore {
         let diagnostics = state.diagnostic_read_models();
         let presentation = state.presentation_read_model();
         let navigation = state.frame_snapshot();
+        let render = state.render_snapshot();
         let summary = state.summary();
         let revision = summary.revision;
         drop(state);
@@ -1132,6 +1231,7 @@ impl AppStore {
         self.diagnostics.lock_mut().replace_cloned(diagnostics);
         self.presentation.set_neq(presentation);
         self.navigation.set_neq(navigation);
+        self.render.set_neq(render);
         self.summary.set_neq(summary);
         revision
     }
@@ -1166,6 +1266,10 @@ impl AppStore {
     /// instead so UI throttling cannot delay semantic integration.
     pub fn navigation_snapshot(&self) -> AppFrameSnapshot {
         self.navigation.get_cloned()
+    }
+
+    pub fn render_snapshot(&self) -> AppRenderSnapshot {
+        self.render.get()
     }
 
     pub fn asset_snapshot(&self) -> Vec<AssetReadModel> {
@@ -1227,6 +1331,12 @@ impl AppStore {
         self.navigation.signal_cloned()
     }
 
+    /// Low-rate FRP render projection published before the summary commit
+    /// fence. UI adapters queue semantic changes; they cannot mutate it.
+    pub fn render_signal(&self) -> MutableSignalCloned<AppRenderSnapshot> {
+        self.render.signal_cloned()
+    }
+
     pub fn asset_signal_vec(&self) -> MutableSignalVec<AssetReadModel> {
         self.assets.signal_vec_cloned()
     }
@@ -1258,9 +1368,11 @@ impl AppStore {
 pub enum ReduceError {
     InvalidTime,
     InvalidAnimationClock,
+    InvalidRenderSettings(&'static str),
     FutureEffectInput,
     FuturePresentationInput,
     FutureAnimationInput,
+    FutureRenderSettingsInput,
     Navigation(&'static str),
     NavigationState(String),
     Presentation(String),
@@ -1277,6 +1389,9 @@ impl fmt::Display for ReduceError {
             }
             Self::InvalidAnimationClock => formatter
                 .write_str("animation time and speed must remain finite"),
+            Self::InvalidRenderSettings(message) => {
+                write!(formatter, "render settings failed validation: {message}")
+            }
             Self::FutureEffectInput => formatter.write_str(
                 "effect-producing input cannot be scheduled beyond the current app frame",
             ),
@@ -1284,6 +1399,9 @@ impl fmt::Display for ReduceError {
                 .write_str("presentation input cannot be scheduled beyond the current app frame"),
             Self::FutureAnimationInput => formatter
                 .write_str("animation input cannot be scheduled beyond the current app frame"),
+            Self::FutureRenderSettingsInput => formatter.write_str(
+                "render-settings input cannot be scheduled beyond the current app frame",
+            ),
             Self::Navigation(message) => write!(formatter, "navigation event failed: {message}"),
             Self::NavigationState(message) => {
                 write!(formatter, "navigation synchronization failed: {message}")
@@ -1380,6 +1498,111 @@ mod tests {
     fn presentation_fixture() -> Presentation {
         Presentation::from_json(hyperscape::HACKER_NIGHT_PRESENTATION_JSON)
         .unwrap()
+    }
+
+    #[test]
+    fn render_settings_are_atomic_validated_and_revision_fenced() {
+        let store = AppStore::default();
+        assert_eq!(store.render_snapshot().settings, RenderSettings::default());
+        let settings = RenderSettings {
+            style: RenderStyle::Stretch,
+            resolution_level: 6,
+            tessellation: PresentationTessellation {
+                density: 237.5,
+                screen_attenuation: false,
+                min_pixels_per_subdivision: 63.5,
+            },
+            atlas_exponent: 9,
+            max_face_edge_ratio: 4,
+        };
+
+        let commit = store
+            .dispatch(AppEvent::Input(Timed {
+                sequence: 1,
+                at_seconds: 0.0,
+                value: SemanticAction::SetRenderSettings(settings),
+            }))
+            .unwrap();
+        let render = store.render_snapshot();
+        assert_eq!(render.revision, commit.revision);
+        assert_eq!(render.revision, store.summary_snapshot().revision);
+        assert_eq!(render.settings, settings);
+
+        let before = render;
+        let invalid = RenderSettings {
+            tessellation: PresentationTessellation {
+                density: f64::NAN,
+                ..settings.tessellation
+            },
+            ..settings
+        };
+        assert_eq!(
+            store.dispatch(AppEvent::Input(Timed {
+                sequence: 2,
+                at_seconds: 0.0,
+                value: SemanticAction::SetRenderSettings(invalid),
+            })),
+            Err(ReduceError::InvalidRenderSettings(
+                "tessellation density must be finite and in [1,500]",
+            )),
+        );
+        assert_eq!(store.render_snapshot(), before);
+        assert_eq!(store.summary_snapshot().revision, before.revision);
+
+        assert_eq!(
+            store.dispatch(AppEvent::Input(Timed {
+                sequence: 3,
+                at_seconds: 1.0,
+                value: SemanticAction::SetRenderSettings(settings),
+            })),
+            Err(ReduceError::FutureRenderSettingsInput),
+        );
+        assert_eq!(store.render_snapshot(), before);
+    }
+
+    #[test]
+    fn cue_activation_atomically_updates_only_authored_render_policy() {
+        let store = AppStore::default();
+        store
+            .dispatch(AppEvent::PresentationLoaded(presentation_fixture()))
+            .unwrap();
+        let session = RenderSettings {
+            style: RenderStyle::Stretch,
+            resolution_level: 6,
+            tessellation: PresentationTessellation {
+                density: 12.0,
+                screen_attenuation: false,
+                min_pixels_per_subdivision: 64.0,
+            },
+            atlas_exponent: 9,
+            max_face_edge_ratio: 4,
+        };
+        store
+            .dispatch(AppEvent::Input(Timed {
+                sequence: 1,
+                at_seconds: 0.0,
+                value: SemanticAction::SetRenderSettings(session),
+            }))
+            .unwrap();
+        let commit = store
+            .dispatch(AppEvent::Input(Timed {
+                sequence: 2,
+                at_seconds: 0.0,
+                value: SemanticAction::Present(PresentationAction::Start),
+            }))
+            .unwrap();
+
+        let active = store.presentation_snapshot().unwrap().active.unwrap();
+        let render = store.render_snapshot();
+        assert_eq!(render.revision, commit.revision);
+        assert_eq!(render.settings.style, active.render_style);
+        assert_eq!(render.settings.tessellation, active.tessellation);
+        assert_eq!(render.settings.resolution_level, session.resolution_level);
+        assert_eq!(render.settings.atlas_exponent, session.atlas_exponent);
+        assert_eq!(
+            render.settings.max_face_edge_ratio,
+            session.max_face_edge_ratio,
+        );
     }
 
     #[test]
