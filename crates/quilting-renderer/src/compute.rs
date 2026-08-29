@@ -1223,7 +1223,9 @@ pub struct WgslResidentGeometryBucketOracleWords {
     /// `(bucket, atlas, parity, compacted_first, compacted_count)`.
     pub bucket_ranges: Vec<[u32; 5]>,
     /// Exact five-word `DrawIndexedIndirect` records for triangle geometry.
-    pub indirect_arguments: Vec<[u32; 5]>,
+    pub triangle_indirect_arguments: Vec<[u32; 5]>,
+    /// Exact five-word `DrawIndexedIndirect` records for line geometry.
+    pub line_indirect_arguments: Vec<[u32; 5]>,
 }
 
 /// Sparse material/render-domain root runs expected from WebGPU. Only keys
@@ -1398,7 +1400,8 @@ fn wgsl_resident_geometry_bucket_oracle_words_with_domain_flags(
 
     let mut compacted_faces = Vec::with_capacity(packed_residents.len());
     let mut bucket_ranges = Vec::with_capacity(bucket_count);
-    let mut indirect_arguments = Vec::with_capacity(bucket_count);
+    let mut triangle_indirect_arguments = Vec::with_capacity(bucket_count);
+    let mut line_indirect_arguments = Vec::with_capacity(bucket_count);
     for (bucket, faces) in buckets.into_iter().enumerate() {
         let atlas_index = bucket / 2;
         let parity = bucket % 2;
@@ -1415,12 +1418,14 @@ fn wgsl_resident_geometry_bucket_oracle_words_with_domain_flags(
             compacted_count,
         ]);
         let draw = atlas_draws[atlas_index];
-        indirect_arguments.push([draw[1], compacted_count, draw[0], 0, 0]);
+        triangle_indirect_arguments.push([draw[1], compacted_count, draw[0], 0, 0]);
+        line_indirect_arguments.push([draw[3], compacted_count, draw[2], 0, 0]);
     }
     Ok(WgslResidentGeometryBucketOracleWords {
         compacted_faces,
         bucket_ranges,
-        indirect_arguments,
+        triangle_indirect_arguments,
+        line_indirect_arguments,
     })
 }
 
@@ -3866,7 +3871,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            oracle.indirect_arguments,
+            oracle.triangle_indirect_arguments,
             [
                 [6, 1, 10, 0, 0],
                 [6, 1, 10, 0, 0],
@@ -3874,6 +3879,17 @@ mod tests {
                 [12, 1, 20, 0, 0],
                 [18, 0, 40, 0, 0],
                 [18, 0, 40, 0, 0],
+            ],
+        );
+        assert_eq!(
+            oracle.line_indirect_arguments,
+            [
+                [8, 1, 100, 0, 0],
+                [8, 1, 100, 0, 0],
+                [16, 1, 108, 0, 0],
+                [16, 1, 108, 0, 0],
+                [24, 0, 124, 0, 0],
+                [24, 0, 124, 0, 0],
             ],
         );
     }

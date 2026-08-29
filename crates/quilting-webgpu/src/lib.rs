@@ -38,10 +38,10 @@ use quilting_core::batch::{
 use quilting_core::instance_layout::InstanceWriter;
 use quilting_core::material::{pbr_material_for_index, PbrAlphaMode, PbrMaterial};
 use quilting_core::render::{
-    FocusFieldPacket, PbrDrawClass, RenderBatchSnapshot, RenderCommand, RenderEntityTransform,
-    RenderFrame, RenderFrameOptions, RenderGeometry, RenderPass, RenderPoseIdentity,
-    RenderSceneSnapshot, RenderStyle, RenderSubmissionStats, RenderView, ResidentRootDrawDomain,
-    ResidentRootDrawDomains,
+    render_draw_passes, FocusFieldPacket, PbrDrawClass, RenderBatchSnapshot, RenderCommand,
+    RenderEntityTransform, RenderFrame, RenderFrameOptions, RenderGeometry, RenderPass,
+    RenderPoseIdentity, RenderSceneSnapshot, RenderStyle, RenderSubmissionStats, RenderView,
+    ResidentRootDrawDomain, ResidentRootDrawDomains,
 };
 use quilting_core::render_evidence::{
     render_image_signature, RenderImageChannelOrder, RenderImageOrigin, RenderImageSignature,
@@ -2300,7 +2300,7 @@ impl LodClassifierDevice {
             let expected_faces = if expected == 0 { vec![] } else { vec![0] };
             if bucketed.compacted_faces != expected_faces
                 || bucketed
-                    .indirect_arguments
+                    .triangle_indirect_arguments
                     .iter()
                     .map(|arguments| arguments[1])
                     .sum::<u32>()

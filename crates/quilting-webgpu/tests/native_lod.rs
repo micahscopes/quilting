@@ -41,18 +41,17 @@ fn live_patch_style_capability_has_one_authoritative_predicate() {
         assert!(supports_patch_presentation_style(style), "{style:?}");
     }
     assert!(!supports_patch_presentation_style(RenderStyle::Pbr));
-    for style in [RenderStyle::Normals, RenderStyle::Lod] {
-        assert!(supports_resident_root_render_style(style), "{style:?}");
-    }
     for style in [
-        RenderStyle::Pbr,
         RenderStyle::Matcap,
         RenderStyle::Wire,
+        RenderStyle::Normals,
         RenderStyle::MatcapWire,
+        RenderStyle::Lod,
         RenderStyle::Stretch,
     ] {
-        assert!(!supports_resident_root_render_style(style), "{style:?}");
+        assert!(supports_resident_root_render_style(style), "{style:?}");
     }
+    assert!(!supports_resident_root_render_style(RenderStyle::Pbr));
 }
 
 fn identity_matrix() -> [f32; 16] {
@@ -575,7 +574,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         assert_eq!(report.full_pipeline_words, 1);
         assert_eq!(report.resident_lod_words, 20);
         assert_eq!(report.resident_visibility_words, 4);
-        assert_eq!(report.resident_bucket_words, 243);
+        assert_eq!(report.resident_bucket_words, 303);
         assert_eq!(report.resident_root_topology_words, 240);
         assert_eq!(report.resident_root_prepared_words, 1040);
         assert_eq!(report.resident_root_domain_words, 18);
@@ -957,6 +956,70 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 .covered_pixels
                 > 0
         );
+        for style in [
+            RenderStyle::Matcap,
+            RenderStyle::Wire,
+            RenderStyle::MatcapWire,
+            RenderStyle::Stretch,
+        ] {
+            let style_frame = RenderFrame::build(
+                lod_frame.revision + style as u64 + 1,
+                render_frame.pose,
+                style,
+                render_frame.view.clone(),
+                render_frame.options,
+                &render_scene,
+            )
+            .unwrap();
+            let style_error_scope = classifier
+                .device()
+                .push_error_scope(wgpu::ErrorFilter::Validation);
+            let style_encoding = classifier
+                .render_offscreen_resident_roots(
+                    &style_frame,
+                    &render_scene,
+                    &root_model,
+                    &resident,
+                    &root_preparation,
+                    &root_geometry,
+                    &root_pipeline,
+                    &root_bindings,
+                    &packed_atlas,
+                    &target,
+                    LodPose::default(),
+                    0,
+                    true,
+                )
+                .unwrap();
+            assert_eq!(
+                style_encoding.logical_submission,
+                style_frame
+                    .expected_submission_stats(&render_scene)
+                    .unwrap(),
+            );
+            assert_eq!(
+                style_encoding.indirect_draw_calls,
+                if style == RenderStyle::MatcapWire {
+                    4
+                } else {
+                    2
+                },
+            );
+            classifier
+                .device()
+                .poll(wgpu::PollType::wait_indefinitely())
+                .unwrap();
+            if let Some(error) = style_error_scope.pop().await {
+                panic!("resident root {style:?} validation: {error}");
+            }
+            assert!(
+                offscreen_signature(&classifier, &target)
+                    .await
+                    .covered_pixels
+                    > 0,
+                "{style:?}",
+            );
+        }
         let error_scope = classifier
             .device()
             .push_error_scope(wgpu::ErrorFilter::Validation);

@@ -8,10 +8,11 @@
 @group(0) @binding(5) var<storage, read_write> chunk_offsets: array<u32>;
 @group(0) @binding(6) var<storage, read_write> bucket_counts: array<u32>;
 @group(0) @binding(7) var<storage, read_write> bucket_ranges: array<ResidentBucketRangeRecord>;
-@group(0) @binding(8) var<storage, read_write> indirect_arguments: array<ResidentIndexedIndirectArguments>;
-@group(0) @binding(9) var<storage, read_write> compacted_faces: array<u32>;
-@group(0) @binding(10) var<storage, read> face_domain_rows: array<u32>;
-@group(0) @binding(11) var<storage, read> draw_domains: array<ResidentDrawDomainRecord>;
+@group(0) @binding(8) var<storage, read_write> triangle_indirect_arguments: array<ResidentIndexedIndirectArguments>;
+@group(0) @binding(9) var<storage, read_write> line_indirect_arguments: array<ResidentIndexedIndirectArguments>;
+@group(0) @binding(10) var<storage, read_write> compacted_faces: array<u32>;
+@group(0) @binding(11) var<storage, read> face_domain_rows: array<u32>;
+@group(0) @binding(12) var<storage, read> draw_domains: array<ResidentDrawDomainRecord>;
 
 var<workgroup> histogram: array<atomic<u32>, 510>;
 var<workgroup> local_buckets: array<u32, 64>;
@@ -94,10 +95,17 @@ fn scan_resident_geometry_buckets(@builtin(global_invocation_id) invocation: vec
             compacted_first,
             count,
         );
-        indirect_arguments[bucket] = ResidentIndexedIndirectArguments(
+        triangle_indirect_arguments[bucket] = ResidentIndexedIndirectArguments(
             draw.triangle_index_count,
             count,
             draw.triangle_first_index,
+            0,
+            0u,
+        );
+        line_indirect_arguments[bucket] = ResidentIndexedIndirectArguments(
+            draw.line_index_count,
+            count,
+            draw.line_first_index,
             0,
             0u,
         );

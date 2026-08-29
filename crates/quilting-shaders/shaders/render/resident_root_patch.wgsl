@@ -1,4 +1,4 @@
-#import quilting::render::patch_vertex::{PatchRenderFrame, PatchVertexOutput, evaluate_prepared_patch_vertex, shade_patch_lod, shade_patch_normals}
+#import quilting::render::patch_vertex::{PatchRenderFrame, PatchVertexOutput, evaluate_prepared_patch_vertex, shade_patch_lod, shade_patch_matcap, shade_patch_normals, shade_patch_stretch, shade_patch_wire}
 #import quilting::surface::patch_prepare::PreparedPatchRecord
 #import quilting::compute::resident_bucket_types::{ResidentBucketRangeRecord, ResidentDrawDomainRecord}
 
@@ -56,4 +56,19 @@ fn render_resident_root_normals(
 @fragment
 fn render_resident_root_lod(input: PatchVertexOutput) -> @location(0) vec4<f32> {
     return shade_patch_lod(input);
+}
+
+@fragment
+fn render_resident_root_matcap(input: PatchVertexOutput) -> @location(0) vec4<f32> {
+    return shade_patch_matcap(input);
+}
+
+@fragment
+fn render_resident_root_stretch(input: PatchVertexOutput) -> @location(0) vec4<f32> {
+    return shade_patch_stretch(input);
+}
+
+@fragment
+fn render_resident_root_wire(input: PatchVertexOutput) -> @location(0) vec4<f32> {
+    return shade_patch_wire(input);
 }

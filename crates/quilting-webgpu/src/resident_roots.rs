@@ -6,9 +6,9 @@
 use super::*;
 
 /// Styles whose fragment inputs are complete in the direct source-root path.
-/// Material-bound styles remain on the established prepared-patch renderer.
+/// PBR remains on the established material-bound prepared-patch renderer.
 pub fn supports_resident_root_render_style(style: RenderStyle) -> bool {
-    matches!(style, RenderStyle::Normals | RenderStyle::Lod)
+    style != RenderStyle::Pbr
 }
 
 /// Whether one extracted scene can be rendered exactly from its source roots
@@ -58,7 +58,8 @@ pub struct ResidentGeometryBucketScene {
     pub(super) _bucket_counts: wgpu::Buffer,
     pub(super) compacted_faces: wgpu::Buffer,
     pub(super) bucket_ranges: wgpu::Buffer,
-    pub(super) indirect_arguments: wgpu::Buffer,
+    pub(super) triangle_indirect_arguments: wgpu::Buffer,
+    pub(super) line_indirect_arguments: wgpu::Buffer,
     pub(super) histogram_bind_group: wgpu::BindGroup,
     pub(super) prefix_bind_group: wgpu::BindGroup,
     pub(super) scan_bind_group: wgpu::BindGroup,
@@ -71,7 +72,8 @@ pub struct ResidentGeometryBucketScene {
 pub struct ResidentGeometryBucketOutput {
     pub compacted_faces: Vec<u32>,
     pub bucket_ranges: Vec<[u32; 5]>,
-    pub indirect_arguments: Vec<[u32; 5]>,
+    pub triangle_indirect_arguments: Vec<[u32; 5]>,
+    pub line_indirect_arguments: Vec<[u32; 5]>,
 }
 
 /// Source-face-indexed root topology reconstructed from packed resident LOD.
@@ -117,8 +119,11 @@ pub struct ResidentRootDrawDomainOutput {
 /// device-generated atlas/parity bucket plan.
 pub struct ResidentRootRenderPipeline {
     bind_group_layout: wgpu::BindGroupLayout,
+    matcap: ResidentRootWindingPipelines,
     normals: ResidentRootWindingPipelines,
     lod: ResidentRootWindingPipelines,
+    stretch: ResidentRootWindingPipelines,
+    wire: ResidentRootWindingPipelines,
 }
 
 struct ResidentRootWindingPipelines {
@@ -181,8 +186,12 @@ impl ResidentGeometryBucketScene {
         &self.bucket_ranges
     }
 
-    pub fn indirect_arguments_buffer(&self) -> &wgpu::Buffer {
-        &self.indirect_arguments
+    pub fn triangle_indirect_arguments_buffer(&self) -> &wgpu::Buffer {
+        &self.triangle_indirect_arguments
+    }
+
+    pub fn line_indirect_arguments_buffer(&self) -> &wgpu::Buffer {
+        &self.line_indirect_arguments
     }
 }
 
@@ -249,10 +258,13 @@ impl ResidentRootRenderBindings {
 }
 
 impl ResidentRootRenderPipeline {
-    fn for_style(&self, style: RenderStyle) -> Option<&ResidentRootWindingPipelines> {
-        match style {
-            RenderStyle::Normals => Some(&self.normals),
-            RenderStyle::Lod => Some(&self.lod),
+    fn for_pass(&self, pass: RenderPass) -> Option<&ResidentRootWindingPipelines> {
+        match pass {
+            RenderPass::Matcap => Some(&self.matcap),
+            RenderPass::Normals => Some(&self.normals),
+            RenderPass::Lod => Some(&self.lod),
+            RenderPass::Stretch => Some(&self.stretch),
+            RenderPass::Wire => Some(&self.wire),
             _ => None,
         }
     }
@@ -354,7 +366,7 @@ impl LodClassifierDevice {
             bias: wgpu::DepthBiasState::default(),
         });
         let attributes = wgpu::vertex_attr_array![0 => Float32x3];
-        let create = |label, fragment_entry_point, front_face| {
+        let create = |label, fragment_entry_point, geometry, front_face| {
             self.device
                 .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(label),
@@ -372,7 +384,10 @@ impl LodClassifierDevice {
                         }],
                     },
                     primitive: wgpu::PrimitiveState {
-                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        topology: match geometry {
+                            RenderGeometry::Triangles => wgpu::PrimitiveTopology::TriangleList,
+                            RenderGeometry::Lines => wgpu::PrimitiveTopology::LineList,
+                        },
                         front_face,
                         cull_mode: None,
                         ..Default::default()
@@ -396,19 +411,36 @@ impl LodClassifierDevice {
                     cache: None,
                 })
         };
-        let create_style = |label, fragment_entry_point| ResidentRootWindingPipelines {
-            counter_clockwise: create(label, fragment_entry_point, wgpu::FrontFace::Ccw),
-            clockwise: create(label, fragment_entry_point, wgpu::FrontFace::Cw),
+        let create_style = |label, fragment_entry_point, geometry| ResidentRootWindingPipelines {
+            counter_clockwise: create(label, fragment_entry_point, geometry, wgpu::FrontFace::Ccw),
+            clockwise: create(label, fragment_entry_point, geometry, wgpu::FrontFace::Cw),
         };
         Ok(ResidentRootRenderPipeline {
             bind_group_layout,
+            matcap: create_style(
+                "quilting resident root matcap",
+                quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_MATCAP_ENTRY_POINT,
+                RenderGeometry::Triangles,
+            ),
             normals: create_style(
                 "quilting resident root normals",
                 quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_NORMALS_ENTRY_POINT,
+                RenderGeometry::Triangles,
             ),
             lod: create_style(
                 "quilting resident root LOD",
                 quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_LOD_ENTRY_POINT,
+                RenderGeometry::Triangles,
+            ),
+            stretch: create_style(
+                "quilting resident root stretch",
+                quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_STRETCH_ENTRY_POINT,
+                RenderGeometry::Triangles,
+            ),
+            wire: create_style(
+                "quilting resident root wire",
+                quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_WIRE_ENTRY_POINT,
+                RenderGeometry::Lines,
             ),
         })
     }
@@ -559,12 +591,16 @@ impl LodClassifierDevice {
         num_joints: u32,
         use_qb: bool,
     ) -> Result<ResidentRootFrameEncoding, LodWebGpuError> {
-        let style_pipeline = pipeline.for_style(frame.style).ok_or_else(|| {
-            LodWebGpuError::Payload(format!(
+        let draw_passes = render_draw_passes(frame.style);
+        if draw_passes
+            .iter()
+            .any(|draw| pipeline.for_pass(draw.pass).is_none())
+        {
+            return Err(LodWebGpuError::Payload(format!(
                 "resident root renderer does not support {:?}",
                 frame.style,
-            ))
-        })?;
+            )));
+        }
         if bindings.model_identity != model.identity
             || geometry.model_identity != model.identity
             || preparation.topology.model_identity != model.identity
@@ -615,30 +651,49 @@ impl LodClassifierDevice {
             multiview_mask: None,
         });
         pass.set_vertex_buffer(0, atlas.barycentric_buffer.slice(..));
-        pass.set_index_buffer(
-            atlas.triangle_index_buffer.slice(..),
-            wgpu::IndexFormat::Uint32,
-        );
-        for bucket in 0..geometry.bucket_count {
-            let render_pipeline = if bucket % 2 == 0 {
-                &style_pipeline.counter_clockwise
-            } else {
-                &style_pipeline.clockwise
+        let mut indirect_draw_calls = 0u32;
+        for draw in draw_passes {
+            let style_pipeline = pipeline
+                .for_pass(draw.pass)
+                .expect("resident root pass support was validated above");
+            let indirect_arguments = match draw.geometry {
+                RenderGeometry::Triangles => {
+                    pass.set_index_buffer(
+                        atlas.triangle_index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    &geometry.triangle_indirect_arguments
+                }
+                RenderGeometry::Lines => {
+                    pass.set_index_buffer(
+                        atlas.line_index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    &geometry.line_indirect_arguments
+                }
             };
-            pass.set_pipeline(render_pipeline);
-            pass.set_bind_group(
-                0,
-                &bindings.bind_group,
-                &[bucket * bindings.bucket_index_uniform_stride],
-            );
-            pass.draw_indexed_indirect(
-                &geometry.indirect_arguments,
-                u64::from(bucket) * INDEXED_INDIRECT_RECORD_BYTES,
-            );
+            for bucket in 0..geometry.bucket_count {
+                let render_pipeline = if bucket % 2 == 0 {
+                    &style_pipeline.counter_clockwise
+                } else {
+                    &style_pipeline.clockwise
+                };
+                pass.set_pipeline(render_pipeline);
+                pass.set_bind_group(
+                    0,
+                    &bindings.bind_group,
+                    &[bucket * bindings.bucket_index_uniform_stride],
+                );
+                pass.draw_indexed_indirect(
+                    indirect_arguments,
+                    u64::from(bucket) * INDEXED_INDIRECT_RECORD_BYTES,
+                );
+                indirect_draw_calls = indirect_draw_calls.saturating_add(1);
+            }
         }
         drop(pass);
         Ok(ResidentRootFrameEncoding {
-            indirect_draw_calls: geometry.bucket_count,
+            indirect_draw_calls,
             source_face_count: geometry.face_count,
         })
     }
@@ -1239,9 +1294,17 @@ impl LodClassifierDevice {
             range_bytes,
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         );
-        let indirect_arguments = gpu_buffer(
+        let triangle_indirect_arguments = gpu_buffer(
             &self.device,
-            "resident geometry indirect arguments",
+            "resident geometry triangle indirect arguments",
+            indirect_bytes,
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_SRC,
+        );
+        let line_indirect_arguments = gpu_buffer(
+            &self.device,
+            "resident geometry line indirect arguments",
             indirect_bytes,
             wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::INDIRECT
@@ -1259,8 +1322,8 @@ impl LodClassifierDevice {
                 bind(1, resident_records),
                 bind(2, &root_eligibility),
                 bind(4, &chunk_counts),
-                bind(10, &draw_domains.face_domain_rows),
-                bind(11, &draw_domains.domain_records),
+                bind(11, &draw_domains.face_domain_rows),
+                bind(12, &draw_domains.domain_records),
             ],
         });
         let prefix_layout = self
@@ -1285,7 +1348,8 @@ impl LodClassifierDevice {
                 bind(3, &atlas_draw_buffer),
                 bind(6, &bucket_counts),
                 bind(7, &bucket_ranges),
-                bind(8, &indirect_arguments),
+                bind(8, &triangle_indirect_arguments),
+                bind(9, &line_indirect_arguments),
             ],
         });
         let scatter_layout = self
@@ -1300,9 +1364,9 @@ impl LodClassifierDevice {
                 bind(2, &root_eligibility),
                 bind(5, &chunk_offsets),
                 bind(7, &bucket_ranges),
-                bind(9, &compacted_faces),
-                bind(10, &draw_domains.face_domain_rows),
-                bind(11, &draw_domains.domain_records),
+                bind(10, &compacted_faces),
+                bind(11, &draw_domains.face_domain_rows),
+                bind(12, &draw_domains.domain_records),
             ],
         });
         Ok(ResidentGeometryBucketScene {
@@ -1320,7 +1384,8 @@ impl LodClassifierDevice {
             _bucket_counts: bucket_counts,
             compacted_faces,
             bucket_ranges,
-            indirect_arguments,
+            triangle_indirect_arguments,
+            line_indirect_arguments,
             histogram_bind_group,
             prefix_bind_group,
             scan_bind_group,
@@ -1463,9 +1528,15 @@ impl LodClassifierDevice {
             range_bytes,
             wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         );
-        let indirect_readback = gpu_buffer(
+        let triangle_indirect_readback = gpu_buffer(
             &self.device,
-            "resident geometry indirect diagnostic readback",
+            "resident geometry triangle indirect diagnostic readback",
+            indirect_bytes,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let line_indirect_readback = gpu_buffer(
+            &self.device,
+            "resident geometry line indirect diagnostic readback",
             indirect_bytes,
             wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         );
@@ -1478,9 +1549,16 @@ impl LodClassifierDevice {
         encoder.copy_buffer_to_buffer(&scene.compacted_faces, 0, &face_readback, 0, face_bytes);
         encoder.copy_buffer_to_buffer(&scene.bucket_ranges, 0, &range_readback, 0, range_bytes);
         encoder.copy_buffer_to_buffer(
-            &scene.indirect_arguments,
+            &scene.triangle_indirect_arguments,
             0,
-            &indirect_readback,
+            &triangle_indirect_readback,
+            0,
+            indirect_bytes,
+        );
+        encoder.copy_buffer_to_buffer(
+            &scene.line_indirect_arguments,
+            0,
+            &line_indirect_readback,
             0,
             indirect_bytes,
         );
@@ -1489,10 +1567,15 @@ impl LodClassifierDevice {
             self.readback_words(&range_readback, range_bytes).await?,
             "resident geometry range",
         )?;
-        let indirect_arguments = words_to_five_records(
-            self.readback_words(&indirect_readback, indirect_bytes)
+        let triangle_indirect_arguments = words_to_five_records(
+            self.readback_words(&triangle_indirect_readback, indirect_bytes)
                 .await?,
-            "resident geometry indirect",
+            "resident geometry triangle indirect",
+        )?;
+        let line_indirect_arguments = words_to_five_records(
+            self.readback_words(&line_indirect_readback, indirect_bytes)
+                .await?,
+            "resident geometry line indirect",
         )?;
         let survivor_count = bucket_ranges
             .last()
@@ -1502,7 +1585,8 @@ impl LodClassifierDevice {
         Ok(ResidentGeometryBucketOutput {
             compacted_faces,
             bucket_ranges,
-            indirect_arguments,
+            triangle_indirect_arguments,
+            line_indirect_arguments,
         })
     }
 
@@ -1719,11 +1803,11 @@ impl LodClassifierDevice {
             prepare_lod_atlas_lookup(atlas_keys).map_err(LodWebGpuError::Conformance)?;
         let atlas = self.upload_packed_patch_atlas(
             &[
-                1, 2, 4, 6, 3, 0, 0, 1, 1, 1, 0, 3, 0, 0, 1, 1, 2, 3, 3, 0, 0,
+                1, 2, 4, 6, 3, 0, 6, 1, 1, 1, 0, 3, 0, 6, 1, 1, 2, 3, 3, 0, 6,
             ],
             &[1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
             &[0, 1, 2, 0, 1, 2, 0, 1, 2],
-            &[],
+            &[0, 1, 1, 2, 2, 0],
         )?;
         let face_count = 137usize;
         let permutations = [0, 1, 2, 4, 3, 5];
@@ -1825,7 +1909,7 @@ impl LodClassifierDevice {
                 "resident geometry accepted nonzero eligibility padding".to_string(),
             ));
         }
-        let atlas_draws = [[0, 3, 0, 0], [3, 3, 0, 0], [6, 3, 0, 0]];
+        let atlas_draws = [[0, 3, 0, 6], [3, 3, 0, 6], [6, 3, 0, 6]];
         let suppression_cases = [
             vec![2, 64, 65, 130],
             (0..face_count as u32)
@@ -1848,7 +1932,8 @@ impl LodClassifierDevice {
                 .await?;
             if actual.compacted_faces != expected.compacted_faces
                 || actual.bucket_ranges != expected.bucket_ranges
-                || actual.indirect_arguments != expected.indirect_arguments
+                || actual.triangle_indirect_arguments != expected.triangle_indirect_arguments
+                || actual.line_indirect_arguments != expected.line_indirect_arguments
             {
                 return Err(LodWebGpuError::Conformance(format!(
                     "resident geometry bucket mismatch for suppression {suppressed:?}: expected {expected:?}, got {actual:?}",
@@ -1856,7 +1941,8 @@ impl LodClassifierDevice {
             }
             compared_words += actual.compacted_faces.len()
                 + actual.bucket_ranges.len() * 5
-                + actual.indirect_arguments.len() * 5;
+                + actual.triangle_indirect_arguments.len() * 5
+                + actual.line_indirect_arguments.len() * 5;
         }
         Ok(compared_words)
     }
