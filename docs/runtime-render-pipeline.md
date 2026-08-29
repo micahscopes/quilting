@@ -741,16 +741,26 @@ Authored PBR state now crosses the backend boundary as validated
 `RenderSceneSnapshot`. Texture references are typed optional indices rather
 than negative sentinels, glTF's infinite attenuation distance remains an
 explicit `None`, and both backends use the same material-index fallback rule.
-WebGPU retains a stable 96-byte material table and can render the untextured
-opaque/masked subset with shared Rust BRDF code, alpha masking, unlit and
-double-sided semantics, selection tint, tone mapping, and fade. Radeon/Vulkan
-produces a nonempty image distinct from every diagnostic style for a scene with
-two authored materials. This is deliberately not a live-browser cut yet:
-preflight rejects textures, alpha blend/transmission, sheen, focus
-postprocessing, and nonopaque draw classes before encoding, and Hyperscope
-keeps WebGL2 visible. The next PBR boundary is retained browser texture and
-environment residency, followed by transmission/focus resources and direct
-cross-backend image evidence.
+WebGPU retains a stable 160-byte material table and renders the opaque/masked
+subset with shared Rust BRDF code, alpha masking, unlit and double-sided
+semantics, selection tint, tone mapping, and fade. The expanded record preserves
+normal scale, occlusion strength, base/normal UV transforms, transmission and
+volume factors, and a compact authored-texture mask. Decoded glTF images remain
+in a sparse index-preserving device table with linear and sRGB views. Baseline
+per-material bind groups resolve base color, metallic/roughness, normal,
+emissive, occlusion, and transmission channels without sampled-texture arrays;
+white, black, and flat-normal 1x1 resources give every unavailable slot a
+channel-correct fallback. Browser `ImageBitmap` handles copy directly into that
+table before closure, without canvas readback or a texture-sized WASM copy.
+
+The required Radeon/Vulkan gate now validates sparse binding residency and
+renders a real base-color texture through the shared PBR draw; its image is
+nonempty and differs from the factor-only oracle. This is deliberately not a
+live-browser cut yet: environment IBL, transmission/blend sequencing, focus
+postprocessing, and direct browser cross-backend texture image evidence remain
+required, so Hyperscope still keeps WebGL2 visible for PBR. Texture-free and
+textured candidates fail before publication if their device resources cannot be
+made coherent with the retained material table.
 
 Cross-backend image evidence now has one backend-neutral diagnostic contract
 in `quilting-core`. It validates exact dimensions and row strides, normalizes
