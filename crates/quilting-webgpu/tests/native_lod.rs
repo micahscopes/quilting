@@ -5,7 +5,8 @@ use quilting_core::batch::{
 };
 use quilting_core::instance_layout::{self, InstanceWriter};
 use quilting_core::material::{
-    PbrMaterial, PbrTextureReferences, Rgba8TextureAsset, TextureAssetDescriptor, TextureWrapMode,
+    EnvironmentMapAsset, EnvironmentMapDescriptor, PbrMaterial, PbrTextureReferences,
+    Rgba8TextureAsset, TextureAssetDescriptor, TextureWrapMode,
 };
 use quilting_core::quaternion::{Mobius, Quat};
 use quilting_core::render::{
@@ -474,6 +475,70 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             .unwrap();
         if let Some(error) = error_scope.pop().await {
             panic!("PBR texture residency validation: {error}");
+        }
+
+        let environment_descriptor = EnvironmentMapDescriptor {
+            prefiltered_face_size: 2,
+            prefiltered_mip_count: 2,
+            irradiance_face_size: 1,
+        };
+        let exact_half_values = [0.0, 0.5, 1.0, 2.0];
+        let prefiltered = (0..environment_descriptor.prefiltered_rgba32f_len().unwrap())
+            .map(|index| exact_half_values[index % exact_half_values.len()])
+            .collect::<Vec<_>>();
+        let irradiance = (0..environment_descriptor.irradiance_rgba32f_len().unwrap())
+            .map(|index| exact_half_values[(index + 1) % exact_half_values.len()])
+            .collect::<Vec<_>>();
+        let environment_asset =
+            EnvironmentMapAsset::new(environment_descriptor, &prefiltered, &irradiance).unwrap();
+        let environment_error_scope = classifier
+            .device()
+            .push_error_scope(wgpu::ErrorFilter::Validation);
+        let environment = classifier
+            .upload_pbr_environment_map(environment_asset)
+            .unwrap();
+        assert_eq!(environment.descriptor(), environment_descriptor);
+        assert_eq!(environment.prefiltered_mip_count(), 2);
+        assert_eq!(
+            classifier
+                .read_pbr_environment_face_for_diagnostics(&environment, true, 0, 3)
+                .await
+                .unwrap(),
+            prefiltered[48..64],
+        );
+        assert_eq!(
+            classifier
+                .read_pbr_environment_face_for_diagnostics(&environment, true, 1, 5)
+                .await
+                .unwrap(),
+            prefiltered[116..120],
+        );
+        assert_eq!(
+            classifier
+                .read_pbr_environment_face_for_diagnostics(&environment, false, 0, 4)
+                .await
+                .unwrap(),
+            irradiance[16..20],
+        );
+        let mut out_of_range = prefiltered.clone();
+        out_of_range[7] = 70_000.0;
+        let out_of_range_error = classifier
+            .upload_pbr_environment_map(EnvironmentMapAsset {
+                descriptor: environment_descriptor,
+                prefiltered_rgba32f: &out_of_range,
+                irradiance_rgba32f: &irradiance,
+            })
+            .err()
+            .expect("out-of-range environment must be rejected");
+        assert!(out_of_range_error
+            .to_string()
+            .contains("exceeds RGBA16F range"));
+        classifier
+            .device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        if let Some(error) = environment_error_scope.pop().await {
+            panic!("PBR environment residency validation: {error}");
         }
 
         let report = classifier.run_conformance_matrix().await.unwrap();

@@ -21,6 +21,7 @@ browser-conformance = [
 [dependencies]
 bytemuck = "1"
 futures-channel = "0.3"
+half = "2.7.1"
 quilting-core = { version = "0.1.0", path = "../quilting-core" }
 quilting-renderer = { version = "0.1.0", path = "../quilting-renderer" }
 quilting-shaders = { version = "0.1.0", path = "../quilting-shaders" }

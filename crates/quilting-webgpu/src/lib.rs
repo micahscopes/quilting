@@ -7,6 +7,7 @@
 //! state, browser layout, and canvas selection remain application concerns.
 
 mod adaptive_overlay;
+mod pbr_environment;
 mod pbr_resources;
 mod presentation;
 mod resident_roots;
@@ -14,6 +15,7 @@ mod resident_roots;
 pub use adaptive_overlay::{
     AdaptiveOverlayFrameEncoding, AdaptiveOverlayScene, ResidentAdaptiveFrameEncoding,
 };
+pub use pbr_environment::PbrEnvironmentMap;
 pub use pbr_resources::{
     PbrMaterialTextureBindings, PbrMaterialTextureResidency, PbrTextureTable, PbrTextureTableUpdate,
 };
