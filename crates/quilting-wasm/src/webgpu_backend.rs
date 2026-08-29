@@ -6,6 +6,7 @@
 //! application-supplied canvas. Canvas selection remains an explicit startup
 //! decision; a claimed context is never silently repurposed.
 
+use quilting_core::material::{TextureAssetDescriptor, TextureWrapMode};
 use quilting_core::render::{
     RenderFrame, RenderFrameOptions, RenderPoseIdentity, RenderSceneSnapshot, RenderStyle,
     RenderSubmissionStats, RenderView,
@@ -14,8 +15,8 @@ use quilting_renderer::compute::{LodAtlasLookup, PreparedLodModel};
 use quilting_webgpu::{
     DiagnosticPatchRenderPipelines, LodClassifierDevice, LodClassifierModel, LodPose,
     OffscreenPatchRenderTarget, PackedPatchAtlas, PatchFrameEncoding, PatchPresentationSurface,
-    PatchRenderScene, PatchRenderSceneUpdate, StagedOffscreenImageReadback, SurfacePresentation,
-    WebGpuAdapterSummary,
+    PatchRenderScene, PatchRenderSceneUpdate, PbrTextureTable, StagedOffscreenImageReadback,
+    SurfacePresentation, WebGpuAdapterSummary,
 };
 use serde::Serialize;
 use std::cell::RefCell;
@@ -30,6 +31,7 @@ struct WebGpuBackend {
     device: Option<LodClassifierDevice>,
     adapter: Option<WebGpuAdapterSummary>,
     atlas: Option<PackedPatchAtlas>,
+    textures: Option<PbrTextureTable>,
     model: Option<LodClassifierModel>,
     model_source: Option<PreparedLodModel>,
     pipelines: Option<DiagnosticPatchRenderPipelines>,
@@ -45,6 +47,7 @@ struct WebGpuBackend {
     next_morph_weights: Vec<f32>,
     initialization_attempts: u64,
     atlas_uploads: u64,
+    texture_uploads: u64,
     model_uploads: u64,
     scene_uploads: u64,
     scene_rebuilds: u64,
@@ -95,6 +98,9 @@ pub(crate) struct WebGpuBackendDiagnostics {
     atlas_ready: bool,
     atlas_entries: usize,
     atlas_vertices: u32,
+    textures_ready: bool,
+    texture_slots: usize,
+    texture_images: usize,
     model_ready: bool,
     model_faces: usize,
     scene_ready: bool,
@@ -111,6 +117,7 @@ pub(crate) struct WebGpuBackendDiagnostics {
     presentation_losses: u64,
     initialization_attempts: u64,
     atlas_uploads: u64,
+    texture_uploads: u64,
     model_uploads: u64,
     scene_uploads: u64,
     scene_rebuilds: u64,
@@ -156,6 +163,12 @@ impl WebGpuBackend {
                 .atlas
                 .as_ref()
                 .map_or(0, PackedPatchAtlas::vertex_count),
+            textures_ready: self.textures.is_some(),
+            texture_slots: self.textures.as_ref().map_or(0, PbrTextureTable::len),
+            texture_images: self
+                .textures
+                .as_ref()
+                .map_or(0, PbrTextureTable::occupied_len),
             model_ready: self.model.is_some(),
             model_faces: self
                 .model_source
@@ -193,6 +206,7 @@ impl WebGpuBackend {
                 .map_or(0, |presentation| presentation.surface_losses),
             initialization_attempts: self.initialization_attempts,
             atlas_uploads: self.atlas_uploads,
+            texture_uploads: self.texture_uploads,
             model_uploads: self.model_uploads,
             scene_uploads: self.scene_uploads,
             scene_rebuilds: self.scene_rebuilds,
@@ -265,6 +279,7 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
                     backend.device = Some(device);
                     backend.adapter = Some(adapter);
                     backend.atlas = None;
+                    backend.textures = None;
                     backend.model = None;
                     backend.model_source = None;
                     backend.pipelines = Some(pipelines);
@@ -348,6 +363,7 @@ pub(crate) async fn initialize_presentation(
         backend.device = Some(device);
         backend.adapter = Some(adapter);
         backend.atlas = None;
+        backend.textures = None;
         backend.model = None;
         backend.model_source = None;
         backend.pipelines = Some(pipelines);
@@ -366,6 +382,68 @@ pub(crate) async fn initialize_presentation(
         backend.last_error = None;
     });
     Ok(diagnostics())
+}
+
+/// Mirror the incumbent browser-decoded texture table into the ready WebGPU
+/// device before JavaScript closes its `ImageBitmap` handles. Missing images
+/// remain empty index slots. A rejected replacement leaves the prior table
+/// resident and does not disable the WebGL rollback renderer.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn replace_image_bitmaps(
+    images: &[Option<(web_sys::ImageBitmap, u32, u32)>],
+) -> Result<bool, String> {
+    BACKEND.with(|slot| {
+        let mut backend = slot.borrow_mut();
+        if backend.state != "ready" {
+            return Ok(false);
+        }
+        let assets = images
+            .iter()
+            .enumerate()
+            .map(|(index, image)| {
+                image
+                    .as_ref()
+                    .map(|(bitmap, wrap_s, wrap_t)| {
+                        Ok((
+                            texture_asset_descriptor(
+                                index,
+                                bitmap.width(),
+                                bitmap.height(),
+                                *wrap_s,
+                                *wrap_t,
+                            )?,
+                            bitmap.clone(),
+                        ))
+                    })
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>, String>>();
+        let assets = match assets {
+            Ok(assets) => assets,
+            Err(error) => {
+                backend.last_error = Some(error.clone());
+                return Err(error);
+            }
+        };
+        let result = backend
+            .device
+            .as_ref()
+            .ok_or_else(|| "ready WebGPU backend has no device".to_string())?
+            .upload_pbr_image_bitmap_table(&assets)
+            .map_err(|error| error.to_string());
+        match result {
+            Ok(textures) => {
+                backend.textures = Some(textures);
+                backend.texture_uploads = backend.texture_uploads.saturating_add(1);
+                backend.last_error = None;
+                Ok(true)
+            }
+            Err(error) => {
+                backend.last_error = Some(error.clone());
+                Err(error)
+            }
+        }
+    })
 }
 
 /// Replace packed atlas and any classifier model that embeds its lookup as one
@@ -981,6 +1059,29 @@ pub(crate) fn diagnostics() -> WebGpuBackendDiagnostics {
     BACKEND.with(|slot| slot.borrow().diagnostics())
 }
 
+fn texture_asset_descriptor(
+    index: usize,
+    width: u32,
+    height: u32,
+    wrap_s: u32,
+    wrap_t: u32,
+) -> Result<TextureAssetDescriptor, String> {
+    let wrap_s = TextureWrapMode::from_gl_enum(wrap_s)
+        .ok_or_else(|| format!("PBR texture {index} has unsupported S wrap {wrap_s:#x}"))?;
+    let wrap_t = TextureWrapMode::from_gl_enum(wrap_t)
+        .ok_or_else(|| format!("PBR texture {index} has unsupported T wrap {wrap_t:#x}"))?;
+    let descriptor = TextureAssetDescriptor {
+        width,
+        height,
+        wrap_s,
+        wrap_t,
+    };
+    descriptor
+        .validate()
+        .map_err(|error| format!("PBR texture {index}: {error}"))?;
+    Ok(descriptor)
+}
+
 fn render_style_name(style: RenderStyle) -> &'static str {
     match style {
         RenderStyle::Pbr => "pbr",
@@ -990,5 +1091,41 @@ fn render_style_name(style: RenderStyle) -> &'static str {
         RenderStyle::MatcapWire => "both",
         RenderStyle::Lod => "lod",
         RenderStyle::Stretch => "stretch",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[wasm_bindgen_test]
+    fn browser_texture_descriptor_adapts_only_the_legacy_gl_wire_values() {
+        let descriptor = texture_asset_descriptor(
+            3,
+            17,
+            9,
+            TextureWrapMode::GL_REPEAT,
+            TextureWrapMode::GL_MIRRORED_REPEAT,
+        )
+        .unwrap();
+        assert_eq!(descriptor.width, 17);
+        assert_eq!(descriptor.height, 9);
+        assert_eq!(descriptor.wrap_s, TextureWrapMode::Repeat);
+        assert_eq!(descriptor.wrap_t, TextureWrapMode::MirroredRepeat);
+        assert!(
+            texture_asset_descriptor(3, 0, 9, TextureWrapMode::GL_REPEAT, 0)
+                .unwrap_err()
+                .contains("unsupported T wrap")
+        );
+        assert!(texture_asset_descriptor(
+            3,
+            0,
+            9,
+            TextureWrapMode::GL_REPEAT,
+            TextureWrapMode::GL_REPEAT,
+        )
+        .unwrap_err()
+        .contains("dimensions must be nonzero"));
     }
 }

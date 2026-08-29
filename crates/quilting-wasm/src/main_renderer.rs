@@ -7468,6 +7468,17 @@ pub fn mr_upload_image_bitmaps(
             .texture_cache
             .upload_image_bitmaps(state.renderer.gl(), &images);
         info!("Uploaded {uploaded}/{} ImageBitmap textures directly to WebGL", images.len());
+        #[cfg(feature = "webgpu-backend")]
+        match crate::webgpu_backend::replace_image_bitmaps(&images) {
+            Ok(true) => info!(
+                "Mirrored {uploaded}/{} ImageBitmap textures directly to WebGPU",
+                images.len()
+            ),
+            Ok(false) => {}
+            Err(error) => warn!(
+                "WebGPU ImageBitmap texture mirror failed; retaining WebGL textures: {error}"
+            ),
+        }
         Ok(uploaded)
     })
 }
