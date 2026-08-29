@@ -4,9 +4,19 @@
 //! not semantic scene state. This table therefore lives beside the WebGPU
 //! device epoch and is addressed by the stable indices in `PbrMaterial`.
 
-use crate::{LodClassifierDevice, LodWebGpuError};
+use crate::{LodClassifierDevice, LodWebGpuError, PatchRenderPipeline};
 use futures_channel::oneshot;
-use quilting_core::material::{Rgba8TextureAsset, TextureAssetDescriptor, TextureWrapMode};
+use quilting_core::material::{
+    PbrMaterial, PbrTextureReferences, Rgba8TextureAsset, TextureAssetDescriptor, TextureWrapMode,
+};
+
+pub(crate) const PBR_BASE_COLOR_TEXTURE_BIT: u32 = 1 << 0;
+pub(crate) const PBR_METALLIC_ROUGHNESS_TEXTURE_BIT: u32 = 1 << 1;
+pub(crate) const PBR_NORMAL_TEXTURE_BIT: u32 = 1 << 2;
+pub(crate) const PBR_EMISSIVE_TEXTURE_BIT: u32 = 1 << 3;
+pub(crate) const PBR_OCCLUSION_TEXTURE_BIT: u32 = 1 << 4;
+pub(crate) const PBR_TRANSMISSION_TEXTURE_BIT: u32 = 1 << 5;
+const PBR_TEXTURE_CHANNELS: usize = 6;
 
 pub(crate) struct PbrTextureResource {
     pub(crate) texture: wgpu::Texture,
@@ -21,6 +31,62 @@ pub(crate) struct PbrTextureResource {
 pub struct PbrTextureTable {
     descriptors: Vec<Option<TextureAssetDescriptor>>,
     resources: Vec<Option<PbrTextureResource>>,
+}
+
+/// Per-material evidence separating authored references from resources that
+/// were actually decoded and retained. Referenced-but-nonresident channels
+/// bind semantic placeholders without shifting any glTF texture index.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PbrMaterialTextureResidency {
+    referenced_mask: u32,
+    resident_mask: u32,
+}
+
+impl PbrMaterialTextureResidency {
+    pub fn referenced_mask(self) -> u32 {
+        self.referenced_mask
+    }
+
+    pub fn resident_mask(self) -> u32 {
+        self.resident_mask
+    }
+
+    pub fn unresolved_mask(self) -> u32 {
+        self.referenced_mask & !self.resident_mask
+    }
+}
+
+struct PbrPlaceholderResources {
+    white: PbrTextureResource,
+    black: PbrTextureResource,
+    flat_normal: PbrTextureResource,
+}
+
+/// One bind group per stable material-table slot. WebGPU's baseline limits do
+/// not promise dynamically indexed sampled-texture arrays, while extracted
+/// render batches are already grouped by material, so selecting one small bind
+/// group per indirect draw is both portable and congruent with the scene ABI.
+pub struct PbrMaterialTextureBindings {
+    material_count: u32,
+    residency: Vec<PbrMaterialTextureResidency>,
+    bind_groups: Vec<wgpu::BindGroup>,
+    _placeholders: PbrPlaceholderResources,
+}
+
+impl PbrMaterialTextureBindings {
+    pub fn material_count(&self) -> u32 {
+        self.material_count
+    }
+
+    pub fn residency(&self) -> &[PbrMaterialTextureResidency] {
+        &self.residency
+    }
+
+    pub(crate) fn bind_group(&self, material_slot: u32) -> Option<&wgpu::BindGroup> {
+        usize::try_from(material_slot)
+            .ok()
+            .and_then(|slot| self.bind_groups.get(slot))
+    }
 }
 
 impl PbrTextureTable {
@@ -68,6 +134,121 @@ pub enum PbrTextureTableUpdate {
 }
 
 impl LodClassifierDevice {
+    /// Resolve every stable material slot to one portable sampled-texture bind
+    /// group. Missing authored channels and unavailable decoded slots receive
+    /// channel-correct placeholders; residency diagnostics retain the
+    /// distinction so asset mismatches cannot become invisible.
+    pub fn create_pbr_material_texture_bindings(
+        &self,
+        pipeline: &PatchRenderPipeline,
+        materials: &[PbrMaterial],
+        textures: Option<&PbrTextureTable>,
+    ) -> Result<PbrMaterialTextureBindings, LodWebGpuError> {
+        if pipeline.style != quilting_core::render::RenderStyle::Pbr {
+            return Err(LodWebGpuError::Payload(
+                "PBR texture bindings require the PBR render pipeline".to_string(),
+            ));
+        }
+        let material_count = materials.len().max(1);
+        let material_count_u32 = u32::try_from(material_count).map_err(|_| {
+            LodWebGpuError::Payload("PBR material texture binding count exceeds u32".to_string())
+        })?;
+        for material in materials {
+            material
+                .validate()
+                .map_err(|error| LodWebGpuError::Payload(error.to_string()))?;
+        }
+
+        let placeholders = create_placeholder_resources(&self.device, &self.queue)?;
+        let default_material = PbrMaterial::default();
+        let mut residency = Vec::with_capacity(material_count);
+        let mut bind_groups = Vec::with_capacity(material_count);
+        for material_slot in 0..material_count {
+            let material = materials.get(material_slot).unwrap_or(&default_material);
+            let channels = [
+                resolve_material_texture(
+                    textures,
+                    material.textures.base_color,
+                    TextureInterpretation::Srgb,
+                    &placeholders.white,
+                ),
+                resolve_material_texture(
+                    textures,
+                    material.textures.metallic_roughness,
+                    TextureInterpretation::Linear,
+                    &placeholders.white,
+                ),
+                resolve_material_texture(
+                    textures,
+                    material.textures.normal,
+                    TextureInterpretation::Linear,
+                    &placeholders.flat_normal,
+                ),
+                resolve_material_texture(
+                    textures,
+                    material.textures.emissive,
+                    TextureInterpretation::Srgb,
+                    &placeholders.black,
+                ),
+                resolve_material_texture(
+                    textures,
+                    material.textures.occlusion,
+                    TextureInterpretation::Linear,
+                    &placeholders.white,
+                ),
+                resolve_material_texture(
+                    textures,
+                    material.textures.transmission,
+                    TextureInterpretation::Linear,
+                    &placeholders.white,
+                ),
+            ];
+            let resident_mask = channels
+                .iter()
+                .enumerate()
+                .fold(0u32, |mask, (channel, resolved)| {
+                    mask | (u32::from(resolved.resident) << channel)
+                });
+            residency.push(PbrMaterialTextureResidency {
+                referenced_mask: pbr_texture_reference_mask(material.textures),
+                resident_mask,
+            });
+
+            let mut entries = Vec::with_capacity(PBR_TEXTURE_CHANNELS * 2);
+            for (channel, resolved) in channels.iter().enumerate() {
+                let texture_binding = u32::try_from(channel * 2).expect("six channels fit u32");
+                entries.push(wgpu::BindGroupEntry {
+                    binding: texture_binding,
+                    resource: wgpu::BindingResource::TextureView(resolved.view),
+                });
+                entries.push(wgpu::BindGroupEntry {
+                    binding: texture_binding + 1,
+                    resource: wgpu::BindingResource::Sampler(resolved.sampler),
+                });
+            }
+            bind_groups.push(
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("quilting PBR material textures"),
+                    layout: pipeline
+                        .pbr_texture_bind_group_layout
+                        .as_ref()
+                        .ok_or_else(|| {
+                            LodWebGpuError::Payload(
+                                "PBR texture bindings require the PBR render pipeline".to_string(),
+                            )
+                        })?,
+                    entries: &entries,
+                }),
+            );
+        }
+        Ok(PbrMaterialTextureBindings {
+            material_count: material_count_u32,
+            residency,
+            bind_groups,
+            _placeholders: placeholders,
+        })
+    }
+
     /// Construct a complete replacement table before returning it to the
     /// caller. All descriptors and payload sizes are validated before the
     /// first resource is allocated or queue write is issued.
@@ -258,6 +439,110 @@ impl LodClassifierDevice {
         buffer.unmap();
         Ok(output)
     }
+}
+
+pub(crate) fn create_pbr_texture_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let mut entries = Vec::with_capacity(PBR_TEXTURE_CHANNELS * 2);
+    for channel in 0..PBR_TEXTURE_CHANNELS {
+        let texture_binding = u32::try_from(channel * 2).expect("six channels fit u32");
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: texture_binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        });
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: texture_binding + 1,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        });
+    }
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("quilting PBR material texture bindings"),
+        entries: &entries,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum TextureInterpretation {
+    Linear,
+    Srgb,
+}
+
+struct ResolvedMaterialTexture<'a> {
+    view: &'a wgpu::TextureView,
+    sampler: &'a wgpu::Sampler,
+    resident: bool,
+}
+
+fn resolve_material_texture<'a>(
+    table: Option<&'a PbrTextureTable>,
+    index: Option<u32>,
+    interpretation: TextureInterpretation,
+    placeholder: &'a PbrTextureResource,
+) -> ResolvedMaterialTexture<'a> {
+    let resident_resource = index.and_then(|index| table.and_then(|table| table.resource(index)));
+    let resident = resident_resource.is_some();
+    let resource = resident_resource.unwrap_or(placeholder);
+    let view = match interpretation {
+        TextureInterpretation::Linear => &resource.linear_view,
+        TextureInterpretation::Srgb => &resource.srgb_view,
+    };
+    ResolvedMaterialTexture {
+        view,
+        sampler: &resource.sampler,
+        resident,
+    }
+}
+
+pub(crate) fn pbr_texture_reference_mask(textures: PbrTextureReferences) -> u32 {
+    [
+        (textures.base_color, PBR_BASE_COLOR_TEXTURE_BIT),
+        (
+            textures.metallic_roughness,
+            PBR_METALLIC_ROUGHNESS_TEXTURE_BIT,
+        ),
+        (textures.normal, PBR_NORMAL_TEXTURE_BIT),
+        (textures.emissive, PBR_EMISSIVE_TEXTURE_BIT),
+        (textures.occlusion, PBR_OCCLUSION_TEXTURE_BIT),
+        (textures.transmission, PBR_TRANSMISSION_TEXTURE_BIT),
+    ]
+    .into_iter()
+    .fold(0, |mask, (index, bit)| mask | index.map_or(0, |_| bit))
+}
+
+fn create_placeholder_resources(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> Result<PbrPlaceholderResources, LodWebGpuError> {
+    Ok(PbrPlaceholderResources {
+        white: create_placeholder_resource(device, queue, [255, 255, 255, 255])?,
+        black: create_placeholder_resource(device, queue, [0, 0, 0, 255])?,
+        flat_normal: create_placeholder_resource(device, queue, [128, 128, 255, 255])?,
+    })
+}
+
+fn create_placeholder_resource(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    rgba: [u8; 4],
+) -> Result<PbrTextureResource, LodWebGpuError> {
+    let descriptor = TextureAssetDescriptor {
+        width: 1,
+        height: 1,
+        wrap_s: TextureWrapMode::ClampToEdge,
+        wrap_t: TextureWrapMode::ClampToEdge,
+    };
+    let resource = create_texture_resource(device, descriptor);
+    let asset = Rgba8TextureAsset::new(descriptor, &rgba)
+        .map_err(|error| LodWebGpuError::Payload(error.to_string()))?;
+    write_texture_asset(queue, &resource, asset)?;
+    Ok(resource)
 }
 
 fn validate_texture_assets(

@@ -5,7 +5,7 @@ use quilting_core::batch::{
 };
 use quilting_core::instance_layout::{self, InstanceWriter};
 use quilting_core::material::{
-    PbrMaterial, Rgba8TextureAsset, TextureAssetDescriptor, TextureWrapMode,
+    PbrMaterial, PbrTextureReferences, Rgba8TextureAsset, TextureAssetDescriptor, TextureWrapMode,
 };
 use quilting_core::quaternion::{Mobius, Quat};
 use quilting_core::render::{
@@ -358,6 +358,44 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             initial_b,
         );
 
+        let pbr_pipeline = classifier
+            .create_diagnostic_patch_render_pipeline(
+                RenderStyle::Pbr,
+                wgpu::TextureFormat::Rgba8Unorm,
+                Some(wgpu::TextureFormat::Depth24Plus),
+                1,
+            )
+            .unwrap();
+        let mut first_material = PbrMaterial::default();
+        first_material.textures = PbrTextureReferences {
+            base_color: Some(0),
+            normal: Some(1),
+            transmission: Some(2),
+            ..Default::default()
+        };
+        let mut second_material = PbrMaterial::default();
+        second_material.textures.emissive = Some(99);
+        let texture_bindings = classifier
+            .create_pbr_material_texture_bindings(
+                &pbr_pipeline,
+                &[first_material, second_material],
+                Some(&sparse_table),
+            )
+            .unwrap();
+        assert_eq!(texture_bindings.material_count(), 2);
+        assert_eq!(texture_bindings.residency().len(), 2);
+        assert_eq!(texture_bindings.residency()[0].referenced_mask(), 0b10_0101);
+        assert_eq!(texture_bindings.residency()[0].resident_mask(), 0b10_0001);
+        assert_eq!(texture_bindings.residency()[0].unresolved_mask(), 0b000100);
+        assert_eq!(texture_bindings.residency()[1].referenced_mask(), 0b001000);
+        assert_eq!(texture_bindings.residency()[1].resident_mask(), 0);
+        assert_eq!(texture_bindings.residency()[1].unresolved_mask(), 0b001000);
+        let default_texture_bindings = classifier
+            .create_pbr_material_texture_bindings(&pbr_pipeline, &[], None)
+            .unwrap();
+        assert_eq!(default_texture_bindings.material_count(), 1);
+        assert_eq!(default_texture_bindings.residency(), &[Default::default()]);
+
         let updated_a = [7; 16];
         let updated_b = [11; 8];
         let updated_assets = [
@@ -473,7 +511,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         ));
         let mut textured_scene = render_scene.clone();
         textured_scene.materials[0].textures.base_color = Some(0);
-        assert!(!supports_basic_pbr_frame(
+        assert!(supports_basic_pbr_frame(
             &textured_scene,
             RenderFrameOptions::default(),
         ));
@@ -496,6 +534,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 render_scene.clone(),
                 &source_instances,
                 render_scene.revision,
+                None,
             )
             .unwrap();
         assert_eq!(retained_scene.patch_count(), 2);
@@ -511,6 +550,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 reordered_scene.clone(),
                 &source_instances,
                 reordered_scene.revision,
+                None,
             )
             .unwrap();
         let mut visibility_dispatch = identity_dispatch();
@@ -587,11 +627,13 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         assert!(matches!(
             classifier
                 .update_patch_render_scene_in_place(
+                    &pipeline,
                     &model,
                     &mut retained_scene,
                     reordered_scene.clone(),
                     &source_instances,
                     reordered_scene.revision,
+                    None,
                 )
                 .unwrap(),
             PatchRenderSceneUpdate::Updated,
@@ -614,11 +656,13 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         resized_scene.revision += 1;
         let returned_scene = match classifier
             .update_patch_render_scene_in_place(
+                &pipeline,
                 &model,
                 &mut retained_scene,
                 resized_scene.clone(),
                 &source_instances,
                 resized_scene.revision,
+                None,
             )
             .unwrap()
         {
@@ -631,11 +675,13 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         assert!(matches!(
             classifier
                 .update_patch_render_scene_in_place(
+                    &pipeline,
                     &model,
                     &mut retained_scene,
                     render_scene.clone(),
                     &source_instances,
                     render_scene.revision,
+                    None,
                 )
                 .unwrap(),
             PatchRenderSceneUpdate::Updated,
@@ -764,11 +810,12 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             .unwrap();
         let diagnostic_scene = classifier
             .upload_patch_render_scene(
-                diagnostic_pipelines.get(RenderStyle::Normals).unwrap(),
+                diagnostic_pipelines.get(RenderStyle::Pbr).unwrap(),
                 &model,
                 render_scene.clone(),
                 &source_instances,
                 render_scene.revision,
+                None,
             )
             .unwrap();
         classifier
@@ -847,6 +894,71 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 assert_ne!(left_hash, right_hash);
             }
         }
+
+        let mut textured_diagnostic_scene = classifier
+            .upload_patch_render_scene(
+                diagnostic_pipelines.get(RenderStyle::Pbr).unwrap(),
+                &model,
+                textured_scene.clone(),
+                &source_instances,
+                textured_scene.revision,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            textured_diagnostic_scene.pbr_texture_residency().unwrap()[0].unresolved_mask(),
+            1,
+        );
+        classifier
+            .replace_patch_render_scene_texture_bindings(
+                diagnostic_pipelines.get(RenderStyle::Pbr).unwrap(),
+                &mut textured_diagnostic_scene,
+                Some(&sparse_table),
+            )
+            .unwrap();
+        assert_eq!(
+            textured_diagnostic_scene.pbr_texture_residency().unwrap()[0].resident_mask(),
+            1,
+        );
+        classifier
+            .write_patch_render_pose_state(
+                &model,
+                &textured_diagnostic_scene,
+                LodPose::default(),
+                0,
+            )
+            .unwrap();
+        classifier
+            .write_patch_render_face_visibility_bits(&textured_diagnostic_scene, &[0b11])
+            .unwrap();
+        let textured_frame = RenderFrame::build(
+            91,
+            render_frame.pose,
+            RenderStyle::Pbr,
+            render_frame.view,
+            render_frame.options,
+            &textured_scene,
+        )
+        .unwrap();
+        classifier
+            .render_offscreen_supported_patch_scene_with_face_visibility(
+                &textured_frame,
+                &diagnostic_pipelines,
+                &textured_diagnostic_scene,
+                &packed_atlas,
+                &target,
+                true,
+            )
+            .unwrap();
+        let textured_image = classifier
+            .stage_offscreen_patch_render_target_image(&target)
+            .unwrap()
+            .read()
+            .await
+            .unwrap();
+        let textured_signature = render_image_signature(textured_image.view().unwrap(), 0);
+        assert!(textured_signature.covered_pixels > 0);
+        assert_ne!(textured_signature.rgba8_hash, diagnostic_hashes[0]);
 
         let compaction_scene = RenderSceneSnapshot {
             revision: 19,

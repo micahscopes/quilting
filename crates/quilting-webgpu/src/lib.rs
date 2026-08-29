@@ -14,7 +14,9 @@ mod resident_roots;
 pub use adaptive_overlay::{
     AdaptiveOverlayFrameEncoding, AdaptiveOverlayScene, ResidentAdaptiveFrameEncoding,
 };
-pub use pbr_resources::{PbrTextureTable, PbrTextureTableUpdate};
+pub use pbr_resources::{
+    PbrMaterialTextureBindings, PbrMaterialTextureResidency, PbrTextureTable, PbrTextureTableUpdate,
+};
 pub use presentation::{
     PatchPresentationSurface, PresentationSkipReason, SurfacePresentation,
     SurfacePresentationDiagnostics,
@@ -30,9 +32,7 @@ use quilting_core::batch::{
     FaceLodGrading, RenderBatchId, RenderBatchKey, RenderBatchLayer, RenderBatchMember,
 };
 use quilting_core::instance_layout::InstanceWriter;
-use quilting_core::material::{
-    pbr_material_for_index, PbrAlphaMode, PbrMaterial, PbrTextureReferences,
-};
+use quilting_core::material::{pbr_material_for_index, PbrAlphaMode, PbrMaterial};
 use quilting_core::render::{
     FocusFieldPacket, PbrDrawClass, RenderBatchSnapshot, RenderCommand, RenderEntityTransform,
     RenderFrame, RenderFrameOptions, RenderGeometry, RenderPass, RenderPoseIdentity,
@@ -86,8 +86,8 @@ const PATCH_SUBJECT_RECORD_BYTES: u64 = 128;
 const PATCH_SUBJECT_RECORD_WORDS: usize = 32;
 const PATCH_RENDER_FRAME_WORDS: usize = 56;
 const PATCH_RENDER_FRAME_BYTES: u64 = 224;
-const PATCH_PBR_MATERIAL_WORDS: usize = 24;
-const PATCH_PBR_MATERIAL_BYTES: u64 = 96;
+const PATCH_PBR_MATERIAL_WORDS: usize = 40;
+const PATCH_PBR_MATERIAL_BYTES: u64 = 160;
 
 fn identity_matrix() -> [f32; 16] {
     [
@@ -411,14 +411,43 @@ fn patch_pbr_material_words(material: &PbrMaterial) -> [u32; PATCH_PBR_MATERIAL_
     words[12] = u32::from(material.unlit);
     words[13] = u32::from(material.double_sided);
     words[14] = u32::from(material.has_specular);
-    words[15] = u32::from(material.has_sheen);
+    words[15] = u32::from(material.has_sheen)
+        | (pbr_resources::pbr_texture_reference_mask(material.textures) << 1);
     for (word, value) in words[16..19].iter_mut().zip(material.specular_color) {
         *word = value.to_bits();
     }
+    words[19] = material.normal_scale.to_bits();
     for (word, value) in words[20..23].iter_mut().zip(material.sheen_color) {
         *word = value.to_bits();
     }
     words[23] = material.sheen_roughness.to_bits();
+    for (word, value) in words[24..28].iter_mut().zip(
+        material
+            .normal_uv_scale
+            .into_iter()
+            .chain(material.normal_uv_offset),
+    ) {
+        *word = value.to_bits();
+    }
+    for (word, value) in words[28..32].iter_mut().zip([
+        material.normal_uv_rotation,
+        material.occlusion_strength,
+        material.base_uv_scale[0],
+        material.base_uv_scale[1],
+    ]) {
+        *word = value.to_bits();
+    }
+    for (word, value) in words[32..36].iter_mut().zip([
+        material.base_uv_rotation,
+        material.transmission_factor,
+        material.thickness_factor,
+        material.attenuation_distance.unwrap_or(0.0),
+    ]) {
+        *word = value.to_bits();
+    }
+    for (word, value) in words[36..39].iter_mut().zip(material.attenuation_color) {
+        *word = value.to_bits();
+    }
     words
 }
 
@@ -443,10 +472,25 @@ fn patch_pbr_material_table_words(materials: &[PbrMaterial]) -> Result<Vec<u32>,
     Ok(words)
 }
 
+fn patch_pbr_material_slot(
+    materials: &[PbrMaterial],
+    requested: usize,
+) -> Result<u32, LodWebGpuError> {
+    let default_material = PbrMaterial::default();
+    let (material_slot, _) = pbr_material_for_index(materials, &default_material, requested);
+    if material_slot == usize::MAX {
+        Ok(0)
+    } else {
+        u32::try_from(material_slot).map_err(|_| {
+            LodWebGpuError::Payload("resolved PBR material slot exceeds u32".to_string())
+        })
+    }
+}
+
 #[cfg(test)]
 mod patch_pbr_material_tests {
     use super::*;
-    use quilting_core::material::PbrAlphaMode;
+    use quilting_core::material::{PbrAlphaMode, PbrTextureReferences};
 
     #[test]
     fn authored_material_words_match_the_shader_record() {
@@ -465,6 +509,23 @@ mod patch_pbr_material_tests {
         material.specular_color = [0.11, 0.22, 0.33];
         material.sheen_color = [0.44, 0.55, 0.66];
         material.sheen_roughness = 0.77;
+        material.normal_scale = 0.45;
+        material.occlusion_strength = 0.67;
+        material.normal_uv_scale = [1.2, 1.3];
+        material.normal_uv_offset = [0.14, 0.15];
+        material.normal_uv_rotation = 0.16;
+        material.base_uv_scale = [1.7, 1.8];
+        material.base_uv_rotation = 0.19;
+        material.transmission_factor = 0.21;
+        material.thickness_factor = 0.22;
+        material.attenuation_distance = Some(2.3);
+        material.attenuation_color = [0.24, 0.25, 0.26];
+        material.textures = PbrTextureReferences {
+            base_color: Some(3),
+            normal: Some(4),
+            occlusion: Some(5),
+            ..Default::default()
+        };
         let words = patch_pbr_material_words(&material);
         assert_eq!(
             words.len() * std::mem::size_of::<u32>(),
@@ -477,10 +538,22 @@ mod patch_pbr_material_tests {
         assert_eq!(words[9], material.alpha_cutoff.to_bits());
         assert_eq!(words[10], 1.0f32.to_bits());
         assert_eq!(words[11], material.ior.to_bits());
-        assert_eq!(words[12..16], [1, 1, 1, 1]);
+        assert_eq!(words[12..15], [1, 1, 1]);
+        assert_eq!(words[15], 1 | (0b01_0101 << 1));
         assert_eq!(words[16..19], material.specular_color.map(f32::to_bits),);
+        assert_eq!(words[19], material.normal_scale.to_bits());
         assert_eq!(words[20..23], material.sheen_color.map(f32::to_bits));
         assert_eq!(words[23], material.sheen_roughness.to_bits());
+        assert_eq!(words[24..26], material.normal_uv_scale.map(f32::to_bits));
+        assert_eq!(words[26..28], material.normal_uv_offset.map(f32::to_bits));
+        assert_eq!(words[28], material.normal_uv_rotation.to_bits());
+        assert_eq!(words[29], material.occlusion_strength.to_bits());
+        assert_eq!(words[30..32], material.base_uv_scale.map(f32::to_bits));
+        assert_eq!(words[32], material.base_uv_rotation.to_bits());
+        assert_eq!(words[33], material.transmission_factor.to_bits());
+        assert_eq!(words[34], material.thickness_factor.to_bits());
+        assert_eq!(words[35], 2.3f32.to_bits());
+        assert_eq!(words[36..39], material.attenuation_color.map(f32::to_bits));
     }
 
     #[test]
@@ -756,6 +829,7 @@ pub struct PatchRenderPipeline {
     style: RenderStyle,
     geometry: RenderGeometry,
     bind_group_layout: wgpu::BindGroupLayout,
+    pbr_texture_bind_group_layout: Option<wgpu::BindGroupLayout>,
     counter_clockwise: wgpu::RenderPipeline,
     clockwise: wgpu::RenderPipeline,
 }
@@ -788,10 +862,10 @@ pub const fn supports_patch_presentation_style(style: RenderStyle) -> bool {
     )
 }
 
-/// Whether the current texture-free PBR pipeline can render a shared scene
-/// exactly within its declared feature subset. This remains separate from the
-/// live-style predicate until environment IBL and browser image resources have
-/// backend-parity evidence.
+/// Whether the current authored-factor and material-texture PBR pipeline can
+/// render a shared scene within its declared feature subset. This remains
+/// separate from the live-style predicate until environment IBL and browser
+/// image resources have backend-parity evidence.
 pub fn supports_basic_pbr_frame(scene: &RenderSceneSnapshot, options: RenderFrameOptions) -> bool {
     validate_basic_pbr_frame(scene, options).is_ok()
 }
@@ -825,11 +899,6 @@ fn validate_basic_pbr_frame(
             &default_material,
             batch.id.key.material_index,
         );
-        if material.textures != PbrTextureReferences::default() {
-            return Err(LodWebGpuError::Payload(format!(
-                "basic WebGPU PBR batch {batch_index} references textures",
-            )));
-        }
         if material.alpha_mode == PbrAlphaMode::Blend || material.transmission_factor > 0.0 {
             return Err(LodWebGpuError::Payload(format!(
                 "basic WebGPU PBR batch {batch_index} requires blending or transmission",
@@ -850,6 +919,7 @@ pub struct PatchRenderBindings {
     material_count: u32,
     frames: wgpu::Buffer,
     materials: wgpu::Buffer,
+    material_textures: Option<PbrMaterialTextureBindings>,
     frame_words: Mutex<Vec<u32>>,
     bind_group: wgpu::BindGroup,
 }
@@ -3034,13 +3104,10 @@ impl LodClassifierDevice {
                         ),
                     ],
                 });
-        let pipeline_layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("quilting prepared QB render pipeline layout"),
-                bind_group_layouts: &[Some(&bind_group_layout)],
-                immediate_size: 0,
-            });
+        let pbr_texture_bind_group_layout = fragment_entry_points
+            .iter()
+            .any(|(style, _, _)| *style == RenderStyle::Pbr)
+            .then(|| pbr_resources::create_pbr_texture_bind_group_layout(&self.device));
         let depth_stencil = depth_format.map(|format| wgpu::DepthStencilState {
             format,
             depth_write_enabled: Some(true),
@@ -3051,6 +3118,27 @@ impl LodClassifierDevice {
         let attributes = wgpu::vertex_attr_array![0 => Float32x3];
         let mut pipelines = Vec::with_capacity(fragment_entry_points.len());
         for (style, geometry, fragment_entry_point) in fragment_entry_points {
+            let pipeline_layout = if style == RenderStyle::Pbr {
+                let pbr_texture_bind_group_layout = pbr_texture_bind_group_layout
+                    .as_ref()
+                    .expect("PBR pipeline request creates its texture layout");
+                self.device
+                    .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("quilting prepared QB PBR pipeline layout"),
+                        bind_group_layouts: &[
+                            Some(&bind_group_layout),
+                            Some(pbr_texture_bind_group_layout),
+                        ],
+                        immediate_size: 0,
+                    })
+            } else {
+                self.device
+                    .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("quilting prepared QB diagnostic pipeline layout"),
+                        bind_group_layouts: &[Some(&bind_group_layout)],
+                        immediate_size: 0,
+                    })
+            };
             let create = |front_face| {
                 self.device
                     .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -3105,6 +3193,12 @@ impl LodClassifierDevice {
                 style,
                 geometry,
                 bind_group_layout: bind_group_layout.clone(),
+                pbr_texture_bind_group_layout: (style == RenderStyle::Pbr).then(|| {
+                    pbr_texture_bind_group_layout
+                        .as_ref()
+                        .expect("PBR pipeline request creates its texture layout")
+                        .clone()
+                }),
                 counter_clockwise,
                 clockwise,
             });
@@ -3257,6 +3351,7 @@ impl LodClassifierDevice {
         scene: &RenderSceneSnapshot,
         patches: &PatchPreparationScene,
         visibility: &VisibilityCompactionScene,
+        textures: Option<&PbrTextureTable>,
     ) -> Result<PatchRenderBindings, LodWebGpuError> {
         if patches.patch_count == 0
             || visibility.source_count == 0
@@ -3296,6 +3391,11 @@ impl LodClassifierDevice {
             bytemuck::cast_slice(&material_words),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         );
+        let material_textures = if pipeline.style == RenderStyle::Pbr {
+            Some(self.create_pbr_material_texture_bindings(pipeline, &scene.materials, textures)?)
+        } else {
+            None
+        };
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("quilting prepared QB render bindings"),
             layout: &pipeline.bind_group_layout,
@@ -3320,6 +3420,7 @@ impl LodClassifierDevice {
             material_count,
             frames,
             materials,
+            material_textures,
             frame_words: Mutex::new(vec![0; frame_word_count]),
             bind_group,
         })
@@ -3394,6 +3495,7 @@ impl LodClassifierDevice {
         mut scene: RenderSceneSnapshot,
         source_instances: &[f32],
         revision: u64,
+        textures: Option<&PbrTextureTable>,
     ) -> Result<PatchRenderScene, LodWebGpuError> {
         scene.revision = revision;
         let patch_words =
@@ -3410,7 +3512,7 @@ impl LodClassifierDevice {
             model.prepared.residency.num_faces,
         )?;
         let bindings =
-            self.create_patch_render_bindings(pipeline, &scene, &patches, &visibility)?;
+            self.create_patch_render_bindings(pipeline, &scene, &patches, &visibility, textures)?;
         Ok(PatchRenderScene {
             model_identity: model.identity,
             scene,
@@ -3425,13 +3527,16 @@ impl LodClassifierDevice {
     /// its patch, subject, and batch cardinalities are unchanged. All queue
     /// writes precede the next frame encoder on the same device queue; callers
     /// retain full aggregate replacement as the shape-change fallback.
+    #[allow(clippy::too_many_arguments)]
     pub fn update_patch_render_scene_in_place(
         &self,
+        pipeline: &PatchRenderPipeline,
         model: &LodClassifierModel,
         retained: &mut PatchRenderScene,
         mut scene: RenderSceneSnapshot,
         source_instances: &[f32],
         revision: u64,
+        textures: Option<&PbrTextureTable>,
     ) -> Result<PatchRenderSceneUpdate, LodWebGpuError> {
         scene.revision = revision;
         let patch_words =
@@ -3440,7 +3545,6 @@ impl LodClassifierDevice {
         let visibility_words =
             pack_wgsl_visibility_compaction_scene_words(&scene).map_err(LodWebGpuError::Payload)?;
         let material_words = patch_pbr_material_table_words(&scene.materials)?;
-
         let same_shape = model.identity == retained.model_identity
             && patch_words.uniform[0] == retained.patches.patch_count
             && patch_words.topology.len() == retained.patches.patch_count as usize
@@ -3461,6 +3565,11 @@ impl LodClassifierDevice {
                 "in-place WebGPU scene update changed immutable model words".to_string(),
             ));
         }
+        let material_textures = if pipeline.style == RenderStyle::Pbr {
+            Some(self.create_pbr_material_texture_bindings(pipeline, &scene.materials, textures)?)
+        } else {
+            None
+        };
 
         if !patch_words.topology.is_empty() {
             self.queue.write_buffer(
@@ -3493,8 +3602,34 @@ impl LodClassifierDevice {
             0,
             bytemuck::cast_slice(&material_words),
         );
+        if let Some(material_textures) = material_textures {
+            retained.bindings.material_textures = Some(material_textures);
+        }
         retained.scene = scene;
         Ok(PatchRenderSceneUpdate::Updated)
+    }
+
+    /// Atomically refresh only the material-to-texture bind groups after an
+    /// independently decoded texture table is published. Frame, topology, and
+    /// material buffers retain their allocations.
+    pub fn replace_patch_render_scene_texture_bindings(
+        &self,
+        pipeline: &PatchRenderPipeline,
+        retained: &mut PatchRenderScene,
+        textures: Option<&PbrTextureTable>,
+    ) -> Result<(), LodWebGpuError> {
+        let candidate = self.create_pbr_material_texture_bindings(
+            pipeline,
+            &retained.scene.materials,
+            textures,
+        )?;
+        if candidate.material_count() != retained.bindings.material_count {
+            return Err(LodWebGpuError::Payload(
+                "PBR texture binding material count does not match retained scene".to_string(),
+            ));
+        }
+        retained.bindings.material_textures = Some(candidate);
+        Ok(())
     }
 
     /// Upload current pose and visibility inputs for one coherent retained
@@ -4230,6 +4365,11 @@ impl LodClassifierDevice {
             || visibility.batch_count != batch_count
             || bindings.frame_count != batch_count
             || bindings.material_count as usize != scene.materials.len().max(1)
+            || (frame.style == RenderStyle::Pbr
+                && bindings
+                    .material_textures
+                    .as_ref()
+                    .is_none_or(|textures| textures.material_count() != bindings.material_count))
         {
             return Err(LodWebGpuError::Payload(format!(
                 "WebGPU render residency does not match scene: batches={batch_count}, instances={source_instance_count}, patch_records={}, visibility={}/{}, frames={}, materials={}/{}",
@@ -4305,25 +4445,12 @@ impl LodClassifierDevice {
             }
         }
 
-        let default_material = PbrMaterial::default();
         let render_frames = scene
             .batches
             .iter()
             .map(|batch| {
-                let (material_slot, _) = pbr_material_for_index(
-                    &scene.materials,
-                    &default_material,
-                    batch.id.key.material_index,
-                );
-                let material_slot = if material_slot == usize::MAX {
-                    0
-                } else {
-                    u32::try_from(material_slot).map_err(|_| {
-                        LodWebGpuError::Payload(
-                            "resolved PBR material slot exceeds u32".to_string(),
-                        )
-                    })?
-                };
+                let material_slot =
+                    patch_pbr_material_slot(&scene.materials, batch.id.key.material_index)?;
                 Ok(PatchRenderFrame::from_render_frame_with_material_slot(
                     frame,
                     batch,
@@ -4400,12 +4527,15 @@ impl LodClassifierDevice {
                 } else {
                     PatchWinding::CounterClockwise
                 };
+                let material_slot =
+                    patch_pbr_material_slot(&scene.materials, batch.id.key.material_index)?;
                 pipeline.draw_batch(
                     &mut render_pass,
                     bindings,
                     visibility,
                     draw,
                     batch_index,
+                    material_slot,
                     winding,
                 )?;
                 indirect_draw_calls = indirect_draw_calls.saturating_add(1);
@@ -5083,8 +5213,13 @@ impl LodClassifierDevice {
         let visibility = self.upload_visibility_compaction_scene(visibility_words)?;
         let pipeline =
             self.create_patch_render_pipeline(wgpu::TextureFormat::Rgba8Unorm, None, 1)?;
-        let bindings =
-            self.create_patch_render_bindings(&pipeline, &render_scene, patches, &visibility)?;
+        let bindings = self.create_patch_render_bindings(
+            &pipeline,
+            &render_scene,
+            patches,
+            &visibility,
+            None,
+        )?;
         self.write_patch_pose(model, patches, pose, num_joints)?;
         let source_visibility = vec![1; patches.patch_count as usize];
         self.write_source_visibility(&visibility, &source_visibility)?;
@@ -6097,6 +6232,13 @@ impl PatchRenderScene {
     pub fn batch_count(&self) -> u32 {
         self.visibility.batch_count
     }
+
+    pub fn pbr_texture_residency(&self) -> Option<&[PbrMaterialTextureResidency]> {
+        self.bindings
+            .material_textures
+            .as_ref()
+            .map(PbrMaterialTextureBindings::residency)
+    }
 }
 
 impl OffscreenPatchRenderTarget {
@@ -6214,6 +6356,7 @@ impl PatchRenderPipeline {
         visibility: &'pass VisibilityCompactionScene,
         atlas: PatchAtlasDraw<'pass>,
         batch_index: u32,
+        material_slot: u32,
         winding: PatchWinding,
     ) -> Result<(), LodWebGpuError> {
         if batch_index >= visibility.batch_count {
@@ -6232,6 +6375,23 @@ impl PatchRenderPipeline {
         };
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bindings.bind_group, &[dynamic_offset]);
+        if self.style == RenderStyle::Pbr {
+            let material_textures = bindings
+                .material_textures
+                .as_ref()
+                .ok_or_else(|| {
+                    LodWebGpuError::Payload(
+                        "PBR material texture bindings are not resident".to_string(),
+                    )
+                })?
+                .bind_group(material_slot)
+                .ok_or_else(|| {
+                    LodWebGpuError::Payload(format!(
+                        "PBR material texture slot {material_slot} is not resident",
+                    ))
+                })?;
+            pass.set_bind_group(1, material_textures, &[]);
+        }
         pass.set_vertex_buffer(0, atlas.barycentric_buffer.slice(..));
         let index_width = match atlas.index_format {
             wgpu::IndexFormat::Uint16 => 2,

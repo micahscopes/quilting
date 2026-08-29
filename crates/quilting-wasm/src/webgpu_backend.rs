@@ -101,6 +101,10 @@ pub(crate) struct WebGpuBackendDiagnostics {
     textures_ready: bool,
     texture_slots: usize,
     texture_images: usize,
+    pbr_texture_materials: usize,
+    pbr_texture_references: usize,
+    pbr_texture_resident_references: usize,
+    pbr_texture_unresolved_references: usize,
     model_ready: bool,
     model_faces: usize,
     scene_ready: bool,
@@ -145,6 +149,11 @@ impl WebGpuBackend {
             .presentation
             .as_ref()
             .map(PatchPresentationSurface::diagnostics);
+        let pbr_texture_residency = self
+            .scene
+            .as_ref()
+            .and_then(PatchRenderScene::pbr_texture_residency)
+            .unwrap_or_default();
         WebGpuBackendDiagnostics {
             state: if self.state.is_empty() {
                 "disabled"
@@ -169,6 +178,19 @@ impl WebGpuBackend {
                 .textures
                 .as_ref()
                 .map_or(0, PbrTextureTable::occupied_len),
+            pbr_texture_materials: pbr_texture_residency.len(),
+            pbr_texture_references: pbr_texture_residency
+                .iter()
+                .map(|residency| residency.referenced_mask().count_ones() as usize)
+                .sum(),
+            pbr_texture_resident_references: pbr_texture_residency
+                .iter()
+                .map(|residency| residency.resident_mask().count_ones() as usize)
+                .sum(),
+            pbr_texture_unresolved_references: pbr_texture_residency
+                .iter()
+                .map(|residency| residency.unresolved_mask().count_ones() as usize)
+                .sum(),
             model_ready: self.model.is_some(),
             model_faces: self
                 .model_source
@@ -425,12 +447,30 @@ pub(crate) fn replace_image_bitmaps(
                 return Err(error);
             }
         };
-        let result = backend
-            .device
-            .as_ref()
-            .ok_or_else(|| "ready WebGPU backend has no device".to_string())?
-            .upload_pbr_image_bitmap_table(&assets)
-            .map_err(|error| error.to_string());
+        let result = {
+            let WebGpuBackend {
+                device,
+                pipelines,
+                scene,
+                ..
+            } = &mut *backend;
+            let device = device
+                .as_ref()
+                .ok_or_else(|| "ready WebGPU backend has no device".to_string())?;
+            let textures = device
+                .upload_pbr_image_bitmap_table(&assets)
+                .map_err(|error| error.to_string())?;
+            if let Some(scene) = scene.as_mut() {
+                let pipeline = pipelines
+                    .as_ref()
+                    .and_then(|pipelines| pipelines.get(RenderStyle::Pbr))
+                    .ok_or_else(|| "ready WebGPU backend has no PBR pipeline".to_string())?;
+                device
+                    .replace_patch_render_scene_texture_bindings(pipeline, scene, Some(&textures))
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok::<_, String>(textures)
+        };
         match result {
             Ok(textures) => {
                 backend.textures = Some(textures);
@@ -579,16 +619,23 @@ pub(crate) fn replace_scene(
                 device,
                 model,
                 scene: retained,
+                pipelines,
+                textures,
                 ..
             } = &mut *backend;
-            match (device.as_ref(), model.as_ref(), retained.as_mut()) {
-                (Some(device), Some(model), Some(retained)) => device
+            let pipeline = pipelines
+                .as_ref()
+                .and_then(|pipelines| pipelines.get(RenderStyle::Pbr));
+            match (device.as_ref(), pipeline, model.as_ref(), retained.as_mut()) {
+                (Some(device), Some(pipeline), Some(model), Some(retained)) => device
                     .update_patch_render_scene_in_place(
+                        pipeline,
                         model,
                         retained,
                         scene,
                         source_instances,
                         next_revision,
+                        textures.as_ref(),
                     )
                     .map_err(|error| error.to_string()),
                 _ => Ok(PatchRenderSceneUpdate::ShapeChanged(scene)),
@@ -618,14 +665,21 @@ pub(crate) fn replace_scene(
             let pipeline = backend
                 .pipelines
                 .as_ref()
-                .and_then(|pipelines| pipelines.get(RenderStyle::Normals))
-                .ok_or_else(|| "ready WebGPU backend has no normals pipeline".to_string())?;
+                .and_then(|pipelines| pipelines.get(RenderStyle::Pbr))
+                .ok_or_else(|| "ready WebGPU backend has no PBR pipeline".to_string())?;
             let model = backend
                 .model
                 .as_ref()
                 .ok_or_else(|| "WebGPU render scene requires model residency".to_string())?;
             device
-                .upload_patch_render_scene(pipeline, model, scene, source_instances, next_revision)
+                .upload_patch_render_scene(
+                    pipeline,
+                    model,
+                    scene,
+                    source_instances,
+                    next_revision,
+                    backend.textures.as_ref(),
+                )
                 .map_err(|error| error.to_string())
         };
         match result {

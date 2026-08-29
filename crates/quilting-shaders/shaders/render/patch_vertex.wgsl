@@ -39,18 +39,31 @@ struct PatchVertexOutput {
     @location(14) @interpolate(flat) node_id: f32,
 }
 
-// Texture-free authored PBR values. Texture references and environment maps
-// are backend resources and deliberately live outside this stable record.
+// Authored PBR values shared by the stable material table and per-material
+// backend texture bindings. Texture indices stay in semantic scene state; the
+// compact presence mask controls samples from the already-resolved bind group.
 struct PatchPbrMaterial {
     base_color: vec4<f32>,
     emissive_metallic: vec4<f32>,
     // x=roughness, y=alpha cutoff, z=alpha mode, w=IOR.
     surface: vec4<f32>,
-    // x=unlit, y=double-sided, z=has-specular, w=has-sheen.
+    // x=unlit, y=double-sided, z=has-specular. In w, bit zero is sheen and
+    // bits 1..6 are base, metallic/roughness, normal, emissive, occlusion,
+    // and transmission texture references.
     flags: vec4<u32>,
-    specular_color: vec4<f32>,
+    // xyz=specular color, w=normal scale.
+    specular_color_normal_scale: vec4<f32>,
     // xyz=sheen color, w=sheen roughness.
     sheen_color_roughness: vec4<f32>,
+    // xy=normal UV scale, zw=normal UV offset.
+    normal_uv_scale_offset: vec4<f32>,
+    // x=normal UV rotation, y=occlusion strength, zw=base UV scale.
+    normal_occlusion_base_scale: vec4<f32>,
+    // x=base UV rotation, y=transmission, z=thickness,
+    // w=attenuation distance (zero means infinite).
+    base_transmission_volume: vec4<f32>,
+    // xyz=attenuation color, w reserved.
+    attenuation_color: vec4<f32>,
 }
 
 fn evaluate_prepared_patch_vertex(
@@ -182,6 +195,12 @@ fn shade_patch_pbr(
     input: PatchVertexOutput,
     material: PatchPbrMaterial,
     selected_node: i32,
+    base_texel: vec4<f32>,
+    metallic_roughness_texel: vec4<f32>,
+    normal_texel: vec4<f32>,
+    emissive_texel: vec4<f32>,
+    occlusion_texel: vec4<f32>,
+    has_normal_texture: bool,
 ) -> vec4<f32> {
     if input.fade < 0.001 {
         discard;
@@ -195,7 +214,23 @@ fn shade_patch_pbr(
     if double_sided && !front_facing {
         normal = -normal;
     }
-    let base = material.base_color;
+    if has_normal_texture {
+        let tangent_length = length(input.tangent_vs);
+        let bitangent_length = length(input.bitangent_vs);
+        if tangent_length > 1e-7 && bitangent_length > 1e-7 {
+            let tangent = normalize(input.tangent_vs - normal * dot(normal, input.tangent_vs));
+            let bitangent = normalize(input.bitangent_vs - normal * dot(normal, input.bitangent_vs));
+            var tangent_normal = normal_texel.xyz * 2.0 - vec3<f32>(1.0);
+            tangent_normal.x = tangent_normal.x * material.specular_color_normal_scale.w;
+            tangent_normal.y = tangent_normal.y * material.specular_color_normal_scale.w;
+            normal = normalize(
+                tangent * tangent_normal.x
+                + bitangent * tangent_normal.y
+                + normal * tangent_normal.z,
+            );
+        }
+    }
+    let base = material.base_color * base_texel;
     let alpha_mode = material.surface.z;
     if alpha_mode > 0.5 && alpha_mode < 1.5 && base.a < material.surface.y {
         discard;
@@ -217,11 +252,11 @@ fn shade_patch_pbr(
         return vec4<f32>(unlit, alpha * input.fade);
     }
 
-    let metallic = material.emissive_metallic.w;
-    let roughness = clamp(material.surface.x, 0.04, 1.0);
+    let metallic = material.emissive_metallic.w * metallic_roughness_texel.b;
+    let roughness = clamp(material.surface.x * metallic_roughness_texel.g, 0.04, 1.0);
     var f0_mod = vec3<f32>(1.0);
     if material.flags.z != 0u {
-        f0_mod = material.specular_color.rgb;
+        f0_mod = material.specular_color_normal_scale.rgb;
     }
     let ior = material.surface.w;
     let ior_f0 = pow((ior - 1.0) / (ior + 1.0), 2.0);
@@ -248,10 +283,10 @@ fn shade_patch_pbr(
         ground,
         sky,
         dot(normal, vec3<f32>(0.0, 1.0, 0.0)) * 0.5 + 0.5,
-    );
+    ) * mix(1.0, occlusion_texel.r, clamp(material.normal_occlusion_base_scale.y, 0.0, 1.0));
     var color = key.color + fill.color
         + base.rgb * hemisphere * (1.0 - metallic)
-        + material.emissive_metallic.rgb;
+        + material.emissive_metallic.rgb * emissive_texel.rgb;
     let aces_a = color * 2.51 + vec3<f32>(0.03);
     let aces_b = color * 2.43 + vec3<f32>(0.59);
     color = clamp((color * aces_a) / (color * aces_b + vec3<f32>(0.14)), vec3<f32>(0.0), vec3<f32>(1.0));
