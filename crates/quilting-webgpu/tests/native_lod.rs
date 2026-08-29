@@ -888,6 +888,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             .pbr_environment_bindings()
             .unwrap()
             .is_resident());
+        assert!(!diagnostic_scene.supports_resident_basic_pbr_frame(RenderFrameOptions::default()));
         classifier
             .write_patch_render_pose_state(&model, &diagnostic_scene, LodPose::default(), 0)
             .unwrap();
@@ -983,6 +984,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 .descriptor(),
             Some(environment_descriptor),
         );
+        assert!(diagnostic_scene.supports_resident_basic_pbr_frame(RenderFrameOptions::default()));
         let environment_frame = RenderFrame::build(
             90,
             render_frame.pose,
@@ -1026,6 +1028,8 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             textured_diagnostic_scene.pbr_texture_residency().unwrap()[0].unresolved_mask(),
             0b101,
         );
+        assert!(!textured_diagnostic_scene
+            .supports_resident_basic_pbr_frame(RenderFrameOptions::default()));
         classifier
             .replace_patch_render_scene_texture_bindings(
                 diagnostic_pipelines.get(RenderStyle::Pbr).unwrap(),
@@ -1037,6 +1041,8 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             textured_diagnostic_scene.pbr_texture_residency().unwrap()[0].resident_mask(),
             0b101,
         );
+        assert!(!textured_diagnostic_scene
+            .supports_resident_basic_pbr_frame(RenderFrameOptions::default()));
         classifier
             .replace_patch_render_scene_environment_bindings(
                 diagnostic_pipelines.get(RenderStyle::Pbr).unwrap(),
@@ -1044,6 +1050,8 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 Some(&environment),
             )
             .unwrap();
+        assert!(textured_diagnostic_scene
+            .supports_resident_basic_pbr_frame(RenderFrameOptions::default()));
         classifier
             .write_patch_render_pose_state(
                 &model,

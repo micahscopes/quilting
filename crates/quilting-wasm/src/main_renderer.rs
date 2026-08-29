@@ -2925,6 +2925,11 @@ pub fn mr_request_backend_frame_evidence() -> Result<bool, JsValue> {
                 "backend image evidence currently requires normals or basic PBR mode",
             ));
         }
+        if !crate::webgpu_backend::shadow_evidence_ready() {
+            return Err(JsValue::from_str(
+                "backend image evidence requires a ready headless WebGPU device",
+            ));
+        }
         if state.fuzzy_enabled || state.highlight_face >= 0 {
             return Err(JsValue::from_str(
                 "backend image evidence requires focus postprocess and highlight to be disabled",
@@ -9183,7 +9188,17 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     .observe(render_started_ms, browser_now_ms());
                 return;
             }
-            crate::webgpu_backend::LiveFrameDisposition::IncumbentRequired => {}
+            crate::webgpu_backend::LiveFrameDisposition::ShadowSubmitted(_) => {}
+            crate::webgpu_backend::LiveFrameDisposition::IncumbentRequired => {
+                if state.backend_evidence_requested {
+                    state.backend_evidence_requested = false;
+                    state.backend_evidence_capture = None;
+                    state.backend_evidence_error = Some(
+                        "backend frame evidence was not admitted by the shadow renderer"
+                            .to_string(),
+                    );
+                }
+            }
         }
 
         let prepare_all = state.patch_prepare_dirty;

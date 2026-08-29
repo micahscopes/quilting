@@ -6332,6 +6332,20 @@ impl PatchRenderScene {
     pub fn pbr_environment_bindings(&self) -> Option<&PbrEnvironmentBindings> {
         self.bindings.pbr_environment.as_ref()
     }
+
+    /// Whether this retained epoch can execute the declared basic PBR subset
+    /// without semantic lowering or placeholder substitution.
+    pub fn supports_resident_basic_pbr_frame(&self, options: RenderFrameOptions) -> bool {
+        supports_basic_pbr_frame(&self.scene, options)
+            && self.pbr_texture_residency().is_some_and(|residency| {
+                residency
+                    .iter()
+                    .all(|material| material.unresolved_mask() == 0)
+            })
+            && self
+                .pbr_environment_bindings()
+                .is_some_and(PbrEnvironmentBindings::is_resident)
+    }
 }
 
 impl OffscreenPatchRenderTarget {

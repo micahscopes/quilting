@@ -88,6 +88,7 @@ struct LiveFrameInput {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LiveFrameDisposition {
     IncumbentRequired,
+    ShadowSubmitted(RenderSubmissionStats),
     PresentationSubmitted(RenderSubmissionStats),
     PresentationRetained,
 }
@@ -683,11 +684,15 @@ pub(crate) fn needs_scene(source_revision: u64) -> bool {
     })
 }
 
-pub(crate) fn pbr_evidence_ready() -> bool {
+pub(crate) fn shadow_evidence_ready() -> bool {
     BACKEND.with(|slot| {
         let backend = slot.borrow();
-        backend.state == "ready" && backend.presentation.is_none() && backend.environment.is_some()
+        backend.state == "ready" && backend.presentation.is_none()
     })
+}
+
+pub(crate) fn pbr_evidence_ready() -> bool {
+    shadow_evidence_ready() && BACKEND.with(|slot| slot.borrow().environment.is_some())
 }
 
 pub(crate) fn record_frame_prerequisite_failure(error: impl ToString) {
@@ -844,14 +849,11 @@ pub(crate) fn submit_frame(
             return Ok(LiveFrameDisposition::IncumbentRequired);
         }
         if style == RenderStyle::Pbr
-            && !quilting_webgpu::supports_basic_pbr_frame(
-                backend
-                    .scene
-                    .as_ref()
-                    .expect("scene presence checked above")
-                    .scene(),
-                options,
-            )
+            && !backend
+                .scene
+                .as_ref()
+                .expect("scene presence checked above")
+                .supports_resident_basic_pbr_frame(options)
         {
             return Ok(LiveFrameDisposition::IncumbentRequired);
         }
@@ -1157,7 +1159,7 @@ pub(crate) fn submit_frame(
                 Ok(if backend.presentation.is_some() {
                     LiveFrameDisposition::PresentationSubmitted(logical_submission)
                 } else {
-                    LiveFrameDisposition::IncumbentRequired
+                    LiveFrameDisposition::ShadowSubmitted(logical_submission)
                 })
             }
             Ok(None) => {
