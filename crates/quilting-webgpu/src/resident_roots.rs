@@ -5,6 +5,22 @@
 
 use super::*;
 
+/// Whether one extracted scene can be rendered exactly from its source roots
+/// without consulting the CPU-authored batch topology. Adaptive leaves remain
+/// on their sparse overlay path until their partition is device-resident too.
+pub fn supports_resident_root_render_scene(scene: &RenderSceneSnapshot, face_count: usize) -> bool {
+    scene.suppressed_root_faces.is_empty()
+        && scene.batches.iter().all(|batch| {
+            batch.id.layer != RenderBatchLayer::AdaptiveOverlay
+                && !batch.members.is_empty()
+                && batch
+                    .members
+                    .iter()
+                    .all(|member| member.leaf_id == ScreenPatchLeafId::ROOT)
+        })
+        && ResidentRootDrawDomains::build(scene, face_count).is_ok()
+}
+
 /// Retained root-only geometry buckets derived from packed resident LOD.
 pub struct ResidentGeometryBucketScene {
     pub(super) model_identity: u64,
@@ -569,6 +585,133 @@ impl LodClassifierDevice {
             source_face_count: geometry.face_count,
         })
     }
+
+    /// Submit one root-only normals frame to retained offscreen attachments.
+    /// Classification, topology emission, preparation, visibility rejection,
+    /// atlas bucketing, and indirect rendering stay ordered on the device.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_offscreen_resident_root_normals(
+        &self,
+        frame: &RenderFrame,
+        render_scene: &RenderSceneSnapshot,
+        model: &LodClassifierModel,
+        resident: &DeviceResidentLod<'_>,
+        preparation: &ResidentRootPreparationScene,
+        geometry: &ResidentGeometryBucketScene,
+        pipeline: &ResidentRootRenderPipeline,
+        bindings: &ResidentRootRenderBindings,
+        atlas: &PackedPatchAtlas,
+        target: &OffscreenPatchRenderTarget,
+        pose: LodPose<'_>,
+        num_joints: u32,
+        use_qb: bool,
+    ) -> Result<PatchFrameEncoding, LodWebGpuError> {
+        if frame.view.viewport != target.size {
+            return Err(LodWebGpuError::Payload(format!(
+                "offscreen target {:?} does not match frame viewport {:?}",
+                target.size, frame.view.viewport,
+            )));
+        }
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quilting resident root offscreen frame"),
+            });
+        let encoding = self.encode_resident_root_normals(
+            &mut encoder,
+            frame,
+            model,
+            resident,
+            preparation,
+            geometry,
+            pipeline,
+            bindings,
+            atlas,
+            PatchRenderTarget {
+                color_view: &target.color_view,
+                resolve_target: None,
+                depth_stencil_view: Some(&target.depth_view),
+                clear_color: Some(wgpu::Color {
+                    r: 0.2,
+                    g: 0.2,
+                    b: 0.3,
+                    a: 0.0,
+                }),
+                clear_depth: Some(1.0),
+            },
+            pose,
+            num_joints,
+            use_qb,
+        )?;
+        self.queue.submit([encoder.finish()]);
+        resident_root_frame_evidence(frame, render_scene, encoding)
+    }
+
+    /// Present one root-only normals frame through the same direct encoder as
+    /// the offscreen path. Surface acquisition and queue submission remain
+    /// Rust-owned and no diagnostic copy or CPU map is introduced.
+    #[allow(clippy::too_many_arguments)]
+    pub fn present_resident_root_normals(
+        &self,
+        surface: &mut PatchPresentationSurface,
+        frame: &RenderFrame,
+        render_scene: &RenderSceneSnapshot,
+        model: &LodClassifierModel,
+        resident: &DeviceResidentLod<'_>,
+        preparation: &ResidentRootPreparationScene,
+        geometry: &ResidentGeometryBucketScene,
+        pipeline: &ResidentRootRenderPipeline,
+        bindings: &ResidentRootRenderBindings,
+        atlas: &PackedPatchAtlas,
+        pose: LodPose<'_>,
+        num_joints: u32,
+        use_qb: bool,
+    ) -> Result<SurfacePresentation<PatchFrameEncoding>, LodWebGpuError> {
+        surface.present_with(
+            self,
+            "quilting resident root presentation frame",
+            |encoder, mut target| {
+                target.clear_color = Some(wgpu::Color {
+                    r: 0.2,
+                    g: 0.2,
+                    b: 0.3,
+                    a: 1.0,
+                });
+                target.clear_depth = Some(1.0);
+                let encoding = self.encode_resident_root_normals(
+                    encoder,
+                    frame,
+                    model,
+                    resident,
+                    preparation,
+                    geometry,
+                    pipeline,
+                    bindings,
+                    atlas,
+                    target,
+                    pose,
+                    num_joints,
+                    use_qb,
+                )?;
+                resident_root_frame_evidence(frame, render_scene, encoding)
+            },
+        )
+    }
+}
+
+fn resident_root_frame_evidence(
+    frame: &RenderFrame,
+    scene: &RenderSceneSnapshot,
+    encoding: ResidentRootFrameEncoding,
+) -> Result<PatchFrameEncoding, LodWebGpuError> {
+    let logical_submission = frame
+        .expected_submission_stats(scene)
+        .map_err(|error| LodWebGpuError::Payload(format!("render frame contract: {error}")))?;
+    Ok(PatchFrameEncoding {
+        logical_submission,
+        indirect_draw_calls: encoding.indirect_draw_calls,
+        source_instance_count: encoding.source_face_count,
+    })
 }
 
 impl LodClassifierDevice {

@@ -24,9 +24,10 @@ pub use presentation::{
     SurfacePresentationDiagnostics,
 };
 pub use resident_roots::{
-    ResidentGeometryBucketOutput, ResidentGeometryBucketScene, ResidentRootDrawDomainOutput,
-    ResidentRootDrawDomainScene, ResidentRootFrameEncoding, ResidentRootPreparationScene,
-    ResidentRootRenderBindings, ResidentRootRenderPipeline, ResidentRootTopologyScene,
+    supports_resident_root_render_scene, ResidentGeometryBucketOutput, ResidentGeometryBucketScene,
+    ResidentRootDrawDomainOutput, ResidentRootDrawDomainScene, ResidentRootFrameEncoding,
+    ResidentRootPreparationScene, ResidentRootRenderBindings, ResidentRootRenderPipeline,
+    ResidentRootTopologyScene,
 };
 
 use futures_channel::oneshot;

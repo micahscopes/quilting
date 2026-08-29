@@ -23,8 +23,9 @@ use quilting_renderer::compute::{
     LodSubjectState, PackedLodClassification, PreparedLodModel, WgslLodDispatchMetrics,
 };
 use quilting_webgpu::{
-    supports_basic_pbr_frame, supports_patch_presentation_style, LodClassifierDevice, LodPose,
-    OffscreenPatchRenderTarget, PatchRenderSceneUpdate, PbrTextureTableUpdate,
+    supports_basic_pbr_frame, supports_patch_presentation_style,
+    supports_resident_root_render_scene, LodClassifierDevice, LodPose, OffscreenPatchRenderTarget,
+    PatchRenderSceneUpdate, PbrTextureTableUpdate,
 };
 
 #[test]
@@ -606,6 +607,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             },
         ));
         let foreign_prepared = prepared.clone();
+        let root_prepared = prepared.clone();
         let atlas = complete_atlas();
         let mut model = classifier.upload_model(prepared, &atlas).unwrap();
         let mut foreign_model = classifier.upload_model(foreign_prepared, &atlas).unwrap();
@@ -791,6 +793,10 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         assert_eq!(packed_atlas.vertex_count(), 3);
         assert_eq!(packed_atlas.triangle_index_count(), 6);
         assert_eq!(packed_atlas.line_index_count(), 6);
+        assert!(supports_resident_root_render_scene(&render_scene, 2));
+        let mut suppressed_scene = render_scene.clone();
+        suppressed_scene.suppressed_root_faces.push(0);
+        assert!(!supports_resident_root_render_scene(&suppressed_scene, 2));
         assert!(
             classifier
                 .upload_packed_patch_atlas(
@@ -813,6 +819,73 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         let target = classifier
             .create_offscreen_patch_render_target([32, 32])
             .unwrap();
+        let root_atlas = prepare_lod_atlas_lookup(vec![[1, 1, 1]]).unwrap();
+        let mut root_model = classifier.upload_model(root_prepared, &root_atlas).unwrap();
+        let root_preparation = classifier
+            .upload_resident_root_preparation_scene(&root_model, &render_scene, &source_instances)
+            .unwrap();
+        let root_geometry = classifier
+            .upload_resident_geometry_bucket_scene(
+                &root_model,
+                &packed_atlas,
+                root_preparation.draw_domains(),
+            )
+            .unwrap();
+        let root_pipeline = classifier
+            .create_resident_root_render_pipeline(
+                wgpu::TextureFormat::Rgba8Unorm,
+                Some(wgpu::TextureFormat::Depth24Plus),
+                1,
+            )
+            .unwrap();
+        let root_bindings = classifier
+            .create_resident_root_render_bindings(&root_pipeline, &root_preparation, &root_geometry)
+            .unwrap();
+        let mut root_metrics = metrics(&root_atlas, 1.0, 0);
+        root_metrics.viewport = [32.0, 32.0];
+        {
+            let classification = classifier
+                .classify_on_device(
+                    &mut root_model,
+                    &identity_dispatch(),
+                    root_metrics,
+                    LodPose::default(),
+                )
+                .unwrap();
+            classifier.reconcile_resident_lod_on_device(&classification, FaceLodGrading::TwoToOne);
+        }
+        let resident = classifier.latest_resident_lod(&root_model).unwrap();
+        let root_encoding = classifier
+            .render_offscreen_resident_root_normals(
+                &render_frame,
+                &render_scene,
+                &root_model,
+                &resident,
+                &root_preparation,
+                &root_geometry,
+                &root_pipeline,
+                &root_bindings,
+                &packed_atlas,
+                &target,
+                LodPose::default(),
+                0,
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            root_encoding.logical_submission,
+            render_frame
+                .expected_submission_stats(&render_scene)
+                .unwrap(),
+        );
+        assert_eq!(root_encoding.indirect_draw_calls, 2);
+        assert_eq!(root_encoding.source_instance_count, 2);
+        assert!(
+            offscreen_signature(&classifier, &target)
+                .await
+                .covered_pixels
+                > 0
+        );
         let error_scope = classifier
             .device()
             .push_error_scope(wgpu::ErrorFilter::Validation);
