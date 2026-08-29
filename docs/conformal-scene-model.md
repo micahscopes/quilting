@@ -257,8 +257,9 @@ Root shape:
 ```
 
 A surface pin is an authored constraint edge. It addresses a stable source
-entity plus source face and barycentric material point, then drives one frame's
-local-to-parent mapping from the posed QB position and differential:
+entity plus an entity-local triangulated source face and barycentric material
+point, then drives one frame's local-to-parent mapping from the posed QB
+position and differential:
 
 ```json
 {
@@ -289,6 +290,13 @@ so anisotropic skinning or QB parameterization never leaks into the conformal
 frame as an accidental nonconformal deformation. `local_offset` acts before
 the surface similarity and may itself contain nested inversions/reflections.
 At most one surface pin may drive a frame in one evaluated scene revision.
+The browser resolves the entity-local face to its packed-scene face once when
+the asset is admitted. Each accepted animation pose then supplies an exact QB
+sample in the target entity's ordinary parent chart. Rust applies every pin in
+parent-first order and publishes the conformal-frame changes atomically before
+paths, coordinates, constraints, and render extraction observe them. This
+requires no GPU readback, and the extracted packets are shared by the WebGL2
+and WebGPU render paths.
 
 An entity node refers to a conformal frame without changing its ordinary glTF
 parenting:

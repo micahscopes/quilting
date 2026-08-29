@@ -72,11 +72,12 @@ use crate::surface_runtime::{
 use crate::surface_walk::{ComposedSurfaceWalkResultJs, SurfaceWalkReflectionTransportResultJs};
 use crate::timing::{TimingDistribution, TimingDistributionSnapshot};
 use hyperscape::interchange::{
-    GltfHyperscopePacket, HyperscapeGltfRuntime, RuntimeDiagnosticSnapshot,
+    GltfHyperscopePacket, GltfSurfaceFramePinRequest, HyperscapeGltfRuntime,
+    RuntimeDiagnosticSnapshot,
 };
 use hyperscape::{
     CameraBasis, CameraRig, ChamberSide, ContactClassification, FocusSphere, PerspectiveLens,
-    SphereReflectionState, SurfaceWalkControls, SurfaceWalkInput,
+    SphereReflectionState, SurfaceSample, SurfaceWalkControls, SurfaceWalkInput,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
@@ -1984,7 +1985,25 @@ thread_local! {
         RefCell::new(std::collections::HashMap::new());
     /// Owns the immutable buffers referenced by `TESS_CACHE` patch slices.
     static TESS_ATLAS: RefCell<Option<TessAtlasBuffers>> = RefCell::new(None);
-    static HYPERSCAPE_RUNTIME: RefCell<Option<HyperscapeGltfRuntime>> = RefCell::new(None);
+    static HYPERSCAPE_RUNTIME: RefCell<Option<BrowserHyperscapeRuntime>> = RefCell::new(None);
+}
+
+struct BrowserHyperscapeRuntime {
+    runtime: HyperscapeGltfRuntime,
+    surface_pins: Vec<ResolvedSurfaceFramePinRequest>,
+    last_surface_pin_sample: Option<SurfaceFramePinSampleKey>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResolvedSurfaceFramePinRequest {
+    authored: GltfSurfaceFramePinRequest,
+    packed_face: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SurfaceFramePinSampleKey {
+    pose_stamp: Option<(u32, u32)>,
+    target_models: Vec<[f32; 16]>,
 }
 
 const IDENTITY_MOBIUS: [f32; 16] = [
@@ -3076,6 +3095,99 @@ fn observe_render_submission(
     );
 }
 
+fn resolve_surface_frame_pin_faces(
+    requests: &[GltfSurfaceFramePinRequest],
+) -> Result<Vec<ResolvedSurfaceFramePinRequest>, String> {
+    STATE.with(|state| {
+        let state = state.borrow();
+        let renderer = state
+            .as_ref()
+            .ok_or_else(|| "renderer is not initialized".to_string())?;
+        requests
+            .iter()
+            .map(|&authored| {
+                let local_face = authored.face as usize;
+                let packed_face = packed_face_for_entity_local_face(
+                    &renderer.face_nodes,
+                    authored.target_node,
+                    local_face,
+                )
+                .ok_or_else(|| {
+                    format!(
+                        "surface pin {} targets missing entity-local face {} on node {}",
+                        authored.pin_index, authored.face, authored.target_node
+                    )
+                })?;
+                Ok(ResolvedSurfaceFramePinRequest {
+                    authored,
+                    packed_face,
+                })
+            })
+            .collect()
+    })
+}
+
+fn packed_face_for_entity_local_face(
+    face_nodes: &[usize],
+    target_node: usize,
+    local_face: usize,
+) -> Option<usize> {
+    face_nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(face, &node)| (node == target_node).then_some(face))
+        .nth(local_face)
+}
+
+fn sample_surface_frame_pins(
+    requests: &[ResolvedSurfaceFramePinRequest],
+    previous: Option<&SurfaceFramePinSampleKey>,
+) -> Result<Option<(SurfaceFramePinSampleKey, Vec<SurfaceSample>)>, String> {
+    if requests.is_empty() {
+        return Ok(None);
+    }
+    STATE.with(|state| {
+        let state = state.borrow();
+        let renderer = state
+            .as_ref()
+            .ok_or_else(|| "renderer is not initialized".to_string())?;
+        let key = SurfaceFramePinSampleKey {
+            pose_stamp: renderer.surface_runtime.pose_stamp(),
+            target_models: requests
+                .iter()
+                .map(|request| {
+                    conformal_state_for_node(renderer, request.authored.target_node)
+                        .euclidean_model
+                })
+                .collect(),
+        };
+        if previous == Some(&key) {
+            return Ok(None);
+        }
+        let samples = requests
+            .iter()
+            .zip(&key.target_models)
+            .map(|(request, &model)| {
+                if renderer.face_nodes.get(request.packed_face).copied()
+                    != Some(request.authored.target_node)
+                {
+                    return Err(format!(
+                        "surface pin {} no longer matches packed face {}",
+                        request.authored.pin_index, request.packed_face
+                    ));
+                }
+                renderer.surface_runtime.sample_face_in_parent_chart(
+                    &renderer.cached_instances,
+                    request.packed_face,
+                    request.authored.barycentric,
+                    model,
+                )
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(Some((key, samples)))
+    })
+}
+
 #[wasm_bindgen(js_name = "mr_loadHyperscape")]
 pub fn mr_load_hyperscape(data: &[u8]) -> bool {
     let (nodes, asset) = match quilting_gltf::load_hyperscape_graph(data) {
@@ -3101,8 +3213,25 @@ pub fn mr_load_hyperscape(data: &[u8]) -> bool {
             return false;
         }
     };
+    let surface_pins = match resolve_surface_frame_pin_faces(
+        &runtime.surface_frame_pin_requests(),
+    ) {
+        Ok(surface_pins) => surface_pins,
+        Err(error) => {
+            web_sys::console::warn_1(&format!("Hyperscape surface pins: {error}").into());
+            HYPERSCAPE_RUNTIME.with(|runtime| *runtime.borrow_mut() = None);
+            clear_hyperscape_packets();
+            return false;
+        }
+    };
     apply_hyperscape_packets(&runtime.packets_by_node());
-    HYPERSCAPE_RUNTIME.with(|slot| *slot.borrow_mut() = Some(runtime));
+    HYPERSCAPE_RUNTIME.with(|slot| {
+        *slot.borrow_mut() = Some(BrowserHyperscapeRuntime {
+            runtime,
+            surface_pins,
+            last_surface_pin_sample: None,
+        })
+    });
     true
 }
 
@@ -3140,14 +3269,52 @@ pub fn mr_tick_hyperscape(delta_seconds: f64, include_scene_diagnostics: bool) -
     } else {
         0.0
     };
+    let surface_pins = HYPERSCAPE_RUNTIME.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|runtime| {
+                (
+                    runtime.surface_pins.clone(),
+                    runtime.last_surface_pin_sample.clone(),
+                )
+            })
+    });
+    let Some((surface_pins, last_surface_pin_sample)) = surface_pins else {
+        return JsValue::NULL;
+    };
+    let sampled_pins = sample_surface_frame_pins(
+        &surface_pins,
+        last_surface_pin_sample.as_ref(),
+    );
     let snapshot = HYPERSCAPE_RUNTIME.with(|slot| {
-        let mut runtime = slot.borrow_mut();
-        let runtime = runtime.as_mut()?;
-        runtime.tick(Duration::from_secs_f64(delta_seconds));
+        let mut browser_runtime = slot.borrow_mut();
+        let browser_runtime = browser_runtime.as_mut()?;
+        let mut sampling_diagnostic = None;
+        match sampled_pins {
+            Ok(Some((key, samples))) => {
+                if let Err(error) = browser_runtime
+                    .runtime
+                    .submit_surface_frame_pin_samples(samples)
+                {
+                    sampling_diagnostic = Some(error.to_string());
+                } else {
+                    browser_runtime.last_surface_pin_sample = Some(key);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => sampling_diagnostic = Some(error),
+        }
+        browser_runtime
+            .runtime
+            .tick(Duration::from_secs_f64(delta_seconds));
+        let mut diagnostics = browser_runtime.runtime.diagnostics().to_vec();
+        if let Some(diagnostic) = sampling_diagnostic {
+            diagnostics.push(diagnostic);
+        }
         Some((
-            runtime.packets_by_node(),
-            runtime.diagnostics().to_vec(),
-            include_scene_diagnostics.then(|| runtime.diagnostic_snapshot()),
+            browser_runtime.runtime.packets_by_node(),
+            diagnostics,
+            include_scene_diagnostics.then(|| browser_runtime.runtime.diagnostic_snapshot()),
         ))
     });
     let Some((packets, diagnostics, scene_diagnostics)) = snapshot else {
@@ -10016,6 +10183,15 @@ mod tests {
         assert_eq!(resolved.mobius, source.mobius);
         assert_eq!(resolved.orientation_sign, source.orientation_sign);
         assert_eq!(resolved.euclidean_model, admitted);
+    }
+
+    #[wasm_bindgen_test]
+    fn entity_local_surface_face_resolves_once_into_packed_scene_order() {
+        let face_nodes = [4, 9, 4, 7, 4];
+        assert_eq!(packed_face_for_entity_local_face(&face_nodes, 4, 0), Some(0));
+        assert_eq!(packed_face_for_entity_local_face(&face_nodes, 4, 1), Some(2));
+        assert_eq!(packed_face_for_entity_local_face(&face_nodes, 4, 2), Some(4));
+        assert_eq!(packed_face_for_entity_local_face(&face_nodes, 4, 3), None);
     }
 
     #[wasm_bindgen_test]

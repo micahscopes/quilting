@@ -665,6 +665,39 @@ impl SurfaceRuntime {
         .ok_or_else(|| format!("could not reconstruct output patch for face {face}"))
     }
 
+    /// Sample a posed source face in one ordinary conformal-parent chart.
+    ///
+    /// Surface-pin constraints deliberately omit the final subject-to-camera
+    /// Mobius map: their frame mapping is composed into that graph later. This
+    /// retains the exact renderer pose and QB differential without making the
+    /// pin dependent on the active projection camera or graphics backend.
+    pub fn sample_face_in_parent_chart(
+        &self,
+        instances: &[f32],
+        face: usize,
+        barycentric: [f64; 3],
+        euclidean_model: [f32; 16],
+    ) -> Result<SurfaceSample, String> {
+        let patch = output_patch_for_pose(
+            instances,
+            face,
+            PoseData {
+                joint_indices: &self.joint_indices,
+                joint_weights: &self.joint_weights,
+                morph_deltas: &self.morph_deltas,
+                morph_num_vertices: self.morph_num_vertices,
+                morph_num_targets: self.morph_num_targets,
+                joint_matrices: &self.joint_matrices,
+                morph_weights: &self.morph_weights,
+            },
+            Mobius::identity(),
+            euclidean_model,
+        )
+        .ok_or_else(|| format!("could not reconstruct parent-chart face {face}"))?;
+        sample_patch(patch, barycentric, [0.0; 3])
+            .ok_or_else(|| format!("could not sample parent-chart face {face}"))
+    }
+
     pub fn attach(
         &mut self,
         instances: &[f32],
@@ -1222,22 +1255,7 @@ struct RuntimeSurfaceField<'a> {
 impl SurfaceField for RuntimeSurfaceField<'_> {
     fn sample(&mut self, address: SurfaceAddress) -> Option<SurfaceSample> {
         let patch = self.patch(address.face as usize)?;
-        let u = address.barycentric[1];
-        let v = address.barycentric[2];
-        let differential = patch.eval_differential(u, v);
-        let point = differential.position;
-        let tangent_u = differential.tangent_u;
-        let tangent_v = differential.tangent_v;
-        [point, tangent_u, tangent_v]
-            .into_iter()
-            .flatten()
-            .all(f64::is_finite)
-            .then_some(SurfaceSample {
-                output_position: point,
-                tangent_u,
-                tangent_v,
-                surface_velocity: self.surface_velocity,
-            })
+        sample_patch(patch, address.barycentric, self.surface_velocity)
     }
 
     fn cross_edge(
@@ -1263,6 +1281,27 @@ impl SurfaceField for RuntimeSurfaceField<'_> {
         let scale = 1.0 + length(source_position).max(length(target_position));
         (separation <= 1.0e-7 * scale).then_some(next)
     }
+}
+
+fn sample_patch(
+    patch: QBTriPatch,
+    barycentric: [f64; 3],
+    surface_velocity: [f64; 3],
+) -> Option<SurfaceSample> {
+    let differential = patch.eval_differential(barycentric[1], barycentric[2]);
+    let point = differential.position;
+    let tangent_u = differential.tangent_u;
+    let tangent_v = differential.tangent_v;
+    [point, tangent_u, tangent_v, surface_velocity]
+        .into_iter()
+        .flatten()
+        .all(f64::is_finite)
+        .then_some(SurfaceSample {
+            output_position: point,
+            tangent_u,
+            tangent_v,
+            surface_velocity,
+        })
 }
 
 impl RuntimeSurfaceField<'_> {
@@ -1899,6 +1938,26 @@ mod tests {
                 1.0e-12,
             );
         }
+    }
+
+    #[test]
+    fn parent_chart_sample_uses_pose_and_affine_model_without_camera_mobius() {
+        let instances = triangle_instances();
+        let runtime = SurfaceRuntime::default();
+        let model = [
+            2.0, 0.0, 0.0, 0.0,
+            0.0, 3.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            5.0, 7.0, 11.0, 1.0,
+        ];
+        let sampled = runtime
+            .sample_face_in_parent_chart(&instances, 0, [0.5, 0.25, 0.25], model)
+            .unwrap();
+
+        assert_near3(sampled.output_position, [5.5, 7.75, 11.0], 1.0e-9);
+        assert_near3(sampled.tangent_u, [2.0, 0.0, 0.0], 1.0e-9);
+        assert_near3(sampled.tangent_v, [0.0, 3.0, 0.0], 1.0e-9);
+        assert_eq!(sampled.surface_velocity, [0.0; 3]);
     }
 
     #[test]

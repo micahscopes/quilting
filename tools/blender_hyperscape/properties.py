@@ -130,7 +130,12 @@ class HyperscapeConstraint(bpy.types.PropertyGroup):
     target: PointerProperty(name="Target", type=bpy.types.Object)
     local_offset: FloatVectorProperty(name="Target Offset", size=3, subtype="TRANSLATION")
     frame: IntProperty(name="Conformal Frame", default=0, min=0)
-    face: IntProperty(name="Source Face", default=0, min=0)
+    face: IntProperty(
+        name="Entity-local Triangle",
+        description="Triangle index within the target entity's exported source topology",
+        default=0,
+        min=0,
+    )
     barycentric: FloatVectorProperty(
         name="Barycentric Point",
         description="Stable source-face weights; values are normalized on load",

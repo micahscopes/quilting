@@ -5,8 +5,9 @@ use crate::{
     ConformalPathTimeline, ConformalScene, ContactRecord, ContactState, CrossFrameTarget,
     EntityFrame, EuclideanCoordinates, EuclideanModelMatrix, LocalCoordinates, PathKeyframe,
     PathTransition, ProjectionCamera, RenderSubject, StableEntityId, TrackedCoordinates,
-    SurfaceAddress, SurfaceAttachment, SurfaceFramePin, SurfaceFramePinBinding, SurfaceFramePinSet,
-    TransformHistory, TransformHistorySample,
+    SurfaceAddress, SurfaceAttachment, SurfaceFramePin, SurfaceFramePinBinding,
+    SurfaceFramePinSamples, SurfaceFramePinSet, SurfaceSample, TransformHistory,
+    TransformHistorySample,
 };
 use bevy_app::App;
 use bevy_ecs::prelude::*;
@@ -14,7 +15,7 @@ use bevy_time::{Time, Virtual};
 use quilting_gltf::hyperscape::{HyperscapeConstraint, HyperscapeGltfError};
 use quilting_gltf::scene::Transform;
 use quilting_gltf::GltfScene;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::time::Duration;
@@ -209,6 +210,7 @@ pub struct HyperscapeGltfRuntime {
     app: App,
     entities: Vec<Entity>,
     node_names: Vec<Option<String>>,
+    stable_nodes: BTreeMap<uuid::Uuid, usize>,
 }
 
 /// One extracted renderer packet with stable ordinary glTF identities for
@@ -219,6 +221,39 @@ pub struct GltfHyperscopePacket {
     pub camera_node: usize,
     pub packet: crate::HyperscopePacket,
 }
+
+/// Geometry work requested by one authored surface-pin constraint.
+///
+/// `face` is local to the target entity's merged source triangles. A renderer
+/// resolves it to its packed-scene face once, then samples `barycentric` from
+/// the exact accepted animation pose in the target frame's ordinary chart.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GltfSurfaceFramePinRequest {
+    pub pin_index: usize,
+    pub frame: usize,
+    pub target_entity: uuid::Uuid,
+    pub target_node: usize,
+    pub face: u32,
+    pub barycentric: [f64; 3],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SurfaceFramePinSampleCountError {
+    pub expected: usize,
+    pub actual: usize,
+}
+
+impl fmt::Display for SurfaceFramePinSampleCountError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "surface-pin pose has {} samples for {} authored pins",
+            self.actual, self.expected
+        )
+    }
+}
+
+impl Error for SurfaceFramePinSampleCountError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameDiagnostic {
@@ -290,10 +325,20 @@ impl HyperscapeGltfRuntime {
         // Resolve the authored scene once at deterministic time zero.
         app.update();
         let node_names = nodes.iter().map(|node| node.name.clone()).collect();
+        let stable_nodes = entities
+            .iter()
+            .enumerate()
+            .filter_map(|(node, &entity)| {
+                app.world()
+                    .get::<StableEntityId>(entity)
+                    .map(|stable| (stable.0, node))
+            })
+            .collect();
         Ok(Self {
             app,
             entities,
             node_names,
+            stable_nodes,
         })
     }
 
@@ -310,10 +355,10 @@ impl HyperscapeGltfRuntime {
     }
 
     pub fn entity_by_stable_id(&self, stable_id: uuid::Uuid) -> Option<Entity> {
-        self.entities.iter().copied().find(|&entity| {
-            self.app.world().get::<StableEntityId>(entity).copied()
-                == Some(StableEntityId(stable_id))
-        })
+        self.stable_nodes
+            .get(&stable_id)
+            .and_then(|&node| self.entities.get(node))
+            .copied()
     }
 
     pub fn stable_id_for_node(&self, node: usize) -> Option<uuid::Uuid> {
@@ -322,6 +367,56 @@ impl HyperscapeGltfRuntime {
             .world()
             .get::<StableEntityId>(entity)
             .map(|stable| stable.0)
+    }
+
+    pub fn surface_frame_pin_requests(&self) -> Vec<GltfSurfaceFramePinRequest> {
+        self.app
+            .world()
+            .resource::<SurfaceFramePinSet>()
+            .0
+            .iter()
+            .enumerate()
+            .map(|(pin_index, binding)| {
+                let address = binding.pin.attachment.address;
+                GltfSurfaceFramePinRequest {
+                    pin_index,
+                    frame: binding.frame.0,
+                    target_entity: address.entity.0,
+                    target_node: *self
+                        .stable_nodes
+                        .get(&address.entity.0)
+                        .expect("validated surface-pin target has a stable glTF node"),
+                    face: address.face,
+                    barycentric: address.barycentric,
+                }
+            })
+            .collect()
+    }
+
+    /// Admit one complete renderer pose into the deterministic ECS tick.
+    pub fn submit_surface_frame_pin_samples(
+        &mut self,
+        samples: Vec<SurfaceSample>,
+    ) -> Result<u64, SurfaceFramePinSampleCountError> {
+        let expected = self.app.world().resource::<SurfaceFramePinSet>().0.len();
+        if samples.len() != expected {
+            return Err(SurfaceFramePinSampleCountError {
+                expected,
+                actual: samples.len(),
+            });
+        }
+        if expected == 0 {
+            return Ok(self
+                .app
+                .world()
+                .resource::<SurfaceFramePinSamples>()
+                .revision());
+        }
+        Ok(self
+            .app
+            .world_mut()
+            .resource_mut::<SurfaceFramePinSamples>()
+            .replace(samples.into_iter().map(Some).collect()))
     }
 
     pub fn packets(&self) -> &[crate::HyperscopePacket] {
@@ -682,6 +777,41 @@ mod tests {
         assert_eq!(pins.0[0].pin.attachment.normal_sign, -1);
         assert_eq!(pins.0[0].pin.orientation, SurfaceFrameOrientation::RightSideIn);
         assert_eq!(pins.0[0].pin.local_offset.orientation_sign(), -1);
+
+        let mut runtime = HyperscapeGltfRuntime::new(&nodes, &asset).unwrap();
+        let requests = runtime.surface_frame_pin_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].pin_index, 0);
+        assert_eq!(requests[0].frame, 1);
+        assert_eq!(requests[0].target_node, 0);
+        assert_eq!(requests[0].face, 5);
+        assert_eq!(
+            runtime.submit_surface_frame_pin_samples(Vec::new()),
+            Err(SurfaceFramePinSampleCountError {
+                expected: 1,
+                actual: 0,
+            })
+        );
+        runtime
+            .submit_surface_frame_pin_samples(vec![SurfaceSample {
+                output_position: [4.0, 2.0, 1.0],
+                tangent_u: [1.0, 0.0, 0.0],
+                tangent_v: [0.0, 1.0, 0.0],
+                surface_velocity: [0.0; 3],
+            }])
+            .unwrap();
+        runtime.tick(Duration::ZERO);
+        assert_eq!(
+            runtime
+                .app()
+                .world()
+                .resource::<ConformalScene>()
+                .frames
+                .world_chain(quilting_core::FrameId(1))
+                .unwrap()
+                .orientation_sign(),
+            1
+        );
     }
 
 }
