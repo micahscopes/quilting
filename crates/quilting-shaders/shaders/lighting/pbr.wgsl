@@ -5,6 +5,28 @@
 
 const PI: f32 = 3.14159265359;
 
+// Preserve the incumbent browser renderer's historical color transfer until
+// both backends deliberately migrate together to the exact sRGB curve.
+fn pbr_legacy_color_to_linear(color: vec3<f32>) -> vec3<f32> {
+    return pow(color, vec3<f32>(2.2));
+}
+
+fn pbr_evaluate_base_color(factor: vec4<f32>, texel: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(pbr_legacy_color_to_linear(texel.rgb) * factor.rgb, texel.a * factor.a);
+}
+
+fn pbr_evaluate_emissive(factor: vec3<f32>, texel: vec4<f32>) -> vec3<f32> {
+    return factor * pbr_legacy_color_to_linear(texel.rgb);
+}
+
+fn pbr_tone_map(color_in: vec3<f32>) -> vec3<f32> {
+    let color = color_in;
+    let numerator = color * (color * 2.51 + vec3<f32>(0.03));
+    let denominator = color * (color * 2.43 + vec3<f32>(0.59)) + vec3<f32>(0.14);
+    let mapped = clamp(numerator / denominator, vec3<f32>(0.0), vec3<f32>(1.0));
+    return pow(mapped, vec3<f32>(1.0 / 2.2));
+}
+
 // GGX/Trowbridge-Reitz normal distribution
 fn distribution_ggx(n_dot_h: f32, roughness: f32) -> f32 {
     let a = roughness * roughness;

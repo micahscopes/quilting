@@ -169,7 +169,7 @@ impl LodClassifierDevice {
                 resolve_material_texture(
                     textures,
                     material.textures.base_color,
-                    TextureInterpretation::Srgb,
+                    TextureInterpretation::LegacyPow22,
                     &placeholders.white,
                 ),
                 resolve_material_texture(
@@ -187,7 +187,7 @@ impl LodClassifierDevice {
                 resolve_material_texture(
                     textures,
                     material.textures.emissive,
-                    TextureInterpretation::Srgb,
+                    TextureInterpretation::LegacyPow22,
                     &placeholders.black,
                 ),
                 resolve_material_texture(
@@ -471,7 +471,9 @@ pub(crate) fn create_pbr_texture_bind_group_layout(device: &wgpu::Device) -> wgp
 #[derive(Clone, Copy)]
 enum TextureInterpretation {
     Linear,
-    Srgb,
+    /// Bind raw UNORM so shared WGSL can reproduce the incumbent's historical
+    /// `pow(2.2)` transfer on both APIs.
+    LegacyPow22,
 }
 
 struct ResolvedMaterialTexture<'a> {
@@ -490,8 +492,7 @@ fn resolve_material_texture<'a>(
     let resident = resident_resource.is_some();
     let resource = resident_resource.unwrap_or(placeholder);
     let view = match interpretation {
-        TextureInterpretation::Linear => &resource.linear_view,
-        TextureInterpretation::Srgb => &resource.srgb_view,
+        TextureInterpretation::Linear | TextureInterpretation::LegacyPow22 => &resource.linear_view,
     };
     ResolvedMaterialTexture {
         view,

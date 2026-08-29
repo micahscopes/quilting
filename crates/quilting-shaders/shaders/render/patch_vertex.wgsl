@@ -3,7 +3,7 @@
 #import quilting::surface::patch_prepare::PreparedPatchRecord
 #import quilting::surface::patch_render::{PatchRenderTransform, PatchSurfaceInput, evaluate_patch_surface}
 #import quilting::lighting::matcap::{matcap_shade, procedural_matcap}
-#import quilting::lighting::pbr::{PBRInput, pbr_ambient, pbr_direct}
+#import quilting::lighting::pbr::{PBRInput, pbr_ambient, pbr_direct, pbr_evaluate_base_color, pbr_evaluate_emissive, pbr_tone_map}
 
 struct PatchRenderFrame {
     mvp: mat4x4<f32>,
@@ -235,7 +235,7 @@ fn shade_patch_pbr(
             );
         }
     }
-    let base = material.base_color * base_texel;
+    let base = pbr_evaluate_base_color(material.base_color, base_texel);
     let alpha_mode = material.surface.z;
     if alpha_mode > 0.5 && alpha_mode < 1.5 && base.a < material.surface.y {
         discard;
@@ -310,11 +310,8 @@ fn shade_patch_pbr(
         * mix(1.0, occlusion_texel.r, clamp(material.normal_occlusion_base_scale.y, 0.0, 1.0));
     var color = key.color + fill.color
         + ambient
-        + material.emissive_metallic.rgb * emissive_texel.rgb;
-    let aces_a = color * 2.51 + vec3<f32>(0.03);
-    let aces_b = color * 2.43 + vec3<f32>(0.59);
-    color = clamp((color * aces_a) / (color * aces_b + vec3<f32>(0.14)), vec3<f32>(0.0), vec3<f32>(1.0));
-    color = pow(color, vec3<f32>(1.0 / 2.2));
+        + pbr_evaluate_emissive(material.emissive_metallic.rgb, emissive_texel);
+    color = pbr_tone_map(color);
     color = mix(color, selection_tint, selection_amount);
     return vec4<f32>(color, alpha * input.fade);
 }

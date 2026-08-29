@@ -1,6 +1,6 @@
 #define_import_path quilting::fragment::pbr
 
-#import quilting::lighting::pbr::{pbr_direct, pbr_ambient, PBRInput, env_dfg, fresnel_schlick_roughness, sh_irradiance_fallback, env_specular_fallback}
+#import quilting::lighting::pbr::{pbr_direct, pbr_ambient, pbr_evaluate_base_color, pbr_evaluate_emissive, pbr_tone_map, PBRInput, env_dfg, fresnel_schlick_roughness, sh_irradiance_fallback, env_specular_fallback}
 
 struct PbrUniforms {
     base_color: vec4<f32>,
@@ -179,12 +179,11 @@ fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> PbrOutput
             (in.tex_uv.x * sr_val + in.tex_uv.y * cr) * s.y,
         );
     }
-    var base = pbr.base_color;
+    var base_texel = vec4<f32>(1.0);
     if pbr.has_base_color_tex > 0.5 {
-        let tex_color = textureSample(base_color_tex, base_color_sampler, base_uv);
-        let linear_rgb = pow(tex_color.rgb, vec3<f32>(2.2));
-        base = vec4<f32>(linear_rgb * pbr.base_color.rgb, tex_color.a * pbr.base_color.a);
+        base_texel = textureSample(base_color_tex, base_color_sampler, base_uv);
     }
+    let base = pbr_evaluate_base_color(pbr.base_color, base_texel);
 
     // --- Alpha ---
     var alpha = base.a;
@@ -399,13 +398,11 @@ fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> PbrOutput
     }
 
     // --- Emissive ---
-    var emissive = pbr.emissive_factor.rgb;
+    var emissive_texel = vec4<f32>(1.0);
     if pbr.has_emissive_tex > 0.5 {
-        let em_tex = textureSample(emissive_tex, emissive_sampler, in.tex_uv);
-        let em_linear = pow(em_tex.rgb, vec3<f32>(2.2)); // sRGB → linear
-        emissive = emissive * em_linear;
+        emissive_texel = textureSample(emissive_tex, emissive_sampler, in.tex_uv);
     }
-    color = color + emissive;
+    color = color + pbr_evaluate_emissive(pbr.emissive_factor.rgb, emissive_texel);
 
     // --- KHR_materials_transmission + volume ---
     if pbr.transmission_factor > 0.0 {
@@ -454,13 +451,7 @@ fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> PbrOutput
         color = reflection + body;
     }
 
-    // Tone mapping: ACES filmic with slight exposure boost for deeper contrast
-    let exposed = color;
-    let a = exposed * 2.51 + vec3<f32>(0.03);
-    let b = exposed * 2.43 + vec3<f32>(0.59);
-    color = clamp((exposed * a) / (exposed * b + vec3<f32>(0.14)), vec3<f32>(0.0), vec3<f32>(1.0));
-    // Gamma correction
-    color = pow(color, vec3<f32>(1.0 / 2.2));
+    color = pbr_tone_map(color);
     color = mix(color, pbr.selection_tint.rgb, selection_amount);
 
     return PbrOutput(vec4<f32>(color, alpha * in.fade), vec4<f32>(in.mobius_stretch, dof_depth, focus_field, 1.0));
