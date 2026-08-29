@@ -11,6 +11,8 @@ struct RouteShadowResult {
     render_settings: Option<RouteRenderSettings>,
     #[serde(skip_serializing_if = "Option::is_none")]
     selection: Option<RouteSelection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    animation_clock: Option<RouteAnimationClock>,
 }
 
 #[derive(Serialize)]
@@ -59,6 +61,13 @@ struct RouteSelection {
     entity_id: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RouteAnimationClock {
+    time_seconds: Option<f64>,
+    speed: Option<f64>,
+}
+
 /// Canonicalize already-decoded browser query pairs. Percent decoding and
 /// encoding remain platform work; key identity, defaults, validation, and
 /// ordering are Rust application policy.
@@ -105,12 +114,21 @@ pub fn canonicalize_hyperscope_route(pairs: JsValue) -> Result<JsValue, JsValue>
             asset_id: identity.asset.to_string(),
             entity_id: identity.entity.to_string(),
         });
+    let animation_clock = route
+        .animation_clock()
+        .ok()
+        .flatten()
+        .map(|clock| RouteAnimationClock {
+            time_seconds: clock.time_seconds,
+            speed: clock.speed,
+        });
     to_js(&RouteShadowResult {
         pairs,
         resolved_pairs,
         diagnostics,
         render_settings,
         selection,
+        animation_clock,
     })
 }
 

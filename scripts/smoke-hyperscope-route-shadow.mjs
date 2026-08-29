@@ -137,6 +137,19 @@ assert.deepEqual(typedSelectionRoute.selection, {
   entityId: '70000000-0000-4000-8000-00000000000b',
 });
 assert.equal(canonicalizeHyperscopeRoute([]).selection, undefined);
+assert.equal(canonicalizeHyperscopeRoute([]).animationClock, undefined);
+assert.deepEqual(
+  canonicalizeHyperscopeRoute([['animtime', '0']]).animationClock,
+  { timeSeconds: 0, speed: undefined },
+);
+assert.deepEqual(
+  canonicalizeHyperscopeRoute([['animspeed', '-0.5']]).animationClock,
+  { timeSeconds: undefined, speed: -0.5 },
+);
+assert.deepEqual(
+  canonicalizeHyperscopeRoute([['animtime', '1.25'], ['animspeed', '-0.5']]).animationClock,
+  { timeSeconds: 1.25, speed: -0.5 },
+);
 for (const [key, value] of [
   ['res', '7'], ['res', '3.5'],
   ['density', '0'], ['density', '12.5'], ['density', '501'],
@@ -640,9 +653,11 @@ for (const startupStep of [
   'initRenderSettings = startupRoute.renderSettings;',
   'initRustRouteAdmitted = true;',
   'initRouteSelection = startupRoute.selection ?? null;',
+  'initRouteAnimationClock = startupRoute.animationClock ?? null;',
   "rustRouteShadowDiagnostics.startupSource = 'browser-fallback';",
   "'missing-typed-render-settings'",
   'initRouteSelection,',
+  'initRouteAnimationClock,',
   "dispatchRustRenderSettings(\n        app,\n        initRenderSettings,\n        'route-startup',",
   "rustRenderSettingsDiagnostics.state = 'route-committed';",
 ]) {
@@ -686,7 +701,7 @@ assert.equal(explicitClock.animtimeProvided, true);
 assert.equal(explicitClock.animspeedProvided, true);
 
 const applyParamsSource = browserSource.match(
-  /applyParams = function\([\s\S]*?validatedRouteSelection = null,[\s\S]*?\) \{([\s\S]*?)\n\};\n\n\/\/ --- IndexedDB/,
+  /applyParams = function\([\s\S]*?validatedRouteAnimationClock = null,[\s\S]*?\) \{([\s\S]*?)\n\};\n\n\/\/ --- IndexedDB/,
 )?.[1];
 assert.ok(applyParamsSource, 'could not locate browser startup state adapter');
 for (const exactProjection of [
@@ -713,6 +728,8 @@ for (const exactAdmissionStep of [
   'fz.radius.set(admittedInteger(params.fradius, 11, 4, 128));',
   'pendingRouteSelection = rustRouteAdmitted',
   '? validatedRouteSelection',
+  'pendingRouteAnimationClock = rustRouteAdmitted',
+  '? validatedRouteAnimationClock',
 ]) {
   assert.ok(
     applyParamsSource.includes(exactAdmissionStep),

@@ -244,6 +244,11 @@ The first application boundary is now explicit:
   nil rejection, UUID parsing, and canonical lowercase formatting; successful
   startup no longer re-runs the browser regex. The old helper remains for the
   explicit JavaScript and runtime fallback lanes.
+  Explicit clip-relative animation time and speed are likewise projected as a
+  typed partial value. Rust retains the difference between an omitted field
+  and an explicitly linked default; the browser only defers that value until
+  the requested clip range is resident, then commits it through the existing
+  application animation action.
   Camera links carry explicit `aim=1` when `px/py/pz` is a finite semantic
   target; omitting it means the same visible pose has a free sight tangent.
   Rust validates and canonically orders that policy, and selection or model

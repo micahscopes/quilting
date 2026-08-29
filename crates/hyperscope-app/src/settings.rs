@@ -339,6 +339,14 @@ pub struct RouteDiagnostic {
     pub value: String,
 }
 
+/// Partial clip-relative animation-clock intent authored by a URL. Absence of
+/// a field is semantically different from explicitly linking its default.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RouteAnimationClock {
+    pub time_seconds: Option<f64>,
+    pub speed: Option<f64>,
+}
+
 /// Decoded route values with deterministic first-value semantics. Invalid
 /// known values are retained for shadow comparison but reported explicitly;
 /// a later authority cutover can select fallback policy per ControlSpec.
@@ -551,6 +559,45 @@ impl HyperscopeRoute {
             .map_err(|_| "route selection identity is invalid")
     }
 
+    pub fn animation_clock(&self) -> Result<Option<RouteAnimationClock>, &'static str> {
+        let time_seconds = self
+            .values
+            .get("animtime")
+            .map(|value| {
+                if !hyperscope_control_spec("animtime").is_some_and(|spec| spec.accepts(value)) {
+                    return Err("route animation time is invalid");
+                }
+                value
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|value| value.is_finite())
+                    .ok_or("route animation time is invalid")
+            })
+            .transpose()?;
+        let speed = self
+            .values
+            .get("animspeed")
+            .map(|value| {
+                if !hyperscope_control_spec("animspeed").is_some_and(|spec| spec.accepts(value)) {
+                    return Err("route animation speed is invalid");
+                }
+                value
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|value| value.is_finite())
+                    .ok_or("route animation speed is invalid")
+            })
+            .transpose()?;
+        if time_seconds.is_none() && speed.is_none() {
+            Ok(None)
+        } else {
+            Ok(Some(RouteAnimationClock {
+                time_seconds,
+                speed,
+            }))
+        }
+    }
+
     pub fn diagnostics(&self) -> &[RouteDiagnostic] {
         &self.diagnostics
     }
@@ -668,15 +715,35 @@ mod tests {
             ]
         );
         assert!(route.diagnostics().is_empty());
+        assert_eq!(
+            route.animation_clock().unwrap(),
+            Some(RouteAnimationClock {
+                time_seconds: Some(1.25),
+                speed: Some(-0.5),
+            })
+        );
 
         let defaults = HyperscopeRoute::from_pairs([
             ("animtime", "0.0"),
             ("animspeed", "1.00"),
         ]);
         assert!(defaults.canonical_pairs().is_empty());
+        assert_eq!(
+            defaults.animation_clock().unwrap(),
+            Some(RouteAnimationClock {
+                time_seconds: Some(0.0),
+                speed: Some(1.0),
+            }),
+            "explicit defaults remain authored clock intent even when omitted from a compact URL",
+        );
+        assert_eq!(HyperscopeRoute::default().animation_clock(), Ok(None));
 
         let invalid = HyperscopeRoute::from_pairs([("animtime", "NaN")]);
         assert_eq!(invalid.diagnostics().len(), 1);
+        assert!(invalid.animation_clock().is_err());
+        assert!(HyperscopeRoute::from_pairs([("animspeed", "1000001")])
+            .animation_clock()
+            .is_err());
         assert_eq!(invalid.diagnostics()[0].code, RouteDiagnosticCode::InvalidValue);
     }
 

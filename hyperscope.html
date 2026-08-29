@@ -7899,6 +7899,7 @@ applyParams = function(
   validatedRenderSettings = null,
   rustRouteAdmitted = false,
   validatedRouteSelection = null,
+  validatedRouteAnimationClock = null,
 ) {
   const finite = (value, fallback, minimum, maximum) => {
     const parsed = Number(value);
@@ -7951,16 +7952,18 @@ applyParams = function(
     lod.grading.set(params.lodratio === '4' ? '4' : '2');
   }
   setAnimationPlaybackIntent(params.animate !== '0');
-  pendingRouteAnimationClock = params.animtimeProvided || params.animspeedProvided
-    ? Object.freeze({
-      timeSeconds: params.animtimeProvided
-        ? admittedNumber(params.animtime, 0, -1e9, 1e9)
-        : null,
-      speed: params.animspeedProvided
-        ? admittedNumber(params.animspeed, 1, -1e6, 1e6)
-        : null,
-    })
-    : null;
+  pendingRouteAnimationClock = rustRouteAdmitted
+    ? validatedRouteAnimationClock
+    : params.animtimeProvided || params.animspeedProvided
+      ? Object.freeze({
+        timeSeconds: params.animtimeProvided
+          ? admittedNumber(params.animtime, 0, -1e9, 1e9)
+          : null,
+        speed: params.animspeedProvided
+          ? admittedNumber(params.animspeed, 1, -1e6, 1e6)
+          : null,
+      })
+      : null;
   zoom = admittedNumber(params.zoom, 3, 0.1, 1000);
   rotX = admittedNumber(params.rx, 0.3, -Math.PI / 2 + 0.01, Math.PI / 2 - 0.01);
   rotY = admittedNumber(params.ry, 0.5, -1e6, 1e6);
@@ -10926,6 +10929,7 @@ let initParams = readParams(initialRouteParams);
 let initRenderSettings = null;
 let initRustRouteAdmitted = false;
 let initRouteSelection = null;
+let initRouteAnimationClock = null;
 currentGlb = initParams.glb;
 let initialPatchLabShape = patchLabShape(initParams.lab);
 // Set camera early (not WASM-dependent)
@@ -10974,6 +10978,7 @@ phase('wasm', [], async () => {
         initRenderSettings = startupRoute.renderSettings;
         initRustRouteAdmitted = true;
         initRouteSelection = startupRoute.selection ?? null;
+        initRouteAnimationClock = startupRoute.animationClock ?? null;
         currentGlb = initParams.glb;
         initialPatchLabShape = patchLabShape(initParams.lab);
         rustRouteShadowDiagnostics.startupSource = 'rust';
@@ -11044,6 +11049,7 @@ phase('wasm', [], async () => {
     initRenderSettings,
     initRustRouteAdmitted,
     initRouteSelection,
+    initRouteAnimationClock,
   ); // Set signal values first
   if (RUST_RENDER_SETTINGS_IMPLEMENTATION !== 'js'
       && initRustRouteAdmitted
