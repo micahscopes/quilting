@@ -4166,6 +4166,48 @@ impl LodClassifierDevice {
         )
     }
 
+    /// Present one supported frame from the latest device-resident,
+    /// crack-free classifier epoch. Classification, visibility expansion,
+    /// stable compaction, and indirect drawing remain ordered on the device;
+    /// no mesh-sized visibility payload crosses the CPU boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub fn present_supported_patch_scene_with_resident_lod_visibility(
+        &self,
+        surface: &mut PatchPresentationSurface,
+        frame: &RenderFrame,
+        pipelines: &DiagnosticPatchRenderPipelines,
+        scene: &PatchRenderScene,
+        resident: &DeviceResidentLod<'_>,
+        atlas: &PackedPatchAtlas,
+        use_qb: bool,
+    ) -> Result<SurfacePresentation<PatchFrameEncoding>, LodWebGpuError> {
+        surface.present_with(
+            self,
+            "quilting device-resident LOD presentation frame",
+            |encoder, mut target| {
+                target.clear_color = Some(wgpu::Color {
+                    r: 0.2,
+                    g: 0.2,
+                    b: 0.3,
+                    a: 1.0,
+                });
+                target.clear_depth = Some(1.0);
+                self.encode_supported_patch_render_scene(
+                    encoder,
+                    frame,
+                    pipelines,
+                    scene,
+                    atlas,
+                    target,
+                    use_qb,
+                    |encoder, _, _| {
+                        self.encode_patch_render_resident_lod_visibility(scene, resident, encoder)
+                    },
+                )
+            },
+        )
+    }
+
     /// Compatibility wrapper for normals-only presentation callers.
     pub fn present_normals_patch_scene_with_face_visibility(
         &self,
@@ -4205,6 +4247,52 @@ impl LodClassifierDevice {
         )
     }
 
+    /// Submit one single-pass diagnostic frame from a device-resident LOD
+    /// epoch without staging visibility through CPU memory.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_offscreen_diagnostic_patch_scene_with_resident_lod_visibility(
+        &self,
+        frame: &RenderFrame,
+        pipeline: &PatchRenderPipeline,
+        scene: &PatchRenderScene,
+        resident: &DeviceResidentLod<'_>,
+        atlas: &PackedPatchAtlas,
+        target: &OffscreenPatchRenderTarget,
+        use_qb: bool,
+    ) -> Result<PatchFrameEncoding, LodWebGpuError> {
+        if frame.view.viewport != target.size {
+            return Err(LodWebGpuError::Payload(format!(
+                "offscreen target {:?} does not match frame viewport {:?}",
+                target.size, frame.view.viewport,
+            )));
+        }
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quilting device-resident LOD diagnostic frame"),
+            });
+        let encoding = self.encode_diagnostic_patch_render_scene(
+            &mut encoder,
+            frame,
+            pipeline,
+            scene,
+            atlas,
+            PatchRenderTarget {
+                color_view: &target.color_view,
+                resolve_target: None,
+                depth_stencil_view: Some(&target.depth_view),
+                clear_color: Some(wgpu::Color::TRANSPARENT),
+                clear_depth: Some(1.0),
+            },
+            use_qb,
+            |encoder, _, _| {
+                self.encode_patch_render_resident_lod_visibility(scene, resident, encoder)
+            },
+        )?;
+        self.queue.submit([encoder.finish()]);
+        Ok(encoding)
+    }
+
     /// Submit any supported diagnostic frame to the retained offscreen target
     /// without a readback. Composite styles still prepare and compact once.
     pub fn render_offscreen_supported_patch_scene_with_face_visibility(
@@ -4225,6 +4313,53 @@ impl LodClassifierDevice {
             use_qb,
             wgpu::Color::TRANSPARENT,
         )
+    }
+
+    /// Submit any supported diagnostic frame from a device-resident LOD
+    /// epoch. This is the rollback-independent counterpart to the compact
+    /// CPU-bitset adapter above and performs no readback.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_offscreen_supported_patch_scene_with_resident_lod_visibility(
+        &self,
+        frame: &RenderFrame,
+        pipelines: &DiagnosticPatchRenderPipelines,
+        scene: &PatchRenderScene,
+        resident: &DeviceResidentLod<'_>,
+        atlas: &PackedPatchAtlas,
+        target: &OffscreenPatchRenderTarget,
+        use_qb: bool,
+    ) -> Result<PatchFrameEncoding, LodWebGpuError> {
+        if frame.view.viewport != target.size {
+            return Err(LodWebGpuError::Payload(format!(
+                "offscreen target {:?} does not match frame viewport {:?}",
+                target.size, frame.view.viewport,
+            )));
+        }
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quilting device-resident LOD offscreen frame"),
+            });
+        let encoding = self.encode_supported_patch_render_scene(
+            &mut encoder,
+            frame,
+            pipelines,
+            scene,
+            atlas,
+            PatchRenderTarget {
+                color_view: &target.color_view,
+                resolve_target: None,
+                depth_stencil_view: Some(&target.depth_view),
+                clear_color: Some(wgpu::Color::TRANSPARENT),
+                clear_depth: Some(1.0),
+            },
+            use_qb,
+            |encoder, _, _| {
+                self.encode_patch_render_resident_lod_visibility(scene, resident, encoder)
+            },
+        )?;
+        self.queue.submit([encoder.finish()]);
+        Ok(encoding)
     }
 
     /// Submit a supported style with an explicit parity clear while preserving

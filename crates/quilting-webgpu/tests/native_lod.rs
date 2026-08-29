@@ -947,6 +947,62 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         classifier
             .write_patch_render_pose_state(&model, &retained_scene, LodPose::default(), 0)
             .unwrap();
+
+        let visible_dispatch = identity_dispatch();
+        let visible_signature = {
+            let classification = classifier
+                .classify_on_device(
+                    &mut model,
+                    &visible_dispatch,
+                    metrics(&atlas, 1.0, 0),
+                    LodPose::default(),
+                )
+                .unwrap();
+            let resident = classifier
+                .reconcile_resident_lod_on_device(&classification, FaceLodGrading::TwoToOne);
+            classifier
+                .render_offscreen_diagnostic_patch_scene_with_resident_lod_visibility(
+                    &render_frame,
+                    &pipeline,
+                    &retained_scene,
+                    &resident,
+                    &packed_atlas,
+                    &target,
+                    true,
+                )
+                .unwrap();
+            offscreen_signature(&classifier, &target).await
+        };
+        assert!(visible_signature.covered_pixels > 0);
+
+        let mut hidden_dispatch = visible_dispatch;
+        hidden_dispatch.baseline_model = translation_matrix(100.0, 0.0, 0.0);
+        let hidden_signature = {
+            let classification = classifier
+                .classify_on_device(
+                    &mut model,
+                    &hidden_dispatch,
+                    metrics(&atlas, 1.0, 0),
+                    LodPose::default(),
+                )
+                .unwrap();
+            let resident = classifier
+                .reconcile_resident_lod_on_device(&classification, FaceLodGrading::TwoToOne);
+            classifier
+                .render_offscreen_diagnostic_patch_scene_with_resident_lod_visibility(
+                    &render_frame,
+                    &pipeline,
+                    &retained_scene,
+                    &resident,
+                    &packed_atlas,
+                    &target,
+                    true,
+                )
+                .unwrap();
+            offscreen_signature(&classifier, &target).await
+        };
+        assert_eq!(hidden_signature.covered_pixels, 0);
+
         classifier
             .write_patch_render_face_visibility_bits(&retained_scene, &[0b11])
             .unwrap();
