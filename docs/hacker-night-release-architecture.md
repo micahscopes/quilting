@@ -419,6 +419,11 @@ The first application boundary is now explicit:
   receives the exact committed selection and cancellation effects rather than
   returning user intent to JavaScript. The incumbent HTML selector remains the
   default and the shadow oracle remains available until live parity is green.
+  `AppFrameSnapshot` also carries an allocation-free active-clip sample with
+  exact scene/request/asset identity, clip index, authored range, and wrapped
+  time. The four-`f64` WASM packet omits repeated IDs but derives entirely from
+  that snapshot; measured clip lanes no longer need to pass a browser-owned
+  `{time_min, duration}` pair back into Rust every frame.
   Version 0.20 separates a successfully fetched/decoded primary candidate from
   a renderer-resident primary scene. Decode emits an explicit
   `InstallPrimaryScene` effect; only a matching, validated completion can

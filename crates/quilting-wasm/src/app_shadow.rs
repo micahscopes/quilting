@@ -1306,6 +1306,30 @@ impl HyperscopeAppShadow {
         Ok(())
     }
 
+    /// Write `[playing, clip_index, wrapped_clip_time, speed]` from the
+    /// renderer-installed catalog owned by AppStore. Unlike
+    /// `writeAnimationSample`, this boundary accepts no browser-authored clip
+    /// range and therefore cannot sample a stale or different clip silently.
+    #[wasm_bindgen(js_name = writeInstalledAnimationSample)]
+    pub fn write_installed_animation_sample(&self, output: &mut [f64]) -> Result<(), JsValue> {
+        if output.len() != 4 {
+            return Err(JsValue::from_str(
+                "installed animation sample output must contain exactly 4 numbers",
+            ));
+        }
+        let frame = self.store.frame_snapshot();
+        let clip = frame.active_animation_clip.ok_or_else(|| {
+            JsValue::from_str("no renderer-installed active animation clip is available")
+        })?;
+        output.copy_from_slice(&[
+            if frame.animation.playing { 1.0 } else { 0.0 },
+            f64::from(clip.clip_index),
+            clip.sample_time_seconds,
+            frame.animation.speed,
+        ]);
+        Ok(())
+    }
+
     /// Atomically admit one transport-neutral authored checkpoint. The
     /// revision travels as decimal text so JavaScript cannot truncate a u64;
     /// commands retain the canonical protocol JSON shape shared with Blender.

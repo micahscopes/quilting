@@ -622,6 +622,7 @@ pub struct AppFrameSnapshot {
     pub revision: u64,
     pub elapsed_seconds: f64,
     pub animation: AnimationClock,
+    pub active_animation_clip: Option<AnimationClipFrameSnapshot>,
     pub navigation_preset: NavigationPreset,
     pub pending_navigation_actions: usize,
     pub last_applied_navigation_sequence: Option<u64>,
@@ -635,6 +636,41 @@ pub struct AppFrameSnapshot {
     pub camera_transition_remaining: Option<f64>,
     pub surface_anchor_transition_remaining: Option<f64>,
     pub surface_anchor_hop_height: Option<f64>,
+}
+
+/// Allocation-free renderer sample for the application-authoritative active
+/// clip. Names remain in the low-rate installed-scene projection; a frame
+/// carries only stable identity, authored range, and mapped sample time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AnimationClipFrameSnapshot {
+    pub scene_request_id: RequestId,
+    pub asset_id: AssetId,
+    pub clip_index: u32,
+    pub time_min_seconds: f64,
+    pub time_max_seconds: f64,
+    pub sample_time_seconds: f64,
+}
+
+impl AnimationClipFrameSnapshot {
+    fn from_active(active: &ActiveAnimationClipReadModel, clock: AnimationClock) -> Self {
+        let clip = &active.clip;
+        let duration = clip.duration_seconds();
+        let sample_time_seconds = if duration > 0.0 {
+            clock
+                .clip_time(clip.time_min_seconds, duration)
+                .unwrap_or(clip.time_min_seconds)
+        } else {
+            clip.time_min_seconds
+        };
+        Self {
+            scene_request_id: active.scene_request_id,
+            asset_id: active.asset_id,
+            clip_index: clip.index,
+            time_min_seconds: clip.time_min_seconds,
+            time_max_seconds: clip.time_max_seconds,
+            sample_time_seconds,
+        }
+    }
 }
 
 /// Low-rate renderer/control projection published before the summary revision
@@ -862,6 +898,10 @@ impl AppState {
             revision: self.revision,
             elapsed_seconds: self.frame_elapsed_seconds,
             animation: self.animation,
+            active_animation_clip: self
+                .active_animation_clip
+                .as_ref()
+                .map(|active| AnimationClipFrameSnapshot::from_active(active, self.animation)),
             navigation_preset: self.navigation.runtime.preset,
             pending_navigation_actions: self.navigation.queue.len(),
             last_applied_navigation_sequence: self.navigation.runtime.last_applied_sequence,
@@ -2803,6 +2843,17 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(store.summary_snapshot().active_animation_clip, Some(0));
+        assert_eq!(
+            store.frame_snapshot().active_animation_clip,
+            Some(AnimationClipFrameSnapshot {
+                scene_request_id: request_id,
+                asset_id: horse.id,
+                clip_index: 0,
+                time_min_seconds: 0.0,
+                time_max_seconds: 1.5,
+                sample_time_seconds: 0.0,
+            }),
+        );
         let installed_revision = store.summary_snapshot().revision;
         assert_eq!(
             store.dispatch_semantic(SemanticAction::Animate(
@@ -2825,6 +2876,15 @@ mod tests {
             }]
         );
         assert_eq!(store.summary_snapshot().pending_animation_clip_job, Some(0));
+        assert_eq!(
+            store
+                .frame_snapshot()
+                .active_animation_clip
+                .unwrap()
+                .clip_index,
+            0,
+            "pending renderer work must not change the sampled active clip",
+        );
         let (_, duplicate) = store
             .dispatch_semantic(SemanticAction::Animate(AnimationAction::SelectClip(1)))
             .unwrap();
@@ -2887,6 +2947,14 @@ mod tests {
             .unwrap();
         assert_eq!(store.summary_snapshot().active_animation_clip, Some(0));
         assert_eq!(store.summary_snapshot().pending_animation_clip_job, None);
+        assert_eq!(
+            store
+                .frame_snapshot()
+                .active_animation_clip
+                .unwrap()
+                .clip_index,
+            0,
+        );
 
         let (_, third) = store
             .dispatch_semantic(SemanticAction::Animate(AnimationAction::SelectClip(1)))
@@ -2914,6 +2982,35 @@ mod tests {
         let selection = store.animation_clip_selection_snapshot();
         assert_eq!(selection.active.unwrap().clip.index, 1);
         assert_eq!(selection.pending, None);
+        assert_eq!(
+            store.frame_snapshot().active_animation_clip,
+            Some(AnimationClipFrameSnapshot {
+                scene_request_id: request_id,
+                asset_id: horse.id,
+                clip_index: 1,
+                time_min_seconds: 2.0,
+                time_max_seconds: 3.0,
+                sample_time_seconds: 2.0,
+            }),
+        );
+        store
+            .dispatch_semantic(SemanticAction::Animate(AnimationAction::SetClock(
+                AnimationClock {
+                    playing: true,
+                    time_seconds: -0.25,
+                    speed: -1.0,
+                },
+            )))
+            .unwrap();
+        assert_eq!(
+            store
+                .frame_snapshot()
+                .active_animation_clip
+                .unwrap()
+                .sample_time_seconds,
+            2.75,
+            "the installed clip frame must retain reverse Euclidean wrapping",
+        );
     }
 
     #[test]

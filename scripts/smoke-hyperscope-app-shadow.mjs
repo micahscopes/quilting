@@ -560,6 +560,9 @@ assert.deepEqual(
   },
 );
 assert.equal(primarySnapshot.animationClipSelection.active.clip.index, 0);
+const installedAnimationPacket = new Float64Array(4);
+primaryApp.writeInstalledAnimationSample(installedAnimationPacket);
+assert.deepEqual(Array.from(installedAnimationPacket), [1, 0, 0, 1]);
 const clipSelection = primaryApp.dispatchAnimationClip(1);
 assert.deepEqual(
   clipSelection.commit.effects.map(effect => effect.type),
@@ -578,6 +581,8 @@ assert.equal(
 );
 assert.equal(primaryApp.snapshot().animationClipSelection.active.clip.index, 1);
 assert.equal(primaryApp.snapshot().animationClipSelection.pending, undefined);
+primaryApp.writeInstalledAnimationSample(installedAnimationPacket);
+assert.deepEqual(Array.from(installedAnimationPacket), [1, 1, 2, 1]);
 const returnToGallop = primaryApp.dispatchAnimationClip(0);
 const returnToGallopEffect = returnToGallop.commit.effects.find(
   effect => effect.type === 'select_animation_clip',
