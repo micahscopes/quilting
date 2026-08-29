@@ -549,7 +549,9 @@ assert.ok(
   browserSource.includes('if (!presentationAppAuthority()) {\n    useBrowserPresentationView();')
     && !presentationCardMountBoundary.includes('activateRustPresentation(')
     && presentationCardMountBoundary.includes('() => prepareRustPresentationAction()')
-    && presentationCardMountBoundary.includes('consumeRustPresentationCardCommit(direction, sequence, revision);')
+    && presentationCardMountBoundary.includes('consumeRustPresentationCardCommit(')
+    && presentationCardMountBoundary.includes('effect,')
+    && presentationCardMountBoundary.includes('cancellations,')
     && presentationCardMountBoundary.includes("'presentation_view_rejection'"),
   'the Rust-authority Leptos card must dispatch directly while rollback lanes retain HTML controls',
 );
@@ -559,6 +561,7 @@ for (const directPresentationStep of [
   'activate_presentation_card(store, action)',
   'arguments.push(&JsValue::from(committed.sequence));',
   'arguments.push(&JsValue::from(committed.revision));',
+  'presentation_clip_effect_to_js("select_animation_clip", effect)',
 ]) {
   assert.ok(
     presentationCardSource.includes(directPresentationStep),
@@ -588,7 +591,7 @@ const activationAdapter = browserSource.slice(
 );
 assert.ok(
   activationAdapter.indexOf('mirrorAppPresentation(direction, cueId, snapshot)')
-    < activationAdapter.indexOf('return applyRustPresentationCommit(snapshot, navigation);'),
+    < activationAdapter.indexOf('return applyRustPresentationCommit(snapshot, navigation, commit);'),
   'AppStore cue authority must commit before active-scene extraction during rendering',
 );
 const directPresentationAdapter = browserSource.slice(
@@ -608,9 +611,22 @@ const presentationCommitAdapter = browserSource.slice(
 );
 assert.ok(
   presentationCommitAdapter.includes('renderRustPresentationSnapshot(snapshot);')
+    && presentationCommitAdapter.includes('applyCommittedPresentationAnimationEffects(')
     && presentationCommitAdapter.includes('applyRustPresentationNavigation(navigation);'),
   'all cue paths must share one committed renderer/navigation adapter',
 );
+for (const residencyStep of [
+  'rustAppShadow.bindPresentationAnimationResidency(',
+  'await bindPrimaryPresentationAnimationResidency(primaryAsset.id);',
+  "effect.type === 'select_animation_clip'",
+  'committedClipJob: job,',
+  'writeRustAnimationSample(rustAppShadow, null);',
+]) {
+  assert.ok(
+    browserSource.includes(residencyStep),
+    `presentation animation residency is missing ${residencyStep}`,
+  );
+}
 
 const layerAdapter = browserSource.slice(
   browserSource.indexOf('function applyPresentationLayerState('),

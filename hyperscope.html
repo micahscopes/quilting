@@ -2752,6 +2752,7 @@ const rustPresentationDiagnostics = {
   activeVisualization: 'pbr',
   activeTessellation: null,
   activeAnimation: null,
+  animationResidency: null,
   unsupportedOverlays: [],
   navigation: null,
   error: null,
@@ -3035,9 +3036,15 @@ function ensureRustPresentationView() {
     rustAppShadow.mountPresentationCard(
       host,
       () => prepareRustPresentationAction(),
-      (direction, sequence, revision) => {
+      (direction, sequence, revision, effect, cancellations) => {
         try {
-          consumeRustPresentationCardCommit(direction, sequence, revision);
+          consumeRustPresentationCardCommit(
+            direction,
+            sequence,
+            revision,
+            effect,
+            cancellations,
+          );
         } catch (error) {
           rustPresentationDiagnostics.viewErrors += 1;
           rustPresentationDiagnostics.error = error?.message || String(error);
@@ -3103,6 +3110,11 @@ function primaryPresentationAnimation(snapshot) {
 
 async function applyPresentationAnimationState(snapshot = rustPresentationSnapshot) {
   const generation = ++presentationAnimationGeneration;
+  if (ANIMATION_CLIP_IMPLEMENTATION === 'rust' && presentationAppAuthority()) {
+    const residency = refreshAppShadowSnapshot()?.presentation?.animationResidency;
+    if (!residency) return false;
+    return applyRustPresentationAnimationTransport('presentation-state');
+  }
   let animation;
   try {
     animation = primaryPresentationAnimation(snapshot);
@@ -3170,6 +3182,121 @@ async function applyPresentationAnimationState(snapshot = rustPresentationSnapsh
     }
     return false;
   }
+}
+
+function committedPresentationClipJob(commit, context) {
+  const selections = (commit?.effects || []).filter(
+    effect => effect.type === 'select_animation_clip',
+  );
+  const cancellations = (commit?.effects || []).filter(
+    effect => effect.type === 'cancel_animation_clip_selection',
+  );
+  if (selections.length > 1 || cancellations.length > 1) {
+    throw new Error(`${context}: Rust emitted an invalid animation clip effect set`);
+  }
+  const effect = selections[0] || null;
+  if (effect) {
+    animationClipDiagnostics.effects += 1;
+    animationClipDiagnostics.lastRequestedClip = effect.clip_index;
+    animationClipDiagnostics.lastJobId = effect.job_id;
+  }
+  animationClipDiagnostics.cancellationEffects += cancellations.length;
+  return { effect, cancellations };
+}
+
+function applyRustPresentationAnimationTransport(context) {
+  try {
+    writeRustAnimationSample(rustAppShadow, null);
+    const playing = installedAnimationSamplePacket[0] >= 0.5;
+    const clipIndex = installedAnimationSamplePacket[1];
+    animTime = installedAnimationSamplePacket[2];
+    presentationAnimationSpeed = installedAnimationSamplePacket[3];
+    animating_sig.set(playing);
+    const timeSlider = $('time');
+    timeSlider.value = animTime;
+    $('time-v').textContent = animTime.toFixed(2);
+    rebaseAnimationPoseContinuity();
+    tickAnimation(animTime, animationPoseClockSeconds);
+    debouncedLodRecompute();
+    const app = refreshAppShadowSnapshot();
+    rustPresentationDiagnostics.activeAnimation = {
+      clipIndex,
+      clip: app?.animationClipSelection?.active?.clip?.name ?? null,
+      timeSeconds: app?.animationTimeSeconds ?? null,
+      playing,
+      speed: presentationAnimationSpeed,
+      source: 'hyperscope-app',
+    };
+    rustPresentationDiagnostics.animationResidency =
+      app?.presentation?.animationResidency ?? null;
+    rustPresentationDiagnostics.error = null;
+    return true;
+  } catch (error) {
+    rustPresentationDiagnostics.activeAnimation = null;
+    rustPresentationDiagnostics.error = `${context}: ${error?.message || String(error)}`;
+    return false;
+  }
+}
+
+async function applyCommittedPresentationAnimationEffects(
+  commit,
+  snapshot,
+  context,
+) {
+  if (ANIMATION_CLIP_IMPLEMENTATION !== 'rust' || !presentationAppAuthority()) {
+    return applyPresentationAnimationState(snapshot);
+  }
+  const job = committedPresentationClipJob(commit, context);
+  const app = refreshAppShadowSnapshot();
+  if (!app?.presentation?.animationResidency) return false;
+  const requestedIndex = job.effect?.clip_index
+    ?? app?.animationClipSelection?.active?.clip?.index;
+  if (job.effect || job.cancellations.length > 0) {
+    if (!Number.isSafeInteger(requestedIndex) || requestedIndex < 0) {
+      throw new Error(`${context}: Rust clip effects have no valid destination`);
+    }
+    if (presentationComposition.ready
+        && job.effect
+        && rendererAnimationClipIndex !== requestedIndex) {
+      const error = new Error('presentation clip switching after scene packing is not supported');
+      completeAppAnimationClipSelection(job, error);
+      throw error;
+    }
+    const switched = await selectAnimationIndex(requestedIndex, {
+      restoreRouteClock: false,
+      committedClipJob: job,
+    });
+    if (!switched) throw new Error(`${context}: renderer clip adaptation failed`);
+  }
+  return applyRustPresentationAnimationTransport(context);
+}
+
+async function bindPrimaryPresentationAnimationResidency(presentationAssetId) {
+  if (ANIMATION_CLIP_IMPLEMENTATION !== 'rust' || !presentationAppAuthority()) return false;
+  const before = refreshAppShadowSnapshot();
+  const installed = before?.installedPrimaryScene?.asset;
+  if (!installed?.requestId || !installed?.assetId) {
+    throw new Error('presentation animation binding requires an installed primary scene');
+  }
+  const commit = rustAppShadow.bindPresentationAnimationResidency(
+    presentationAssetId,
+    installed.requestId,
+    installed.assetId,
+  );
+  rustAppShadowDiagnostics.lastCommit = commit;
+  const after = refreshAppShadowSnapshot();
+  const residency = after?.presentation?.animationResidency;
+  if (residency?.presentationAssetId !== presentationAssetId
+      || residency?.sceneRequestId !== installed.requestId
+      || residency?.residentAssetId !== installed.assetId) {
+    throw new Error('Rust presentation animation residency projection diverged');
+  }
+  rustPresentationDiagnostics.animationResidency = residency;
+  return applyCommittedPresentationAnimationEffects(
+    commit,
+    after?.presentation?.active,
+    'presentation-residency',
+  );
 }
 
 function presentationLayerMatrix(transform = {}) {
@@ -3500,32 +3627,54 @@ function prepareRustPresentationAction() {
   resetRustApplicationFrameClock();
 }
 
-function applyRustPresentationCommit(snapshot, navigation) {
+function applyRustPresentationCommit(snapshot, navigation, commit = null) {
   renderRustPresentationSnapshot(snapshot);
   rustPresentationDiagnostics.error = null;
-  void applyPresentationAnimationState(snapshot);
+  void applyCommittedPresentationAnimationEffects(
+    commit,
+    snapshot,
+    'presentation-cue',
+  ).catch(error => {
+    rustPresentationDiagnostics.error = error?.message || String(error);
+    console.warn('Presentation animation adaptation failed:', error);
+  });
   rustPresentationTransitionActive = true;
   applyRustPresentationNavigation(navigation);
   syncURL();
   return snapshot;
 }
 
-function consumeRustPresentationCardCommit(direction, sequence, revision) {
+function consumeRustPresentationCardCommit(
+  direction,
+  sequence,
+  revision,
+  effect,
+  cancellations,
+) {
   if (!presentationAppAuthority() || !rustAppShadow) {
     throw new Error('Rust presentation application authority is unavailable');
   }
   observeRustAppShadowSequence(sequence, 'Rust presentation control');
-  rustAppShadowDiagnostics.lastCommit = {
+  if (effect != null && effect.type !== 'select_animation_clip') {
+    throw new Error('Rust presentation view emitted an invalid selection effect');
+  }
+  if (!Array.isArray(cancellations)
+      || cancellations.some(item => item?.type !== 'cancel_animation_clip_selection')) {
+    throw new Error('Rust presentation view emitted invalid cancellation effects');
+  }
+  const effects = effect == null ? [...cancellations] : [...cancellations, effect];
+  const commit = {
     revision: String(revision),
     disposition: 'applied',
     publishedUi: true,
-    effects: [],
+    effects,
   };
+  rustAppShadowDiagnostics.lastCommit = commit;
   const snapshot = refreshAppShadowSnapshot()?.presentation?.active;
   if (!snapshot) throw new Error(`presentation action ${direction} produced no active cue`);
   rustAppPresentationPoseReady = true;
   rustPresentationDiagnostics.viewDispatches += 1;
-  return applyRustPresentationCommit(snapshot, rustAppShadow.navigationSnapshot());
+  return applyRustPresentationCommit(snapshot, rustAppShadow.navigationSnapshot(), commit);
 }
 
 function activateRustPresentation(direction, cueId) {
@@ -3534,9 +3683,11 @@ function activateRustPresentation(direction, cueId) {
     prepareRustPresentationAction();
     let snapshot;
     let navigation;
+    let commit = null;
     if (presentationAppAuthority()) {
       const result = dispatchAppPresentation(direction, cueId);
       snapshot = result.active;
+      commit = result.commit;
       if (!snapshot) throw new Error(`presentation action ${direction} produced no active cue`);
       rustAppPresentationPoseReady = true;
       navigation = rustAppShadow.navigationSnapshot();
@@ -3555,7 +3706,7 @@ function activateRustPresentation(direction, cueId) {
     // can never compose the newly selected browser cue against the previous
     // application cue.
     if (!presentationAppAuthority()) mirrorAppPresentation(direction, cueId, snapshot);
-    return applyRustPresentationCommit(snapshot, navigation);
+    return applyRustPresentationCommit(snapshot, navigation, commit);
   } catch (error) {
     rustPresentationDiagnostics.error = error?.message || String(error);
     console.warn('Rust presentation cue failed:', error);
@@ -10985,6 +11136,7 @@ async function initializePresentationComposition() {
     ok: true,
     source: 'primary-runtime',
   });
+  await bindPrimaryPresentationAnimationResidency(primaryAsset.id);
   const secondaryAssets = rustPresentationManifest.assets.filter(asset => asset.id !== primaryAsset.id);
   const fetched = await Promise.all(secondaryAssets.map(async asset => {
     try {

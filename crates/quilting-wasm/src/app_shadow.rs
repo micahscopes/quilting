@@ -22,6 +22,7 @@ use hyperscope_app::{
     AssetLoadScope, AssetMetadata, AssetStatus, AuthoredRevision, CommitDisposition,
     EffectCompletion, FrameTick, LocalPeerDisposition, LocalPeerIngress, LocalPeerLane,
     LocalPeerReceipt, NavigationSynchronization, PresentationAction,
+    PresentationAnimationResidencyBinding,
     PrimarySceneInstallCompletion, PrimarySceneInstallMetadata, PrimarySceneInstallOutcome,
     RenderSettings, SemanticAction, Timed,
 };
@@ -1041,6 +1042,38 @@ impl HyperscopeAppShadow {
         commit_to_js(&commit)
     }
 
+    /// Bind one authored presentation asset to the exact process-local
+    /// primary scene currently resident in the renderer. This is platform
+    /// resource evidence, never authored identity or durable HHHS state.
+    #[wasm_bindgen(js_name = bindPresentationAnimationResidency)]
+    pub fn bind_presentation_animation_residency(
+        &self,
+        presentation_asset_id: &str,
+        scene_request_id: &str,
+        resident_asset_id: &str,
+    ) -> Result<JsValue, JsValue> {
+        let commit = self
+            .store
+            .dispatch(AppEvent::PresentationAnimationResidencyChanged(Some(
+                PresentationAnimationResidencyBinding {
+                    presentation_asset_id: asset_id_from_str(presentation_asset_id)?,
+                    scene_request_id: request_id_from_str(scene_request_id)?,
+                    resident_asset_id: asset_id_from_str(resident_asset_id)?,
+                },
+            )))
+            .map_err(js_error)?;
+        commit_to_js(&commit)
+    }
+
+    #[wasm_bindgen(js_name = clearPresentationAnimationResidency)]
+    pub fn clear_presentation_animation_residency(&self) -> Result<JsValue, JsValue> {
+        let commit = self
+            .store
+            .dispatch(AppEvent::PresentationAnimationResidencyChanged(None))
+            .map_err(js_error)?;
+        commit_to_js(&commit)
+    }
+
     /// Mirror low-rate cue intent. This shadow compares resolved desired state;
     /// the existing navigation controller remains frame/camera authority until
     /// a separate pose-parity gate is enabled.
@@ -1655,6 +1688,13 @@ impl HyperscopeAppShadow {
                     cue_count: presentation.cue_count,
                     assets: presentation.assets,
                     active: presentation.active,
+                    animation_residency: presentation.animation_residency.map(|binding| {
+                        ShadowPresentationAnimationResidency {
+                            presentation_asset_id: binding.presentation_asset_id.to_string(),
+                            scene_request_id: binding.scene_request_id.to_string(),
+                            resident_asset_id: binding.resident_asset_id.to_string(),
+                        }
+                    }),
                 });
         to_js(&ShadowSnapshot {
             revision: summary.revision.to_string(),
@@ -2247,6 +2287,15 @@ struct ShadowPresentation {
     cue_count: usize,
     assets: Vec<PresentationAsset>,
     active: Option<PresentationSnapshot>,
+    animation_residency: Option<ShadowPresentationAnimationResidency>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowPresentationAnimationResidency {
+    presentation_asset_id: String,
+    scene_request_id: String,
+    resident_asset_id: String,
 }
 
 #[derive(Serialize)]

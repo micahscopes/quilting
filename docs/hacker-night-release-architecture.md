@@ -398,7 +398,12 @@ The first application boundary is now explicit:
   scene. Presentation and resident asset IDs may differ; the request/asset
   fence must still match the installed scene exactly. Cue animation names are
   resolved in Rust, duplicate names and out-of-range authored times fail
-  explicitly, and a successful binding emits the ordinary exact clip job.
+  explicitly, and a successful binding emits the ordinary exact clip job. The
+  generated WASM adapter binds the primary residency before multi-asset scene
+  packing. Both direct and Leptos cue controls carry committed clip effects to
+  the renderer adapter; they do not repeat name lookup in JavaScript. A clip
+  change requested after the current WebGL packed scene exists is completed as
+  an explicit failed job until per-layer animated residency is implemented.
   Version 0.21 makes the installed animation catalog operational application
   state. Installation derives the renderer's initial clip, selection allocates
   a Rust job and emits an exact scene/request/asset-scoped effect, and only its

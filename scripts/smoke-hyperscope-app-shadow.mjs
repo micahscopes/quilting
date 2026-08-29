@@ -968,9 +968,75 @@ assert.equal(
   directPresentationApp.snapshot().presentation.active.cue_id,
   presentation.cues[0].id,
 );
+const presentationResidentRequest = 'f0000000-0000-4000-8000-000000000021';
+const presentationResidentAsset = 'f0000000-0000-4000-8000-000000000022';
+directPresentationApp.requestPrimaryAsset(
+  1,
+  0,
+  presentationResidentRequest,
+  presentationResidentAsset,
+  'cached-horse.glb',
+  'model/gltf-binary',
+);
+directPresentationApp.completeAssetLoaded(
+  presentationResidentRequest,
+  presentationResidentAsset,
+  200_000,
+);
+directPresentationApp.completePrimarySceneInstalled(
+  presentationResidentRequest,
+  presentationResidentAsset,
+  796,
+  984,
+  JSON.stringify([
+    {
+      index: 0,
+      name: 'idle',
+      timeMinSeconds: 0,
+      timeMaxSeconds: 1,
+    },
+    {
+      index: 1,
+      name: 'horse_A_',
+      timeMinSeconds: 2,
+      timeMaxSeconds: 3.5,
+    },
+  ]),
+);
+const presentationResidency = directPresentationApp.bindPresentationAnimationResidency(
+  presentation.assets[0].id,
+  presentationResidentRequest,
+  presentationResidentAsset,
+);
+assert.deepEqual(
+  presentationResidency.effects.map(effect => effect.type),
+  ['select_animation_clip'],
+);
+const presentationClipEffect = presentationResidency.effects[0];
+assert.equal(presentationClipEffect.clip_index, 1);
+assert.deepEqual(
+  directPresentationApp.snapshot().presentation.animationResidency,
+  {
+    presentationAssetId: presentation.assets[0].id,
+    sceneRequestId: presentationResidentRequest,
+    residentAssetId: presentationResidentAsset,
+  },
+  'presentation identity must remain distinct from exact renderer residency',
+);
+directPresentationApp.completeAnimationClipSelected(
+  presentationClipEffect.job_id,
+  presentationClipEffect.scene_request_id,
+  presentationClipEffect.asset_id,
+  presentationClipEffect.clip_index,
+);
 const directPresentationAdvance = directPresentationApp.dispatchPresentation('advance', '');
-assert.equal(directPresentationAdvance.sequence, '1');
+assert.equal(directPresentationAdvance.sequence, '2');
 assert.equal(directPresentationAdvance.commit.disposition, 'applied');
+assert.deepEqual(
+  directPresentationAdvance.commit.effects,
+  [],
+  'another layer instance of the same presentation asset must reuse its resident clip',
+);
 assert.equal(
   directPresentationApp.snapshot().presentation.active.cue_id,
   presentation.cues[1].id,
@@ -988,7 +1054,7 @@ assert.deepEqual(
 const directPresentationReverse = directPresentationApp.dispatchPresentation('reverse', '');
 assert.equal(
   directPresentationReverse.sequence,
-  '2',
+  '3',
   'rejected direct cue input must not consume a sequence number',
 );
 directPresentationApp.free();

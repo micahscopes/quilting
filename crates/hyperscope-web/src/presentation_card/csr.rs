@@ -1,10 +1,10 @@
 use super::{
-    activate_presentation_card, project_presentation_card, PresentationCardAction,
-    PresentationCardViewModel,
+    activate_presentation_card, project_presentation_card, PresentationAnimationClipEffect,
+    PresentationCardAction, PresentationCardViewModel,
 };
 use futures_signals::signal::SignalExt as _;
 use hyperscope_app::AppStore;
-use js_sys::{Array, Function};
+use js_sys::{Array, Function, Object, Reflect};
 use leptos::mount::mount_to;
 use leptos::prelude::*;
 use send_wrapper::SendWrapper;
@@ -136,7 +136,45 @@ fn activate(
     arguments.push(&JsValue::from_str(action_name));
     arguments.push(&JsValue::from(committed.sequence));
     arguments.push(&JsValue::from(committed.revision));
+    arguments.push(
+        &committed
+            .selection
+            .as_ref()
+            .map(|effect| presentation_clip_effect_to_js("select_animation_clip", effect))
+            .unwrap_or(JsValue::NULL),
+    );
+    let cancellations = Array::new();
+    for effect in &committed.cancellations {
+        cancellations.push(&presentation_clip_effect_to_js(
+            "cancel_animation_clip_selection",
+            effect,
+        ));
+    }
+    arguments.push(&cancellations);
     let _ = commit_callback.apply(&JsValue::UNDEFINED, &arguments);
+}
+
+fn presentation_clip_effect_to_js(
+    effect_type: &str,
+    effect: &PresentationAnimationClipEffect,
+) -> JsValue {
+    let object = Object::new();
+    for (key, value) in [
+        ("type", JsValue::from_str(effect_type)),
+        ("job_id", JsValue::from_str(&effect.job_id.to_string())),
+        (
+            "scene_request_id",
+            JsValue::from_str(&effect.scene_request_id),
+        ),
+        ("asset_id", JsValue::from_str(&effect.asset_id)),
+        (
+            "clip_index",
+            JsValue::from_f64(f64::from(effect.clip_index)),
+        ),
+    ] {
+        let _ = Reflect::set(&object, &JsValue::from_str(key), &value);
+    }
+    object.into()
 }
 
 fn emit_error(callback: &Function, message: &str) {

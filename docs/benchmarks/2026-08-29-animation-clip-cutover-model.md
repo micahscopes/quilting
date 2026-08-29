@@ -27,14 +27,22 @@ The implementation checkpoints are `182e76e`, `b687968`, `c28f929`,
 
 ## Deterministic evidence already green
 
-- 89 `hyperscope-app --all-features` tests, including pending, cancellation,
+- 97 `hyperscope-app --all-features` tests, including pending, cancellation,
   stale, failure, success, and reverse-wrapped installed-frame sampling.
-- 27 native `hyperscope-web --all-features` library/relay tests.
+- 28 native `hyperscope-web --all-features` library/relay tests.
 - strict native application and native/WASM web-control Clippy.
 - `quilting-wasm` with `leptos-ui,webgpu-backend` on
   `wasm32-unknown-unknown`.
 - generated application and route smokes.
 - all three replay `0.22` fingerprints.
+
+Presentation animation now has the same exact gate. Rust joins the authored
+presentation asset to the installed request/session asset through an ephemeral
+residency event, resolves the cue's clip name and relative time, and emits the
+ordinary clip selection effect. The browser binds before multi-asset packing
+and executes only that committed effect. A later unsupported clip change fails
+the job visibly instead of rebuilding only the primary prefix and corrupting
+the packed composition.
 
 The generated WASM smoke explicitly performs this race:
 
