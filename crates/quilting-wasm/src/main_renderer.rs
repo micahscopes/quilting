@@ -2646,7 +2646,11 @@ fn submit_webgpu_frame(
 ) -> crate::webgpu_backend::LiveFrameDisposition {
     use crate::webgpu_backend::LiveFrameDisposition;
 
-    if !quilting_webgpu::supports_patch_presentation_style(renderer.render_style) {
+    let requested_pbr_evidence =
+        renderer.render_style == RenderStyle::Pbr && renderer.backend_evidence_requested;
+    if !quilting_webgpu::supports_patch_presentation_style(renderer.render_style)
+        && !requested_pbr_evidence
+    {
         return LiveFrameDisposition::IncumbentRequired;
     }
     let source_revision = renderer.render_command_builds;
@@ -2851,6 +2855,64 @@ fn capture_webgl_frame_evidence(
 }
 
 #[cfg(feature = "webgpu-backend")]
+fn capture_current_webgl_pbr_frame_evidence(
+    gl: &glow::Context,
+    viewport: (i32, i32),
+    render_call: u64,
+    submission: RenderSubmissionStats,
+) -> Result<WebGlFrameEvidenceCapture, String> {
+    let (width, height) = viewport;
+    if width <= 0 || height <= 0 {
+        return Err("WebGL PBR image evidence requires a nonzero viewport".to_string());
+    }
+    let byte_len = usize::try_from(width)
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+        .and_then(|row| usize::try_from(height).ok().and_then(|height| row.checked_mul(height)))
+        .ok_or_else(|| "WebGL PBR image evidence dimensions overflowed".to_string())?;
+    let mut rgba8_bottom_left = vec![0u8; byte_len];
+    unsafe {
+        let prior_error = gl.get_error();
+        if prior_error != glow::NO_ERROR {
+            return Err(format!(
+                "WebGL PBR image evidence found preexisting GL error 0x{prior_error:04x}",
+            ));
+        }
+        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+        gl.read_pixels(
+            0,
+            0,
+            width,
+            height,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelPackData::Slice(Some(&mut rgba8_bottom_left)),
+        );
+        let error = gl.get_error();
+        if error != glow::NO_ERROR {
+            return Err(format!(
+                "WebGL PBR image evidence readback failed with GL error 0x{error:04x}",
+            ));
+        }
+    }
+    // The visible default framebuffer has opaque clear alpha, while the
+    // parity target uses transparent alpha as its coverage mask. Canonicalize
+    // only exact incumbent-clear pixels; ordinary opaque PBR fragments retain
+    // their authored alpha.
+    for pixel in rgba8_bottom_left.chunks_exact_mut(4) {
+        if pixel[0] == 51 && pixel[1] == 51 && (pixel[2] == 76 || pixel[2] == 77) {
+            pixel[3] = 0;
+        }
+    }
+    Ok(WebGlFrameEvidenceCapture {
+        render_call,
+        viewport: [width as u32, height as u32],
+        submission,
+        rgba8_bottom_left,
+    })
+}
+
+#[cfg(feature = "webgpu-backend")]
 #[wasm_bindgen(js_name = "mr_requestBackendFrameEvidence")]
 pub fn mr_request_backend_frame_evidence() -> Result<bool, JsValue> {
     STATE.with(|slot| {
@@ -2858,9 +2920,9 @@ pub fn mr_request_backend_frame_evidence() -> Result<bool, JsValue> {
         let state = state
             .as_mut()
             .ok_or_else(|| JsValue::from_str("renderer is not initialized"))?;
-        if state.render_style != RenderStyle::Normals {
+        if !matches!(state.render_style, RenderStyle::Normals | RenderStyle::Pbr) {
             return Err(JsValue::from_str(
-                "backend image evidence currently requires normals mode",
+                "backend image evidence currently requires normals or basic PBR mode",
             ));
         }
         if state.fuzzy_enabled || state.highlight_face >= 0 {
@@ -2872,6 +2934,24 @@ pub fn mr_request_backend_frame_evidence() -> Result<bool, JsValue> {
             return Err(JsValue::from_str(
                 "backend image evidence requires a nonzero viewport",
             ));
+        }
+        if state.render_style == RenderStyle::Pbr {
+            if !crate::webgpu_backend::pbr_evidence_ready() {
+                return Err(JsValue::from_str(
+                    "PBR backend evidence requires a headless WebGPU device with resident environment maps",
+                ));
+            }
+            let scene = extract_render_scene(state).map_err(|error| JsValue::from_str(&error))?;
+            let options = RenderFrameOptions {
+                focus_postprocess: state.fuzzy_enabled,
+                highlight_face: u32::try_from(state.highlight_face).ok(),
+                matcap_style: state.matcap_style,
+            };
+            if !quilting_webgpu::supports_basic_pbr_frame(&scene, options) {
+                return Err(JsValue::from_str(
+                    "PBR backend evidence requires opaque materials without transmission, sheen, or focus post-processing",
+                ));
+            }
         }
         state.backend_evidence_requested = true;
         state.backend_evidence_capture = None;
@@ -9030,7 +9110,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         let render_started_ms = browser_now_ms();
         #[cfg(feature = "webgpu-backend")]
         if state.backend_evidence_requested
-            && (state.render_style != RenderStyle::Normals
+            && (!matches!(state.render_style, RenderStyle::Normals | RenderStyle::Pbr)
                 || state.fuzzy_enabled
                 || state.highlight_face >= 0)
         {
@@ -9053,6 +9133,23 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         };
 
         sync_render_batches(state);
+        #[cfg(feature = "webgpu-backend")]
+        if state.backend_evidence_requested && state.render_style == RenderStyle::Pbr {
+            let options = RenderFrameOptions {
+                focus_postprocess: state.fuzzy_enabled,
+                highlight_face: u32::try_from(state.highlight_face).ok(),
+                matcap_style: state.matcap_style,
+            };
+            let supported = extract_render_scene(state)
+                .is_ok_and(|scene| quilting_webgpu::supports_basic_pbr_frame(&scene, options));
+            if !supported {
+                state.backend_evidence_requested = false;
+                state.backend_evidence_error = Some(
+                    "PBR backend evidence became unsupported before its requested render"
+                        .to_string(),
+                );
+            }
+        }
         refresh_render_shadow_scene(state);
 
         // The explicitly selected WebGPU normals backend submits before any
@@ -9719,6 +9816,26 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                             }
                             gl.viewport(0, 0, vw, vh);
                             gl.enable(glow::DEPTH_TEST);
+                        }
+                    }
+                }
+
+                #[cfg(feature = "webgpu-backend")]
+                if state.backend_evidence_requested {
+                    state.backend_evidence_requested = false;
+                    match capture_current_webgl_pbr_frame_evidence(
+                        gl,
+                        state.viewport_size,
+                        state.render_calls,
+                        submission_stats,
+                    ) {
+                        Ok(capture) => {
+                            state.backend_evidence_capture = Some(capture);
+                            state.backend_evidence_error = None;
+                        }
+                        Err(error) => {
+                            state.backend_evidence_capture = None;
+                            state.backend_evidence_error = Some(error);
                         }
                     }
                 }

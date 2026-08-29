@@ -683,6 +683,13 @@ pub(crate) fn needs_scene(source_revision: u64) -> bool {
     })
 }
 
+pub(crate) fn pbr_evidence_ready() -> bool {
+    BACKEND.with(|slot| {
+        let backend = slot.borrow();
+        backend.state == "ready" && backend.presentation.is_none() && backend.environment.is_some()
+    })
+}
+
 pub(crate) fn record_frame_prerequisite_failure(error: impl ToString) {
     BACKEND.with(|slot| {
         let mut backend = slot.borrow_mut();
@@ -824,13 +831,28 @@ pub(crate) fn submit_frame(
 ) -> Result<LiveFrameDisposition, String> {
     BACKEND.with(|slot| {
         let mut backend = slot.borrow_mut();
-        if backend.state != "ready" || !quilting_webgpu::supports_patch_presentation_style(style) {
+        let shadow_only_pbr = style == RenderStyle::Pbr && backend.presentation.is_none();
+        if backend.state != "ready"
+            || (!quilting_webgpu::supports_patch_presentation_style(style) && !shadow_only_pbr)
+        {
             return Ok(LiveFrameDisposition::IncumbentRequired);
         }
         // Atlas/model/scene residency arrives asynchronously during ordinary
         // application startup. Frames before the first coherent scene are
         // inert lifecycle gaps, not failed render attempts.
         if backend.scene.is_none() {
+            return Ok(LiveFrameDisposition::IncumbentRequired);
+        }
+        if style == RenderStyle::Pbr
+            && !quilting_webgpu::supports_basic_pbr_frame(
+                backend
+                    .scene
+                    .as_ref()
+                    .expect("scene presence checked above")
+                    .scene(),
+                options,
+            )
+        {
             return Ok(LiveFrameDisposition::IncumbentRequired);
         }
         if view.viewport[0] == 0 || view.viewport[1] == 0 {
@@ -1082,6 +1104,10 @@ pub(crate) fn submit_frame(
                         })?;
                         device.render_offscreen_normals_patch_scene_with_webgl_clear(
                             &frame, pipeline, scene, atlas, target, true,
+                        )
+                    } else if style == RenderStyle::Pbr {
+                        device.render_offscreen_supported_patch_scene_with_webgl_clear(
+                            &frame, pipelines, scene, atlas, target, true,
                         )
                     } else {
                         device.render_offscreen_supported_patch_scene_with_face_visibility(

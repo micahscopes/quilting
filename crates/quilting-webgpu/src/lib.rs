@@ -4216,6 +4216,30 @@ impl LodClassifierDevice {
         target: &OffscreenPatchRenderTarget,
         use_qb: bool,
     ) -> Result<PatchFrameEncoding, LodWebGpuError> {
+        self.render_offscreen_supported_patch_scene_with_face_visibility_and_clear(
+            frame,
+            pipelines,
+            scene,
+            atlas,
+            target,
+            use_qb,
+            wgpu::Color::TRANSPARENT,
+        )
+    }
+
+    /// Submit a supported style with an explicit parity clear while preserving
+    /// the shared preparation, visibility, and draw-command path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_offscreen_supported_patch_scene_with_face_visibility_and_clear(
+        &self,
+        frame: &RenderFrame,
+        pipelines: &DiagnosticPatchRenderPipelines,
+        scene: &PatchRenderScene,
+        atlas: &PackedPatchAtlas,
+        target: &OffscreenPatchRenderTarget,
+        use_qb: bool,
+        clear_color: wgpu::Color,
+    ) -> Result<PatchFrameEncoding, LodWebGpuError> {
         if frame.view.viewport != target.size {
             return Err(LodWebGpuError::Payload(format!(
                 "offscreen target {:?} does not match frame viewport {:?}",
@@ -4237,7 +4261,7 @@ impl LodClassifierDevice {
                 color_view: &target.color_view,
                 resolve_target: None,
                 depth_stencil_view: Some(&target.depth_view),
-                clear_color: Some(wgpu::Color::TRANSPARENT),
+                clear_color: Some(clear_color),
                 clear_depth: Some(1.0),
             },
             use_qb,
@@ -4248,6 +4272,33 @@ impl LodClassifierDevice {
         )?;
         self.queue.submit([encoder.finish()]);
         Ok(encoding)
+    }
+
+    /// Backend-neutral convenience for exact incumbent RGB with transparent
+    /// diagnostic coverage alpha.
+    pub fn render_offscreen_supported_patch_scene_with_webgl_clear(
+        &self,
+        frame: &RenderFrame,
+        pipelines: &DiagnosticPatchRenderPipelines,
+        scene: &PatchRenderScene,
+        atlas: &PackedPatchAtlas,
+        target: &OffscreenPatchRenderTarget,
+        use_qb: bool,
+    ) -> Result<PatchFrameEncoding, LodWebGpuError> {
+        self.render_offscreen_supported_patch_scene_with_face_visibility_and_clear(
+            frame,
+            pipelines,
+            scene,
+            atlas,
+            target,
+            use_qb,
+            wgpu::Color {
+                r: 0.2,
+                g: 0.2,
+                b: 0.3,
+                a: 0.0,
+            },
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
