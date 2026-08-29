@@ -4,6 +4,7 @@
 //! registered vendor extension can reuse it, but version 0.1 does not claim a
 //! reserved Khronos or multi-vendor prefix.
 
+use hyperscape_protocol::ConformalFrameId;
 use quilting_core::{
     AnchorState, ConformalFrameForest, ConformalGenerator, ConformalTransformChain, FrameId,
     RoundWall, RoundWallGeometry, RoundWallSet, WallId,
@@ -11,7 +12,7 @@ use quilting_core::{
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
@@ -49,6 +50,11 @@ impl Default for HyperscapePayload {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HyperscapeFrame {
+    /// Durable authored identity. Array position is retained only as a compact
+    /// glTF/runtime handle and must not be used by editors or replicated
+    /// authored operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_id: Option<ConformalFrameId>,
     pub name: String,
     pub parent: Option<usize>,
     #[serde(default)]
@@ -139,6 +145,11 @@ pub struct HyperscapeAsset {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeHyperscapeScene {
     pub frames: ConformalFrameForest,
+    /// Dense runtime handle to durable authored identity. Legacy 0.1 assets
+    /// may omit an identity; newly authored frames should always provide one.
+    pub frame_stable_ids: Vec<Option<ConformalFrameId>>,
+    /// Durable authored identity to dense runtime handle.
+    pub frames_by_stable_id: BTreeMap<ConformalFrameId, FrameId>,
     pub walls: RoundWallSet,
     pub anchors: Vec<AnchorState>,
 }
@@ -168,6 +179,8 @@ impl HyperscapeAsset {
         }
 
         let mut frames = ConformalFrameForest::new();
+        let mut frame_stable_ids = Vec::with_capacity(self.payload.frames.len());
+        let mut frames_by_stable_id = BTreeMap::new();
         for (index, frame) in self.payload.frames.iter().enumerate() {
             if frame.parent.is_some_and(|parent| parent >= index) {
                 return Err(HyperscapeGltfError::Validation(format!(
@@ -180,6 +193,17 @@ impl HyperscapeAsset {
                 .add_frame(frame.name.clone(), frame.parent.map(FrameId), chain)
                 .map_err(|error| validation(format!("frame {index}: {error}")))?;
             debug_assert_eq!(id, FrameId(index));
+            if let Some(stable_id) = frame.stable_id {
+                stable_id
+                    .validate()
+                    .map_err(|error| validation(format!("frame {index}: {error}")))?;
+                if frames_by_stable_id.insert(stable_id, id).is_some() {
+                    return Err(validation(format!(
+                        "frame {index} repeats stable conformal frame ID {stable_id}"
+                    )));
+                }
+            }
+            frame_stable_ids.push(frame.stable_id);
         }
         frames
             .validate()
@@ -335,9 +359,25 @@ impl HyperscapeAsset {
 
         Ok(RuntimeHyperscapeScene {
             frames,
+            frame_stable_ids,
+            frames_by_stable_id,
             walls,
             anchors,
         })
+    }
+}
+
+impl RuntimeHyperscapeScene {
+    /// Resolve durable authored identity to the compact handle used by the
+    /// conformal evaluator.
+    pub fn frame_id(&self, stable_id: ConformalFrameId) -> Option<FrameId> {
+        self.frames_by_stable_id.get(&stable_id).copied()
+    }
+
+    /// Resolve a compact evaluator handle back to durable authored identity.
+    /// Legacy interchange may legitimately return `None`.
+    pub fn stable_frame_id(&self, frame: FrameId) -> Option<ConformalFrameId> {
+        self.frame_stable_ids.get(frame.0).copied().flatten()
     }
 }
 
@@ -622,11 +662,13 @@ mod tests {
                 version: HYPERSCAPE_INTERCHANGE_VERSION.into(),
                 frames: vec![
                     HyperscapeFrame {
+                        stable_id: Some(ConformalFrameId::from_u128(10).unwrap()),
                         name: "world".into(),
                         parent: None,
                         generators: Vec::new(),
                     },
                     HyperscapeFrame {
+                        stable_id: Some(ConformalFrameId::from_u128(11).unwrap()),
                         name: "reflection room".into(),
                         parent: Some(0),
                         generators: vec![ConformalGenerator::SphereReflection {
@@ -742,6 +784,15 @@ mod tests {
         assert_eq!(recovered, asset);
         let runtime = recovered.validate().unwrap();
         assert_eq!(runtime.frames.frames().len(), 2);
+        assert_eq!(
+            runtime.frame_id(ConformalFrameId::from_u128(11).unwrap()),
+            Some(FrameId(1))
+        );
+        assert_eq!(
+            runtime.stable_frame_id(FrameId(0)),
+            Some(ConformalFrameId::from_u128(10).unwrap())
+        );
+        assert_eq!(runtime.stable_frame_id(FrameId(99)), None);
         assert_eq!(runtime.walls.walls().len(), 1);
         assert_eq!(
             runtime.anchors[0].flipped_walls(),
@@ -799,6 +850,29 @@ mod tests {
         let mut nil = sample_asset();
         nil.node_bindings[0].as_mut().unwrap().stable_id = Some(Uuid::nil());
         assert!(nil.validate().is_err());
+    }
+
+    #[test]
+    fn stable_conformal_frame_ids_must_be_non_nil_and_unique() {
+        let mut duplicate = sample_asset();
+        duplicate.payload.frames[1].stable_id = duplicate.payload.frames[0].stable_id;
+        assert!(duplicate.validate().is_err());
+
+        let mut nil = sample_asset();
+        nil.payload.frames[0].stable_id =
+            Some(serde_json::from_value(Value::String(Uuid::nil().to_string())).unwrap());
+        assert!(nil.validate().is_err());
+    }
+
+    #[test]
+    fn legacy_frames_without_stable_ids_remain_valid() {
+        let mut asset = sample_asset();
+        for frame in &mut asset.payload.frames {
+            frame.stable_id = None;
+        }
+        let runtime = asset.validate().unwrap();
+        assert_eq!(runtime.frame_stable_ids, vec![None, None]);
+        assert!(runtime.frames_by_stable_id.is_empty());
     }
 
     #[test]

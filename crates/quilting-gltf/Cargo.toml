@@ -10,6 +10,7 @@ description = "glTF 2.0 loader for quilting — extracts meshes, materials, anim
 [dependencies]
 quilting-core = { version = "0.1.0", path = "../quilting-core" }
 quilting-mesh = { version = "0.1.0", path = "../quilting-mesh" }
+hyperscape-protocol = { version = "0.1.0", path = "../hyperscape-protocol" }
 
 gltf = { version = "1.4", features = ["KHR_materials_unlit", "extensions", "extras", "KHR_texture_transform"] }
 serde = { version = "1", features = ["derive"] }

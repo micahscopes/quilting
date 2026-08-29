@@ -3000,6 +3000,7 @@ name = "quilting-gltf"
 version = "0.1.0"
 dependencies = [
  "gltf",
+ "hyperscape-protocol",
  "quilting-core",
  "quilting-mesh",
  "serde",

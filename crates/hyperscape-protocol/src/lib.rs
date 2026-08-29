@@ -73,6 +73,7 @@ stable_id!(PeerId, "peer");
 stable_id!(RequestId, "request");
 stable_id!(AssetId, "asset");
 stable_id!(EntityId, "entity");
+stable_id!(ConformalFrameId, "conformal frame");
 
 /// Stable identity of one entity within a particular source asset.
 ///
