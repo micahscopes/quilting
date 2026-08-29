@@ -5,6 +5,12 @@
 
 use super::*;
 
+/// Styles whose fragment inputs are complete in the direct source-root path.
+/// Material-bound styles remain on the established prepared-patch renderer.
+pub fn supports_resident_root_render_style(style: RenderStyle) -> bool {
+    matches!(style, RenderStyle::Normals | RenderStyle::Lod)
+}
+
 /// Whether one extracted scene can be rendered exactly from its source roots
 /// without consulting the CPU-authored batch topology. Adaptive leaves remain
 /// on their sparse overlay path until their partition is device-resident too.
@@ -111,6 +117,11 @@ pub struct ResidentRootDrawDomainOutput {
 /// device-generated atlas/parity bucket plan.
 pub struct ResidentRootRenderPipeline {
     bind_group_layout: wgpu::BindGroupLayout,
+    normals: ResidentRootWindingPipelines,
+    lod: ResidentRootWindingPipelines,
+}
+
+struct ResidentRootWindingPipelines {
     counter_clockwise: wgpu::RenderPipeline,
     clockwise: wgpu::RenderPipeline,
 }
@@ -237,6 +248,16 @@ impl ResidentRootRenderBindings {
     }
 }
 
+impl ResidentRootRenderPipeline {
+    fn for_style(&self, style: RenderStyle) -> Option<&ResidentRootWindingPipelines> {
+        match style {
+            RenderStyle::Normals => Some(&self.normals),
+            RenderStyle::Lod => Some(&self.lod),
+            _ => None,
+        }
+    }
+}
+
 impl LodClassifierDevice {
     /// Create the fixed-format resident-root pipeline used by the headless
     /// browser parity target without exposing backend texture enums upstream.
@@ -333,10 +354,10 @@ impl LodClassifierDevice {
             bias: wgpu::DepthBiasState::default(),
         });
         let attributes = wgpu::vertex_attr_array![0 => Float32x3];
-        let create = |front_face| {
+        let create = |label, fragment_entry_point, front_face| {
             self.device
                 .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("quilting resident root normals"),
+                    label: Some(label),
                     layout: Some(&pipeline_layout),
                     vertex: wgpu::VertexState {
                         module: &module,
@@ -363,9 +384,7 @@ impl LodClassifierDevice {
                     },
                     fragment: Some(wgpu::FragmentState {
                         module: &module,
-                        entry_point: Some(
-                            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_NORMALS_ENTRY_POINT,
-                        ),
+                        entry_point: Some(fragment_entry_point),
                         compilation_options: Default::default(),
                         targets: &[Some(wgpu::ColorTargetState {
                             format: color_format,
@@ -377,10 +396,20 @@ impl LodClassifierDevice {
                     cache: None,
                 })
         };
+        let create_style = |label, fragment_entry_point| ResidentRootWindingPipelines {
+            counter_clockwise: create(label, fragment_entry_point, wgpu::FrontFace::Ccw),
+            clockwise: create(label, fragment_entry_point, wgpu::FrontFace::Cw),
+        };
         Ok(ResidentRootRenderPipeline {
             bind_group_layout,
-            counter_clockwise: create(wgpu::FrontFace::Ccw),
-            clockwise: create(wgpu::FrontFace::Cw),
+            normals: create_style(
+                "quilting resident root normals",
+                quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_NORMALS_ENTRY_POINT,
+            ),
+            lod: create_style(
+                "quilting resident root LOD",
+                quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_LOD_ENTRY_POINT,
+            ),
         })
     }
 
@@ -514,7 +543,7 @@ impl LodClassifierDevice {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn encode_resident_root_normals<'resource>(
+    pub fn encode_resident_roots<'resource>(
         &'resource self,
         encoder: &mut wgpu::CommandEncoder,
         frame: &RenderFrame,
@@ -530,11 +559,12 @@ impl LodClassifierDevice {
         num_joints: u32,
         use_qb: bool,
     ) -> Result<ResidentRootFrameEncoding, LodWebGpuError> {
-        if frame.style != RenderStyle::Normals {
-            return Err(LodWebGpuError::Payload(
-                "resident root normals renderer requires a normals frame".to_string(),
-            ));
-        }
+        let style_pipeline = pipeline.for_style(frame.style).ok_or_else(|| {
+            LodWebGpuError::Payload(format!(
+                "resident root renderer does not support {:?}",
+                frame.style,
+            ))
+        })?;
         if bindings.model_identity != model.identity
             || geometry.model_identity != model.identity
             || preparation.topology.model_identity != model.identity
@@ -569,7 +599,7 @@ impl LodClassifierDevice {
                     stencil_ops: None,
                 });
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("quilting resident root normals"),
+            label: Some("quilting resident root frame"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target.color_view,
                 depth_slice: None,
@@ -591,9 +621,9 @@ impl LodClassifierDevice {
         );
         for bucket in 0..geometry.bucket_count {
             let render_pipeline = if bucket % 2 == 0 {
-                &pipeline.counter_clockwise
+                &style_pipeline.counter_clockwise
             } else {
-                &pipeline.clockwise
+                &style_pipeline.clockwise
             };
             pass.set_pipeline(render_pipeline);
             pass.set_bind_group(
@@ -613,11 +643,11 @@ impl LodClassifierDevice {
         })
     }
 
-    /// Submit one root-only normals frame to retained offscreen attachments.
+    /// Submit one root-only supported frame to retained offscreen attachments.
     /// Classification, topology emission, preparation, visibility rejection,
     /// atlas bucketing, and indirect rendering stay ordered on the device.
     #[allow(clippy::too_many_arguments)]
-    pub fn render_offscreen_resident_root_normals(
+    pub fn render_offscreen_resident_roots(
         &self,
         frame: &RenderFrame,
         render_scene: &RenderSceneSnapshot,
@@ -644,7 +674,7 @@ impl LodClassifierDevice {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("quilting resident root offscreen frame"),
             });
-        let encoding = self.encode_resident_root_normals(
+        let encoding = self.encode_resident_roots(
             &mut encoder,
             frame,
             model,
@@ -674,11 +704,11 @@ impl LodClassifierDevice {
         resident_root_frame_evidence(frame, render_scene, encoding)
     }
 
-    /// Present one root-only normals frame through the same direct encoder as
+    /// Present one root-only supported frame through the same direct encoder as
     /// the offscreen path. Surface acquisition and queue submission remain
     /// Rust-owned and no diagnostic copy or CPU map is introduced.
     #[allow(clippy::too_many_arguments)]
-    pub fn present_resident_root_normals(
+    pub fn present_resident_roots(
         &self,
         surface: &mut PatchPresentationSurface,
         frame: &RenderFrame,
@@ -705,7 +735,7 @@ impl LodClassifierDevice {
                     a: 1.0,
                 });
                 target.clear_depth = Some(1.0);
-                let encoding = self.encode_resident_root_normals(
+                let encoding = self.encode_resident_roots(
                     encoder,
                     frame,
                     model,

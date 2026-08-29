@@ -24,8 +24,8 @@ use quilting_renderer::compute::{
 };
 use quilting_webgpu::{
     resident_root_render_domains, supports_basic_pbr_frame, supports_patch_presentation_style,
-    supports_resident_root_render_scene, LodClassifierDevice, LodPose, OffscreenPatchRenderTarget,
-    PatchRenderSceneUpdate, PbrTextureTableUpdate,
+    supports_resident_root_render_scene, supports_resident_root_render_style, LodClassifierDevice,
+    LodPose, OffscreenPatchRenderTarget, PatchRenderSceneUpdate, PbrTextureTableUpdate,
 };
 
 #[test]
@@ -41,6 +41,18 @@ fn live_patch_style_capability_has_one_authoritative_predicate() {
         assert!(supports_patch_presentation_style(style), "{style:?}");
     }
     assert!(!supports_patch_presentation_style(RenderStyle::Pbr));
+    for style in [RenderStyle::Normals, RenderStyle::Lod] {
+        assert!(supports_resident_root_render_style(style), "{style:?}");
+    }
+    for style in [
+        RenderStyle::Pbr,
+        RenderStyle::Matcap,
+        RenderStyle::Wire,
+        RenderStyle::MatcapWire,
+        RenderStyle::Stretch,
+    ] {
+        assert!(!supports_resident_root_render_style(style), "{style:?}");
+    }
 }
 
 fn identity_matrix() -> [f32; 16] {
@@ -867,7 +879,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         }
         let resident = classifier.latest_resident_lod(&root_model).unwrap();
         let root_encoding = classifier
-            .render_offscreen_resident_root_normals(
+            .render_offscreen_resident_roots(
                 &render_frame,
                 &render_scene,
                 &root_model,
@@ -891,6 +903,54 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         );
         assert_eq!(root_encoding.indirect_draw_calls, 2);
         assert_eq!(root_encoding.source_instance_count, 2);
+        assert!(
+            offscreen_signature(&classifier, &target)
+                .await
+                .covered_pixels
+                > 0
+        );
+        let lod_frame = RenderFrame::build(
+            render_frame.revision + 1,
+            render_frame.pose,
+            RenderStyle::Lod,
+            render_frame.view.clone(),
+            render_frame.options,
+            &render_scene,
+        )
+        .unwrap();
+        let lod_error_scope = classifier
+            .device()
+            .push_error_scope(wgpu::ErrorFilter::Validation);
+        let lod_root_encoding = classifier
+            .render_offscreen_resident_roots(
+                &lod_frame,
+                &render_scene,
+                &root_model,
+                &resident,
+                &root_preparation,
+                &root_geometry,
+                &root_pipeline,
+                &root_bindings,
+                &packed_atlas,
+                &target,
+                LodPose::default(),
+                0,
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            lod_root_encoding.logical_submission,
+            lod_frame.expected_submission_stats(&render_scene).unwrap(),
+        );
+        assert_eq!(lod_root_encoding.indirect_draw_calls, 2);
+        assert_eq!(lod_root_encoding.source_instance_count, 2);
+        classifier
+            .device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        if let Some(error) = lod_error_scope.pop().await {
+            panic!("resident root LOD validation: {error}");
+        }
         assert!(
             offscreen_signature(&classifier, &target)
                 .await

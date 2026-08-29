@@ -435,7 +435,7 @@ impl LodClassifierDevice {
             clear_color,
             clear_depth,
         } = target;
-        let root_encoding = self.encode_resident_root_normals(
+        let root_encoding = self.encode_resident_roots(
             encoder,
             frame,
             model,

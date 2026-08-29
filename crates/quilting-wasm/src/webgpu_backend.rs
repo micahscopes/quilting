@@ -1173,7 +1173,7 @@ pub(crate) fn submit_frame(
             .zip(backend.model.as_ref())
             .and_then(|(device, model)| device.latest_resident_lod(model))
             .map(|resident| resident.classification_epoch());
-        let resident_root_frame = style == RenderStyle::Normals
+        let resident_root_frame = quilting_webgpu::supports_resident_root_render_style(style)
             && device_lod_epoch.is_some()
             && backend.resident_roots.is_some();
         if device_lod_epoch.is_none() {
@@ -1386,7 +1386,7 @@ pub(crate) fn submit_frame(
                         let root_pipeline = resident_root_pipeline.as_ref().ok_or_else(|| {
                             "WebGPU resident root frame lost its pipeline residency".to_string()
                         })?;
-                        device.present_resident_root_normals(
+                        device.present_resident_roots(
                             presentation,
                             &frame,
                             scene.scene(),
@@ -1471,7 +1471,7 @@ pub(crate) fn submit_frame(
                         let root_pipeline = backend.resident_root_pipeline.as_ref().ok_or_else(|| {
                             "WebGPU resident root frame lost its pipeline residency".to_string()
                         })?;
-                        device.render_offscreen_resident_root_normals(
+                        device.render_offscreen_resident_roots(
                             &frame,
                             scene.scene(),
                             model,

@@ -43,6 +43,7 @@ pub const PATCH_RENDER_DEVICE_WIRE_ENTRY_POINT: &str = "render_patch_wire";
 pub const PATCH_RENDER_DEVICE_PBR_ENTRY_POINT: &str = "render_patch_pbr";
 pub const RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT: &str = "render_resident_root_vertex";
 pub const RESIDENT_ROOT_RENDER_DEVICE_NORMALS_ENTRY_POINT: &str = "render_resident_root_normals";
+pub const RESIDENT_ROOT_RENDER_DEVICE_LOD_ENTRY_POINT: &str = "render_resident_root_lod";
 
 /// All WGSL shader module sources, embedded at compile time.
 pub mod sources {
@@ -960,6 +961,10 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
                 ),
                 (
                     RESIDENT_ROOT_RENDER_DEVICE_NORMALS_ENTRY_POINT,
+                    naga::ShaderStage::Fragment,
+                ),
+                (
+                    RESIDENT_ROOT_RENDER_DEVICE_LOD_ENTRY_POINT,
                     naga::ShaderStage::Fragment,
                 ),
             ],

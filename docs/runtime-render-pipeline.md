@@ -464,9 +464,9 @@ same pure rational-QB/Möbius evaluator used by WebGL2. A validated
 `RenderSceneSnapshot`/`RenderFrame` executor coalesces the canonical all-batch
 prepare and visibility phases, selects a device-resident conformal frame per
 batch, derives winding from semantic orientation plus S3 parity, and issues
-portable compacted indexed-indirect normals draws. Native Vulkan and Chromium
-both execute a two-batch retained-root/adaptive-overlay frame; the browser gate
-reports two shared-frame draws and a nonempty ten-pixel footprint with no
+portable compacted indexed-indirect diagnostic draws. Native Vulkan and
+Chromium both execute a two-batch retained-root/adaptive-overlay frame; the
+browser gate reports two shared-frame draws and a nonempty ten-pixel footprint with no
 console warning or error. Each draw borrows an element-offset slice of the
 existing packed global barycentric/index atlas, keeping indirect `first_index`
 zero without allocating one WebGPU buffer per canonical patch. The retained
@@ -483,10 +483,10 @@ model without constructing a redundant WebGL classifier when the worker
 remains authoritative. The backend now replaces preparation/compaction/binding
 resources as one atomic `PatchRenderScene`, resolves packed-atlas slices during
 encoding without a per-frame draw-view allocation, and executes supported live
-normals frames into a depth-backed offscreen target. `gfx=webgpu` instead
+diagnostic frames into a depth-backed offscreen target. `gfx=webgpu` instead
 claims a separately supplied presentation canvas on a surface-compatible
-adapter before that canvas has any context. It specializes the same normals
-pipeline to the surface format and presents the same extracted live frame.
+adapter before that canvas has any context. It specializes the same retained
+pipelines to the surface format and presents the same extracted live frame.
 The original WebGL2 canvas remains a transparent input/picking and rollback
 layer; it becomes visible for unsupported modes or any presentation failure.
 No code attempts to repurpose a claimed canvas context. A failed device, atlas,
@@ -496,8 +496,8 @@ The first live Chrome residency check retained 22 canonical atlas entries,
 25,551 barycentric vertices, and the horse's 984-face prepared model through a
 `BrowserWebGpu` adapter with one initialization, atlas upload, and model upload.
 The default route remains disabled and allocates no WebGPU residency. Shadow
-mode keeps WebGL2 visible; direct mode can now make WebGPU normals visibly
-authoritative after its first successful presentation.
+mode keeps WebGL2 visible; direct mode can now make supported WebGPU styles
+visibly authoritative after their first successful presentation.
 
 The first live normals gate extracted five real horse batches and 984 source
 instances at a 496×770 viewport, then submitted five compacted indirect draws
@@ -544,9 +544,9 @@ visibility expansion, stable compaction, and indirect drawing; ordinary frames
 perform neither a visibility upload nor a readback. A partial animated-primary
 request explicitly retires that epoch and exposes the compact CPU-bitset
 adapter again, so it cannot combine a stale full-scene classification with a
-new pose. For normals scenes consisting entirely of unsuppressed source roots,
-the live browser backend now continues from that epoch through device root
-topology emission, QB preparation, atlas/parity bucketing, and indirect
+new pose. For normals or LOD-color scenes consisting entirely of unsuppressed
+source roots, the live browser backend now continues from that epoch through
+device root topology emission, QB preparation, atlas/parity bucketing, and indirect
 submission. It does not prepare or compact the CPU-authored batch topology for
 that frame. The root scene is published atomically beside the established
 retained scene and has separate readiness, upload, frame, fallback, and error
@@ -555,9 +555,9 @@ CPU-authored LOD buckets, so ordinary LOD regrouping reuses the same root GPU
 buffers; model/atlas replacement or a real authored-domain change invalidates
 them. Root pipeline/allocation failure is optional and falls back without
 disabling the established WebGPU modes. Adaptive leaves, suppressed roots,
-partial animated-primary classification, and non-normals styles deliberately
-retain the established path; WebGL2 and the worker remain rollback authority
-throughout this bounded promotion.
+partial animated-primary classification, and wire, stretch, or
+material/composite styles deliberately retain the established path; WebGL2 and
+the worker remain rollback authority throughout this bounded promotion.
 
 The next device stage now derives a deterministic retained-root geometry plan
 from the packed resident words themselves. Its bounded bucket domain is sorted
