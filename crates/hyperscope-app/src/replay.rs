@@ -25,7 +25,8 @@ use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
 
-pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.18";
+pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.19";
+pub const LEGACY_APP_REPLAY_VERSION_0_18: &str = "hyperscope-app-replay/0.18";
 pub const LEGACY_APP_REPLAY_VERSION_0_17: &str = "hyperscope-app-replay/0.17";
 pub const LEGACY_APP_REPLAY_VERSION_0_16: &str = "hyperscope-app-replay/0.16";
 pub const LEGACY_APP_REPLAY_VERSION_0_15: &str = "hyperscope-app-replay/0.15";
@@ -58,6 +59,7 @@ enum ReplaySchema {
     V0_16,
     V0_17,
     V0_18,
+    V0_19,
 }
 pub const APP_REPLAY_FINGERPRINT_ALGORITHM: &str = "fnv1a-128-json";
 const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
@@ -786,6 +788,8 @@ pub struct AppReplayState {
     pub loading_primary_scene_asset: Option<AssetId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loading_primary_scene_request: Option<RequestId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready_primary_asset: Option<AppReplayPrimaryAssetState>,
     pub assets: Vec<AppReplayAssetState>,
     pub authored_assets: Vec<AssetDescriptor>,
     pub authored_entities: Vec<AppReplayAuthoredEntityState>,
@@ -809,6 +813,18 @@ pub struct AppReplayAuthoredEntityState {
 pub struct AppReplayAssetState {
     pub descriptor: AssetDescriptor,
     pub status: ReplayAssetStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppReplayPrimaryAssetState {
+    pub request_id: RequestId,
+    pub descriptor: AssetDescriptor,
+    pub byte_length: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_digest: Option<[u8; 32]>,
+    #[serde(default, skip_serializing_if = "AssetMetadata::is_empty")]
+    pub metadata: AssetMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -949,7 +965,8 @@ pub fn run_app_replay(script: &AppReplayScript) -> Result<AppReplayTrace, AppRep
         LEGACY_APP_REPLAY_VERSION_0_15 => ReplaySchema::V0_15,
         LEGACY_APP_REPLAY_VERSION_0_16 => ReplaySchema::V0_16,
         LEGACY_APP_REPLAY_VERSION_0_17 => ReplaySchema::V0_17,
-        APP_REPLAY_VERSION => ReplaySchema::V0_18,
+        LEGACY_APP_REPLAY_VERSION_0_18 => ReplaySchema::V0_18,
+        APP_REPLAY_VERSION => ReplaySchema::V0_19,
         _ => return Err(AppReplayError::UnsupportedVersion(script.version.clone())),
     };
     let store = AppStore::default();
@@ -1112,10 +1129,14 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_16
                     | ReplaySchema::V0_17
                     | ReplaySchema::V0_18
+                    | ReplaySchema::V0_19
             ) {
                 return Err("animation playback actions require app replay 0.11".to_owned());
             }
-            if !matches!(schema, ReplaySchema::V0_17 | ReplaySchema::V0_18)
+            if !matches!(
+                schema,
+                ReplaySchema::V0_17 | ReplaySchema::V0_18 | ReplaySchema::V0_19
+            )
                 && matches!(
                     action,
                     ReplayAnimationAction::Seek { .. }
@@ -1136,7 +1157,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
             at_seconds,
             settings,
         } => {
-            if schema != ReplaySchema::V0_18 {
+            if !matches!(schema, ReplaySchema::V0_18 | ReplaySchema::V0_19) {
                 return Err("render settings actions require app replay 0.18".to_owned());
             }
             Ok(AppEvent::Input(Timed {
@@ -1167,7 +1188,8 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_15
                     | ReplaySchema::V0_16
                     | ReplaySchema::V0_17
-                    | ReplaySchema::V0_18 => (*scope).into(),
+                    | ReplaySchema::V0_18
+                    | ReplaySchema::V0_19 => (*scope).into(),
                     _ if *scope == ReplayAssetLoadScope::Asset => AssetLoadScope::Asset,
                     _ => {
                         return Err(
@@ -1203,6 +1225,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_16
                     | ReplaySchema::V0_17
                     | ReplaySchema::V0_18
+                    | ReplaySchema::V0_19
             ) {
                 return Err("asset provenance requires app replay 0.12".to_owned());
             }
@@ -1250,6 +1273,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_16
             | ReplaySchema::V0_17
             | ReplaySchema::V0_18
+            | ReplaySchema::V0_19
     )
         && matches!(action, ReplayNavigationAction::ApplyCameraIntent { .. })
     {
@@ -1262,6 +1286,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_16
             | ReplaySchema::V0_17
             | ReplaySchema::V0_18
+            | ReplaySchema::V0_19
     )
         && matches!(action, ReplayNavigationAction::ApplyTurntableIntent { .. })
     {
@@ -1273,6 +1298,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_16
             | ReplaySchema::V0_17
             | ReplaySchema::V0_18
+            | ReplaySchema::V0_19
     )
         && matches!(action, ReplayNavigationAction::ReframeSelection { .. })
     {
@@ -1280,7 +1306,10 @@ fn navigation_action_for_replay_version(
     }
     if !matches!(
         schema,
-        ReplaySchema::V0_16 | ReplaySchema::V0_17 | ReplaySchema::V0_18
+        ReplaySchema::V0_16
+            | ReplaySchema::V0_17
+            | ReplaySchema::V0_18
+            | ReplaySchema::V0_19
     )
         && matches!(action, ReplayNavigationAction::AimAtSelection { .. })
     {
@@ -1306,6 +1335,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_16
             | ReplaySchema::V0_17
             | ReplaySchema::V0_18
+            | ReplaySchema::V0_19
     ) && matches!(
         action,
         ReplayNavigationAction::RefitFocusAndToggleInversion { .. }
@@ -1338,6 +1368,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_16
             | ReplaySchema::V0_17
             | ReplaySchema::V0_18
+            | ReplaySchema::V0_19
     ) && matches!(
         action,
         ReplayNavigationAction::AnchorFocus { asset_id: None, .. }
@@ -1389,6 +1420,16 @@ fn replay_state(store: &AppStore) -> AppReplayState {
         render_settings: state.render_settings,
         loading_primary_scene_asset: state.primary_scene_load.map(|(_, asset)| asset),
         loading_primary_scene_request: state.primary_scene_load.map(|(request, _)| request),
+        ready_primary_asset: state.ready_primary_asset.as_ref().map(|asset| {
+            AppReplayPrimaryAssetState {
+                request_id: asset.request_id,
+                descriptor: asset.descriptor.clone(),
+                byte_length: u64::try_from(asset.byte_length)
+                    .expect("supported Rust targets have at most 64-bit usize"),
+                content_digest: asset.content_digest,
+                metadata: asset.metadata.clone(),
+            }
+        }),
         assets: state
             .asset_read_models()
             .into_iter()
@@ -1534,6 +1575,7 @@ mod tests {
             left.loading_primary_scene_request,
             right.loading_primary_scene_request
         );
+        assert_eq!(left.ready_primary_asset, right.ready_primary_asset);
         assert_eq!(
             left.authored_projection_revision,
             right.authored_projection_revision
@@ -1779,7 +1821,7 @@ mod tests {
             .iter()
             .chain(navigation.events.iter())
             .chain(orchestration.events.iter())
-            .filter_map(|event| replay_app_event(event, ReplaySchema::V0_18).ok())
+            .filter_map(|event| replay_app_event(event, ReplaySchema::V0_19).ok())
             .map(|event| authoritative_app_event_name(&event))
             .collect::<std::collections::BTreeSet<_>>();
         let authored_covered = orchestration
@@ -2211,6 +2253,58 @@ mod tests {
         ));
         assert_eq!(legacy.records[0].state.revision, 0);
         assert!(legacy.records[0].state.assets.is_empty());
+    }
+
+    #[test]
+    fn replay_0_19_projects_ready_primary_asset_without_reinterpreting_0_18() {
+        let asset = AssetDescriptor {
+            id: AssetId::from_u128(1).unwrap(),
+            uri: "horse.glb".to_owned(),
+            media_type: Some("model/gltf-binary".to_owned()),
+            content_digest: None,
+        };
+        let request_id = RequestId::from_u128(10).unwrap();
+        let events = vec![
+            AppReplayEvent::RequestAsset {
+                sequence: 1,
+                at_seconds: 0.0,
+                request_id,
+                asset: asset.clone(),
+                scope: ReplayAssetLoadScope::PrimaryScene,
+            },
+            AppReplayEvent::CompleteAssetLoad {
+                request_id,
+                asset_id: asset.id,
+                outcome: ReplayAssetLoadOutcome::Loaded {
+                    byte_length: 123,
+                    content_digest: Some([9; 32]),
+                    metadata: AssetMetadata::default(),
+                },
+            },
+        ];
+
+        let current = run_app_replay(&AppReplayScript::new(events.clone())).unwrap();
+        assert_eq!(
+            current.records[1].state.ready_primary_asset,
+            Some(AppReplayPrimaryAssetState {
+                request_id,
+                descriptor: asset,
+                byte_length: 123,
+                content_digest: Some([9; 32]),
+                metadata: AssetMetadata::default(),
+            })
+        );
+
+        let legacy = run_app_replay(&AppReplayScript {
+            version: LEGACY_APP_REPLAY_VERSION_0_18.to_owned(),
+            events,
+        })
+        .unwrap();
+        assert_semantic_state_eq(&current.records[1].state, &legacy.records[1].state);
+        assert!(matches!(
+            legacy.records[1].outcome,
+            AppReplayOutcome::Committed { .. }
+        ));
     }
 
     #[test]

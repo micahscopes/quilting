@@ -388,7 +388,7 @@ The first application boundary is now explicit:
   events, device reports, renderer handles, or wall clock. Decimal JSON uses
   exact `f64` round trips.
   The native `replay` feature is excluded from browser builds;
-  `hyperscope-replay` version 0.17 walks every checked-in cue, every current
+  `hyperscope-replay` version 0.19 walks every checked-in cue, every current
   semantic navigation action, and every current application event lane. It
   records the key-sorted authored asset/entity materialization as well as its
   atomic projection revision, so stale or invalid Blender-style checkpoints
@@ -424,6 +424,12 @@ The first application boundary is now explicit:
   share the one compatibility sequence/effect adapter; Leptos dispatches
   directly through `AppStore`. This eliminates duplicate browser
   `setRenderSettings` call sites without weakening the rollback lane.
+  Version 0.19 retains the last successfully loaded/decoded primary asset as a
+  distinct FRP read model, including its request, descriptor, byte length,
+  digest, and provenance. A pending or failed replacement cannot erase that
+  candidate, including same-asset reloads. This does not claim renderer
+  residency: scene installation and active animation clip selection remain
+  separate asynchronous completion boundaries.
   Version 0.17 added the renderer-independent primary animation clock: playing,
   unwrapped scene time, and signed finite speed. Frame events advance it from
   explicit deltas, cue activation replaces all three fields atomically, and
@@ -460,7 +466,7 @@ The first application boundary is now explicit:
   semantic-target-presence policy without inferring aim mode from inversion.
   Version 0.5 retains selected source bounds and clicked pivots and derives
   output-chart pivots/radii in the application snapshot; a projection pole
-  clears only those derived values. The reader accepts 0.4 through 0.17 inputs,
+  clears only those derived values. The reader accepts 0.4 through 0.18 inputs,
   but only 0.4 migrates an omitted source pivot to the bound center.
   Versions 0.4 and 0.5 reject 0.6-only actions rather than silently changing
   their meaning; every pre-0.7 unscoped focus anchor is rejected. Action
@@ -477,10 +483,10 @@ The first application boundary is now explicit:
   cancellation, presence TTL/order, authored revisions, and rejected wire
   input. Tests prove exhaustive current event/action coverage, JSON round trips,
   atomic rejection, and transition cadence invariance. The eight-cue golden is
-  `fnv1a-128-json:c1df294e32201bf7e0665b94848d3174`;
+  `fnv1a-128-json:27e291db6fb86f54ac24737a7a7d5b11`;
   the navigation golden is
-  `fnv1a-128-json:23b8b3dbd4dbfda43dc11b9cc16c940e`; the orchestration
-  golden is `fnv1a-128-json:d4767df6646b8c20d53c48e91fd281ef`.
+  `fnv1a-128-json:c2a385c8599850df131a94787b7cb207`; the orchestration
+  golden is `fnv1a-128-json:de452829bdd3e27f080b286b6153cbf4`.
 - `hyperscape::StableEntityId` converts explicitly to the validated wire
   `EntityId`, so the protocol wrapper is an interchange type rather than a
   second identity authority.
