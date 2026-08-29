@@ -216,6 +216,11 @@ The first application boundary is now explicit:
   defaults and clamps run only for explicit JavaScript authority or a recorded
   Rust startup fallback. A missing typed projection fails over visibly rather
   than being mistaken for successful Rust authority.
+  `ControlSpec` now exposes reusable numeric-domain metadata—minimum, maximum,
+  and integrality—rather than burying those constraints in route-specific
+  validators. Render URL admission and future Leptos controls therefore share
+  one range contract; additional control families can migrate onto the same
+  representation without adding bespoke validator code.
   The same successful result carries all 85 resolved control values in
   registry order, so omitted URL controls no longer regain authority through
   the browser's duplicate default table after WASM starts. That table remains

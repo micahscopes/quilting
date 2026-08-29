@@ -24,6 +24,14 @@ struct RouteControlSpec {
     key: &'static str,
     default_value: &'static str,
     kind: &'static str,
+    numeric_domain: Option<RouteNumericControlDomain>,
+}
+
+#[derive(Serialize)]
+struct RouteNumericControlDomain {
+    minimum: f64,
+    maximum: f64,
+    integral: bool,
 }
 
 #[derive(Serialize)]
@@ -93,6 +101,11 @@ pub fn hyperscope_control_specs() -> Result<JsValue, JsValue> {
                 key: spec.key,
                 default_value: spec.default_value,
                 kind: spec.kind.name(),
+                numeric_domain: spec.numeric_domain.map(|domain| RouteNumericControlDomain {
+                    minimum: domain.minimum,
+                    maximum: domain.maximum,
+                    integral: domain.integral,
+                }),
             })
             .collect::<Vec<_>>(),
     )

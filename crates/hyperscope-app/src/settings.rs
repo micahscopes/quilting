@@ -37,7 +37,7 @@ impl ControlValueKind {
         }
     }
 
-    fn accepts(self, value: &str) -> bool {
+    fn accepts_shape(self, value: &str) -> bool {
         match self {
             Self::Text => !value.is_empty(),
             Self::Number => value.parse::<f64>().is_ok_and(|number| number.is_finite()),
@@ -46,10 +46,12 @@ impl ControlValueKind {
                 value,
                 "pbr" | "matcap" | "wire" | "normals" | "both" | "lod" | "stretch"
             ),
-            Self::ResolutionLevel => bounded_integer(value, 0, 6),
-            Self::TessellationDensity => bounded_integer(value, 1, 500),
-            Self::PixelFloor => bounded_number(value, 1.0, 64.0),
-            Self::AtlasExponent => bounded_integer(value, 3, 9),
+            Self::ResolutionLevel | Self::TessellationDensity | Self::AtlasExponent => {
+                value.parse::<i64>().is_ok()
+            }
+            Self::PixelFloor => value
+                .parse::<f64>()
+                .is_ok_and(|number| number.is_finite()),
             Self::LodRatio => matches!(value, "2" | "4"),
             Self::Implementation => matches!(value, "js" | "shadow" | "rust"),
             Self::RenderBackend => matches!(value, "webgl2" | "webgpu-shadow" | "webgpu"),
@@ -88,29 +90,47 @@ impl ControlValueKind {
     }
 }
 
-fn bounded_number(value: &str, minimum: f64, maximum: f64) -> bool {
-    value
-        .parse::<f64>()
-        .is_ok_and(|number| number.is_finite() && (minimum..=maximum).contains(&number))
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NumericControlDomain {
+    pub minimum: f64,
+    pub maximum: f64,
+    pub integral: bool,
 }
 
-fn bounded_integer(value: &str, minimum: u16, maximum: u16) -> bool {
-    value
-        .parse::<u16>()
-        .is_ok_and(|number| (minimum..=maximum).contains(&number))
+impl NumericControlDomain {
+    fn accepts(self, value: &str) -> bool {
+        if self.integral {
+            value.parse::<i64>().is_ok_and(|number| {
+                let number = number as f64;
+                (self.minimum..=self.maximum).contains(&number)
+            })
+        } else {
+            value.parse::<f64>().is_ok_and(|number| {
+                number.is_finite() && (self.minimum..=self.maximum).contains(&number)
+            })
+        }
+    }
 }
 
 /// Stable application-level route metadata. DOM range/label/accessibility
 /// metadata will extend this type; URL identity and defaults already live here
 /// so future views cannot silently invent a second persistence contract.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ControlSpec {
     pub key: &'static str,
     pub default_value: &'static str,
     pub kind: ControlValueKind,
+    pub numeric_domain: Option<NumericControlDomain>,
 }
 
 impl ControlSpec {
+    pub fn accepts(self, value: &str) -> bool {
+        self.kind.accepts_shape(value)
+            && self
+                .numeric_domain
+                .is_none_or(|domain| domain.accepts(value))
+    }
+
     pub fn is_default(self, value: &str) -> bool {
         self.kind.equivalent(value, self.default_value)
     }
@@ -122,6 +142,22 @@ macro_rules! spec {
             key: $key,
             default_value: $default,
             kind: ControlValueKind::$kind,
+            numeric_domain: None,
+        }
+    };
+}
+
+macro_rules! numeric_spec {
+    ($key:literal, $default:literal, $kind:ident, $minimum:expr, $maximum:expr, $integral:literal) => {
+        ControlSpec {
+            key: $key,
+            default_value: $default,
+            kind: ControlValueKind::$kind,
+            numeric_domain: Some(NumericControlDomain {
+                minimum: $minimum,
+                maximum: $maximum,
+                integral: $integral,
+            }),
         }
     };
 }
@@ -139,11 +175,11 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("mr", "20", Number),
     spec!("env", "rosendal_plains_1_1k", Text),
     spec!("matcap", "citric-acid", Text),
-    spec!("res", "0", ResolutionLevel),
-    spec!("density", "100", TessellationDensity),
+    numeric_spec!("res", "0", ResolutionLevel, 0.0, 6.0, true),
+    numeric_spec!("density", "100", TessellationDensity, 1.0, 500.0, true),
     spec!("atten", "1", Toggle),
-    spec!("minpx", "16", PixelFloor),
-    spec!("atlas", "7", AtlasExponent),
+    numeric_spec!("minpx", "16", PixelFloor, 1.0, 64.0, false),
+    numeric_spec!("atlas", "7", AtlasExponent, 3.0, 9.0, true),
     spec!("lodratio", "2", LodRatio),
     spec!("animate", "1", Toggle),
     spec!("anim", "-1", Number),
@@ -280,7 +316,7 @@ impl HyperscopeRoute {
                 });
                 continue;
             }
-            if !spec.kind.accepts(&value) {
+            if !spec.accepts(&value) {
                 route.diagnostics.push(RouteDiagnostic {
                     code: RouteDiagnosticCode::InvalidValue,
                     key: spec.key.to_owned(),
@@ -423,7 +459,7 @@ mod tests {
         for spec in HYPERSCOPE_CONTROL_SPECS {
             assert!(keys.insert(spec.key), "duplicate route key {}", spec.key);
             assert!(
-                spec.kind.accepts(spec.default_value),
+                spec.accepts(spec.default_value),
                 "invalid default for {}",
                 spec.key
             );

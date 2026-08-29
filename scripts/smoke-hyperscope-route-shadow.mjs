@@ -17,10 +17,30 @@ const specs = hyperscopeControlSpecs();
 assert.equal(new Set(specs.map(spec => spec.key)).size, specs.length);
 assert.equal(specs.find(spec => spec.key === 'mode').kind, 'render_mode');
 assert.equal(specs.find(spec => spec.key === 'res').kind, 'resolution_level');
+assert.deepEqual(specs.find(spec => spec.key === 'res').numericDomain, {
+  minimum: 0,
+  maximum: 6,
+  integral: true,
+});
 assert.equal(specs.find(spec => spec.key === 'density').kind, 'tessellation_density');
+assert.deepEqual(specs.find(spec => spec.key === 'density').numericDomain, {
+  minimum: 1,
+  maximum: 500,
+  integral: true,
+});
 assert.equal(specs.find(spec => spec.key === 'minpx').kind, 'pixel_floor');
 assert.equal(specs.find(spec => spec.key === 'minpx').defaultValue, '16');
+assert.deepEqual(specs.find(spec => spec.key === 'minpx').numericDomain, {
+  minimum: 1,
+  maximum: 64,
+  integral: false,
+});
 assert.equal(specs.find(spec => spec.key === 'atlas').kind, 'atlas_exponent');
+assert.deepEqual(specs.find(spec => spec.key === 'atlas').numericDomain, {
+  minimum: 3,
+  maximum: 9,
+  integral: true,
+});
 assert.equal(specs.find(spec => spec.key === 'lodratio').defaultValue, '2');
 assert.equal(specs.find(spec => spec.key === 'lodratio').kind, 'lod_ratio');
 assert.equal(specs.find(spec => spec.key === 'appshadow').kind, 'toggle');
