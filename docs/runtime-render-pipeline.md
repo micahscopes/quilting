@@ -753,14 +753,30 @@ white, black, and flat-normal 1x1 resources give every unavailable slot a
 channel-correct fallback. Browser `ImageBitmap` handles copy directly into that
 table before closure, without canvas readback or a texture-sized WASM copy.
 
+Image-based lighting now has the same rollback-safe boundary. A validated
+backend-neutral asset describes one complete power-of-two RGBA32F prefiltered
+cube mip chain plus one irradiance cube. WebGPU validates both payloads and the
+device limit before allocation, converts one face at a time into filterable
+RGBA16F storage, and publishes one group-two binding only after both cubes are
+complete. Missing IBL binds a valid black placeholder while selecting the
+analytical fallback. Resident PBR samples diffuse irradiance and the
+roughness-selected specular mip through the shared BRDF. The existing browser
+environment upload mirrors the same borrowed WASM slices after WebGL succeeds;
+it does not cross JavaScript again or read a canvas. Environment replacement
+and later scene creation both preserve the last coherent binding epoch.
+
 The required Radeon/Vulkan gate now validates sparse binding residency and
-renders a real base-color texture through the shared PBR draw; its image is
-nonempty and differs from the factor-only oracle. This is deliberately not a
-live-browser cut yet: environment IBL, transmission/blend sequencing, focus
-postprocessing, and direct browser cross-backend texture image evidence remain
-required, so Hyperscope still keeps WebGL2 visible for PBR. Texture-free and
-textured candidates fail before publication if their device resources cannot be
-made coherent with the retained material table.
+renders both a real base-color texture and independently replaced IBL through
+the shared PBR draw; both images are nonempty and differ from their respective
+fallback oracles. This is deliberately not a live-browser cut yet:
+transmission/blend sequencing, focus postprocessing, and browser image-parity
+acceptance remain required, so Hyperscope still keeps WebGL2 visible for PBR.
+An explicit one-shot basic-PBR evidence request now admits only the opaque,
+non-sheen, non-focus subset on a headless backend with resident IBL, captures
+the incumbent framebuffer after its real material pass, and stages the matching
+WebGPU frame. Ordinary PBR frames still incur no WebGPU shadow work. Texture,
+environment, and scene candidates fail before publication if their device
+resources cannot be made coherent with the retained epoch.
 
 Cross-backend image evidence now has one backend-neutral diagnostic contract
 in `quilting-core`. It validates exact dimensions and row strides, normalizes
