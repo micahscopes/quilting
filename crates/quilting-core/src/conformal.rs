@@ -296,6 +296,25 @@ impl ConformalFrameForest {
         Ok(id)
     }
 
+    /// Replace a frame's local mapping without changing its spatial parent.
+    ///
+    /// Validation happens before mutation, so an invalid animated constraint
+    /// result leaves the previous mapping intact. Descendants observe the new
+    /// mapping through ordinary world-chain composition.
+    pub fn set_local_to_parent(
+        &mut self,
+        frame: FrameId,
+        local_to_parent: ConformalTransformChain,
+    ) -> Result<(), ConformalError> {
+        local_to_parent.validate()?;
+        let target = self
+            .frames
+            .get_mut(frame.0)
+            .ok_or(ConformalError::UnknownFrame(frame))?;
+        target.local_to_parent = local_to_parent;
+        Ok(())
+    }
+
     /// Validate references, generator parameters, and the forest invariant.
     pub fn validate(&self) -> Result<(), ConformalError> {
         for (index, frame) in self.frames.iter().enumerate() {
@@ -577,6 +596,42 @@ mod tests {
             .unwrap();
         assert_point_close(after, before);
         assert_point_close(descendant_after, descendant_before);
+    }
+
+    #[test]
+    fn local_mapping_updates_are_atomic_and_flow_to_descendants() {
+        let mut frames = ConformalFrameForest::new();
+        let root = frames
+            .add_frame("root", None, ConformalTransformChain::identity())
+            .unwrap();
+        let child = frames
+            .add_frame(
+                "child",
+                Some(root),
+                chain(vec![ConformalGenerator::translation([0.0, 2.0, 0.0])]),
+            )
+            .unwrap();
+        frames
+            .set_local_to_parent(
+                root,
+                chain(vec![ConformalGenerator::translation([3.0, 0.0, 0.0])]),
+            )
+            .unwrap();
+        assert_point_close(
+            frames
+                .world_chain(child)
+                .unwrap()
+                .apply_point([0.0; 3])
+                .unwrap(),
+            [3.0, 2.0, 0.0],
+        );
+
+        let before = frames.frame(root).unwrap().local_to_parent.clone();
+        let invalid = ConformalTransformChain {
+            generators: vec![ConformalGenerator::uniform_scale(0.0)],
+        };
+        assert!(frames.set_local_to_parent(root, invalid).is_err());
+        assert_eq!(frames.frame(root).unwrap().local_to_parent, before);
     }
 
     #[test]
