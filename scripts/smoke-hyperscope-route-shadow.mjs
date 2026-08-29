@@ -602,7 +602,8 @@ for (const startupStep of [
   'const startupRoute = evaluateRustRoute(startupBrowserParams, false);',
   'startupRoute.diagnostics.length === 0',
   '&& startupRoute.renderSettings',
-  'initParams = readParams(new URLSearchParams(startupRoute.resolvedPairs));',
+  'new URLSearchParams(startupRoute.resolvedPairs),',
+  'new URLSearchParams(startupRoute.pairs),',
   'initRenderSettings = startupRoute.renderSettings;',
   "rustRouteShadowDiagnostics.startupSource = 'browser-fallback';",
   "'missing-typed-render-settings'",
@@ -614,10 +615,38 @@ for (const startupStep of [
   );
 }
 assert.ok(
-  startupAdapter.indexOf('initParams = readParams(new URLSearchParams(startupRoute.resolvedPairs));')
+  startupAdapter.indexOf('new URLSearchParams(startupRoute.resolvedPairs),')
     < startupAdapter.indexOf('applyParams(initParams, initRenderSettings);'),
   'Rust startup decoding must finish before browser state is applied',
 );
+assert.ok(
+  browserSource.includes('function readParams(p, explicitParams = p) {')
+    && browserSource.includes("animtimeProvided: explicitParams.has('animtime')")
+    && browserSource.includes("animspeedProvided: explicitParams.has('animspeed')"),
+  'resolved Rust defaults must not masquerade as explicitly linked animation-clock values',
+);
+const defaultsDeclaration = browserSource.match(
+  /const PARAM_DEFAULTS = \{[\s\S]*?\n\};/,
+)?.[0];
+const readParamsDeclaration = browserSource.match(
+  /function readParams\(p, explicitParams = p\) \{[\s\S]*?\n\}/,
+)?.[0];
+assert.ok(defaultsDeclaration && readParamsDeclaration, 'could not isolate route decoder');
+const decodeRoute = Function(
+  `${defaultsDeclaration}\n${readParamsDeclaration}\nreturn readParams;`,
+)();
+const resolvedDefaults = new URLSearchParams(
+  canonicalizeHyperscopeRoute([]).resolvedPairs,
+);
+const implicitClock = decodeRoute(resolvedDefaults, new URLSearchParams());
+assert.equal(implicitClock.animtimeProvided, false);
+assert.equal(implicitClock.animspeedProvided, false);
+const explicitClock = decodeRoute(
+  resolvedDefaults,
+  new URLSearchParams([['animtime', '0'], ['animspeed', '1']]),
+);
+assert.equal(explicitClock.animtimeProvided, true);
+assert.equal(explicitClock.animspeedProvided, true);
 
 const applyParamsSource = browserSource.match(
   /applyParams = function\(params, validatedRenderSettings = null\) \{([\s\S]*?)\n\};\n\n\/\/ --- IndexedDB/,

@@ -1548,7 +1548,7 @@ const PARAM_DEFAULTS = {
   fqual: '1', fkaw: '3', fkoff: '15',
 };
 
-function readParams(p) {
+function readParams(p, explicitParams = p) {
   const get = (k) => p.get(k) ?? PARAM_DEFAULTS[k];
   return {
     glb: get('glb'),
@@ -1566,8 +1566,8 @@ function readParams(p) {
     anim: get('anim'),
     animtime: get('animtime'),
     animspeed: get('animspeed'),
-    animtimeProvided: p.has('animtime'),
-    animspeedProvided: p.has('animspeed'),
+    animtimeProvided: explicitParams.has('animtime'),
+    animspeedProvided: explicitParams.has('animspeed'),
     animclockimpl: get('animclockimpl'),
     atlas: get('atlas'),
     lodratio: get('lodratio'),
@@ -10943,7 +10943,10 @@ phase('wasm', [], async () => {
       if (startupRoute
           && startupRoute.diagnostics.length === 0
           && startupRoute.renderSettings) {
-        initParams = readParams(new URLSearchParams(startupRoute.resolvedPairs));
+        initParams = readParams(
+          new URLSearchParams(startupRoute.resolvedPairs),
+          new URLSearchParams(startupRoute.pairs),
+        );
         initRenderSettings = startupRoute.renderSettings;
         currentGlb = initParams.glb;
         initialPatchLabShape = patchLabShape(initParams.lab);

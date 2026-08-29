@@ -225,6 +225,10 @@ The first application boundary is now explicit:
   registry order, so omitted URL controls no longer regain authority through
   the browser's duplicate default table after WASM starts. That table remains
   only for the inert pre-WASM preview and the serialized JavaScript fallback.
+  Compact canonical pairs remain a separate provenance channel: only an
+  explicitly linked `animtime` or `animspeed` may arm deferred clock
+  restoration. A resolved default can populate state without masquerading as
+  authored URL intent.
   Camera links carry explicit `aim=1` when `px/py/pz` is a finite semantic
   target; omitting it means the same visible pose has a free sight tangent.
   Rust validates and canonically orders that policy, and selection or model
