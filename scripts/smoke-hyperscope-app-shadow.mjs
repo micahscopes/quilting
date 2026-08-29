@@ -578,6 +578,36 @@ assert.equal(
 );
 assert.equal(primaryApp.snapshot().animationClipSelection.active.clip.index, 1);
 assert.equal(primaryApp.snapshot().animationClipSelection.pending, undefined);
+const returnToGallop = primaryApp.dispatchAnimationClip(0);
+const returnToGallopEffect = returnToGallop.commit.effects.find(
+  effect => effect.type === 'select_animation_clip',
+);
+assert.ok(returnToGallopEffect);
+assert.equal(primaryApp.snapshot().animationClipSelection.pending.clip.index, 0);
+const cancelReturn = primaryApp.dispatchAnimationClip(1);
+assert.deepEqual(
+  cancelReturn.commit.effects,
+  [{
+    type: 'cancel_animation_clip_selection',
+    job_id: returnToGallopEffect.job_id,
+    scene_request_id: returnToGallopEffect.scene_request_id,
+    asset_id: returnToGallopEffect.asset_id,
+    clip_index: 0,
+  }],
+  'returning to the incumbent must cancel the pending renderer job exactly',
+);
+assert.equal(primaryApp.snapshot().animationClipSelection.pending, undefined);
+assert.equal(
+  primaryApp.completeAnimationClipSelected(
+    returnToGallopEffect.job_id,
+    returnToGallopEffect.scene_request_id,
+    returnToGallopEffect.asset_id,
+    returnToGallopEffect.clip_index,
+  ).disposition,
+  'ignored_stale',
+  'a canceled renderer job must not become active through a late completion',
+);
+assert.equal(primaryApp.snapshot().animationClipSelection.active.clip.index, 1);
 const failedPrimaryReplacement = 'e0000000-0000-4000-8000-000000000012';
 primaryApp.requestPrimaryAsset(
   3,
