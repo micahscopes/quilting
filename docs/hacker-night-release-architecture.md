@@ -249,6 +249,9 @@ The first application boundary is now explicit:
   and an explicitly linked default; the browser only defers that value until
   the requested clip range is resident, then commits it through the existing
   application animation action.
+  Animation clip indices are integral Rust-domain values as well; a
+  successful route converts them exactly, while fractional legacy inputs can
+  only take the explicit browser-fallback path that retains `parseInt`.
   Camera links carry explicit `aim=1` when `px/py/pz` is a finite semantic
   target; omitting it means the same visible pose has a free sight tangent.
   Rust validates and canonically orders that policy, and selection or model

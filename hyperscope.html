@@ -11491,7 +11491,9 @@ phase('render', ['wasm', 'atlas', 'model'], async () => {
       if (RUST_PRESENTATION_ENABLED && rustPresentationSnapshot) {
         await applyPresentationAnimationState(rustPresentationSnapshot);
       } else {
-        const animIdx = parseInt(initParams.anim);
+        const animIdx = initRustRouteAdmitted
+          ? Number(initParams.anim)
+          : parseInt(initParams.anim);
         if (animIdx >= 0 && $('anim-sel').querySelector(`option[value="${animIdx}"]`)) {
           await selectAnimationIndex(animIdx);
         } else if (gpuSkinned && restorePendingRouteAnimationClock('startup-animation')) {

@@ -52,6 +52,12 @@ assert.deepEqual(specs.find(spec => spec.key === 'fmode').choices, ['0', '1', '2
 assert.deepEqual(specs.find(spec => spec.key === 'smnav').choices, [
   'hyperscope', 'object', 'fly', 'drone',
 ]);
+assert.deepEqual(specs.find(spec => spec.key === 'anim').numericDomain, {
+  minimum: -1,
+  maximum: 2147483647,
+  integral: true,
+  step: 1,
+});
 assert.deepEqual(specs.find(spec => spec.key === 'lab').choices, [
   '0', 'triangle', 'plane', 'cube',
 ]);
@@ -736,6 +742,12 @@ for (const exactAdmissionStep of [
     `Rust-admitted startup values are missing exact projection: ${exactAdmissionStep}`,
   );
 }
+assert.ok(
+  browserSource.includes('const animIdx = initRustRouteAdmitted')
+    && browserSource.includes('? Number(initParams.anim)')
+    && browserSource.includes(': parseInt(initParams.anim);'),
+  'Rust-admitted animation indices must bypass legacy parseInt coercion',
+);
 
 const canonical = canonicalizeHyperscopeRoute([
   ['zoom', '3.00'],
