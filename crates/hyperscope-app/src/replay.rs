@@ -10,6 +10,7 @@ use crate::{
     AnimationClipSelectionOutcome, AppCommit, AppEffect, AppEvent, AppStore, AssetLoadCompletion,
     AssetLoadOutcome, AssetLoadScope, AssetMetadata, AssetStatus, AuthoredRevision,
     CommitDisposition, EffectCompletion, FrameTick, NavigationSynchronization, PresentationAction,
+    PatchLabEffect,
     PresentationAnimationResidencyBinding, PrimarySceneInstallCompletion,
     PrimarySceneInstallMetadata, PrimarySceneInstallOutcome, ReceivedPresence, RenderSettings,
     SemanticAction, Timed,
@@ -943,6 +944,9 @@ pub enum AppReplayEffect {
         asset_id: AssetId,
         clip_index: u32,
     },
+    PatchLab {
+        effect: PatchLabEffect,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1815,6 +1819,9 @@ fn replay_effect(effect: &AppEffect) -> AppReplayEffect {
             asset_id: *asset_id,
             clip_index: *clip_index,
         },
+        AppEffect::PatchLab(effect) => AppReplayEffect::PatchLab {
+            effect: effect.clone(),
+        },
     }
 }
 
@@ -2261,6 +2268,7 @@ mod tests {
                 SemanticAction::Present(_) => "present",
                 SemanticAction::Animate(_) => "animate",
                 SemanticAction::SetRenderSettings(_) => "set_render_settings",
+                SemanticAction::SetPatchLab(_) => "set_patch_lab",
                 SemanticAction::RequestAsset { .. } => "request_asset",
                 SemanticAction::CancelAsset(_) => "cancel_asset",
             },
@@ -2278,6 +2286,7 @@ mod tests {
                 EffectCompletion::AnimationClipSelection(_) => {
                     "effect_completed_animation_clip_selection"
                 }
+                EffectCompletion::PatchLab(_) => "effect_completed_patch_lab",
             },
             AppEvent::RemotePresence(_) => "remote_presence",
             AppEvent::AuthoredRevision(_) => "authored_revision",

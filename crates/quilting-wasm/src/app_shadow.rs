@@ -21,7 +21,7 @@ use hyperscope_app::{
     AppEffect, AppEvent, AppFrameSnapshot, AppStore, AssetLoadCompletion, AssetLoadOutcome,
     AssetLoadScope, AssetMetadata, AssetStatus, AuthoredRevision, CommitDisposition,
     EffectCompletion, FrameTick, LocalPeerDisposition, LocalPeerIngress, LocalPeerLane,
-    LocalPeerReceipt, NavigationSynchronization, PresentationAction,
+    LocalPeerReceipt, NavigationSynchronization, PatchLabEffect, PresentationAction,
     PresentationAnimationResidencyBinding,
     PrimarySceneInstallCompletion, PrimarySceneInstallMetadata, PrimarySceneInstallOutcome,
     RenderSettings, SemanticAction, Timed,
@@ -2052,6 +2052,41 @@ enum ShadowEffect {
         asset_id: String,
         clip_index: u32,
     },
+    PatchLab {
+        effect: ShadowPatchLabEffect,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ShadowPatchLabEffect {
+    BuildGeometry {
+        job_id: String,
+        shape: &'static str,
+        grid: u8,
+        bend_percent: u8,
+    },
+    CancelGeometry {
+        job_id: String,
+    },
+    DiscardGeometry {
+        geometry_job_id: String,
+    },
+    EvaluateLod {
+        job_id: String,
+        geometry_job_id: String,
+        field: &'static str,
+        phase_microradians: u32,
+        min_exponent: u8,
+        max_exponent: u8,
+        manual_edge_exponents: [u8; 3],
+        atlas_exponent: u8,
+        max_face_edge_ratio: u8,
+    },
+    CancelLod {
+        job_id: String,
+        geometry_job_id: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -2572,6 +2607,9 @@ fn shadow_commit(commit: &AppCommit) -> ShadowCommit {
                 asset_id: asset_id.to_string(),
                 clip_index: *clip_index,
             },
+            AppEffect::PatchLab(effect) => ShadowEffect::PatchLab {
+                effect: shadow_patch_lab_effect(effect),
+            },
         })
         .collect();
     ShadowCommit {
@@ -2582,6 +2620,49 @@ fn shadow_commit(commit: &AppCommit) -> ShadowCommit {
         },
         published_ui: commit.published_ui,
         effects,
+    }
+}
+
+fn shadow_patch_lab_effect(effect: &PatchLabEffect) -> ShadowPatchLabEffect {
+    match effect {
+        PatchLabEffect::BuildGeometry { job_id, geometry } => {
+            ShadowPatchLabEffect::BuildGeometry {
+                job_id: job_id.to_string(),
+                shape: geometry.shape.wire_name(),
+                grid: geometry.grid,
+                bend_percent: geometry.bend_percent,
+            }
+        }
+        PatchLabEffect::CancelGeometry { job_id } => ShadowPatchLabEffect::CancelGeometry {
+            job_id: job_id.to_string(),
+        },
+        PatchLabEffect::DiscardGeometry { geometry_job_id } => {
+            ShadowPatchLabEffect::DiscardGeometry {
+                geometry_job_id: geometry_job_id.to_string(),
+            }
+        }
+        PatchLabEffect::EvaluateLod {
+            job_id,
+            geometry_job_id,
+            parameters,
+        } => ShadowPatchLabEffect::EvaluateLod {
+            job_id: job_id.to_string(),
+            geometry_job_id: geometry_job_id.to_string(),
+            field: parameters.field.wire_name(),
+            phase_microradians: parameters.phase_microradians,
+            min_exponent: parameters.min_exponent,
+            max_exponent: parameters.max_exponent,
+            manual_edge_exponents: parameters.manual_edge_exponents,
+            atlas_exponent: parameters.atlas_exponent,
+            max_face_edge_ratio: parameters.max_face_edge_ratio,
+        },
+        PatchLabEffect::CancelLod {
+            job_id,
+            geometry_job_id,
+        } => ShadowPatchLabEffect::CancelLod {
+            job_id: job_id.to_string(),
+            geometry_job_id: geometry_job_id.to_string(),
+        },
     }
 }
 

@@ -11,7 +11,8 @@ use quilting_mesh::HalfEdgeMesh;
 use std::collections::BTreeMap;
 
 /// Geometry shown by the interactive patch laboratory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PatchLabShape {
     /// One genuine rational QB triangle with an adjustable corner weight.
     Triangle,
@@ -21,8 +22,28 @@ pub enum PatchLabShape {
     Cube,
 }
 
+impl PatchLabShape {
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Triangle => "triangle",
+            Self::Plane => "plane",
+            Self::Cube => "cube",
+        }
+    }
+
+    pub fn from_wire_name(value: &str) -> Option<Self> {
+        match value {
+            "triangle" => Some(Self::Triangle),
+            "plane" => Some(Self::Plane),
+            "cube" => Some(Self::Cube),
+            _ => None,
+        }
+    }
+}
+
 /// Scalar field used to request edge tessellation levels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PatchLabField {
     Uniform,
     Wave,
@@ -30,6 +51,29 @@ pub enum PatchLabField {
     Sweep,
     /// Direct edge control for the single-triangle scene.
     ManualEdges,
+}
+
+impl PatchLabField {
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Uniform => "uniform",
+            Self::Wave => "wave",
+            Self::Radial => "radial",
+            Self::Sweep => "sweep",
+            Self::ManualEdges => "manual_edges",
+        }
+    }
+
+    pub fn from_wire_name(value: &str) -> Option<Self> {
+        match value {
+            "uniform" => Some(Self::Uniform),
+            "wave" => Some(Self::Wave),
+            "radial" => Some(Self::Radial),
+            "sweep" => Some(Self::Sweep),
+            "manual_edges" => Some(Self::ManualEdges),
+            _ => None,
+        }
+    }
 }
 
 /// Indexed source geometry plus per-face QB weights.
@@ -302,6 +346,28 @@ fn shared_edge_stats(topology: &HalfEdgeMesh, residents: &[ResidentLod]) -> (usi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn patch_lab_wire_vocabulary_roundtrips_without_browser_aliases() {
+        for shape in [
+            PatchLabShape::Triangle,
+            PatchLabShape::Plane,
+            PatchLabShape::Cube,
+        ] {
+            assert_eq!(PatchLabShape::from_wire_name(shape.wire_name()), Some(shape));
+        }
+        for field in [
+            PatchLabField::Uniform,
+            PatchLabField::Wave,
+            PatchLabField::Radial,
+            PatchLabField::Sweep,
+            PatchLabField::ManualEdges,
+        ] {
+            assert_eq!(PatchLabField::from_wire_name(field.wire_name()), Some(field));
+        }
+        assert_eq!(PatchLabShape::from_wire_name("mesh"), None);
+        assert_eq!(PatchLabField::from_wire_name("manual"), None);
+    }
 
     #[test]
     fn laboratory_mesh_counts_are_small_and_predictable() {

@@ -10,12 +10,14 @@
 #[cfg(feature = "replay")]
 mod replay;
 mod peer;
+mod patch_lab;
 mod presentation_animation;
 mod settings;
 
 #[cfg(feature = "replay")]
 pub use replay::*;
 pub use peer::*;
+pub use patch_lab::*;
 pub use presentation_animation::*;
 pub use settings::*;
 
@@ -81,6 +83,7 @@ pub enum SemanticAction {
     Present(PresentationAction),
     Animate(AnimationAction),
     SetRenderSettings(RenderSettings),
+    SetPatchLab(PatchLabSessionIntent),
     RequestAsset {
         request_id: RequestId,
         asset: AssetDescriptor,
@@ -359,6 +362,7 @@ pub enum EffectCompletion {
     AssetLoad(AssetLoadCompletion),
     PrimarySceneInstall(PrimarySceneInstallCompletion),
     AnimationClipSelection(AnimationClipSelectionCompletion),
+    PatchLab(PatchLabCompletion),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -405,6 +409,7 @@ pub enum AppEffect {
         asset_id: AssetId,
         clip_index: u32,
     },
+    PatchLab(PatchLabEffect),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -620,6 +625,9 @@ pub struct AppSummary {
     pub animation_playing: bool,
     pub animation_time_seconds: f64,
     pub animation_speed: f64,
+    pub patch_lab_active: bool,
+    pub patch_lab_geometry_job: Option<u64>,
+    pub patch_lab_lod_job: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -839,6 +847,7 @@ pub struct AppState {
     presentation_animation_residency: Option<PresentationAnimationResidencyBinding>,
     animation: AnimationClock,
     render_settings: RenderSettings,
+    patch_lab: PatchLabRuntime,
     assets: BTreeMap<AssetId, AssetRecord>,
     primary_scene_load: Option<(RequestId, AssetId)>,
     ready_primary_asset: Option<PrimaryAssetReadModel>,
@@ -866,6 +875,7 @@ impl Default for AppState {
             presentation_animation_residency: None,
             animation: AnimationClock::default(),
             render_settings: RenderSettings::default(),
+            patch_lab: PatchLabRuntime::default(),
             assets: BTreeMap::new(),
             primary_scene_load: None,
             ready_primary_asset: None,
@@ -1009,9 +1019,34 @@ impl AppState {
                         if !input_may_run_now {
                             return Err(ReduceError::FutureRenderSettingsInput);
                         }
-                        self.render_settings = settings
+                        let settings = settings
                             .validate()
                             .map_err(ReduceError::InvalidRenderSettings)?;
+                        let mut staged = self.clone();
+                        let patch_lab_policy_changed = staged.render_settings.atlas_exponent
+                            != settings.atlas_exponent
+                            || staged.render_settings.max_face_edge_ratio
+                                != settings.max_face_edge_ratio;
+                        staged.render_settings = settings;
+                        if patch_lab_policy_changed {
+                            staged
+                                .patch_lab
+                                .render_settings_changed(settings, &mut effects)?;
+                        }
+                        *self = staged;
+                    }
+                    SemanticAction::SetPatchLab(intent) => {
+                        if !input_may_run_now {
+                            return Err(ReduceError::FutureEffectInput);
+                        }
+                        let mut staged = self.clone();
+                        staged.patch_lab.apply_session(
+                            intent,
+                            staged.render_settings,
+                            staged.frame_elapsed_seconds,
+                            &mut effects,
+                        )?;
+                        *self = staged;
                     }
                     SemanticAction::RequestAsset {
                         request_id,
@@ -1153,6 +1188,11 @@ impl AppState {
                 }
                 self.animation = next_animation;
                 self.frame_elapsed_seconds = frame.elapsed_seconds;
+                self.patch_lab.advance(
+                    frame.elapsed_seconds,
+                    self.render_settings,
+                    &mut effects,
+                )?;
                 self.presence
                     .retain(|_, record| record.expires_at_seconds > frame.elapsed_seconds);
                 publish_ui = false;
@@ -1340,6 +1380,18 @@ impl AppState {
                                 pending.clip.index
                             ),
                         ),
+                    }
+                }
+            }
+            AppEvent::EffectCompleted(EffectCompletion::PatchLab(completion)) => {
+                match self
+                    .patch_lab
+                    .complete(completion, self.render_settings, &mut effects)?
+                {
+                    PatchLabCompletionDisposition::Applied => {}
+                    PatchLabCompletionDisposition::Stale(message) => {
+                        disposition = CommitDisposition::IgnoredStale;
+                        self.push_diagnostic("stale_patch_lab_completion", message);
                     }
                 }
             }
@@ -1684,6 +1736,8 @@ impl AppState {
     }
 
     fn summary(&self) -> AppSummary {
+        let (patch_lab_active, patch_lab_geometry_job, patch_lab_lod_job) =
+            self.patch_lab.summary();
         AppSummary {
             revision: self.revision,
             authored_projection_revision: self.authored_projection_revision,
@@ -1741,6 +1795,9 @@ impl AppState {
             animation_playing: self.animation.playing,
             animation_time_seconds: self.animation.time_seconds,
             animation_speed: self.animation.speed,
+            patch_lab_active,
+            patch_lab_geometry_job,
+            patch_lab_lod_job,
         }
     }
 
@@ -1820,6 +1877,7 @@ pub struct AppStore {
     summary: Mutable<AppSummary>,
     navigation: Mutable<AppFrameSnapshot>,
     render: Mutable<AppRenderSnapshot>,
+    patch_lab: Mutable<PatchLabReadModel>,
     assets: MutableVec<AssetReadModel>,
     primary_asset: Mutable<Option<PrimaryAssetReadModel>>,
     installed_primary_scene: Mutable<Option<InstalledPrimarySceneReadModel>>,
@@ -1841,6 +1899,7 @@ impl AppStore {
         let summary = state.summary();
         let navigation = state.frame_snapshot();
         let render = state.render_snapshot();
+        let patch_lab = state.patch_lab.read_model();
         let assets = state.asset_read_models();
         let primary_asset = state.primary_asset_read_model();
         let installed_primary_scene = state.installed_primary_scene_read_model();
@@ -1853,6 +1912,7 @@ impl AppStore {
             summary: Mutable::new(summary),
             navigation: Mutable::new(navigation),
             render: Mutable::new(render),
+            patch_lab: Mutable::new(patch_lab),
             assets: MutableVec::new_with_values(assets),
             primary_asset: Mutable::new(primary_asset),
             installed_primary_scene: Mutable::new(installed_primary_scene),
@@ -1951,6 +2011,7 @@ impl AppStore {
         let presentation = state.presentation_read_model();
         let navigation = state.frame_snapshot();
         let render = state.render_snapshot();
+        let patch_lab = state.patch_lab.read_model();
         let summary = state.summary();
         let revision = summary.revision;
         drop(state);
@@ -1970,6 +2031,7 @@ impl AppStore {
         self.presentation.set_neq(presentation);
         self.navigation.set_neq(navigation);
         self.render.set_neq(render);
+        self.patch_lab.set_neq(patch_lab);
         self.summary.set_neq(summary);
         revision
     }
@@ -2008,6 +2070,10 @@ impl AppStore {
 
     pub fn render_snapshot(&self) -> AppRenderSnapshot {
         self.render.get()
+    }
+
+    pub fn patch_lab_snapshot(&self) -> PatchLabReadModel {
+        self.patch_lab.get_cloned()
     }
 
     pub fn asset_snapshot(&self) -> Vec<AssetReadModel> {
@@ -2087,6 +2153,10 @@ impl AppStore {
         self.render.signal_cloned()
     }
 
+    pub fn patch_lab_signal(&self) -> MutableSignalCloned<PatchLabReadModel> {
+        self.patch_lab.signal_cloned()
+    }
+
     pub fn asset_signal_vec(&self) -> MutableSignalVec<AssetReadModel> {
         self.assets.signal_vec_cloned()
     }
@@ -2138,6 +2208,7 @@ pub enum ReduceError {
     InvalidRenderSettings(&'static str),
     InputSequenceExhausted,
     AnimationClipJobExhausted,
+    PatchLabJobExhausted,
     FutureEffectInput,
     FuturePresentationInput,
     FutureAnimationInput,
@@ -2173,6 +2244,9 @@ impl fmt::Display for ReduceError {
             }
             Self::AnimationClipJobExhausted => {
                 formatter.write_str("animation clip selection job sequence is exhausted")
+            }
+            Self::PatchLabJobExhausted => {
+                formatter.write_str("patch-lab job sequence is exhausted")
             }
             Self::FutureEffectInput => formatter.write_str(
                 "effect-producing input cannot be scheduled beyond the current app frame",
