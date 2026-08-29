@@ -14,7 +14,7 @@ use quilting_core::render::{
     RenderFrame, RenderFrameOptions, RenderGeometry, RenderPoseIdentity, RenderSceneSnapshot,
     RenderStyle, RenderView,
 };
-use quilting_core::render_evidence::render_image_signature;
+use quilting_core::render_evidence::{render_image_signature, RenderImageSignature};
 use quilting_core::screen_partition::ScreenPatchLeafId;
 use quilting_renderer::compute::{
     pack_lod_classification, pack_wgsl_visibility_compaction_scene_words, prepare_lod_atlas_lookup,
@@ -24,7 +24,7 @@ use quilting_renderer::compute::{
 };
 use quilting_webgpu::{
     supports_basic_pbr_frame, supports_patch_presentation_style, LodClassifierDevice, LodPose,
-    PatchRenderSceneUpdate, PbrTextureTableUpdate,
+    OffscreenPatchRenderTarget, PatchRenderSceneUpdate, PbrTextureTableUpdate,
 };
 
 #[test]
@@ -254,6 +254,23 @@ fn packed_mobius(mobius: Mobius) -> [f32; 16] {
         ]);
     }
     packed
+}
+
+async fn offscreen_signature(
+    classifier: &LodClassifierDevice,
+    target: &OffscreenPatchRenderTarget,
+) -> RenderImageSignature {
+    render_image_signature(
+        classifier
+            .stage_offscreen_patch_render_target_image(target)
+            .unwrap()
+            .read()
+            .await
+            .unwrap()
+            .view()
+            .unwrap(),
+        0,
+    )
 }
 
 async fn classify_one(
@@ -824,6 +841,108 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         if let Some(error) = error_scope.pop().await {
             panic!("shared RenderFrame validation: {error}");
         }
+        let baseline_signature = offscreen_signature(&classifier, &target).await;
+
+        // Animated surface pins change the same backend-neutral entity
+        // transform consumed by both renderers. Prove that a shape-compatible
+        // WebGPU scene update publishes both its ordinary affine chart and its
+        // conformal map without rebuilding residency or reading GPU state back
+        // into the ordinary frame loop.
+        let mut affine_scene = render_scene.clone();
+        affine_scene.revision += 1;
+        for batch in &mut affine_scene.batches {
+            batch.transform.euclidean_model = translation_matrix(0.35, 0.0, 0.0);
+        }
+        assert!(matches!(
+            classifier
+                .update_patch_render_scene_in_place(
+                    &pipeline,
+                    &model,
+                    &mut retained_scene,
+                    affine_scene.clone(),
+                    &source_instances,
+                    affine_scene.revision,
+                    None,
+                )
+                .unwrap(),
+            PatchRenderSceneUpdate::Updated,
+        ));
+        let affine_frame = RenderFrame::build(
+            render_frame.revision + 1,
+            render_frame.pose,
+            render_frame.style,
+            render_frame.view,
+            render_frame.options,
+            &affine_scene,
+        )
+        .unwrap();
+        classifier
+            .render_offscreen_normals_patch_scene(
+                &affine_frame,
+                &pipeline,
+                &retained_scene,
+                &packed_atlas,
+                &target,
+                true,
+            )
+            .unwrap();
+        let affine_signature = offscreen_signature(&classifier, &target).await;
+        assert_ne!(baseline_signature.rgba8_hash, affine_signature.rgba8_hash);
+
+        let mut pinned_scene = affine_scene.clone();
+        pinned_scene.revision += 1;
+        pinned_scene.batches[0].transform.mobius =
+            packed_mobius(Mobius::translation(Quat::from_point(0.0, 0.35, 0.0)));
+        assert!(matches!(
+            classifier
+                .update_patch_render_scene_in_place(
+                    &pipeline,
+                    &model,
+                    &mut retained_scene,
+                    pinned_scene.clone(),
+                    &source_instances,
+                    pinned_scene.revision,
+                    None,
+                )
+                .unwrap(),
+            PatchRenderSceneUpdate::Updated,
+        ));
+        let pinned_frame = RenderFrame::build(
+            affine_frame.revision + 1,
+            affine_frame.pose,
+            affine_frame.style,
+            affine_frame.view,
+            affine_frame.options,
+            &pinned_scene,
+        )
+        .unwrap();
+        classifier
+            .render_offscreen_normals_patch_scene(
+                &pinned_frame,
+                &pipeline,
+                &retained_scene,
+                &packed_atlas,
+                &target,
+                true,
+            )
+            .unwrap();
+        let pinned_signature = offscreen_signature(&classifier, &target).await;
+        assert_ne!(affine_signature.rgba8_hash, pinned_signature.rgba8_hash);
+
+        assert!(matches!(
+            classifier
+                .update_patch_render_scene_in_place(
+                    &pipeline,
+                    &model,
+                    &mut retained_scene,
+                    render_scene.clone(),
+                    &source_instances,
+                    render_scene.revision,
+                    None,
+                )
+                .unwrap(),
+            PatchRenderSceneUpdate::Updated,
+        ));
 
         classifier
             .write_patch_render_pose_state(&model, &retained_scene, LodPose::default(), 0)
