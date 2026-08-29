@@ -15,7 +15,12 @@ await init({ module_or_path: readFileSync(wasmPath) });
 
 const specs = hyperscopeControlSpecs();
 assert.equal(new Set(specs.map(spec => spec.key)).size, specs.length);
+assert.equal(specs.find(spec => spec.key === 'mode').kind, 'render_mode');
+assert.equal(specs.find(spec => spec.key === 'res').kind, 'resolution_level');
+assert.equal(specs.find(spec => spec.key === 'density').kind, 'tessellation_density');
+assert.equal(specs.find(spec => spec.key === 'minpx').kind, 'pixel_floor');
 assert.equal(specs.find(spec => spec.key === 'minpx').defaultValue, '16');
+assert.equal(specs.find(spec => spec.key === 'atlas').kind, 'atlas_exponent');
 assert.equal(specs.find(spec => spec.key === 'lodratio').defaultValue, '2');
 assert.equal(specs.find(spec => spec.key === 'lodratio').kind, 'lod_ratio');
 assert.equal(specs.find(spec => spec.key === 'appshadow').kind, 'toggle');
@@ -49,6 +54,25 @@ assert.equal(specs.find(spec => spec.key === 'renderstateimpl').kind, 'implement
 assert.equal(specs.find(spec => spec.key === 'renderstateimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'cue').kind, 'optional_uuid');
 assert.equal(specs.find(spec => spec.key === 'cue').defaultValue, '');
+
+for (const mode of ['pbr', 'matcap', 'wire', 'normals', 'both', 'lod', 'stretch']) {
+  assert.equal(canonicalizeHyperscopeRoute([['mode', mode]]).diagnostics.length, 0);
+}
+for (const mode of ['matcap_wire', 'PBR', 'browser_magic']) {
+  assert.equal(canonicalizeHyperscopeRoute([['mode', mode]]).diagnostics[0].code, 'invalid_value');
+}
+for (const [key, value] of [
+  ['res', '7'], ['res', '3.5'],
+  ['density', '0'], ['density', '12.5'], ['density', '501'],
+  ['minpx', '0.99'], ['minpx', '64.01'],
+  ['atlas', '2'], ['atlas', '9.5'], ['atlas', '10'],
+]) {
+  assert.equal(
+    canonicalizeHyperscopeRoute([[key, value]]).diagnostics[0].code,
+    'invalid_value',
+    `${key}=${value} must fail Rust route admission`,
+  );
+}
 
 const browserSource = readFileSync(`${repository}/hyperscope.html`, 'utf8');
 const legacyRouteNormalizerSource = browserSource.match(

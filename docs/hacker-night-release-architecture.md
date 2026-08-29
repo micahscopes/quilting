@@ -189,7 +189,7 @@ The first application boundary is now explicit:
   tests additionally cover both walkers, one-shot velocity rebasing, and the
   first real animated-pose sample; native replay proves that an animated chart
   edit cancels an old-chart anchor independently of tick partition.
-- `hyperscope-app::ControlSpec` is the canonical registry for all 82 currently
+- `hyperscope-app::ControlSpec` is the canonical registry for all 85 currently
   linkable controls and migration flags. `HyperscopeRoute` owns default
   equivalence, first-value duplicate semantics, stable ordering, and explicit
   malformed/unknown diagnostics. `routeimpl=js|shadow|rust` is the rollback
@@ -205,6 +205,12 @@ The first application boundary is now explicit:
   remain browser adapter work while that rollback is soaking. Camera drafts
   normalize rounded signed zero before comparison, so Rust numeric-default
   equivalence does not create false parity failures.
+  Render mode, resolution level, tessellation density, pixel floor, and atlas
+  exponent now carry their actual enum or bounded numeric contracts in that
+  registry rather than masquerading as generic text or numbers. Invalid URL
+  values therefore produce a Rust route diagnostic and preserve the incumbent
+  fallback path; valid values are not silently admitted for a later JavaScript
+  clamp. Removing the remaining adapter-side clamps is a separate cutover.
   Camera links carry explicit `aim=1` when `px/py/pz` is a finite semantic
   target; omitting it means the same visible pose has a free sight tangent.
   Rust validates and canonically orders that policy, and selection or model

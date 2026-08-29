@@ -5,6 +5,11 @@ pub enum ControlValueKind {
     Text,
     Number,
     Toggle,
+    RenderMode,
+    ResolutionLevel,
+    TessellationDensity,
+    PixelFloor,
+    AtlasExponent,
     LodRatio,
     Implementation,
     RenderBackend,
@@ -17,6 +22,11 @@ impl ControlValueKind {
             Self::Text => "text",
             Self::Number => "number",
             Self::Toggle => "toggle",
+            Self::RenderMode => "render_mode",
+            Self::ResolutionLevel => "resolution_level",
+            Self::TessellationDensity => "tessellation_density",
+            Self::PixelFloor => "pixel_floor",
+            Self::AtlasExponent => "atlas_exponent",
             Self::LodRatio => "lod_ratio",
             Self::Implementation => "implementation",
             Self::RenderBackend => "render_backend",
@@ -29,6 +39,14 @@ impl ControlValueKind {
             Self::Text => !value.is_empty(),
             Self::Number => value.parse::<f64>().is_ok_and(|number| number.is_finite()),
             Self::Toggle => matches!(value, "0" | "1"),
+            Self::RenderMode => matches!(
+                value,
+                "pbr" | "matcap" | "wire" | "normals" | "both" | "lod" | "stretch"
+            ),
+            Self::ResolutionLevel => bounded_integer(value, 0, 6),
+            Self::TessellationDensity => bounded_integer(value, 1, 500),
+            Self::PixelFloor => bounded_number(value, 1.0, 64.0),
+            Self::AtlasExponent => bounded_integer(value, 3, 9),
             Self::LodRatio => matches!(value, "2" | "4"),
             Self::Implementation => matches!(value, "js" | "shadow" | "rust"),
             Self::RenderBackend => matches!(value, "webgl2" | "webgpu-shadow" | "webgpu"),
@@ -41,7 +59,11 @@ impl ControlValueKind {
 
     fn equivalent(self, left: &str, right: &str) -> bool {
         match self {
-            Self::Number => left
+            Self::Number
+            | Self::ResolutionLevel
+            | Self::TessellationDensity
+            | Self::PixelFloor
+            | Self::AtlasExponent => left
                 .parse::<f64>()
                 .ok()
                 .zip(right.parse::<f64>().ok())
@@ -55,11 +77,24 @@ impl ControlValueKind {
             },
             Self::Text
             | Self::Toggle
+            | Self::RenderMode
             | Self::LodRatio
             | Self::Implementation
             | Self::RenderBackend => left == right,
         }
     }
+}
+
+fn bounded_number(value: &str, minimum: f64, maximum: f64) -> bool {
+    value
+        .parse::<f64>()
+        .is_ok_and(|number| number.is_finite() && (minimum..=maximum).contains(&number))
+}
+
+fn bounded_integer(value: &str, minimum: u16, maximum: u16) -> bool {
+    value
+        .parse::<u16>()
+        .is_ok_and(|number| (minimum..=maximum).contains(&number))
 }
 
 /// Stable application-level route metadata. DOM range/label/accessibility
@@ -93,7 +128,7 @@ macro_rules! spec {
 pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("glb", "horse.glb", Text),
     spec!("gfx", "webgl2", RenderBackend),
-    spec!("mode", "pbr", Text),
+    spec!("mode", "pbr", RenderMode),
     spec!("xform", "identity", Text),
     spec!("mx", "5", Number),
     spec!("my", "0", Number),
@@ -101,11 +136,11 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("mr", "20", Number),
     spec!("env", "rosendal_plains_1_1k", Text),
     spec!("matcap", "citric-acid", Text),
-    spec!("res", "0", Number),
-    spec!("density", "100", Number),
+    spec!("res", "0", ResolutionLevel),
+    spec!("density", "100", TessellationDensity),
     spec!("atten", "1", Toggle),
-    spec!("minpx", "16", Number),
-    spec!("atlas", "7", Number),
+    spec!("minpx", "16", PixelFloor),
+    spec!("atlas", "7", AtlasExponent),
     spec!("lodratio", "2", LodRatio),
     spec!("animate", "1", Toggle),
     spec!("anim", "-1", Number),
@@ -476,6 +511,55 @@ mod tests {
                 RouteDiagnosticCode::InvalidValue,
             );
         }
+    }
+
+    #[test]
+    fn render_control_routes_validate_the_actual_browser_contract() {
+        for accepted in ["pbr", "matcap", "wire", "normals", "both", "lod", "stretch"] {
+            let route = HyperscopeRoute::from_pairs([("mode", accepted)]);
+            assert!(route.diagnostics().is_empty());
+        }
+        for rejected in ["", "matcap_wire", "normal", "PBR", "browser_magic"] {
+            let route = HyperscopeRoute::from_pairs([("mode", rejected)]);
+            assert_eq!(route.diagnostics().len(), 1);
+        }
+
+        for (key, accepted, rejected) in [
+            ("res", ["0", "3", "6"], ["-1", "7", "3.5"]),
+            ("density", ["1", "237", "500"], ["0", "501", "12.5"]),
+            ("atlas", ["3", "7", "9"], ["2", "10", "7.5"]),
+        ] {
+            for value in accepted {
+                assert!(HyperscopeRoute::from_pairs([(key, value)])
+                    .diagnostics()
+                    .is_empty());
+            }
+            for value in rejected {
+                assert_eq!(
+                    HyperscopeRoute::from_pairs([(key, value)])
+                        .diagnostics()
+                        .len(),
+                    1,
+                );
+            }
+        }
+
+        for accepted in ["1", "16.0", "48.25", "64"] {
+            assert!(HyperscopeRoute::from_pairs([("minpx", accepted)])
+                .diagnostics()
+                .is_empty());
+        }
+        for rejected in ["0", "0.999", "64.001", "65", "NaN"] {
+            assert_eq!(
+                HyperscopeRoute::from_pairs([("minpx", rejected)])
+                    .diagnostics()
+                    .len(),
+                1,
+            );
+        }
+        assert!(HyperscopeRoute::from_pairs([("minpx", "16.0")])
+            .canonical_pairs()
+            .is_empty());
     }
 
     #[test]

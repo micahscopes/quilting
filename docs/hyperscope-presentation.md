@@ -120,6 +120,10 @@ time. Outside cue application, the same complete render policy can be observed
 through `renderstateimpl=shadow` or explicitly consumed with
 `renderstateimpl=rust`; ordinary links retain JavaScript control authority
 until live parity evidence justifies changing that default.
+The canonical Rust route registry separately validates the browser spellings
+and ranges for those render controls. In particular, URL `mode=both` maps to
+the backend-neutral `matcap_wire` style, density and atlas values must be
+integers in their supported ranges, and the pixel floor may remain fractional.
 
 The polytope fixtures are deterministic static GLBs generated from
 `quilting_core::polytope4`. Their closed 3-cell shells are separated before 4D
