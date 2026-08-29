@@ -116,7 +116,10 @@ reports the separately orthogonal, not-yet-rendered `control_net` capability.
 The same snapshot carries Rust-validated density, attenuation enablement, and
 pixel-floor values. The browser applies those values exactly; malformed bridge
 data fails visibly instead of being silently defaulted or clamped a second
-time.
+time. Outside cue application, the same complete render policy can be observed
+through `renderstateimpl=shadow` or explicitly consumed with
+`renderstateimpl=rust`; ordinary links retain JavaScript control authority
+until live parity evidence justifies changing that default.
 
 The polytope fixtures are deterministic static GLBs generated from
 `quilting_core::polytope4`. Their closed 3-cell shells are separated before 4D

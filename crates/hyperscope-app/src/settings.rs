@@ -171,6 +171,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("assetimpl", "rust", Implementation),
     spec!("sceneimpl", "rust", Implementation),
     spec!("routeimpl", "rust", Implementation),
+    spec!("renderstateimpl", "js", Implementation),
     spec!("lodimpl", "js", Implementation),
     spec!("rendershadow", "0", Toggle),
     spec!("adaptiveshadow", "0", Toggle),
@@ -487,6 +488,7 @@ mod tests {
             "assetimpl",
             "sceneimpl",
             "routeimpl",
+            "renderstateimpl",
             "lodimpl",
         ] {
             for accepted in ["js", "shadow", "rust"] {
@@ -515,6 +517,21 @@ mod tests {
             assert_eq!(
                 route.canonical_pairs(),
                 vec![("navimpl", implementation)]
+            );
+            assert!(route.diagnostics().is_empty());
+        }
+    }
+
+    #[test]
+    fn render_settings_cutover_starts_as_an_explicit_measurement_lane() {
+        let default_route = HyperscopeRoute::from_pairs([("renderstateimpl", "js")]);
+        assert!(default_route.canonical_pairs().is_empty());
+
+        for implementation in ["shadow", "rust"] {
+            let route = HyperscopeRoute::from_pairs([("renderstateimpl", implementation)]);
+            assert_eq!(
+                route.canonical_pairs(),
+                vec![("renderstateimpl", implementation)],
             );
             assert!(route.diagnostics().is_empty());
         }

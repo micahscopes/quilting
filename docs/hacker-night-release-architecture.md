@@ -341,7 +341,12 @@ The first application boundary is now explicit:
   and grading policy. The generated application facade admits the same
   complete value, rejects unknown backend-neutral styles and invalid ranges
   atomically, and exposes its revision-fenced projection; browser control
-  signals remain the incumbent until a separate shadow/cutover gate lands.
+  signals remain the default incumbent behind
+  `renderstateimpl=js|shadow|rust`. The explicit shadow lane coalesces one
+  browser signal batch into one complete reducer comparison, while the
+  explicit Rust lane reapplies the committed projection and rolls invalid
+  intent back to the preceding Rust value. Neither measured lane is canonical
+  until live browser parity evidence is recorded.
   Version 0.17 added the renderer-independent primary animation clock: playing,
   unwrapped scene time, and signed finite speed. Frame events advance it from
   explicit deltas, cue activation replaces all three fields atomically, and

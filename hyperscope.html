@@ -549,6 +549,9 @@ const RUST_ASSET_IMPLEMENTATION = implementationFromRoute(
 const ANIMATION_CLOCK_IMPLEMENTATION = implementationFromRoute(
   initialBrowserParams, 'animclockimpl', 'js',
 );
+const RUST_RENDER_SETTINGS_IMPLEMENTATION = implementationFromRoute(
+  initialBrowserParams, 'renderstateimpl', 'js',
+);
 const EXPLICIT_RUST_APP_SHADOW_ENABLED =
   initialBrowserParams.get('appshadow') === '1';
 const RUST_APP_SHADOW_ENABLED =
@@ -556,6 +559,7 @@ const RUST_APP_SHADOW_ENABLED =
   || RUST_NAVIGATION_IMPLEMENTATION !== 'js'
   || RUST_ASSET_IMPLEMENTATION !== 'js'
   || ANIMATION_CLOCK_IMPLEMENTATION !== 'js'
+  || RUST_RENDER_SETTINGS_IMPLEMENTATION !== 'js'
   || RUST_SELECTION_IMPLEMENTATION !== 'js'
   || RUST_SCENE_IMPLEMENTATION !== 'js'
   || (RUST_PRESENTATION_ENABLED && RUST_PRESENTATION_IMPLEMENTATION !== 'js');
@@ -1532,7 +1536,7 @@ const PARAM_DEFAULTS = {
   walkspeed: '0', walkscale: '0', walkheight: '0', walkimpl: 'js', navimpl: 'js',
   selectionimpl: 'rust',
   presentimpl: 'rust', assetimpl: 'rust', sceneimpl: 'rust', routeimpl: 'rust',
-  lodimpl: 'js',
+  renderstateimpl: 'js', lodimpl: 'js',
   cue: '',
   lab: '0', labfield: 'edges', laba: '3', labb: '4', labc: '4',
   labmin: '1', labmax: '6', labphase: '0', labbend: '55', labgrid: '8', labanimate: '0',
@@ -1579,6 +1583,7 @@ function readParams(p) {
     walkscale: get('walkscale'), walkheight: get('walkheight'), walkimpl: get('walkimpl'),
     selectionimpl: get('selectionimpl'),
     assetimpl: get('assetimpl'),
+    renderstateimpl: get('renderstateimpl'),
     lodimpl: get('lodimpl'),
     cue: get('cue'),
     lab: get('lab'), labfield: get('labfield'),
@@ -1762,6 +1767,11 @@ function syncURL() {
     set('assetimpl', RUST_ASSET_IMPLEMENTATION, PARAM_DEFAULTS.assetimpl);
     set('sceneimpl', RUST_SCENE_IMPLEMENTATION, PARAM_DEFAULTS.sceneimpl);
     set('routeimpl', RUST_ROUTE_IMPLEMENTATION, PARAM_DEFAULTS.routeimpl);
+    set(
+      'renderstateimpl',
+      RUST_RENDER_SETTINGS_IMPLEMENTATION,
+      PARAM_DEFAULTS.renderstateimpl,
+    );
     set('lodimpl', LOD_IMPLEMENTATION, PARAM_DEFAULTS.lodimpl);
     if (RUST_RENDER_SHADOW_ENABLED) p.set('rendershadow', '1');
     if (RUST_ADAPTIVE_ROOT_SHADOW_ENABLED) p.set('adaptiveshadow', '1');
@@ -3721,6 +3731,131 @@ const rustAppShadowDiagnostics = {
   snapshot: null,
 };
 globalThis.__hyperscopeAppShadowDiagnostics = rustAppShadowDiagnostics;
+
+const rustRenderSettingsDiagnostics = {
+  enabled: RUST_RENDER_SETTINGS_IMPLEMENTATION !== 'js',
+  implementation: RUST_RENDER_SETTINGS_IMPLEMENTATION,
+  state: RUST_RENDER_SETTINGS_IMPLEMENTATION === 'js' ? 'disabled' : 'awaiting-wasm',
+  dispatches: 0,
+  comparisons: 0,
+  mismatches: 0,
+  authorityWrites: 0,
+  authorityRollbacks: 0,
+  errors: 0,
+  lastBrowser: null,
+  lastRust: null,
+  lastError: null,
+};
+globalThis.__hyperscopeRenderSettings = rustRenderSettingsDiagnostics;
+
+function backendNeutralRenderStyle(mode) {
+  const style = mode === 'both' ? 'matcap_wire' : String(mode);
+  if (!PRESENTATION_RENDER_MODES[style]) {
+    throw new Error(`unsupported browser render mode ${mode}`);
+  }
+  return style;
+}
+
+function browserRenderSettingsState() {
+  return {
+    style: backendNeutralRenderStyle(renderMode.peek()),
+    resolutionLevel: Number(lod.res.peek()),
+    density: Number(lod.density.peek()),
+    screenAttenuation: Boolean(lod.screenAtten.peek()),
+    minPixelsPerSubdivision: Number(lod.minPx.peek()),
+    atlasExponent: Number(lod.atlas.peek()),
+    maxFaceEdgeRatio: Number(lod.grading.peek()),
+  };
+}
+
+function renderSettingsContentEqual(left, right) {
+  return left?.style === right?.style
+    && left?.resolutionLevel === right?.resolutionLevel
+    && left?.density === right?.density
+    && left?.screenAttenuation === right?.screenAttenuation
+    && left?.minPixelsPerSubdivision === right?.minPixelsPerSubdivision
+    && left?.atlasExponent === right?.atlasExponent
+    && left?.maxFaceEdgeRatio === right?.maxFaceEdgeRatio;
+}
+
+function applyRustRenderSettingsProjection(render) {
+  const mode = PRESENTATION_RENDER_MODES[render.style];
+  if (!mode) throw new Error(`unsupported Rust render style ${render.style}`);
+  batchSignals(() => {
+    renderMode.set(mode);
+    lod.res.set(render.resolutionLevel);
+    lod.density.set(render.density);
+    lod.screenAtten.set(render.screenAttenuation);
+    lod.minPx.set(render.minPixelsPerSubdivision);
+    lod.atlas.set(render.atlasExponent);
+    lod.grading.set(String(render.maxFaceEdgeRatio));
+  });
+}
+
+function synchronizeRustRenderSettings() {
+  if (RUST_RENDER_SETTINGS_IMPLEMENTATION === 'js' || !wasmOk.peek()) return false;
+  let app = null;
+  try {
+    const browser = browserRenderSettingsState();
+    app = ensureRustAppShadow('render-settings');
+    const committed = app.snapshot().renderSettings;
+    let rust = committed;
+    rustRenderSettingsDiagnostics.comparisons += 1;
+    if (!renderSettingsContentEqual(browser, committed)) {
+      const receipt = app.setRenderSettings(
+        ++rustAppShadowSequence,
+        browser.style,
+        browser.resolutionLevel,
+        browser.density,
+        browser.screenAttenuation,
+        browser.minPixelsPerSubdivision,
+        browser.atlasExponent,
+        browser.maxFaceEdgeRatio,
+      );
+      rustAppShadowDiagnostics.lastCommit = receipt.commit;
+      rustRenderSettingsDiagnostics.dispatches += 1;
+      rust = receipt.render;
+    }
+    rustRenderSettingsDiagnostics.lastBrowser = browser;
+    rustRenderSettingsDiagnostics.lastRust = rust;
+    if (!renderSettingsContentEqual(browser, rust)) {
+      rustRenderSettingsDiagnostics.mismatches += 1;
+      recordAppShadowMismatch('render_settings', { browser, rust });
+    }
+    if (RUST_RENDER_SETTINGS_IMPLEMENTATION === 'rust' && app) {
+      applyRustRenderSettingsProjection(rust);
+      rustRenderSettingsDiagnostics.authorityWrites += 1;
+    }
+    rustRenderSettingsDiagnostics.state =
+      RUST_RENDER_SETTINGS_IMPLEMENTATION === 'rust' ? 'authoritative' : 'observing';
+    rustRenderSettingsDiagnostics.lastError = null;
+    return true;
+  } catch (error) {
+    rustRenderSettingsDiagnostics.errors += 1;
+    rustRenderSettingsDiagnostics.lastError = error?.message || String(error);
+    if (RUST_RENDER_SETTINGS_IMPLEMENTATION === 'rust') {
+      try {
+        applyRustRenderSettingsProjection(app.snapshot().renderSettings);
+        rustRenderSettingsDiagnostics.authorityRollbacks += 1;
+      } catch (rollbackError) {
+        rustRenderSettingsDiagnostics.lastError +=
+          `; rollback failed: ${rollbackError?.message || String(rollbackError)}`;
+      }
+    }
+    recordAppShadowMismatch('render_settings_exception', rustRenderSettingsDiagnostics.lastError);
+    return false;
+  }
+}
+
+let rustRenderSettingsSyncScheduled = false;
+function scheduleRustRenderSettingsSynchronization() {
+  if (RUST_RENDER_SETTINGS_IMPLEMENTATION === 'js' || rustRenderSettingsSyncScheduled) return;
+  rustRenderSettingsSyncScheduled = true;
+  queueMicrotask(() => {
+    rustRenderSettingsSyncScheduled = false;
+    synchronizeRustRenderSettings();
+  });
+}
 
 function ensureRustAppShadow(reason = 'shadow') {
   if (rustAppShadow) return rustAppShadow;
@@ -7223,6 +7358,16 @@ bindSlider('atlas-exp', lod.atlas, v => v.toFixed(0), () => {
   syncURL();
 });
 bindBtnGroup('lod-ratio-btns', lod.grading);
+effect(() => {
+  renderMode.get();
+  lod.res.get();
+  lod.density.get();
+  lod.screenAtten.get();
+  lod.minPx.get();
+  lod.atlas.get();
+  lod.grading.get();
+  if (wasmOk.get()) scheduleRustRenderSettingsSynchronization();
+});
 
 // --- Rust-backed educational patch laboratory ---
 const PATCH_LAB_SHAPES = new Set(['triangle', 'plane', 'cube']);

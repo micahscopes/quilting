@@ -45,6 +45,8 @@ assert.equal(specs.find(spec => spec.key === 'sceneimpl').kind, 'implementation'
 assert.equal(specs.find(spec => spec.key === 'sceneimpl').defaultValue, 'rust');
 assert.equal(specs.find(spec => spec.key === 'routeimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'routeimpl').defaultValue, 'rust');
+assert.equal(specs.find(spec => spec.key === 'renderstateimpl').kind, 'implementation');
+assert.equal(specs.find(spec => spec.key === 'renderstateimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'cue').kind, 'optional_uuid');
 assert.equal(specs.find(spec => spec.key === 'cue').defaultValue, '');
 
@@ -343,6 +345,22 @@ for (const sceneExtractionStep of [
     `browser scene extraction rollback gate is missing ${sceneExtractionStep}`,
   );
 }
+for (const renderSettingsStep of [
+  "implementationFromRoute(\n  initialBrowserParams, 'renderstateimpl', 'js',\n)",
+  "renderstateimpl: 'js'",
+  'function browserRenderSettingsState()',
+  "const style = mode === 'both' ? 'matcap_wire' : String(mode);",
+  'app.setRenderSettings(',
+  'function renderSettingsContentEqual(left, right)',
+  "RUST_RENDER_SETTINGS_IMPLEMENTATION === 'rust'",
+  'applyRustRenderSettingsProjection(app.snapshot().renderSettings);',
+  'scheduleRustRenderSettingsSynchronization();',
+]) {
+  assert.ok(
+    browserSource.includes(renderSettingsStep),
+    `browser render-settings boundary is missing ${renderSettingsStep}`,
+  );
+}
 for (const assetAuthorityStep of [
   "implementationFromRoute(\n  initialBrowserParams, 'assetimpl', 'rust',\n)",
   "assetimpl: 'rust'",
@@ -473,6 +491,18 @@ assert.deepEqual(
   [['sceneimpl', 'js']],
   'canonical routes must retain an explicit scene-extraction rollback',
 );
+assert.deepEqual(
+  canonicalizeHyperscopeRoute([['renderstateimpl', 'js']]).pairs,
+  [],
+  'canonical routes must omit the JavaScript render-settings default',
+);
+for (const implementation of ['shadow', 'rust']) {
+  assert.deepEqual(
+    canonicalizeHyperscopeRoute([['renderstateimpl', implementation]]).pairs,
+    [['renderstateimpl', implementation]],
+    `canonical routes must retain explicit ${implementation} render settings`,
+  );
+}
 assert.deepEqual(
   canonicalizeHyperscopeRoute([['routeimpl', 'rust']]).pairs,
   [],
