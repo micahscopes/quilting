@@ -10,11 +10,13 @@
 #[cfg(feature = "replay")]
 mod replay;
 mod peer;
+mod presentation_animation;
 mod settings;
 
 #[cfg(feature = "replay")]
 pub use replay::*;
 pub use peer::*;
+pub use presentation_animation::*;
 pub use settings::*;
 
 use futures_signals::signal::{Mutable, MutableSignalCloned};
