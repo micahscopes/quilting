@@ -9,6 +9,8 @@ struct RouteShadowResult {
     resolved_pairs: Vec<[String; 2]>,
     diagnostics: Vec<RouteShadowDiagnostic>,
     render_settings: Option<RouteRenderSettings>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selection: Option<RouteSelection>,
 }
 
 #[derive(Serialize)]
@@ -50,6 +52,13 @@ struct RouteRenderSettings {
     max_face_edge_ratio: u8,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RouteSelection {
+    asset_id: String,
+    entity_id: String,
+}
+
 /// Canonicalize already-decoded browser query pairs. Percent decoding and
 /// encoding remain platform work; key identity, defaults, validation, and
 /// ordering are Rust application policy.
@@ -88,11 +97,20 @@ pub fn canonicalize_hyperscope_route(pairs: JsValue) -> Result<JsValue, JsValue>
             atlas_exponent: settings.atlas_exponent,
             max_face_edge_ratio: settings.max_face_edge_ratio,
         });
+    let selection = route
+        .selected_identity()
+        .ok()
+        .flatten()
+        .map(|identity| RouteSelection {
+            asset_id: identity.asset.to_string(),
+            entity_id: identity.entity.to_string(),
+        });
     to_js(&RouteShadowResult {
         pairs,
         resolved_pairs,
         diagnostics,
         render_settings,
+        selection,
     })
 }
 

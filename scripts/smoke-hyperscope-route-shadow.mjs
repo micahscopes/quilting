@@ -128,6 +128,15 @@ assert.deepEqual(
   ])),
 );
 assert.equal(canonicalizeHyperscopeRoute([['mode', 'matcap_wire']]).renderSettings, undefined);
+const typedSelectionRoute = canonicalizeHyperscopeRoute([
+  ['selasset', '60000000-0000-4000-8000-00000000000A'],
+  ['selentity', '70000000-0000-4000-8000-00000000000B'],
+]);
+assert.deepEqual(typedSelectionRoute.selection, {
+  assetId: '60000000-0000-4000-8000-00000000000a',
+  entityId: '70000000-0000-4000-8000-00000000000b',
+});
+assert.equal(canonicalizeHyperscopeRoute([]).selection, undefined);
 for (const [key, value] of [
   ['res', '7'], ['res', '3.5'],
   ['density', '0'], ['density', '12.5'], ['density', '501'],
@@ -620,9 +629,10 @@ for (const startupStep of [
   'new URLSearchParams(startupRoute.pairs),',
   'initRenderSettings = startupRoute.renderSettings;',
   'initRustRouteAdmitted = true;',
+  'initRouteSelection = startupRoute.selection ?? null;',
   "rustRouteShadowDiagnostics.startupSource = 'browser-fallback';",
   "'missing-typed-render-settings'",
-  'applyParams(initParams, initRenderSettings, initRustRouteAdmitted);',
+  'initRouteSelection,',
 ]) {
   assert.ok(
     startupAdapter.includes(startupStep),
@@ -631,7 +641,7 @@ for (const startupStep of [
 }
 assert.ok(
   startupAdapter.indexOf('new URLSearchParams(startupRoute.resolvedPairs),')
-    < startupAdapter.indexOf('applyParams(initParams, initRenderSettings, initRustRouteAdmitted);'),
+    < startupAdapter.indexOf('initRouteSelection,'),
   'Rust startup decoding must finish before browser state is applied',
 );
 assert.ok(
@@ -664,7 +674,7 @@ assert.equal(explicitClock.animtimeProvided, true);
 assert.equal(explicitClock.animspeedProvided, true);
 
 const applyParamsSource = browserSource.match(
-  /applyParams = function\(params, validatedRenderSettings = null, rustRouteAdmitted = false\) \{([\s\S]*?)\n\};\n\n\/\/ --- IndexedDB/,
+  /applyParams = function\([\s\S]*?validatedRouteSelection = null,[\s\S]*?\) \{([\s\S]*?)\n\};\n\n\/\/ --- IndexedDB/,
 )?.[1];
 assert.ok(applyParamsSource, 'could not locate browser startup state adapter');
 for (const exactProjection of [
@@ -689,6 +699,8 @@ for (const exactAdmissionStep of [
   '$(id).max = atlasExp;',
   '$(id).value = admittedInteger(value, fallback, 0, atlasExp);',
   'fz.radius.set(admittedInteger(params.fradius, 11, 4, 128));',
+  'pendingRouteSelection = rustRouteAdmitted',
+  '? validatedRouteSelection',
 ]) {
   assert.ok(
     applyParamsSource.includes(exactAdmissionStep),

@@ -239,6 +239,11 @@ The first application boundary is now explicit:
   fallback. Patch Lab installs the admitted atlas maximum before assigning its
   exponent controls, preventing the DOM's old maximum of seven from silently
   truncating an atlas-nine link.
+  A valid selected-object route also carries its protocol-native
+  `AssetEntityId` as a typed projection. Rust performs atomic pair admission,
+  nil rejection, UUID parsing, and canonical lowercase formatting; successful
+  startup no longer re-runs the browser regex. The old helper remains for the
+  explicit JavaScript and runtime fallback lanes.
   Camera links carry explicit `aim=1` when `px/py/pz` is a finite semantic
   target; omitting it means the same visible pose has a free sight tangent.
   Rust validates and canonically orders that policy, and selection or model

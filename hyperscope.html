@@ -7887,7 +7887,12 @@ effect(() => {
 });
 
 // --- applyParams: set all signals from URL params (defined after all signals exist) ---
-applyParams = function(params, validatedRenderSettings = null, rustRouteAdmitted = false) {
+applyParams = function(
+  params,
+  validatedRenderSettings = null,
+  rustRouteAdmitted = false,
+  validatedRouteSelection = null,
+) {
   const finite = (value, fallback, minimum, maximum) => {
     const parsed = Number(value);
     if (!Number.isFinite(parsed)) return fallback;
@@ -7957,7 +7962,9 @@ applyParams = function(params, validatedRenderSettings = null, rustRouteAdmitted
   panY = admittedNumber(params.py, 0, -1e6, 1e6);
   panZ = admittedNumber(params.pz, 0, -1e6, 1e6);
   manualCameraSemanticTargetEnabled = params.aim === '1';
-  pendingRouteSelection = routeSelectionFromParams(params);
+  pendingRouteSelection = rustRouteAdmitted
+    ? validatedRouteSelection
+    : routeSelectionFromParams(params);
   routeSelectionDiagnostics.requested = pendingRouteSelection;
   routeSelectionDiagnostics.state = pendingRouteSelection ? 'pending' : 'none';
   setManualCameraBasisFromEuler();
@@ -10911,6 +10918,7 @@ globalThis.__hyperscopeLocalPeer = Object.freeze({
 let initParams = readParams(initialRouteParams);
 let initRenderSettings = null;
 let initRustRouteAdmitted = false;
+let initRouteSelection = null;
 currentGlb = initParams.glb;
 let initialPatchLabShape = patchLabShape(initParams.lab);
 // Set camera early (not WASM-dependent)
@@ -10958,6 +10966,7 @@ phase('wasm', [], async () => {
         );
         initRenderSettings = startupRoute.renderSettings;
         initRustRouteAdmitted = true;
+        initRouteSelection = startupRoute.selection ?? null;
         currentGlb = initParams.glb;
         initialPatchLabShape = patchLabShape(initParams.lab);
         rustRouteShadowDiagnostics.startupSource = 'rust';
@@ -11023,7 +11032,12 @@ phase('wasm', [], async () => {
     rendererInitMs: rendererFinished - instantiateFinished,
     sharedCompiledModule: true,
   };
-  applyParams(initParams, initRenderSettings, initRustRouteAdmitted); // Set signal values first
+  applyParams(
+    initParams,
+    initRenderSettings,
+    initRustRouteAdmitted,
+    initRouteSelection,
+  ); // Set signal values first
   activeLodGradingRatio = Number(lod.grading.peek());
   if (!mr_setLodGradingRatio(activeLodGradingRatio)) {
     throw new Error(`renderer rejected ${activeLodGradingRatio}:1 LOD grading`);

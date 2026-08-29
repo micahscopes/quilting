@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::RenderSettings;
 use hyperscape::{PresentationTessellation, RenderStyle};
+use hyperscape_protocol::{AssetEntityId, AssetId, EntityId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlValueKind {
@@ -526,6 +527,30 @@ impl HyperscopeRoute {
         .validate()
     }
 
+    /// Resolve the optional stable asset-scoped selection carried by a route.
+    /// Runtime node indices never enter this boundary.
+    pub fn selected_identity(&self) -> Result<Option<AssetEntityId>, &'static str> {
+        let asset = self.value("selasset").unwrap_or_default();
+        let entity = self.value("selentity").unwrap_or_default();
+        if asset.is_empty() && entity.is_empty() {
+            return Ok(None);
+        }
+        if asset.is_empty() || entity.is_empty() {
+            return Err("route selection identity must contain both IDs");
+        }
+        let asset = uuid::Uuid::parse_str(asset)
+            .ok()
+            .and_then(|value| AssetId::new(value).ok())
+            .ok_or("route selection asset ID is invalid")?;
+        let entity = uuid::Uuid::parse_str(entity)
+            .ok()
+            .and_then(|value| EntityId::new(value).ok())
+            .ok_or("route selection entity ID is invalid")?;
+        AssetEntityId::new(asset, entity)
+            .map(Some)
+            .map_err(|_| "route selection identity is invalid")
+    }
+
     pub fn diagnostics(&self) -> &[RouteDiagnostic] {
         &self.diagnostics
     }
@@ -666,6 +691,16 @@ mod tests {
         assert_eq!(selected.value("selasset"), Some(asset));
         assert_eq!(selected.value("selentity"), Some(entity));
         assert_eq!(
+            selected.selected_identity().unwrap(),
+            Some(
+                AssetEntityId::new(
+                    AssetId::new(uuid::Uuid::parse_str(asset).unwrap()).unwrap(),
+                    EntityId::new(uuid::Uuid::parse_str(entity).unwrap()).unwrap(),
+                )
+                .unwrap()
+            )
+        );
+        assert_eq!(
             selected.canonical_pairs(),
             vec![("selasset", asset), ("selentity", entity)]
         );
@@ -679,7 +714,9 @@ mod tests {
             assert_eq!(partial.diagnostics().len(), 1);
             assert_eq!(partial.diagnostics()[0].code, RouteDiagnosticCode::InvalidValue);
             assert_eq!(partial.diagnostics()[0].key, missing_key);
+            assert!(partial.selected_identity().is_err());
         }
+        assert_eq!(HyperscopeRoute::default().selected_identity(), Ok(None));
     }
 
     #[test]
