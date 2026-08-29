@@ -633,13 +633,15 @@ export function scaleRelativeNearPlane(
   eyeHeight,
   defaultNear = 0.01,
   minimumNear = 1e-7,
+  nearEyeFraction = 0.08,
 ) {
   const height = Math.abs(Number(eyeHeight));
   const fallback = Number(defaultNear);
   const minimum = Number(minimumNear);
-  if (!(fallback > 0) || !(minimum > 0)) return null;
+  const fraction = Number(nearEyeFraction);
+  if (!(fallback > 0) || !(minimum > 0) || !(fraction > 0)) return null;
   if (!(height > 0) || !Number.isFinite(height)) return fallback;
-  return Math.max(minimum, Math.min(fallback, height * 0.08));
+  return Math.max(minimum, Math.min(fallback, height * fraction));
 }
 
 function normalizedCameraBasis(forward, up) {

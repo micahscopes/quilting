@@ -260,6 +260,14 @@ The first application boundary is now explicit:
   fallback. Patch Lab installs the admitted atlas maximum before assigning its
   exponent controls, preventing the DOM's old maximum of seven from silently
   truncating an atlas-nine link.
+  Camera/conformal-transform state, SpaceMouse policy, and surface-walk policy
+  additionally leave Rust as one typed `RouteNavigationSettings` value.
+  Centiseconds and percentages become semantic seconds and fractions before
+  crossing the WASM boundary; default walking pace, eye height, fast factor,
+  and near-plane policy come from `hyperscape::SurfaceWalkControls` rather than
+  a second set of frame-loop constants. The browser only projects that value
+  into existing DOM signals and retains raw-query decoding for the inert
+  pre-WASM preview and explicit rollback lane.
   A valid selected-object route also carries its protocol-native
   `AssetEntityId` as a typed projection. Rust performs atomic pair admission,
   nil rejection, UUID parsing, and canonical lowercase formatting; successful

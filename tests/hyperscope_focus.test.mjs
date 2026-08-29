@@ -295,6 +295,7 @@ test('surface-relative view pitch survives a changing walk normal', () => {
 test('walk near plane follows tiny eye heights without exceeding the ordinary plane', () => {
   assert.equal(scaleRelativeNearPlane(1), 0.01);
   assert.ok(Math.abs(scaleRelativeNearPlane(0.035) - 0.0028) < 1e-12);
+  assert.ok(Math.abs(scaleRelativeNearPlane(0.035, 0.02, 1e-8, 0.1) - 0.0035) < 1e-12);
   assert.equal(scaleRelativeNearPlane(1e-8), 1e-7);
   assert.equal(scaleRelativeNearPlane(Number.NaN), 0.01);
 });

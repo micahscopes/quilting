@@ -2039,7 +2039,12 @@ function cameraFovRadians() {
 }
 function cameraNearPlane() {
   return surfaceWalk.active
-    ? scaleRelativeNearPlane(surfaceWalkEyeHeight())
+    ? scaleRelativeNearPlane(
+      surfaceWalkEyeHeight(),
+      surfaceWalk.defaultNear,
+      surfaceWalk.minimumNear,
+      surfaceWalk.nearEyeFraction,
+    )
     : 0.01;
 }
 function lookAt(ex, ey, ez, tx, ty, tz, ux, uy, uz, out = new Float32Array(16)) {
@@ -5636,7 +5641,12 @@ const surfaceWalk = {
   controllerRight: 0,
   controllerForward: 0,
   anchorTransition: null,
+  baseRadiiPerSecond: DEFAULT_WALK_RADII_PER_SECOND,
   baseEyeHeight: 0.035,
+  fastMultiplier: 3,
+  defaultNear: 0.01,
+  minimumNear: 1e-7,
+  nearEyeFraction: 0.08,
   lastLodAt: 0,
   error: null,
   keys: [],
@@ -5670,17 +5680,17 @@ globalThis.__hyperscopeSurfaceWalkRustShadow = surfaceWalkRustShadow;
 
 function surfaceWalkRustControls() {
   return new Float64Array([
-    DEFAULT_WALK_RADII_PER_SECOND,
+    surfaceWalk.baseRadiiPerSecond,
     surfaceWalk.baseEyeHeight,
     walkSpeedSteps.peek(),
     walkScaleSteps.peek(),
     walkHeightSteps.peek(),
     walkSmoothingCentiseconds.peek() / 100,
     walkTangentPullPercent.peek() / 100,
-    3,
-    0.01,
-    1e-7,
-    0.08,
+    surfaceWalk.fastMultiplier,
+    surfaceWalk.defaultNear,
+    surfaceWalk.minimumNear,
+    surfaceWalk.nearEyeFraction,
   ]);
 }
 
@@ -5870,10 +5880,10 @@ function surfaceWalkScale() {
 
 function surfaceWalkSpeed() {
   const sceneRadius = sceneSourceBound?.radius;
-  const radiiPerSecond = DEFAULT_WALK_RADII_PER_SECOND
+  const radiiPerSecond = surfaceWalk.baseRadiiPerSecond
     * Math.pow(2, walkSpeedSteps.peek() / 100);
   return sceneRelativeWalkSpeed(sceneRadius, radiiPerSecond, surfaceWalkScale())
-    ?? DEFAULT_WALK_RADII_PER_SECOND;
+    ?? surfaceWalk.baseRadiiPerSecond;
 }
 
 function surfaceWalkEyeHeight() {
@@ -8655,6 +8665,7 @@ applyParams = function(
   rustRouteAdmitted = false,
   validatedRouteSelection = null,
   validatedRouteAnimationClock = null,
+  validatedNavigationSettings = null,
 ) {
   const finite = (value, fallback, minimum, maximum) => {
     const parsed = Number(value);
@@ -8675,12 +8686,17 @@ applyParams = function(
   // transient pole and incorrectly leave an otherwise-safe deep link in the
   // identity chart. Geometry is staged first, then the mode, and effects see
   // only the complete transaction when the batch commits.
+  const routeTransform = rustRouteAdmitted ? validatedNavigationSettings?.transform : null;
   batchSignals(() => {
-    mob.mx.set(admittedNumber(params.mx, 5, -30, 30));
-    mob.my.set(admittedNumber(params.my, 0, -30, 30));
-    mob.mz.set(admittedNumber(params.mz, 0, -30, 30));
-    mob.mr.set(admittedNumber(params.mr, 20, 0.11, 50));
-    mob.xform.set(params.xform || 'identity');
+    mob.mx.set(routeTransform?.centerControls[0]
+      ?? admittedNumber(params.mx, 5, -30, 30));
+    mob.my.set(routeTransform?.centerControls[1]
+      ?? admittedNumber(params.my, 0, -30, 30));
+    mob.mz.set(routeTransform?.centerControls[2]
+      ?? admittedNumber(params.mz, 0, -30, 30));
+    mob.mr.set(routeTransform?.radiusControl
+      ?? admittedNumber(params.mr, 20, 0.11, 50));
+    mob.xform.set(routeTransform?.kind ?? params.xform ?? 'identity');
   });
   focusSphere.center = [mob.mx.peek() / 10, mob.my.peek() / 10, mob.mz.peek() / 10];
   focusSphere.radius = Math.max(mob.mr.peek() / 10, 0.011);
@@ -8719,40 +8735,74 @@ applyParams = function(
           : null,
       })
       : null;
-  zoom = admittedNumber(params.zoom, 3, 0.1, 1000);
-  rotX = admittedNumber(params.rx, 0.3, -Math.PI / 2 + 0.01, Math.PI / 2 - 0.01);
-  rotY = admittedNumber(params.ry, 0.5, -1e6, 1e6);
-  cameraRoll = admittedNumber(params.rz, 0, -Math.PI, Math.PI);
-  panX = admittedNumber(params.px, 0, -1e6, 1e6);
-  panY = admittedNumber(params.py, 0, -1e6, 1e6);
-  panZ = admittedNumber(params.pz, 0, -1e6, 1e6);
-  manualCameraSemanticTargetEnabled = params.aim === '1';
+  const routeCamera = rustRouteAdmitted ? validatedNavigationSettings?.camera : null;
+  zoom = routeCamera?.zoom ?? admittedNumber(params.zoom, 3, 0.1, 1000);
+  rotX = routeCamera?.eulerRadians[0]
+    ?? admittedNumber(params.rx, 0.3, -Math.PI / 2 + 0.01, Math.PI / 2 - 0.01);
+  rotY = routeCamera?.eulerRadians[1] ?? admittedNumber(params.ry, 0.5, -1e6, 1e6);
+  cameraRoll = routeCamera?.eulerRadians[2]
+    ?? admittedNumber(params.rz, 0, -Math.PI, Math.PI);
+  panX = routeCamera?.position[0] ?? admittedNumber(params.px, 0, -1e6, 1e6);
+  panY = routeCamera?.position[1] ?? admittedNumber(params.py, 0, -1e6, 1e6);
+  panZ = routeCamera?.position[2] ?? admittedNumber(params.pz, 0, -1e6, 1e6);
+  manualCameraSemanticTargetEnabled = routeCamera?.semanticTargetEnabled
+    ?? params.aim === '1';
   pendingRouteSelection = rustRouteAdmitted
     ? validatedRouteSelection
     : routeSelectionFromParams(params);
   routeSelectionDiagnostics.requested = pendingRouteSelection;
   routeSelectionDiagnostics.state = pendingRouteSelection ? 'pending' : 'none';
   setManualCameraBasisFromEuler();
-  spaceMouseMove.set(admittedNumber(params.smmove, 300, 10, 900));
-  spaceMouseRotate.set(admittedNumber(params.smrotate, 300, 10, 900));
-  spaceMouseNavigation.set(rustRouteAdmitted
+  const routeSpaceMouse = rustRouteAdmitted
+    ? validatedNavigationSettings?.spaceMouse : null;
+  spaceMouseMove.set(routeSpaceMouse?.moveSensitivity
+    ?? admittedNumber(params.smmove, 300, 10, 900));
+  spaceMouseRotate.set(routeSpaceMouse?.rotateSensitivity
+    ?? admittedNumber(params.smrotate, 300, 10, 900));
+  spaceMouseNavigation.set(routeSpaceMouse?.profile ?? (rustRouteAdmitted
     ? params.smnav
     : ['hyperscope', 'object', 'fly', 'drone'].includes(params.smnav)
-      ? params.smnav : 'hyperscope');
-  spaceMouseLockHorizon.set(params.smlock === '1');
-  spaceMouseSwapYZ.set(params.smswap === '1');
-  spaceMouseBackground.set(params.smbackground === '1');
-  spaceMouseHyperscopePanInvert.set(admittedInteger(params.smpinv, 2, 0, 7));
-  spaceMouseHyperscopeRotateInvert.set(admittedInteger(params.smrinv, 1, 0, 7));
-  spaceMouseBlenderPanInvert.set(admittedInteger(params.smbpinv, 0, 0, 7));
-  spaceMouseBlenderRotateInvert.set(admittedInteger(params.smbrinv, 0, 0, 7));
-  cameraFovDegrees.set(admittedInteger(params.fov, 75, 35, 110));
-  focusTransitionCentiseconds.set(admittedInteger(params.interp, 70, 5, 500));
-  walkSmoothingCentiseconds.set(admittedInteger(params.walksmooth, 18, 0, 150));
-  walkTangentPullPercent.set(admittedInteger(params.walkalign, 70, 0, 100));
-  walkSpeedSteps.set(admittedNumber(params.walkspeed, 0, -400, 400));
-  walkScaleSteps.set(admittedNumber(params.walkscale, 0, -800, 800));
-  walkHeightSteps.set(admittedNumber(params.walkheight, 0, -400, 400));
+      ? params.smnav : 'hyperscope'));
+  spaceMouseLockHorizon.set(routeSpaceMouse?.lockHorizon ?? params.smlock === '1');
+  spaceMouseSwapYZ.set(routeSpaceMouse?.swapYz ?? params.smswap === '1');
+  spaceMouseBackground.set(
+    routeSpaceMouse?.acceptBackgroundInput ?? params.smbackground === '1',
+  );
+  spaceMouseHyperscopePanInvert.set(routeSpaceMouse?.hyperscopePanInvertMask
+    ?? admittedInteger(params.smpinv, 2, 0, 7));
+  spaceMouseHyperscopeRotateInvert.set(routeSpaceMouse?.hyperscopeRotateInvertMask
+    ?? admittedInteger(params.smrinv, 1, 0, 7));
+  spaceMouseBlenderPanInvert.set(routeSpaceMouse?.blenderPanInvertMask
+    ?? admittedInteger(params.smbpinv, 0, 0, 7));
+  spaceMouseBlenderRotateInvert.set(routeSpaceMouse?.blenderRotateInvertMask
+    ?? admittedInteger(params.smbrinv, 0, 0, 7));
+  cameraFovDegrees.set(routeCamera?.verticalFovDegrees
+    ?? admittedInteger(params.fov, 75, 35, 110));
+  focusTransitionCentiseconds.set(routeCamera
+    ? routeCamera.focusTransitionSeconds * 100
+    : admittedInteger(params.interp, 70, 5, 500));
+  const routeSurfaceWalk = rustRouteAdmitted
+    ? validatedNavigationSettings?.surfaceWalk : null;
+  walkSmoothingCentiseconds.set(routeSurfaceWalk
+    ? routeSurfaceWalk.smoothingSeconds * 100
+    : admittedInteger(params.walksmooth, 18, 0, 150));
+  walkTangentPullPercent.set(routeSurfaceWalk
+    ? routeSurfaceWalk.tangentPullFraction * 100
+    : admittedInteger(params.walkalign, 70, 0, 100));
+  walkSpeedSteps.set(routeSurfaceWalk?.speedOctaveSteps
+    ?? admittedNumber(params.walkspeed, 0, -400, 400));
+  walkScaleSteps.set(routeSurfaceWalk?.bodyScaleOctaveSteps
+    ?? admittedNumber(params.walkscale, 0, -800, 800));
+  walkHeightSteps.set(routeSurfaceWalk?.eyeHeightOctaveSteps
+    ?? admittedNumber(params.walkheight, 0, -400, 400));
+  if (routeSurfaceWalk) {
+    surfaceWalk.baseRadiiPerSecond = routeSurfaceWalk.baseRadiiPerSecond;
+    surfaceWalk.baseEyeHeight = routeSurfaceWalk.baseEyeHeight;
+    surfaceWalk.fastMultiplier = routeSurfaceWalk.fastMultiplier;
+    surfaceWalk.defaultNear = routeSurfaceWalk.defaultNear;
+    surfaceWalk.minimumNear = routeSurfaceWalk.minimumNear;
+    surfaceWalk.nearEyeFraction = routeSurfaceWalk.nearEyeFraction;
+  }
   patchLab.shape = patchLabShape(params.lab) || 'triangle';
   $('patch-lab-field').value = rustRouteAdmitted
     ? params.labfield
@@ -10390,7 +10440,7 @@ function frame(ts) {
           - Number(surfaceWalkKeys.has('KeyA') || surfaceWalkKeys.has('ArrowLeft'));
         const inputLength = Math.max(1, Math.hypot(forwardAxis, rightAxis));
         const fast = surfaceWalkKeys.has('ShiftLeft') || surfaceWalkKeys.has('ShiftRight');
-        const speed = surfaceWalkSpeed() * (fast ? 3 : 1);
+        const speed = surfaceWalkSpeed() * (fast ? surfaceWalk.fastMultiplier : 1);
         const velocity = new Float32Array([
           (forward[0] * forwardAxis + right[0] * rightAxis) * speed / inputLength,
           (forward[1] * forwardAxis + right[1] * rightAxis) * speed / inputLength,
@@ -11727,6 +11777,7 @@ let initRenderSettings = null;
 let initRustRouteAdmitted = false;
 let initRouteSelection = null;
 let initRouteAnimationClock = null;
+let initNavigationSettings = null;
 currentGlb = initParams.glb;
 let initialPatchLabShape = patchLabShape(initParams.lab);
 // Set camera early (not WASM-dependent)
@@ -11772,7 +11823,8 @@ phase('wasm', [], async () => {
     if (RUST_ROUTE_IMPLEMENTATION === 'rust') {
       if (startupRoute
           && startupRoute.diagnostics.length === 0
-          && startupRoute.renderSettings) {
+          && startupRoute.renderSettings
+          && startupRoute.navigationSettings) {
         initParams = readParams(
           new URLSearchParams(startupRoute.resolvedPairs),
           new URLSearchParams(startupRoute.pairs),
@@ -11781,6 +11833,7 @@ phase('wasm', [], async () => {
         initRustRouteAdmitted = true;
         initRouteSelection = startupRoute.selection ?? null;
         initRouteAnimationClock = startupRoute.animationClock ?? null;
+        initNavigationSettings = startupRoute.navigationSettings;
         currentGlb = initParams.glb;
         initialPatchLabShape = patchLabShape(initParams.lab);
         rustRouteShadowDiagnostics.startupSource = 'rust';
@@ -11790,7 +11843,7 @@ phase('wasm', [], async () => {
           ? 'route-bridge-error'
           : startupRoute.diagnostics.length > 0
             ? 'route-diagnostics'
-            : 'missing-typed-render-settings';
+            : 'missing-typed-route-settings';
       }
     } else {
       rustRouteShadowDiagnostics.startupSource = 'browser';
@@ -11852,6 +11905,7 @@ phase('wasm', [], async () => {
     initRustRouteAdmitted,
     initRouteSelection,
     initRouteAnimationClock,
+    initNavigationSettings,
   ); // Set signal values first
   if (RUST_RENDER_SETTINGS_IMPLEMENTATION !== 'js'
       && initRustRouteAdmitted

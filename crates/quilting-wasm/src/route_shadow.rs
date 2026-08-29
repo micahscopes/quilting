@@ -9,6 +9,7 @@ struct RouteShadowResult {
     resolved_pairs: Vec<[String; 2]>,
     diagnostics: Vec<RouteShadowDiagnostic>,
     render_settings: Option<RouteRenderSettings>,
+    navigation_settings: Option<RouteNavigationSettings>,
     #[serde(skip_serializing_if = "Option::is_none")]
     selection: Option<RouteSelection>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -68,6 +69,65 @@ struct RouteAnimationClock {
     speed: Option<f64>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RouteNavigationSettings {
+    transform: RouteTransformSettings,
+    camera: RouteCameraSettings,
+    space_mouse: RouteSpaceMouseSettings,
+    surface_walk: RouteSurfaceWalkSettings,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RouteTransformSettings {
+    kind: &'static str,
+    center_controls: [f64; 3],
+    radius_control: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RouteCameraSettings {
+    zoom: f64,
+    euler_radians: [f64; 3],
+    position: [f64; 3],
+    semantic_target_enabled: bool,
+    vertical_fov_degrees: f64,
+    focus_transition_seconds: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RouteSpaceMouseSettings {
+    move_sensitivity: f64,
+    rotate_sensitivity: f64,
+    profile: &'static str,
+    lock_horizon: bool,
+    swap_yz: bool,
+    accept_background_input: bool,
+    hyperscope_pan_invert_mask: u8,
+    hyperscope_rotate_invert_mask: u8,
+    blender_pan_invert_mask: u8,
+    blender_rotate_invert_mask: u8,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RouteSurfaceWalkSettings {
+    base_radii_per_second: f64,
+    base_eye_height: f64,
+    speed_octave_steps: f64,
+    body_scale_octave_steps: f64,
+    eye_height_octave_steps: f64,
+    smoothing_seconds: f64,
+    tangent_pull_fraction: f64,
+    fast_multiplier: f64,
+    default_near: f64,
+    minimum_near: f64,
+    near_eye_fraction: f64,
+}
+
 /// Canonicalize already-decoded browser query pairs. Percent decoding and
 /// encoding remain platform work; key identity, defaults, validation, and
 /// ordering are Rust application policy.
@@ -122,11 +182,58 @@ pub fn canonicalize_hyperscope_route(pairs: JsValue) -> Result<JsValue, JsValue>
             time_seconds: clock.time_seconds,
             speed: clock.speed,
         });
+    let navigation_settings =
+        route
+            .navigation_settings()
+            .ok()
+            .map(|settings| RouteNavigationSettings {
+                transform: RouteTransformSettings {
+                    kind: settings.transform.kind.wire_name(),
+                    center_controls: settings.transform.center_controls,
+                    radius_control: settings.transform.radius_control,
+                },
+                camera: RouteCameraSettings {
+                    zoom: settings.camera.zoom,
+                    euler_radians: settings.camera.euler_radians,
+                    position: settings.camera.position,
+                    semantic_target_enabled: settings.camera.semantic_target_enabled,
+                    vertical_fov_degrees: settings.camera.vertical_fov_degrees,
+                    focus_transition_seconds: settings.camera.focus_transition_seconds,
+                },
+                space_mouse: RouteSpaceMouseSettings {
+                    move_sensitivity: settings.space_mouse.move_sensitivity,
+                    rotate_sensitivity: settings.space_mouse.rotate_sensitivity,
+                    profile: settings.space_mouse.profile.wire_name(),
+                    lock_horizon: settings.space_mouse.lock_horizon,
+                    swap_yz: settings.space_mouse.swap_yz,
+                    accept_background_input: settings.space_mouse.accept_background_input,
+                    hyperscope_pan_invert_mask: settings.space_mouse.hyperscope_pan_invert_mask,
+                    hyperscope_rotate_invert_mask: settings
+                        .space_mouse
+                        .hyperscope_rotate_invert_mask,
+                    blender_pan_invert_mask: settings.space_mouse.blender_pan_invert_mask,
+                    blender_rotate_invert_mask: settings.space_mouse.blender_rotate_invert_mask,
+                },
+                surface_walk: RouteSurfaceWalkSettings {
+                    base_radii_per_second: settings.surface_walk.base_radii_per_second,
+                    base_eye_height: settings.surface_walk.base_eye_height,
+                    speed_octave_steps: settings.surface_walk.speed_octave_steps,
+                    body_scale_octave_steps: settings.surface_walk.body_scale_octave_steps,
+                    eye_height_octave_steps: settings.surface_walk.eye_height_octave_steps,
+                    smoothing_seconds: settings.surface_walk.smoothing_seconds,
+                    tangent_pull_fraction: settings.surface_walk.tangent_pull_fraction,
+                    fast_multiplier: settings.surface_walk.fast_multiplier,
+                    default_near: settings.surface_walk.default_near,
+                    minimum_near: settings.surface_walk.minimum_near,
+                    near_eye_fraction: settings.surface_walk.near_eye_fraction,
+                },
+            });
     to_js(&RouteShadowResult {
         pairs,
         resolved_pairs,
         diagnostics,
         render_settings,
+        navigation_settings,
         selection,
         animation_clock,
     })

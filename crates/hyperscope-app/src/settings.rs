@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::RenderSettings;
+use hyperscape::SurfaceWalkControls;
 use hyperscape_protocol::{AssetEntityId, AssetId, EntityId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -347,6 +348,86 @@ pub struct RouteAnimationClock {
     pub speed: Option<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteTransformKind {
+    Identity,
+    SphereReflection,
+    Rotation,
+    Translation,
+}
+
+impl RouteTransformKind {
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::Identity => "identity",
+            Self::SphereReflection => "sphere_reflection",
+            Self::Rotation => "rotation",
+            Self::Translation => "translation",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RouteTransformSettings {
+    pub kind: RouteTransformKind,
+    pub center_controls: [f64; 3],
+    pub radius_control: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RouteCameraSettings {
+    pub zoom: f64,
+    pub euler_radians: [f64; 3],
+    pub position: [f64; 3],
+    pub semantic_target_enabled: bool,
+    pub vertical_fov_degrees: f64,
+    pub focus_transition_seconds: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteSpaceMouseProfile {
+    Hyperscope,
+    Object,
+    Fly,
+    Drone,
+}
+
+impl RouteSpaceMouseProfile {
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::Hyperscope => "hyperscope",
+            Self::Object => "object",
+            Self::Fly => "fly",
+            Self::Drone => "drone",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RouteSpaceMouseSettings {
+    pub move_sensitivity: f64,
+    pub rotate_sensitivity: f64,
+    pub profile: RouteSpaceMouseProfile,
+    pub lock_horizon: bool,
+    pub swap_yz: bool,
+    pub accept_background_input: bool,
+    pub hyperscope_pan_invert_mask: u8,
+    pub hyperscope_rotate_invert_mask: u8,
+    pub blender_pan_invert_mask: u8,
+    pub blender_rotate_invert_mask: u8,
+}
+
+/// One typed startup value for browser, replay, and future Blender navigation
+/// adapters. URL/UI units are converted here; adapters consume semantic
+/// seconds and fractions and do not maintain a parallel route parser.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RouteNavigationSettings {
+    pub transform: RouteTransformSettings,
+    pub camera: RouteCameraSettings,
+    pub space_mouse: RouteSpaceMouseSettings,
+    pub surface_walk: SurfaceWalkControls,
+}
+
 /// Decoded route values with deterministic first-value semantics. Invalid
 /// known values are retained for shadow comparison but reported explicitly;
 /// a later authority cutover can select fallback policy per ControlSpec.
@@ -590,6 +671,122 @@ impl HyperscopeRoute {
                 speed,
             }))
         }
+    }
+
+    pub fn navigation_settings(&self) -> Result<RouteNavigationSettings, &'static str> {
+        let number = |key, error| {
+            self.value(key)
+                .filter(|value| {
+                    hyperscope_control_spec(key).is_some_and(|spec| spec.accepts(value))
+                })
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|value| value.is_finite())
+                .ok_or(error)
+        };
+        let toggle = |key, error| match self.value(key) {
+            Some("0") => Ok(false),
+            Some("1") => Ok(true),
+            _ => Err(error),
+        };
+        let mask = |key, error| {
+            self.value(key)
+                .filter(|value| {
+                    hyperscope_control_spec(key).is_some_and(|spec| spec.accepts(value))
+                })
+                .and_then(|value| value.parse::<u8>().ok())
+                .ok_or(error)
+        };
+
+        let transform_kind = match self.value("xform") {
+            Some("identity") => RouteTransformKind::Identity,
+            Some("sphere_reflection") => RouteTransformKind::SphereReflection,
+            Some("rotation") => RouteTransformKind::Rotation,
+            Some("translation") => RouteTransformKind::Translation,
+            _ => return Err("route transform kind is invalid"),
+        };
+        let space_mouse_profile = match self.value("smnav") {
+            Some("hyperscope") => RouteSpaceMouseProfile::Hyperscope,
+            Some("object") => RouteSpaceMouseProfile::Object,
+            Some("fly") => RouteSpaceMouseProfile::Fly,
+            Some("drone") => RouteSpaceMouseProfile::Drone,
+            _ => return Err("route SpaceMouse profile is invalid"),
+        };
+        let surface_walk = SurfaceWalkControls {
+            speed_octave_steps: number("walkspeed", "route walk speed is invalid")?,
+            body_scale_octave_steps: number("walkscale", "route walk scale is invalid")?,
+            eye_height_octave_steps: number("walkheight", "route walk height is invalid")?,
+            smoothing_seconds: number("walksmooth", "route walk smoothing is invalid")? / 100.0,
+            tangent_pull_fraction: number("walkalign", "route walk alignment is invalid")? / 100.0,
+            ..SurfaceWalkControls::default()
+        };
+        surface_walk
+            .metrics(1.0, false)
+            .map_err(|_| "route surface-walk controls are invalid")?;
+
+        Ok(RouteNavigationSettings {
+            transform: RouteTransformSettings {
+                kind: transform_kind,
+                center_controls: [
+                    number("mx", "route transform center X is invalid")?,
+                    number("my", "route transform center Y is invalid")?,
+                    number("mz", "route transform center Z is invalid")?,
+                ],
+                radius_control: number("mr", "route transform radius is invalid")?,
+            },
+            camera: RouteCameraSettings {
+                zoom: number("zoom", "route camera zoom is invalid")?,
+                euler_radians: [
+                    number("rx", "route camera pitch is invalid")?,
+                    number("ry", "route camera yaw is invalid")?,
+                    number("rz", "route camera roll is invalid")?,
+                ],
+                position: [
+                    number("px", "route camera X is invalid")?,
+                    number("py", "route camera Y is invalid")?,
+                    number("pz", "route camera Z is invalid")?,
+                ],
+                semantic_target_enabled: toggle("aim", "route camera target mode is invalid")?,
+                vertical_fov_degrees: number("fov", "route camera FOV is invalid")?,
+                focus_transition_seconds: number(
+                    "interp",
+                    "route focus transition duration is invalid",
+                )? / 100.0,
+            },
+            space_mouse: RouteSpaceMouseSettings {
+                move_sensitivity: number(
+                    "smmove",
+                    "route SpaceMouse move sensitivity is invalid",
+                )?,
+                rotate_sensitivity: number(
+                    "smrotate",
+                    "route SpaceMouse rotation sensitivity is invalid",
+                )?,
+                profile: space_mouse_profile,
+                lock_horizon: toggle("smlock", "route SpaceMouse horizon lock is invalid")?,
+                swap_yz: toggle("smswap", "route SpaceMouse axis swap is invalid")?,
+                accept_background_input: toggle(
+                    "smbackground",
+                    "route SpaceMouse background policy is invalid",
+                )?,
+                hyperscope_pan_invert_mask: mask(
+                    "smpinv",
+                    "route Hyperscope pan inversion mask is invalid",
+                )?,
+                hyperscope_rotate_invert_mask: mask(
+                    "smrinv",
+                    "route Hyperscope rotation inversion mask is invalid",
+                )?,
+                blender_pan_invert_mask: mask(
+                    "smbpinv",
+                    "route Blender pan inversion mask is invalid",
+                )?,
+                blender_rotate_invert_mask: mask(
+                    "smbrinv",
+                    "route Blender rotation inversion mask is invalid",
+                )?,
+            },
+            surface_walk,
+        })
     }
 
     pub fn diagnostics(&self) -> &[RouteDiagnostic] {
@@ -1022,6 +1219,59 @@ mod tests {
             );
             assert!(route.diagnostics().is_empty());
         }
+    }
+
+    #[test]
+    fn navigation_route_resolves_semantic_units_without_browser_conversion() {
+        let route = HyperscopeRoute::from_pairs([
+            ("xform", "sphere_reflection"),
+            ("mx", "-2.5"),
+            ("mr", "7.25"),
+            ("zoom", "12.5"),
+            ("rx", "-0.25"),
+            ("ry", "1.5"),
+            ("rz", "0.75"),
+            ("px", "3.0"),
+            ("aim", "1"),
+            ("fov", "108"),
+            ("interp", "250"),
+            ("smnav", "drone"),
+            ("smbackground", "1"),
+            ("smpinv", "7"),
+            ("walksmooth", "45"),
+            ("walkalign", "25"),
+            ("walkspeed", "100"),
+            ("walkscale", "-100"),
+            ("walkheight", "50"),
+        ]);
+        assert!(route.diagnostics().is_empty());
+        let settings = route.navigation_settings().unwrap();
+        assert_eq!(settings.transform.kind, RouteTransformKind::SphereReflection);
+        assert_eq!(settings.transform.kind.wire_name(), "sphere_reflection");
+        assert_eq!(settings.transform.center_controls, [-2.5, 0.0, 0.0]);
+        assert_eq!(settings.transform.radius_control, 7.25);
+        assert_eq!(settings.camera.zoom, 12.5);
+        assert_eq!(settings.camera.euler_radians, [-0.25, 1.5, 0.75]);
+        assert_eq!(settings.camera.position, [3.0, 0.0, 0.0]);
+        assert!(settings.camera.semantic_target_enabled);
+        assert_eq!(settings.camera.vertical_fov_degrees, 108.0);
+        assert_eq!(settings.camera.focus_transition_seconds, 2.5);
+        assert_eq!(settings.space_mouse.profile, RouteSpaceMouseProfile::Drone);
+        assert_eq!(settings.space_mouse.profile.wire_name(), "drone");
+        assert!(settings.space_mouse.accept_background_input);
+        assert_eq!(settings.space_mouse.hyperscope_pan_invert_mask, 7);
+        assert_eq!(settings.surface_walk.smoothing_seconds, 0.45);
+        assert_eq!(settings.surface_walk.tangent_pull_fraction, 0.25);
+        assert_eq!(settings.surface_walk.speed_octave_steps, 100.0);
+        assert_eq!(settings.surface_walk.body_scale_octave_steps, -100.0);
+        assert_eq!(settings.surface_walk.eye_height_octave_steps, 50.0);
+    }
+
+    #[test]
+    fn navigation_route_rejects_invalid_semantic_controls() {
+        let invalid = HyperscopeRoute::from_pairs([("walksmooth", "151")]);
+        assert_eq!(invalid.diagnostics().len(), 1);
+        assert!(invalid.navigation_settings().is_err());
     }
 
     #[test]
