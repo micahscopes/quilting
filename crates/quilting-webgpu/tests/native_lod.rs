@@ -23,7 +23,7 @@ use quilting_renderer::compute::{
     LodSubjectState, PackedLodClassification, PreparedLodModel, WgslLodDispatchMetrics,
 };
 use quilting_webgpu::{
-    supports_basic_pbr_frame, supports_patch_presentation_style,
+    resident_root_render_domains, supports_basic_pbr_frame, supports_patch_presentation_style,
     supports_resident_root_render_scene, LodClassifierDevice, LodPose, OffscreenPatchRenderTarget,
     PatchRenderSceneUpdate, PbrTextureTableUpdate,
 };
@@ -794,6 +794,21 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         assert_eq!(packed_atlas.triangle_index_count(), 6);
         assert_eq!(packed_atlas.line_index_count(), 6);
         assert!(supports_resident_root_render_scene(&render_scene, 2));
+        let mut relod_scene = render_scene.clone();
+        for batch in &mut relod_scene.batches {
+            batch.id.key.lod = [2; 3];
+            batch.triangle_index_count = 6;
+            batch.line_index_count = 12;
+            for member in &mut batch.members {
+                member.edge_lods = [2; 3];
+                member.vertex_lods = [2; 3];
+            }
+        }
+        assert_eq!(
+            resident_root_render_domains(&render_scene, 2).unwrap(),
+            resident_root_render_domains(&relod_scene, 2).unwrap(),
+            "root residency must ignore CPU-authored LOD buckets",
+        );
         let mut suppressed_scene = render_scene.clone();
         suppressed_scene.suppressed_root_faces.push(0);
         assert!(!supports_resident_root_render_scene(&suppressed_scene, 2));
@@ -832,11 +847,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             )
             .unwrap();
         let root_pipeline = classifier
-            .create_resident_root_render_pipeline(
-                wgpu::TextureFormat::Rgba8Unorm,
-                Some(wgpu::TextureFormat::Depth24Plus),
-                1,
-            )
+            .create_offscreen_resident_root_render_pipeline()
             .unwrap();
         let root_bindings = classifier
             .create_resident_root_render_bindings(&root_pipeline, &root_preparation, &root_geometry)

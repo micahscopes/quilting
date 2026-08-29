@@ -9,16 +9,31 @@ use super::*;
 /// without consulting the CPU-authored batch topology. Adaptive leaves remain
 /// on their sparse overlay path until their partition is device-resident too.
 pub fn supports_resident_root_render_scene(scene: &RenderSceneSnapshot, face_count: usize) -> bool {
-    scene.suppressed_root_faces.is_empty()
-        && scene.batches.iter().all(|batch| {
-            batch.id.layer != RenderBatchLayer::AdaptiveOverlay
-                && !batch.members.is_empty()
-                && batch
+    matches!(resident_root_render_domains(scene, face_count), Ok(Some(_)))
+}
+
+/// Extract the exact LOD-independent root state used to decide whether a live
+/// scene publication can reuse its retained topology, preparation, domains,
+/// and bindings. `None` is a supported fallback, not a malformed scene.
+pub fn resident_root_render_domains(
+    scene: &RenderSceneSnapshot,
+    face_count: usize,
+) -> Result<Option<ResidentRootDrawDomains>, String> {
+    if !scene.suppressed_root_faces.is_empty()
+        || scene.batches.iter().any(|batch| {
+            batch.id.layer == RenderBatchLayer::AdaptiveOverlay
+                || batch.members.is_empty()
+                || batch
                     .members
                     .iter()
-                    .all(|member| member.leaf_id == ScreenPatchLeafId::ROOT)
+                    .any(|member| member.leaf_id != ScreenPatchLeafId::ROOT)
         })
-        && ResidentRootDrawDomains::build(scene, face_count).is_ok()
+    {
+        return Ok(None);
+    }
+    ResidentRootDrawDomains::build(scene, face_count)
+        .map(Some)
+        .map_err(|error| error.to_string())
 }
 
 /// Retained root-only geometry buckets derived from packed resident LOD.
@@ -223,6 +238,18 @@ impl ResidentRootRenderBindings {
 }
 
 impl LodClassifierDevice {
+    /// Create the fixed-format resident-root pipeline used by the headless
+    /// browser parity target without exposing backend texture enums upstream.
+    pub fn create_offscreen_resident_root_render_pipeline(
+        &self,
+    ) -> Result<ResidentRootRenderPipeline, LodWebGpuError> {
+        self.create_resident_root_render_pipeline(
+            wgpu::TextureFormat::Rgba8Unorm,
+            Some(wgpu::TextureFormat::Depth24Plus),
+            1,
+        )
+    }
+
     pub fn create_resident_root_render_pipeline(
         &self,
         color_format: wgpu::TextureFormat,

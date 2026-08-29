@@ -12,16 +12,18 @@ use quilting_core::material::{
 };
 use quilting_core::render::{
     RenderFrame, RenderFrameOptions, RenderPoseIdentity, RenderSceneSnapshot, RenderStyle,
-    RenderSubmissionStats, RenderView,
+    RenderSubmissionStats, RenderView, ResidentRootDrawDomains,
 };
 use quilting_renderer::compute::{
     prepare_lod_dispatch_state, LodAtlasLookup, PreparedLodModel, WgslLodDispatchMetrics,
 };
 use quilting_webgpu::{
-    DiagnosticPatchRenderPipelines, LodClassifierDevice, LodClassifierModel, LodPose,
-    OffscreenPatchRenderTarget, PackedPatchAtlas, PatchFrameEncoding, PatchPresentationSurface,
-    PatchRenderScene, PatchRenderSceneUpdate, PbrEnvironmentMap, PbrTextureTable,
-    StagedOffscreenImageReadback, SurfacePresentation, WebGpuAdapterSummary,
+    resident_root_render_domains, DiagnosticPatchRenderPipelines, LodClassifierDevice,
+    LodClassifierModel, LodPose, OffscreenPatchRenderTarget, PackedPatchAtlas, PatchFrameEncoding,
+    PatchPresentationSurface, PatchRenderScene, PatchRenderSceneUpdate, PbrEnvironmentMap,
+    PbrTextureTable, ResidentGeometryBucketScene, ResidentRootPreparationScene,
+    ResidentRootRenderBindings, ResidentRootRenderPipeline, StagedOffscreenImageReadback,
+    SurfacePresentation, WebGpuAdapterSummary,
 };
 use serde::Serialize;
 use std::cell::RefCell;
@@ -41,6 +43,8 @@ struct WebGpuBackend {
     model: Option<LodClassifierModel>,
     model_source: Option<PreparedLodModel>,
     pipelines: Option<DiagnosticPatchRenderPipelines>,
+    resident_root_pipeline: Option<ResidentRootRenderPipeline>,
+    resident_roots: Option<ResidentRootBackend>,
     scene: Option<PatchRenderScene>,
     scene_source_revision: Option<u64>,
     target: Option<OffscreenPatchRenderTarget>,
@@ -68,6 +72,10 @@ struct WebGpuBackend {
     visibility_upload_bytes: u64,
     device_lod_dispatches: u64,
     device_lod_frames: u64,
+    resident_root_scene_uploads: u64,
+    resident_root_scene_reuses: u64,
+    resident_root_frames: u64,
+    resident_root_fallbacks: u64,
     last_device_lod_epoch: Option<u64>,
     last_frame_revision: u64,
     last_source_render_call: u64,
@@ -76,7 +84,15 @@ struct WebGpuBackend {
     last_logical_submission: RenderSubmissionStats,
     last_viewport: [u32; 2],
     last_frame_failure: Option<String>,
+    last_resident_root_error: Option<String>,
     last_error: Option<String>,
+}
+
+struct ResidentRootBackend {
+    domains: ResidentRootDrawDomains,
+    preparation: ResidentRootPreparationScene,
+    geometry: ResidentGeometryBucketScene,
+    bindings: ResidentRootRenderBindings,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -152,6 +168,12 @@ pub(crate) struct WebGpuBackendDiagnostics {
     visibility_upload_bytes: u64,
     device_lod_dispatches: u64,
     device_lod_frames: u64,
+    resident_root_pipeline_ready: bool,
+    resident_root_scene_ready: bool,
+    resident_root_scene_uploads: u64,
+    resident_root_scene_reuses: u64,
+    resident_root_frames: u64,
+    resident_root_fallbacks: u64,
     last_device_lod_epoch: Option<u64>,
     last_frame_revision: u64,
     last_source_render_call: u64,
@@ -160,6 +182,7 @@ pub(crate) struct WebGpuBackendDiagnostics {
     last_logical_submission: RenderSubmissionStats,
     last_viewport: [u32; 2],
     last_frame_failure: Option<String>,
+    last_resident_root_error: Option<String>,
     last_error: Option<String>,
 }
 
@@ -274,6 +297,12 @@ impl WebGpuBackend {
             visibility_upload_bytes: self.visibility_upload_bytes,
             device_lod_dispatches: self.device_lod_dispatches,
             device_lod_frames: self.device_lod_frames,
+            resident_root_pipeline_ready: self.resident_root_pipeline.is_some(),
+            resident_root_scene_ready: self.resident_roots.is_some(),
+            resident_root_scene_uploads: self.resident_root_scene_uploads,
+            resident_root_scene_reuses: self.resident_root_scene_reuses,
+            resident_root_frames: self.resident_root_frames,
+            resident_root_fallbacks: self.resident_root_fallbacks,
             last_device_lod_epoch: self.last_device_lod_epoch,
             last_frame_revision: self.last_frame_revision,
             last_source_render_call: self.last_source_render_call,
@@ -282,6 +311,7 @@ impl WebGpuBackend {
             last_logical_submission: self.last_logical_submission,
             last_viewport: self.last_viewport,
             last_frame_failure: self.last_frame_failure.clone(),
+            last_resident_root_error: self.last_resident_root_error.clone(),
             last_error: self.last_error.clone(),
         }
     }
@@ -307,6 +337,23 @@ impl WebGpuBackend {
         self.last_error = Some(error.clone());
         error
     }
+
+    fn publish_resident_roots(
+        &mut self,
+        candidate: Option<ResidentRootBackend>,
+        failure: Option<String>,
+    ) {
+        self.resident_roots = candidate;
+        if self.resident_roots.is_some() {
+            self.resident_root_scene_uploads = self.resident_root_scene_uploads.saturating_add(1);
+        }
+        if let Some(error) = failure {
+            self.resident_root_fallbacks = self.resident_root_fallbacks.saturating_add(1);
+            self.last_resident_root_error = Some(error);
+        } else {
+            self.last_resident_root_error = None;
+        }
+    }
 }
 
 pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
@@ -331,6 +378,11 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
                     .create_offscreen_diagnostic_patch_render_pipelines()
                     .map_err(|error| error.to_string())
                     .map_err(|error| BACKEND.with(|slot| slot.borrow_mut().fail(error)))?;
+                let (resident_root_pipeline, resident_root_error) =
+                    match device.create_offscreen_resident_root_render_pipeline() {
+                        Ok(pipeline) => (Some(pipeline), None),
+                        Err(error) => (None, Some(error.to_string())),
+                    };
                 BACKEND.with(|slot| {
                     let mut backend = slot.borrow_mut();
                     backend.device = Some(device);
@@ -341,6 +393,8 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
                     backend.model = None;
                     backend.model_source = None;
                     backend.pipelines = Some(pipelines);
+                    backend.resident_root_pipeline = resident_root_pipeline;
+                    backend.resident_roots = None;
                     backend.scene = None;
                     backend.scene_source_revision = None;
                     backend.target = None;
@@ -352,6 +406,11 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
                     backend.last_joint_matrices.clear();
                     backend.last_morph_weights.clear();
                     backend.next_morph_weights.clear();
+                    if resident_root_error.is_some() {
+                        backend.resident_root_fallbacks =
+                            backend.resident_root_fallbacks.saturating_add(1);
+                    }
+                    backend.last_resident_root_error = resident_root_error;
                     backend.last_logical_submission = RenderSubmissionStats::default();
                     backend.state = "ready";
                     backend.last_error = None;
@@ -417,6 +476,15 @@ pub(crate) async fn initialize_presentation(
         )
         .map_err(|error| error.to_string())
         .map_err(|error| BACKEND.with(|slot| slot.borrow_mut().fail(error)))?;
+    let (resident_root_pipeline, resident_root_error) = match device
+        .create_resident_root_render_pipeline(
+            presentation.color_format(),
+            Some(presentation.depth_format()),
+            1,
+        ) {
+        Ok(pipeline) => (Some(pipeline), None),
+        Err(error) => (None, Some(error.to_string())),
+    };
     BACKEND.with(|slot| {
         let mut backend = slot.borrow_mut();
         backend.device = Some(device);
@@ -427,6 +495,8 @@ pub(crate) async fn initialize_presentation(
         backend.model = None;
         backend.model_source = None;
         backend.pipelines = Some(pipelines);
+        backend.resident_root_pipeline = resident_root_pipeline;
+        backend.resident_roots = None;
         backend.scene = None;
         backend.scene_source_revision = None;
         backend.target = None;
@@ -438,6 +508,10 @@ pub(crate) async fn initialize_presentation(
         backend.last_joint_matrices.clear();
         backend.last_morph_weights.clear();
         backend.next_morph_weights.clear();
+        if resident_root_error.is_some() {
+            backend.resident_root_fallbacks = backend.resident_root_fallbacks.saturating_add(1);
+        }
+        backend.last_resident_root_error = resident_root_error;
         backend.last_logical_submission = RenderSubmissionStats::default();
         backend.state = "ready";
         backend.last_error = None;
@@ -632,6 +706,8 @@ pub(crate) fn replace_atlas(
             Ok((atlas, model)) => {
                 backend.atlas = Some(atlas);
                 backend.model = model;
+                backend.resident_roots = None;
+                backend.last_resident_root_error = None;
                 backend.scene = None;
                 backend.scene_source_revision = None;
                 backend.last_frame_input = None;
@@ -675,6 +751,8 @@ pub(crate) fn replace_model(
             Ok(model) => {
                 backend.model = Some(model);
                 backend.model_source = Some(source);
+                backend.resident_roots = None;
+                backend.last_resident_root_error = None;
                 backend.scene = None;
                 backend.scene_source_revision = None;
                 backend.last_frame_input = None;
@@ -757,9 +835,11 @@ pub(crate) fn dispatch_lod(
                     },
                 )
                 .map_err(|error| error.to_string())?;
-            Ok::<_, String>(device
-                .reconcile_resident_lod_on_device(&classification, grading)
-                .classification_epoch())
+            Ok::<_, String>(
+                device
+                    .reconcile_resident_lod_on_device(&classification, grading)
+                    .classification_epoch(),
+            )
         })();
         let epoch = match epoch_result {
             Ok(epoch) => epoch,
@@ -822,6 +902,32 @@ pub(crate) fn record_frame_prerequisite_failure(error: impl ToString) {
     });
 }
 
+fn build_resident_root_backend(
+    device: &LodClassifierDevice,
+    model: &LodClassifierModel,
+    atlas: &PackedPatchAtlas,
+    pipeline: &ResidentRootRenderPipeline,
+    domains: ResidentRootDrawDomains,
+    scene: &RenderSceneSnapshot,
+    source_instances: &[f32],
+) -> Result<ResidentRootBackend, String> {
+    let preparation = device
+        .upload_resident_root_preparation_scene(model, scene, source_instances)
+        .map_err(|error| error.to_string())?;
+    let geometry = device
+        .upload_resident_geometry_bucket_scene(model, atlas, preparation.draw_domains())
+        .map_err(|error| error.to_string())?;
+    let bindings = device
+        .create_resident_root_render_bindings(pipeline, &preparation, &geometry)
+        .map_err(|error| error.to_string())?;
+    Ok(ResidentRootBackend {
+        domains,
+        preparation,
+        geometry,
+        bindings,
+    })
+}
+
 /// Publish one device-side render scene derived from shared backend-neutral
 /// extraction. Shape-compatible epochs update retained buffers in place; a
 /// cardinality change allocates an atomic replacement. The previous scene
@@ -837,6 +943,55 @@ pub(crate) fn replace_scene(
             return Ok(false);
         }
         let next_revision = backend.scene_uploads.saturating_add(1);
+        let resident_root_domains = backend
+            .model_source
+            .as_ref()
+            .ok_or_else(|| "WebGPU resident roots require immutable model residency".to_string())
+            .and_then(|source| resident_root_render_domains(&scene, source.residency.num_faces));
+        let mut resident_root_reused = false;
+        let resident_root_candidate = match (
+            backend.device.as_ref(),
+            backend.model.as_ref(),
+            backend.atlas.as_ref(),
+            backend.resident_root_pipeline.as_ref(),
+            resident_root_domains,
+        ) {
+            (_, _, _, _, Ok(None)) => Ok(None),
+            (_, _, _, None, Ok(Some(_))) => Ok(None),
+            (_, _, _, _, Ok(Some(domains)))
+                if backend
+                    .resident_roots
+                    .as_ref()
+                    .is_some_and(|resident| resident.domains == domains) =>
+            {
+                // Source-face records are immutable for one model residency;
+                // atlas/model replacement clears this aggregate. Exact root
+                // domains therefore distinguish authored state changes from
+                // CPU-only LOD bucket churn without retaining another copy of
+                // the 208-byte source record per face.
+                resident_root_reused = true;
+                Ok(None)
+            }
+            (Some(device), Some(model), Some(atlas), Some(pipeline), Ok(Some(domains))) => {
+                build_resident_root_backend(
+                    device,
+                    model,
+                    atlas,
+                    pipeline,
+                    domains,
+                    &scene,
+                    source_instances,
+                )
+                .map(Some)
+            }
+            (_, _, _, _, Err(error)) => Err(error),
+            _ => Err("WebGPU resident roots require model, atlas, and pipeline residency".into()),
+        };
+        let (mut resident_root_candidate, mut resident_root_failure) = match resident_root_candidate
+        {
+            Ok(candidate) => (candidate, None),
+            Err(error) => (None, Some(error)),
+        };
         let update_result = {
             let WebGpuBackend {
                 device,
@@ -871,6 +1026,16 @@ pub(crate) fn replace_scene(
                 backend.scene_updates = backend.scene_updates.saturating_add(1);
                 backend.last_frame_input = None;
                 backend.next_morph_weights.clear();
+                if resident_root_reused {
+                    backend.resident_root_scene_reuses =
+                        backend.resident_root_scene_reuses.saturating_add(1);
+                    backend.last_resident_root_error = None;
+                } else {
+                    backend.publish_resident_roots(
+                        resident_root_candidate.take(),
+                        resident_root_failure.take(),
+                    );
+                }
                 backend.last_error = None;
                 return Ok(true);
             }
@@ -925,6 +1090,16 @@ pub(crate) fn replace_scene(
                 backend.last_face_visibility_bits.clear();
                 backend.next_face_visibility_bits.clear();
                 backend.next_morph_weights.clear();
+                if resident_root_reused {
+                    backend.resident_root_scene_reuses =
+                        backend.resident_root_scene_reuses.saturating_add(1);
+                    backend.last_resident_root_error = None;
+                } else {
+                    backend.publish_resident_roots(
+                        resident_root_candidate.take(),
+                        resident_root_failure.take(),
+                    );
+                }
                 backend.last_error = None;
                 Ok(true)
             }
@@ -998,6 +1173,9 @@ pub(crate) fn submit_frame(
             .zip(backend.model.as_ref())
             .and_then(|(device, model)| device.latest_resident_lod(model))
             .map(|resident| resident.classification_epoch());
+        let resident_root_frame = style == RenderStyle::Normals
+            && device_lod_epoch.is_some()
+            && backend.resident_roots.is_some();
         if device_lod_epoch.is_none() {
             if face_visibility.len() != resident_faces {
                 return Err(backend.reject_frame(
@@ -1146,17 +1324,19 @@ pub(crate) fn submit_frame(
                 scene.scene(),
             )
             .map_err(|error| error.to_string())?;
-            device
-                .write_patch_render_pose_state(
-                    model,
-                    scene,
-                    LodPose {
-                        joint_matrices,
-                        morph_weights: &effective_morph_weights,
-                    },
-                    num_joints,
-                )
-                .map_err(|error| error.to_string())?;
+            if !resident_root_frame {
+                device
+                    .write_patch_render_pose_state(
+                        model,
+                        scene,
+                        LodPose {
+                            joint_matrices,
+                            morph_weights: &effective_morph_weights,
+                        },
+                        num_joints,
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
             if visibility_upload_required {
                 device
                     .write_patch_render_face_visibility_bits(scene, &face_visibility_bits)
@@ -1171,6 +1351,8 @@ pub(crate) fn submit_frame(
                         device,
                         model,
                         pipelines,
+                        resident_root_pipeline,
+                        resident_roots,
                         scene,
                         atlas,
                         presentation,
@@ -1191,7 +1373,38 @@ pub(crate) fn submit_frame(
                     let presentation = presentation
                         .as_mut()
                         .ok_or_else(|| "WebGPU presentation surface disappeared".to_string())?;
-                    let presented = if let Some(resident) = model
+                    let presented = if resident_root_frame {
+                        let model = model.as_ref().ok_or_else(|| {
+                            "WebGPU resident root frame requires model residency".to_string()
+                        })?;
+                        let resident = device.latest_resident_lod(model).ok_or_else(|| {
+                            "WebGPU resident root frame lost its LOD epoch".to_string()
+                        })?;
+                        let roots = resident_roots.as_ref().ok_or_else(|| {
+                            "WebGPU resident root frame lost its scene residency".to_string()
+                        })?;
+                        let root_pipeline = resident_root_pipeline.as_ref().ok_or_else(|| {
+                            "WebGPU resident root frame lost its pipeline residency".to_string()
+                        })?;
+                        device.present_resident_root_normals(
+                            presentation,
+                            &frame,
+                            scene.scene(),
+                            model,
+                            &resident,
+                            &roots.preparation,
+                            &roots.geometry,
+                            root_pipeline,
+                            &roots.bindings,
+                            atlas,
+                            LodPose {
+                                joint_matrices,
+                                morph_weights: &effective_morph_weights,
+                            },
+                            num_joints,
+                            true,
+                        )
+                    } else if let Some(resident) = model
                         .as_ref()
                         .and_then(|model| device.latest_resident_lod(model))
                     {
@@ -1245,7 +1458,38 @@ pub(crate) fn submit_frame(
                         .model
                         .as_ref()
                         .and_then(|model| device.latest_resident_lod(model));
-                    let encoding = if let Some(resident) = resident {
+                    let encoding = if resident_root_frame {
+                        let model = backend.model.as_ref().ok_or_else(|| {
+                            "WebGPU resident root frame requires model residency".to_string()
+                        })?;
+                        let resident = resident.ok_or_else(|| {
+                            "WebGPU resident root frame lost its LOD epoch".to_string()
+                        })?;
+                        let roots = backend.resident_roots.as_ref().ok_or_else(|| {
+                            "WebGPU resident root frame lost its scene residency".to_string()
+                        })?;
+                        let root_pipeline = backend.resident_root_pipeline.as_ref().ok_or_else(|| {
+                            "WebGPU resident root frame lost its pipeline residency".to_string()
+                        })?;
+                        device.render_offscreen_resident_root_normals(
+                            &frame,
+                            scene.scene(),
+                            model,
+                            &resident,
+                            &roots.preparation,
+                            &roots.geometry,
+                            root_pipeline,
+                            &roots.bindings,
+                            atlas,
+                            target,
+                            LodPose {
+                                joint_matrices,
+                                morph_weights: &effective_morph_weights,
+                            },
+                            num_joints,
+                            true,
+                        )
+                    } else if let Some(resident) = resident {
                         device
                             .render_offscreen_supported_patch_scene_with_resident_lod_visibility_and_webgl_clear(
                                 &frame,
@@ -1314,6 +1558,9 @@ pub(crate) fn submit_frame(
                 );
                 backend.next_morph_weights = effective_morph_weights;
                 backend.last_frame_input = Some(frame_input);
+                if resident_root_frame {
+                    backend.resident_root_frames = backend.resident_root_frames.saturating_add(1);
+                }
                 backend.last_error = None;
                 Ok(if backend.presentation.is_some() {
                     LiveFrameDisposition::PresentationSubmitted(logical_submission)

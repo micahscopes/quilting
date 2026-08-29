@@ -544,8 +544,20 @@ visibility expansion, stable compaction, and indirect drawing; ordinary frames
 perform neither a visibility upload nor a readback. A partial animated-primary
 request explicitly retires that epoch and exposes the compact CPU-bitset
 adapter again, so it cannot combine a stale full-scene classification with a
-new pose. WebGL2 and the worker remain rollback authority while device-side
-root topology/bucket construction is promoted into the live path.
+new pose. For normals scenes consisting entirely of unsuppressed source roots,
+the live browser backend now continues from that epoch through device root
+topology emission, QB preparation, atlas/parity bucketing, and indirect
+submission. It does not prepare or compact the CPU-authored batch topology for
+that frame. The root scene is published atomically beside the established
+retained scene and has separate readiness, upload, frame, fallback, and error
+diagnostics. Its exact face-to-domain and domain-state key is independent of
+CPU-authored LOD buckets, so ordinary LOD regrouping reuses the same root GPU
+buffers; model/atlas replacement or a real authored-domain change invalidates
+them. Root pipeline/allocation failure is optional and falls back without
+disabling the established WebGPU modes. Adaptive leaves, suppressed roots,
+partial animated-primary classification, and non-normals styles deliberately
+retain the established path; WebGL2 and the worker remain rollback authority
+throughout this bounded promotion.
 
 The next device stage now derives a deterministic retained-root geometry plan
 from the packed resident words themselves. Its bounded bucket domain is sorted
