@@ -1,6 +1,6 @@
 #define_import_path quilting::fragment::pbr
 
-#import quilting::lighting::pbr::{pbr_direct, pbr_ambient, pbr_evaluate_base_color, pbr_evaluate_emissive, pbr_tone_map, PBRInput, env_dfg, fresnel_schlick_roughness, sh_irradiance_fallback, env_specular_fallback}
+#import quilting::lighting::pbr::{pbr_direct, pbr_ambient, pbr_apply_tangent_normal, pbr_evaluate_base_color, pbr_evaluate_emissive, pbr_tone_map, PBRInput, env_dfg, fresnel_schlick_roughness, sh_irradiance_fallback, env_specular_fallback}
 
 struct PbrUniforms {
     base_color: vec4<f32>,
@@ -233,37 +233,18 @@ fn fs_pbr(@builtin(front_facing) front_facing: bool, in: FragInput) -> PbrOutput
             (uv.x * sr + uv.y * cr) * s.y + o.y,
         );
     }
+    var normal_texel = vec4<f32>(0.5, 0.5, 1.0, 1.0);
     if pbr.has_normal_tex > 0.5 {
-        let raw_t = in.tangent_vs;
-        let raw_b = in.bitangent_vs;
-        // Guard against degenerate tangents (NaN/zero from stretched Möbius faces)
-        if dot(raw_t, raw_t) > 1e-6 {
-            var t = normalize(raw_t);
-            t = normalize(t - n * dot(t, n));  // Gram-Schmidt against N
-            if dot(t, t) > 0.5 {               // guard post-projection
-                // Use vertex-computed bitangent to preserve UV handedness.
-                // cross(n, t) always produces a right-handed frame, but UV mirroring
-                // (e.g. V-only flip) requires the bitangent to match the actual UV layout.
-                var b = cross(n, t); // fallback
-                if dot(raw_b, raw_b) > 1e-6 {
-                    // Project vertex bitangent onto plane perpendicular to N and T
-                    var bv = normalize(raw_b);
-                    bv = bv - n * dot(bv, n);
-                    bv = bv - t * dot(bv, t);
-                    if dot(bv, bv) > 0.01 {
-                        b = normalize(bv);
-                    }
-                }
-                let tbn = mat3x3<f32>(t, b, n);
-
-                let nm = textureSample(normal_tex, normal_sampler, normal_uv).xyz;
-                var tangent_n = nm * 2.0 - vec3<f32>(1.0);
-                tangent_n.x = tangent_n.x * pbr.normal_scale;
-                tangent_n.y = tangent_n.y * pbr.normal_scale;
-                n = normalize(tbn * tangent_n);
-            }
-        }
+        normal_texel = textureSample(normal_tex, normal_sampler, normal_uv);
     }
+    n = pbr_apply_tangent_normal(
+        n,
+        in.tangent_vs,
+        in.bitangent_vs,
+        normal_texel,
+        pbr.normal_scale,
+        pbr.has_normal_tex > 0.5,
+    );
 
     // --- Debug: output final computed normal as RGB ---
     if pbr.debug_output > 0.5 {

@@ -27,6 +27,42 @@ fn pbr_tone_map(color_in: vec3<f32>) -> vec3<f32> {
     return pow(mapped, vec3<f32>(1.0 / 2.2));
 }
 
+fn pbr_apply_tangent_normal(
+    geometric_normal: vec3<f32>,
+    raw_tangent: vec3<f32>,
+    raw_bitangent: vec3<f32>,
+    texel: vec4<f32>,
+    normal_scale: f32,
+    enabled: bool,
+) -> vec3<f32> {
+    let normal = normalize(geometric_normal);
+    if !enabled || dot(raw_tangent, raw_tangent) <= 1e-6 {
+        return normal;
+    }
+    let projected_tangent = raw_tangent - normal * dot(raw_tangent, normal);
+    if dot(projected_tangent, projected_tangent) <= 1e-6 {
+        return normal;
+    }
+    let tangent = normalize(projected_tangent);
+    var bitangent = cross(normal, tangent);
+    if dot(raw_bitangent, raw_bitangent) > 1e-6 {
+        let projected_bitangent = raw_bitangent
+            - normal * dot(raw_bitangent, normal)
+            - tangent * dot(raw_bitangent, tangent);
+        if dot(projected_bitangent, projected_bitangent) > 0.01 {
+            bitangent = normalize(projected_bitangent);
+        }
+    }
+    var tangent_normal = texel.xyz * 2.0 - vec3<f32>(1.0);
+    tangent_normal.x = tangent_normal.x * normal_scale;
+    tangent_normal.y = tangent_normal.y * normal_scale;
+    return normalize(
+        tangent * tangent_normal.x
+        + bitangent * tangent_normal.y
+        + normal * tangent_normal.z,
+    );
+}
+
 // GGX/Trowbridge-Reitz normal distribution
 fn distribution_ggx(n_dot_h: f32, roughness: f32) -> f32 {
     let a = roughness * roughness;

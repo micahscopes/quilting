@@ -3,7 +3,7 @@
 #import quilting::surface::patch_prepare::PreparedPatchRecord
 #import quilting::surface::patch_render::{PatchRenderTransform, PatchSurfaceInput, evaluate_patch_surface}
 #import quilting::lighting::matcap::{matcap_shade, procedural_matcap}
-#import quilting::lighting::pbr::{PBRInput, pbr_ambient, pbr_direct, pbr_evaluate_base_color, pbr_evaluate_emissive, pbr_tone_map}
+#import quilting::lighting::pbr::{PBRInput, pbr_ambient, pbr_apply_tangent_normal, pbr_direct, pbr_evaluate_base_color, pbr_evaluate_emissive, pbr_tone_map}
 
 struct PatchRenderFrame {
     mvp: mat4x4<f32>,
@@ -219,22 +219,14 @@ fn shade_patch_pbr(
     if double_sided && !front_facing {
         normal = -normal;
     }
-    if has_normal_texture {
-        let tangent_length = length(input.tangent_vs);
-        let bitangent_length = length(input.bitangent_vs);
-        if tangent_length > 1e-7 && bitangent_length > 1e-7 {
-            let tangent = normalize(input.tangent_vs - normal * dot(normal, input.tangent_vs));
-            let bitangent = normalize(input.bitangent_vs - normal * dot(normal, input.bitangent_vs));
-            var tangent_normal = normal_texel.xyz * 2.0 - vec3<f32>(1.0);
-            tangent_normal.x = tangent_normal.x * material.specular_color_normal_scale.w;
-            tangent_normal.y = tangent_normal.y * material.specular_color_normal_scale.w;
-            normal = normalize(
-                tangent * tangent_normal.x
-                + bitangent * tangent_normal.y
-                + normal * tangent_normal.z,
-            );
-        }
-    }
+    normal = pbr_apply_tangent_normal(
+        normal,
+        input.tangent_vs,
+        input.bitangent_vs,
+        normal_texel,
+        material.specular_color_normal_scale.w,
+        has_normal_texture,
+    );
     let base = pbr_evaluate_base_color(material.base_color, base_texel);
     let alpha_mode = material.surface.z;
     if alpha_mode > 0.5 && alpha_mode < 1.5 && base.a < material.surface.y {
@@ -266,12 +258,7 @@ fn shade_patch_pbr(
     let ior = material.surface.w;
     let ior_f0 = pow((ior - 1.0) / (ior + 1.0), 2.0);
     let f0 = mix(vec3<f32>(ior_f0) * f0_mod, base.rgb, metallic);
-    let view_distance = length(input.position_vs);
-    let view_dir = select(
-        vec3<f32>(0.0, 0.0, 1.0),
-        -input.position_vs / max(view_distance, 1e-7),
-        view_distance > 1e-7,
-    );
+    let view_dir = vec3<f32>(0.0, 0.0, 1.0);
     let key_dir = normalize(vec3<f32>(0.5, 0.8, 0.6));
     let key_color = vec3<f32>(3.0, 2.9, 2.7);
     let key = pbr_direct(PBRInput(
