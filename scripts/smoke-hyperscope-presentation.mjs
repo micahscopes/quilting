@@ -275,6 +275,31 @@ for (const requiredAnimationAdapterStep of [
     `browser animation adapter is missing ${requiredAnimationAdapterStep}`,
   );
 }
+const animationPlaybackAdapter = browserSource.slice(
+  browserSource.indexOf('function setAnimationPlaybackIntent('),
+  browserSource.indexOf('function appShadowUuid('),
+);
+for (const directPlaybackStep of [
+  'app.dispatchAnimationPlaying(requested)',
+  "observeRustAppShadowSequence(receipt.sequence, 'Rust animation playback')",
+  'app.dispatchAnimationToggle()',
+  "observeRustAppShadowSequence(receipt.sequence, 'Rust animation toggle')",
+]) {
+  assert.ok(
+    animationPlaybackAdapter.includes(directPlaybackStep),
+    `browser playback adapter is missing store-allocated dispatch step: ${directPlaybackStep}`,
+  );
+}
+for (const forbiddenPlaybackStep of [
+  'app.setAnimationPlaying(++rustAppShadowSequence',
+  'app.toggleAnimationPlaying(++rustAppShadowSequence',
+]) {
+  assert.equal(
+    animationPlaybackAdapter.includes(forbiddenPlaybackStep),
+    false,
+    `browser playback adapter still allocates an application sequence: ${forbiddenPlaybackStep}`,
+  );
+}
 const animationControlMountBoundary = browserSource.slice(
   browserSource.indexOf('rustAppShadow.mountAnimationControl('),
   browserSource.indexOf(

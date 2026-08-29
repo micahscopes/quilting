@@ -1014,6 +1014,21 @@ impl HyperscopeAppShadow {
         self.dispatch_animation(sequence, AnimationAction::TogglePlaying)
     }
 
+    /// Commit local playback intent through AppStore's sequence authority.
+    /// Explicitly sequenced playback methods remain available for replay and
+    /// shadow adapters, but ordinary browser controls do not allocate Rust
+    /// application sequence numbers.
+    #[wasm_bindgen(js_name = dispatchAnimationPlaying)]
+    pub fn dispatch_animation_playing(&self, playing: bool) -> Result<JsValue, JsValue> {
+        self.dispatch_animation_semantic(AnimationAction::SetPlaying(playing))
+    }
+
+    /// Atomically toggle playback through AppStore's sequence authority.
+    #[wasm_bindgen(js_name = dispatchAnimationToggle)]
+    pub fn dispatch_animation_toggle(&self) -> Result<JsValue, JsValue> {
+        self.dispatch_animation_semantic(AnimationAction::TogglePlaying)
+    }
+
     /// Seek the primary unwrapped scene clock without changing playback or
     /// speed. Clip wrapping remains a renderer concern.
     #[wasm_bindgen(js_name = seekAnimation)]
@@ -1508,6 +1523,21 @@ impl HyperscopeAppShadow {
         })
     }
 
+    fn dispatch_animation_semantic(&self, action: AnimationAction) -> Result<JsValue, JsValue> {
+        let (sequence, commit) = self
+            .store
+            .dispatch_semantic(SemanticAction::Animate(action))
+            .map_err(js_error)?;
+        let animation = self.store.frame_snapshot().animation;
+        to_js(&ShadowDirectAnimationPlaybackReceipt {
+            sequence: sequence.to_string(),
+            commit: shadow_commit(&commit),
+            playing: animation.playing,
+            time_seconds: animation.time_seconds,
+            speed: animation.speed,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn request_asset_scoped(
         &self,
@@ -1711,6 +1741,16 @@ impl From<hyperscope_app::AppRenderSnapshot> for ShadowRenderSettings {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ShadowAnimationPlaybackReceipt {
+    commit: ShadowCommit,
+    playing: bool,
+    time_seconds: f64,
+    speed: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowDirectAnimationPlaybackReceipt {
+    sequence: String,
     commit: ShadowCommit,
     playing: bool,
     time_seconds: f64,

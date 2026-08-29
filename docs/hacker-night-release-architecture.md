@@ -442,6 +442,10 @@ The first application boundary is now explicit:
   error, then 432 Rust authority writes with no fallback or errors, including
   pause and seek. Reverse playback, presentation cue switching, and background
   cadence remain explicit cutover gates.
+  Spacebar, startup, and retained HTML playback intent now also allocate their
+  semantic sequence inside `AppStore`; JavaScript consumes only the committed
+  playback receipt. Explicitly sequenced WASM methods remain as replay/shadow
+  oracles while the independent high-rate clock lane continues to soak.
   Version 0.9 records whether an asset request is independent or replaces the
   primary scene. A 0.8 trace keeps its historical per-asset meaning; it cannot
   smuggle a `primary_scene` request into the older schema.

@@ -282,6 +282,16 @@ assert.equal(app.snapshot().animationPlaying, false);
 const resumedAnimation = app.toggleAnimationPlaying(91);
 assert.equal(resumedAnimation.playing, true);
 assert.equal(app.snapshot().animationPlaying, true);
+const directAnimationApp = new HyperscopeAppShadow();
+const directPause = directAnimationApp.dispatchAnimationPlaying(false);
+assert.equal(directPause.sequence, '0');
+assert.equal(directPause.commit.disposition, 'applied');
+assert.equal(directPause.playing, false);
+const directResume = directAnimationApp.dispatchAnimationToggle();
+assert.equal(directResume.sequence, '1');
+assert.equal(directResume.commit.disposition, 'applied');
+assert.equal(directResume.playing, true);
+directAnimationApp.free();
 const animationClockApp = new HyperscopeAppShadow();
 const restoredAnimation = animationClockApp.setAnimationClock(1, true, 2, -0.5);
 assert.deepEqual(

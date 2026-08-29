@@ -3939,10 +3939,8 @@ function ensureRustAppShadow(reason = 'shadow') {
   globalThis.__hyperscopeAppShadowController = rustAppShadow;
   rustAppShadowDiagnostics.state = reason;
   try {
-    const receipt = rustAppShadow.setAnimationPlaying(
-      rustAppShadowSequence,
-      animating_sig.peek(),
-    );
+    const receipt = rustAppShadow.dispatchAnimationPlaying(animating_sig.peek());
+    observeRustAppShadowSequence(receipt.sequence, 'Rust animation initialization');
     rustAppShadowDiagnostics.lastCommit = receipt.commit;
   } catch (error) {
     rustAppShadowDiagnostics.animationPlaybackErrors += 1;
@@ -3973,7 +3971,8 @@ function setAnimationPlaybackIntent(playing) {
   }
   try {
     const app = ensureRustAppShadow('animation-playback');
-    const receipt = app.setAnimationPlaying(++rustAppShadowSequence, requested);
+    const receipt = app.dispatchAnimationPlaying(requested);
+    observeRustAppShadowSequence(receipt.sequence, 'Rust animation playback');
     rustAppShadowDiagnostics.lastCommit = receipt.commit;
     rustAppShadowDiagnostics.animationPlaybackDispatches += 1;
     if (ANIMATION_CLOCK_IMPLEMENTATION !== 'js') {
@@ -3996,7 +3995,8 @@ function toggleAnimationPlaybackIntent() {
   }
   try {
     const app = ensureRustAppShadow('animation-playback');
-    const receipt = app.toggleAnimationPlaying(++rustAppShadowSequence);
+    const receipt = app.dispatchAnimationToggle();
+    observeRustAppShadowSequence(receipt.sequence, 'Rust animation toggle');
     rustAppShadowDiagnostics.lastCommit = receipt.commit;
     rustAppShadowDiagnostics.animationPlaybackDispatches += 1;
     if (ANIMATION_CLOCK_IMPLEMENTATION !== 'js') {
