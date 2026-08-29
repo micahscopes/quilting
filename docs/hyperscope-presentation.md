@@ -124,6 +124,10 @@ The canonical Rust route registry separately validates the browser spellings
 and ranges for those render controls. In particular, URL `mode=both` maps to
 the backend-neutral `matcap_wire` style, density and atlas values must be
 integers in their supported ranges, and the pixel floor may remain fractional.
+On Rust-authoritative startup the route result contains this complete typed
+render policy, including canonical defaults. JavaScript only converts the
+backend-neutral combined-style name to its legacy control spelling; it does
+not default, round, or clamp an admitted value.
 
 The polytope fixtures are deterministic static GLBs generated from
 `quilting_core::polytope4`. Their closed 3-cell shells are separated before 4D

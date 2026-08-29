@@ -210,7 +210,12 @@ The first application boundary is now explicit:
   registry rather than masquerading as generic text or numbers. Invalid URL
   values therefore produce a Rust route diagnostic and preserve the incumbent
   fallback path; valid values are not silently admitted for a later JavaScript
-  clamp. Removing the remaining adapter-side clamps is a separate cutover.
+  clamp. A successful Rust startup admission now also carries the complete
+  typed `RenderSettings`, with omitted controls resolved from the Rust
+  registry. The browser projects that value exactly into controls; its old
+  defaults and clamps run only for explicit JavaScript authority or a recorded
+  Rust startup fallback. A missing typed projection fails over visibly rather
+  than being mistaken for successful Rust authority.
   Camera links carry explicit `aim=1` when `px/py/pz` is a finite semantic
   target; omitting it means the same visible pose has a free sight tangent.
   Rust validates and canonically orders that policy, and selection or model

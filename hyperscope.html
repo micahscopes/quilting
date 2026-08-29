@@ -673,6 +673,7 @@ const rustRouteShadowDiagnostics = {
   startupBrowserQuery: null,
   startupRustQuery: null,
   startupDiagnostics: [],
+  startupFallbackReason: null,
 };
 globalThis.__hyperscopeRouteShadowDiagnostics = rustRouteShadowDiagnostics;
 
@@ -7791,7 +7792,7 @@ effect(() => {
 });
 
 // --- applyParams: set all signals from URL params (defined after all signals exist) ---
-applyParams = function(params) {
+applyParams = function(params, validatedRenderSettings = null) {
   const finite = (value, fallback, minimum, maximum) => {
     const parsed = Number(value);
     if (!Number.isFinite(parsed)) return fallback;
@@ -7799,7 +7800,9 @@ applyParams = function(params) {
   };
   const integer = (value, fallback, minimum, maximum) =>
     Math.round(finite(value, fallback, minimum, maximum));
-  renderMode.set(params.mode || 'pbr');
+  const routeRenderMode = validatedRenderSettings?.style === 'matcap_wire'
+    ? 'both' : validatedRenderSettings?.style;
+  renderMode.set(routeRenderMode ?? params.mode ?? 'pbr');
   // URL restoration is one chart request. Enabling inversion against the
   // default sphere before installing the linked center/radius can encounter a
   // transient pole and incorrectly leave an otherwise-safe deep link in the
@@ -7821,12 +7824,21 @@ applyParams = function(params) {
   );
   envMap.set(params.env || 'rosendal_plains_1_1k');
   matcap.set(params.matcap || 'citric-acid');
-  lod.res.set(integer(params.res, 0, 0, 6));
-  lod.density.set(integer(params.density, 100, 1, 500));
-  lod.screenAtten.set(params.atten !== '0');
-  lod.minPx.set(finite(params.minpx, 16, 1, 64));
-  lod.atlas.set(integer(params.atlas, 7, 3, 9));
-  lod.grading.set(params.lodratio === '4' ? '4' : '2');
+  if (validatedRenderSettings) {
+    lod.res.set(validatedRenderSettings.resolutionLevel);
+    lod.density.set(validatedRenderSettings.density);
+    lod.screenAtten.set(validatedRenderSettings.screenAttenuation);
+    lod.minPx.set(validatedRenderSettings.minPixelsPerSubdivision);
+    lod.atlas.set(validatedRenderSettings.atlasExponent);
+    lod.grading.set(String(validatedRenderSettings.maxFaceEdgeRatio));
+  } else {
+    lod.res.set(integer(params.res, 0, 0, 6));
+    lod.density.set(integer(params.density, 100, 1, 500));
+    lod.screenAtten.set(params.atten !== '0');
+    lod.minPx.set(finite(params.minpx, 16, 1, 64));
+    lod.atlas.set(integer(params.atlas, 7, 3, 9));
+    lod.grading.set(params.lodratio === '4' ? '4' : '2');
+  }
   setAnimationPlaybackIntent(params.animate !== '0');
   pendingRouteAnimationClock = params.animtimeProvided || params.animspeedProvided
     ? Object.freeze({
@@ -7871,7 +7883,8 @@ applyParams = function(params) {
   patchLab.shape = patchLabShape(params.lab) || 'triangle';
   $('patch-lab-field').value = PATCH_LAB_FIELDS.has(params.labfield)
     ? params.labfield : 'edges';
-  const atlasExp = integer(params.atlas, 7, 3, 9);
+  const atlasExp = validatedRenderSettings?.atlasExponent
+    ?? integer(params.atlas, 7, 3, 9);
   for (const [id, value, fallback] of [
     ['patch-lab-edge-a', params.laba, 3],
     ['patch-lab-edge-b', params.labb, 4],
@@ -10793,6 +10806,7 @@ globalThis.__hyperscopeLocalPeer = Object.freeze({
 // Bootstrap platform flags and an inert camera preview from the raw query.
 // Rust route mode re-decodes valid pairs before any application state is set.
 let initParams = readParams(initialRouteParams);
+let initRenderSettings = null;
 currentGlb = initParams.glb;
 let initialPatchLabShape = patchLabShape(initParams.lab);
 // Set camera early (not WASM-dependent)
@@ -10831,13 +10845,21 @@ phase('wasm', [], async () => {
       : null;
     rustRouteShadowDiagnostics.startupDiagnostics = startupRoute?.diagnostics || [];
     if (RUST_ROUTE_IMPLEMENTATION === 'rust') {
-      if (startupRoute && startupRoute.diagnostics.length === 0) {
+      if (startupRoute
+          && startupRoute.diagnostics.length === 0
+          && startupRoute.renderSettings) {
         initParams = readParams(new URLSearchParams(startupRoute.pairs));
+        initRenderSettings = startupRoute.renderSettings;
         currentGlb = initParams.glb;
         initialPatchLabShape = patchLabShape(initParams.lab);
         rustRouteShadowDiagnostics.startupSource = 'rust';
       } else {
         rustRouteShadowDiagnostics.startupSource = 'browser-fallback';
+        rustRouteShadowDiagnostics.startupFallbackReason = !startupRoute
+          ? 'route-bridge-error'
+          : startupRoute.diagnostics.length > 0
+            ? 'route-diagnostics'
+            : 'missing-typed-render-settings';
       }
     } else {
       rustRouteShadowDiagnostics.startupSource = 'browser';
@@ -10893,7 +10915,7 @@ phase('wasm', [], async () => {
     rendererInitMs: rendererFinished - instantiateFinished,
     sharedCompiledModule: true,
   };
-  applyParams(initParams); // Set signal values first
+  applyParams(initParams, initRenderSettings); // Set signal values first
   activeLodGradingRatio = Number(lod.grading.peek());
   if (!mr_setLodGradingRatio(activeLodGradingRatio)) {
     throw new Error(`renderer rejected ${activeLodGradingRatio}:1 LOD grading`);

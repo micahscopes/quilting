@@ -3,9 +3,11 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct RouteShadowResult {
     pairs: Vec<[String; 2]>,
     diagnostics: Vec<RouteShadowDiagnostic>,
+    render_settings: Option<RouteRenderSettings>,
 }
 
 #[derive(Serialize)]
@@ -21,6 +23,18 @@ struct RouteControlSpec {
     key: &'static str,
     default_value: &'static str,
     kind: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RouteRenderSettings {
+    style: &'static str,
+    resolution_level: u8,
+    density: f64,
+    screen_attenuation: bool,
+    min_pixels_per_subdivision: f64,
+    atlas_exponent: u8,
+    max_face_edge_ratio: u8,
 }
 
 /// Canonicalize already-decoded browser query pairs. Percent decoding and
@@ -44,7 +58,23 @@ pub fn canonicalize_hyperscope_route(pairs: JsValue) -> Result<JsValue, JsValue>
             value: diagnostic.value.clone(),
         })
         .collect();
-    to_js(&RouteShadowResult { pairs, diagnostics })
+    let render_settings = route
+        .render_settings()
+        .ok()
+        .map(|settings| RouteRenderSettings {
+            style: settings.style.wire_name(),
+            resolution_level: settings.resolution_level,
+            density: settings.tessellation.density,
+            screen_attenuation: settings.tessellation.screen_attenuation,
+            min_pixels_per_subdivision: settings.tessellation.min_pixels_per_subdivision,
+            atlas_exponent: settings.atlas_exponent,
+            max_face_edge_ratio: settings.max_face_edge_ratio,
+        });
+    to_js(&RouteShadowResult {
+        pairs,
+        diagnostics,
+        render_settings,
+    })
 }
 
 #[wasm_bindgen(js_name = hyperscopeControlSpecs)]

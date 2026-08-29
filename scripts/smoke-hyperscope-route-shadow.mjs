@@ -61,6 +61,26 @@ for (const mode of ['pbr', 'matcap', 'wire', 'normals', 'both', 'lod', 'stretch'
 for (const mode of ['matcap_wire', 'PBR', 'browser_magic']) {
   assert.equal(canonicalizeHyperscopeRoute([['mode', mode]]).diagnostics[0].code, 'invalid_value');
 }
+
+const typedRenderRoute = canonicalizeHyperscopeRoute([
+  ['mode', 'both'],
+  ['res', '4'],
+  ['density', '237'],
+  ['atten', '0'],
+  ['minpx', '48.25'],
+  ['atlas', '9'],
+  ['lodratio', '4'],
+]);
+assert.deepEqual(typedRenderRoute.renderSettings, {
+  style: 'matcap_wire',
+  resolutionLevel: 4,
+  density: 237,
+  screenAttenuation: false,
+  minPixelsPerSubdivision: 48.25,
+  atlasExponent: 9,
+  maxFaceEdgeRatio: 4,
+});
+assert.equal(canonicalizeHyperscopeRoute([['mode', 'matcap_wire']]).renderSettings, undefined);
 for (const [key, value] of [
   ['res', '7'], ['res', '3.5'],
   ['density', '0'], ['density', '12.5'], ['density', '501'],
@@ -543,10 +563,13 @@ const startupAdapter = browserSource.slice(
 );
 for (const startupStep of [
   'const startupRoute = evaluateRustRoute(startupBrowserParams, false);',
-  'startupRoute && startupRoute.diagnostics.length === 0',
+  'startupRoute.diagnostics.length === 0',
+  '&& startupRoute.renderSettings',
   'initParams = readParams(new URLSearchParams(startupRoute.pairs));',
+  'initRenderSettings = startupRoute.renderSettings;',
   "rustRouteShadowDiagnostics.startupSource = 'browser-fallback';",
-  'applyParams(initParams);',
+  "'missing-typed-render-settings'",
+  'applyParams(initParams, initRenderSettings);',
 ]) {
   assert.ok(
     startupAdapter.includes(startupStep),
@@ -555,9 +578,28 @@ for (const startupStep of [
 }
 assert.ok(
   startupAdapter.indexOf('initParams = readParams(new URLSearchParams(startupRoute.pairs));')
-    < startupAdapter.indexOf('applyParams(initParams);'),
+    < startupAdapter.indexOf('applyParams(initParams, initRenderSettings);'),
   'Rust startup decoding must finish before browser state is applied',
 );
+
+const applyParamsSource = browserSource.match(
+  /applyParams = function\(params, validatedRenderSettings = null\) \{([\s\S]*?)\n\};\n\n\/\/ --- IndexedDB/,
+)?.[1];
+assert.ok(applyParamsSource, 'could not locate browser startup state adapter');
+for (const exactProjection of [
+  'renderMode.set(routeRenderMode ?? params.mode ?? \'pbr\');',
+  'lod.res.set(validatedRenderSettings.resolutionLevel);',
+  'lod.density.set(validatedRenderSettings.density);',
+  'lod.screenAtten.set(validatedRenderSettings.screenAttenuation);',
+  'lod.minPx.set(validatedRenderSettings.minPixelsPerSubdivision);',
+  'lod.atlas.set(validatedRenderSettings.atlasExponent);',
+  'lod.grading.set(String(validatedRenderSettings.maxFaceEdgeRatio));',
+]) {
+  assert.ok(
+    applyParamsSource.includes(exactProjection),
+    `Rust-admitted startup render state is missing exact projection: ${exactProjection}`,
+  );
+}
 
 const canonical = canonicalizeHyperscopeRoute([
   ['zoom', '3.00'],

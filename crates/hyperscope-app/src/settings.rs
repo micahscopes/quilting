@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
 
+use crate::RenderSettings;
+use hyperscape::{PresentationTessellation, RenderStyle};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlValueKind {
     Text,
@@ -331,6 +334,62 @@ impl HyperscopeRoute {
             .collect()
     }
 
+    /// Resolve the route's complete renderer-independent render policy.
+    ///
+    /// Omitted values come from the canonical Rust control registry. Browser
+    /// adapters may convert the resulting numbers into control values, but
+    /// must not apply another default or range policy after route admission.
+    pub fn render_settings(&self) -> Result<RenderSettings, &'static str> {
+        let style = match self.value("mode") {
+            Some("pbr") => RenderStyle::Pbr,
+            Some("matcap") => RenderStyle::Matcap,
+            Some("wire") => RenderStyle::Wire,
+            Some("normals") => RenderStyle::Normals,
+            Some("both") => RenderStyle::MatcapWire,
+            Some("lod") => RenderStyle::Lod,
+            Some("stretch") => RenderStyle::Stretch,
+            _ => return Err("route render mode is invalid"),
+        };
+        let resolution_level = self
+            .value("res")
+            .and_then(|value| value.parse::<u8>().ok())
+            .ok_or("route resolution level is invalid")?;
+        let density = self
+            .value("density")
+            .and_then(|value| value.parse::<f64>().ok())
+            .ok_or("route tessellation density is invalid")?;
+        let screen_attenuation = match self.value("atten") {
+            Some("0") => false,
+            Some("1") => true,
+            _ => return Err("route screen attenuation value is invalid"),
+        };
+        let min_pixels_per_subdivision = self
+            .value("minpx")
+            .and_then(|value| value.parse::<f64>().ok())
+            .ok_or("route pixel floor is invalid")?;
+        let atlas_exponent = self
+            .value("atlas")
+            .and_then(|value| value.parse::<u8>().ok())
+            .ok_or("route atlas exponent is invalid")?;
+        let max_face_edge_ratio = self
+            .value("lodratio")
+            .and_then(|value| value.parse::<u8>().ok())
+            .ok_or("route face-edge ratio is invalid")?;
+
+        RenderSettings {
+            style,
+            resolution_level,
+            tessellation: PresentationTessellation {
+                density,
+                screen_attenuation,
+                min_pixels_per_subdivision,
+            },
+            atlas_exponent,
+            max_face_edge_ratio,
+        }
+        .validate()
+    }
+
     pub fn diagnostics(&self) -> &[RouteDiagnostic] {
         &self.diagnostics
     }
@@ -560,6 +619,37 @@ mod tests {
         assert!(HyperscopeRoute::from_pairs([("minpx", "16.0")])
             .canonical_pairs()
             .is_empty());
+
+        let route = HyperscopeRoute::from_pairs([
+            ("mode", "both"),
+            ("res", "4"),
+            ("density", "237"),
+            ("atten", "0"),
+            ("minpx", "48.25"),
+            ("atlas", "9"),
+            ("lodratio", "4"),
+        ]);
+        assert_eq!(
+            route.render_settings().unwrap(),
+            RenderSettings {
+                style: RenderStyle::MatcapWire,
+                resolution_level: 4,
+                tessellation: PresentationTessellation {
+                    density: 237.0,
+                    screen_attenuation: false,
+                    min_pixels_per_subdivision: 48.25,
+                },
+                atlas_exponent: 9,
+                max_face_edge_ratio: 4,
+            }
+        );
+        assert_eq!(
+            HyperscopeRoute::default().render_settings().unwrap(),
+            RenderSettings::default(),
+        );
+        assert!(HyperscopeRoute::from_pairs([("mode", "matcap_wire")])
+            .render_settings()
+            .is_err());
     }
 
     #[test]
