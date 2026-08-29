@@ -346,6 +346,14 @@ for (const animationClipAuthorityStep of [
   'let rendererSwitched = false;',
   'if (!rendererSwitched) {',
   'Animation switched, but Rust completion failed:',
+  'globalThis.__hyperscopeAnimationClipDiagnostics = animationClipDiagnostics;',
+  "observeAnimationClipResidency('scene-installed', snapshot);",
+  "observeAnimationClipResidency('selection-pending');",
+  "observeAnimationClipResidency(error ? 'selection-failed' : 'selection-complete', snapshot);",
+  'if (clipJob && !clipJob.effect && rendererAnimationClipIndex === idx) {',
+  'animationClipDiagnostics.repairs += 1;',
+  'rendererAnimationClipIndex = null;',
+  'rendererAnimationClipIndex = idx;',
 ]) {
   assert.ok(
     browserSource.includes(animationClipAuthorityStep),

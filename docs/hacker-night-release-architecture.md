@@ -403,6 +403,13 @@ The first application boundary is now explicit:
   until live clip-switch parity is measured. A 0.20 replay retains its
   historical installed catalog without gaining application-owned active-clip
   state or asynchronous clip jobs.
+  The browser records a separate scalar renderer-residency witness only after
+  the clip's worker, skin/morph textures, rest instances, LOD compute model,
+  and same-context residency are coherent. This is platform resource state,
+  not a second semantic controller. `__hyperscopeAnimationClipDiagnostics`
+  compares it with Rust's active clip after install, pending selection,
+  completion, failure, and explicit same-clip repair; a Rust no-op cannot hide
+  missing renderer residency.
   Version 0.20 separates a successfully fetched/decoded primary candidate from
   a renderer-resident primary scene. Decode emits an explicit
   `InstallPrimaryScene` effect; only a matching, validated completion can
