@@ -147,13 +147,23 @@ command by compacting visible instances and emitting indirect draw counts.
 The command contract deliberately says nothing about transform feedback,
 storage buffers, or GPU handles.
 
+`RenderFrame::execution` is the validated, allocation-free lowering seam. It
+rejects a stale scene revision or any noncanonical command sequence before
+device work, then resolves every batch command to the immutable batch metadata
+and exact index count it addresses. WebGPU validation, atlas admission, ordered
+draw traversal, highlight admission, and workload accounting consume that one
+view; extending the command enum therefore fails closed until the backend
+handles the new command. The live WebGL2 dispatcher still consumes the shared
+pass plan and is checked by the exact submission fingerprint. Moving it onto
+the resolved execution view is the next cutover gate, not a claimed parity
+result.
+
 `RenderStyle` also resolves to one canonical ordered `RenderDrawPassPlan`
 slice. Each pass names its geometry and semantic batch selection (`all`, PBR
-opaque, or PBR non-opaque). `RenderFrame` extraction and the WebGL2 dispatcher
-iterate this same plan; shader selection, material binding, and API resources
-remain backend-local. A future WebGPU dispatcher can therefore consume the
-same ordering and batch selection while lowering submission to compacted
-indirect draws.
+opaque, or PBR non-opaque). `RenderFrame` construction and the incumbent WebGL2
+dispatcher iterate this same plan; shader selection, material binding, and API
+resources remain backend-local. The WebGPU dispatcher consumes the resulting
+resolved command order while lowering submission to compacted indirect draws.
 
 The invalidation predicate is shared as well: preparation changes with source
 pose, resident topology, or the entity's ordinary affine model; visibility
