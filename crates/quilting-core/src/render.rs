@@ -1204,6 +1204,158 @@ pub struct RenderFrame {
     pub commands: Vec<RenderCommand>,
 }
 
+/// One validated logical command resolved against the immutable scene it
+/// addresses. Backend resources deliberately remain outside this value; a
+/// renderer uses `batch_index` to select its retained device allocation while
+/// consuming the canonical batch metadata and draw cardinality from here.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ResolvedRenderCommand<'scene> {
+    PreparePatches {
+        batch_index: u32,
+        batch: &'scene RenderBatchSnapshot,
+        instance_count: u32,
+    },
+    ResolveVisibility {
+        batch_index: u32,
+        batch: &'scene RenderBatchSnapshot,
+        instance_count: u32,
+    },
+    DrawPatches {
+        batch_index: u32,
+        batch: &'scene RenderBatchSnapshot,
+        instance_count: u32,
+        pass: RenderPass,
+        geometry: RenderGeometry,
+        index_count: u32,
+    },
+    BuildTransmissionPyramid,
+    FocusPostProcess,
+    HighlightFace {
+        face_index: u32,
+    },
+}
+
+/// Validated, allocation-free execution view over a [`RenderFrame`].
+///
+/// Constructing this view proves the scene revision and entire command stream
+/// before a backend can touch device state. Iteration then resolves batch
+/// references and index counts without backend-specific pass reconstruction.
+#[derive(Debug, Clone, Copy)]
+pub struct RenderExecution<'frame, 'scene> {
+    frame: &'frame RenderFrame,
+    scene: &'scene RenderSceneSnapshot,
+}
+
+impl<'frame, 'scene> RenderExecution<'frame, 'scene> {
+    pub fn iter(self) -> RenderExecutionIter<'frame, 'scene> {
+        RenderExecutionIter {
+            commands: self.frame.commands.iter(),
+            scene: self.scene,
+        }
+    }
+
+    /// Derive the exact logical indexed work without revalidating or allocating.
+    pub fn submission_stats(self) -> RenderSubmissionStats {
+        let mut stats = RenderSubmissionStats::default();
+        for command in self {
+            let ResolvedRenderCommand::DrawPatches {
+                batch_index,
+                instance_count,
+                pass,
+                geometry,
+                index_count,
+                ..
+            } = command
+            else {
+                continue;
+            };
+            stats.record_patch_draw(
+                batch_index,
+                pass,
+                geometry,
+                index_count,
+                instance_count,
+            );
+        }
+        stats
+    }
+}
+
+impl<'frame, 'scene> IntoIterator for RenderExecution<'frame, 'scene> {
+    type Item = ResolvedRenderCommand<'scene>;
+    type IntoIter = RenderExecutionIter<'frame, 'scene>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RenderExecutionIter<'frame, 'scene> {
+    commands: std::slice::Iter<'frame, RenderCommand>,
+    scene: &'scene RenderSceneSnapshot,
+}
+
+impl<'scene> Iterator for RenderExecutionIter<'_, 'scene> {
+    type Item = ResolvedRenderCommand<'scene>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let command = *self.commands.next()?;
+        Some(match command {
+            RenderCommand::PreparePatches {
+                batch_index,
+                instance_count,
+            } => ResolvedRenderCommand::PreparePatches {
+                batch_index,
+                batch: &self.scene.batches[batch_index as usize],
+                instance_count,
+            },
+            RenderCommand::ResolveVisibility {
+                batch_index,
+                instance_count,
+            } => ResolvedRenderCommand::ResolveVisibility {
+                batch_index,
+                batch: &self.scene.batches[batch_index as usize],
+                instance_count,
+            },
+            RenderCommand::DrawPatches {
+                batch_index,
+                instance_count,
+                pass,
+                geometry,
+            } => {
+                let batch = &self.scene.batches[batch_index as usize];
+                let index_count = match geometry {
+                    RenderGeometry::Triangles => batch.triangle_index_count,
+                    RenderGeometry::Lines => batch.line_index_count,
+                };
+                ResolvedRenderCommand::DrawPatches {
+                    batch_index,
+                    batch,
+                    instance_count,
+                    pass,
+                    geometry,
+                    index_count,
+                }
+            }
+            RenderCommand::BuildTransmissionPyramid => {
+                ResolvedRenderCommand::BuildTransmissionPyramid
+            }
+            RenderCommand::FocusPostProcess => ResolvedRenderCommand::FocusPostProcess,
+            RenderCommand::HighlightFace { face_index } => {
+                ResolvedRenderCommand::HighlightFace { face_index }
+            }
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.commands.size_hint()
+    }
+}
+
+impl ExactSizeIterator for RenderExecutionIter<'_, '_> {}
+impl std::iter::FusedIterator for RenderExecutionIter<'_, '_> {}
+
 impl RenderFrame {
     #[allow(clippy::too_many_arguments)]
     pub fn build(
@@ -1249,6 +1401,16 @@ impl RenderFrame {
         Ok(())
     }
 
+    /// Validate once and expose the exact backend-neutral command execution
+    /// order with all scene-dependent batch metadata resolved.
+    pub fn execution<'frame, 'scene>(
+        &'frame self,
+        scene: &'scene RenderSceneSnapshot,
+    ) -> Result<RenderExecution<'frame, 'scene>, RenderContractError> {
+        self.validate(scene)?;
+        Ok(RenderExecution { frame: self, scene })
+    }
+
     /// Derive the indexed patch work implied by this validated frame. This is
     /// the backend-independent side of render shadowing; concrete renderers
     /// record an actual [`RenderSubmissionStats`] at their draw boundary.
@@ -1256,35 +1418,7 @@ impl RenderFrame {
         &self,
         scene: &RenderSceneSnapshot,
     ) -> Result<RenderSubmissionStats, RenderContractError> {
-        self.validate(scene)?;
-        let mut stats = RenderSubmissionStats::default();
-        for command in &self.commands {
-            let RenderCommand::DrawPatches {
-                batch_index,
-                instance_count,
-                pass,
-                geometry,
-            } = *command
-            else {
-                continue;
-            };
-            let batch = scene
-                .batches
-                .get(batch_index as usize)
-                .ok_or(RenderContractError::CommandBatchMissing { batch_index })?;
-            let index_count = match geometry {
-                RenderGeometry::Triangles => batch.triangle_index_count,
-                RenderGeometry::Lines => batch.line_index_count,
-            };
-            stats.record_patch_draw(
-                batch_index,
-                pass,
-                geometry,
-                index_count,
-                instance_count,
-            );
-        }
-        Ok(stats)
+        Ok(self.execution(scene)?.submission_stats())
     }
 }
 
@@ -1440,7 +1574,6 @@ pub enum RenderContractError {
     CompactionBatchShapeMismatch,
     SceneRevisionMismatch { frame: u64, scene: u64 },
     CommandSequenceMismatch,
-    CommandBatchMissing { batch_index: u32 },
     ObserverDisabled,
     ObserverSceneUnavailable,
 }
@@ -1552,12 +1685,6 @@ impl fmt::Display for RenderContractError {
             ),
             Self::CommandSequenceMismatch => {
                 formatter.write_str("render command sequence is not canonical")
-            }
-            Self::CommandBatchMissing { batch_index } => {
-                write!(
-                    formatter,
-                    "render command references missing batch {batch_index}"
-                )
             }
             Self::ObserverDisabled => formatter.write_str("render parity observer is disabled"),
             Self::ObserverSceneUnavailable => {
@@ -1896,6 +2023,87 @@ mod tests {
         );
         assert_eq!(frame.expected_submission_stats(&scene).unwrap(), expected);
         frame.validate(&scene).unwrap();
+    }
+
+    #[test]
+    fn validated_execution_resolves_exact_batches_counts_and_command_order() {
+        let scene = scene();
+        let frame = RenderFrame::build(
+            12,
+            RenderPoseIdentity {
+                asset_revision: 2,
+                pose_revision: 9,
+            },
+            RenderStyle::Pbr,
+            view(),
+            RenderFrameOptions {
+                focus_postprocess: Some(FocusPostprocessPacket {
+                    mode: FocusPostprocessMode::Spheroidal,
+                    blur_radius_pixels: 11,
+                    blur_strength: 1.0,
+                    focus_coordinate: 0.5,
+                    bandwidth: 0.1,
+                    normalize_range: false,
+                    stretch_range: [0.5, 0.5],
+                    gaussian_passes: 1,
+                    kawase_passes: 3,
+                    kawase_offset: 1.5,
+                }),
+                ..RenderFrameOptions::default()
+            },
+            &scene,
+        )
+        .unwrap();
+
+        let commands = frame.execution(&scene).unwrap().into_iter().collect::<Vec<_>>();
+        assert_eq!(commands.len(), frame.commands.len());
+        assert!(matches!(
+            commands[1],
+            ResolvedRenderCommand::PreparePatches {
+                batch_index: 1,
+                batch,
+                instance_count: 0,
+            } if std::ptr::eq(batch, &scene.batches[1])
+        ));
+        assert!(matches!(
+            commands[6],
+            ResolvedRenderCommand::DrawPatches {
+                batch_index: 0,
+                batch,
+                instance_count: 1,
+                pass: RenderPass::PbrOpaque,
+                geometry: RenderGeometry::Triangles,
+                index_count: 6,
+            } if std::ptr::eq(batch, &scene.batches[0])
+        ));
+        assert_eq!(
+            commands[7],
+            ResolvedRenderCommand::BuildTransmissionPyramid
+        );
+        assert_eq!(commands[10], ResolvedRenderCommand::FocusPostProcess);
+    }
+
+    #[test]
+    fn execution_rejects_mutated_commands_before_iteration() {
+        let scene = scene();
+        let mut frame = RenderFrame::build(
+            13,
+            RenderPoseIdentity {
+                asset_revision: 2,
+                pose_revision: 9,
+            },
+            RenderStyle::Matcap,
+            view(),
+            RenderFrameOptions::default(),
+            &scene,
+        )
+        .unwrap();
+        frame.commands.swap(0, 1);
+
+        assert_eq!(
+            frame.execution(&scene).unwrap_err(),
+            RenderContractError::CommandSequenceMismatch
+        );
     }
 
     #[test]

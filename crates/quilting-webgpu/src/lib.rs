@@ -60,10 +60,10 @@ use quilting_core::material::{
     PbrMaterial, Rgba8TextureAsset, TextureAssetDescriptor, TextureWrapMode,
 };
 use quilting_core::render::{
-    render_draw_passes, FocusFieldPacket, PbrDrawClass, RenderBatchSnapshot, RenderCommand,
+    render_draw_passes, FocusFieldPacket, PbrDrawClass, RenderBatchSnapshot,
     RenderEntityTransform, RenderFrame, RenderFrameOptions, RenderGeometry, RenderPass,
     RenderPoseIdentity, RenderSceneSnapshot, RenderStyle, RenderSubmissionStats, RenderView,
-    ResidentRootDrawDomain, ResidentRootDrawDomains,
+    ResolvedRenderCommand, ResidentRootDrawDomain, ResidentRootDrawDomains,
 };
 use quilting_core::render_evidence::{
     render_image_signature, RenderImageChannelOrder, RenderImageOrigin, RenderImageSignature,
@@ -5829,8 +5829,8 @@ impl LodClassifierDevice {
             &VisibilityCompactionScene,
         ) -> Result<(), LodWebGpuError>,
     {
-        frame
-            .validate(scene)
+        let execution = frame
+            .execution(scene)
             .map_err(|error| LodWebGpuError::Payload(format!("render frame contract: {error}")))?;
         if frame.style == RenderStyle::Pbr {
             if raw_field_target.is_some() {
@@ -5879,36 +5879,34 @@ impl LodClassifierDevice {
 
         // Keep unsupported commands explicit even after shared validation, so
         // extending RenderFrame cannot silently lower to the wrong pipeline.
-        for command in &frame.commands {
+        for command in execution {
             match command {
-                RenderCommand::PreparePatches { .. } | RenderCommand::ResolveVisibility { .. } => {}
-                RenderCommand::DrawPatches {
+                ResolvedRenderCommand::PreparePatches { .. }
+                | ResolvedRenderCommand::ResolveVisibility { .. } => {}
+                ResolvedRenderCommand::DrawPatches {
                     batch_index,
+                    batch,
                     pass,
                     geometry,
+                    index_count,
                     ..
                 } => {
-                    let pipeline = resolve_pipeline(*pass, *geometry)?;
-                    if pipeline.geometry != *geometry {
+                    let pipeline = resolve_pipeline(pass, geometry)?;
+                    if pipeline.geometry != geometry {
                         return Err(LodWebGpuError::Payload(format!(
                             "WebGPU {pass:?} pipeline uses {:?}, but the frame requires {geometry:?}",
                             pipeline.geometry,
                         )));
                     }
-                    let batch = &scene.batches[*batch_index as usize];
-                    let draw = atlas.draw(batch.id.key.lod, *geometry).ok_or_else(|| {
+                    let draw = atlas.draw(batch.id.key.lod, geometry).ok_or_else(|| {
                         LodWebGpuError::Payload(format!(
                             "packed WebGPU atlas is missing batch {batch_index} key {:?} for {geometry:?}",
                             batch.id.key.lod,
                         ))
                     })?;
-                    let expected_count = match geometry {
-                        RenderGeometry::Triangles => batch.triangle_index_count,
-                        RenderGeometry::Lines => batch.line_index_count,
-                    };
-                    if draw.index_count != expected_count {
+                    if draw.index_count != index_count {
                         return Err(LodWebGpuError::Payload(format!(
-                            "WebGPU atlas batch {batch_index} has {} {geometry:?} indices; scene requires {expected_count}",
+                            "WebGPU atlas batch {batch_index} has {} {geometry:?} indices; scene requires {index_count}",
                             draw.index_count,
                         )));
                     }
@@ -5932,7 +5930,7 @@ impl LodClassifierDevice {
                         )));
                     }
                 }
-                RenderCommand::HighlightFace { .. } if highlight_pipeline.is_some() => {}
+                ResolvedRenderCommand::HighlightFace { .. } if highlight_pipeline.is_some() => {}
                 unsupported => {
                     return Err(LodWebGpuError::Payload(format!(
                         "WebGPU patch renderer does not yet support command {unsupported:?}",
@@ -6014,17 +6012,17 @@ impl LodClassifierDevice {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            for command in &frame.commands {
-                let RenderCommand::DrawPatches {
+            for command in execution {
+                let ResolvedRenderCommand::DrawPatches {
                     batch_index,
+                    batch,
                     pass,
                     geometry,
                     ..
-                } = *command
+                } = command
                 else {
                     continue;
                 };
-                let batch = &scene.batches[batch_index as usize];
                 let draw = atlas.draw(batch.id.key.lod, geometry).ok_or_else(|| {
                     LodWebGpuError::Payload(format!(
                         "packed WebGPU atlas lost batch {batch_index} key {:?} for {geometry:?}",
@@ -6055,7 +6053,10 @@ impl LodClassifierDevice {
                 )?;
                 indirect_draw_calls = indirect_draw_calls.saturating_add(1);
             }
-            if frame.options.highlight_face.is_some() {
+            if execution
+                .into_iter()
+                .any(|command| matches!(command, ResolvedRenderCommand::HighlightFace { .. }))
+            {
                 let highlight_pipeline = highlight_pipeline.ok_or_else(|| {
                     LodWebGpuError::Payload(
                         "WebGPU patch renderer has no selection highlight pipeline".to_string(),
@@ -6094,9 +6095,7 @@ impl LodClassifierDevice {
             }
         }
 
-        let logical_submission = frame
-            .expected_submission_stats(scene)
-            .map_err(|error| LodWebGpuError::Payload(format!("render frame contract: {error}")))?;
+        let logical_submission = execution.submission_stats();
         Ok(PatchFrameEncoding {
             logical_submission,
             indirect_draw_calls,
