@@ -32,6 +32,98 @@ pub struct FocusPostprocessPipelines {
     output_format: wgpu::TextureFormat,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FocusRenderPipelineKind {
+    SelectWeight,
+    JfaInit,
+    JfaStep,
+    Firmness,
+    Kawase,
+    DirectionalBlurIntermediate,
+    DirectionalBlurOutput,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FocusPipelineTarget {
+    Intermediate,
+    SceneColor,
+    Output,
+}
+
+impl FocusPipelineTarget {
+    const fn functional_format(
+        self,
+        output_format: functional::TextureFormat,
+    ) -> functional::TextureFormat {
+        match self {
+            Self::Intermediate => functional::TextureFormat::Rgba16Float,
+            Self::SceneColor => functional::TextureFormat::Rgba8Unorm,
+            Self::Output => output_format,
+        }
+    }
+
+    const fn webgpu_format(self, output_format: wgpu::TextureFormat) -> wgpu::TextureFormat {
+        match self {
+            Self::Intermediate => wgpu::TextureFormat::Rgba16Float,
+            Self::SceneColor => wgpu::TextureFormat::Rgba8Unorm,
+            Self::Output => output_format,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FocusPipelinePass {
+    kind: FocusRenderPipelineKind,
+    label: &'static str,
+    fragment_entry_point: &'static str,
+    target: FocusPipelineTarget,
+}
+
+const FOCUS_PIPELINE_PASSES: [FocusPipelinePass; 7] = [
+    FocusPipelinePass {
+        kind: FocusRenderPipelineKind::SelectWeight,
+        label: "quilting focus select weight",
+        fragment_entry_point: quilting_shaders::FOCUS_SELECT_WEIGHT_ENTRY_POINT,
+        target: FocusPipelineTarget::Intermediate,
+    },
+    FocusPipelinePass {
+        kind: FocusRenderPipelineKind::JfaInit,
+        label: "quilting focus JFA init",
+        fragment_entry_point: quilting_shaders::FOCUS_JFA_INIT_ENTRY_POINT,
+        target: FocusPipelineTarget::Intermediate,
+    },
+    FocusPipelinePass {
+        kind: FocusRenderPipelineKind::JfaStep,
+        label: "quilting focus JFA step",
+        fragment_entry_point: quilting_shaders::FOCUS_JFA_STEP_ENTRY_POINT,
+        target: FocusPipelineTarget::Intermediate,
+    },
+    FocusPipelinePass {
+        kind: FocusRenderPipelineKind::Firmness,
+        label: "quilting focus firmness",
+        fragment_entry_point: quilting_shaders::FOCUS_FIRMNESS_ENTRY_POINT,
+        target: FocusPipelineTarget::Intermediate,
+    },
+    FocusPipelinePass {
+        kind: FocusRenderPipelineKind::Kawase,
+        label: "quilting focus Kawase",
+        fragment_entry_point: quilting_shaders::FOCUS_KAWASE_ENTRY_POINT,
+        target: FocusPipelineTarget::Intermediate,
+    },
+    FocusPipelinePass {
+        kind: FocusRenderPipelineKind::DirectionalBlurIntermediate,
+        label: "quilting focus directional blur intermediate",
+        fragment_entry_point: quilting_shaders::FOCUS_DIRECTIONAL_BLUR_ENTRY_POINT,
+        target: FocusPipelineTarget::SceneColor,
+    },
+    FocusPipelinePass {
+        kind: FocusRenderPipelineKind::DirectionalBlurOutput,
+        label: "quilting focus directional blur output",
+        fragment_entry_point: quilting_shaders::FOCUS_DIRECTIONAL_BLUR_ENTRY_POINT,
+        target: FocusPipelineTarget::Output,
+    },
+];
+
 /// Pure, backend-neutral graphics state for the seven retained focus passes.
 /// Applications and FRP code may compare or memoize this value without owning
 /// a WebGPU device; concrete handles remain inside `LodClassifierDevice`.
@@ -93,34 +185,15 @@ pub fn focus_postprocess_pipeline_descriptors(
             ],
         )?,
     ])?;
-    let intermediate = functional::TextureFormat::Rgba16Float;
-    let passes = [
-        (
-            quilting_shaders::FOCUS_SELECT_WEIGHT_ENTRY_POINT,
-            intermediate,
-        ),
-        (quilting_shaders::FOCUS_JFA_INIT_ENTRY_POINT, intermediate),
-        (quilting_shaders::FOCUS_JFA_STEP_ENTRY_POINT, intermediate),
-        (quilting_shaders::FOCUS_FIRMNESS_ENTRY_POINT, intermediate),
-        (quilting_shaders::FOCUS_KAWASE_ENTRY_POINT, intermediate),
-        (
-            quilting_shaders::FOCUS_DIRECTIONAL_BLUR_ENTRY_POINT,
-            functional::TextureFormat::Rgba8Unorm,
-        ),
-        (
-            quilting_shaders::FOCUS_DIRECTIONAL_BLUR_ENTRY_POINT,
-            output_format,
-        ),
-    ];
-    passes
+    FOCUS_PIPELINE_PASSES
         .into_iter()
-        .map(|(fragment_entry_point, format)| {
+        .map(|pass| {
             functional::RenderPipelineDescriptor::new(
                 functional::GraphicsProgramDescriptor::new(
                     vertex.clone(),
                     Some(shader(
                         functional::ShaderStage::Fragment,
-                        fragment_entry_point,
+                        pass.fragment_entry_point,
                     )?),
                     Vec::new(),
                 )?,
@@ -134,7 +207,7 @@ pub fn focus_postprocess_pipeline_descriptors(
                 },
                 None,
                 vec![functional::ColorTargetStateDescriptor {
-                    format,
+                    format: pass.target.functional_format(output_format),
                     blend: None,
                     write_mask: functional::ColorWriteMask::ALL,
                 }],
@@ -442,10 +515,11 @@ impl LodClassifierDevice {
             quilting_shaders::compile_focus_postprocess_wgsl,
         )?;
         let functional_layout = if let Some(descriptors) = descriptors {
-            if descriptors.len() != 7 {
-                return Err(LodWebGpuError::Payload(
-                    "functional focus pipeline family must contain seven passes".to_string(),
-                ));
+            if descriptors.len() != FOCUS_PIPELINE_PASSES.len() {
+                return Err(LodWebGpuError::Payload(format!(
+                    "functional focus pipeline family must contain {} passes",
+                    FOCUS_PIPELINE_PASSES.len(),
+                )));
             }
             let layout = descriptors[0].layout();
             if descriptors
@@ -503,9 +577,7 @@ impl LodClassifierDevice {
                 immediate_size: 0,
             });
         let create_pipeline = |index: usize,
-                               label: &'static str,
-                               fragment_entry: &'static str,
-                               format: wgpu::TextureFormat|
+                               pass: FocusPipelinePass|
          -> Result<wgpu::RenderPipeline, LodWebGpuError> {
             if let Some(descriptors) = descriptors {
                 let descriptor = &descriptors[index];
@@ -514,7 +586,7 @@ impl LodClassifierDevice {
                         "functional focus pipeline is missing a fragment stage".to_string(),
                     )
                 })?;
-                if fragment.entry_point() != fragment_entry
+                if fragment.entry_point() != pass.fragment_entry_point
                     || !descriptor.vertex_buffers().is_empty()
                     || descriptor.depth_stencil().is_some()
                     || descriptor.color_targets().len() != 1
@@ -525,21 +597,21 @@ impl LodClassifierDevice {
                 }
                 return crate::pipeline_lowering::render_pipeline(
                     &self.device,
-                    label,
+                    pass.label,
                     &pipeline_layout,
                     &module,
                     descriptor,
                 );
             }
             let targets = [Some(wgpu::ColorTargetState {
-                format,
+                format: pass.target.webgpu_format(output_format),
                 blend: None,
                 write_mask: wgpu::ColorWrites::ALL,
             })];
             Ok(self
                 .device
                 .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(label),
+                    label: Some(pass.label),
                     layout: Some(&pipeline_layout),
                     vertex: wgpu::VertexState {
                         module: &module,
@@ -552,7 +624,7 @@ impl LodClassifierDevice {
                     multisample: wgpu::MultisampleState::default(),
                     fragment: Some(wgpu::FragmentState {
                         module: &module,
-                        entry_point: Some(fragment_entry),
+                        entry_point: Some(pass.fragment_entry_point),
                         compilation_options: Default::default(),
                         targets: &targets,
                     }),
@@ -560,50 +632,25 @@ impl LodClassifierDevice {
                     cache: None,
                 }))
         };
-        let intermediate_format = wgpu::TextureFormat::Rgba16Float;
+        let mut pipelines = Vec::with_capacity(FOCUS_PIPELINE_PASSES.len());
+        for (index, pass) in FOCUS_PIPELINE_PASSES.into_iter().enumerate() {
+            pipelines.push(create_pipeline(index, pass)?);
+        }
+        let pipelines: [wgpu::RenderPipeline; 7] = pipelines.try_into().map_err(|_| {
+            LodWebGpuError::Payload(
+                "focus pass plan did not produce seven pipeline handles".to_string(),
+            )
+        })?;
+        let [select_weight, jfa_init, jfa_step, firmness, kawase, directional_blur_intermediate, directional_blur_output] =
+            pipelines;
         Ok(FocusPostprocessPipelines {
-            select_weight: create_pipeline(
-                0,
-                "quilting focus select weight",
-                quilting_shaders::FOCUS_SELECT_WEIGHT_ENTRY_POINT,
-                intermediate_format,
-            )?,
-            jfa_init: create_pipeline(
-                1,
-                "quilting focus JFA init",
-                quilting_shaders::FOCUS_JFA_INIT_ENTRY_POINT,
-                intermediate_format,
-            )?,
-            jfa_step: create_pipeline(
-                2,
-                "quilting focus JFA step",
-                quilting_shaders::FOCUS_JFA_STEP_ENTRY_POINT,
-                intermediate_format,
-            )?,
-            firmness: create_pipeline(
-                3,
-                "quilting focus firmness",
-                quilting_shaders::FOCUS_FIRMNESS_ENTRY_POINT,
-                intermediate_format,
-            )?,
-            kawase: create_pipeline(
-                4,
-                "quilting focus Kawase",
-                quilting_shaders::FOCUS_KAWASE_ENTRY_POINT,
-                intermediate_format,
-            )?,
-            directional_blur_intermediate: create_pipeline(
-                5,
-                "quilting focus directional blur intermediate",
-                quilting_shaders::FOCUS_DIRECTIONAL_BLUR_ENTRY_POINT,
-                wgpu::TextureFormat::Rgba8Unorm,
-            )?,
-            directional_blur_output: create_pipeline(
-                6,
-                "quilting focus directional blur output",
-                quilting_shaders::FOCUS_DIRECTIONAL_BLUR_ENTRY_POINT,
-                output_format,
-            )?,
+            select_weight,
+            jfa_init,
+            jfa_step,
+            firmness,
+            kawase,
+            directional_blur_intermediate,
+            directional_blur_output,
             bind_group_layout,
             output_format,
         })
@@ -1192,6 +1239,37 @@ mod tests {
             kawase_passes: 3,
             kawase_offset: 1.5,
         }
+    }
+
+    #[test]
+    fn one_semantic_pass_plan_drives_descriptor_and_runtime_order() {
+        assert_eq!(
+            FOCUS_PIPELINE_PASSES
+                .iter()
+                .map(|pass| pass.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                FocusRenderPipelineKind::SelectWeight,
+                FocusRenderPipelineKind::JfaInit,
+                FocusRenderPipelineKind::JfaStep,
+                FocusRenderPipelineKind::Firmness,
+                FocusRenderPipelineKind::Kawase,
+                FocusRenderPipelineKind::DirectionalBlurIntermediate,
+                FocusRenderPipelineKind::DirectionalBlurOutput,
+            ],
+        );
+        assert!(FOCUS_PIPELINE_PASSES[..5]
+            .iter()
+            .all(|pass| pass.target == FocusPipelineTarget::Intermediate));
+        assert_eq!(
+            FOCUS_PIPELINE_PASSES[5].target,
+            FocusPipelineTarget::SceneColor,
+        );
+        assert_eq!(FOCUS_PIPELINE_PASSES[6].target, FocusPipelineTarget::Output,);
+        assert_eq!(
+            FOCUS_PIPELINE_PASSES[5].fragment_entry_point,
+            FOCUS_PIPELINE_PASSES[6].fragment_entry_point,
+        );
     }
 
     #[test]
