@@ -28,3 +28,21 @@ hard-coded material-zero placeholder.
 The strict `quilting-webgpu` Clippy gate and the required Radeon 780M RADV
 Vulkan `native_lod` test pass. Browser promotion remains opt-in and still uses
 the shared capability predicates; live Chrome parity is a separate gate.
+
+## Portable multi-material direction
+
+`wgpu 29` marks both dynamically indexed texture binding arrays and
+GPU-counted multi-draw as native-only. Its browser implementation expands a
+fixed multi-draw count into individual `drawIndexedIndirect` calls. A radix/run
+compactor can therefore optimize native execution, but cannot by itself remove
+the browser's material draw boundary without a readback or Cartesian command
+expansion.
+
+The shared path now builds a deterministic paged `texture_2d_array` atlas at
+asset upload time. Each stable texture slot retains its exact rectangle,
+dimensions, layer, and wrap modes. Native byte uploads and browser
+`ImageBitmap` uploads publish both the incumbent individual texture and the
+portable atlas; allocation-preserving updates modify both. Radeon conformance
+reads packed rectangles back and proves byte equality before and after an
+in-place update, including sparse texture-table slots. Manual wrap-aware
+filtering and material-indexed shader bindings are the next cutover gate.

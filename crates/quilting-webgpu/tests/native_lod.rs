@@ -358,12 +358,27 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             &[Some(texture_a), Some(texture_b)]
         );
         assert_eq!(texture_table.occupied_len(), 2);
+        assert_eq!(texture_table.portable_atlas_plan().extent, [4, 4]);
+        assert_eq!(texture_table.portable_atlas_plan().layer_count, 1);
+        assert_eq!(
+            texture_table.portable_atlas_plan().placements[1]
+                .unwrap()
+                .origin,
+            [2, 0],
+        );
         assert!(texture_table.linear_view(0).is_some());
         assert!(texture_table.srgb_view(0).is_some());
         assert!(texture_table.sampler(1).is_some());
         assert_eq!(
             classifier
                 .read_pbr_texture_rgba8_for_diagnostics(&texture_table, 0)
+                .await
+                .unwrap(),
+            initial_a,
+        );
+        assert_eq!(
+            classifier
+                .read_pbr_portable_atlas_rgba8_for_diagnostics(&texture_table, 0)
                 .await
                 .unwrap(),
             initial_a,
@@ -380,9 +395,17 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             &[Some(texture_a), None, Some(texture_b)]
         );
         assert!(sparse_table.linear_view(1).is_none());
+        assert_eq!(sparse_table.portable_atlas_plan().placements[1], None);
         assert_eq!(
             classifier
                 .read_pbr_texture_rgba8_for_diagnostics(&sparse_table, 2)
+                .await
+                .unwrap(),
+            initial_b,
+        );
+        assert_eq!(
+            classifier
+                .read_pbr_portable_atlas_rgba8_for_diagnostics(&sparse_table, 2)
                 .await
                 .unwrap(),
             initial_b,
@@ -441,6 +464,13 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         assert_eq!(
             classifier
                 .read_pbr_texture_rgba8_for_diagnostics(&texture_table, 0)
+                .await
+                .unwrap(),
+            updated_a,
+        );
+        assert_eq!(
+            classifier
+                .read_pbr_portable_atlas_rgba8_for_diagnostics(&texture_table, 0)
                 .await
                 .unwrap(),
             updated_a,

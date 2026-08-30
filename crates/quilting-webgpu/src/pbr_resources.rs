@@ -4,7 +4,10 @@
 //! not semantic scene state. This table therefore lives beside the WebGPU
 //! device epoch and is addressed by the stable indices in `PbrMaterial`.
 
-use crate::{LodClassifierDevice, LodWebGpuError, PatchRenderPipeline};
+use crate::{
+    buffer_init_or_zero, LodClassifierDevice, LodWebGpuError, PatchRenderPipeline,
+    PortableTextureAtlasLimits, PortableTextureAtlasPlan,
+};
 use futures_channel::oneshot;
 use quilting_core::material::{
     PbrMaterial, PbrTextureReferences, Rgba8TextureAsset, TextureAssetDescriptor, TextureWrapMode,
@@ -31,6 +34,17 @@ pub(crate) struct PbrTextureResource {
 pub struct PbrTextureTable {
     descriptors: Vec<Option<TextureAssetDescriptor>>,
     resources: Vec<Option<PbrTextureResource>>,
+    portable_atlas: PortablePbrTextureAtlas,
+}
+
+/// Baseline-WebGPU representation for non-uniform material texture access.
+/// Individual resources remain resident during cutover so the established
+/// material-batched path and the portable atlas can be compared exactly.
+pub struct PortablePbrTextureAtlas {
+    plan: PortableTextureAtlasPlan,
+    texture: wgpu::Texture,
+    _view: wgpu::TextureView,
+    _descriptor_records: wgpu::Buffer,
 }
 
 /// Per-material evidence separating authored references from resources that
@@ -104,6 +118,10 @@ impl PbrTextureTable {
 
     pub fn descriptors(&self) -> &[Option<TextureAssetDescriptor>] {
         &self.descriptors
+    }
+
+    pub fn portable_atlas_plan(&self) -> &PortableTextureAtlasPlan {
+        &self.portable_atlas.plan
     }
 
     fn resource(&self, index: u32) -> Option<&PbrTextureResource> {
@@ -286,14 +304,17 @@ impl LodClassifierDevice {
                 descriptor.map(|descriptor| create_texture_resource(&self.device, descriptor))
             })
             .collect::<Vec<_>>();
-        for (resource, asset) in resources.iter().zip(assets) {
+        let portable_atlas = create_portable_pbr_texture_atlas(&self.device, &descriptors)?;
+        for (slot, (resource, asset)) in resources.iter().zip(assets).enumerate() {
             if let (Some(resource), Some(asset)) = (resource.as_ref(), *asset) {
                 write_texture_asset(&self.queue, resource, asset)?;
+                write_portable_texture_asset(&self.queue, &portable_atlas, slot, asset)?;
             }
         }
         Ok(PbrTextureTable {
             descriptors,
             resources,
+            portable_atlas,
         })
     }
 
@@ -316,7 +337,8 @@ impl LodClassifierDevice {
                 descriptor.map(|descriptor| create_texture_resource(&self.device, descriptor))
             })
             .collect::<Vec<_>>();
-        for (resource, asset) in resources.iter().zip(assets) {
+        let portable_atlas = create_portable_pbr_texture_atlas(&self.device, &descriptors)?;
+        for (slot, (resource, asset)) in resources.iter().zip(assets).enumerate() {
             if let (Some(resource), Some((descriptor, bitmap))) = (resource.as_ref(), asset) {
                 self.queue.copy_external_image_to_texture(
                     &wgpu::CopyExternalImageSourceInfo {
@@ -334,11 +356,19 @@ impl LodClassifierDevice {
                     },
                     texture_extent(*descriptor),
                 );
+                copy_external_image_to_portable_atlas(
+                    &self.queue,
+                    &portable_atlas,
+                    slot,
+                    *descriptor,
+                    bitmap,
+                )?;
             }
         }
         Ok(PbrTextureTable {
             descriptors,
             resources,
+            portable_atlas,
         })
     }
 
@@ -359,8 +389,14 @@ impl LodClassifierDevice {
         {
             return Ok(PbrTextureTableUpdate::ShapeChanged);
         }
-        for (resource, asset) in retained.resources.iter().flatten().zip(assets) {
+        for (slot, (resource, asset)) in retained.resources.iter().zip(assets).enumerate() {
+            let resource = resource.as_ref().ok_or_else(|| {
+                LodWebGpuError::Payload(
+                    "dense PBR texture update encountered an empty retained slot".to_string(),
+                )
+            })?;
             write_texture_asset(&self.queue, resource, *asset)?;
+            write_portable_texture_asset(&self.queue, &retained.portable_atlas, slot, *asset)?;
         }
         Ok(PbrTextureTableUpdate::Updated)
     }
@@ -378,6 +414,54 @@ impl LodClassifierDevice {
         let descriptor = table.descriptors[index as usize].ok_or_else(|| {
             LodWebGpuError::Payload(format!("PBR texture index {index} is an empty slot"))
         })?;
+        self.read_rgba8_texture_region(
+            &resource.texture,
+            wgpu::Origin3d::ZERO,
+            descriptor,
+            "quilting PBR texture evidence",
+        )
+        .await
+    }
+
+    /// Read the same stable texture slot from the portable array atlas. This
+    /// is conformance-only evidence that packing and in-place publication did
+    /// not change image bytes or slot identity.
+    pub async fn read_pbr_portable_atlas_rgba8_for_diagnostics(
+        &self,
+        table: &PbrTextureTable,
+        index: u32,
+    ) -> Result<Vec<u8>, LodWebGpuError> {
+        let placement = table
+            .portable_atlas
+            .plan
+            .placements
+            .get(index as usize)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| {
+                LodWebGpuError::Payload(format!(
+                    "portable PBR texture index {index} is empty or out of range",
+                ))
+            })?;
+        self.read_rgba8_texture_region(
+            &table.portable_atlas.texture,
+            wgpu::Origin3d {
+                x: placement.origin[0],
+                y: placement.origin[1],
+                z: placement.layer,
+            },
+            placement.descriptor,
+            "quilting portable PBR atlas evidence",
+        )
+        .await
+    }
+
+    async fn read_rgba8_texture_region(
+        &self,
+        texture: &wgpu::Texture,
+        origin: wgpu::Origin3d,
+        descriptor: TextureAssetDescriptor,
+        label: &'static str,
+    ) -> Result<Vec<u8>, LodWebGpuError> {
         let unpadded_bytes_per_row = descriptor.width.checked_mul(4).ok_or_else(|| {
             LodWebGpuError::Payload("PBR texture row byte length overflowed u32".to_string())
         })?;
@@ -393,21 +477,19 @@ impl LodClassifierDevice {
                 LodWebGpuError::Payload("PBR texture readback size overflowed".to_string())
             })?;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("quilting PBR texture evidence readback"),
+            label: Some(label),
             size: byte_len,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let mut encoder = self
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("quilting PBR texture evidence copy"),
-            });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &resource.texture,
+                texture,
                 mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
+                origin,
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
@@ -614,6 +696,172 @@ fn validate_image_bitmap_slots(
         }
     }
     Ok(())
+}
+
+fn create_portable_pbr_texture_atlas(
+    device: &wgpu::Device,
+    descriptors: &[Option<TextureAssetDescriptor>],
+) -> Result<PortablePbrTextureAtlas, LodWebGpuError> {
+    let limits = device.limits();
+    let plan = PortableTextureAtlasPlan::build(
+        descriptors,
+        PortableTextureAtlasLimits {
+            maximum_dimension: limits.max_texture_dimension_2d,
+            maximum_layers: limits.max_texture_array_layers,
+        },
+    )
+    .map_err(|error| LodWebGpuError::Payload(error.to_string()))?;
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("quilting portable PBR texture atlas"),
+        size: wgpu::Extent3d {
+            width: plan.extent[0],
+            height: plan.extent[1],
+            depth_or_array_layers: plan.layer_count,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor {
+        label: Some("quilting portable PBR texture atlas array view"),
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        base_array_layer: 0,
+        array_layer_count: Some(plan.layer_count),
+        ..Default::default()
+    });
+    let mut descriptor_records = vec![[0u32; 8]; descriptors.len().max(1)];
+    for (record, placement) in descriptor_records.iter_mut().zip(&plan.placements) {
+        let Some(placement) = placement else {
+            continue;
+        };
+        *record = [
+            placement.origin[0],
+            placement.origin[1],
+            placement.descriptor.width,
+            placement.descriptor.height,
+            placement.layer,
+            portable_wrap_mode(placement.descriptor.wrap_s),
+            portable_wrap_mode(placement.descriptor.wrap_t),
+            1,
+        ];
+    }
+    let descriptor_records = buffer_init_or_zero(
+        device,
+        "quilting portable PBR texture descriptor records",
+        bytemuck::cast_slice(&descriptor_records),
+        wgpu::BufferUsages::STORAGE,
+    );
+    Ok(PortablePbrTextureAtlas {
+        plan,
+        texture,
+        _view: view,
+        _descriptor_records: descriptor_records,
+    })
+}
+
+fn write_portable_texture_asset(
+    queue: &wgpu::Queue,
+    atlas: &PortablePbrTextureAtlas,
+    slot: usize,
+    asset: Rgba8TextureAsset<'_>,
+) -> Result<(), LodWebGpuError> {
+    let placement = atlas
+        .plan
+        .placements
+        .get(slot)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| {
+            LodWebGpuError::Payload(format!(
+                "portable PBR atlas has no placement for texture slot {slot}",
+            ))
+        })?;
+    if placement.descriptor != asset.descriptor {
+        return Err(LodWebGpuError::Payload(format!(
+            "portable PBR atlas slot {slot} descriptor changed during upload",
+        )));
+    }
+    let bytes_per_row = asset.descriptor.width.checked_mul(4).ok_or_else(|| {
+        LodWebGpuError::Payload("portable PBR texture row bytes overflowed u32".to_string())
+    })?;
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &atlas.texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d {
+                x: placement.origin[0],
+                y: placement.origin[1],
+                z: placement.layer,
+            },
+            aspect: wgpu::TextureAspect::All,
+        },
+        asset.pixels,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(bytes_per_row),
+            rows_per_image: Some(asset.descriptor.height),
+        },
+        texture_extent(asset.descriptor),
+    );
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn copy_external_image_to_portable_atlas(
+    queue: &wgpu::Queue,
+    atlas: &PortablePbrTextureAtlas,
+    slot: usize,
+    descriptor: TextureAssetDescriptor,
+    bitmap: &web_sys::ImageBitmap,
+) -> Result<(), LodWebGpuError> {
+    let placement = atlas
+        .plan
+        .placements
+        .get(slot)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| {
+            LodWebGpuError::Payload(format!(
+                "portable PBR atlas has no placement for texture slot {slot}",
+            ))
+        })?;
+    if placement.descriptor != descriptor {
+        return Err(LodWebGpuError::Payload(format!(
+            "portable PBR atlas slot {slot} descriptor changed during browser upload",
+        )));
+    }
+    queue.copy_external_image_to_texture(
+        &wgpu::CopyExternalImageSourceInfo {
+            source: wgpu::ExternalImageSource::ImageBitmap(bitmap.clone()),
+            origin: wgpu::Origin2d::ZERO,
+            flip_y: false,
+        },
+        wgpu::CopyExternalImageDestInfo {
+            texture: &atlas.texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d {
+                x: placement.origin[0],
+                y: placement.origin[1],
+                z: placement.layer,
+            },
+            aspect: wgpu::TextureAspect::All,
+            color_space: wgpu::PredefinedColorSpace::Srgb,
+            premultiplied_alpha: false,
+        },
+        texture_extent(descriptor),
+    );
+    Ok(())
+}
+
+fn portable_wrap_mode(mode: TextureWrapMode) -> u32 {
+    match mode {
+        TextureWrapMode::ClampToEdge => 0,
+        TextureWrapMode::MirroredRepeat => 1,
+        TextureWrapMode::Repeat => 2,
+    }
 }
 
 fn create_texture_resource(
