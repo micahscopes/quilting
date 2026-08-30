@@ -148,6 +148,12 @@ The first application boundary is now explicit:
   flush boundary and mounts the host; it neither polls navigation nor owns a
   second view model. Selection and presentation publish their settled endpoint
   explicitly, while active frame integration remains allocation-light.
+- The focus-transition and surface-walk preference panel is likewise a Leptos
+  CSR island in the explicit `navstateimpl=rust` lane. It consumes the separate
+  committed navigation-settings signal and dispatches one complete replacement
+  through `AppStore` per edit. JavaScript applies only the committed packet to
+  legacy runtime consumers and URL state; `js`, `shadow`, and mount failure
+  retain the incumbent HTML controls as a measured rollback.
 - The normalized SpaceMouse camera gate freezes samples at
   a platform-neutral Rust boundary. Browser code retains only WebHID/report
   acquisition, device shaping/smoothing, button layers, and the

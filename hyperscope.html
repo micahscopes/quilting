@@ -141,18 +141,21 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
       <div class="sr"><span style="font-size:10px;color:#8b949e;width:30px">R</span><input type="range" id="mr" min="0.11" max="50" step="0.01" value="20"><span class="v" id="mr-v">2.00</span></div>
     </div>
     <div id="selection-status" style="color:#8b949e;font-size:9px;margin-top:5px">No object selected</div>
-    <label style="margin-top:5px">Focus/navigation transition</label>
-    <div class="sr"><input type="range" id="focus-transition" min="5" max="500" step="1" value="70"><span class="v" id="focus-transition-v">0.70 s</span></div>
-    <label style="margin-top:5px">Walk frame smoothing</label>
-    <div class="sr"><input type="range" id="walk-smoothing" min="0" max="150" step="1" value="18"><span class="v" id="walk-smoothing-v">0.18 s</span></div>
-    <label>Walk frame pull</label>
-    <div class="sr"><input type="range" id="walk-align" min="0" max="100" step="1" value="70"><span class="v" id="walk-align-v">70%</span></div>
-    <label>Walk speed</label>
-    <div class="sr"><input type="range" id="walk-speed" min="-400" max="400" step="1" value="0"><span class="v" id="walk-speed-v">0.20 R/s</span></div>
-    <label>Walk scale</label>
-    <div class="sr"><input type="range" id="walk-scale" min="-800" max="800" step="1" value="0"><span class="v" id="walk-scale-v">1.00×</span></div>
-    <label>Walk eye height</label>
-    <div class="sr"><input type="range" id="walk-height" min="-400" max="400" step="1" value="0"><span class="v" id="walk-height-v">1.00×</span></div>
+    <div id="navigation-controls-rust" hidden></div>
+    <div id="navigation-controls-browser">
+      <label style="margin-top:5px">Focus/navigation transition</label>
+      <div class="sr"><input type="range" id="focus-transition" min="5" max="500" step="1" value="70"><span class="v" id="focus-transition-v">0.70 s</span></div>
+      <label style="margin-top:5px">Walk frame smoothing</label>
+      <div class="sr"><input type="range" id="walk-smoothing" min="0" max="150" step="1" value="18"><span class="v" id="walk-smoothing-v">0.18 s</span></div>
+      <label>Walk frame pull</label>
+      <div class="sr"><input type="range" id="walk-align" min="0" max="100" step="1" value="70"><span class="v" id="walk-align-v">70%</span></div>
+      <label>Walk speed</label>
+      <div class="sr"><input type="range" id="walk-speed" min="-400" max="400" step="1" value="0"><span class="v" id="walk-speed-v">0.20 R/s</span></div>
+      <label>Walk scale</label>
+      <div class="sr"><input type="range" id="walk-scale" min="-800" max="800" step="1" value="0"><span class="v" id="walk-scale-v">1.00×</span></div>
+      <label>Walk eye height</label>
+      <div class="sr"><input type="range" id="walk-height" min="-400" max="400" step="1" value="0"><span class="v" id="walk-height-v">1.00×</span></div>
+    </div>
   </div>
 
   <div class="section">
@@ -4033,7 +4036,11 @@ const rustNavigationSettingsDiagnostics = {
   errors: 0,
   lastBrowser: null,
   lastRust: null,
+  lastDispatchSource: null,
   lastError: null,
+  viewAuthority: 'browser-fallback',
+  viewMountAttempts: 0,
+  viewMountErrors: 0,
 };
 globalThis.__hyperscopeNavigationSettings = rustNavigationSettingsDiagnostics;
 
@@ -4442,6 +4449,7 @@ function synchronizeRustNavigationSettings() {
     if (RUST_NAVIGATION_SETTINGS_IMPLEMENTATION === 'rust') {
       applyRustNavigationSettingsProjection(rust);
       rustNavigationSettingsDiagnostics.authorityWrites += 1;
+      ensureRustNavigationSettingsView();
     }
     rustNavigationSettingsDiagnostics.state =
       RUST_NAVIGATION_SETTINGS_IMPLEMENTATION === 'rust'
@@ -4477,6 +4485,104 @@ function scheduleRustNavigationSettingsSynchronization() {
     rustNavigationSettingsSyncScheduled = false;
     synchronizeRustNavigationSettings();
   });
+}
+
+function useBrowserNavigationSettingsView() {
+  const host = $('navigation-controls-rust');
+  const fallback = $('navigation-controls-browser');
+  if (host) host.hidden = true;
+  if (fallback) fallback.hidden = false;
+  rustNavigationSettingsDiagnostics.viewAuthority = 'browser-fallback';
+}
+
+let rustNavigationSettingsViewMounted = false;
+let rustNavigationSettingsViewMountAttempted = false;
+function ensureRustNavigationSettingsView() {
+  if (RUST_NAVIGATION_SETTINGS_IMPLEMENTATION !== 'rust') return false;
+  const host = $('navigation-controls-rust');
+  const fallback = $('navigation-controls-browser');
+  if (rustNavigationSettingsViewMounted) {
+    host.hidden = false;
+    fallback.hidden = true;
+    rustNavigationSettingsDiagnostics.viewAuthority = 'hyperscope-web';
+    return true;
+  }
+  if (rustNavigationSettingsViewMountAttempted || !rustAppShadow) return false;
+  rustNavigationSettingsViewMountAttempted = true;
+  rustNavigationSettingsDiagnostics.viewMountAttempts += 1;
+  if (!host || !fallback
+      || typeof rustAppShadow.mountNavigationControls !== 'function') {
+    useBrowserNavigationSettingsView();
+    return false;
+  }
+  try {
+    rustAppShadow.mountNavigationControls(
+      host,
+      (
+        transitionSeconds,
+        smoothingSeconds,
+        tangentPullFraction,
+        speedOctaveSteps,
+        bodyScaleOctaveSteps,
+        eyeHeightOctaveSteps,
+        sequence,
+        revision,
+      ) => {
+        try {
+          observeRustAppShadowSequence(sequence, 'Rust navigation-settings control');
+          rustAppShadowDiagnostics.lastCommit = {
+            revision: String(revision),
+            disposition: 'applied',
+            publishedUi: true,
+            effects: [],
+          };
+          const rust = {
+            transitionSeconds,
+            smoothingSeconds,
+            tangentPullFraction,
+            speedOctaveSteps,
+            bodyScaleOctaveSteps,
+            eyeHeightOctaveSteps,
+          };
+          rustNavigationSettingsDiagnostics.dispatches += 1;
+          rustNavigationSettingsDiagnostics.lastRust = rust;
+          rustNavigationSettingsDiagnostics.lastDispatchSource = 'leptos-control';
+          applyRustNavigationSettingsProjection(rust);
+          rustNavigationSettingsDiagnostics.authorityWrites += 1;
+        } catch (error) {
+          rustNavigationSettingsDiagnostics.errors += 1;
+          rustNavigationSettingsDiagnostics.lastError = error?.message || String(error);
+          recordAppShadowMismatch(
+            'navigation_settings_view_projection',
+            rustNavigationSettingsDiagnostics.lastError,
+          );
+        }
+      },
+      error => {
+        rustNavigationSettingsDiagnostics.errors += 1;
+        rustNavigationSettingsDiagnostics.lastError = String(error);
+        rustNavigationSettingsDiagnostics.lastDispatchSource = 'leptos-control-rejected';
+        recordAppShadowMismatch(
+          'navigation_settings_view_rejection',
+          rustNavigationSettingsDiagnostics.lastError,
+        );
+      },
+    );
+    host.hidden = false;
+    fallback.hidden = true;
+    rustNavigationSettingsViewMounted = true;
+    rustNavigationSettingsDiagnostics.viewAuthority = 'hyperscope-web';
+    return true;
+  } catch (error) {
+    rustNavigationSettingsDiagnostics.viewMountErrors += 1;
+    rustNavigationSettingsDiagnostics.lastError = error?.message || String(error);
+    recordAppShadowMismatch(
+      'navigation_settings_view_mount',
+      rustNavigationSettingsDiagnostics.lastError,
+    );
+    useBrowserNavigationSettingsView();
+    return false;
+  }
 }
 
 function browserRenderSettingsState() {
@@ -5102,6 +5208,7 @@ function refreshAppShadowSnapshot() {
   rustAppShadowDiagnostics.snapshot = snapshot;
   ensureRustAnimationControlView();
   ensureRustAnimationClipControlView();
+  ensureRustNavigationSettingsView();
   ensureRustNavigationStatusView();
   ensureRustPatchLabView();
   if (!ensureRustAssetCreditsView()) renderAssetCredits(snapshot);

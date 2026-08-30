@@ -19,7 +19,11 @@ The URL lane is explicit and rollback-safe:
 - `navstateimpl=js` keeps the incumbent browser signals authoritative (default).
 - `navstateimpl=shadow` sends the same packet to Rust and records divergence.
 - `navstateimpl=rust` applies the committed Rust packet back to the six browser
-  projections in one signal batch.
+  projections in one signal batch. It also mounts a Leptos CSR control island
+  over `AppStore::navigation_settings_signal`; each edit reads the reducer's
+  current complete packet, commits one replacement, and exposes only the
+  committed result to the browser adapter. The incumbent HTML controls remain
+  intact and visible if the Rust view cannot mount.
 
 ## Verification
 
@@ -33,6 +37,10 @@ The URL lane is explicit and rollback-safe:
 - Replay 0.23: exact nested-settings JSON round-trip, deterministic committed
   state, and explicit 0.22 rejection without mutation.
 - Inline browser module syntax parse: passed.
+- `hyperscope-web --all-features`: 36 native tests passed, including complete
+  control dispatch, semantic-unit projection, preservation of non-UI walk
+  policy, and atomic rejection.
+- Strict `hyperscope-web --all-features` Clippy: passed.
 
 Live Chromium comparison and authority evidence remain pending. The default is
 therefore still `js`; no release route is silently promoted by this cut.
@@ -40,8 +48,8 @@ therefore still `js`; no release route is silently promoted by this cut.
 ## Architectural consequence
 
 Navigation preferences now follow the same reducer/store/WASM/thin-adapter
-shape as render settings. Replay 0.23 now gives the packet a durable semantic
-identity suitable for a future HHHS/Blender session without making browser HID
-policy part of shared scene state. The WebGL2 and WebGPU renderers consume the
-same application semantics; this cut adds no backend-specific navigation
-policy.
+shape as render settings, including a Rust-owned FRP browser view. Replay 0.23
+now gives the packet a durable semantic identity suitable for a future
+HHHS/Blender session without making browser HID policy part of shared scene
+state. The WebGL2 and WebGPU renderers consume the same application semantics;
+this cut adds no backend-specific navigation policy.

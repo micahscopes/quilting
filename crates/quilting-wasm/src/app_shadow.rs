@@ -308,6 +308,25 @@ impl HyperscopeAppShadow {
         hyperscope_web::navigation_status::mount_navigation_status(parent, self.store.clone());
     }
 
+    /// Mount the explicit Rust-authority navigation preference controls over
+    /// the committed low-rate AppStore projection. The callback receives only
+    /// the complete committed packet needed by the browser adapters.
+    #[cfg(feature = "leptos-ui")]
+    #[wasm_bindgen(js_name = mountNavigationControls)]
+    pub fn mount_navigation_controls(
+        &self,
+        parent: web_sys::HtmlElement,
+        on_commit: js_sys::Function,
+        on_error: js_sys::Function,
+    ) {
+        hyperscope_web::navigation_controls::mount_navigation_controls(
+            parent,
+            self.store.clone(),
+            on_commit,
+            on_error,
+        );
+    }
+
     /// Mount the opt-in Leptos presentation card over the committed
     /// presentation signal. A platform callback synchronizes incumbent input
     /// state, then the view dispatches through AppStore and exposes only

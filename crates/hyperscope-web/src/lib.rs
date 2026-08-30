@@ -6,7 +6,11 @@
 
 #![forbid(unsafe_code)]
 
-#[cfg(any(feature = "patch-lab", feature = "render-controls"))]
+#[cfg(any(
+    feature = "navigation-controls",
+    feature = "patch-lab",
+    feature = "render-controls"
+))]
 mod controls;
 
 #[cfg(all(feature = "csr", target_arch = "wasm32"))]
@@ -26,6 +30,9 @@ pub mod local_peer_relay;
 
 #[cfg(feature = "navigation-status")]
 pub mod navigation_status;
+
+#[cfg(feature = "navigation-controls")]
+pub mod navigation_controls;
 
 #[cfg(feature = "presentation-card")]
 pub mod presentation_card;
