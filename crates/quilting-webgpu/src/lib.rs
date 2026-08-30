@@ -2064,11 +2064,20 @@ impl LodClassifierDevice {
             EnvironmentMapAsset::new(environment_descriptor, &prefiltered, &irradiance)
                 .map_err(environment_error)?,
         )?;
+        // This conformance transform deliberately reports reversed
+        // orientation while retaining identity coordinates to exercise parity
+        // bucketing. Make the PBR material double-sided so the raster proof is
+        // independent of that intentionally inconsistent fixture metadata.
+        let mut pbr_render_scene = render_scene.clone();
+        pbr_render_scene.materials = vec![PbrMaterial {
+            double_sided: true,
+            ..PbrMaterial::default()
+        }];
         let pbr_bindings = self.create_resident_root_render_bindings_with_pbr(
             &pipeline,
             &preparation,
             &geometry,
-            &render_scene,
+            &pbr_render_scene,
             None,
             Some(&environment),
         )?;
@@ -2093,7 +2102,7 @@ impl LodClassifierDevice {
             RenderStyle::Pbr,
             frame.view,
             RenderFrameOptions::default(),
-            &render_scene,
+            &pbr_render_scene,
         )
         .map_err(|error| LodWebGpuError::Conformance(error.to_string()))?;
         let pbr_error_scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -2136,10 +2145,48 @@ impl LodClassifierDevice {
                 "resident root PBR encoding mismatch: {pbr_encoding:?}",
             )));
         }
+        pbr_encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(PADDED_BYTES_PER_ROW),
+                    rows_per_image: Some(HEIGHT),
+                },
+            },
+            wgpu::Extent3d {
+                width: WIDTH,
+                height: HEIGHT,
+                depth_or_array_layers: 1,
+            },
+        );
         self.queue.submit([pbr_encoder.finish()]);
         if let Some(error) = pbr_error_scope.pop().await {
             return Err(LodWebGpuError::Conformance(format!(
                 "resident root PBR failed validation: {error}",
+            )));
+        }
+        let pbr_pixels = self.readback_words(&readback, readback_bytes).await?;
+        let pbr_image = Rgba8ImageView::new(
+            [WIDTH, HEIGHT],
+            PADDED_BYTES_PER_ROW as usize,
+            RenderImageOrigin::TopLeft,
+            channel_order,
+            bytemuck::cast_slice(&pbr_pixels),
+        )
+        .map_err(|error| LodWebGpuError::Conformance(error.to_string()))?;
+        let pbr_signature = render_image_signature(pbr_image, 0);
+        if pbr_signature.covered_pixels == 0
+            || pbr_signature.covered_pixels >= u64::from(WIDTH) * u64::from(HEIGHT)
+        {
+            return Err(LodWebGpuError::Conformance(format!(
+                "resident root PBR produced implausible image evidence: {pbr_signature:?}",
             )));
         }
         if let Some(surface) = presentation {
