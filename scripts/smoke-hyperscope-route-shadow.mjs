@@ -14,6 +14,14 @@ const mainRendererSource = readFileSync(
   `${repository}/crates/quilting-wasm/src/main_renderer.rs`,
   'utf8',
 );
+const appShadowSource = readFileSync(
+  `${repository}/crates/quilting-wasm/src/app_shadow.rs`,
+  'utf8',
+);
+const appStoreSource = readFileSync(
+  `${repository}/crates/hyperscope-app/src/lib.rs`,
+  'utf8',
+);
 const cameraControlsSource = [
   `${repository}/crates/hyperscope-web/src/camera_controls.rs`,
   `${repository}/crates/hyperscope-web/src/camera_controls/csr.rs`,
@@ -138,6 +146,18 @@ assert.deepEqual(typedRenderRoute.renderSettings, {
   minPixelsPerSubdivision: 48.25,
   atlasExponent: 9,
   maxFaceEdgeRatio: 4,
+  focusPostprocess: {
+    enabled: false,
+    mode: 1,
+    blurRadiusPixels: 11,
+    blurStrength: 3,
+    focusCoordinate: 0.62,
+    bandwidth: 0.1,
+    normalizeRange: false,
+    gaussianPasses: 1,
+    kawasePasses: 3,
+    kawaseOffset: 1.5,
+  },
 });
 assert.equal(typedRenderRoute.resolvedPairs.length, specs.length);
 assert.deepEqual(
@@ -498,6 +518,31 @@ for (const navigationAuthorityStep of [
     `browser navigation authority adapter is missing ${navigationAuthorityStep}`,
   );
 }
+for (const focusSphereAuthorityStep of [
+  'function dispatchRustFocusSphereGeometry(sphere, preserveAnchor, source)',
+  'rustAppShadow.editFocusSphere(',
+  'const navigation = rustAppShadow.tickNavigation(0);',
+  '? applyRustSelectedFocusNavigation(navigation)',
+  ': applyRustNavigationSnapshot(navigation);',
+  "{ center: nextCenter, radius: nextRadius },\n          'spacemouse-inversion',",
+  "}, 'focus-wheel');",
+]) {
+  assert.ok(
+    browserSource.includes(focusSphereAuthorityStep),
+    `browser focus-sphere authority adapter is missing ${focusSphereAuthorityStep}`,
+  );
+}
+assert.ok(
+  appShadowSource.includes('#[wasm_bindgen(js_name = editFocusSphere)]')
+    && appShadowSource.includes('.dispatch_focus_sphere_edit(target, preserve_anchor)'),
+  'generated WASM facade must delegate focus-sphere semantics to AppStore',
+);
+assert.ok(
+  appStoreSource.includes('pub fn dispatch_focus_sphere_edit(')
+    && appStoreSource.includes('NavigationAction::ScaleFocusLog(ratio.ln())')
+    && appStoreSource.includes('NavigationAction::SetFreeFocusSphere(target)'),
+  'AppStore must atomically distinguish anchored and detached focus-sphere edits',
+);
 for (const navigationSettingsAuthorityStep of [
   "implementationFromRoute(\n  initialNavigationParams, 'navstateimpl',\n)",
   "RUST_NAVIGATION_SETTINGS_IMPLEMENTATION !== 'js'",
@@ -573,7 +618,8 @@ for (const stalePresentationGuard of [
 }
 for (const selectedFaceEvidenceStep of [
   'fn backend_frame_evidence_supports_composition(',
-  '!focus_postprocess',
+  'focus_postprocess.is_none()',
+  'backend image evidence does not yet support focus postprocess composition',
   'render_highlight_to(',
   'Some(target)',
   'render_highlight(state.renderer.gl(), state, &camera);',
@@ -756,12 +802,24 @@ assert.equal(
 );
 const renderControlMountBoundary = browserSource.slice(
   browserSource.indexOf('rustAppShadow.mountRenderControls('),
-  browserSource.indexOf('host.hidden = false;', browserSource.indexOf('rustAppShadow.mountRenderControls(')),
+  browserSource.indexOf(
+    'rustRenderSettingsViewMounted = true;',
+    browserSource.indexOf('rustAppShadow.mountRenderControls('),
+  ),
 );
 assert.ok(
   !renderControlMountBoundary.includes('dispatchRustRenderSettings(')
-    && renderControlMountBoundary.includes('applyRustRenderSettingsProjection(rust);'),
+    && renderControlMountBoundary.includes('acceptRustRenderSettingsViewCommit,'),
   'the Leptos callback must adapt an already committed Rust projection, not dispatch browser intent',
+);
+const renderControlCommitBoundary = browserSource.slice(
+  browserSource.indexOf('function acceptRustRenderSettingsViewCommit('),
+  browserSource.indexOf('function rejectRustRenderSettingsViewCommit('),
+);
+assert.ok(
+  renderControlCommitBoundary.includes('applyRustRenderSettingsProjection(rust);')
+    && !renderControlCommitBoundary.includes('dispatchRustRenderSettings('),
+  'the shared render/focus callback must project committed Rust state without redispatch',
 );
 for (const directDispatchStep of [
   '.dispatch_semantic(SemanticAction::SetRenderSettings(settings))',
@@ -1079,7 +1137,8 @@ for (const exactAdmissionStep of [
   '?? admittedInteger(params.fov, 75, 35, 110));',
   '$(id).max = atlasExp;',
   '$(id).value = admittedInteger(value, fallback, 0, atlasExp);',
-  'fz.radius.set(admittedInteger(params.fradius, 11, 4, 128));',
+  'fz.radius.set(admittedFocus?.blurRadiusPixels',
+  '?? admittedInteger(params.fradius, 11, 4, 128));',
   'pendingRouteSelection = rustRouteAdmitted',
   '? validatedRouteSelection',
   'pendingRouteAnimationClock = rustRouteAdmitted',

@@ -1058,6 +1058,26 @@ impl HyperscopeAppShadow {
         self.dispatch_navigation(NavigationAction::SetFreeFocusSphere(sphere))
     }
 
+    /// Queue one absolute device-independent sphere edit. Rust resolves the
+    /// edit against the current application focus under the store lock so a
+    /// selected anchor becomes a radius-only margin edit, while a detached
+    /// request replaces the complete free sphere.
+    #[wasm_bindgen(js_name = editFocusSphere)]
+    pub fn edit_focus_sphere(
+        &self,
+        center: &[f64],
+        radius: f64,
+        preserve_anchor: bool,
+    ) -> Result<u64, JsValue> {
+        let target =
+            FocusSphere::new(vector3(center, "focus center")?, radius).map_err(js_error)?;
+        let (sequence, _) = self
+            .store
+            .dispatch_focus_sphere_edit(target, preserve_anchor)
+            .map_err(js_error)?;
+        Ok(sequence)
+    }
+
     #[wasm_bindgen(js_name = anchorFocus)]
     #[allow(clippy::too_many_arguments)]
     pub fn anchor_focus(

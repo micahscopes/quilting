@@ -2140,6 +2140,55 @@ impl AppStore {
         Ok((sequence, commit))
     }
 
+    /// Queue one absolute focus-sphere edit while preserving the semantic
+    /// distinction between an object-anchored margin and detached geometry.
+    ///
+    /// The current focus state and navigation sequence are sampled under the
+    /// same store lock. An anchored request may change only radius; a detached
+    /// request replaces the complete sphere and clears any prior anchor. This
+    /// keeps continuous browser/device gestures from deriving a scale action
+    /// against a stale application snapshot.
+    pub fn dispatch_focus_sphere_edit(
+        &self,
+        target: FocusSphere,
+        preserve_anchor: bool,
+    ) -> Result<(u64, AppCommit), ReduceError> {
+        let (sequence, commit) = {
+            let mut state = self.lock_state();
+            let action = if preserve_anchor {
+                let anchor = state.navigation.focus.anchor.ok_or(ReduceError::Navigation(
+                    "anchored focus edit requires a selected focus anchor",
+                ))?;
+                if target.center != anchor.source_bound.center {
+                    return Err(ReduceError::Navigation(
+                        "anchored focus edit cannot move the selected focus center",
+                    ));
+                }
+                let ratio = target.radius / state.navigation.focus.sphere.radius;
+                if !ratio.is_finite() || ratio <= 0.0 {
+                    return Err(ReduceError::Navigation(
+                        "anchored focus edit requires a finite positive radius ratio",
+                    ));
+                }
+                NavigationAction::ScaleFocusLog(ratio.ln())
+            } else {
+                NavigationAction::SetFreeFocusSphere(target)
+            };
+            let sequence = state.navigation.next_sequence();
+            let at_seconds = state.frame_elapsed_seconds;
+            let commit = state.reduce(AppEvent::Input(Timed {
+                sequence,
+                at_seconds,
+                value: SemanticAction::Navigate(action),
+            }))?;
+            (sequence, commit)
+        };
+        if commit.published_ui {
+            self.flush_read_models();
+        }
+        Ok((sequence, commit))
+    }
+
     /// Publish a coherent read-model batch after a high-rate event burst. The
     /// summary is set last and its revision acts as the consumer commit fence.
     pub fn flush_read_models(&self) -> u64 {
@@ -3930,6 +3979,78 @@ mod tests {
             duration_seconds: 0.0,
             easing: hyperscape::TransitionEasing::SmootherStep,
         }
+    }
+
+    #[test]
+    fn focus_sphere_edit_preserves_anchor_or_replaces_detached_geometry_atomically() {
+        let store = AppStore::default();
+        let detached = FocusSphere::new([1.0, -2.0, 0.5], 2.5).unwrap();
+        let (detached_sequence, detached_commit) = store
+            .dispatch_focus_sphere_edit(detached, false)
+            .unwrap();
+        assert_eq!(detached_sequence, 0);
+        assert!(!detached_commit.published_ui);
+        assert_eq!(store.frame_snapshot().pending_navigation_actions, 1);
+        store
+            .dispatch(AppEvent::Frame(FrameTick {
+                elapsed_seconds: 0.0,
+                delta_seconds: 0.0,
+            }))
+            .unwrap();
+        assert_eq!(store.frame_snapshot().focus.sphere, detached);
+        assert_eq!(store.frame_snapshot().selected_focus, None);
+
+        let source_bound = FocusSphere::new([2.0, 0.0, -1.0], 1.0).unwrap();
+        apply_navigation_now(
+            &store,
+            NavigationAction::AnchorFocus {
+                identity: selection_identity(),
+                source_bound,
+                source_pivot: source_bound.center,
+                margin: 1.5,
+                duration_seconds: 0.0,
+                easing: hyperscape::TransitionEasing::SmootherStep,
+            },
+        );
+        let anchored_target = FocusSphere::new(source_bound.center, 3.0).unwrap();
+        let (anchored_sequence, _) = store
+            .dispatch_focus_sphere_edit(anchored_target, true)
+            .unwrap();
+        assert_eq!(anchored_sequence, 2);
+        store
+            .dispatch(AppEvent::Frame(FrameTick {
+                elapsed_seconds: 0.0,
+                delta_seconds: 0.0,
+            }))
+            .unwrap();
+        let anchored = store.frame_snapshot();
+        assert_eq!(anchored.focus.sphere, anchored_target);
+        assert_eq!(anchored.selected_focus.unwrap().identity, selection_identity());
+
+        let before_rejection = store.frame_snapshot();
+        let moved_anchor = FocusSphere::new([3.0, 0.0, -1.0], 3.5).unwrap();
+        assert!(matches!(
+            store.dispatch_focus_sphere_edit(moved_anchor, true),
+            Err(ReduceError::Navigation(
+                "anchored focus edit cannot move the selected focus center"
+            )),
+        ));
+        assert_eq!(store.frame_snapshot(), before_rejection);
+
+        let replacement = FocusSphere::new([-1.0, 0.25, 0.75], 0.75).unwrap();
+        let (replacement_sequence, _) = store
+            .dispatch_focus_sphere_edit(replacement, false)
+            .unwrap();
+        assert_eq!(replacement_sequence, 3);
+        store
+            .dispatch(AppEvent::Frame(FrameTick {
+                elapsed_seconds: 0.0,
+                delta_seconds: 0.0,
+            }))
+            .unwrap();
+        let replaced = store.frame_snapshot();
+        assert_eq!(replaced.focus.sphere, replacement);
+        assert_eq!(replaced.selected_focus, None);
     }
 
     #[test]

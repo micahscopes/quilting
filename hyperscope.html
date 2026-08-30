@@ -3988,6 +3988,11 @@ const rustAppShadowDiagnostics = {
   focusFieldAuthorityErrors: 0,
   focusFieldComparisons: 0,
   focusFieldMismatches: 0,
+  focusSphereEditDispatches: 0,
+  focusSphereEditAuthorityWrites: 0,
+  focusSphereEditRejects: 0,
+  focusSphereEditFallbackWrites: 0,
+  lastFocusSphereEditSource: null,
   mappedSelectionPicks: 0,
   unmappedSelectionPicks: 0,
   selectionDispatches: 0,
@@ -7631,11 +7636,94 @@ function clearSelectedObject(message = '') {
   syncURL();
 }
 
-function setFocusSphereGeometry(sphere) {
+function dispatchRustFocusSphereGeometry(sphere, preserveAnchor, source) {
+  if (RUST_SELECTION_IMPLEMENTATION !== 'rust' || !rustAppShadow) return null;
+  // An unmapped renderer selection deliberately retains the incumbent local
+  // sphere. Rust must not detach or reinterpret it as an authored anchor.
+  if (selectedObject && (!preserveAnchor || !rustAppShadowSelectionQueued)) return null;
+  rustAppShadowDiagnostics.focusSphereEditDispatches += 1;
+  rustAppShadowDiagnostics.lastFocusSphereEditSource = source;
+  try {
+    advanceRustApplicationClockToSelectionEvent(performance.now());
+    rustAppShadow.editFocusSphere(
+      new Float64Array(sphere.center),
+      sphere.radius,
+      preserveAnchor,
+    );
+    const navigation = rustAppShadow.tickNavigation(0);
+    const committed = navigation?.focus;
+    const tolerance = 1e-11 * Math.max(1, Math.abs(sphere.radius));
+    const geometryMatches = committed?.center?.length === 3
+      && committed.center.every(
+        (coordinate, axis) => Math.abs(Number(coordinate) - sphere.center[axis]) <= tolerance,
+      )
+      && Math.abs(Number(committed.radius) - sphere.radius) <= tolerance
+      && Boolean(committed.anchored) === preserveAnchor;
+    if (!geometryMatches) {
+      throw new Error('Rust rejected or clamped the requested focus-sphere geometry');
+    }
+    const projectionApplied = preserveAnchor
+      ? applyRustSelectedFocusNavigation(navigation)
+      : applyRustNavigationSnapshot(navigation);
+    if (!projectionApplied) {
+      throw new Error('Rust focus-sphere projection could not be applied');
+    }
+    if (!applyRustAppFocusToRenderer(
+      navigation,
+      preserveAnchor ? selectedObject : null,
+    )) {
+      throw new Error('Rust focus-sphere state did not reach the resident renderer');
+    }
+    rustManualCameraActive = true;
+    rustAppShadowDiagnostics.focusSphereEditAuthorityWrites += 1;
+    return true;
+  } catch (error) {
+    rustAppShadowDiagnostics.focusSphereEditRejects += 1;
+    recordAppShadowMismatch(
+      'focus_sphere_edit',
+      `${source}: ${error?.message || String(error)}`,
+    );
+    try {
+      const committed = rustAppShadow.navigationSnapshot();
+      const selectedFocus = committed?.selected_focus;
+      const identity = selectedObject?.identity;
+      const retainsSelection = Boolean(identity && selectedFocus
+        && selectedFocus.asset_id === identity.assetId
+        && selectedFocus.entity_id === identity.entityId);
+      if (retainsSelection) applyRustSelectedFocusNavigation(committed);
+      else applyRustNavigationSnapshot(committed);
+      applyRustAppFocusToRenderer(committed, retainsSelection ? selectedObject : null);
+    } catch (rollbackError) {
+      recordAppShadowMismatch(
+        'focus_sphere_edit_rollback',
+        rollbackError?.message || String(rollbackError),
+      );
+    }
+    return false;
+  }
+}
+
+function setFocusSphereGeometry(sphere, source = 'browser-focus-geometry') {
+  const requestedSphere = {
+    center: Array.from(sphere.center, Number),
+    radius: Math.max(Number(sphere.radius) || 0, 0.011),
+  };
+  const preserveAnchor = Boolean(selectedObject
+    && focusSphere.anchorNode === selectedObject.node
+    && focusSphere.anchorRadius > 0);
+  const rustAccepted = dispatchRustFocusSphereGeometry(
+    requestedSphere,
+    preserveAnchor,
+    source,
+  );
+  if (rustAccepted != null) return rustAccepted;
+  if (RUST_SELECTION_IMPLEMENTATION === 'rust') {
+    rustAppShadowDiagnostics.focusSphereEditFallbackWrites += 1;
+  }
   const previousCenter = focusSphere.center.slice();
   const previousRadius = focusSphere.radius;
-  focusSphere.center = sphere.center.slice();
-  focusSphere.radius = Math.max(Number(sphere.radius) || 0, 0.011);
+  focusSphere.center = requestedSphere.center;
+  focusSphere.radius = requestedSphere.radius;
   const requestedControls = [
     focusSphere.center[0] * 10,
     focusSphere.center[1] * 10,
@@ -8109,7 +8197,7 @@ canvas.addEventListener('wheel', e => {
       const accepted = setFocusSphereGeometry({
         center: anchored ? selectedObject.bound.center : focusSphere.center,
         radius: nextRadius,
-      });
+      }, 'focus-wheel');
       if (anchored && accepted) focusSphere.margin = nextRadius / focusSphere.anchorRadius;
       if (accepted && mob.xform.peek() === 'sphere_reflection') debouncedLodRecompute();
     }
@@ -11488,7 +11576,10 @@ function frame(ts) {
             Math.max(-3, Math.min(3, focusSphere.center[1] + dy)),
             Math.max(-3, Math.min(3, focusSphere.center[2] + dz)),
           ];
-        const accepted = setFocusSphereGeometry({ center: nextCenter, radius: nextRadius });
+        const accepted = setFocusSphereGeometry(
+          { center: nextCenter, radius: nextRadius },
+          'spacemouse-inversion',
+        );
         if (anchored && accepted) focusSphere.margin = nextRadius / focusSphere.anchorRadius;
       } else if (spaceMouseMode === 'depth-of-field') {
         rustManualCameraActive = false;
