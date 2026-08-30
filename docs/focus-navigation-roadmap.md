@@ -285,7 +285,11 @@ or sphere state.
    validated entity-level or face/barycentric hover plus primary
    press/release/cancel and a read-only interaction snapshot. The retained
    WebGL2 pick now also evaluates the exact animated QB point in source and
-   displayed charts on demand. `selectionimpl=shadow` routes mouse and
+   displayed charts on demand. A backend-neutral `InteractionTargetTable`
+   atomically joins transient packed nodes to optional stable identity and
+   source bounds. WebGL2 and WebGPU queries therefore supply the same compact
+   packed-node/surface sample instead of independently rebuilding semantic
+   identity. `selectionimpl=shadow` routes mouse and
    view-center picks through hover/press/release, compares the activated stable
    identity, and falls back to the incumbent direct observer without changing
    renderer authority. Replay 0.25 records exact interaction actions and state,

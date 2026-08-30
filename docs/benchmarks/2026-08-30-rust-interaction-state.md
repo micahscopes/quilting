@@ -20,6 +20,14 @@ system set. `InteractionState` retains hover and active hits only. Its snapshot
 derives selected identity from `FocusNavigation::anchor`, so this work does not
 create a competing selection owner or a second focus sphere.
 
+Renderer residency now enters through `InteractionTargetTable`. Each transient
+packed node is registered with its source bound and optional asset-scoped
+identity in one validated replacement. A WebGL2 or WebGPU query then supplies
+only the packed node, source pivot, displayed distance, and optional
+face/barycentrics. Rust performs the join before constructing
+`InteractionHit`; an unknown or deliberately unmapped node cannot masquerade as
+semantic identity.
+
 ## Determinism and failure policy
 
 - Actions carry monotonically allocated sequences and nondecreasing virtual
@@ -35,9 +43,11 @@ create a competing selection owner or a second focus sphere.
 ## Evidence
 
 `nice -n 19 ionice -c 3 env CARGO_BUILD_JOBS=1 cargo test -p hyperscape --lib`
-passed all 140 tests. The six interaction tests cover barycentric validation,
+passes all 142 tests. The eight interaction tests cover barycentric validation,
 focus-relative reach, ECS activation routing without duplicate selection,
-cross-entity cancellation, invalid-hit atomicity, and cadence invariance.
+cross-entity cancellation, invalid-hit atomicity, cadence invariance,
+asset-scoped packed-node resolution, and atomic rejection of duplicate,
+unknown, unmapped, or non-finite target samples.
 
 `hyperscope-app` now retains the controller beside navigation and integrates it
 first on each virtual frame. Replay schema 0.25 records the complete semantic
@@ -59,6 +69,11 @@ and snapshot methods. The route source smoke fences their delegation through
 `SemanticAction::Interact`; the exact `leptos-ui,webgpu-backend` WASM feature
 set passes `cargo check --target wasm32-unknown-unknown`.
 
+The facade also owns the backend-local target table outside `AppState` and
+outside JavaScript semantic state. Source-bound refresh replaces it atomically;
+the shadow pick path submits `setPackedInteractionHover` when available. The
+old identity-explicit method remains as the stale-artifact/rollback path.
+
 The first page adapter is intentionally shadow-only. The retained WebGL2 pick
 returns its exact face/barycentric coordinate plus on-demand animated QB points
 in the source and displayed conformal charts. Under `selectionimpl=shadow`,
@@ -74,8 +89,8 @@ The command used one low-priority Cargo job and did not invoke Trunk,
 ## Remaining boundary
 
 This is semantic-core evidence, not live browser authority. WebGL2/WebGPU ray
-or shape queries beyond this first WebGL2 click path still need thin adapters
-that resolve packed renderer hits to exact stable identity. Visualization such
-as hover/selection tint remains presentation policy. Representative live shadow
-parity and a deliberate Rust-default promotion should precede any incumbent
-removal.
+or shape queries beyond this first WebGL2 click path still need thin adapters;
+they now share the packed-target resolver rather than owning separate identity
+joins. Visualization such as hover/selection tint remains presentation policy.
+Representative live shadow parity and a deliberate Rust-default promotion
+should precede any incumbent removal.

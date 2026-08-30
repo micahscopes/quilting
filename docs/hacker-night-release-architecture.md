@@ -633,8 +633,14 @@ and snapshots derive selection from `FocusNavigation::anchor`. This keeps
 WebGL2/WebGPU picking, selection tint, and DOM event shape outside semantic
 authority. The generated `HyperscopeAppShadow` facade now validates and queues
 entity-level or face/barycentric hover plus primary press/release/cancel, and
-projects an interaction snapshot without mutating focus directly. Browser query
-plumbing now has a shadow-only first slice: the WebGL2 pick evaluates the exact
+projects an interaction snapshot without mutating focus directly. Renderer
+residency is registered through an atomic `InteractionTargetTable`: transient
+packed nodes carry source bounds and optional stable asset/entity identity,
+while WebGL2/WebGPU samples carry only the packed node, source pivot, displayed
+distance, and optional surface coordinate. The Rust join rejects unknown or
+unmapped nodes before semantic dispatch and remains adapter state rather than
+durable `AppState`. Browser query plumbing now has a shadow-only first slice:
+the WebGL2 pick evaluates the exact
 animated QB point in source and displayed charts only on explicit picks, while
 `selectionimpl=shadow` sends hover/press/release and compares the resulting
 stable identity. Exact ray hits bypass proximity range; explicitly named
