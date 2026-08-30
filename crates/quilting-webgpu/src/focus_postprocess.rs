@@ -59,6 +59,14 @@ pub struct FocusPostprocessTarget {
 }
 
 impl FocusPostprocessTarget {
+    pub const fn scene_color_format(&self) -> wgpu::TextureFormat {
+        wgpu::TextureFormat::Rgba8Unorm
+    }
+
+    pub const fn raw_field_format(&self) -> wgpu::TextureFormat {
+        wgpu::TextureFormat::Rgba16Float
+    }
+
     pub const fn size(&self) -> [u32; 2] {
         self.size
     }

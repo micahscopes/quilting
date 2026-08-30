@@ -333,6 +333,20 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             focus_pipelines.output_format(),
             wgpu::TextureFormat::Rgba8Unorm,
         );
+        let focus_pbr_pipeline = classifier
+            .create_offscreen_focus_pbr_patch_render_pipeline()
+            .expect("create focus PBR MRT pipeline");
+        assert_eq!(
+            focus_pbr_pipeline.color_format(),
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
+        assert_eq!(
+            focus_pbr_pipeline.raw_field_format(),
+            wgpu::TextureFormat::Rgba16Float,
+        );
+        let focus_target = classifier
+            .create_focus_postprocess_target([32, 32], &focus_pipelines)
+            .expect("create retained focus target");
 
         let texture_a = TextureAssetDescriptor {
             width: 2,
@@ -893,6 +907,77 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         let target = classifier
             .create_offscreen_patch_render_target([32, 32])
             .unwrap();
+        let focus_scene = classifier
+            .upload_focus_pbr_patch_render_scene(
+                &focus_pbr_pipeline,
+                &model,
+                render_scene.clone(),
+                &source_instances,
+                render_scene.revision,
+                None,
+            )
+            .unwrap();
+        classifier
+            .write_patch_render_scene_state(&model, &focus_scene, LodPose::default(), 0, &[1, 1])
+            .unwrap();
+        let mut focus_view = render_frame.view.clone();
+        focus_view.focus = FocusFieldPacket {
+            sphere: [0.0, 0.0, 0.0, 1.0],
+            enabled: true,
+        };
+        let focus_frame = RenderFrame::build(
+            render_frame.revision + 100,
+            render_frame.pose,
+            RenderStyle::Pbr,
+            focus_view,
+            RenderFrameOptions {
+                focus_postprocess: Some(quilting_core::render::FocusPostprocessPacket {
+                    mode: quilting_core::render::FocusPostprocessMode::Spheroidal,
+                    blur_radius_pixels: 11,
+                    blur_strength: 1.0,
+                    focus_coordinate: 0.5,
+                    bandwidth: 0.1,
+                    normalize_range: false,
+                    stretch_range: [0.5, 0.5],
+                    gaussian_passes: 1,
+                    kawase_passes: 3,
+                    kawase_offset: 1.5,
+                }),
+                ..RenderFrameOptions::default()
+            },
+            &render_scene,
+        )
+        .unwrap();
+        let focus_error_scope = classifier
+            .device()
+            .push_error_scope(wgpu::ErrorFilter::Validation);
+        let focus_encoding = classifier
+            .render_offscreen_focus_pbr_patch_scene_with_face_visibility(
+                &focus_frame,
+                &focus_pbr_pipeline,
+                &focus_pipelines,
+                &focus_scene,
+                &packed_atlas,
+                &focus_target,
+                &target,
+                true,
+            )
+            .unwrap();
+        assert_eq!(focus_encoding.scene.indirect_draw_calls, 2);
+        assert_eq!(focus_encoding.postprocess.render_passes, 8);
+        classifier
+            .device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        if let Some(error) = focus_error_scope.pop().await {
+            panic!("complete focus PBR frame validation: {error}");
+        }
+        assert!(
+            offscreen_signature(&classifier, &target)
+                .await
+                .covered_pixels
+                > 0
+        );
         let root_atlas = prepare_lod_atlas_lookup(vec![[1, 1, 1]]).unwrap();
         let mut root_model = classifier.upload_model(root_prepared, &root_atlas).unwrap();
         let root_preparation = classifier

@@ -755,6 +755,12 @@ pub struct PatchFrameEncoding {
     pub source_instance_count: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FocusPatchFrameEncoding {
+    pub scene: PatchFrameEncoding,
+    pub postprocess: FocusPostprocessEncoding,
+}
+
 /// Device-local pipelines shared by every uploaded classifier model.
 pub struct LodClassifierDevice {
     device: wgpu::Device,
@@ -895,6 +901,26 @@ pub struct PatchRenderPipeline {
     clockwise: wgpu::RenderPipeline,
 }
 
+/// Dedicated two-attachment PBR pipeline used only by focus composition.
+/// Keeping the ordinary single-target pipeline inaccessible through this
+/// wrapper prevents a focus pipeline from being submitted to a one-attachment
+/// render pass by mistake.
+pub struct FocusPbrPatchRenderPipeline {
+    inner: PatchRenderPipeline,
+    color_format: wgpu::TextureFormat,
+    raw_field_format: wgpu::TextureFormat,
+}
+
+impl FocusPbrPatchRenderPipeline {
+    pub const fn color_format(&self) -> wgpu::TextureFormat {
+        self.color_format
+    }
+
+    pub const fn raw_field_format(&self) -> wgpu::TextureFormat {
+        self.raw_field_format
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PatchPipelineKind {
     Style(RenderStyle),
@@ -954,17 +980,35 @@ fn validate_basic_pbr_frame(
     scene: &RenderSceneSnapshot,
     options: RenderFrameOptions,
 ) -> Result<(), LodWebGpuError> {
+    validate_pbr_material_subset(scene)?;
+    if options.focus_postprocess.is_some() {
+        return Err(LodWebGpuError::Payload(
+            "basic WebGPU PBR does not yet support focus post-processing".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_focus_pbr_frame(
+    scene: &RenderSceneSnapshot,
+    options: RenderFrameOptions,
+) -> Result<(), LodWebGpuError> {
+    validate_pbr_material_subset(scene)?;
+    if options.focus_postprocess.is_none() {
+        return Err(LodWebGpuError::Payload(
+            "focus WebGPU PBR requires a focus postprocess packet".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_pbr_material_subset(scene: &RenderSceneSnapshot) -> Result<(), LodWebGpuError> {
     scene
         .validate()
         .map_err(|error| LodWebGpuError::Payload(format!("render scene contract: {error}")))?;
     if scene.batches.is_empty() {
         return Err(LodWebGpuError::Payload(
             "basic WebGPU PBR requires a nonempty scene".to_string(),
-        ));
-    }
-    if options.focus_postprocess.is_some() {
-        return Err(LodWebGpuError::Payload(
-            "basic WebGPU PBR does not yet support focus post-processing".to_string(),
         ));
     }
     let default_material = PbrMaterial::default();
@@ -3308,6 +3352,7 @@ impl LodClassifierDevice {
             depth_format,
             sample_count,
             false,
+            None,
         )?
         .0
         .pop()
@@ -3336,6 +3381,7 @@ impl LodClassifierDevice {
             depth_format,
             sample_count,
             true,
+            None,
         )?;
         let highlight = highlight.expect("requested highlight pipeline");
         let wire = pipelines.pop().expect("requested wire pipeline");
@@ -3362,10 +3408,16 @@ impl LodClassifierDevice {
         depth_format: Option<wgpu::TextureFormat>,
         sample_count: u32,
         include_highlight: bool,
+        pbr_raw_field_format: Option<wgpu::TextureFormat>,
     ) -> Result<(Vec<PatchRenderPipeline>, Option<PatchRenderPipeline>), LodWebGpuError> {
         if sample_count == 0 {
             return Err(LodWebGpuError::Payload(
                 "patch render sample count must be nonzero".to_string(),
+            ));
+        }
+        if pbr_raw_field_format.is_some() && (include_highlight || styles != [RenderStyle::Pbr]) {
+            return Err(LodWebGpuError::Payload(
+                "focus MRT pipeline creation requires exactly the PBR style".to_string(),
             ));
         }
         let source = quilting_shaders::compile_patch_render_device_wgsl()
@@ -3377,7 +3429,11 @@ impl LodClassifierDevice {
                 let (geometry, entry_point) = match style {
                     RenderStyle::Pbr => (
                         RenderGeometry::Triangles,
-                        quilting_shaders::PATCH_RENDER_DEVICE_PBR_ENTRY_POINT,
+                        if pbr_raw_field_format.is_some() {
+                            quilting_shaders::PATCH_RENDER_DEVICE_PBR_FOCUS_ENTRY_POINT
+                        } else {
+                            quilting_shaders::PATCH_RENDER_DEVICE_PBR_ENTRY_POINT
+                        },
                     ),
                     RenderStyle::Normals => {
                         (
@@ -3525,6 +3581,20 @@ impl LodClassifierDevice {
                     })
             };
             let create = |front_face| {
+                let mut targets = vec![Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })];
+                if uses_pbr_bindings {
+                    if let Some(format) = pbr_raw_field_format {
+                        targets.push(Some(wgpu::ColorTargetState {
+                            format,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }));
+                    }
+                }
                 self.device
                     .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                         label: Some("quilting prepared QB diagnostic"),
@@ -3559,11 +3629,7 @@ impl LodClassifierDevice {
                             module: &module,
                             entry_point: Some(fragment_entry_point),
                             compilation_options: Default::default(),
-                            targets: &[Some(wgpu::ColorTargetState {
-                                format: color_format,
-                                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                                write_mask: wgpu::ColorWrites::ALL,
-                            })],
+                            targets: &targets,
                         }),
                         multiview_mask: None,
                         cache: None,
@@ -3597,6 +3663,46 @@ impl LodClassifierDevice {
         let highlight =
             include_highlight.then(|| pipelines.pop().expect("requested highlight pipeline"));
         Ok((pipelines, highlight))
+    }
+
+    /// Create the focus-only PBR MRT pipeline. The first attachment receives
+    /// scene color; the second receives the raw stretch/depth/spheroidal
+    /// payload consumed by [`FocusPostprocessPipelines`].
+    pub fn create_focus_pbr_patch_render_pipeline(
+        &self,
+        color_format: wgpu::TextureFormat,
+        raw_field_format: wgpu::TextureFormat,
+        depth_format: Option<wgpu::TextureFormat>,
+        sample_count: u32,
+    ) -> Result<FocusPbrPatchRenderPipeline, LodWebGpuError> {
+        let (mut pipelines, highlight) = self.create_diagnostic_patch_render_pipelines_for(
+            &[RenderStyle::Pbr],
+            color_format,
+            depth_format,
+            sample_count,
+            false,
+            Some(raw_field_format),
+        )?;
+        debug_assert!(highlight.is_none());
+        let inner = pipelines.pop().ok_or_else(|| {
+            LodWebGpuError::Payload("focus PBR pipeline set was empty".to_string())
+        })?;
+        Ok(FocusPbrPatchRenderPipeline {
+            inner,
+            color_format,
+            raw_field_format,
+        })
+    }
+
+    pub fn create_offscreen_focus_pbr_patch_render_pipeline(
+        &self,
+    ) -> Result<FocusPbrPatchRenderPipeline, LodWebGpuError> {
+        self.create_focus_pbr_patch_render_pipeline(
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Rgba16Float,
+            Some(wgpu::TextureFormat::Depth24Plus),
+            1,
+        )
     }
 
     /// Create the fixed-format live shadow pipeline without leaking backend
@@ -3934,6 +4040,28 @@ impl LodClassifierDevice {
             face_visibility,
             bindings,
         })
+    }
+
+    /// Focus-PBR counterpart to [`Self::upload_patch_render_scene`]. The
+    /// wrapper keeps the two-attachment pipeline type distinct while reusing
+    /// the same retained semantic scene and binding machinery.
+    pub fn upload_focus_pbr_patch_render_scene(
+        &self,
+        pipeline: &FocusPbrPatchRenderPipeline,
+        model: &LodClassifierModel,
+        scene: RenderSceneSnapshot,
+        source_instances: &[f32],
+        revision: u64,
+        textures: Option<&PbrTextureTable>,
+    ) -> Result<PatchRenderScene, LodWebGpuError> {
+        self.upload_patch_render_scene(
+            &pipeline.inner,
+            model,
+            scene,
+            source_instances,
+            revision,
+            textures,
+        )
     }
 
     /// Publish a new extracted topology into an existing scene allocation when
@@ -4394,6 +4522,139 @@ impl LodClassifierDevice {
             false,
             wgpu::Color::TRANSPARENT,
         )
+    }
+
+    /// Encode one complete offscreen focus frame: PBR scene/raw MRT followed
+    /// by the retained Rust-scheduled focus composition. All resources remain
+    /// on the same device and no readback is introduced.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_focus_pbr_patch_render_scene<'resource, VisibilityProducer>(
+        &'resource self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &RenderFrame,
+        pipeline: &'resource FocusPbrPatchRenderPipeline,
+        focus_pipelines: &FocusPostprocessPipelines,
+        scene: &'resource PatchRenderScene,
+        atlas: &'resource PackedPatchAtlas,
+        focus_target: &FocusPostprocessTarget,
+        output_target: &OffscreenPatchRenderTarget,
+        use_qb: bool,
+        encode_visibility: VisibilityProducer,
+    ) -> Result<FocusPatchFrameEncoding, LodWebGpuError>
+    where
+        VisibilityProducer: FnOnce(
+            &mut wgpu::CommandEncoder,
+            &PatchPreparationScene,
+            &VisibilityCompactionScene,
+        ) -> Result<(), LodWebGpuError>,
+    {
+        if frame.style != RenderStyle::Pbr {
+            return Err(LodWebGpuError::Payload(format!(
+                "focus WebGPU pipeline cannot render {:?} frame",
+                frame.style,
+            )));
+        }
+        if frame.view.viewport != focus_target.size() || frame.view.viewport != output_target.size {
+            return Err(LodWebGpuError::Payload(format!(
+                "focus/output targets {:?}/{:?} do not match frame viewport {:?}",
+                focus_target.size(),
+                output_target.size,
+                frame.view.viewport,
+            )));
+        }
+        if pipeline.color_format != focus_target.scene_color_format()
+            || pipeline.raw_field_format != focus_target.raw_field_format()
+        {
+            return Err(LodWebGpuError::Payload(
+                "focus PBR pipeline formats do not match retained target".to_string(),
+            ));
+        }
+        let packet = frame.options.focus_postprocess.ok_or_else(|| {
+            LodWebGpuError::Payload(
+                "focus WebGPU frame has no postprocess packet after validation".to_string(),
+            )
+        })?;
+        let scene_encoding = self.encode_render_frame_with_pipelines(
+            encoder,
+            frame,
+            &scene.scene,
+            &scene.bindings,
+            &scene.patches,
+            &scene.visibility,
+            atlas,
+            PatchRenderTarget {
+                color_view: focus_target.scene_color_view(),
+                resolve_target: None,
+                depth_stencil_view: Some(&output_target.depth_view),
+                clear_color: Some(wgpu::Color::TRANSPARENT),
+                clear_depth: Some(1.0),
+            },
+            Some((
+                focus_target.raw_field_view(),
+                Some(wgpu::Color::TRANSPARENT),
+            )),
+            use_qb,
+            None,
+            |pass, geometry| {
+                if pass == RenderPass::PbrOpaque && geometry == RenderGeometry::Triangles {
+                    Ok(&pipeline.inner)
+                } else {
+                    Err(LodWebGpuError::Payload(format!(
+                        "focus WebGPU frame cannot lower {pass:?}/{geometry:?}",
+                    )))
+                }
+            },
+            encode_visibility,
+        )?;
+        let postprocess = self.encode_focus_postprocess(
+            encoder,
+            focus_pipelines,
+            focus_target,
+            &output_target.color_view,
+            packet,
+        )?;
+        Ok(FocusPatchFrameEncoding {
+            scene: scene_encoding,
+            postprocess,
+        })
+    }
+
+    /// Submit the complete focus frame using the scene's retained per-face
+    /// visibility adapter. This convenience remains no-readback.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_offscreen_focus_pbr_patch_scene_with_face_visibility(
+        &self,
+        frame: &RenderFrame,
+        pipeline: &FocusPbrPatchRenderPipeline,
+        focus_pipelines: &FocusPostprocessPipelines,
+        scene: &PatchRenderScene,
+        atlas: &PackedPatchAtlas,
+        focus_target: &FocusPostprocessTarget,
+        output_target: &OffscreenPatchRenderTarget,
+        use_qb: bool,
+    ) -> Result<FocusPatchFrameEncoding, LodWebGpuError> {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quilting complete offscreen focus frame"),
+            });
+        let encoding = self.encode_focus_pbr_patch_render_scene(
+            &mut encoder,
+            frame,
+            pipeline,
+            focus_pipelines,
+            scene,
+            atlas,
+            focus_target,
+            output_target,
+            use_qb,
+            |encoder, _, _| {
+                self.encode_face_visibility_expansion(scene, encoder);
+                Ok(())
+            },
+        )?;
+        self.queue.submit([encoder.finish()]);
+        Ok(encoding)
     }
 
     /// Submit a live offscreen normals frame whose current visibility arrives
@@ -4990,6 +5251,7 @@ impl LodClassifierDevice {
         visibility: &'resource VisibilityCompactionScene,
         atlas: &'resource PackedPatchAtlas,
         target: PatchRenderTarget<'resource>,
+        raw_field_target: Option<(&'resource wgpu::TextureView, Option<wgpu::Color>)>,
         use_qb: bool,
         highlight_pipeline: Option<&'resource PatchRenderPipeline>,
         resolve_pipeline: PipelineResolver,
@@ -5010,7 +5272,11 @@ impl LodClassifierDevice {
             .validate(scene)
             .map_err(|error| LodWebGpuError::Payload(format!("render frame contract: {error}")))?;
         if frame.style == RenderStyle::Pbr {
-            validate_basic_pbr_frame(scene, frame.options)?;
+            if raw_field_target.is_some() {
+                validate_focus_pbr_frame(scene, frame.options)?;
+            } else {
+                validate_basic_pbr_frame(scene, frame.options)?;
+            }
         }
         if scene.batches.is_empty() {
             return Err(LodWebGpuError::Payload(
@@ -5152,17 +5418,36 @@ impl LodClassifierDevice {
                         }),
                         stencil_ops: None,
                     });
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("quilting shared diagnostic frame"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target.color_view,
+            let primary_attachment = Some(wgpu::RenderPassColorAttachment {
+                view: target.color_view,
+                depth_slice: None,
+                resolve_target: target.resolve_target,
+                ops: wgpu::Operations {
+                    load: color_load,
+                    store: wgpu::StoreOp::Store,
+                },
+            });
+            let has_raw_field_target = raw_field_target.is_some();
+            let raw_attachment = raw_field_target.map(|(view, clear)| {
+                Some(wgpu::RenderPassColorAttachment {
+                    view,
                     depth_slice: None,
-                    resolve_target: target.resolve_target,
+                    resolve_target: None,
                     ops: wgpu::Operations {
-                        load: color_load,
+                        load: clear.map_or(wgpu::LoadOp::Load, wgpu::LoadOp::Clear),
                         store: wgpu::StoreOp::Store,
                     },
-                })],
+                })
+            });
+            let color_attachments = [primary_attachment, raw_attachment.flatten()];
+            let color_attachments = if has_raw_field_target {
+                &color_attachments[..]
+            } else {
+                &color_attachments[..1]
+            };
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("quilting shared diagnostic frame"),
+                color_attachments,
                 depth_stencil_attachment,
                 timestamp_writes: None,
                 occlusion_query_set: None,
@@ -5299,6 +5584,7 @@ impl LodClassifierDevice {
             visibility,
             atlas,
             target,
+            None,
             use_qb,
             None,
             |_, _| Ok(pipeline),
@@ -5339,6 +5625,7 @@ impl LodClassifierDevice {
             visibility,
             atlas,
             target,
+            None,
             use_qb,
             Some(&pipelines.highlight),
             |pass, geometry| pipelines.get_for_pass(pass, geometry),
