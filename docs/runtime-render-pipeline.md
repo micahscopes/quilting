@@ -153,10 +153,15 @@ device work, then resolves every batch command to the immutable batch metadata
 and exact index count it addresses. WebGPU validation, atlas admission, ordered
 draw traversal, highlight admission, and workload accounting consume that one
 view; extending the command enum therefore fails closed until the backend
-handles the new command. The live WebGL2 dispatcher still consumes the shared
-pass plan and is checked by the exact submission fingerprint. Moving it onto
-the resolved execution view is the next cutover gate, not a claimed parity
-result.
+handles the new command. With `rendershadow=1`, non-PBR WebGL2 styles now
+preflight every retained batch against that resolved scene and execute its draw
+commands directly; a mismatch falls back before the first diagnostic draw.
+`resolvedExecutionFrames`, `resolvedExecutionFallbacks`, and
+`lastExecutionError` make that gate observable through the existing render
+shadow diagnostics. The default WebGL2 path still consumes the shared pass plan
+without the shadow's per-frame scene validation, so this measured cutover adds
+no default CPU scan. PBR remains on its incumbent interleaved composition path
+until transmission and focus commands are lowered explicitly.
 
 `RenderStyle` also resolves to one canonical ordered `RenderDrawPassPlan`
 slice. Each pass names its geometry and semantic batch selection (`all`, PBR
