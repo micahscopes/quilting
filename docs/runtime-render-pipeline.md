@@ -248,9 +248,12 @@ the shared bind-group layout, shader entry points, primitive/multisample state,
 and color targets; the same ordered vector is the device memo key. WebGPU
 formats outside the currently named portable `TextureFormat` subset preserve
 the older uncached construction path instead of being folded into an
-incomplete key. Prepared-patch and resident-root families remain migration
-work and must not be described as functional-descriptor-backed until their
-actual lowering consumes those values too.
+incomplete key. Resident-root rendering now uses the same rule for its sixteen
+style/winding variants, including its shared root layout, PBR atlas/environment
+groups, focus MRT, vertex layout, and highlight depth-write policy.
+Prepared/adaptive patch families remain migration work and must not be
+described as functional-descriptor-backed until their actual lowering consumes
+those values too.
 
 `quilting_renderer::memo::DeviceMemo` is the effect boundary. It maps a pure
 descriptor to a concrete backend resource, inserts only after construction has

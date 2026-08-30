@@ -777,17 +777,6 @@ pub struct FocusPatchFrameEncoding {
     pub postprocess: FocusPostprocessEncoding,
 }
 
-/// Complete immutable state that selects one resident-root graphics pipeline
-/// family. Shader identity is memoized independently by its functional
-/// descriptor; these are the remaining backend target states that determine
-/// whether the retained family can be reused.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct ResidentRootPipelineKey {
-    color_format: wgpu::TextureFormat,
-    depth_format: Option<wgpu::TextureFormat>,
-    sample_count: u32,
-}
-
 /// Device-local pipelines shared by every uploaded classifier model.
 pub struct LodClassifierDevice {
     device: wgpu::Device,
@@ -797,7 +786,7 @@ pub struct LodClassifierDevice {
     focus_postprocess_render_pipelines:
         Mutex<DeviceMemo<Vec<RenderPipelineDescriptor>, FocusPostprocessPipelines>>,
     resident_root_render_pipelines:
-        Mutex<DeviceMemo<ResidentRootPipelineKey, ResidentRootRenderPipeline>>,
+        Mutex<DeviceMemo<Vec<RenderPipelineDescriptor>, ResidentRootRenderPipeline>>,
     pass1_pipeline: wgpu::ComputePipeline,
     pass2_pipeline: wgpu::ComputePipeline,
     resident_seed_pipeline: wgpu::ComputePipeline,

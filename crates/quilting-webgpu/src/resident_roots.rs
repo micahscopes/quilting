@@ -720,18 +720,49 @@ impl LodClassifierDevice {
                 "resident root render sample count must be nonzero".to_string(),
             ));
         }
-        let key = crate::ResidentRootPipelineKey {
-            color_format,
-            depth_format,
-            sample_count,
+        let Some(functional_color_format) =
+            crate::pipeline_lowering::functional_texture_format(color_format)
+        else {
+            return self.build_resident_root_render_pipeline(
+                color_format,
+                depth_format,
+                sample_count,
+                None,
+            );
         };
+        let functional_depth_format = match depth_format {
+            Some(format) => {
+                let Some(format) = crate::pipeline_lowering::functional_texture_format(format)
+                else {
+                    return self.build_resident_root_render_pipeline(
+                        color_format,
+                        depth_format,
+                        sample_count,
+                        None,
+                    );
+                };
+                Some(format)
+            }
+            None => None,
+        };
+        let descriptors = resident_root_pipeline_descriptors(
+            functional_color_format,
+            functional_depth_format,
+            sample_count,
+        )
+        .map_err(|error| LodWebGpuError::Payload(error.to_string()))?;
         let mut pipelines = self.resident_root_render_pipelines.lock().map_err(|_| {
             LodWebGpuError::Payload(
                 "WebGPU resident-root render pipeline memo was poisoned".to_string(),
             )
         })?;
-        let pipeline = pipelines.get_or_try_insert_with(key, |_| {
-            self.build_resident_root_render_pipeline(color_format, depth_format, sample_count)
+        let pipeline = pipelines.get_or_try_insert_with(descriptors, |descriptors| {
+            self.build_resident_root_render_pipeline(
+                color_format,
+                depth_format,
+                sample_count,
+                Some(descriptors.as_slice()),
+            )
         })?;
         Ok(pipeline.clone())
     }
@@ -741,6 +772,7 @@ impl LodClassifierDevice {
         color_format: wgpu::TextureFormat,
         depth_format: Option<wgpu::TextureFormat>,
         sample_count: u32,
+        descriptors: Option<&[functional::RenderPipelineDescriptor]>,
     ) -> Result<ResidentRootRenderPipeline, LodWebGpuError> {
         let module = self.memoized_render_shader_module(
             "quilting resident root render",
@@ -748,69 +780,114 @@ impl LodClassifierDevice {
             quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT,
             quilting_shaders::compile_resident_root_render_device_wgsl,
         )?;
-        let bind_group_layout =
-            self.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("quilting resident root render bindings"),
-                    entries: &[
-                        render_buffer_layout_visible(
-                            0,
-                            wgpu::BufferBindingType::Storage { read_only: true },
-                            PATCH_RENDER_FRAME_BYTES,
-                            false,
-                            wgpu::ShaderStages::VERTEX_FRAGMENT,
-                        ),
-                        render_buffer_layout(
-                            1,
-                            wgpu::BufferBindingType::Storage { read_only: true },
-                            PREPARED_PATCH_RECORD_BYTES,
-                            false,
-                        ),
-                        render_buffer_layout(
-                            2,
-                            wgpu::BufferBindingType::Storage { read_only: true },
-                            PACKED_RECORD_BYTES,
-                            false,
-                        ),
-                        render_buffer_layout(
-                            3,
-                            wgpu::BufferBindingType::Storage { read_only: true },
-                            RESIDENT_BUCKET_RANGE_RECORD_BYTES,
-                            false,
-                        ),
-                        render_buffer_layout(
-                            4,
-                            wgpu::BufferBindingType::Uniform,
-                            DRAW_BATCH_INDEX_BYTES,
-                            true,
-                        ),
-                        render_buffer_layout_visible(
-                            5,
-                            wgpu::BufferBindingType::Storage { read_only: true },
-                            PACKED_RECORD_BYTES,
-                            false,
-                            wgpu::ShaderStages::VERTEX_FRAGMENT,
-                        ),
-                        render_buffer_layout_visible(
-                            6,
-                            wgpu::BufferBindingType::Storage { read_only: true },
-                            16,
-                            false,
-                            wgpu::ShaderStages::VERTEX_FRAGMENT,
-                        ),
-                        render_buffer_layout_visible(
-                            7,
-                            wgpu::BufferBindingType::Storage { read_only: true },
-                            PATCH_PBR_MATERIAL_BYTES,
-                            false,
-                            wgpu::ShaderStages::FRAGMENT,
-                        ),
-                    ],
-                });
-        let pbr_portable_atlas_bind_group_layout =
-            pbr_resources::create_pbr_portable_atlas_bind_group_layout(&self.device);
-        let pbr_environment_bind_group_layout =
-            pbr_environment::create_pbr_environment_bind_group_layout(&self.device);
+        let (
+            bind_group_layout,
+            pbr_portable_atlas_bind_group_layout,
+            pbr_environment_bind_group_layout,
+        ) = if let Some(descriptors) = descriptors {
+            if descriptors.len() != 16 {
+                return Err(LodWebGpuError::Payload(
+                    "functional resident-root pipeline family must contain sixteen variants"
+                        .to_string(),
+                ));
+            }
+            let pbr_layout = descriptors[0].layout();
+            let diagnostic_layout = descriptors[4].layout();
+            if descriptors[..4]
+                .iter()
+                .any(|descriptor| descriptor.layout() != pbr_layout)
+                || descriptors[4..]
+                    .iter()
+                    .any(|descriptor| descriptor.layout() != diagnostic_layout)
+                || pbr_layout.groups().len() != 3
+                || diagnostic_layout.groups().len() != 1
+                || pbr_layout.groups()[0] != diagnostic_layout.groups()[0]
+            {
+                return Err(LodWebGpuError::Payload(
+                    "functional resident-root pipeline layouts are inconsistent".to_string(),
+                ));
+            }
+            (
+                crate::pipeline_lowering::bind_group_layout(
+                    &self.device,
+                    "quilting resident root render bindings",
+                    &pbr_layout.groups()[0],
+                ),
+                crate::pipeline_lowering::bind_group_layout(
+                    &self.device,
+                    "quilting portable PBR atlas binding layout",
+                    &pbr_layout.groups()[1],
+                ),
+                crate::pipeline_lowering::bind_group_layout(
+                    &self.device,
+                    "quilting PBR environment binding layout",
+                    &pbr_layout.groups()[2],
+                ),
+            )
+        } else {
+            (
+                self.device
+                    .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        label: Some("quilting resident root render bindings"),
+                        entries: &[
+                            render_buffer_layout_visible(
+                                0,
+                                wgpu::BufferBindingType::Storage { read_only: true },
+                                PATCH_RENDER_FRAME_BYTES,
+                                false,
+                                wgpu::ShaderStages::VERTEX_FRAGMENT,
+                            ),
+                            render_buffer_layout(
+                                1,
+                                wgpu::BufferBindingType::Storage { read_only: true },
+                                PREPARED_PATCH_RECORD_BYTES,
+                                false,
+                            ),
+                            render_buffer_layout(
+                                2,
+                                wgpu::BufferBindingType::Storage { read_only: true },
+                                PACKED_RECORD_BYTES,
+                                false,
+                            ),
+                            render_buffer_layout(
+                                3,
+                                wgpu::BufferBindingType::Storage { read_only: true },
+                                RESIDENT_BUCKET_RANGE_RECORD_BYTES,
+                                false,
+                            ),
+                            render_buffer_layout(
+                                4,
+                                wgpu::BufferBindingType::Uniform,
+                                DRAW_BATCH_INDEX_BYTES,
+                                true,
+                            ),
+                            render_buffer_layout_visible(
+                                5,
+                                wgpu::BufferBindingType::Storage { read_only: true },
+                                PACKED_RECORD_BYTES,
+                                false,
+                                wgpu::ShaderStages::VERTEX_FRAGMENT,
+                            ),
+                            render_buffer_layout_visible(
+                                6,
+                                wgpu::BufferBindingType::Storage { read_only: true },
+                                16,
+                                false,
+                                wgpu::ShaderStages::VERTEX_FRAGMENT,
+                            ),
+                            render_buffer_layout_visible(
+                                7,
+                                wgpu::BufferBindingType::Storage { read_only: true },
+                                PATCH_PBR_MATERIAL_BYTES,
+                                false,
+                                wgpu::ShaderStages::FRAGMENT,
+                            ),
+                        ],
+                    }),
+                pbr_resources::create_pbr_portable_atlas_bind_group_layout(&self.device),
+                pbr_environment::create_pbr_environment_bind_group_layout(&self.device),
+            )
+        };
         let diagnostic_pipeline_layout =
             self.device
                 .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -837,46 +914,100 @@ impl LodClassifierDevice {
             bias: wgpu::DepthBiasState::default(),
         });
         let attributes = wgpu::vertex_attr_array![0 => Float32x3];
-        let create = |label,
+        let create = |index: usize,
+                      label,
                       fragment_entry_point,
                       geometry,
                       front_face,
                       pipeline_layout: &wgpu::PipelineLayout,
                       depth_write_enabled,
-                      raw_field_format: Option<wgpu::TextureFormat>| {
-            let pipeline_depth_stencil = depth_stencil.clone().map(|mut state| {
-                state.depth_write_enabled = Some(depth_write_enabled);
-                state
-            });
-            let mut targets = vec![Some(wgpu::ColorTargetState {
-                format: color_format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })];
-            if let Some(format) = raw_field_format {
-                targets.push(Some(wgpu::ColorTargetState {
-                    format,
-                    blend: None,
+                      raw_field_format: Option<wgpu::TextureFormat>|
+         -> Result<wgpu::RenderPipeline, LodWebGpuError> {
+            let mut attribute_storage = Vec::new();
+            let (
+                vertex_entry_point,
+                fragment_entry_point,
+                vertex_buffers,
+                primitive,
+                pipeline_depth_stencil,
+                multisample,
+                targets,
+            ) = if let Some(descriptors) = descriptors {
+                let descriptor = &descriptors[index];
+                let fragment = descriptor.program().fragment().ok_or_else(|| {
+                    LodWebGpuError::Payload(
+                        "functional resident-root pipeline is missing a fragment stage".to_string(),
+                    )
+                })?;
+                for (expected_slot, buffer) in descriptor.vertex_buffers().iter().enumerate() {
+                    if buffer.slot() != expected_slot as u32 {
+                        return Err(LodWebGpuError::Payload(
+                            "functional resident-root vertex slots are not contiguous".to_string(),
+                        ));
+                    }
+                    attribute_storage.push(
+                        buffer
+                            .attributes()
+                            .iter()
+                            .map(|attribute| wgpu::VertexAttribute {
+                                format: crate::pipeline_lowering::vertex_format(attribute.format),
+                                offset: attribute.offset,
+                                shader_location: attribute.location,
+                            })
+                            .collect::<Vec<_>>(),
+                    );
+                }
+                let vertex_buffers = descriptor
+                    .vertex_buffers()
+                    .iter()
+                    .zip(attribute_storage.iter())
+                    .map(|(buffer, attributes)| wgpu::VertexBufferLayout {
+                        array_stride: buffer.stride(),
+                        step_mode: crate::pipeline_lowering::vertex_step_mode(buffer.step_mode()),
+                        attributes,
+                    })
+                    .collect::<Vec<_>>();
+                let targets = descriptor
+                    .color_targets()
+                    .iter()
+                    .copied()
+                    .map(crate::pipeline_lowering::color_target_state)
+                    .map(|target| target.map(Some))
+                    .collect::<Result<Vec<_>, _>>()?;
+                (
+                    descriptor.program().vertex().entry_point(),
+                    fragment.entry_point(),
+                    vertex_buffers,
+                    crate::pipeline_lowering::primitive_state(descriptor.primitive()),
+                    descriptor
+                        .depth_stencil()
+                        .map(crate::pipeline_lowering::depth_stencil_state),
+                    crate::pipeline_lowering::multisample_state(descriptor.multisample()),
+                    targets,
+                )
+            } else {
+                attribute_storage.push(attributes.to_vec());
+                let mut targets = vec![Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
-                }));
-            }
-            self.device
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(label),
-                    layout: Some(pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &module,
-                        entry_point: Some(
-                            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT,
-                        ),
-                        compilation_options: Default::default(),
-                        buffers: &[wgpu::VertexBufferLayout {
-                            array_stride: 12,
-                            step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &attributes,
-                        }],
-                    },
-                    primitive: wgpu::PrimitiveState {
+                })];
+                if let Some(format) = raw_field_format {
+                    targets.push(Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }));
+                }
+                (
+                    quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT,
+                    fragment_entry_point,
+                    vec![wgpu::VertexBufferLayout {
+                        array_stride: 12,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &attribute_storage[0],
+                    }],
+                    wgpu::PrimitiveState {
                         topology: match geometry {
                             RenderGeometry::Triangles => wgpu::PrimitiveTopology::TriangleList,
                             RenderGeometry::Lines => wgpu::PrimitiveTopology::LineList,
@@ -885,11 +1016,31 @@ impl LodClassifierDevice {
                         cull_mode: None,
                         ..Default::default()
                     },
-                    depth_stencil: pipeline_depth_stencil,
-                    multisample: wgpu::MultisampleState {
+                    depth_stencil.clone().map(|mut state| {
+                        state.depth_write_enabled = Some(depth_write_enabled);
+                        state
+                    }),
+                    wgpu::MultisampleState {
                         count: sample_count,
                         ..Default::default()
                     },
+                    targets,
+                )
+            };
+            Ok(self
+                .device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some(vertex_entry_point),
+                        compilation_options: Default::default(),
+                        buffers: &vertex_buffers,
+                    },
+                    primitive,
+                    depth_stencil: pipeline_depth_stencil,
+                    multisample,
                     fragment: Some(wgpu::FragmentState {
                         module: &module,
                         entry_point: Some(fragment_entry_point),
@@ -898,11 +1049,17 @@ impl LodClassifierDevice {
                     }),
                     multiview_mask: None,
                     cache: None,
-                })
+                }))
         };
-        let create_style =
-            |label, fragment_entry_point, geometry, pipeline_layout| ResidentRootWindingPipelines {
+        let create_style = |base_index,
+                            label,
+                            fragment_entry_point,
+                            geometry,
+                            pipeline_layout|
+         -> Result<ResidentRootWindingPipelines, LodWebGpuError> {
+            Ok(ResidentRootWindingPipelines {
                 counter_clockwise: create(
+                    base_index,
                     label,
                     fragment_entry_point,
                     geometry,
@@ -910,8 +1067,9 @@ impl LodClassifierDevice {
                     pipeline_layout,
                     true,
                     None,
-                ),
+                )?,
                 clockwise: create(
+                    base_index + 1,
                     label,
                     fragment_entry_point,
                     geometry,
@@ -919,20 +1077,23 @@ impl LodClassifierDevice {
                     pipeline_layout,
                     true,
                     None,
-                ),
-            };
+                )?,
+            })
+        };
         Ok(ResidentRootRenderPipeline {
             color_format,
             sample_count,
             bind_group_layout,
             pbr: create_style(
+                0,
                 "quilting resident root PBR",
                 quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_PBR_ENTRY_POINT,
                 RenderGeometry::Triangles,
                 &pbr_pipeline_layout,
-            ),
+            )?,
             pbr_focus: ResidentRootWindingPipelines {
                 counter_clockwise: create(
+                    2,
                     "quilting resident root focus PBR",
                     quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_PBR_FOCUS_ENTRY_POINT,
                     RenderGeometry::Triangles,
@@ -940,8 +1101,9 @@ impl LodClassifierDevice {
                     &pbr_pipeline_layout,
                     true,
                     Some(wgpu::TextureFormat::Rgba16Float),
-                ),
+                )?,
                 clockwise: create(
+                    3,
                     "quilting resident root focus PBR",
                     quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_PBR_FOCUS_ENTRY_POINT,
                     RenderGeometry::Triangles,
@@ -949,40 +1111,46 @@ impl LodClassifierDevice {
                     &pbr_pipeline_layout,
                     true,
                     Some(wgpu::TextureFormat::Rgba16Float),
-                ),
+                )?,
             },
             matcap: create_style(
+                4,
                 "quilting resident root matcap",
                 quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_MATCAP_ENTRY_POINT,
                 RenderGeometry::Triangles,
                 &diagnostic_pipeline_layout,
-            ),
+            )?,
             normals: create_style(
+                6,
                 "quilting resident root normals",
                 quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_NORMALS_ENTRY_POINT,
                 RenderGeometry::Triangles,
                 &diagnostic_pipeline_layout,
-            ),
+            )?,
             lod: create_style(
+                8,
                 "quilting resident root LOD",
                 quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_LOD_ENTRY_POINT,
                 RenderGeometry::Triangles,
                 &diagnostic_pipeline_layout,
-            ),
+            )?,
             stretch: create_style(
+                10,
                 "quilting resident root stretch",
                 quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_STRETCH_ENTRY_POINT,
                 RenderGeometry::Triangles,
                 &diagnostic_pipeline_layout,
-            ),
+            )?,
             wire: create_style(
+                12,
                 "quilting resident root wire",
                 quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_WIRE_ENTRY_POINT,
                 RenderGeometry::Lines,
                 &diagnostic_pipeline_layout,
-            ),
+            )?,
             highlight: ResidentRootWindingPipelines {
                 counter_clockwise: create(
+                    14,
                     "quilting resident root highlight",
                     quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT,
                     RenderGeometry::Triangles,
@@ -990,8 +1158,9 @@ impl LodClassifierDevice {
                     &diagnostic_pipeline_layout,
                     false,
                     None,
-                ),
+                )?,
                 clockwise: create(
+                    15,
                     "quilting resident root highlight",
                     quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT,
                     RenderGeometry::Triangles,
@@ -999,7 +1168,7 @@ impl LodClassifierDevice {
                     &diagnostic_pipeline_layout,
                     false,
                     None,
-                ),
+                )?,
             },
             pbr_portable_atlas_bind_group_layout,
             pbr_environment_bind_group_layout,
