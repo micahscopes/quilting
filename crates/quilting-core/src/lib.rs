@@ -31,6 +31,8 @@
 //! - [`batch`] — grouping faces into instanced draw calls.
 //! - [`render`] — backend-neutral scene snapshots and frame commands shared by
 //!   WebGL2 and WebGPU implementations.
+//! - [`focus_postprocess`] — the backend-neutral JFA and directional-blur
+//!   schedule consumed identically by WebGL2 and WebGPU.
 //! - [`material`] — authored PBR values and stable texture references, without
 //!   backend resource handles or frame-local presentation state.
 //! - [`render_evidence`] — normalized, bounded workload/image evidence for
@@ -71,6 +73,7 @@ pub mod conformal_lod;
 pub mod batch;
 pub mod educational;
 pub mod render;
+pub mod focus_postprocess;
 pub mod material;
 pub mod render_evidence;
 pub mod render_pipeline;

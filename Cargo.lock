@@ -1354,6 +1354,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glow 0.16.0",
+ "quilting-core",
 ]
 
 [[package]]

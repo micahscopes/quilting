@@ -12,3 +12,4 @@ categories = ["graphics", "rendering", "game-development"]
 [dependencies]
 glow = "0.16"
 bytemuck = "1"
+quilting-core = { version = "0.1.0", path = "../quilting-core" }

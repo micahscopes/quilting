@@ -27,10 +27,47 @@
 //! reachable from `Drop`, so GL objects are *not* released automatically —
 //! call [`JfaPipeline::destroy`] explicitly when tearing the pipeline down.
 
-mod plan;
-
 use glow::HasContext;
-use plan::{Extent2d, JfaPropagationPlan, PingPong, ShaderId};
+use quilting_core::focus_postprocess::{
+    focus_per_subpass_blur_strength as per_pass_blur_strength,
+    FocusExtent2d as Extent2d,
+    FocusJfaPropagationPlan as JfaPropagationPlan,
+    FocusPingPong as PingPong,
+    FOCUS_BLUR_DIRECTIONS,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShaderId {
+    Init,
+    Step,
+    Firmness,
+    BlurDir,
+    WeightRadial,
+    WeightConformal,
+    ReduceMinmax,
+    WeightConformalNorm,
+    WeightKawase,
+    Passthrough,
+    MipComposite,
+    GaussDown,
+}
+
+impl ShaderId {
+    const ALL: [Self; 12] = [
+        Self::Init,
+        Self::Step,
+        Self::Firmness,
+        Self::BlurDir,
+        Self::WeightRadial,
+        Self::WeightConformal,
+        Self::ReduceMinmax,
+        Self::WeightConformalNorm,
+        Self::WeightKawase,
+        Self::Passthrough,
+        Self::MipComposite,
+        Self::GaussDown,
+    ];
+}
 
 /// Precision mode for intermediate textures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -737,16 +774,6 @@ fn mip_level_count(width: i32, height: i32) -> i32 {
     (max_dim.log2().floor() as i32 + 1).clamp(1, 8)
 }
 
-/// Per-sub-pass blur strength for the hex blur.
-///
-/// The hex blur fires `blur_passes * 3` directional Gaussians; dividing by
-/// `sqrt(passes * 3)` keeps total blur roughly constant as `blur_passes` varies,
-/// because independent Gaussian variances add.
-fn per_pass_blur_strength(blur_strength: f32, blur_passes: u32) -> f32 {
-    let n = blur_passes.max(1);
-    blur_strength / (n as f32 * 3.0).sqrt()
-}
-
 impl JfaPipeline {
     /// Create the JFA pipeline. Call once at init time.
     pub fn new(gl: &glow::Context, config: JfaConfig) -> Result<Self, String> {
@@ -910,8 +937,8 @@ impl JfaPipeline {
             gl.viewport(
                 0,
                 0,
-                propagation_extent.width() as i32,
-                propagation_extent.height() as i32,
+                propagation_extent.width as i32,
+                propagation_extent.height as i32,
             );
             gl.use_program(Some(self.prog_init));
             gl.active_texture(glow::TEXTURE0);
@@ -945,8 +972,8 @@ impl JfaPipeline {
                 if let Some(loc) = gl.get_uniform_location(self.prog_step, "u_dims") {
                     gl.uniform_2_f32(
                         Some(&loc),
-                        propagation_extent.width() as f32,
-                        propagation_extent.height() as f32,
+                        propagation_extent.width as f32,
+                        propagation_extent.height as f32,
                     );
                 }
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
@@ -1145,13 +1172,9 @@ impl JfaPipeline {
                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
             } else {
                 // --- Hex blur: 3 directional Gaussian passes at 0°, 60°, 120° ---
-                let hex_dirs: [(f32, f32); 3] = [
-                    (1.0, 0.0),      // 0°
-                    (0.5, 0.866),    // 60°
-                    (-0.5, 0.866),   // 120°
-                ];
                 let num_passes = self.config.blur_passes.max(1);
-                let per_pass_strength = per_pass_blur_strength(self.config.blur_strength, num_passes);
+                let per_pass_strength =
+                    per_pass_blur_strength(self.config.blur_strength, num_passes);
                 let tx = 1.0 / fw as f32;
                 let ty = 1.0 / fh as f32;
 
@@ -1181,7 +1204,7 @@ impl JfaPipeline {
                 let mut sub_idx = 0u32;
 
                 for _ in 0..num_passes {
-                    for &(dx, dy) in &hex_dirs {
+                    for [dx, dy] in FOCUS_BLUR_DIRECTIONS {
                         sub_idx += 1;
                         let is_last = sub_idx == total_sub;
                         let dst_fbo = if is_last { output_fbo }
