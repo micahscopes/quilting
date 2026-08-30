@@ -14,7 +14,7 @@ use quilting_core::render_pipeline::{
 use std::sync::Arc;
 
 use crate::shader::{
-    shared_vertex_binding_entries, WebGlBindingPlan, WebGlProgramKey, WebGlProgramMemo,
+    vertex_binding_entries, WebGlBindingPlan, WebGlProgramKey, WebGlProgramMemo,
 };
 
 const PATCH_PREPARE_FRAGMENT_WGSL: &str = r#"
@@ -79,7 +79,7 @@ fn transform_feedback_program_descriptor(
         varyings.iter().map(|varying| (*varying).into()).collect(),
     )
     .map_err(|error| error.to_string())?;
-    let (uniform_blocks, samplers) = shared_vertex_binding_entries();
+    let (uniform_blocks, samplers) = vertex_binding_entries(entry_point)?;
     let bindings = WebGlBindingPlan::new(uniform_blocks, samplers)?;
     Ok(WebGlProgramKey::new(program, bindings))
 }
@@ -260,6 +260,7 @@ mod tests {
     use crate::shader::{
         FACE_DATA_TEX_UNIT, JOINT_MATRICES_BINDING, MORPH_TEX_UNIT,
         SKINNING_TEX_UNIT, SUPPRESSED_FACE_TEX_UNIT, VERTEX_UNIFORMS_BINDING,
+        WebGlOpaqueBindingKind,
     };
     use std::collections::HashSet;
 
@@ -316,7 +317,6 @@ mod tests {
                 ("_group_0_binding_2_vs", SKINNING_TEX_UNIT),
                 ("_group_0_binding_3_vs", MORPH_TEX_UNIT),
                 ("_group_0_binding_4_vs", FACE_DATA_TEX_UNIT),
-                ("_group_0_binding_5_vs", SUPPRESSED_FACE_TEX_UNIT),
             ]
         );
     }
@@ -350,6 +350,56 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn transform_feedback_binding_provenance_matches_each_entry() {
+        for key in [
+            patch_prepare_program_descriptor().unwrap(),
+            patch_visibility_program_descriptor().unwrap(),
+        ] {
+            let descriptor = key.program().vertex();
+            let module = quilting_shaders::compile_shader(
+                descriptor.source(),
+                Default::default(),
+            )
+            .unwrap();
+            let reflected = quilting_shaders::reflect_graphics_entry_bindings(
+                &module,
+                quilting_shaders::EntryPointStage::Vertex,
+                descriptor.entry_point(),
+            )
+            .unwrap();
+            let mut planned = key
+                .bindings()
+                .uniform_blocks()
+                .iter()
+                .map(|binding| quilting_shaders::ReflectedEntryBinding {
+                    group: binding.source.group,
+                    binding: binding.source.binding,
+                    name: binding.source_name.to_string(),
+                    kind: quilting_shaders::ReflectedBindingKind::UniformBuffer,
+                })
+                .chain(key.bindings().samplers().iter().map(|binding| {
+                    quilting_shaders::ReflectedEntryBinding {
+                        group: binding.source.group,
+                        binding: binding.source.binding,
+                        name: binding.source_name.to_string(),
+                        kind: match binding.source_kind {
+                            WebGlOpaqueBindingKind::SampledTexture => {
+                                quilting_shaders::ReflectedBindingKind::SampledTexture
+                            }
+                            WebGlOpaqueBindingKind::Sampler => {
+                                quilting_shaders::ReflectedBindingKind::Sampler
+                            }
+                        },
+                    }
+                }))
+                .collect::<Vec<_>>();
+            planned.sort();
+            assert_eq!(planned, reflected, "{} bindings", descriptor.entry_point());
+            assert!(key.bindings().cross_stage_slot_conflicts().is_empty());
         }
     }
 }

@@ -8,7 +8,7 @@ use quilting_core::render_pipeline::{
     GraphicsProgramDescriptor, ShaderDefinitionValue, ShaderModuleDescriptor, ShaderStage,
     ShaderTarget,
 };
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use crate::memo::{DeviceMemo, DeviceMemoDiagnostics};
@@ -44,12 +44,47 @@ pub const JOINT_MATRICES_BINDING: u32 = 4;
 pub struct WebGlUniformBlockBinding {
     pub name: Arc<str>,
     pub binding_point: u32,
+    pub source_name: Arc<str>,
+    pub source: WebGlBindingSite,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WebGlBindingSite {
+    pub group: u32,
+    pub binding: u32,
+    pub stage: ShaderStage,
+}
+
+impl WebGlBindingSite {
+    pub const fn new(group: u32, binding: u32, stage: ShaderStage) -> Self {
+        Self {
+            group,
+            binding,
+            stage,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum WebGlOpaqueBindingKind {
+    SampledTexture,
+    Sampler,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WebGlSamplerBinding {
     pub name: Arc<str>,
     pub texture_unit: u32,
+    pub source_name: Arc<str>,
+    pub source: WebGlBindingSite,
+    pub source_kind: WebGlOpaqueBindingKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebGlStageBindingConflict {
+    pub group: u32,
+    pub binding: u32,
+    pub stages: Vec<ShaderStage>,
 }
 
 /// Immutable WebGL mutations applied immediately after a program links.
@@ -68,10 +103,23 @@ impl WebGlBindingPlan {
         mut uniform_blocks: Vec<WebGlUniformBlockBinding>,
         mut samplers: Vec<WebGlSamplerBinding>,
     ) -> Result<Self, String> {
-        if uniform_blocks.iter().any(|binding| binding.name.is_empty())
-            || samplers.iter().any(|binding| binding.name.is_empty())
+        if uniform_blocks
+            .iter()
+            .any(|binding| binding.name.is_empty() || binding.source_name.is_empty())
+            || samplers
+                .iter()
+                .any(|binding| binding.name.is_empty() || binding.source_name.is_empty())
         {
-            return Err("WebGL binding names must not be empty".into());
+            return Err("WebGL emitted and source binding names must not be empty".into());
+        }
+        if uniform_blocks
+            .iter()
+            .any(|binding| binding.source.stage == ShaderStage::Compute)
+            || samplers
+                .iter()
+                .any(|binding| binding.source.stage == ShaderStage::Compute)
+        {
+            return Err("WebGL graphics bindings cannot use the compute stage".into());
         }
         uniform_blocks.sort_by(|left, right| left.name.cmp(&right.name));
         samplers.sort_by(|left, right| left.name.cmp(&right.name));
@@ -83,6 +131,15 @@ impl WebGlBindingPlan {
         }
         if samplers.windows(2).any(|pair| pair[0].name == pair[1].name) {
             return Err("duplicate WebGL sampler binding".into());
+        }
+        let mut source_sites = BTreeSet::new();
+        if !uniform_blocks
+            .iter()
+            .map(|binding| binding.source)
+            .chain(samplers.iter().map(|binding| binding.source))
+            .all(|source| source_sites.insert(source))
+        {
+            return Err("duplicate stage-specific WebGL source binding".into());
         }
         Ok(Self {
             uniform_blocks,
@@ -96,6 +153,35 @@ impl WebGlBindingPlan {
 
     pub fn samplers(&self) -> &[WebGlSamplerBinding] {
         &self.samplers
+    }
+
+    /// Return legacy binding coordinates that name distinct resources in more
+    /// than one shader stage. WebGL can initialize those resources by their
+    /// emitted GLSL names, but a WebGPU pipeline layout has one resource per
+    /// `(group, binding)` and therefore cannot lower this plan losslessly.
+    pub fn cross_stage_slot_conflicts(&self) -> Vec<WebGlStageBindingConflict> {
+        let mut stages_by_slot = BTreeMap::<(u32, u32), BTreeSet<ShaderStage>>::new();
+        for source in self
+            .uniform_blocks
+            .iter()
+            .map(|binding| binding.source)
+            .chain(self.samplers.iter().map(|binding| binding.source))
+        {
+            stages_by_slot
+                .entry((source.group, source.binding))
+                .or_default()
+                .insert(source.stage);
+        }
+        stages_by_slot
+            .into_iter()
+            .filter_map(|((group, binding), stages)| {
+                (stages.len() > 1).then(|| WebGlStageBindingConflict {
+                    group,
+                    binding,
+                    stages: stages.into_iter().collect(),
+                })
+            })
+            .collect()
     }
 }
 
@@ -190,86 +276,181 @@ fn fragment_source_and_entry(mode: &str) -> Result<(&'static str, &'static str),
     }
 }
 
-pub(crate) fn shared_vertex_binding_entries() -> (Vec<WebGlUniformBlockBinding>, Vec<WebGlSamplerBinding>) {
-    (
-        vec![
-            WebGlUniformBlockBinding {
-                name: "Uniforms_block_0Vertex".into(),
-                binding_point: VERTEX_UNIFORMS_BINDING,
-            },
-            WebGlUniformBlockBinding {
-                name: "JointMatrices_block_1Vertex".into(),
-                binding_point: JOINT_MATRICES_BINDING,
-            },
-        ],
-        vec![
-            WebGlSamplerBinding {
-                name: "_group_0_binding_2_vs".into(),
-                texture_unit: SKINNING_TEX_UNIT,
-            },
-            WebGlSamplerBinding {
-                name: "_group_0_binding_3_vs".into(),
-                texture_unit: MORPH_TEX_UNIT,
-            },
-            WebGlSamplerBinding {
-                name: "_group_0_binding_4_vs".into(),
-                texture_unit: FACE_DATA_TEX_UNIT,
-            },
-            WebGlSamplerBinding {
-                name: "_group_0_binding_5_vs".into(),
-                texture_unit: SUPPRESSED_FACE_TEX_UNIT,
-            },
-        ],
-    )
+pub(crate) fn vertex_binding_entries(
+    entry_point: &str,
+) -> Result<(Vec<WebGlUniformBlockBinding>, Vec<WebGlSamplerBinding>), String> {
+    let mut uniform_blocks = vec![
+        WebGlUniformBlockBinding {
+            name: "Uniforms_block_0Vertex".into(),
+            binding_point: VERTEX_UNIFORMS_BINDING,
+            source_name: "u".into(),
+            source: WebGlBindingSite::new(0, 0, ShaderStage::Vertex),
+        },
+        WebGlUniformBlockBinding {
+            name: "JointMatrices_block_1Vertex".into(),
+            binding_point: JOINT_MATRICES_BINDING,
+            source_name: "joints".into(),
+            source: WebGlBindingSite::new(0, 1, ShaderStage::Vertex),
+        },
+    ];
+    let mut samplers = vec![
+        WebGlSamplerBinding {
+            name: "_group_0_binding_2_vs".into(),
+            texture_unit: SKINNING_TEX_UNIT,
+            source_name: "skinning_tex".into(),
+            source: WebGlBindingSite::new(0, 2, ShaderStage::Vertex),
+            source_kind: WebGlOpaqueBindingKind::SampledTexture,
+        },
+        WebGlSamplerBinding {
+            name: "_group_0_binding_3_vs".into(),
+            texture_unit: MORPH_TEX_UNIT,
+            source_name: "morph_tex".into(),
+            source: WebGlBindingSite::new(0, 3, ShaderStage::Vertex),
+            source_kind: WebGlOpaqueBindingKind::SampledTexture,
+        },
+        WebGlSamplerBinding {
+            name: "_group_0_binding_4_vs".into(),
+            texture_unit: FACE_DATA_TEX_UNIT,
+            source_name: "face_data_tex".into(),
+            source: WebGlBindingSite::new(0, 4, ShaderStage::Vertex),
+            source_kind: WebGlOpaqueBindingKind::SampledTexture,
+        },
+        WebGlSamplerBinding {
+            name: "_group_0_binding_5_vs".into(),
+            texture_unit: SUPPRESSED_FACE_TEX_UNIT,
+            source_name: "suppressed_face_tex".into(),
+            source: WebGlBindingSite::new(0, 5, ShaderStage::Vertex),
+            source_kind: WebGlOpaqueBindingKind::SampledTexture,
+        },
+    ];
+    match entry_point {
+        "vs_main" => {
+            samplers.retain(|binding| binding.source.binding <= 3);
+        }
+        "prepare_patches" => {
+            samplers.retain(|binding| binding.source.binding <= 4);
+        }
+        "classify_patch_visibility" => {
+            uniform_blocks.retain(|binding| binding.source.binding == 0);
+            samplers.retain(|binding| binding.source.binding == 5);
+        }
+        _ => return Err(format!("unknown WebGL vertex entry point: {entry_point}")),
+    }
+    Ok((uniform_blocks, samplers))
 }
 
 fn primary_binding_plan(mode: &str) -> Result<WebGlBindingPlan, String> {
-    let (mut uniform_blocks, mut samplers) = shared_vertex_binding_entries();
+    let (mut uniform_blocks, mut samplers) = vertex_binding_entries("vs_main")?;
     match mode {
         "matcap" => uniform_blocks.push(WebGlUniformBlockBinding {
             name: "MatcapUniforms_block_0Fragment".into(),
             binding_point: WIRE_UNIFORMS_BINDING,
+            source_name: "matcap_u".into(),
+            source: WebGlBindingSite::new(0, 1, ShaderStage::Fragment),
         }),
         "wire" => uniform_blocks.push(WebGlUniformBlockBinding {
             name: "WireUniforms_block_0Fragment".into(),
             binding_point: WIRE_UNIFORMS_BINDING,
+            source_name: "wire".into(),
+            source: WebGlBindingSite::new(0, 1, ShaderStage::Fragment),
         }),
         "pbr" => uniform_blocks.push(WebGlUniformBlockBinding {
             name: "PbrUniforms_block_0Fragment".into(),
             binding_point: PBR_UNIFORMS_BINDING,
+            source_name: "pbr".into(),
+            source: WebGlBindingSite::new(0, 1, ShaderStage::Fragment),
         }),
         "normals" | "stretch" | "pick" => {}
         _ => return Err(format!("unknown fragment mode: {mode}")),
     }
 
     if mode == "pbr" {
-        for (binding, texture_unit) in [
-            (2, 0),
-            (3, 0),
-            (4, 1),
-            (5, 1),
-            (6, 2),
-            (7, 2),
-            (8, 3),
-            (9, 3),
-            (10, 4),
-            (11, 4),
-            (12, 5),
-            (13, 5),
-            (14, 6),
-            (15, 6),
-            (16, 7),
-            (17, 7),
-            (18, 8),
-            (19, 8),
-            (20, 9),
-            (21, 9),
-            (22, 10),
-            (23, 10),
+        for (binding, texture_unit, source_name, source_kind) in [
+            (
+                2,
+                0,
+                "base_color_tex",
+                WebGlOpaqueBindingKind::SampledTexture,
+            ),
+            (3, 0, "base_color_sampler", WebGlOpaqueBindingKind::Sampler),
+            (
+                4,
+                1,
+                "metallic_roughness_tex",
+                WebGlOpaqueBindingKind::SampledTexture,
+            ),
+            (
+                5,
+                1,
+                "metallic_roughness_sampler",
+                WebGlOpaqueBindingKind::Sampler,
+            ),
+            (6, 2, "normal_tex", WebGlOpaqueBindingKind::SampledTexture),
+            (7, 2, "normal_sampler", WebGlOpaqueBindingKind::Sampler),
+            (8, 3, "emissive_tex", WebGlOpaqueBindingKind::SampledTexture),
+            (9, 3, "emissive_sampler", WebGlOpaqueBindingKind::Sampler),
+            (
+                10,
+                4,
+                "occlusion_tex",
+                WebGlOpaqueBindingKind::SampledTexture,
+            ),
+            (11, 4, "occlusion_sampler", WebGlOpaqueBindingKind::Sampler),
+            (
+                12,
+                5,
+                "env_prefiltered",
+                WebGlOpaqueBindingKind::SampledTexture,
+            ),
+            (
+                13,
+                5,
+                "env_prefiltered_sampler",
+                WebGlOpaqueBindingKind::Sampler,
+            ),
+            (
+                14,
+                6,
+                "env_irradiance",
+                WebGlOpaqueBindingKind::SampledTexture,
+            ),
+            (
+                15,
+                6,
+                "env_irradiance_sampler",
+                WebGlOpaqueBindingKind::Sampler,
+            ),
+            (
+                18,
+                8,
+                "scene_color_tex",
+                WebGlOpaqueBindingKind::SampledTexture,
+            ),
+            (
+                19,
+                8,
+                "scene_color_sampler",
+                WebGlOpaqueBindingKind::Sampler,
+            ),
+            (
+                22,
+                10,
+                "transmission_tex",
+                WebGlOpaqueBindingKind::SampledTexture,
+            ),
+            (
+                23,
+                10,
+                "transmission_tex_sampler",
+                WebGlOpaqueBindingKind::Sampler,
+            ),
         ] {
             samplers.push(WebGlSamplerBinding {
                 name: format!("_group_0_binding_{binding}_fs").into(),
                 texture_unit,
+                source_name: source_name.into(),
+                source: WebGlBindingSite::new(0, binding, ShaderStage::Fragment),
+                source_kind,
             });
         }
     }
@@ -830,6 +1011,71 @@ mod tests {
     }
 
     #[test]
+    fn primary_binding_provenance_matches_composed_wgsl_reflection() {
+        for (mode, key) in primary_program_descriptors().unwrap() {
+            for descriptor in [
+                key.program().vertex(),
+                key.program()
+                    .fragment()
+                    .expect("primary programs have fragment shaders"),
+            ] {
+                assert!(descriptor.definitions().is_empty());
+                let stage = match descriptor.stage() {
+                    ShaderStage::Vertex => quilting_shaders::EntryPointStage::Vertex,
+                    ShaderStage::Fragment => quilting_shaders::EntryPointStage::Fragment,
+                    ShaderStage::Compute => unreachable!("graphics program contains compute"),
+                };
+                let module =
+                    quilting_shaders::compile_shader(descriptor.source(), HashMap::new()).unwrap();
+                let reflected = quilting_shaders::reflect_graphics_entry_bindings(
+                    &module,
+                    stage,
+                    descriptor.entry_point(),
+                )
+                .unwrap();
+                let mut planned = key
+                    .bindings()
+                    .uniform_blocks()
+                    .iter()
+                    .filter(|binding| binding.source.stage == descriptor.stage())
+                    .map(|binding| quilting_shaders::ReflectedEntryBinding {
+                        group: binding.source.group,
+                        binding: binding.source.binding,
+                        name: binding.source_name.to_string(),
+                        kind: quilting_shaders::ReflectedBindingKind::UniformBuffer,
+                    })
+                    .chain(
+                        key.bindings()
+                            .samplers()
+                            .iter()
+                            .filter(|binding| binding.source.stage == descriptor.stage())
+                            .map(|binding| quilting_shaders::ReflectedEntryBinding {
+                                group: binding.source.group,
+                                binding: binding.source.binding,
+                                name: binding.source_name.to_string(),
+                                kind: match binding.source_kind {
+                                    WebGlOpaqueBindingKind::SampledTexture => {
+                                        quilting_shaders::ReflectedBindingKind::SampledTexture
+                                    }
+                                    WebGlOpaqueBindingKind::Sampler => {
+                                        quilting_shaders::ReflectedBindingKind::Sampler
+                                    }
+                                },
+                            }),
+                    )
+                    .collect::<Vec<_>>();
+                planned.sort();
+                assert_eq!(
+                    planned,
+                    reflected,
+                    "{mode} {:?} bindings",
+                    descriptor.stage()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn cold_renderer_descriptor_catalog_predicts_memo_diagnostics() {
         let mut keys = primary_program_descriptors()
             .unwrap()
@@ -978,13 +1224,76 @@ mod tests {
             vec![WebGlUniformBlockBinding {
                 name: "Uniforms_block_0Vertex".into(),
                 binding_point: 99,
+                source_name: "u".into(),
+                source: WebGlBindingSite::new(0, 0, ShaderStage::Vertex),
             }],
             Vec::new(),
         )
         .unwrap();
+        assert_ne!(pbr, WebGlProgramKey::new(pbr.program().clone(), altered));
+    }
+
+    #[test]
+    fn primary_plans_report_the_exact_legacy_cross_stage_slots() {
+        let conflicts = primary_program_descriptors()
+            .unwrap()
+            .into_iter()
+            .map(|(mode, key)| {
+                (
+                    mode,
+                    key.bindings()
+                        .cross_stage_slot_conflicts()
+                        .into_iter()
+                        .map(|conflict| {
+                            assert_eq!(
+                                conflict.stages,
+                                vec![ShaderStage::Vertex, ShaderStage::Fragment]
+                            );
+                            (conflict.group, conflict.binding)
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(conflicts["matcap"], vec![(0, 1)]);
+        assert_eq!(conflicts["wire"], vec![(0, 1)]);
+        assert_eq!(conflicts["pbr"], vec![(0, 1), (0, 2), (0, 3)]);
+        for mode in ["normals", "stretch", "pick"] {
+            assert!(conflicts[mode].is_empty(), "unexpected {mode} conflict");
+        }
+    }
+
+    #[test]
+    fn stage_specific_binding_provenance_is_program_identity() {
+        let program = primary_program_descriptors().unwrap()[0]
+            .1
+            .program()
+            .clone();
+        let vertex_plan = WebGlBindingPlan::new(
+            vec![WebGlUniformBlockBinding {
+                name: "SameEmittedBlock".into(),
+                binding_point: 7,
+                source_name: "same_source".into(),
+                source: WebGlBindingSite::new(0, 1, ShaderStage::Vertex),
+            }],
+            Vec::new(),
+        )
+        .unwrap();
+        let fragment_plan = WebGlBindingPlan::new(
+            vec![WebGlUniformBlockBinding {
+                name: "SameEmittedBlock".into(),
+                binding_point: 7,
+                source_name: "same_source".into(),
+                source: WebGlBindingSite::new(0, 1, ShaderStage::Fragment),
+            }],
+            Vec::new(),
+        )
+        .unwrap();
+
         assert_ne!(
-            pbr,
-            WebGlProgramKey::new(pbr.program().clone(), altered)
+            WebGlProgramKey::new(program.clone(), vertex_plan),
+            WebGlProgramKey::new(program, fragment_plan)
         );
     }
 
@@ -995,10 +1304,14 @@ mod tests {
                 WebGlUniformBlockBinding {
                     name: "z".into(),
                     binding_point: 2,
+                    source_name: "z_source".into(),
+                    source: WebGlBindingSite::new(0, 2, ShaderStage::Vertex),
                 },
                 WebGlUniformBlockBinding {
                     name: "a".into(),
                     binding_point: 1,
+                    source_name: "a_source".into(),
+                    source: WebGlBindingSite::new(0, 1, ShaderStage::Vertex),
                 },
             ],
             Vec::new(),
@@ -1009,10 +1322,14 @@ mod tests {
                 WebGlUniformBlockBinding {
                     name: "a".into(),
                     binding_point: 1,
+                    source_name: "a_source".into(),
+                    source: WebGlBindingSite::new(0, 1, ShaderStage::Vertex),
                 },
                 WebGlUniformBlockBinding {
                     name: "z".into(),
                     binding_point: 2,
+                    source_name: "z_source".into(),
+                    source: WebGlBindingSite::new(0, 2, ShaderStage::Vertex),
                 },
             ],
             Vec::new(),
@@ -1024,15 +1341,51 @@ mod tests {
                 WebGlUniformBlockBinding {
                     name: "same".into(),
                     binding_point: 1,
+                    source_name: "first_source".into(),
+                    source: WebGlBindingSite::new(0, 1, ShaderStage::Vertex),
                 },
                 WebGlUniformBlockBinding {
                     name: "same".into(),
                     binding_point: 2,
+                    source_name: "second_source".into(),
+                    source: WebGlBindingSite::new(0, 2, ShaderStage::Vertex),
                 },
             ],
             Vec::new(),
         )
         .is_err());
+
+        assert!(WebGlBindingPlan::new(
+            vec![
+                WebGlUniformBlockBinding {
+                    name: "first".into(),
+                    binding_point: 1,
+                    source_name: "first_source".into(),
+                    source: WebGlBindingSite::new(0, 1, ShaderStage::Vertex),
+                },
+                WebGlUniformBlockBinding {
+                    name: "second".into(),
+                    binding_point: 2,
+                    source_name: "second_source".into(),
+                    source: WebGlBindingSite::new(0, 1, ShaderStage::Vertex),
+                },
+            ],
+            Vec::new(),
+        )
+        .unwrap_err()
+        .contains("duplicate stage-specific"));
+
+        assert!(WebGlBindingPlan::new(
+            vec![WebGlUniformBlockBinding {
+                name: "compute".into(),
+                binding_point: 0,
+                source_name: "compute_source".into(),
+                source: WebGlBindingSite::new(0, 0, ShaderStage::Compute),
+            }],
+            Vec::new(),
+        )
+        .unwrap_err()
+        .contains("compute stage"));
     }
 
     #[test]
