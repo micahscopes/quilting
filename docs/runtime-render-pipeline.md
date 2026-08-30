@@ -147,24 +147,31 @@ command by compacting visible instances and emitting indirect draw counts.
 The command contract deliberately says nothing about transform feedback,
 storage buffers, or GPU handles.
 
-`RenderFrame::execution` is the validated, allocation-free lowering seam. It
-rejects a stale scene revision or any noncanonical command sequence before
-device work, then resolves every batch command to the immutable batch metadata
-and exact index count it addresses. WebGPU validation, atlas admission, ordered
-draw traversal, highlight admission, and workload accounting consume that one
-view; extending the command enum therefore fails closed until the backend
-handles the new command. With `rendershadow=1`, non-PBR WebGL2 styles now
-preflight every retained batch against that resolved scene and execute its draw
-commands directly; a mismatch falls back before the first diagnostic draw.
+`RenderFrame::execution` and the immutable `RenderCommandPlan` expose the same
+validated, allocation-free lowering seam. A plan shares one `Arc`-backed
+`ValidatedRenderScene` epoch and rebuilds only when the scene, render style, or
+command-presence key changes. Camera matrices, pose samples, focus parameters,
+and uniform-only matcap changes therefore neither rescan the scene nor allocate
+a command vector. Both paths reject a stale/distinct scene or a noncanonical
+command sequence before device work, then resolve every batch command to the
+immutable batch metadata and exact index count it addresses. WebGPU validation,
+atlas admission, ordered draw traversal, highlight admission, and workload
+accounting consume that one view; extending the command enum therefore fails
+closed until the backend handles the new command. With `rendershadow=1`,
+non-PBR WebGL2 styles preflight every retained batch against that resolved scene
+and execute its draw commands directly; a mismatch falls back before the first
+diagnostic draw.
 `resolvedExecutionFrames`, `resolvedExecutionFallbacks`, and
 `lastExecutionError` make that gate observable through the existing render
-shadow diagnostics. The default WebGL2 path still consumes the shared pass plan
-without the shadow's per-frame scene validation, so this measured cutover adds
-no default CPU scan. PBR shadow frames preflight the same exact residency and
-lower the canonical opaque/transparent order plus transmission-pyramid and
-focus-postprocess boundaries into an owned renderer plan. Browser framebuffer,
-material, and texture effects remain incumbent, but their control flow now
-follows that plan; a validation failure retains the complete legacy selection
+shadow diagnostics. Shadow scene validation and WebGL PBR lowering now happen
+once per structural plan rebuild, not once per frame; `renderCommandPlanBuilds`
+records that low-rate work. The default WebGL2 path still consumes the shared
+pass plan without retaining or validating this shadow scene, so the measured
+cutover adds no default CPU scan. PBR shadow frames reuse the same exact
+residency preflight and canonical opaque/transparent order plus
+transmission-pyramid and focus-postprocess boundaries. Browser framebuffer,
+material, and texture effects remain incumbent, but their control flow follows
+that retained plan; a validation failure retains the complete legacy selection
 path for the frame.
 
 `RenderStyle` also resolves to one canonical ordered `RenderDrawPassPlan`
