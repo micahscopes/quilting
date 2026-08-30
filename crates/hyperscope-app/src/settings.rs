@@ -426,6 +426,8 @@ pub struct RouteSpaceMouseSettings {
 /// locomotion, so mouse, SpaceMouse, replay, Blender, and future game inputs
 /// must all observe one committed packet.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "replay", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "replay", serde(default, rename_all = "camelCase"))]
 pub struct NavigationSettings {
     pub transition_seconds: f64,
     pub surface_walk: SurfaceWalkControls,

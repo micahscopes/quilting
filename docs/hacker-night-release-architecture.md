@@ -405,11 +405,17 @@ The first application boundary is now explicit:
   events, device reports, renderer handles, or wall clock. Decimal JSON uses
   exact `f64` round trips.
   The native `replay` feature is excluded from browser builds;
-  `hyperscope-replay` version 0.22 walks every checked-in cue, every current
+  `hyperscope-replay` version 0.23 walks every checked-in cue, every current
   semantic navigation action, and every current application event lane. It
   records the key-sorted authored asset/entity materialization as well as its
   atomic projection revision, so stale or invalid Blender-style checkpoints
   cannot silently mutate the scene oracle.
+  Version 0.23 records the atomic device-independent navigation-settings
+  packet and includes that packet in every compact committed-state witness.
+  Transition duration and surface-walk behavior therefore survive replay and
+  future session transport without admitting browser HID maps or window-focus
+  policy into shared application state. A 0.22 script cannot introduce the new
+  event and retains the historical default packet.
   Version 0.22 records the ephemeral presentation-animation residency that
   joins an authored presentation asset to an exact process-local renderer
   scene. Presentation and resident asset IDs may differ; the request/asset
@@ -544,7 +550,7 @@ The first application boundary is now explicit:
   semantic-target-presence policy without inferring aim mode from inversion.
   Version 0.5 retains selected source bounds and clicked pivots and derives
   output-chart pivots/radii in the application snapshot; a projection pole
-  clears only those derived values. The reader accepts 0.4 through 0.22 inputs,
+  clears only those derived values. The reader accepts 0.4 through 0.23 inputs,
   but only 0.4 migrates an omitted source pivot to the bound center.
   Versions 0.4 and 0.5 reject 0.6-only actions rather than silently changing
   their meaning; every pre-0.7 unscoped focus anchor is rejected. Action

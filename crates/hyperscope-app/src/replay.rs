@@ -9,11 +9,10 @@ use crate::{
     AnimationAction, AnimationClipDescriptor, AnimationClipSelectionCompletion,
     AnimationClipSelectionOutcome, AppCommit, AppEffect, AppEvent, AppStore, AssetLoadCompletion,
     AssetLoadOutcome, AssetLoadScope, AssetMetadata, AssetStatus, AuthoredRevision,
-    CommitDisposition, EffectCompletion, FrameTick, NavigationSynchronization, PresentationAction,
-    PatchLabEffect,
-    PresentationAnimationResidencyBinding, PrimarySceneInstallCompletion,
-    PrimarySceneInstallMetadata, PrimarySceneInstallOutcome, ReceivedPresence, RenderSettings,
-    SemanticAction, Timed,
+    CommitDisposition, EffectCompletion, FrameTick, NavigationSettings, NavigationSynchronization,
+    PatchLabEffect, PresentationAction, PresentationAnimationResidencyBinding,
+    PrimarySceneInstallCompletion, PrimarySceneInstallMetadata, PrimarySceneInstallOutcome,
+    ReceivedPresence, RenderSettings, SemanticAction, Timed,
 };
 use hyperscape::{
     AuthoredCamera, AuthoredFocus, FocusSphere, NavigationAction, NavigationFrame,
@@ -29,7 +28,8 @@ use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
 
-pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.22";
+pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.23";
+pub const LEGACY_APP_REPLAY_VERSION_0_22: &str = "hyperscope-app-replay/0.22";
 pub const LEGACY_APP_REPLAY_VERSION_0_21: &str = "hyperscope-app-replay/0.21";
 pub const LEGACY_APP_REPLAY_VERSION_0_20: &str = "hyperscope-app-replay/0.20";
 pub const LEGACY_APP_REPLAY_VERSION_0_19: &str = "hyperscope-app-replay/0.19";
@@ -70,6 +70,7 @@ enum ReplaySchema {
     V0_20,
     V0_21,
     V0_22,
+    V0_23,
 }
 pub const APP_REPLAY_FINGERPRINT_ALGORITHM: &str = "fnv1a-128-json";
 const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
@@ -124,6 +125,11 @@ pub enum AppReplayEvent {
         sequence: u64,
         at_seconds: f64,
         settings: RenderSettings,
+    },
+    SetNavigationSettings {
+        sequence: u64,
+        at_seconds: f64,
+        settings: NavigationSettings,
     },
     RequestAsset {
         sequence: u64,
@@ -963,6 +969,8 @@ pub struct AppReplayState {
     pub animation_playing: bool,
     pub animation_time_seconds: f64,
     pub animation_speed: f64,
+    #[serde(default)]
+    pub navigation_settings: NavigationSettings,
     pub render_settings: RenderSettings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loading_primary_scene_asset: Option<AssetId>,
@@ -1215,7 +1223,8 @@ pub fn run_app_replay(script: &AppReplayScript) -> Result<AppReplayTrace, AppRep
         LEGACY_APP_REPLAY_VERSION_0_19 => ReplaySchema::V0_19,
         LEGACY_APP_REPLAY_VERSION_0_20 => ReplaySchema::V0_20,
         LEGACY_APP_REPLAY_VERSION_0_21 => ReplaySchema::V0_21,
-        APP_REPLAY_VERSION => ReplaySchema::V0_22,
+        LEGACY_APP_REPLAY_VERSION_0_22 => ReplaySchema::V0_22,
+        APP_REPLAY_VERSION => ReplaySchema::V0_23,
         _ => return Err(AppReplayError::UnsupportedVersion(script.version.clone())),
     };
     let store = AppStore::default();
@@ -1324,7 +1333,10 @@ fn replay_event(
             // historical reducer semantics.
             if !matches!(
                 schema,
-                ReplaySchema::V0_20 | ReplaySchema::V0_21 | ReplaySchema::V0_22
+                ReplaySchema::V0_20
+                    | ReplaySchema::V0_21
+                    | ReplaySchema::V0_22
+                    | ReplaySchema::V0_23
             ) {
                 let pending_install = commit.effects.iter().find_map(|effect| match effect {
                     AppEffect::InstallPrimaryScene {
@@ -1382,7 +1394,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
             Ok(AppEvent::PresentationLoaded(presentation.clone()))
         }
         AppReplayEvent::UpdatePresentationAnimationResidency { binding } => {
-            if schema != ReplaySchema::V0_22 {
+            if !matches!(schema, ReplaySchema::V0_22 | ReplaySchema::V0_23) {
                 return Err(
                     "presentation animation residency requires app replay 0.22".to_owned(),
                 );
@@ -1439,6 +1451,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_20
                     | ReplaySchema::V0_21
                     | ReplaySchema::V0_22
+                    | ReplaySchema::V0_23
             ) {
                 return Err("animation playback actions require app replay 0.11".to_owned());
             }
@@ -1450,6 +1463,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_20
                     | ReplaySchema::V0_21
                     | ReplaySchema::V0_22
+                    | ReplaySchema::V0_23
             )
                 && matches!(
                     action,
@@ -1460,7 +1474,10 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
             {
                 return Err("animation clock actions require app replay 0.17".to_owned());
             }
-            if !matches!(schema, ReplaySchema::V0_21 | ReplaySchema::V0_22)
+            if !matches!(
+                schema,
+                ReplaySchema::V0_21 | ReplaySchema::V0_22 | ReplaySchema::V0_23
+            )
                 && matches!(action, ReplayAnimationAction::SelectClip { .. })
             {
                 return Err("animation clip selection requires app replay 0.21".to_owned());
@@ -1483,6 +1500,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_20
                     | ReplaySchema::V0_21
                     | ReplaySchema::V0_22
+                    | ReplaySchema::V0_23
             ) {
                 return Err("render settings actions require app replay 0.18".to_owned());
             }
@@ -1490,6 +1508,20 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                 sequence: *sequence,
                 at_seconds: *at_seconds,
                 value: SemanticAction::SetRenderSettings(*settings),
+            }))
+        }
+        AppReplayEvent::SetNavigationSettings {
+            sequence,
+            at_seconds,
+            settings,
+        } => {
+            if schema != ReplaySchema::V0_23 {
+                return Err("navigation settings actions require app replay 0.23".to_owned());
+            }
+            Ok(AppEvent::Input(Timed {
+                sequence: *sequence,
+                at_seconds: *at_seconds,
+                value: SemanticAction::SetNavigationSettings(*settings),
             }))
         }
         AppReplayEvent::RequestAsset {
@@ -1518,7 +1550,8 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_19
                     | ReplaySchema::V0_20
                     | ReplaySchema::V0_21
-                    | ReplaySchema::V0_22 => (*scope).into(),
+                    | ReplaySchema::V0_22
+                    | ReplaySchema::V0_23 => (*scope).into(),
                     _ if *scope == ReplayAssetLoadScope::Asset => AssetLoadScope::Asset,
                     _ => {
                         return Err(
@@ -1558,6 +1591,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_20
                     | ReplaySchema::V0_21
                     | ReplaySchema::V0_22
+                    | ReplaySchema::V0_23
             ) {
                 return Err("asset provenance requires app replay 0.12".to_owned());
             }
@@ -1576,7 +1610,10 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
         } => {
             if !matches!(
                 schema,
-                ReplaySchema::V0_20 | ReplaySchema::V0_21 | ReplaySchema::V0_22
+                ReplaySchema::V0_20
+                    | ReplaySchema::V0_21
+                    | ReplaySchema::V0_22
+                    | ReplaySchema::V0_23
             ) {
                 return Err("primary scene installation requires app replay 0.20".to_owned());
             }
@@ -1595,7 +1632,10 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
             clip_index,
             outcome,
         } => {
-            if !matches!(schema, ReplaySchema::V0_21 | ReplaySchema::V0_22) {
+            if !matches!(
+                schema,
+                ReplaySchema::V0_21 | ReplaySchema::V0_22 | ReplaySchema::V0_23
+            ) {
                 return Err("animation clip selection requires app replay 0.21".to_owned());
             }
             Ok(AppEvent::EffectCompleted(
@@ -1648,6 +1688,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_20
             | ReplaySchema::V0_21
             | ReplaySchema::V0_22
+            | ReplaySchema::V0_23
     )
         && matches!(action, ReplayNavigationAction::ApplyCameraIntent { .. })
     {
@@ -1664,6 +1705,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_20
             | ReplaySchema::V0_21
             | ReplaySchema::V0_22
+            | ReplaySchema::V0_23
     )
         && matches!(action, ReplayNavigationAction::ApplyTurntableIntent { .. })
     {
@@ -1679,6 +1721,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_20
             | ReplaySchema::V0_21
             | ReplaySchema::V0_22
+            | ReplaySchema::V0_23
     )
         && matches!(action, ReplayNavigationAction::ReframeSelection { .. })
     {
@@ -1693,6 +1736,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_20
             | ReplaySchema::V0_21
             | ReplaySchema::V0_22
+            | ReplaySchema::V0_23
     )
         && matches!(action, ReplayNavigationAction::AimAtSelection { .. })
     {
@@ -1722,6 +1766,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_20
             | ReplaySchema::V0_21
             | ReplaySchema::V0_22
+            | ReplaySchema::V0_23
     ) && matches!(
         action,
         ReplayNavigationAction::RefitFocusAndToggleInversion { .. }
@@ -1758,6 +1803,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_20
             | ReplaySchema::V0_21
             | ReplaySchema::V0_22
+            | ReplaySchema::V0_23
     ) && matches!(
         action,
         ReplayNavigationAction::AnchorFocus { asset_id: None, .. }
@@ -1848,6 +1894,7 @@ fn replay_state(store: &AppStore) -> AppReplayState {
         animation_playing: state.animation.playing,
         animation_time_seconds: state.animation.time_seconds,
         animation_speed: state.animation.speed,
+        navigation_settings: state.navigation_settings,
         render_settings: state.render_settings,
         loading_primary_scene_asset: state.primary_scene_load.map(|(_, asset)| asset),
         loading_primary_scene_request: state.primary_scene_load.map(|(request, _)| request),
@@ -2031,6 +2078,7 @@ mod tests {
         assert_eq!(left.animation_playing, right.animation_playing);
         assert_eq!(left.animation_time_seconds, right.animation_time_seconds);
         assert_eq!(left.animation_speed, right.animation_speed);
+        assert_eq!(left.navigation_settings, right.navigation_settings);
         assert_eq!(left.render_settings, right.render_settings);
         assert_eq!(
             left.loading_primary_scene_asset,
@@ -2178,6 +2226,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn replay_0_23_records_atomic_navigation_settings_without_reinterpreting_0_22() {
+        let mut settings = NavigationSettings::default();
+        settings.transition_seconds = 2.5;
+        settings.surface_walk.smoothing_seconds = 0.45;
+        settings.surface_walk.tangent_pull_fraction = 0.25;
+        settings.surface_walk.speed_octave_steps = 100.0;
+        settings.surface_walk.body_scale_octave_steps = -100.0;
+        settings.surface_walk.eye_height_octave_steps = 50.0;
+        let events = vec![AppReplayEvent::SetNavigationSettings {
+            sequence: 1,
+            at_seconds: 0.0,
+            settings,
+        }];
+        let script = AppReplayScript::new(events.clone());
+        let encoded = serde_json::to_string(&script).unwrap();
+        let decoded: AppReplayScript = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, script);
+
+        let current = run_app_replay(&decoded).unwrap();
+        assert!(matches!(
+            current.records[0].outcome,
+            AppReplayOutcome::Committed { .. }
+        ));
+        assert_eq!(current.records[0].state.navigation_settings, settings);
+        let mut legacy_state_json = serde_json::to_value(&current.records[0].state).unwrap();
+        legacy_state_json
+            .as_object_mut()
+            .unwrap()
+            .remove("navigationSettings");
+        let legacy_state: AppReplayState = serde_json::from_value(legacy_state_json).unwrap();
+        assert_eq!(
+            legacy_state.navigation_settings,
+            NavigationSettings::default(),
+        );
+
+        let legacy = run_app_replay(&AppReplayScript {
+            version: LEGACY_APP_REPLAY_VERSION_0_22.to_owned(),
+            events,
+        })
+        .unwrap();
+        assert!(matches!(
+            &legacy.records[0].outcome,
+            AppReplayOutcome::Rejected { error }
+                if error.contains("require app replay 0.23")
+        ));
+        assert_eq!(
+            legacy.records[0].state.navigation_settings,
+            NavigationSettings::default(),
+        );
+    }
+
     fn committed_effects(record: &AppReplayRecord) -> &[AppReplayEffect] {
         match &record.outcome {
             AppReplayOutcome::Committed { effects, .. } => effects,
@@ -2308,6 +2408,11 @@ mod tests {
         let orchestration: AppReplayScript = serde_json::from_str(ORCHESTRATION_FIXTURE).unwrap();
         let presentation = presentation_walkthrough_replay(fixture());
         let current_animation_events = [
+            AppReplayEvent::SetNavigationSettings {
+                sequence: 0,
+                at_seconds: 0.0,
+                settings: NavigationSettings::default(),
+            },
             AppReplayEvent::CompletePrimarySceneInstall {
                 request_id: RequestId::from_u128(0xb0).unwrap(),
                 asset_id: AssetId::from_u128(0xa0).unwrap(),
@@ -2345,7 +2450,7 @@ mod tests {
             .chain(navigation.events.iter())
             .chain(orchestration.events.iter())
             .chain(current_animation_events.iter())
-            .filter_map(|event| replay_app_event(event, ReplaySchema::V0_22).ok())
+            .filter_map(|event| replay_app_event(event, ReplaySchema::V0_23).ok())
             .map(|event| authoritative_app_event_name(&event))
             .collect::<std::collections::BTreeSet<_>>();
         let authored_covered = orchestration
@@ -2375,6 +2480,7 @@ mod tests {
                 "present",
                 "remote_presence",
                 "request_asset",
+                "set_navigation_settings",
                 "set_render_settings",
             ])
         );

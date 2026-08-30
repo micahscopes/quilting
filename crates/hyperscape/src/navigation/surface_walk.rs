@@ -10,7 +10,8 @@ const SURFACE_FRAME_EPSILON: f64 = 1.0e-8;
 ///
 /// The octave values use 100 steps per doubling so a URL slider, SpaceMouse,
 /// keyboard, replay, or Blender adapter can all emit the same semantic state.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct SurfaceWalkControls {
     pub base_radii_per_second: f64,
     pub base_eye_height: f64,

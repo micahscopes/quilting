@@ -30,6 +30,8 @@ The URL lane is explicit and rollback-safe:
 - Route/browser smoke: passed with 88 Rust control specifications.
 - Direct Node/WASM boundary probe: exact six-field round-trip; an invalid
   transition duration left the prior revision and value unchanged.
+- Replay 0.23: exact nested-settings JSON round-trip, deterministic committed
+  state, and explicit 0.22 rejection without mutation.
 - Inline browser module syntax parse: passed.
 
 Live Chromium comparison and authority evidence remain pending. The default is
@@ -38,8 +40,8 @@ therefore still `js`; no release route is silently promoted by this cut.
 ## Architectural consequence
 
 Navigation preferences now follow the same reducer/store/WASM/thin-adapter
-shape as render settings. This gives the packet the stable reducer identity
-needed by replay and a future HHHS/Blender session without making browser HID
-policy part of shared scene state. The replay schema bump is still pending.
-The WebGL2 and WebGPU renderers consume the same application semantics; this
-cut adds no backend-specific navigation policy.
+shape as render settings. Replay 0.23 now gives the packet a durable semantic
+identity suitable for a future HHHS/Blender session without making browser HID
+policy part of shared scene state. The WebGL2 and WebGPU renderers consume the
+same application semantics; this cut adds no backend-specific navigation
+policy.
