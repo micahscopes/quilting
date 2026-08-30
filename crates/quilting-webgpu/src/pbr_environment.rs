@@ -89,6 +89,14 @@ impl LodClassifierDevice {
                     "PBR environment layout is not available on this pipeline".to_string(),
                 )
             })?;
+        self.create_pbr_environment_bindings_for_layout(layout, environment)
+    }
+
+    pub(crate) fn create_pbr_environment_bindings_for_layout(
+        &self,
+        layout: &wgpu::BindGroupLayout,
+        environment: Option<&PbrEnvironmentMap>,
+    ) -> Result<PbrEnvironmentBindings, LodWebGpuError> {
         let resident = environment.is_some();
         let descriptor = environment.map(PbrEnvironmentMap::descriptor);
         let placeholder = if environment.is_none() {

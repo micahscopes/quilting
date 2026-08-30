@@ -120,6 +120,9 @@ pub struct ResidentRootDrawDomainOutput {
 /// device-generated atlas/parity bucket plan.
 pub struct ResidentRootRenderPipeline {
     bind_group_layout: wgpu::BindGroupLayout,
+    pbr_texture_bind_group_layout: wgpu::BindGroupLayout,
+    pbr_environment_bind_group_layout: wgpu::BindGroupLayout,
+    pbr: ResidentRootWindingPipelines,
     matcap: ResidentRootWindingPipelines,
     normals: ResidentRootWindingPipelines,
     lod: ResidentRootWindingPipelines,
@@ -140,6 +143,10 @@ pub struct ResidentRootRenderBindings {
     bucket_count: u32,
     bucket_index_uniform_stride: u32,
     frames: wgpu::Buffer,
+    _materials: wgpu::Buffer,
+    material_textures: Option<PbrMaterialTextureBindings>,
+    pbr_environment: Option<PbrEnvironmentBindings>,
+    pbr_scene_supported: bool,
     frame_words: Mutex<Vec<u32>>,
     _bucket_index_uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
@@ -158,6 +165,35 @@ pub struct ResidentRootPreparationScene {
     pub(super) topology: ResidentRootTopologyScene,
     pub(super) patches: PatchPreparationScene,
     pub(super) draw_domains: ResidentRootDrawDomainScene,
+}
+
+impl ResidentRootRenderBindings {
+    pub fn pbr_texture_residency(&self) -> Option<&[PbrMaterialTextureResidency]> {
+        self.material_textures
+            .as_ref()
+            .map(PbrMaterialTextureBindings::residency)
+    }
+
+    pub fn pbr_environment_bindings(&self) -> Option<&PbrEnvironmentBindings> {
+        self.pbr_environment.as_ref()
+    }
+
+    /// The portable root pipeline binds one sampled-texture group for the
+    /// complete indirect bucket. It is therefore exact while every authored
+    /// material is factor-only; textured material domains stay on the
+    /// material-batched prepared renderer until a shared texture-addressing
+    /// scheme removes that draw boundary.
+    pub fn supports_resident_untextured_pbr(&self) -> bool {
+        self.pbr_scene_supported
+            && self.pbr_texture_residency().is_some_and(|residency| {
+                residency
+                    .iter()
+                    .all(|material| material.referenced_mask() == 0)
+            })
+            && self
+                .pbr_environment_bindings()
+                .is_some_and(PbrEnvironmentBindings::is_resident)
+    }
 }
 
 impl ResidentGeometryBucketScene {
@@ -261,6 +297,7 @@ impl ResidentRootRenderBindings {
 impl ResidentRootRenderPipeline {
     fn for_pass(&self, pass: RenderPass) -> Option<&ResidentRootWindingPipelines> {
         match pass {
+            RenderPass::PbrOpaque => Some(&self.pbr),
             RenderPass::Matcap => Some(&self.matcap),
             RenderPass::Normals => Some(&self.normals),
             RenderPass::Lod => Some(&self.lod),
@@ -308,11 +345,12 @@ impl LodClassifierDevice {
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("quilting resident root render bindings"),
                     entries: &[
-                        render_buffer_layout(
+                        render_buffer_layout_visible(
                             0,
                             wgpu::BufferBindingType::Storage { read_only: true },
                             PATCH_RENDER_FRAME_BYTES,
                             false,
+                            wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ),
                         render_buffer_layout(
                             1,
@@ -338,27 +376,51 @@ impl LodClassifierDevice {
                             DRAW_BATCH_INDEX_BYTES,
                             true,
                         ),
-                        render_buffer_layout(
+                        render_buffer_layout_visible(
                             5,
                             wgpu::BufferBindingType::Storage { read_only: true },
                             PACKED_RECORD_BYTES,
                             false,
+                            wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ),
-                        render_buffer_layout(
+                        render_buffer_layout_visible(
                             6,
                             wgpu::BufferBindingType::Storage { read_only: true },
                             16,
                             false,
+                            wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ),
+                        render_buffer_layout_visible(
+                            7,
+                            wgpu::BufferBindingType::Storage { read_only: true },
+                            PATCH_PBR_MATERIAL_BYTES,
+                            false,
+                            wgpu::ShaderStages::FRAGMENT,
                         ),
                     ],
                 });
-        let pipeline_layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("quilting resident root render pipeline layout"),
-                bind_group_layouts: &[Some(&bind_group_layout)],
-                immediate_size: 0,
-            });
+        let pbr_texture_bind_group_layout =
+            pbr_resources::create_pbr_texture_bind_group_layout(&self.device);
+        let pbr_environment_bind_group_layout =
+            pbr_environment::create_pbr_environment_bind_group_layout(&self.device);
+        let diagnostic_pipeline_layout =
+            self.device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("quilting resident root render pipeline layout"),
+                    bind_group_layouts: &[Some(&bind_group_layout)],
+                    immediate_size: 0,
+                });
+        let pbr_pipeline_layout =
+            self.device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("quilting resident root PBR pipeline layout"),
+                    bind_group_layouts: &[
+                        Some(&bind_group_layout),
+                        Some(&pbr_texture_bind_group_layout),
+                        Some(&pbr_environment_bind_group_layout),
+                    ],
+                    immediate_size: 0,
+                });
         let depth_stencil = depth_format.map(|format| wgpu::DepthStencilState {
             format,
             depth_write_enabled: Some(true),
@@ -367,11 +429,15 @@ impl LodClassifierDevice {
             bias: wgpu::DepthBiasState::default(),
         });
         let attributes = wgpu::vertex_attr_array![0 => Float32x3];
-        let create = |label, fragment_entry_point, geometry, front_face| {
+        let create = |label,
+                      fragment_entry_point,
+                      geometry,
+                      front_face,
+                      pipeline_layout: &wgpu::PipelineLayout| {
             self.device
                 .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(label),
-                    layout: Some(&pipeline_layout),
+                    layout: Some(pipeline_layout),
                     vertex: wgpu::VertexState {
                         module: &module,
                         entry_point: Some(
@@ -412,37 +478,63 @@ impl LodClassifierDevice {
                     cache: None,
                 })
         };
-        let create_style = |label, fragment_entry_point, geometry| ResidentRootWindingPipelines {
-            counter_clockwise: create(label, fragment_entry_point, geometry, wgpu::FrontFace::Ccw),
-            clockwise: create(label, fragment_entry_point, geometry, wgpu::FrontFace::Cw),
-        };
+        let create_style =
+            |label, fragment_entry_point, geometry, pipeline_layout| ResidentRootWindingPipelines {
+                counter_clockwise: create(
+                    label,
+                    fragment_entry_point,
+                    geometry,
+                    wgpu::FrontFace::Ccw,
+                    pipeline_layout,
+                ),
+                clockwise: create(
+                    label,
+                    fragment_entry_point,
+                    geometry,
+                    wgpu::FrontFace::Cw,
+                    pipeline_layout,
+                ),
+            };
         Ok(ResidentRootRenderPipeline {
             bind_group_layout,
+            pbr: create_style(
+                "quilting resident root PBR",
+                quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_PBR_ENTRY_POINT,
+                RenderGeometry::Triangles,
+                &pbr_pipeline_layout,
+            ),
             matcap: create_style(
                 "quilting resident root matcap",
                 quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_MATCAP_ENTRY_POINT,
                 RenderGeometry::Triangles,
+                &diagnostic_pipeline_layout,
             ),
             normals: create_style(
                 "quilting resident root normals",
                 quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_NORMALS_ENTRY_POINT,
                 RenderGeometry::Triangles,
+                &diagnostic_pipeline_layout,
             ),
             lod: create_style(
                 "quilting resident root LOD",
                 quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_LOD_ENTRY_POINT,
                 RenderGeometry::Triangles,
+                &diagnostic_pipeline_layout,
             ),
             stretch: create_style(
                 "quilting resident root stretch",
                 quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_STRETCH_ENTRY_POINT,
                 RenderGeometry::Triangles,
+                &diagnostic_pipeline_layout,
             ),
             wire: create_style(
                 "quilting resident root wire",
                 quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_WIRE_ENTRY_POINT,
                 RenderGeometry::Lines,
+                &diagnostic_pipeline_layout,
             ),
+            pbr_texture_bind_group_layout,
+            pbr_environment_bind_group_layout,
         })
     }
 
@@ -451,6 +543,51 @@ impl LodClassifierDevice {
         pipeline: &ResidentRootRenderPipeline,
         preparation: &ResidentRootPreparationScene,
         geometry: &ResidentGeometryBucketScene,
+    ) -> Result<ResidentRootRenderBindings, LodWebGpuError> {
+        self.create_resident_root_render_bindings_impl(
+            pipeline,
+            preparation,
+            geometry,
+            &[],
+            None,
+            None,
+            false,
+            false,
+        )
+    }
+
+    pub fn create_resident_root_render_bindings_with_pbr(
+        &self,
+        pipeline: &ResidentRootRenderPipeline,
+        preparation: &ResidentRootPreparationScene,
+        geometry: &ResidentGeometryBucketScene,
+        scene: &RenderSceneSnapshot,
+        textures: Option<&PbrTextureTable>,
+        environment: Option<&PbrEnvironmentMap>,
+    ) -> Result<ResidentRootRenderBindings, LodWebGpuError> {
+        self.create_resident_root_render_bindings_impl(
+            pipeline,
+            preparation,
+            geometry,
+            &scene.materials,
+            textures,
+            environment,
+            true,
+            supports_basic_pbr_frame(scene, RenderFrameOptions::default()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_resident_root_render_bindings_impl(
+        &self,
+        pipeline: &ResidentRootRenderPipeline,
+        preparation: &ResidentRootPreparationScene,
+        geometry: &ResidentGeometryBucketScene,
+        materials: &[PbrMaterial],
+        textures: Option<&PbrTextureTable>,
+        environment: Option<&PbrEnvironmentMap>,
+        retain_pbr_resources: bool,
+        pbr_scene_supported: bool,
     ) -> Result<ResidentRootRenderBindings, LodWebGpuError> {
         let domains = &preparation.draw_domains;
         if domains.model_identity != preparation.topology.model_identity
@@ -511,6 +648,30 @@ impl LodClassifierDevice {
             &bucket_index_words,
             wgpu::BufferUsages::UNIFORM,
         );
+        let material_words = patch_pbr_material_table_words(materials)?;
+        let material_buffer = buffer_init_or_zero(
+            &self.device,
+            "resident root authored PBR material table",
+            bytemuck::cast_slice(&material_words),
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
+        let material_textures = retain_pbr_resources
+            .then(|| {
+                self.create_pbr_material_texture_bindings_for_layout(
+                    &pipeline.pbr_texture_bind_group_layout,
+                    materials,
+                    textures,
+                )
+            })
+            .transpose()?;
+        let pbr_environment = retain_pbr_resources
+            .then(|| {
+                self.create_pbr_environment_bindings_for_layout(
+                    &pipeline.pbr_environment_bind_group_layout,
+                    environment,
+                )
+            })
+            .transpose()?;
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("quilting resident root render bindings"),
             layout: &pipeline.bind_group_layout,
@@ -529,6 +690,7 @@ impl LodClassifierDevice {
                 },
                 bind(5, &domains.face_domain_rows),
                 bind(6, &domains.domain_records),
+                bind(7, &material_buffer),
             ],
         });
         Ok(ResidentRootRenderBindings {
@@ -538,6 +700,10 @@ impl LodClassifierDevice {
             bucket_count: geometry.bucket_count,
             bucket_index_uniform_stride,
             frames,
+            _materials: material_buffer,
+            material_textures,
+            pbr_environment,
+            pbr_scene_supported,
             frame_words: Mutex::new(vec![0; frame_word_count]),
             _bucket_index_uniform: bucket_index_uniform,
             bind_group,
@@ -593,8 +759,17 @@ impl LodClassifierDevice {
         use_qb: bool,
     ) -> Result<ResidentRootFrameEncoding, LodWebGpuError> {
         let draw_passes = render_draw_passes(frame.style);
+        if frame.style == RenderStyle::Pbr
+            && (!bindings.supports_resident_untextured_pbr() || frame.options.focus_postprocess)
+        {
+            return Err(LodWebGpuError::Payload(
+                "resident root PBR requires factor-only materials, resident IBL, and no focus post-process"
+                    .to_string(),
+            ));
+        }
         if draw_passes
             .iter()
+            .filter(|draw| draw.pass != RenderPass::PbrTransparent)
             .any(|draw| pipeline.for_pass(draw.pass).is_none())
         {
             return Err(LodWebGpuError::Payload(format!(
@@ -653,10 +828,31 @@ impl LodClassifierDevice {
         });
         pass.set_vertex_buffer(0, atlas.barycentric_buffer.slice(..));
         let mut indirect_draw_calls = 0u32;
-        for draw in draw_passes {
+        for &draw in draw_passes {
+            if draw.pass == RenderPass::PbrTransparent {
+                continue;
+            }
             let style_pipeline = pipeline
                 .for_pass(draw.pass)
                 .expect("resident root pass support was validated above");
+            if draw.pass == RenderPass::PbrOpaque {
+                let material_textures = bindings
+                    .material_textures
+                    .as_ref()
+                    .and_then(|bindings| bindings.bind_group(0))
+                    .ok_or_else(|| {
+                        LodWebGpuError::Payload(
+                            "resident root PBR has no default material texture binding".to_string(),
+                        )
+                    })?;
+                pass.set_bind_group(1, material_textures, &[]);
+                let environment = bindings.pbr_environment.as_ref().ok_or_else(|| {
+                    LodWebGpuError::Payload(
+                        "resident root PBR has no environment binding".to_string(),
+                    )
+                })?;
+                pass.set_bind_group(2, environment.bind_group(), &[]);
+            }
             let indirect_arguments = match draw.geometry {
                 RenderGeometry::Triangles => {
                     pass.set_index_buffer(

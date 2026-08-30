@@ -36,7 +36,10 @@ use quilting_core::batch::{
     FaceLodGrading, RenderBatchId, RenderBatchKey, RenderBatchLayer, RenderBatchMember,
 };
 use quilting_core::instance_layout::InstanceWriter;
-use quilting_core::material::{pbr_material_for_index, PbrAlphaMode, PbrMaterial};
+use quilting_core::material::{
+    pbr_material_for_index, EnvironmentMapAsset, EnvironmentMapDescriptor, PbrAlphaMode,
+    PbrMaterial,
+};
 use quilting_core::render::{
     render_draw_passes, FocusFieldPacket, PbrDrawClass, RenderBatchSnapshot, RenderCommand,
     RenderEntityTransform, RenderFrame, RenderFrameOptions, RenderGeometry, RenderPass,
@@ -1837,6 +1840,11 @@ impl LodClassifierDevice {
         }
         let bindings =
             self.create_resident_root_render_bindings(&pipeline, &preparation, &geometry)?;
+        if bindings.supports_resident_untextured_pbr() {
+            return Err(LodWebGpuError::Conformance(
+                "resident root PBR accepted placeholder environment residency".to_string(),
+            ));
+        }
 
         self.write_lod_classification_state(
             &model,
@@ -2030,6 +2038,101 @@ impl LodClassifierDevice {
         if !(32..WIDTH as usize * HEIGHT as usize).contains(&rendered) {
             return Err(LodWebGpuError::Conformance(format!(
                 "resident root render produced an implausible {rendered}-pixel footprint",
+            )));
+        }
+        let environment_descriptor = EnvironmentMapDescriptor {
+            prefiltered_face_size: 1,
+            prefiltered_mip_count: 1,
+            irradiance_face_size: 1,
+        };
+        let environment_error = |error: quilting_core::material::EnvironmentMapAssetError| {
+            LodWebGpuError::Conformance(error.to_string())
+        };
+        let prefiltered = vec![
+            0.5;
+            environment_descriptor
+                .prefiltered_rgba32f_len()
+                .map_err(environment_error)?
+        ];
+        let irradiance = vec![
+            0.5;
+            environment_descriptor
+                .irradiance_rgba32f_len()
+                .map_err(environment_error)?
+        ];
+        let environment = self.upload_pbr_environment_map(
+            EnvironmentMapAsset::new(environment_descriptor, &prefiltered, &irradiance)
+                .map_err(environment_error)?,
+        )?;
+        let pbr_bindings = self.create_resident_root_render_bindings_with_pbr(
+            &pipeline,
+            &preparation,
+            &geometry,
+            &render_scene,
+            None,
+            Some(&environment),
+        )?;
+        if !pbr_bindings.supports_resident_untextured_pbr() {
+            return Err(LodWebGpuError::Conformance(
+                "resident root PBR rejected factor-only material residency".to_string(),
+            ));
+        }
+        let pbr_frame = RenderFrame::build(
+            18,
+            RenderPoseIdentity {
+                asset_revision: 3,
+                pose_revision: 6,
+            },
+            RenderStyle::Pbr,
+            frame.view,
+            RenderFrameOptions::default(),
+            &render_scene,
+        )
+        .map_err(|error| LodWebGpuError::Conformance(error.to_string()))?;
+        let pbr_error_scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut pbr_encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("resident root PBR render conformance"),
+            });
+        let pbr_encoding = {
+            let classification = self.encode_lod_classification(&mut model, &mut pbr_encoder)?;
+            let resident = self.encode_resident_lod_reconciliation(
+                &classification,
+                FaceLodGrading::TwoToOne,
+                &mut pbr_encoder,
+            );
+            self.encode_resident_roots(
+                &mut pbr_encoder,
+                &pbr_frame,
+                classification.model,
+                &resident,
+                &preparation,
+                &geometry,
+                &pipeline,
+                &pbr_bindings,
+                &packed_atlas,
+                PatchRenderTarget {
+                    color_view: &target_view,
+                    resolve_target: None,
+                    depth_stencil_view: Some(&depth_view),
+                    clear_color: Some(wgpu::Color::TRANSPARENT),
+                    clear_depth: Some(1.0),
+                },
+                LodPose::default(),
+                0,
+                true,
+            )?
+        };
+        if pbr_encoding.source_face_count != 2 || pbr_encoding.indirect_draw_calls != 2 {
+            return Err(LodWebGpuError::Conformance(format!(
+                "resident root PBR encoding mismatch: {pbr_encoding:?}",
+            )));
+        }
+        self.queue.submit([pbr_encoder.finish()]);
+        if let Some(error) = pbr_error_scope.pop().await {
+            return Err(LodWebGpuError::Conformance(format!(
+                "resident root PBR failed validation: {error}",
             )));
         }
         if let Some(surface) = presentation {

@@ -1,4 +1,5 @@
-#import quilting::render::patch_vertex::{PatchRenderFrame, PatchVertexOutput, evaluate_prepared_patch_vertex, shade_patch_lod, shade_patch_matcap, shade_patch_normals, shade_patch_stretch, shade_patch_wire}
+#import quilting::render::patch_vertex::{PatchPbrMaterial, PatchRenderFrame, PatchVertexOutput, evaluate_prepared_patch_vertex, shade_patch_lod, shade_patch_matcap, shade_patch_normals, shade_patch_stretch, shade_patch_wire}
+#import quilting::render::patch_pbr::shade_textured_patch_pbr
 #import quilting::surface::patch_prepare::PreparedPatchRecord
 #import quilting::compute::resident_bucket_types::{ResidentBucketRangeRecord, ResidentDrawDomainRecord}
 
@@ -16,6 +17,7 @@ struct DrawRootBucketIndex {
 @group(0) @binding(4) var<uniform> draw_bucket: DrawRootBucketIndex;
 @group(0) @binding(5) var<storage, read> face_domain_rows: array<u32>;
 @group(0) @binding(6) var<storage, read> draw_domains: array<ResidentDrawDomainRecord>;
+@group(0) @binding(7) var<storage, read> pbr_materials: array<PatchPbrMaterial>;
 
 struct ResidentRootVertexInput {
     @location(0) bary: vec3<f32>,
@@ -71,4 +73,26 @@ fn render_resident_root_stretch(input: PatchVertexOutput) -> @location(0) vec4<f
 @fragment
 fn render_resident_root_wire(input: PatchVertexOutput) -> @location(0) vec4<f32> {
     return shade_patch_wire(input);
+}
+
+@fragment
+fn render_resident_root_pbr(
+    @builtin(front_facing) front_facing: bool,
+    input: PatchVertexOutput,
+) -> @location(0) vec4<f32> {
+    let source_face = u32(max(input.instance_id, 0.0));
+    let domain_row = face_domain_rows[source_face];
+    let domain = draw_domains[domain_row];
+    let material_count = arrayLength(&pbr_materials);
+    let material_index = select(
+        0u,
+        domain.material_index,
+        domain.material_index < material_count,
+    );
+    return shade_textured_patch_pbr(
+        front_facing,
+        input,
+        pbr_materials[material_index],
+        frames[domain_row].modes.w,
+    );
 }

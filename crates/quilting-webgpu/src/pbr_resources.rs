@@ -149,6 +149,23 @@ impl LodClassifierDevice {
                 "PBR texture bindings require the PBR render pipeline".to_string(),
             ));
         }
+        let layout = pipeline
+            .pbr_texture_bind_group_layout
+            .as_ref()
+            .ok_or_else(|| {
+                LodWebGpuError::Payload(
+                    "PBR texture bindings require the PBR render pipeline".to_string(),
+                )
+            })?;
+        self.create_pbr_material_texture_bindings_for_layout(layout, materials, textures)
+    }
+
+    pub(crate) fn create_pbr_material_texture_bindings_for_layout(
+        &self,
+        layout: &wgpu::BindGroupLayout,
+        materials: &[PbrMaterial],
+        textures: Option<&PbrTextureTable>,
+    ) -> Result<PbrMaterialTextureBindings, LodWebGpuError> {
         let material_count = materials.len().max(1);
         let material_count_u32 = u32::try_from(material_count).map_err(|_| {
             LodWebGpuError::Payload("PBR material texture binding count exceeds u32".to_string())
@@ -226,20 +243,11 @@ impl LodClassifierDevice {
                     resource: wgpu::BindingResource::Sampler(resolved.sampler),
                 });
             }
-            bind_groups.push(
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("quilting PBR material textures"),
-                    layout: pipeline
-                        .pbr_texture_bind_group_layout
-                        .as_ref()
-                        .ok_or_else(|| {
-                            LodWebGpuError::Payload(
-                                "PBR texture bindings require the PBR render pipeline".to_string(),
-                            )
-                        })?,
-                    entries: &entries,
-                }),
-            );
+            bind_groups.push(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("quilting PBR material textures"),
+                layout,
+                entries: &entries,
+            }));
         }
         Ok(PbrMaterialTextureBindings {
             material_count: material_count_u32,
