@@ -689,6 +689,16 @@ impl AnimationClipFrameSnapshot {
     }
 }
 
+/// Throttled FRP projection for animation controls. Renderers continue to
+/// sample [`AppFrameSnapshot`] directly; publishing this compact value never
+/// clones unrelated scene, navigation, job, or diagnostic state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AppAnimationSnapshot {
+    pub revision: u64,
+    pub clock: AnimationClock,
+    pub active_clip: Option<AnimationClipFrameSnapshot>,
+}
+
 /// Low-rate renderer/control projection published before the summary revision
 /// fence. Render extraction can sample the same value directly from AppState.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -948,6 +958,17 @@ impl AppState {
                 .surface_walk
                 .anchor_transition()
                 .map(|transition| transition.hop_height),
+        }
+    }
+
+    pub fn animation_snapshot(&self) -> AppAnimationSnapshot {
+        AppAnimationSnapshot {
+            revision: self.revision,
+            clock: self.animation,
+            active_clip: self
+                .active_animation_clip
+                .as_ref()
+                .map(|active| AnimationClipFrameSnapshot::from_active(active, self.animation)),
         }
     }
 
@@ -1904,6 +1925,7 @@ impl AppState {
 pub struct AppStore {
     state: Arc<Mutex<AppState>>,
     summary: Mutable<AppSummary>,
+    animation: Mutable<AppAnimationSnapshot>,
     navigation: Mutable<AppFrameSnapshot>,
     navigation_settings: Mutable<AppNavigationSettingsSnapshot>,
     render: Mutable<AppRenderSnapshot>,
@@ -1927,6 +1949,7 @@ impl Default for AppStore {
 impl AppStore {
     pub fn new(state: AppState) -> Self {
         let summary = state.summary();
+        let animation = state.animation_snapshot();
         let navigation = state.frame_snapshot();
         let navigation_settings = state.navigation_settings_snapshot();
         let render = state.render_snapshot();
@@ -1941,6 +1964,7 @@ impl AppStore {
         Self {
             state: Arc::new(Mutex::new(state)),
             summary: Mutable::new(summary),
+            animation: Mutable::new(animation),
             navigation: Mutable::new(navigation),
             navigation_settings: Mutable::new(navigation_settings),
             render: Mutable::new(render),
@@ -2041,6 +2065,7 @@ impl AppStore {
         let authored = state.authored_scene_read_model();
         let diagnostics = state.diagnostic_read_models();
         let presentation = state.presentation_read_model();
+        let animation = state.animation_snapshot();
         let navigation = state.frame_snapshot();
         let navigation_settings = state.navigation_settings_snapshot();
         let render = state.render_snapshot();
@@ -2062,6 +2087,7 @@ impl AppStore {
             .replace_cloned(authored.entities);
         self.diagnostics.lock_mut().replace_cloned(diagnostics);
         self.presentation.set_neq(presentation);
+        self.animation.set_neq(animation);
         self.navigation.set_neq(navigation);
         self.navigation_settings.set_neq(navigation_settings);
         self.render.set_neq(render);
@@ -2070,8 +2096,22 @@ impl AppStore {
         revision
     }
 
+    /// Publish only the compact animation control projection. Browser hosts
+    /// call this on their low-rate UI cadence while renderers keep sampling
+    /// [`Self::frame_snapshot`] every frame.
+    pub fn flush_animation_read_model(&self) -> u64 {
+        let animation = self.lock_state().animation_snapshot();
+        let revision = animation.revision;
+        self.animation.set_neq(animation);
+        revision
+    }
+
     pub fn frame_snapshot(&self) -> AppFrameSnapshot {
         self.lock_state().frame_snapshot()
+    }
+
+    pub fn animation_snapshot(&self) -> AppAnimationSnapshot {
+        self.animation.get()
     }
 
     /// Low-rate diagnostics projection kept separate from the render-frame
@@ -2177,6 +2217,10 @@ impl AppStore {
 
     pub fn summary_signal(&self) -> MutableSignalCloned<AppSummary> {
         self.summary.signal_cloned()
+    }
+
+    pub fn animation_signal(&self) -> MutableSignalCloned<AppAnimationSnapshot> {
+        self.animation.signal_cloned()
     }
 
     /// Low-rate FRP navigation projection. The summary revision changes only
@@ -4418,6 +4462,33 @@ mod tests {
         assert_eq!(store.navigation_snapshot().elapsed_seconds, 0.2);
         assert_eq!(store.summary_snapshot().active_peers, 0);
         assert!(store.presence_snapshot().is_empty());
+    }
+
+    #[test]
+    fn animation_controls_have_a_dedicated_throttled_projection() {
+        let store = AppStore::default();
+        store
+            .dispatch(AppEvent::Frame(FrameTick {
+                elapsed_seconds: 0.25,
+                delta_seconds: 0.25,
+            }))
+            .unwrap();
+
+        assert_eq!(store.frame_snapshot().animation.time_seconds, 0.25);
+        assert_eq!(store.animation_snapshot().clock.time_seconds, 0.0);
+        assert_eq!(store.summary_snapshot().animation_time_seconds, 0.0);
+        assert_eq!(store.navigation_snapshot().elapsed_seconds, 0.0);
+
+        assert_eq!(store.flush_animation_read_model(), 1);
+        assert_eq!(store.animation_snapshot().clock.time_seconds, 0.25);
+        assert_eq!(store.summary_snapshot().animation_time_seconds, 0.0);
+        assert_eq!(store.navigation_snapshot().elapsed_seconds, 0.0);
+
+        store
+            .dispatch_semantic(SemanticAction::Animate(AnimationAction::TogglePlaying))
+            .unwrap();
+        assert!(!store.animation_snapshot().clock.playing);
+        assert!(!store.summary_snapshot().animation_playing);
     }
 
     #[test]
