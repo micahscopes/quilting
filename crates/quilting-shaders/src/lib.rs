@@ -56,6 +56,7 @@ pub mod sources {
     pub const PATCH_PREPARE: &str = include_str!("../shaders/surface/patch_prepare.wgsl");
     pub const PATCH_RENDER: &str = include_str!("../shaders/surface/patch_render.wgsl");
     pub const PATCH_RENDER_VERTEX: &str = include_str!("../shaders/render/patch_vertex.wgsl");
+    pub const PATCH_RENDER_PBR: &str = include_str!("../shaders/render/patch_pbr.wgsl");
     pub const PBR: &str = include_str!("../shaders/lighting/pbr.wgsl");
     pub const MATCAP: &str = include_str!("../shaders/lighting/matcap.wgsl");
     pub const DENSITY: &str = include_str!("../shaders/viz/density.wgsl");
@@ -122,6 +123,7 @@ fn build_compiler_catalog_revision() -> Arc<str> {
             "quilting::render::patch_vertex",
             sources::PATCH_RENDER_VERTEX,
         ),
+        ("quilting::render::patch_pbr", sources::PATCH_RENDER_PBR),
         ("quilting::compute::lod_types", sources::LOD_TYPES),
         ("quilting::compute::pose", sources::POSE),
         (
@@ -174,6 +176,7 @@ pub fn create_composer() -> Result<Composer, Box<dyn std::error::Error>> {
             "quilting::render::patch_vertex",
             sources::PATCH_RENDER_VERTEX,
         ),
+        ("quilting::render::patch_pbr", sources::PATCH_RENDER_PBR),
         ("quilting::compute::lod_types", sources::LOD_TYPES),
         ("quilting::compute::pose", sources::POSE),
         (
@@ -875,7 +878,8 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
                 .iter()
                 .filter(|(_, variable)| variable.binding.is_some())
                 .count(),
-            22,
+            20,
+            "the unsampled transmission texture pair is absent from shader reflection",
         );
         let mut layouter = naga::proc::Layouter::default();
         layouter.update(module.to_ctx()).expect("patch render layouts");
