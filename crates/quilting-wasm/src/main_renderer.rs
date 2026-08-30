@@ -49,7 +49,7 @@ use quilting_core::render::RenderSubmissionMismatch;
 #[cfg(feature = "webgpu-backend")]
 use quilting_core::render_evidence::{
     compare_render_images, RenderImageChannelOrder, RenderImageComparison, RenderImageOrigin,
-    RenderPickComparison, RenderPickHit, Rgba8ImageView,
+    RenderPickComparison, RenderPickEvidenceReport, RenderPickHit, Rgba8ImageView,
 };
 use quilting_core::screen_partition::ScreenPartitionPolicy;
 use quilting_core::screen_leaf_lod::{
@@ -574,21 +574,6 @@ struct BackendPickEvidenceCapture {
     staged: crate::webgpu_backend::StagedWebGpuPick,
     staging_ms: f64,
     started_ms: f64,
-}
-
-#[cfg(feature = "webgpu-backend")]
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BackendPickEvidenceReport {
-    webgl_render_call: u64,
-    webgpu_frame_revision: u64,
-    viewport: [u32; 2],
-    pixel: [u32; 2],
-    target_epoch: u32,
-    comparison: RenderPickComparison,
-    staging_ms: f64,
-    readback_ms: f64,
-    total_ms: f64,
 }
 
 struct MainState {
@@ -4470,7 +4455,7 @@ pub async fn mr_read_backend_pick_evidence() -> Result<JsValue, JsValue> {
         let comparison = RenderPickComparison::between(expected, actual)
             .map_err(|error| error.to_string())?;
         let completed_ms = browser_now_ms();
-        Ok(BackendPickEvidenceReport {
+        Ok(RenderPickEvidenceReport {
             webgl_render_call,
             webgpu_frame_revision,
             viewport,
