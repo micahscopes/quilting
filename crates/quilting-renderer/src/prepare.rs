@@ -260,7 +260,6 @@ mod tests {
     use crate::shader::{
         FACE_DATA_TEX_UNIT, JOINT_MATRICES_BINDING, MORPH_TEX_UNIT,
         SKINNING_TEX_UNIT, SUPPRESSED_FACE_TEX_UNIT, VERTEX_UNIFORMS_BINDING,
-        WebGlOpaqueBindingKind,
     };
     use std::collections::HashSet;
 
@@ -371,34 +370,13 @@ mod tests {
                 descriptor.entry_point(),
             )
             .unwrap();
-            let mut planned = key
-                .bindings()
-                .uniform_blocks()
-                .iter()
-                .map(|binding| quilting_shaders::ReflectedEntryBinding {
-                    group: binding.source.group,
-                    binding: binding.source.binding,
-                    name: binding.source_name.to_string(),
-                    kind: quilting_shaders::ReflectedBindingKind::UniformBuffer,
-                })
-                .chain(key.bindings().samplers().iter().map(|binding| {
-                    quilting_shaders::ReflectedEntryBinding {
-                        group: binding.source.group,
-                        binding: binding.source.binding,
-                        name: binding.source_name.to_string(),
-                        kind: match binding.source_kind {
-                            WebGlOpaqueBindingKind::SampledTexture => {
-                                quilting_shaders::ReflectedBindingKind::SampledTexture
-                            }
-                            WebGlOpaqueBindingKind::Sampler => {
-                                quilting_shaders::ReflectedBindingKind::Sampler
-                            }
-                        },
-                    }
-                }))
-                .collect::<Vec<_>>();
-            planned.sort();
-            assert_eq!(planned, reflected, "{} bindings", descriptor.entry_point());
+            assert_eq!(
+                key.bindings()
+                    .source_bindings_for_stage(ShaderStage::Vertex),
+                reflected,
+                "{} bindings",
+                descriptor.entry_point()
+            );
             assert!(key.bindings().cross_stage_slot_conflicts().is_empty());
         }
     }

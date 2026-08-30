@@ -4,7 +4,8 @@ use quilting_core::render_pipeline::{
     GraphicsProgramDescriptor, ShaderModuleDescriptor, ShaderStage, ShaderTarget,
 };
 use quilting_renderer::shader::{
-    WebGlBindingPlan, WebGlProgramKey, WebGlSamplerBinding, WebGlUniformBlockBinding,
+    WebGlBindingPlan, WebGlBindingSite, WebGlOpaqueBindingKind, WebGlProgramKey,
+    WebGlSamplerBinding, WebGlUniformBlockBinding,
 };
 use std::sync::Arc;
 
@@ -139,15 +140,23 @@ pub(crate) fn auxiliary_program_descriptor(
         vec![WebGlUniformBlockBinding {
             name: "PostProcessUniforms_block_0Fragment".into(),
             binding_point: POST_PROCESS_UNIFORMS_BINDING,
+            source_name: "post_process".into(),
+            source: WebGlBindingSite::new(0, 0, ShaderStage::Fragment),
         }],
         vec![
             WebGlSamplerBinding {
                 name: "_group_0_binding_1_fs".into(),
                 texture_unit: 0,
+                source_name: "source_texture".into(),
+                source: WebGlBindingSite::new(0, 1, ShaderStage::Fragment),
+                source_kind: WebGlOpaqueBindingKind::SampledTexture,
             },
             WebGlSamplerBinding {
                 name: "_group_0_binding_2_fs".into(),
                 texture_unit: 0,
+                source_name: "source_sampler".into(),
+                source: WebGlBindingSite::new(0, 2, ShaderStage::Fragment),
+                source_kind: WebGlOpaqueBindingKind::Sampler,
             },
         ],
     )?;
@@ -223,6 +232,29 @@ mod tests {
                 let source = lower(descriptor);
                 assert!(source.contains("#version 300 es"));
                 assert!(source.contains("void main()"));
+                let module = quilting_shaders::compile_shader(
+                    descriptor.source(),
+                    HashMap::new(),
+                )
+                .unwrap();
+                let stage = match descriptor.stage() {
+                    ShaderStage::Vertex => quilting_shaders::EntryPointStage::Vertex,
+                    ShaderStage::Fragment => quilting_shaders::EntryPointStage::Fragment,
+                    ShaderStage::Compute => unreachable!(),
+                };
+                let reflected = quilting_shaders::reflect_graphics_entry_bindings(
+                    &module,
+                    stage,
+                    descriptor.entry_point(),
+                )
+                .unwrap();
+                assert_eq!(
+                    key.bindings()
+                        .source_bindings_for_stage(descriptor.stage()),
+                    reflected,
+                    "{kind:?} {:?}",
+                    descriptor.stage()
+                );
                 for line in source.lines() {
                     if let Some(after_uniform) = line.split("uniform ").nth(1) {
                         if let Some(block) = after_uniform

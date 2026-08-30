@@ -155,6 +155,46 @@ impl WebGlBindingPlan {
         &self.samplers
     }
 
+    /// Canonical compiler-input interface represented by this WebGL plan for
+    /// one graphics stage. This is independent of emitted GLSL identifiers and
+    /// can be compared directly with composed Naga entry-point reflection.
+    pub fn source_bindings_for_stage(
+        &self,
+        stage: ShaderStage,
+    ) -> Vec<quilting_shaders::ReflectedEntryBinding> {
+        let mut bindings = self
+            .uniform_blocks
+            .iter()
+            .filter(|binding| binding.source.stage == stage)
+            .map(|binding| quilting_shaders::ReflectedEntryBinding {
+                group: binding.source.group,
+                binding: binding.source.binding,
+                name: binding.source_name.to_string(),
+                kind: quilting_shaders::ReflectedBindingKind::UniformBuffer,
+            })
+            .chain(
+                self.samplers
+                    .iter()
+                    .filter(|binding| binding.source.stage == stage)
+                    .map(|binding| quilting_shaders::ReflectedEntryBinding {
+                        group: binding.source.group,
+                        binding: binding.source.binding,
+                        name: binding.source_name.to_string(),
+                        kind: match binding.source_kind {
+                            WebGlOpaqueBindingKind::SampledTexture => {
+                                quilting_shaders::ReflectedBindingKind::SampledTexture
+                            }
+                            WebGlOpaqueBindingKind::Sampler => {
+                                quilting_shaders::ReflectedBindingKind::Sampler
+                            }
+                        },
+                    }),
+            )
+            .collect::<Vec<_>>();
+        bindings.sort();
+        bindings
+    }
+
     /// Return legacy binding coordinates that name distinct resources in more
     /// than one shader stage. WebGL can initialize those resources by their
     /// emitted GLSL names, but a WebGPU pipeline layout has one resource per
@@ -1033,40 +1073,9 @@ mod tests {
                     descriptor.entry_point(),
                 )
                 .unwrap();
-                let mut planned = key
-                    .bindings()
-                    .uniform_blocks()
-                    .iter()
-                    .filter(|binding| binding.source.stage == descriptor.stage())
-                    .map(|binding| quilting_shaders::ReflectedEntryBinding {
-                        group: binding.source.group,
-                        binding: binding.source.binding,
-                        name: binding.source_name.to_string(),
-                        kind: quilting_shaders::ReflectedBindingKind::UniformBuffer,
-                    })
-                    .chain(
-                        key.bindings()
-                            .samplers()
-                            .iter()
-                            .filter(|binding| binding.source.stage == descriptor.stage())
-                            .map(|binding| quilting_shaders::ReflectedEntryBinding {
-                                group: binding.source.group,
-                                binding: binding.source.binding,
-                                name: binding.source_name.to_string(),
-                                kind: match binding.source_kind {
-                                    WebGlOpaqueBindingKind::SampledTexture => {
-                                        quilting_shaders::ReflectedBindingKind::SampledTexture
-                                    }
-                                    WebGlOpaqueBindingKind::Sampler => {
-                                        quilting_shaders::ReflectedBindingKind::Sampler
-                                    }
-                                },
-                            }),
-                    )
-                    .collect::<Vec<_>>();
-                planned.sort();
                 assert_eq!(
-                    planned,
+                    key.bindings()
+                        .source_bindings_for_stage(descriptor.stage()),
                     reflected,
                     "{mode} {:?} bindings",
                     descriptor.stage()
