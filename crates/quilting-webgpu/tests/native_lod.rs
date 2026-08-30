@@ -1025,35 +1025,39 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             sphere: [0.0, 0.0, 0.0, 1.0],
             enabled: true,
         };
-        let focus_frame = RenderFrame::build(
+        let focus_options = RenderFrameOptions {
+            focus_postprocess: Some(quilting_core::render::FocusPostprocessPacket {
+                mode: quilting_core::render::FocusPostprocessMode::Spheroidal,
+                blur_radius_pixels: 11,
+                blur_strength: 1.0,
+                focus_coordinate: 0.5,
+                bandwidth: 0.1,
+                normalize_range: false,
+                stretch_range: [0.5, 0.5],
+                gaussian_passes: 1,
+                kawase_passes: 3,
+                kawase_offset: 1.5,
+            }),
+            ..RenderFrameOptions::default()
+        };
+        let focus_plan = focus_scene
+            .command_plan(RenderStyle::Pbr, focus_options)
+            .unwrap();
+        let focus_frame = RenderFrame::from_command_plan(
             render_frame.revision + 100,
             render_frame.pose,
-            RenderStyle::Pbr,
             focus_view,
-            RenderFrameOptions {
-                focus_postprocess: Some(quilting_core::render::FocusPostprocessPacket {
-                    mode: quilting_core::render::FocusPostprocessMode::Spheroidal,
-                    blur_radius_pixels: 11,
-                    blur_strength: 1.0,
-                    focus_coordinate: 0.5,
-                    bandwidth: 0.1,
-                    normalize_range: false,
-                    stretch_range: [0.5, 0.5],
-                    gaussian_passes: 1,
-                    kawase_passes: 3,
-                    kawase_offset: 1.5,
-                }),
-                ..RenderFrameOptions::default()
-            },
-            &render_scene,
+            focus_options,
+            &focus_plan,
         )
         .unwrap();
         let focus_error_scope = classifier
             .device()
             .push_error_scope(wgpu::ErrorFilter::Validation);
         let focus_encoding = classifier
-            .render_offscreen_focus_pbr_patch_scene_with_face_visibility(
+            .render_offscreen_focus_pbr_patch_render_plan_with_face_visibility(
                 &focus_frame,
+                &focus_plan,
                 focus_pbr_pipeline,
                 focus_pipelines,
                 &focus_scene,

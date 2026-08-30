@@ -5168,6 +5168,85 @@ impl LodClassifierDevice {
             &VisibilityCompactionScene,
         ) -> Result<(), LodWebGpuError>,
     {
+        self.encode_focus_pbr_patch_render_scene_with_command_plan(
+            encoder,
+            frame,
+            None,
+            pipeline,
+            focus_pipelines,
+            scene,
+            atlas,
+            focus_target,
+            output_target,
+            use_qb,
+            encode_visibility,
+        )
+    }
+
+    /// Allocation-free retained-command counterpart to
+    /// [`Self::encode_focus_pbr_patch_render_scene`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_focus_pbr_patch_render_plan<'resource, VisibilityProducer>(
+        &'resource self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &RenderFrame,
+        plan: &RenderCommandPlan,
+        pipeline: &'resource FocusPbrPatchRenderPipeline,
+        focus_pipelines: &FocusPostprocessPipelines,
+        scene: &'resource PatchRenderScene,
+        atlas: &'resource PackedPatchAtlas,
+        focus_target: &FocusPostprocessTarget,
+        output_target: &OffscreenPatchRenderTarget,
+        use_qb: bool,
+        encode_visibility: VisibilityProducer,
+    ) -> Result<FocusPatchFrameEncoding, LodWebGpuError>
+    where
+        VisibilityProducer: FnOnce(
+            &mut wgpu::CommandEncoder,
+            &PatchPreparationScene,
+            &VisibilityCompactionScene,
+        ) -> Result<(), LodWebGpuError>,
+    {
+        self.encode_focus_pbr_patch_render_scene_with_command_plan(
+            encoder,
+            frame,
+            Some(plan),
+            pipeline,
+            focus_pipelines,
+            scene,
+            atlas,
+            focus_target,
+            output_target,
+            use_qb,
+            encode_visibility,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_focus_pbr_patch_render_scene_with_command_plan<
+        'resource,
+        VisibilityProducer,
+    >(
+        &'resource self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &RenderFrame,
+        command_plan: Option<&RenderCommandPlan>,
+        pipeline: &'resource FocusPbrPatchRenderPipeline,
+        focus_pipelines: &FocusPostprocessPipelines,
+        scene: &'resource PatchRenderScene,
+        atlas: &'resource PackedPatchAtlas,
+        focus_target: &FocusPostprocessTarget,
+        output_target: &OffscreenPatchRenderTarget,
+        use_qb: bool,
+        encode_visibility: VisibilityProducer,
+    ) -> Result<FocusPatchFrameEncoding, LodWebGpuError>
+    where
+        VisibilityProducer: FnOnce(
+            &mut wgpu::CommandEncoder,
+            &PatchPreparationScene,
+            &VisibilityCompactionScene,
+        ) -> Result<(), LodWebGpuError>,
+    {
         if frame.style != RenderStyle::Pbr {
             return Err(LodWebGpuError::Payload(format!(
                 "focus WebGPU pipeline cannot render {:?} frame",
@@ -5198,7 +5277,7 @@ impl LodClassifierDevice {
             encoder,
             frame,
             scene.scene.snapshot(),
-            None,
+            command_plan,
             &scene.bindings,
             &scene.patches,
             &scene.visibility,
@@ -5254,14 +5333,69 @@ impl LodClassifierDevice {
         output_target: &OffscreenPatchRenderTarget,
         use_qb: bool,
     ) -> Result<FocusPatchFrameEncoding, LodWebGpuError> {
+        self.render_offscreen_focus_pbr_patch_scene_with_command_plan(
+            frame,
+            None,
+            pipeline,
+            focus_pipelines,
+            scene,
+            atlas,
+            focus_target,
+            output_target,
+            use_qb,
+        )
+    }
+
+    /// Retained-command counterpart to
+    /// [`Self::render_offscreen_focus_pbr_patch_scene_with_face_visibility`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_offscreen_focus_pbr_patch_render_plan_with_face_visibility(
+        &self,
+        frame: &RenderFrame,
+        plan: &RenderCommandPlan,
+        pipeline: &FocusPbrPatchRenderPipeline,
+        focus_pipelines: &FocusPostprocessPipelines,
+        scene: &PatchRenderScene,
+        atlas: &PackedPatchAtlas,
+        focus_target: &FocusPostprocessTarget,
+        output_target: &OffscreenPatchRenderTarget,
+        use_qb: bool,
+    ) -> Result<FocusPatchFrameEncoding, LodWebGpuError> {
+        self.render_offscreen_focus_pbr_patch_scene_with_command_plan(
+            frame,
+            Some(plan),
+            pipeline,
+            focus_pipelines,
+            scene,
+            atlas,
+            focus_target,
+            output_target,
+            use_qb,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_offscreen_focus_pbr_patch_scene_with_command_plan(
+        &self,
+        frame: &RenderFrame,
+        command_plan: Option<&RenderCommandPlan>,
+        pipeline: &FocusPbrPatchRenderPipeline,
+        focus_pipelines: &FocusPostprocessPipelines,
+        scene: &PatchRenderScene,
+        atlas: &PackedPatchAtlas,
+        focus_target: &FocusPostprocessTarget,
+        output_target: &OffscreenPatchRenderTarget,
+        use_qb: bool,
+    ) -> Result<FocusPatchFrameEncoding, LodWebGpuError> {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("quilting complete offscreen focus frame"),
             });
-        let encoding = self.encode_focus_pbr_patch_render_scene(
+        let encoding = self.encode_focus_pbr_patch_render_scene_with_command_plan(
             &mut encoder,
             frame,
+            command_plan,
             pipeline,
             focus_pipelines,
             scene,
