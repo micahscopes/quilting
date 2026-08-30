@@ -925,7 +925,7 @@ pub struct PatchPreparationScene {
 /// bind-group layout instead of recompiling or mutating state per batch.
 #[derive(Clone)]
 pub struct PatchRenderPipeline {
-    kind: PatchPipelineKind,
+    kind: prepared_patch_pipeline::PreparedPatchPipelineKind,
     geometry: RenderGeometry,
     bind_group_layout: wgpu::BindGroupLayout,
     pbr_texture_bind_group_layout: Option<wgpu::BindGroupLayout>,
@@ -999,17 +999,11 @@ impl FocusPbrRenderResources {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PatchPipelineKind {
-    Style(RenderStyle),
-    Highlight,
-}
-
 impl PatchRenderPipeline {
     fn style(&self) -> Option<RenderStyle> {
         match self.kind {
-            PatchPipelineKind::Style(style) => Some(style),
-            PatchPipelineKind::Highlight => None,
+            prepared_patch_pipeline::PreparedPatchPipelineKind::Style(style) => Some(style),
+            prepared_patch_pipeline::PreparedPatchPipelineKind::Highlight => None,
         }
     }
 
@@ -3872,72 +3866,16 @@ impl LodClassifierDevice {
                 "patch render sample count must be a nonzero power of two".to_string(),
             ));
         }
-        if pbr_raw_field_format.is_some() && (include_highlight || styles != [RenderStyle::Pbr]) {
-            return Err(LodWebGpuError::Payload(
-                "focus MRT pipeline creation requires exactly the PBR style".to_string(),
-            ));
-        }
-        let mut fragment_entry_points = styles
+        let passes = prepared_patch_pipeline::prepared_patch_pipeline_passes(
+            styles,
+            include_highlight,
+            pbr_raw_field_format.is_some(),
+        )
+        .map_err(|error| LodWebGpuError::Payload(error.to_string()))?;
+        let expected_descriptor_count = passes
             .iter()
             .copied()
-            .map(|style| {
-                let (geometry, entry_point) = match style {
-                    RenderStyle::Pbr => (
-                        RenderGeometry::Triangles,
-                        if pbr_raw_field_format.is_some() {
-                            quilting_shaders::PATCH_RENDER_DEVICE_PBR_FOCUS_ENTRY_POINT
-                        } else {
-                            quilting_shaders::PATCH_RENDER_DEVICE_PBR_ENTRY_POINT
-                        },
-                    ),
-                    RenderStyle::Normals => {
-                        (
-                            RenderGeometry::Triangles,
-                            quilting_shaders::PATCH_RENDER_DEVICE_NORMALS_ENTRY_POINT,
-                        )
-                    }
-                    RenderStyle::Matcap => {
-                        (
-                            RenderGeometry::Triangles,
-                            quilting_shaders::PATCH_RENDER_DEVICE_MATCAP_ENTRY_POINT,
-                        )
-                    }
-                    RenderStyle::Lod => (
-                        RenderGeometry::Triangles,
-                        quilting_shaders::PATCH_RENDER_DEVICE_LOD_ENTRY_POINT,
-                    ),
-                    RenderStyle::Stretch => {
-                        (
-                            RenderGeometry::Triangles,
-                            quilting_shaders::PATCH_RENDER_DEVICE_STRETCH_ENTRY_POINT,
-                        )
-                    }
-                    RenderStyle::Wire => (
-                        RenderGeometry::Lines,
-                        quilting_shaders::PATCH_RENDER_DEVICE_WIRE_ENTRY_POINT,
-                    ),
-                    unsupported => {
-                        return Err(LodWebGpuError::Payload(format!(
-                            "WebGPU prepared-patch diagnostic pipeline does not support {unsupported:?}",
-                        )));
-                    }
-                };
-                Ok((PatchPipelineKind::Style(style), geometry, entry_point))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if include_highlight {
-            fragment_entry_points.push((
-                PatchPipelineKind::Highlight,
-                RenderGeometry::Triangles,
-                quilting_shaders::PATCH_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT,
-            ));
-        }
-        let expected_descriptor_count = fragment_entry_points
-            .iter()
-            .map(|(_, geometry, _)| match geometry {
-                RenderGeometry::Triangles => 2,
-                RenderGeometry::Lines => 1,
-            })
+            .map(prepared_patch_pipeline::PreparedPatchPipelinePass::descriptor_count)
             .sum::<usize>();
         if descriptors.is_some_and(|descriptors| descriptors.len() != expected_descriptor_count) {
             return Err(LodWebGpuError::Payload(format!(
@@ -3950,9 +3888,10 @@ impl LodClassifierDevice {
             quilting_shaders::PATCH_RENDER_DEVICE_VERTEX_ENTRY_POINT,
             quilting_shaders::compile_patch_render_device_wgsl,
         )?;
-        let uses_pbr_family = fragment_entry_points
+        let uses_pbr_family = passes
             .iter()
-            .any(|(kind, _, _)| *kind == PatchPipelineKind::Style(RenderStyle::Pbr));
+            .copied()
+            .any(prepared_patch_pipeline::PreparedPatchPipelinePass::uses_pbr);
         let (bind_group_layout, pbr_texture_bind_group_layout, pbr_environment_bind_group_layout) =
             if let Some(descriptors) = descriptors {
                 let first_layout = descriptors
@@ -4106,12 +4045,15 @@ impl LodClassifierDevice {
             bias: wgpu::DepthBiasState::default(),
         });
         let attributes = wgpu::vertex_attr_array![0 => Float32x3];
-        let mut pipelines = Vec::with_capacity(fragment_entry_points.len());
+        let mut pipelines = Vec::with_capacity(passes.len());
         let mut descriptor_index = 0usize;
-        for (kind, geometry, fragment_entry_point) in fragment_entry_points {
-            let uses_pbr_bindings = kind == PatchPipelineKind::Style(RenderStyle::Pbr);
+        for pass in passes {
+            let kind = pass.kind;
+            let geometry = pass.geometry;
+            let fragment_entry_point = pass.fragment_entry_point;
+            let uses_pbr_bindings = pass.uses_pbr();
             let pipeline_depth_stencil = depth_stencil.clone().map(|mut state| {
-                state.depth_write_enabled = Some(kind != PatchPipelineKind::Highlight);
+                state.depth_write_enabled = Some(pass.depth_write);
                 state
             });
             let pipeline_layout = if uses_pbr_bindings {

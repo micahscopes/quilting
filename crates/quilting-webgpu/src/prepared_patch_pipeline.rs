@@ -12,7 +12,7 @@ use crate::{
     DRAW_BATCH_INDEX_BYTES, PACKED_RECORD_BYTES, PATCH_PBR_MATERIAL_BYTES,
     PATCH_RENDER_FRAME_BYTES, PREPARED_PATCH_RECORD_BYTES, VISIBILITY_RANGE_RECORD_BYTES,
 };
-use quilting_core::render::RenderStyle;
+use quilting_core::render::{RenderGeometry, RenderStyle};
 use quilting_core::render_pipeline as functional;
 use std::error::Error;
 use std::fmt;
@@ -54,52 +54,75 @@ impl From<functional::RenderPipelineDescriptorError> for PreparedPatchPipelineDe
     }
 }
 
-#[derive(Clone, Copy)]
-struct PreparedPass {
-    fragment_entry_point: &'static str,
-    topology: functional::PrimitiveTopology,
-    uses_pbr: bool,
-    depth_write: bool,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PreparedPatchPipelineKind {
+    Style(RenderStyle),
+    Highlight,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PreparedPatchPipelinePass {
+    pub(crate) kind: PreparedPatchPipelineKind,
+    pub(crate) fragment_entry_point: &'static str,
+    pub(crate) geometry: RenderGeometry,
+    pub(crate) depth_write: bool,
+}
+
+impl PreparedPatchPipelinePass {
+    pub(crate) const fn uses_pbr(self) -> bool {
+        matches!(
+            self.kind,
+            PreparedPatchPipelineKind::Style(RenderStyle::Pbr)
+        )
+    }
+
+    pub(crate) const fn topology(self) -> functional::PrimitiveTopology {
+        match self.geometry {
+            RenderGeometry::Triangles => functional::PrimitiveTopology::TriangleList,
+            RenderGeometry::Lines => functional::PrimitiveTopology::LineList,
+        }
+    }
+
+    pub(crate) const fn descriptor_count(self) -> usize {
+        match self.geometry {
+            RenderGeometry::Triangles => 2,
+            RenderGeometry::Lines => 1,
+        }
+    }
 }
 
 fn style_pass(
     style: RenderStyle,
     focus: bool,
-) -> Result<PreparedPass, PreparedPatchPipelineDescriptorError> {
-    let (fragment_entry_point, topology, uses_pbr) = match style {
+) -> Result<PreparedPatchPipelinePass, PreparedPatchPipelineDescriptorError> {
+    let (fragment_entry_point, geometry) = match style {
         RenderStyle::Pbr => (
             if focus {
                 quilting_shaders::PATCH_RENDER_DEVICE_PBR_FOCUS_ENTRY_POINT
             } else {
                 quilting_shaders::PATCH_RENDER_DEVICE_PBR_ENTRY_POINT
             },
-            functional::PrimitiveTopology::TriangleList,
-            true,
+            RenderGeometry::Triangles,
         ),
         RenderStyle::Normals => (
             quilting_shaders::PATCH_RENDER_DEVICE_NORMALS_ENTRY_POINT,
-            functional::PrimitiveTopology::TriangleList,
-            false,
+            RenderGeometry::Triangles,
         ),
         RenderStyle::Matcap => (
             quilting_shaders::PATCH_RENDER_DEVICE_MATCAP_ENTRY_POINT,
-            functional::PrimitiveTopology::TriangleList,
-            false,
+            RenderGeometry::Triangles,
         ),
         RenderStyle::Lod => (
             quilting_shaders::PATCH_RENDER_DEVICE_LOD_ENTRY_POINT,
-            functional::PrimitiveTopology::TriangleList,
-            false,
+            RenderGeometry::Triangles,
         ),
         RenderStyle::Stretch => (
             quilting_shaders::PATCH_RENDER_DEVICE_STRETCH_ENTRY_POINT,
-            functional::PrimitiveTopology::TriangleList,
-            false,
+            RenderGeometry::Triangles,
         ),
         RenderStyle::Wire => (
             quilting_shaders::PATCH_RENDER_DEVICE_WIRE_ENTRY_POINT,
-            functional::PrimitiveTopology::LineList,
-            false,
+            RenderGeometry::Lines,
         ),
         unsupported => {
             return Err(PreparedPatchPipelineDescriptorError::UnsupportedStyle(
@@ -107,12 +130,36 @@ fn style_pass(
             ));
         }
     };
-    Ok(PreparedPass {
+    Ok(PreparedPatchPipelinePass {
+        kind: PreparedPatchPipelineKind::Style(style),
         fragment_entry_point,
-        topology,
-        uses_pbr,
+        geometry,
         depth_write: true,
     })
+}
+
+pub(crate) fn prepared_patch_pipeline_passes(
+    styles: &[RenderStyle],
+    include_highlight: bool,
+    focus: bool,
+) -> Result<Vec<PreparedPatchPipelinePass>, PreparedPatchPipelineDescriptorError> {
+    if focus && (include_highlight || styles != [RenderStyle::Pbr]) {
+        return Err(PreparedPatchPipelineDescriptorError::FocusRequiresExactlyPbr);
+    }
+    let mut passes = styles
+        .iter()
+        .copied()
+        .map(|style| style_pass(style, focus))
+        .collect::<Result<Vec<_>, _>>()?;
+    if include_highlight {
+        passes.push(PreparedPatchPipelinePass {
+            kind: PreparedPatchPipelineKind::Highlight,
+            fragment_entry_point: quilting_shaders::PATCH_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT,
+            geometry: RenderGeometry::Triangles,
+            depth_write: false,
+        });
+    }
+    Ok(passes)
 }
 
 fn prepared_bindings(
@@ -170,10 +217,6 @@ pub fn prepared_patch_pipeline_descriptors(
     include_highlight: bool,
     pbr_raw_field_format: Option<functional::TextureFormat>,
 ) -> Result<Vec<functional::RenderPipelineDescriptor>, PreparedPatchPipelineDescriptorError> {
-    if pbr_raw_field_format.is_some() && (include_highlight || styles != [RenderStyle::Pbr]) {
-        return Err(PreparedPatchPipelineDescriptorError::FocusRequiresExactlyPbr);
-    }
-
     let prepared_bindings = prepared_bindings()?;
     let diagnostic_layout =
         functional::PipelineLayoutDescriptor::new(vec![prepared_bindings.clone()])?;
@@ -200,25 +243,13 @@ pub fn prepared_patch_pipeline_descriptors(
     let vertex_buffer = position_vertex_buffer()?;
     let alpha_blend = alpha_blending();
     let focus = pbr_raw_field_format.is_some();
-    let mut passes = styles
-        .iter()
-        .copied()
-        .map(|style| style_pass(style, focus))
-        .collect::<Result<Vec<_>, _>>()?;
-    if include_highlight {
-        passes.push(PreparedPass {
-            fragment_entry_point: quilting_shaders::PATCH_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT,
-            topology: functional::PrimitiveTopology::TriangleList,
-            uses_pbr: false,
-            depth_write: false,
-        });
-    }
+    let passes = prepared_patch_pipeline_passes(styles, include_highlight, focus)?;
 
     let mut descriptors = Vec::with_capacity(passes.len() * 2);
     for pass in passes {
-        let front_faces: &[_] = match pass.topology {
-            functional::PrimitiveTopology::LineList => &[functional::FrontFace::CounterClockwise],
-            _ => &[
+        let front_faces: &[_] = match pass.geometry {
+            RenderGeometry::Lines => &[functional::FrontFace::CounterClockwise],
+            RenderGeometry::Triangles => &[
                 functional::FrontFace::CounterClockwise,
                 functional::FrontFace::Clockwise,
             ],
@@ -229,7 +260,7 @@ pub fn prepared_patch_pipeline_descriptors(
                 blend: Some(alpha_blend),
                 write_mask: functional::ColorWriteMask::ALL,
             }];
-            if let Some(format) = pbr_raw_field_format.filter(|_| pass.uses_pbr) {
+            if let Some(format) = pbr_raw_field_format.filter(|_| pass.uses_pbr()) {
                 color_targets.push(functional::ColorTargetStateDescriptor {
                     format,
                     blend: None,
@@ -245,14 +276,14 @@ pub fn prepared_patch_pipeline_descriptors(
                     )?),
                     Vec::new(),
                 )?,
-                if pass.uses_pbr {
+                if pass.uses_pbr() {
                     pbr_layout.clone()
                 } else {
                     diagnostic_layout.clone()
                 },
                 vec![vertex_buffer.clone()],
                 functional::PrimitiveStateDescriptor {
-                    topology: pass.topology,
+                    topology: pass.topology(),
                     strip_index_format: None,
                     front_face,
                     cull_mode: functional::CullMode::None,
@@ -295,6 +326,46 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn one_semantic_pass_plan_drives_runtime_and_descriptor_order() {
+        let passes = prepared_patch_pipeline_passes(STYLES, true, false).unwrap();
+        assert_eq!(
+            passes.iter().map(|pass| pass.kind).collect::<Vec<_>>(),
+            vec![
+                PreparedPatchPipelineKind::Style(RenderStyle::Pbr),
+                PreparedPatchPipelineKind::Style(RenderStyle::Normals),
+                PreparedPatchPipelineKind::Style(RenderStyle::Matcap),
+                PreparedPatchPipelineKind::Style(RenderStyle::Lod),
+                PreparedPatchPipelineKind::Style(RenderStyle::Stretch),
+                PreparedPatchPipelineKind::Style(RenderStyle::Wire),
+                PreparedPatchPipelineKind::Highlight,
+            ],
+        );
+        assert!(passes[0].uses_pbr());
+        assert_eq!(passes[5].geometry, RenderGeometry::Lines);
+        assert_eq!(passes[5].descriptor_count(), 1);
+        assert!(!passes[6].depth_write);
+        assert_eq!(
+            passes
+                .iter()
+                .copied()
+                .map(PreparedPatchPipelinePass::descriptor_count)
+                .sum::<usize>(),
+            13,
+        );
+
+        let focus = prepared_patch_pipeline_passes(&[RenderStyle::Pbr], false, true).unwrap();
+        assert_eq!(focus.len(), 1);
+        assert_eq!(
+            focus[0].fragment_entry_point,
+            quilting_shaders::PATCH_RENDER_DEVICE_PBR_FOCUS_ENTRY_POINT,
+        );
+        assert_eq!(
+            prepared_patch_pipeline_passes(&[RenderStyle::Pbr, RenderStyle::Wire], false, true),
+            Err(PreparedPatchPipelineDescriptorError::FocusRequiresExactlyPbr),
+        );
     }
 
     #[test]
