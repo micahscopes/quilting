@@ -121,10 +121,13 @@ pub struct ResidentRootDrawDomainOutput {
 /// Graphics pipelines that pull source-indexed prepared roots through the
 /// device-generated atlas/parity bucket plan.
 pub struct ResidentRootRenderPipeline {
+    color_format: wgpu::TextureFormat,
+    sample_count: u32,
     bind_group_layout: wgpu::BindGroupLayout,
     pbr_portable_atlas_bind_group_layout: wgpu::BindGroupLayout,
     pbr_environment_bind_group_layout: wgpu::BindGroupLayout,
     pbr: ResidentRootWindingPipelines,
+    pbr_focus: ResidentRootWindingPipelines,
     matcap: ResidentRootWindingPipelines,
     normals: ResidentRootWindingPipelines,
     lod: ResidentRootWindingPipelines,
@@ -160,6 +163,12 @@ pub struct ResidentRootRenderBindings {
 pub struct ResidentRootFrameEncoding {
     pub indirect_draw_calls: u32,
     pub source_face_count: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FocusResidentRootFrameEncoding {
+    pub roots: ResidentRootFrameEncoding,
+    pub postprocess: FocusPostprocessEncoding,
 }
 
 /// Atomic retained aggregate for direct source-indexed root preparation.
@@ -469,11 +478,24 @@ impl LodClassifierDevice {
                       geometry,
                       front_face,
                       pipeline_layout: &wgpu::PipelineLayout,
-                      depth_write_enabled| {
+                      depth_write_enabled,
+                      raw_field_format: Option<wgpu::TextureFormat>| {
             let pipeline_depth_stencil = depth_stencil.clone().map(|mut state| {
                 state.depth_write_enabled = Some(depth_write_enabled);
                 state
             });
+            let mut targets = vec![Some(wgpu::ColorTargetState {
+                format: color_format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })];
+            if let Some(format) = raw_field_format {
+                targets.push(Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                }));
+            }
             self.device
                 .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(label),
@@ -508,11 +530,7 @@ impl LodClassifierDevice {
                         module: &module,
                         entry_point: Some(fragment_entry_point),
                         compilation_options: Default::default(),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: color_format,
-                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
+                        targets: &targets,
                     }),
                     multiview_mask: None,
                     cache: None,
@@ -527,6 +545,7 @@ impl LodClassifierDevice {
                     wgpu::FrontFace::Ccw,
                     pipeline_layout,
                     true,
+                    None,
                 ),
                 clockwise: create(
                     label,
@@ -535,9 +554,12 @@ impl LodClassifierDevice {
                     wgpu::FrontFace::Cw,
                     pipeline_layout,
                     true,
+                    None,
                 ),
             };
         Ok(ResidentRootRenderPipeline {
+            color_format,
+            sample_count,
             bind_group_layout,
             pbr: create_style(
                 "quilting resident root PBR",
@@ -545,6 +567,26 @@ impl LodClassifierDevice {
                 RenderGeometry::Triangles,
                 &pbr_pipeline_layout,
             ),
+            pbr_focus: ResidentRootWindingPipelines {
+                counter_clockwise: create(
+                    "quilting resident root focus PBR",
+                    quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_PBR_FOCUS_ENTRY_POINT,
+                    RenderGeometry::Triangles,
+                    wgpu::FrontFace::Ccw,
+                    &pbr_pipeline_layout,
+                    true,
+                    Some(wgpu::TextureFormat::Rgba16Float),
+                ),
+                clockwise: create(
+                    "quilting resident root focus PBR",
+                    quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_PBR_FOCUS_ENTRY_POINT,
+                    RenderGeometry::Triangles,
+                    wgpu::FrontFace::Cw,
+                    &pbr_pipeline_layout,
+                    true,
+                    Some(wgpu::TextureFormat::Rgba16Float),
+                ),
+            },
             matcap: create_style(
                 "quilting resident root matcap",
                 quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_MATCAP_ENTRY_POINT,
@@ -583,6 +625,7 @@ impl LodClassifierDevice {
                     wgpu::FrontFace::Ccw,
                     &diagnostic_pipeline_layout,
                     false,
+                    None,
                 ),
                 clockwise: create(
                     "quilting resident root highlight",
@@ -591,6 +634,7 @@ impl LodClassifierDevice {
                     wgpu::FrontFace::Cw,
                     &diagnostic_pipeline_layout,
                     false,
+                    None,
                 ),
             },
             pbr_portable_atlas_bind_group_layout,
@@ -835,14 +879,62 @@ impl LodClassifierDevice {
         num_joints: u32,
         use_qb: bool,
     ) -> Result<ResidentRootFrameEncoding, LodWebGpuError> {
+        self.encode_resident_roots_with_raw_field(
+            encoder,
+            frame,
+            model,
+            resident,
+            preparation,
+            geometry,
+            pipeline,
+            bindings,
+            atlas,
+            target,
+            None,
+            pose,
+            num_joints,
+            use_qb,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_resident_roots_with_raw_field<'resource>(
+        &'resource self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &RenderFrame,
+        model: &LodClassifierModel,
+        resident: &DeviceResidentLod<'_>,
+        preparation: &'resource ResidentRootPreparationScene,
+        geometry: &'resource ResidentGeometryBucketScene,
+        pipeline: &'resource ResidentRootRenderPipeline,
+        bindings: &'resource ResidentRootRenderBindings,
+        atlas: &'resource PackedPatchAtlas,
+        target: PatchRenderTarget<'resource>,
+        raw_field_target: Option<&'resource wgpu::TextureView>,
+        pose: LodPose<'_>,
+        num_joints: u32,
+        use_qb: bool,
+    ) -> Result<ResidentRootFrameEncoding, LodWebGpuError> {
         let draw_passes = render_draw_passes(frame.style);
+        let focus_frame = raw_field_target.is_some();
+        if focus_frame && frame.style != RenderStyle::Pbr {
+            return Err(LodWebGpuError::Payload(format!(
+                "resident root focus target cannot render {:?}",
+                frame.style,
+            )));
+        }
         if frame.style == RenderStyle::Pbr
             && (!bindings.supports_resident_basic_pbr()
-                || frame.options.focus_postprocess.is_some())
+                || frame.options.focus_postprocess.is_some() != focus_frame)
         {
             return Err(LodWebGpuError::Payload(
-                "resident root PBR requires one exact texture binding, resident IBL, and no focus post-process"
+                "resident root PBR requires exact texture/IBL bindings and a focus target matching its postprocess packet"
                     .to_string(),
+            ));
+        }
+        if focus_frame && frame.options.highlight_face.is_some() {
+            return Err(LodWebGpuError::Payload(
+                "resident root focus PBR does not yet compose source-face highlight".to_string(),
             ));
         }
         if draw_passes
@@ -889,17 +981,35 @@ impl LodClassifierDevice {
                     }),
                     stencil_ops: None,
                 });
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("quilting resident root frame"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target.color_view,
+        let primary_attachment = Some(wgpu::RenderPassColorAttachment {
+            view: target.color_view,
+            depth_slice: None,
+            resolve_target: target.resolve_target,
+            ops: wgpu::Operations {
+                load: color_load,
+                store: wgpu::StoreOp::Store,
+            },
+        });
+        let raw_attachment = raw_field_target.map(|view| {
+            Some(wgpu::RenderPassColorAttachment {
+                view,
                 depth_slice: None,
-                resolve_target: target.resolve_target,
+                resolve_target: None,
                 ops: wgpu::Operations {
-                    load: color_load,
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                     store: wgpu::StoreOp::Store,
                 },
-            })],
+            })
+        });
+        let color_attachments = [primary_attachment, raw_attachment.flatten()];
+        let color_attachments = if focus_frame {
+            &color_attachments[..]
+        } else {
+            &color_attachments[..1]
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("quilting resident root frame"),
+            color_attachments,
             depth_stencil_attachment,
             timestamp_writes: None,
             occlusion_query_set: None,
@@ -911,9 +1021,13 @@ impl LodClassifierDevice {
             if draw.pass == RenderPass::PbrTransparent {
                 continue;
             }
-            let style_pipeline = pipeline
-                .for_pass(draw.pass)
-                .expect("resident root pass support was validated above");
+            let style_pipeline = if focus_frame && draw.pass == RenderPass::PbrOpaque {
+                &pipeline.pbr_focus
+            } else {
+                pipeline
+                    .for_pass(draw.pass)
+                    .expect("resident root pass support was validated above")
+            };
             if draw.pass == RenderPass::PbrOpaque {
                 let portable_material_textures = bindings
                     .portable_material_textures
@@ -994,6 +1108,127 @@ impl LodClassifierDevice {
         Ok(ResidentRootFrameEncoding {
             indirect_draw_calls,
             source_face_count: geometry.face_count,
+        })
+    }
+
+    /// Encode device-resident source roots into the retained focus MRT and
+    /// immediately compose them through the shared Rust focus schedule.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_focus_resident_roots<'resource>(
+        &'resource self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &RenderFrame,
+        model: &LodClassifierModel,
+        resident: &DeviceResidentLod<'_>,
+        preparation: &'resource ResidentRootPreparationScene,
+        geometry: &'resource ResidentGeometryBucketScene,
+        pipeline: &'resource ResidentRootRenderPipeline,
+        bindings: &'resource ResidentRootRenderBindings,
+        atlas: &'resource PackedPatchAtlas,
+        focus_pipelines: &FocusPostprocessPipelines,
+        focus_target: &'resource FocusPostprocessTarget,
+        output_target: &'resource OffscreenPatchRenderTarget,
+        pose: LodPose<'_>,
+        num_joints: u32,
+        use_qb: bool,
+    ) -> Result<FocusResidentRootFrameEncoding, LodWebGpuError> {
+        if frame.view.viewport != focus_target.size() || frame.view.viewport != output_target.size {
+            return Err(LodWebGpuError::Payload(format!(
+                "resident focus/output targets {:?}/{:?} do not match viewport {:?}",
+                focus_target.size(),
+                output_target.size,
+                frame.view.viewport,
+            )));
+        }
+        if pipeline.color_format != focus_target.scene_color_format() || pipeline.sample_count != 1
+        {
+            return Err(LodWebGpuError::Payload(
+                "resident focus path requires an RGBA8 single-sample root pipeline".to_string(),
+            ));
+        }
+        let packet = frame.options.focus_postprocess.ok_or_else(|| {
+            LodWebGpuError::Payload("resident focus frame has no postprocess packet".to_string())
+        })?;
+        let roots = self.encode_resident_roots_with_raw_field(
+            encoder,
+            frame,
+            model,
+            resident,
+            preparation,
+            geometry,
+            pipeline,
+            bindings,
+            atlas,
+            PatchRenderTarget {
+                color_view: focus_target.scene_color_view(),
+                resolve_target: None,
+                depth_stencil_view: Some(&output_target.depth_view),
+                clear_color: Some(wgpu::Color::TRANSPARENT),
+                clear_depth: Some(1.0),
+            },
+            Some(focus_target.raw_field_view()),
+            pose,
+            num_joints,
+            use_qb,
+        )?;
+        let postprocess = self.encode_focus_postprocess(
+            encoder,
+            focus_pipelines,
+            focus_target,
+            &output_target.color_view,
+            packet,
+        )?;
+        Ok(FocusResidentRootFrameEncoding { roots, postprocess })
+    }
+
+    /// Submit one complete focus frame from the current device-resident root
+    /// LOD epoch. No topology, visibility, or image data crosses the CPU.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_offscreen_focus_resident_roots(
+        &self,
+        frame: &RenderFrame,
+        render_scene: &RenderSceneSnapshot,
+        model: &LodClassifierModel,
+        resident: &DeviceResidentLod<'_>,
+        preparation: &ResidentRootPreparationScene,
+        geometry: &ResidentGeometryBucketScene,
+        pipeline: &ResidentRootRenderPipeline,
+        bindings: &ResidentRootRenderBindings,
+        atlas: &PackedPatchAtlas,
+        focus_pipelines: &FocusPostprocessPipelines,
+        focus_target: &FocusPostprocessTarget,
+        output_target: &OffscreenPatchRenderTarget,
+        pose: LodPose<'_>,
+        num_joints: u32,
+        use_qb: bool,
+    ) -> Result<FocusPatchFrameEncoding, LodWebGpuError> {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quilting resident root focus frame"),
+            });
+        let encoding = self.encode_focus_resident_roots(
+            &mut encoder,
+            frame,
+            model,
+            resident,
+            preparation,
+            geometry,
+            pipeline,
+            bindings,
+            atlas,
+            focus_pipelines,
+            focus_target,
+            output_target,
+            pose,
+            num_joints,
+            use_qb,
+        )?;
+        self.queue.submit([encoder.finish()]);
+        let scene = resident_root_frame_evidence(frame, render_scene, encoding.roots)?;
+        Ok(FocusPatchFrameEncoding {
+            scene,
+            postprocess: encoding.postprocess,
         })
     }
 

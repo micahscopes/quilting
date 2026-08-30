@@ -35,10 +35,10 @@ pub use presentation::{
 };
 pub use resident_roots::{
     resident_root_render_domains, supports_resident_root_render_scene,
-    supports_resident_root_render_style, ResidentGeometryBucketOutput, ResidentGeometryBucketScene,
-    ResidentRootDrawDomainOutput, ResidentRootDrawDomainScene, ResidentRootFrameEncoding,
-    ResidentRootPreparationScene, ResidentRootRenderBindings, ResidentRootRenderPipeline,
-    ResidentRootTopologyScene,
+    supports_resident_root_render_style, FocusResidentRootFrameEncoding,
+    ResidentGeometryBucketOutput, ResidentGeometryBucketScene, ResidentRootDrawDomainOutput,
+    ResidentRootDrawDomainScene, ResidentRootFrameEncoding, ResidentRootPreparationScene,
+    ResidentRootRenderBindings, ResidentRootRenderPipeline, ResidentRootTopologyScene,
 };
 
 use futures_channel::oneshot;

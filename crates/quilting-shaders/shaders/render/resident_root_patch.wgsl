@@ -1,4 +1,4 @@
-#import quilting::render::patch_vertex::{PatchPbrMaterial, PatchRenderFrame, PatchVertexOutput, evaluate_prepared_patch_vertex, shade_patch_highlight, shade_patch_lod, shade_patch_matcap, shade_patch_normals, shade_patch_stretch, shade_patch_wire}
+#import quilting::render::patch_vertex::{PatchPbrMaterial, PatchRenderFrame, PatchVertexOutput, evaluate_prepared_patch_vertex, patch_focus_raw_field, shade_patch_highlight, shade_patch_lod, shade_patch_matcap, shade_patch_normals, shade_patch_stretch, shade_patch_wire}
 #import quilting::render::patch_pbr_portable::shade_portable_patch_pbr
 #import quilting::surface::patch_prepare::PreparedPatchRecord
 #import quilting::compute::resident_bucket_types::{ResidentBucketRangeRecord, ResidentDrawDomainRecord}
@@ -102,5 +102,37 @@ fn render_resident_root_pbr(
         pbr_materials[material_index],
         material_index,
         frames[domain_row].modes.w,
+    );
+}
+
+struct ResidentRootPbrFocusOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) raw_field: vec4<f32>,
+}
+
+@fragment
+fn render_resident_root_pbr_focus(
+    @builtin(front_facing) front_facing: bool,
+    input: PatchVertexOutput,
+) -> ResidentRootPbrFocusOutput {
+    let source_face = u32(max(input.instance_id, 0.0));
+    let domain_row = face_domain_rows[source_face];
+    let domain = draw_domains[domain_row];
+    let material_count = arrayLength(&pbr_materials);
+    let material_index = select(
+        0u,
+        domain.material_index,
+        domain.material_index < material_count,
+    );
+    let frame = frames[domain_row];
+    return ResidentRootPbrFocusOutput(
+        shade_portable_patch_pbr(
+            front_facing,
+            input,
+            pbr_materials[material_index],
+            material_index,
+            frame.modes.w,
+        ),
+        patch_focus_raw_field(input, frame),
     );
 }

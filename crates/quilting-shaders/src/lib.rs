@@ -53,6 +53,8 @@ pub const RESIDENT_ROOT_RENDER_DEVICE_WIRE_ENTRY_POINT: &str = "render_resident_
 pub const RESIDENT_ROOT_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT: &str =
     "render_resident_root_highlight";
 pub const RESIDENT_ROOT_RENDER_DEVICE_PBR_ENTRY_POINT: &str = "render_resident_root_pbr";
+pub const RESIDENT_ROOT_RENDER_DEVICE_PBR_FOCUS_ENTRY_POINT: &str =
+    "render_resident_root_pbr_focus";
 pub const FOCUS_POSTPROCESS_VERTEX_ENTRY_POINT: &str = "focus_fullscreen_vertex";
 pub const FOCUS_SELECT_WEIGHT_ENTRY_POINT: &str = "focus_select_weight";
 pub const FOCUS_JFA_INIT_ENTRY_POINT: &str = "focus_jfa_init";
@@ -1147,6 +1149,10 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
                 ),
                 (
                     RESIDENT_ROOT_RENDER_DEVICE_PBR_ENTRY_POINT,
+                    naga::ShaderStage::Fragment,
+                ),
+                (
+                    RESIDENT_ROOT_RENDER_DEVICE_PBR_FOCUS_ENTRY_POINT,
                     naga::ShaderStage::Fragment,
                 ),
             ],

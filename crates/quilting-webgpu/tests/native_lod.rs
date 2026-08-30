@@ -1011,6 +1011,17 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         let root_bindings = classifier
             .create_resident_root_render_bindings(&root_pipeline, &root_preparation, &root_geometry)
             .unwrap();
+        let root_focus_bindings = classifier
+            .create_resident_root_render_bindings_with_pbr(
+                &root_pipeline,
+                &root_preparation,
+                &root_geometry,
+                &render_scene,
+                None,
+                Some(&environment),
+            )
+            .unwrap();
+        assert!(root_focus_bindings.supports_resident_basic_pbr());
         let mut root_metrics = metrics(&root_atlas, 1.0, 0);
         root_metrics.viewport = [32.0, 32.0];
         {
@@ -1025,6 +1036,44 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             classifier.reconcile_resident_lod_on_device(&classification, FaceLodGrading::TwoToOne);
         }
         let resident = classifier.latest_resident_lod(&root_model).unwrap();
+        let root_focus_error_scope = classifier
+            .device()
+            .push_error_scope(wgpu::ErrorFilter::Validation);
+        let root_focus_encoding = classifier
+            .render_offscreen_focus_resident_roots(
+                &focus_frame,
+                &render_scene,
+                &root_model,
+                &resident,
+                &root_preparation,
+                &root_geometry,
+                &root_pipeline,
+                &root_focus_bindings,
+                &packed_atlas,
+                &focus_pipelines,
+                &focus_target,
+                &target,
+                LodPose::default(),
+                0,
+                true,
+            )
+            .unwrap();
+        assert_eq!(root_focus_encoding.scene.indirect_draw_calls, 2);
+        assert_eq!(root_focus_encoding.postprocess.render_passes, 8);
+        classifier
+            .device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        if let Some(error) = root_focus_error_scope.pop().await {
+            panic!("resident root focus frame validation: {error}");
+        }
+        let root_focus_raw = classifier
+            .stage_focus_raw_field_image(&focus_target)
+            .unwrap()
+            .read()
+            .await
+            .unwrap();
+        assert!(root_focus_raw.covered_texels() > 0);
         assert_eq!(
             classifier
                 .classify_resident_root_visibility_for_diagnostics(
