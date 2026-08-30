@@ -2077,6 +2077,13 @@ impl LodClassifierDevice {
                 "resident root PBR rejected factor-only material residency".to_string(),
             ));
         }
+        if !pbr_bindings.supports_resident_root_frame(RenderStyle::Pbr, false)
+            || pbr_bindings.supports_resident_root_frame(RenderStyle::Pbr, true)
+        {
+            return Err(LodWebGpuError::Conformance(
+                "resident root PBR overlay capability was not conservative".to_string(),
+            ));
+        }
         let pbr_frame = RenderFrame::build(
             18,
             RenderPoseIdentity {

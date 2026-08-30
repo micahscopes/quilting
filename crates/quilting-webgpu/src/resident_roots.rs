@@ -194,6 +194,21 @@ impl ResidentRootRenderBindings {
                 .pbr_environment_bindings()
                 .is_some_and(PbrEnvironmentBindings::is_resident)
     }
+
+    /// Decide whether this coherent binding epoch can execute one frame from
+    /// device-resident roots without semantic lowering. Diagnostic styles can
+    /// composite their sparse overlay; PBR remains root-only until adaptive
+    /// material binding has an equivalent portable addressing scheme.
+    pub fn supports_resident_root_frame(
+        &self,
+        style: RenderStyle,
+        has_adaptive_overlay: bool,
+    ) -> bool {
+        supports_resident_root_render_style(style)
+            || (style == RenderStyle::Pbr
+                && !has_adaptive_overlay
+                && self.supports_resident_untextured_pbr())
+    }
 }
 
 impl ResidentGeometryBucketScene {
