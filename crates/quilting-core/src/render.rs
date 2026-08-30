@@ -1356,6 +1356,19 @@ impl RenderCommandPlan {
             && self.key == RenderCommandPlanKey::new(style, options)
     }
 
+    pub fn validate_for(
+        &self,
+        scene: &ValidatedRenderScene,
+        style: RenderStyle,
+        options: RenderFrameOptions,
+    ) -> Result<(), RenderContractError> {
+        if self.matches(scene, style, options) {
+            Ok(())
+        } else {
+            Err(RenderContractError::CommandPlanMismatch)
+        }
+    }
+
     pub fn execution(&self) -> RenderExecution<'_, '_> {
         RenderExecution {
             commands: &self.commands,
@@ -1746,6 +1759,7 @@ pub enum RenderContractError {
     CompactionBatchShapeMismatch,
     SceneRevisionMismatch { frame: u64, scene: u64 },
     CommandSequenceMismatch,
+    CommandPlanMismatch,
     ExecutionSceneMismatch,
     ObserverDisabled,
     ObserverSceneUnavailable,
@@ -1858,6 +1872,9 @@ impl fmt::Display for RenderContractError {
             ),
             Self::CommandSequenceMismatch => {
                 formatter.write_str("render command sequence is not canonical")
+            }
+            Self::CommandPlanMismatch => {
+                formatter.write_str("render command plan does not match the retained scene or options")
             }
             Self::ExecutionSceneMismatch => {
                 formatter.write_str("render execution does not reference the observed scene epoch")
@@ -2289,6 +2306,10 @@ mod tests {
         let options = RenderFrameOptions::default();
         let plan = RenderCommandPlan::build(&validated, RenderStyle::Matcap, options).unwrap();
         assert!(plan.matches(&validated, RenderStyle::Matcap, options));
+        assert_eq!(
+            plan.validate_for(&validated, RenderStyle::Matcap, options),
+            Ok(())
+        );
         assert!(plan.scene().shares_snapshot_with(&validated));
 
         let frame = RenderFrame::build(
@@ -2312,6 +2333,17 @@ mod tests {
         let mut uniform_only = options;
         uniform_only.matcap_style = MatcapStyle::GoldenSoft;
         assert!(plan.matches(&validated, RenderStyle::Matcap, uniform_only));
+        assert_eq!(
+            plan.validate_for(&validated, RenderStyle::Matcap, uniform_only),
+            Ok(())
+        );
+
+        let mut different_commands = options;
+        different_commands.highlight_face = Some(7);
+        assert_eq!(
+            plan.validate_for(&validated, RenderStyle::Matcap, different_commands),
+            Err(RenderContractError::CommandPlanMismatch)
+        );
 
         let equivalent_but_distinct = ValidatedRenderScene::new(scene).unwrap();
         assert!(!plan.matches(
@@ -2319,6 +2351,14 @@ mod tests {
             RenderStyle::Matcap,
             options,
         ));
+        assert_eq!(
+            plan.validate_for(
+                &equivalent_but_distinct,
+                RenderStyle::Matcap,
+                options,
+            ),
+            Err(RenderContractError::CommandPlanMismatch)
+        );
         let clone = plan.clone();
         assert!(clone.scene().shares_snapshot_with(plan.scene()));
         assert!(std::ptr::eq(

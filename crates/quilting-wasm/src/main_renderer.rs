@@ -41,8 +41,8 @@ use quilting_core::material::{
 use quilting_core::render::{
     patch_preparation_needed, patch_visibility_needed, FocusFieldPacket, FocusPostprocessMode,
     FocusPostprocessPacket, MatcapStyle, PbrDrawClass, RenderBatchSnapshot,
-    RenderEntityTransform, RenderFrame, RenderFrameOptions, RenderPass, RenderSceneSnapshot,
-    RenderStyle, RenderSubmissionStats, RenderView,
+    RenderCommandPlan, RenderEntityTransform, RenderFrameOptions, RenderPass, RenderSceneSnapshot,
+    RenderStyle, RenderSubmissionStats, RenderView, ValidatedRenderScene,
 };
 #[cfg(feature = "webgpu-backend")]
 use quilting_core::render::RenderSubmissionMismatch;
@@ -613,6 +613,14 @@ struct MainState {
     /// indexed WebGL patch submissions.
     render_shadow: RenderShadowObserver,
     render_shadow_scene_dirty: bool,
+    /// Immutable scene epoch validated only when the opt-in render authority
+    /// gate observes a changed retained batch set.
+    validated_render_scene: Option<ValidatedRenderScene>,
+    /// Memoized command-affecting identity for the validated scene. Camera,
+    /// pose, and uniform-only changes do not rebuild this value.
+    render_command_plan: Option<RenderCommandPlan>,
+    webgl_pbr_command_plan: Option<WebGlPbrCommandPlan>,
+    render_command_plan_builds: u64,
     batch_groups: BTreeMap<batch::RenderBatchKey, Vec<batch::RenderBatchMember>>,
     /// Complete crack-free root grouping for the latest admitted source-face
     /// classification. Adaptive publication keeps this separate from the live
@@ -2102,6 +2110,10 @@ pub fn mr_init(canvas_id: &str) -> bool {
             backend_evidence_error: None,
             render_shadow: RenderShadowObserver::default(),
             render_shadow_scene_dirty: true,
+            validated_render_scene: None,
+            render_command_plan: None,
+            webgl_pbr_command_plan: None,
+            render_command_plan_builds: 0,
             batch_groups: BTreeMap::new(),
             baseline_batch_groups: BTreeMap::new(),
             root_topology_revision: 0,
@@ -3109,28 +3121,93 @@ fn refresh_render_shadow_scene(renderer: &mut MainState) {
     if !renderer.render_shadow.is_enabled() || !renderer.render_shadow_scene_dirty {
         return;
     }
-    let extracted = extract_render_scene(renderer);
+    let extracted = extract_render_scene(renderer).and_then(|mut scene| {
+        scene.revision = renderer.render_command_builds;
+        ValidatedRenderScene::new(scene).map_err(|error| error.to_string())
+    });
     renderer.render_shadow_scene_dirty = false;
     match extracted {
-        Ok(scene) => renderer.render_shadow.replace_scene(scene),
-        Err(error) => renderer.render_shadow.record_extraction_error(error),
+        Ok(scene) => {
+            renderer.render_shadow.replace_scene(scene.clone());
+            renderer.validated_render_scene = Some(scene);
+            renderer.render_command_plan = None;
+            renderer.webgl_pbr_command_plan = None;
+        }
+        Err(error) => {
+            renderer.validated_render_scene = None;
+            renderer.render_command_plan = None;
+            renderer.webgl_pbr_command_plan = None;
+            renderer.render_shadow.record_extraction_error(error);
+        }
     }
 }
 
-fn prepare_render_shadow_frame(renderer: &mut MainState, camera: &Camera) -> Option<RenderFrame> {
+fn refresh_render_command_plan(renderer: &mut MainState) {
+    if !renderer.render_shadow.is_enabled() {
+        return;
+    }
+    let style = renderer.render_style;
+    let options = current_render_frame_options(renderer);
+    let Some(scene) = renderer.validated_render_scene.as_ref() else {
+        return;
+    };
+    if renderer
+        .render_command_plan
+        .as_ref()
+        .is_some_and(|plan| plan.matches(scene, style, options))
+    {
+        return;
+    }
+    match RenderCommandPlan::build(scene, style, options) {
+        Ok(plan) => {
+            let pbr_plan = if style == RenderStyle::Pbr {
+                match WebGlPbrCommandPlan::build(
+                    plan.execution(),
+                    renderer.render_batches.as_slice(),
+                ) {
+                    Ok(plan) => Some(plan),
+                    Err(error) => {
+                        renderer.render_shadow.record_execution_fallback(error);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            renderer.render_command_plan = Some(plan);
+            renderer.webgl_pbr_command_plan = pbr_plan;
+            renderer.render_command_plan_builds =
+                renderer.render_command_plan_builds.saturating_add(1);
+        }
+        Err(error) => {
+            renderer.render_command_plan = None;
+            renderer.webgl_pbr_command_plan = None;
+            renderer.render_shadow.record_extraction_error(error);
+        }
+    }
+}
+
+fn prepare_render_shadow_observation(renderer: &mut MainState, camera: &Camera) -> Option<u64> {
     let style = renderer.render_style;
     let view = current_render_view(renderer, camera);
     let options = current_render_frame_options(renderer);
-    renderer.render_shadow.prepare_frame(style, view, options)
+    let plan = renderer.render_command_plan.as_ref()?;
+    renderer
+        .render_shadow
+        .prepare_observation(plan, style, view, options)
 }
 
 fn observe_render_submission(
     renderer: &mut MainState,
-    prepared_frame: Option<&RenderFrame>,
+    prepared_revision: Option<u64>,
     actual: RenderSubmissionStats,
 ) {
-    if let Some(frame) = prepared_frame {
-        renderer.render_shadow.observe_prepared(frame, actual);
+    if let (Some(frame_revision), Some(plan)) =
+        (prepared_revision, renderer.render_command_plan.as_ref())
+    {
+        renderer
+            .render_shadow
+            .observe_prepared(frame_revision, plan, actual);
     }
 }
 
@@ -5065,6 +5142,11 @@ pub fn mr_set_render_shadow_enabled(enabled: bool) -> JsValue {
             state.render_shadow_scene_dirty = true;
             sync_render_batches(state);
             refresh_render_shadow_scene(state);
+            refresh_render_command_plan(state);
+        } else if !enabled && changed {
+            state.validated_render_scene = None;
+            state.render_command_plan = None;
+            state.webgl_pbr_command_plan = None;
         }
         state.render_shadow.to_js()
     })
@@ -5853,6 +5935,7 @@ pub fn mr_debug_resident_lod_edges() -> JsValue {
             ),
             ("lastGpuBatchFailures", batch_stats.last_gpu_failures),
             ("renderCommandBuilds", state.render_command_builds),
+            ("renderCommandPlanBuilds", state.render_command_plan_builds),
             ("renderCalls", state.render_calls),
             ("webglPatchFrames", state.webgl_patch_frames),
             ("patchPrepareFrames", state.patch_prepare_frames),
@@ -9530,7 +9613,8 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
             }
         }
         refresh_render_shadow_scene(state);
-        let prepared_render_frame = prepare_render_shadow_frame(state, &camera);
+        refresh_render_command_plan(state);
+        let prepared_render_revision = prepare_render_shadow_observation(state, &camera);
 
         // The explicitly selected WebGPU backend submits before any WebGL
         // frame work. A valid presentation frame needs none of the
@@ -9545,7 +9629,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 state.webgpu_presentation_patch_frames = state
                     .webgpu_presentation_patch_frames
                     .saturating_add(1);
-                observe_render_submission(state, prepared_render_frame.as_ref(), submission_stats);
+                observe_render_submission(state, prepared_render_revision, submission_stats);
                 state.last_render_submission = submission_stats;
                 state.render_submission_totals.merge(submission_stats);
                 state
@@ -9638,43 +9722,29 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 state.skipped_patch_visibility_frames.saturating_add(1);
             state.last_visibility_patch_instances = 0;
         }
-        let resolved_pbr_plan = if state.render_style == RenderStyle::Pbr {
-            prepared_render_frame.as_ref().and_then(|frame| {
-                let execution = match state.render_shadow.execution(frame) {
-                    Ok(execution) => execution,
-                    Err(error) => {
-                        state.render_shadow.record_execution_fallback(error);
-                        return None;
-                    }
-                };
-                match WebGlPbrCommandPlan::build(
-                    execution,
-                    state.render_batches.as_slice(),
-                ) {
-                    Ok(plan) => Some(plan),
-                    Err(error) => {
-                        warn!("Resolved WebGL PBR frame fell back: {error}");
-                        state.render_shadow.record_execution_fallback(error);
-                        None
-                    }
-                }
-            })
+        let use_resolved_pbr_plan = state.render_style == RenderStyle::Pbr
+            && prepared_render_revision.is_some()
+            && state.webgl_pbr_command_plan.is_some();
+        let has_transmission = if use_resolved_pbr_plan {
+            state
+                .webgl_pbr_command_plan
+                .as_ref()
+                .is_some_and(WebGlPbrCommandPlan::builds_transmission_pyramid)
         } else {
-            None
+            state.render_style == RenderStyle::Pbr
+                && state
+                    .render_batches
+                    .iter()
+                    .any(|batch| batch.pbr_class == PbrDrawClass::Transmission)
         };
-        let has_transmission = resolved_pbr_plan.as_ref().map_or_else(
-            || {
-                state.render_style == RenderStyle::Pbr
-                    && state
-                        .render_batches
-                        .iter()
-                        .any(|batch| batch.pbr_class == PbrDrawClass::Transmission)
-            },
-            WebGlPbrCommandPlan::builds_transmission_pyramid,
-        );
-        let focus_postprocess_requested = resolved_pbr_plan
-            .as_ref()
-            .map_or(state.fuzzy_enabled, WebGlPbrCommandPlan::runs_focus_postprocess);
+        let focus_postprocess_requested = if use_resolved_pbr_plan {
+            state
+                .webgl_pbr_command_plan
+                .as_ref()
+                .is_some_and(WebGlPbrCommandPlan::runs_focus_postprocess)
+        } else {
+            state.fuzzy_enabled
+        };
         if has_transmission && state.blur_program.is_none() {
             match resolve_auxiliary_program(state, AuxiliaryProgram::Blur) {
                 Ok(program) => state.blur_program = Some(program),
@@ -9683,6 +9753,12 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 }
             }
         }
+        let resolved_pbr_plan = use_resolved_pbr_plan.then(|| {
+            state
+                .webgl_pbr_command_plan
+                .as_ref()
+                .expect("resolved PBR plan availability was checked above")
+        });
         let render_batches = state.render_batches.as_slice();
         let gl = state.renderer.gl();
         state.renderer.begin_frame();
@@ -9834,7 +9910,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
 
                 // Pass 1: opaque non-transmission
                 for (batch_index, batch) in webgl_pbr_draws(
-                    resolved_pbr_plan.as_ref(),
+                    resolved_pbr_plan,
                     render_batches,
                     RenderPass::PbrOpaque,
                 ) {
@@ -10047,7 +10123,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 active_material = None;
                 active_vertex_state = None;
                 for (batch_index, batch) in webgl_pbr_draws(
-                    resolved_pbr_plan.as_ref(),
+                    resolved_pbr_plan,
                     render_batches,
                     RenderPass::PbrTransparent,
                 ) {
@@ -10274,10 +10350,10 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 state.pbr_vertex_uniform_updates += vertex_uniform_updates;
                 state.last_render_submission = submission_stats;
                 state.render_submission_totals.merge(submission_stats);
-                if resolved_pbr_plan.is_some() {
+                if use_resolved_pbr_plan {
                     state.render_shadow.record_execution_success();
                 }
-                observe_render_submission(state, prepared_render_frame.as_ref(), submission_stats);
+                observe_render_submission(state, prepared_render_revision, submission_stats);
                 state.renderer.end_frame();
                 state
                     .render_timing
@@ -10300,10 +10376,10 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
             }
         }
 
-        let resolved_submission = if let Some(frame) = prepared_render_frame.as_ref() {
-            match state.render_shadow.execution(frame) {
-                Ok(execution) => match state.renderer.render_diagnostic_execution(
-                    execution,
+        let resolved_submission = if prepared_render_revision.is_some() {
+            state.render_command_plan.as_ref().and_then(|plan| {
+                match state.renderer.render_diagnostic_execution(
+                    plan.execution(),
                     &camera,
                     render_batches,
                 ) {
@@ -10316,13 +10392,8 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         state.render_shadow.record_execution_fallback(error);
                         None
                     }
-                },
-                Err(error) => {
-                    warn!("Resolved WebGL diagnostic frame was invalid: {error}");
-                    state.render_shadow.record_execution_fallback(error);
-                    None
                 }
-            }
+            })
         } else {
             None
         };
@@ -10354,7 +10425,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 }
             }
         }
-        observe_render_submission(state, prepared_render_frame.as_ref(), submission_stats);
+        observe_render_submission(state, prepared_render_revision, submission_stats);
 
         // Highlight pass: overlay picked QB patch with cyan
         if state.highlight_face >= 0 && state.highlight_prog.is_some() {
