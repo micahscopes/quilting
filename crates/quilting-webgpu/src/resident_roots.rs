@@ -838,91 +838,74 @@ impl LodClassifierDevice {
                       depth_write_enabled,
                       raw_field_format: Option<wgpu::TextureFormat>|
          -> Result<wgpu::RenderPipeline, LodWebGpuError> {
-            let mut attribute_storage = Vec::new();
-            let (
-                vertex_entry_point,
-                fragment_entry_point,
-                vertex_buffers,
-                primitive,
-                pipeline_depth_stencil,
-                multisample,
-                targets,
-            ) = if let Some(descriptors) = descriptors {
+            if let Some(descriptors) = descriptors {
                 let descriptor = &descriptors[index];
                 let fragment = descriptor.program().fragment().ok_or_else(|| {
                     LodWebGpuError::Payload(
                         "functional resident-root pipeline is missing a fragment stage".to_string(),
                     )
                 })?;
-                for (expected_slot, buffer) in descriptor.vertex_buffers().iter().enumerate() {
-                    if buffer.slot() != expected_slot as u32 {
-                        return Err(LodWebGpuError::Payload(
-                            "functional resident-root vertex slots are not contiguous".to_string(),
-                        ));
-                    }
-                    attribute_storage.push(
-                        buffer
-                            .attributes()
-                            .iter()
-                            .map(|attribute| wgpu::VertexAttribute {
-                                format: crate::pipeline_lowering::vertex_format(attribute.format),
-                                offset: attribute.offset,
-                                shader_location: attribute.location,
-                            })
-                            .collect::<Vec<_>>(),
-                    );
-                }
-                let vertex_buffers = descriptor
-                    .vertex_buffers()
-                    .iter()
-                    .zip(attribute_storage.iter())
-                    .map(|(buffer, attributes)| wgpu::VertexBufferLayout {
-                        array_stride: buffer.stride(),
-                        step_mode: crate::pipeline_lowering::vertex_step_mode(buffer.step_mode()),
-                        attributes,
-                    })
-                    .collect::<Vec<_>>();
-                let targets = descriptor
-                    .color_targets()
-                    .iter()
-                    .copied()
-                    .map(crate::pipeline_lowering::color_target_state)
-                    .map(|target| target.map(Some))
-                    .collect::<Result<Vec<_>, _>>()?;
-                (
-                    descriptor.program().vertex().entry_point(),
-                    fragment.entry_point(),
-                    vertex_buffers,
-                    crate::pipeline_lowering::primitive_state(descriptor.primitive()),
-                    descriptor
+                let expected_topology = match geometry {
+                    RenderGeometry::Triangles => functional::PrimitiveTopology::TriangleList,
+                    RenderGeometry::Lines => functional::PrimitiveTopology::LineList,
+                };
+                let expected_front_face = match front_face {
+                    wgpu::FrontFace::Ccw => functional::FrontFace::CounterClockwise,
+                    wgpu::FrontFace::Cw => functional::FrontFace::Clockwise,
+                };
+                let expected_depth_write = depth_format.map(|_| depth_write_enabled);
+                if fragment.entry_point() != fragment_entry_point
+                    || descriptor.primitive().topology != expected_topology
+                    || descriptor.primitive().front_face != expected_front_face
+                    || descriptor
                         .depth_stencil()
-                        .map(crate::pipeline_lowering::depth_stencil_state),
-                    crate::pipeline_lowering::multisample_state(descriptor.multisample()),
-                    targets,
-                )
-            } else {
-                attribute_storage.push(attributes.to_vec());
-                let mut targets = vec![Some(wgpu::ColorTargetState {
-                    format: color_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })];
-                if let Some(format) = raw_field_format {
-                    targets.push(Some(wgpu::ColorTargetState {
-                        format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }));
+                        .map(|state| state.depth_write_enabled)
+                        != expected_depth_write
+                    || descriptor.color_targets().len()
+                        != 1 + usize::from(raw_field_format.is_some())
+                {
+                    return Err(LodWebGpuError::Payload(
+                        "functional resident-root pipeline order is inconsistent".to_string(),
+                    ));
                 }
-                (
-                    quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT,
-                    fragment_entry_point,
-                    vec![wgpu::VertexBufferLayout {
-                        array_stride: 12,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &attribute_storage[0],
-                    }],
-                    wgpu::PrimitiveState {
+                return crate::pipeline_lowering::render_pipeline(
+                    &self.device,
+                    label,
+                    pipeline_layout,
+                    &module,
+                    descriptor,
+                );
+            }
+            let mut targets = vec![Some(wgpu::ColorTargetState {
+                format: color_format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })];
+            if let Some(format) = raw_field_format {
+                targets.push(Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                }));
+            }
+            Ok(self
+                .device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some(
+                            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT,
+                        ),
+                        compilation_options: Default::default(),
+                        buffers: &[wgpu::VertexBufferLayout {
+                            array_stride: 12,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &attributes,
+                        }],
+                    },
+                    primitive: wgpu::PrimitiveState {
                         topology: match geometry {
                             RenderGeometry::Triangles => wgpu::PrimitiveTopology::TriangleList,
                             RenderGeometry::Lines => wgpu::PrimitiveTopology::LineList,
@@ -931,31 +914,14 @@ impl LodClassifierDevice {
                         cull_mode: None,
                         ..Default::default()
                     },
-                    depth_stencil.clone().map(|mut state| {
+                    depth_stencil: depth_stencil.clone().map(|mut state| {
                         state.depth_write_enabled = Some(depth_write_enabled);
                         state
                     }),
-                    wgpu::MultisampleState {
+                    multisample: wgpu::MultisampleState {
                         count: sample_count,
                         ..Default::default()
                     },
-                    targets,
-                )
-            };
-            Ok(self
-                .device
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(label),
-                    layout: Some(pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &module,
-                        entry_point: Some(vertex_entry_point),
-                        compilation_options: Default::default(),
-                        buffers: &vertex_buffers,
-                    },
-                    primitive,
-                    depth_stencil: pipeline_depth_stencil,
-                    multisample,
                     fragment: Some(wgpu::FragmentState {
                         module: &module,
                         entry_point: Some(fragment_entry_point),

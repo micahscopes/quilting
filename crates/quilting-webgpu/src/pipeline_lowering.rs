@@ -423,6 +423,45 @@ where
     }))
 }
 
+/// Perform the single WebGPU allocation corresponding to one validated
+/// functional descriptor. Memo ownership and family-level atomicity remain
+/// with the caller; this function only prevents fixed-state lowering from
+/// drifting between render paths.
+pub(crate) fn render_pipeline(
+    device: &wgpu::Device,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    module: &wgpu::ShaderModule,
+    descriptor: &functional::RenderPipelineDescriptor,
+) -> Result<wgpu::RenderPipeline, LodWebGpuError> {
+    with_render_pipeline_state(descriptor, |state| {
+        let fragment = state
+            .fragment_entry_point
+            .map(|entry_point| wgpu::FragmentState {
+                module,
+                entry_point: Some(entry_point),
+                compilation_options: Default::default(),
+                targets: &state.targets,
+            });
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module,
+                entry_point: Some(state.vertex_entry_point),
+                compilation_options: Default::default(),
+                buffers: &state.vertex_buffers,
+            },
+            primitive: state.primitive,
+            depth_stencil: state.depth_stencil,
+            multisample: state.multisample,
+            fragment,
+            multiview_mask: None,
+            cache: None,
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

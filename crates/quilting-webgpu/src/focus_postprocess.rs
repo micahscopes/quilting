@@ -507,44 +507,35 @@ impl LodClassifierDevice {
                                fragment_entry: &'static str,
                                format: wgpu::TextureFormat|
          -> Result<wgpu::RenderPipeline, LodWebGpuError> {
-            let (vertex_entry, fragment_entry, primitive, multisample, targets) =
-                if let Some(descriptors) = descriptors {
-                    let descriptor = &descriptors[index];
-                    let fragment = descriptor.program().fragment().ok_or_else(|| {
-                        LodWebGpuError::Payload(
-                            "functional focus pipeline is missing a fragment stage".to_string(),
-                        )
-                    })?;
-                    if !descriptor.vertex_buffers().is_empty()
-                        || descriptor.depth_stencil().is_some()
-                        || descriptor.color_targets().len() != 1
-                    {
-                        return Err(LodWebGpuError::Payload(
-                            "functional focus pipeline uses unsupported fixed state".to_string(),
-                        ));
-                    }
-                    (
-                        descriptor.program().vertex().entry_point(),
-                        fragment.entry_point(),
-                        crate::pipeline_lowering::primitive_state(descriptor.primitive()),
-                        crate::pipeline_lowering::multisample_state(descriptor.multisample()),
-                        vec![Some(crate::pipeline_lowering::color_target_state(
-                            descriptor.color_targets()[0],
-                        )?)],
+            if let Some(descriptors) = descriptors {
+                let descriptor = &descriptors[index];
+                let fragment = descriptor.program().fragment().ok_or_else(|| {
+                    LodWebGpuError::Payload(
+                        "functional focus pipeline is missing a fragment stage".to_string(),
                     )
-                } else {
-                    (
-                        quilting_shaders::FOCUS_POSTPROCESS_VERTEX_ENTRY_POINT,
-                        fragment_entry,
-                        wgpu::PrimitiveState::default(),
-                        wgpu::MultisampleState::default(),
-                        vec![Some(wgpu::ColorTargetState {
-                            format,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                    )
-                };
+                })?;
+                if fragment.entry_point() != fragment_entry
+                    || !descriptor.vertex_buffers().is_empty()
+                    || descriptor.depth_stencil().is_some()
+                    || descriptor.color_targets().len() != 1
+                {
+                    return Err(LodWebGpuError::Payload(
+                        "functional focus pipeline uses inconsistent fixed state".to_string(),
+                    ));
+                }
+                return crate::pipeline_lowering::render_pipeline(
+                    &self.device,
+                    label,
+                    &pipeline_layout,
+                    &module,
+                    descriptor,
+                );
+            }
+            let targets = [Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })];
             Ok(self
                 .device
                 .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -552,13 +543,13 @@ impl LodClassifierDevice {
                     layout: Some(&pipeline_layout),
                     vertex: wgpu::VertexState {
                         module: &module,
-                        entry_point: Some(vertex_entry),
+                        entry_point: Some(quilting_shaders::FOCUS_POSTPROCESS_VERTEX_ENTRY_POINT),
                         compilation_options: Default::default(),
                         buffers: &[],
                     },
-                    primitive,
+                    primitive: wgpu::PrimitiveState::default(),
                     depth_stencil: None,
-                    multisample,
+                    multisample: wgpu::MultisampleState::default(),
                     fragment: Some(wgpu::FragmentState {
                         module: &module,
                         entry_point: Some(fragment_entry),
