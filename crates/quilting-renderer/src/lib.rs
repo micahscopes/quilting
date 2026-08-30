@@ -534,7 +534,8 @@ mod tests {
     fn current_pose_culling_precedes_surface_evaluation() {
         let source = quilting_shaders::sources::VERTEX_MAIN;
         let main = source.find("fn vs_main").expect("main vertex entry point");
-        let cull = source[main..].find("if patch_outside_frustum(")
+        let cull = source[main..]
+            .find("if prepared_patch_outside_frustum(")
             .expect("vertex shader must cull from current posed control points");
         let evaluate = source[main + cull..].find("evaluate_patch_surface(")
             .expect("QB evaluation must follow current-pose culling");
@@ -544,8 +545,9 @@ mod tests {
             &[(4, 48), (5, 64), (6, 80)],
             "rational QB weights must be resident patch attributes",
         );
-        assert!(source.contains("origin_to_quaternion_triangle"));
-        assert!(source.contains("rational_patch_outside_frustum"));
+        let visibility = quilting_shaders::sources::PATCH_VISIBILITY;
+        assert!(visibility.contains("origin_to_quaternion_triangle"));
+        assert!(visibility.contains("rational_patch_outside_frustum"));
         assert!(quilting_shaders::sources::PATCH_RENDER.contains(
             "fn evaluate_mobius_qb_patch("
         ));

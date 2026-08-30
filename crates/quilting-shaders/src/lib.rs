@@ -56,6 +56,7 @@ pub mod sources {
     pub const QB_EVAL: &str = include_str!("../shaders/surface/qb_eval.wgsl");
     pub const PATCH_PREPARE: &str = include_str!("../shaders/surface/patch_prepare.wgsl");
     pub const PATCH_RENDER: &str = include_str!("../shaders/surface/patch_render.wgsl");
+    pub const PATCH_VISIBILITY: &str = include_str!("../shaders/surface/patch_visibility.wgsl");
     pub const PATCH_RENDER_VERTEX: &str = include_str!("../shaders/render/patch_vertex.wgsl");
     pub const PATCH_RENDER_PBR: &str = include_str!("../shaders/render/patch_pbr.wgsl");
     pub const PBR: &str = include_str!("../shaders/lighting/pbr.wgsl");
@@ -121,6 +122,10 @@ fn build_compiler_catalog_revision() -> Arc<str> {
         ("quilting::viz::density", sources::DENSITY),
         ("quilting::surface::patch_render", sources::PATCH_RENDER),
         (
+            "quilting::surface::patch_visibility",
+            sources::PATCH_VISIBILITY,
+        ),
+        (
             "quilting::render::patch_vertex",
             sources::PATCH_RENDER_VERTEX,
         ),
@@ -173,6 +178,10 @@ pub fn create_composer() -> Result<Composer, Box<dyn std::error::Error>> {
         ("quilting::lighting::matcap", sources::MATCAP),
         ("quilting::viz::density", sources::DENSITY),
         ("quilting::surface::patch_render", sources::PATCH_RENDER),
+        (
+            "quilting::surface::patch_visibility",
+            sources::PATCH_VISIBILITY,
+        ),
         (
             "quilting::render::patch_vertex",
             sources::PATCH_RENDER_VERTEX,
