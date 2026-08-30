@@ -1569,11 +1569,14 @@ function bindToggle(id, sig) {
   effect(() => el.classList.toggle('on', sig.get()));
 }
 // Bind a button group to a signal
-function bindBtnGroup(id, sig) {
+function bindBtnGroup(id, sig, onRequest = null) {
   const btns = document.querySelectorAll(`#${id} button`);
   btns.forEach(b => {
     b.classList.toggle('a', b.dataset.v === String(sig.peek()));
-    b.addEventListener('click', () => sig.set(b.dataset.v));
+    b.addEventListener('click', () => {
+      const handled = onRequest ? onRequest(b.dataset.v) : null;
+      if (handled == null) sig.set(b.dataset.v);
+    });
   });
   effect(() => {
     const v = String(sig.get());
@@ -4019,6 +4022,9 @@ const rustAppShadowDiagnostics = {
   inversionGestureRejects: 0,
   inversionGestureComparisons: 0,
   inversionGestureMismatches: 0,
+  manualInversionDispatches: 0,
+  manualInversionAccepts: 0,
+  manualInversionRejects: 0,
   aimDispatches: 0,
   aimAccepts: 0,
   aimRejects: 0,
@@ -8254,7 +8260,55 @@ const mob = {
   xform: signal('identity', 'xform'),
   mx: signal(5, 'mx'), my: signal(0, 'my'), mz: signal(0, 'mz'), mr: signal(20, 'mr'),
 };
-bindBtnGroup('xform-btns', mob.xform);
+function dispatchManualInversionControl(requested) {
+  if (RUST_SELECTION_IMPLEMENTATION !== 'rust' || !rustAppShadow) return null;
+  if (selectedObject && !rustAppShadowSelectionQueued) return null;
+  const enabled = requested === 'sphere_reflection';
+  rustAppShadowDiagnostics.manualInversionDispatches += 1;
+  try {
+    advanceRustApplicationClockToSelectionEvent(performance.now());
+    rustAppShadow.setInversionEnabled(enabled);
+    const navigation = rustAppShadow.tickNavigation(0);
+    if (navigation.focus?.inversion_enabled !== enabled) {
+      throw new Error('Rust rejected the requested inversion chart');
+    }
+    const projectionApplied = navigation.selected_focus
+      ? applyRustSelectedFocusNavigation(navigation)
+      : applyRustNavigationSnapshot(navigation);
+    if (!projectionApplied || !applyRustAppFocusToRenderer(
+      navigation,
+      navigation.selected_focus ? selectedObject : null,
+    )) {
+      throw new Error('Rust inversion state did not reach the resident renderer');
+    }
+    rustManualCameraActive = true;
+    rustAppShadowDiagnostics.manualInversionAccepts += 1;
+    return true;
+  } catch (error) {
+    rustAppShadowDiagnostics.manualInversionRejects += 1;
+    recordAppShadowMismatch(
+      'manual_inversion_control',
+      `${requested}: ${error?.message || String(error)}`,
+    );
+    try {
+      const committed = rustAppShadow.navigationSnapshot();
+      const retainsSelection = Boolean(committed?.selected_focus);
+      if (retainsSelection) applyRustSelectedFocusNavigation(committed);
+      else applyRustNavigationSnapshot(committed);
+      applyRustAppFocusToRenderer(
+        committed,
+        retainsSelection ? selectedObject : null,
+      );
+    } catch (rollbackError) {
+      recordAppShadowMismatch(
+        'manual_inversion_control_rollback',
+        rollbackError?.message || String(rollbackError),
+      );
+    }
+    return false;
+  }
+}
+bindBtnGroup('xform-btns', mob.xform, dispatchManualInversionControl);
 function dispatchManualFocusSphereControl(id, requested) {
   if (RUST_SELECTION_IMPLEMENTATION !== 'rust' || !rustAppShadow) return null;
   const controls = [mob.mx.peek(), mob.my.peek(), mob.mz.peek(), mob.mr.peek()];

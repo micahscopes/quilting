@@ -521,6 +521,8 @@ for (const navigationAuthorityStep of [
 for (const focusSphereAuthorityStep of [
   'function dispatchRustFocusSphereGeometry(sphere, preserveAnchor, source)',
   'function dispatchManualFocusSphereControl(id, requested)',
+  'function dispatchManualInversionControl(requested)',
+  'rustAppShadow.setInversionEnabled(enabled);',
   'rustAppShadow.editFocusSphere(',
   'const navigation = rustAppShadow.tickNavigation(0);',
   '? applyRustSelectedFocusNavigation(navigation)',
@@ -528,6 +530,7 @@ for (const focusSphereAuthorityStep of [
   "{ center: nextCenter, radius: nextRadius },\n          'spacemouse-inversion',",
   "}, 'focus-wheel');",
   "requested => dispatchManualFocusSphereControl('mr', requested)",
+  "bindBtnGroup('xform-btns', mob.xform, dispatchManualInversionControl);",
   'rustNavigationProjectionDepth > 0',
   'const retainsSelectedAnchor = Boolean(rustGesture.navigation?.selected_focus);',
 ]) {

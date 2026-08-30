@@ -24,6 +24,13 @@ The interaction semantics are unchanged:
 
 The `js` and unmapped-selection fallbacks remain available.
 
+The transform button group now uses the same precommit boundary. In the Rust
+lane, `None` and `Inversion` dispatch `SetInversionEnabled`; the historical
+`Rotation` and `Translate` labels canonicalize to `None` because the incumbent
+`computeMobius` implementation has always rendered both as identity. This
+removes an inert UI-state distinction without claiming unimplemented transform
+semantics. The JS rollback lane retains its historical spelling and behavior.
+
 ## Duplicate-transport removal
 
 Browser signals run effects synchronously. Before this cut, projecting a Rust
