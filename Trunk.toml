@@ -30,8 +30,8 @@ watch = [
 # Build WASM before trunk processes the HTML
 [[hooks]]
 stage = "pre_build"
-command = "wasm-pack"
-command_arguments = ["build", "--target", "web", "--out-dir", "../../pkg", "crates/quilting-wasm", "--features", "leptos-ui,webgpu-backend"]
+command = "bash"
+command_arguments = ["scripts/build-hyperscope-wasm.sh"]
 
 [[hooks]]
 stage = "pre_build"
