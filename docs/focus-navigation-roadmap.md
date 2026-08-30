@@ -7,7 +7,10 @@ This document remains the detailed behavior oracle for focus and navigation.
 Status: the browser prototype is functional, the render contract is GPU-side,
 and `hyperscape` now owns `FocusNavigation`, quaternion `CameraRig`, named
 navigation policies, sequence/timestamp-ordered `NavigationAction`s, and
-deterministic camera/focus transitions. `SurfaceWalkRuntime` is the single Rust
+deterministic camera/focus transitions. The backend-neutral interaction reducer
+now owns sequence/timestamp-ordered hover, press, release, and cancel semantics;
+selection remains the existing `FocusNavigation::anchor` rather than a second
+interaction-state copy. `SurfaceWalkRuntime` is the single Rust
 owner of surface topology, physical side, metric locomotion, animated contact
 response, view following, scale/height/near policy, recovery/detach, and the
 surface re-anchor glide. That glide matches the browser oracle's independent
@@ -105,13 +108,16 @@ device adapter -> semantic interaction actions -> FocusNavigation + CameraRig
               -> Hyperscope extraction -> WebGL2 or WebGPU backend
 ```
 
-`hyperscape::FocusNavigation` owns the sphere, optional stable-UUID entity anchor,
-transition, focus/inversion enablement, constrained/free translation, and
-radius policy. `NavigationController` and the ECS plugin consume semantic
-actions such as:
+`hyperscape::FocusNavigation` owns the sphere, optional asset-scoped stable-UUID
+entity anchor, transition, focus/inversion enablement, constrained/free
+translation, and radius policy. `InteractionController` consumes renderer-
+independent `SetHover`, `PressPrimary`, `ReleasePrimary`, and `CancelPrimary`
+actions. A successful release emits the existing `AnchorFocus` navigation
+action; it does not mutate a second selected field. `NavigationController` and
+the ECS plugin then consume semantic actions such as:
 
-- `Select { entity, source_bound }` and `DetachSelection`;
-- `TranslateFocus`, `ScaleFocus`, `SetFocalShell`, and `SetAngularAperture`;
+- `AnchorFocus` and `DetachFocus`;
+- `TranslateFocus`, `ScaleFocusLog`, and `SetFocusField`;
 - `SetFocusEnabled` and `ToggleInversion`;
 - `ReframeSelection`; and
 - camera-local translate/rotate actions independent of any device axes.
@@ -264,9 +270,18 @@ or sphere state.
    `rust`; `selectionimpl=js` remains the explicit rollback and unresolved
    assets still fall back locally. Free/manual focus edits remain a separate
    browser-owned migration lane rather than a second selected-focus transition.
-5. **Interaction layer.** Add ray/shape queries, hover/active/selected states,
-   focus-aware interaction range, and explicit visualization policies. The
-   selection tint remains presentation; selection identity belongs to ECS.
+5. **Interaction layer — Rust semantic core complete; query adapters active.**
+   `InteractionHit` carries one validated asset/entity identity, source bound,
+   source pivot, displayed-chart distance, and optional face/barycentric detail.
+   `InteractionState` retains only ephemeral hover/active state; its snapshot
+   derives selected identity from `FocusNavigation::anchor`. Focus-radius-aware
+   reach, virtual-time ordering, cadence invariance, cross-entity release
+   cancellation, and invalid-hit atomicity are covered natively. The ECS plugin
+   routes a successful activation into the established `AnchorFocus` action in
+   the same ordered interaction set. Renderer/browser ray and shape queries,
+   visualization policy, generated-WASM exposure, and live rollback-gated
+   adoption remain. Selection tint remains presentation; neither it nor a
+   backend-local face index becomes selection authority.
 6. **Persistence and replay — native oracle complete.** Replay version 0.17
    serializes asset-scoped stable entity references, selected source
    bounds/pivots, derived

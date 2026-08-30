@@ -622,6 +622,17 @@ release fixture now carries five persistent stable IDs, four joined to pickable
 mesh nodes, and a live Chrome MCP composition gate selects one with zero
 browser-transition, renderer-packet, or observer-sequence mismatch. The shared
 clock and CPU-retained packet remain measurable in every mode.
+The next semantic layer is now explicit in `hyperscape::interaction`.
+Renderer, browser, XR, or replay adapters resolve their own rays into one
+validated `InteractionHit`: asset-scoped entity identity, source bound and
+pivot, displayed-chart distance, and optional face/barycentric detail. The
+virtual-time reducer owns hover/press/release/cancel and focus-radius-aware
+reach. Its state is deliberately ephemeral and contains no selected field; a
+same-identity press/release emits the existing `AnchorFocus` navigation action,
+and snapshots derive selection from `FocusNavigation::anchor`. This keeps
+WebGL2/WebGPU picking, selection tint, and DOM event shape outside semantic
+authority. Browser query plumbing and live rollback-gated adoption remain
+separate work; the Rust core does not yet claim live picking authority.
 `selectionimpl=js|shadow|rust` is the rollback boundary: the Rust mode verifies
 the application identity against `AppStore`, joins only the backend-local packed
 node, and applies the selected focus packet directly to the resident renderer
