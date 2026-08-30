@@ -1,4 +1,4 @@
-#import quilting::render::patch_vertex::{PatchPbrMaterial, PatchRenderFrame, PatchVertexOutput, evaluate_prepared_patch_vertex, shade_patch_lod, shade_patch_matcap, shade_patch_normals, shade_patch_stretch, shade_patch_wire}
+#import quilting::render::patch_vertex::{PatchPbrMaterial, PatchRenderFrame, PatchVertexOutput, evaluate_prepared_patch_vertex, shade_patch_highlight, shade_patch_lod, shade_patch_matcap, shade_patch_normals, shade_patch_stretch, shade_patch_wire}
 #import quilting::render::patch_pbr_portable::shade_portable_patch_pbr
 #import quilting::surface::patch_prepare::PreparedPatchRecord
 #import quilting::compute::resident_bucket_types::{ResidentBucketRangeRecord, ResidentDrawDomainRecord}
@@ -73,6 +73,13 @@ fn render_resident_root_stretch(input: PatchVertexOutput) -> @location(0) vec4<f
 @fragment
 fn render_resident_root_wire(input: PatchVertexOutput) -> @location(0) vec4<f32> {
     return shade_patch_wire(input);
+}
+
+@fragment
+fn render_resident_root_highlight(input: PatchVertexOutput) -> @location(0) vec4<f32> {
+    let source_face = u32(max(round(input.instance_id), 0.0));
+    let domain_row = face_domain_rows[source_face];
+    return shade_patch_highlight(input, frames[domain_row].selection.x);
 }
 
 @fragment

@@ -849,7 +849,11 @@ teleporting.
 
 Unknown, tangent, pole-touching, and uncertified bulge cases remain visible.
 WebGL2 vertex rejection saves raster/fragment work but not vertex invocation;
-WebGPU later performs visible-instance compaction and indirect submission.
+the staged WebGPU backend already performs same-device visible-instance
+compaction and indexed-indirect submission for both prepared adaptive patches
+and source-indexed resident roots. Promoting that path to the browser default
+still requires live image/cadence parity; it does not require a new CPU
+visibility loop.
 
 The browser's first observer is opt-in with `roundshadow=1`. It builds a
 stable-topology `StaticPatchIndex`, compares its candidates with coherent
@@ -905,9 +909,16 @@ admits the hint only after exact worker parity; Rust authority admits it only
 after pose-continuity acceptance. The pure-JavaScript implementation remains a
 rollback oracle with its historical stable ranking.
 
-WebGPU will replace transform feedback with compute preparation, reconcile LOD
-in storage, compact visible instances, and emit indirect draw arguments. CPU
-readback becomes optional telemetry rather than a frame dependency.
+The staged WebGPU backend replaces transform feedback with compute preparation,
+reconciles LOD in storage, compacts visible instances, and emits indexed
+indirect draw arguments. Both the adaptive replacement layer and the
+source-indexed resident-root layer consume those retained device buffers. CPU
+readback is optional conformance/telemetry rather than a frame dependency.
+Selection highlighting is also a retained post-style indirect pass: the stable
+source-face ID survives preparation and dyadic restriction, and the fragment
+shader discards nonselected patches without a pick-texture allocation or
+readback. Browser-default promotion remains gated on live WebGL2/WebGPU image
+and interaction parity.
 
 ## Tuesday cut
 

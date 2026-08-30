@@ -26,24 +26,22 @@ pub const RESIDENT_BUCKET_HISTOGRAM_DEVICE_ENTRY_POINT: &str =
 pub const RESIDENT_BUCKET_PREFIX_DEVICE_ENTRY_POINT: &str = "prefix_resident_geometry_chunks";
 pub const RESIDENT_BUCKET_SCAN_DEVICE_ENTRY_POINT: &str = "scan_resident_geometry_buckets";
 pub const RESIDENT_BUCKET_SCATTER_DEVICE_ENTRY_POINT: &str = "scatter_resident_geometry_faces";
-pub const RESIDENT_ROOT_VISIBILITY_DEVICE_ENTRY_POINT: &str =
-    "classify_resident_root_visibility";
-pub const RESIDENT_ROOT_VERTEX_CLEAR_DEVICE_ENTRY_POINT: &str =
-    "clear_resident_root_vertex_lods";
+pub const RESIDENT_ROOT_VISIBILITY_DEVICE_ENTRY_POINT: &str = "classify_resident_root_visibility";
+pub const RESIDENT_ROOT_VERTEX_CLEAR_DEVICE_ENTRY_POINT: &str = "clear_resident_root_vertex_lods";
 pub const RESIDENT_ROOT_VERTEX_ACCUMULATE_DEVICE_ENTRY_POINT: &str =
     "accumulate_resident_root_vertex_lods";
 pub const RESIDENT_ROOT_TOPOLOGY_DEVICE_ENTRY_POINT: &str = "emit_resident_root_topology";
 pub const VISIBILITY_SCAN_DEVICE_ENTRY_POINT: &str = "scan_visible_batches";
 pub const VISIBILITY_SCATTER_DEVICE_ENTRY_POINT: &str = "scatter_visible_instances";
 pub const PATCH_PREPARE_DEVICE_ENTRY_POINT: &str = "prepare_patch_instances";
-pub const PREPARED_VISIBILITY_DEVICE_ENTRY_POINT: &str =
-    "classify_prepared_patch_visibility";
+pub const PREPARED_VISIBILITY_DEVICE_ENTRY_POINT: &str = "classify_prepared_patch_visibility";
 pub const PATCH_RENDER_DEVICE_VERTEX_ENTRY_POINT: &str = "render_patch_vertex";
 pub const PATCH_RENDER_DEVICE_NORMALS_ENTRY_POINT: &str = "render_patch_normals";
 pub const PATCH_RENDER_DEVICE_LOD_ENTRY_POINT: &str = "render_patch_lod";
 pub const PATCH_RENDER_DEVICE_STRETCH_ENTRY_POINT: &str = "render_patch_stretch";
 pub const PATCH_RENDER_DEVICE_MATCAP_ENTRY_POINT: &str = "render_patch_matcap";
 pub const PATCH_RENDER_DEVICE_WIRE_ENTRY_POINT: &str = "render_patch_wire";
+pub const PATCH_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT: &str = "render_patch_highlight";
 pub const PATCH_RENDER_DEVICE_PBR_ENTRY_POINT: &str = "render_patch_pbr";
 pub const RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT: &str = "render_resident_root_vertex";
 pub const RESIDENT_ROOT_RENDER_DEVICE_NORMALS_ENTRY_POINT: &str = "render_resident_root_normals";
@@ -51,6 +49,8 @@ pub const RESIDENT_ROOT_RENDER_DEVICE_LOD_ENTRY_POINT: &str = "render_resident_r
 pub const RESIDENT_ROOT_RENDER_DEVICE_MATCAP_ENTRY_POINT: &str = "render_resident_root_matcap";
 pub const RESIDENT_ROOT_RENDER_DEVICE_STRETCH_ENTRY_POINT: &str = "render_resident_root_stretch";
 pub const RESIDENT_ROOT_RENDER_DEVICE_WIRE_ENTRY_POINT: &str = "render_resident_root_wire";
+pub const RESIDENT_ROOT_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT: &str =
+    "render_resident_root_highlight";
 pub const RESIDENT_ROOT_RENDER_DEVICE_PBR_ENTRY_POINT: &str = "render_resident_root_pbr";
 
 /// All WGSL shader module sources, embedded at compile time.
@@ -523,8 +523,7 @@ pub fn compile_visibility_expand_module() -> Result<naga::Module, Box<dyn std::e
 }
 
 /// Compile resident classifier visibility expansion into current patch order.
-pub fn compile_lod_visibility_expand_module(
-) -> Result<naga::Module, Box<dyn std::error::Error>> {
+pub fn compile_lod_visibility_expand_module() -> Result<naga::Module, Box<dyn std::error::Error>> {
     compile_validated_compute_module(sources::LOD_VISIBILITY_EXPAND)
 }
 
@@ -532,18 +531,16 @@ pub fn compile_resident_buckets_module() -> Result<naga::Module, Box<dyn std::er
     compile_validated_compute_module(sources::RESIDENT_BUCKETS)
 }
 
-pub fn compile_resident_root_visibility_module(
-) -> Result<naga::Module, Box<dyn std::error::Error>> {
+pub fn compile_resident_root_visibility_module() -> Result<naga::Module, Box<dyn std::error::Error>>
+{
     compile_validated_compute_module(sources::RESIDENT_ROOT_VISIBILITY)
 }
 
-pub fn compile_resident_root_visibility_wgsl(
-) -> Result<String, Box<dyn std::error::Error>> {
+pub fn compile_resident_root_visibility_wgsl() -> Result<String, Box<dyn std::error::Error>> {
     emit_wgsl(&compile_resident_root_visibility_module()?)
 }
 
-pub fn compile_prepared_visibility_module(
-) -> Result<naga::Module, Box<dyn std::error::Error>> {
+pub fn compile_prepared_visibility_module() -> Result<naga::Module, Box<dyn std::error::Error>> {
     compile_validated_compute_module(sources::PREPARED_VISIBILITY)
 }
 
@@ -551,8 +548,7 @@ pub fn compile_prepared_visibility_wgsl() -> Result<String, Box<dyn std::error::
     emit_wgsl(&compile_prepared_visibility_module()?)
 }
 
-pub fn compile_resident_root_topology_module(
-) -> Result<naga::Module, Box<dyn std::error::Error>> {
+pub fn compile_resident_root_topology_module() -> Result<naga::Module, Box<dyn std::error::Error>> {
     compile_validated_compute_module(sources::RESIDENT_ROOT_TOPOLOGY)
 }
 
@@ -920,6 +916,7 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             PATCH_RENDER_DEVICE_STRETCH_ENTRY_POINT,
             PATCH_RENDER_DEVICE_MATCAP_ENTRY_POINT,
             PATCH_RENDER_DEVICE_WIRE_ENTRY_POINT,
+            PATCH_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT,
             PATCH_RENDER_DEVICE_PBR_ENTRY_POINT,
         ] {
             let fragment = module
@@ -939,9 +936,11 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             "the unsampled transmission texture pair is absent from shader reflection",
         );
         let mut layouter = naga::proc::Layouter::default();
-        layouter.update(module.to_ctx()).expect("patch render layouts");
+        layouter
+            .update(module.to_ctx())
+            .expect("patch render layouts");
         for (name, expected_size) in [
-            ("PatchRenderFrame", 224),
+            ("PatchRenderFrame", 240),
             ("PatchPbrMaterial", 160),
             ("PbrEnvironmentUniform", 16),
             ("DrawBatchIndex", 16),
@@ -968,7 +967,7 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             .iter()
             .map(|entry| (entry.name.as_str(), entry.stage))
             .collect::<Vec<_>>();
-        assert_eq!(entries.len(), 7);
+        assert_eq!(entries.len(), 8);
         assert!(entries.contains(&(
             PATCH_RENDER_DEVICE_VERTEX_ENTRY_POINT,
             naga::ShaderStage::Vertex,
@@ -991,6 +990,10 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
         )));
         assert!(entries.contains(&(
             PATCH_RENDER_DEVICE_WIRE_ENTRY_POINT,
+            naga::ShaderStage::Fragment,
+        )));
+        assert!(entries.contains(&(
+            PATCH_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT,
             naga::ShaderStage::Fragment,
         )));
         assert!(entries.contains(&(
@@ -1045,6 +1048,10 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
                     naga::ShaderStage::Fragment,
                 ),
                 (
+                    RESIDENT_ROOT_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT,
+                    naga::ShaderStage::Fragment,
+                ),
+                (
                     RESIDENT_ROOT_RENDER_DEVICE_PBR_ENTRY_POINT,
                     naga::ShaderStage::Fragment,
                 ),
@@ -1055,7 +1062,7 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             .update(module.to_ctx())
             .expect("resident root render layouts");
         for (name, expected_size) in [
-            ("PatchRenderFrame", 224),
+            ("PatchRenderFrame", 240),
             ("DrawRootBucketIndex", 16),
             ("ResidentBucketRangeRecord", 20),
             ("ResidentDrawDomainRecord", 16),

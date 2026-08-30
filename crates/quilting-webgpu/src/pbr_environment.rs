@@ -76,7 +76,7 @@ impl LodClassifierDevice {
         pipeline: &PatchRenderPipeline,
         environment: Option<&PbrEnvironmentMap>,
     ) -> Result<PbrEnvironmentBindings, LodWebGpuError> {
-        if pipeline.style != RenderStyle::Pbr {
+        if pipeline.style() != Some(RenderStyle::Pbr) {
             return Err(LodWebGpuError::Payload(
                 "PBR environment bindings require the PBR render pipeline".to_string(),
             ));

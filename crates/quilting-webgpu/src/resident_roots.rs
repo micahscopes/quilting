@@ -130,6 +130,7 @@ pub struct ResidentRootRenderPipeline {
     lod: ResidentRootWindingPipelines,
     stretch: ResidentRootWindingPipelines,
     wire: ResidentRootWindingPipelines,
+    highlight: ResidentRootWindingPipelines,
 }
 
 struct ResidentRootWindingPipelines {
@@ -467,7 +468,12 @@ impl LodClassifierDevice {
                       fragment_entry_point,
                       geometry,
                       front_face,
-                      pipeline_layout: &wgpu::PipelineLayout| {
+                      pipeline_layout: &wgpu::PipelineLayout,
+                      depth_write_enabled| {
+            let pipeline_depth_stencil = depth_stencil.clone().map(|mut state| {
+                state.depth_write_enabled = Some(depth_write_enabled);
+                state
+            });
             self.device
                 .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(label),
@@ -493,7 +499,7 @@ impl LodClassifierDevice {
                         cull_mode: None,
                         ..Default::default()
                     },
-                    depth_stencil: depth_stencil.clone(),
+                    depth_stencil: pipeline_depth_stencil,
                     multisample: wgpu::MultisampleState {
                         count: sample_count,
                         ..Default::default()
@@ -520,6 +526,7 @@ impl LodClassifierDevice {
                     geometry,
                     wgpu::FrontFace::Ccw,
                     pipeline_layout,
+                    true,
                 ),
                 clockwise: create(
                     label,
@@ -527,6 +534,7 @@ impl LodClassifierDevice {
                     geometry,
                     wgpu::FrontFace::Cw,
                     pipeline_layout,
+                    true,
                 ),
             };
         Ok(ResidentRootRenderPipeline {
@@ -567,6 +575,24 @@ impl LodClassifierDevice {
                 RenderGeometry::Lines,
                 &diagnostic_pipeline_layout,
             ),
+            highlight: ResidentRootWindingPipelines {
+                counter_clockwise: create(
+                    "quilting resident root highlight",
+                    quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT,
+                    RenderGeometry::Triangles,
+                    wgpu::FrontFace::Ccw,
+                    &diagnostic_pipeline_layout,
+                    false,
+                ),
+                clockwise: create(
+                    "quilting resident root highlight",
+                    quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT,
+                    RenderGeometry::Triangles,
+                    wgpu::FrontFace::Cw,
+                    &diagnostic_pipeline_layout,
+                    false,
+                ),
+            },
             pbr_portable_atlas_bind_group_layout,
             pbr_environment_bind_group_layout,
         })
@@ -934,6 +960,30 @@ impl LodClassifierDevice {
                 );
                 pass.draw_indexed_indirect(
                     indirect_arguments,
+                    u64::from(bucket) * INDEXED_INDIRECT_RECORD_BYTES,
+                );
+                indirect_draw_calls = indirect_draw_calls.saturating_add(1);
+            }
+        }
+        if frame.options.highlight_face.is_some() {
+            pass.set_index_buffer(
+                atlas.triangle_index_buffer.slice(..),
+                wgpu::IndexFormat::Uint32,
+            );
+            for bucket in 0..geometry.bucket_count {
+                let render_pipeline = if bucket % 2 == 0 {
+                    &pipeline.highlight.counter_clockwise
+                } else {
+                    &pipeline.highlight.clockwise
+                };
+                pass.set_pipeline(render_pipeline);
+                pass.set_bind_group(
+                    0,
+                    &bindings.bind_group,
+                    &[bucket * bindings.bucket_index_uniform_stride],
+                );
+                pass.draw_indexed_indirect(
+                    &geometry.triangle_indirect_arguments,
                     u64::from(bucket) * INDEXED_INDIRECT_RECORD_BYTES,
                 );
                 indirect_draw_calls = indirect_draw_calls.saturating_add(1);

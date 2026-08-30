@@ -158,7 +158,7 @@ impl LodClassifierDevice {
         textures: Option<&PbrTextureTable>,
         environment: Option<&PbrEnvironmentMap>,
     ) -> Result<Option<AdaptiveOverlayScene>, LodWebGpuError> {
-        if pipeline.style != RenderStyle::Pbr {
+        if pipeline.style() != Some(RenderStyle::Pbr) {
             return Err(LodWebGpuError::Payload(
                 "adaptive PBR resources require the PBR render pipeline".to_string(),
             ));
@@ -254,7 +254,7 @@ impl LodClassifierDevice {
             bindings,
             _patch_frame_rows: patch_frame_rows,
             prepared_visibility_bind_group,
-            pbr_scene_supported: pipeline.style == RenderStyle::Pbr
+            pbr_scene_supported: pipeline.style() == Some(RenderStyle::Pbr)
                 && supports_basic_pbr_frame(scene, RenderFrameOptions::default()),
         }))
     }
@@ -540,6 +540,38 @@ impl LodClassifierDevice {
                     draw,
                     batch_index as u32,
                     material_slot,
+                    winding,
+                )?;
+                indirect_draw_calls = indirect_draw_calls.saturating_add(1);
+            }
+        }
+        if frame.options.highlight_face.is_some() {
+            for (batch_index, batch) in overlay.batches.iter().enumerate() {
+                let draw = atlas
+                    .draw(batch.id.key.lod, RenderGeometry::Triangles)
+                    .ok_or_else(|| {
+                        LodWebGpuError::Payload(format!(
+                            "packed WebGPU atlas is missing adaptive highlight batch {batch_index} key {:?}",
+                            batch.id.key.lod,
+                        ))
+                    })?;
+                let permutation_sign = if batch.id.key.parity_bucket == 0 {
+                    1
+                } else {
+                    -1
+                };
+                let winding = if batch.transform.orientation_sign * permutation_sign < 0 {
+                    PatchWinding::Clockwise
+                } else {
+                    PatchWinding::CounterClockwise
+                };
+                pipelines.highlight.draw_batch(
+                    &mut pass,
+                    &overlay.bindings,
+                    &overlay.visibility,
+                    draw,
+                    batch_index as u32,
+                    0,
                     winding,
                 )?;
                 indirect_draw_calls = indirect_draw_calls.saturating_add(1);

@@ -1022,6 +1022,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 .covered_pixels
                 > 0
         );
+        let mut unhighlighted_root_wire = None;
         for style in [
             RenderStyle::Matcap,
             RenderStyle::Wire,
@@ -1078,14 +1079,47 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             if let Some(error) = style_error_scope.pop().await {
                 panic!("resident root {style:?} validation: {error}");
             }
-            assert!(
-                offscreen_signature(&classifier, &target)
-                    .await
-                    .covered_pixels
-                    > 0,
-                "{style:?}",
-            );
+            let signature = offscreen_signature(&classifier, &target).await;
+            assert!(signature.covered_pixels > 0, "{style:?}");
+            if style == RenderStyle::Wire {
+                unhighlighted_root_wire = Some(signature);
+            }
         }
+        let highlighted_root_wire = RenderFrame::build(
+            lod_frame.revision + 20,
+            render_frame.pose,
+            RenderStyle::Wire,
+            render_frame.view,
+            RenderFrameOptions {
+                highlight_face: Some(0),
+                ..render_frame.options
+            },
+            &render_scene,
+        )
+        .unwrap();
+        let highlighted_root_encoding = classifier
+            .render_offscreen_resident_roots(
+                &highlighted_root_wire,
+                &render_scene,
+                &root_model,
+                &resident,
+                &root_preparation,
+                &root_geometry,
+                &root_pipeline,
+                &root_bindings,
+                &packed_atlas,
+                &target,
+                LodPose::default(),
+                0,
+                true,
+            )
+            .unwrap();
+        assert_eq!(highlighted_root_encoding.indirect_draw_calls, 4);
+        let highlighted_root_signature = offscreen_signature(&classifier, &target).await;
+        assert_ne!(
+            highlighted_root_signature.rgba8_hash,
+            unhighlighted_root_wire.unwrap().rgba8_hash,
+        );
         let error_scope = classifier
             .device()
             .push_error_scope(wgpu::ErrorFilter::Validation);
@@ -1343,10 +1377,12 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             .unwrap()
             .is_resident());
         assert!(!diagnostic_scene.supports_resident_basic_pbr_frame(RenderFrameOptions::default()));
-        assert!(!diagnostic_scene.supports_resident_patch_presentation_frame(
-            RenderStyle::Pbr,
-            RenderFrameOptions::default(),
-        ));
+        assert!(
+            !diagnostic_scene.supports_resident_patch_presentation_frame(
+                RenderStyle::Pbr,
+                RenderFrameOptions::default(),
+            )
+        );
         assert!(diagnostic_scene.supports_resident_patch_presentation_frame(
             RenderStyle::Wire,
             RenderFrameOptions::default(),
@@ -1370,6 +1406,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         .enumerate()
         {
             let options = RenderFrameOptions {
+                highlight_face: (style == RenderStyle::Wire).then_some(0),
                 matcap_style: MatcapStyle::GoldenSoft,
                 ..render_frame.options
             };
@@ -1395,7 +1432,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                     true,
                 )
                 .unwrap();
-            let expected_draws = if style == RenderStyle::MatcapWire {
+            let expected_draws = if style == RenderStyle::MatcapWire || style == RenderStyle::Wire {
                 4
             } else {
                 2

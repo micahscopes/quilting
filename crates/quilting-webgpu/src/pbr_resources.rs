@@ -237,7 +237,7 @@ impl LodClassifierDevice {
         materials: &[PbrMaterial],
         textures: Option<&PbrTextureTable>,
     ) -> Result<PbrMaterialTextureBindings, LodWebGpuError> {
-        if pipeline.style != quilting_core::render::RenderStyle::Pbr {
+        if pipeline.style() != Some(quilting_core::render::RenderStyle::Pbr) {
             return Err(LodWebGpuError::Payload(
                 "PBR texture bindings require the PBR render pipeline".to_string(),
             ));

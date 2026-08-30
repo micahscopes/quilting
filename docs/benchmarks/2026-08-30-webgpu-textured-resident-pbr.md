@@ -70,3 +70,25 @@ draw domain. Radeon conformance proves packed byte equality before and after an
 in-place update, including sparse texture-table slots, and proves the
 multi-material raster result. Exact WASM compilation and live Chrome promotion
 remain separate gates.
+
+## Selected-face overlay
+
+An ordinary selected face no longer invalidates an otherwise supported WebGPU
+frame. The shared `PatchRenderFrame` carries the source-face selection as a
+separate ABI field from material and node identity. Prepared adaptive patches
+and source-indexed resident roots then issue one post-style triangle pass over
+their existing indexed-indirect ranges. The stable source face survives QB
+preparation and dyadic restriction; the highlight fragment entry point rejects
+every other face and emits the incumbent cyan half-alpha overlay. Depth testing
+remains `LessEqual`, while the overlay does not write depth.
+
+This cut adds neither a face-ID attachment nor CPU map/readback. It does add an
+extra indirect draw per resident geometry bucket or adaptive batch while a face
+is selected; those attempts are intentionally reported in backend draw-call
+diagnostics but remain outside the backend-neutral logical scene submission.
+The hardware conformance test proves both prepared and resident command paths,
+requires the highlighted resident image hash to differ from the unhighlighted
+wire image, and passed on the Radeon 780M RADV Vulkan adapter. The shader ABI
+tests, strict focused Clippy gate, and exact `wasm32-unknown-unknown`
+`leptos-ui,webgpu-backend` build also pass. Live Chrome visual parity remains a
+separate promotion gate.

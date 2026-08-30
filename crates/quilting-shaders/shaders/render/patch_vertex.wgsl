@@ -8,8 +8,11 @@
 struct PatchRenderFrame {
     mvp: mat4x4<f32>,
     mv: mat4x4<f32>,
-    // x = use rational QB; y = procedural matcap style; z/w reserved.
+    // x = use rational QB; y = procedural matcap style; z = material slot;
+    // w = selected semantic node.
     modes: vec4<i32>,
+    // x = selected source face or u32::MAX; yzw reserved.
+    selection: vec4<u32>,
     mob_a: vec4<f32>,
     mob_b: vec4<f32>,
     mob_c: vec4<f32>,
@@ -161,6 +164,19 @@ fn shade_patch_wire(input: PatchVertexOutput) -> vec4<f32> {
         discard;
     }
     return vec4<f32>(patch_lod_heatmap(input.density), input.fade);
+}
+
+// Match the incumbent fullscreen pick overlay without allocating a face-ID
+// attachment or reading anything back. The source face survives rational QB
+// preparation and dyadic restriction in `instance_id`, so one indirect
+// triangle overlay can discard every unselected patch in the fragment stage.
+fn shade_patch_highlight(input: PatchVertexOutput, selected_face: u32) -> vec4<f32> {
+    if input.fade < 0.001
+        || selected_face == 0xffffffffu
+        || u32(max(round(input.instance_id), 0.0)) != selected_face {
+        discard;
+    }
+    return vec4<f32>(0.0, 1.0, 1.0, 0.5 * input.fade);
 }
 
 fn shade_patch_stretch(input: PatchVertexOutput) -> vec4<f32> {

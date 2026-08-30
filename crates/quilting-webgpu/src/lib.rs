@@ -97,8 +97,8 @@ const PREPARED_PATCH_RECORD_WORDS: usize = 52;
 const PREPARED_PATCH_RECORD_BYTES: u64 = 208;
 const PATCH_SUBJECT_RECORD_BYTES: u64 = 128;
 const PATCH_SUBJECT_RECORD_WORDS: usize = 32;
-const PATCH_RENDER_FRAME_WORDS: usize = 56;
-const PATCH_RENDER_FRAME_BYTES: u64 = 224;
+const PATCH_RENDER_FRAME_WORDS: usize = 60;
+const PATCH_RENDER_FRAME_BYTES: u64 = 240;
 const PATCH_PBR_MATERIAL_WORDS: usize = 40;
 const PATCH_PBR_MATERIAL_BYTES: u64 = 160;
 
@@ -323,6 +323,7 @@ pub struct PatchRenderFrame {
     pub matcap_style: quilting_core::render::MatcapStyle,
     pub material_slot: u32,
     pub selected_node: Option<u32>,
+    pub selected_face: Option<u32>,
     pub mobius: [f32; 16],
     pub camera_position: [f32; 3],
 }
@@ -365,6 +366,7 @@ impl PatchRenderFrame {
                 .view
                 .selected_node
                 .and_then(|node| node.try_into().ok()),
+            selected_face: frame.options.highlight_face,
             mobius: transform.mobius,
             camera_position: frame.view.camera_position,
         }
@@ -394,10 +396,11 @@ impl PatchRenderFrame {
         words[33] = self.matcap_style.as_u32();
         words[34] = self.material_slot;
         words[35] = self.selected_node.unwrap_or(u32::MAX);
-        for (word, value) in words[36..52].iter_mut().zip(self.mobius) {
+        words[36] = self.selected_face.unwrap_or(u32::MAX);
+        for (word, value) in words[40..56].iter_mut().zip(self.mobius) {
             *word = value.to_bits();
         }
-        for (word, value) in words[52..55].iter_mut().zip(self.camera_position) {
+        for (word, value) in words[56..59].iter_mut().zip(self.camera_position) {
             *word = value.to_bits();
         }
         Ok(words)
@@ -504,6 +507,30 @@ fn patch_pbr_material_slot(
 mod patch_pbr_material_tests {
     use super::*;
     use quilting_core::material::{PbrAlphaMode, PbrTextureReferences};
+
+    #[test]
+    fn patch_frame_keeps_source_face_selection_separate_from_node_and_material() {
+        let mut mobius = identity_mobius();
+        mobius[5] = 0.625;
+        let frame = PatchRenderFrame {
+            mvp: identity_matrix(),
+            mv: translation_matrix(1.0, 2.0, 3.0),
+            use_qb: true,
+            matcap_style: quilting_core::render::MatcapStyle::GoldenSoft,
+            material_slot: 17,
+            selected_node: Some(23),
+            selected_face: Some(29),
+            mobius,
+            camera_position: [4.0, 5.0, 6.0],
+        };
+        let words = frame.to_words().unwrap();
+        assert_eq!(words.len(), PATCH_RENDER_FRAME_WORDS);
+        assert_eq!(words[32..37], [1, 2, 17, 23, 29]);
+        assert_eq!(words[37..40], [0; 3]);
+        assert_eq!(words[40..56], mobius.map(f32::to_bits));
+        assert_eq!(words[56..59], [4.0, 5.0, 6.0].map(f32::to_bits));
+        assert_eq!(words[59], 0);
+    }
 
     #[test]
     fn authored_material_words_match_the_shader_record() {
@@ -842,13 +869,32 @@ pub struct PatchPreparationScene {
 /// Winding is pipeline state in WebGPU, so both variants share one explicit
 /// bind-group layout instead of recompiling or mutating state per batch.
 pub struct PatchRenderPipeline {
-    style: RenderStyle,
+    kind: PatchPipelineKind,
     geometry: RenderGeometry,
     bind_group_layout: wgpu::BindGroupLayout,
     pbr_texture_bind_group_layout: Option<wgpu::BindGroupLayout>,
     pbr_environment_bind_group_layout: Option<wgpu::BindGroupLayout>,
     counter_clockwise: wgpu::RenderPipeline,
     clockwise: wgpu::RenderPipeline,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PatchPipelineKind {
+    Style(RenderStyle),
+    Highlight,
+}
+
+impl PatchRenderPipeline {
+    fn style(&self) -> Option<RenderStyle> {
+        match self.kind {
+            PatchPipelineKind::Style(style) => Some(style),
+            PatchPipelineKind::Highlight => None,
+        }
+    }
+
+    fn uses_pbr_bindings(&self) -> bool {
+        self.style() == Some(RenderStyle::Pbr)
+    }
 }
 
 /// Retained diagnostic pipelines sharing one shader module and bind-group
@@ -861,6 +907,7 @@ pub struct DiagnosticPatchRenderPipelines {
     lod: PatchRenderPipeline,
     stretch: PatchRenderPipeline,
     wire: PatchRenderPipeline,
+    highlight: PatchRenderPipeline,
 }
 
 /// Whether the retained WebGPU patch renderer can present this style without
@@ -3243,7 +3290,9 @@ impl LodClassifierDevice {
             color_format,
             depth_format,
             sample_count,
+            false,
         )?
+        .0
         .pop()
         .ok_or_else(|| LodWebGpuError::Payload("diagnostic pipeline set was empty".to_string()))
     }
@@ -3257,7 +3306,7 @@ impl LodClassifierDevice {
         depth_format: Option<wgpu::TextureFormat>,
         sample_count: u32,
     ) -> Result<DiagnosticPatchRenderPipelines, LodWebGpuError> {
-        let mut pipelines = self.create_diagnostic_patch_render_pipelines_for(
+        let (mut pipelines, highlight) = self.create_diagnostic_patch_render_pipelines_for(
             &[
                 RenderStyle::Pbr,
                 RenderStyle::Normals,
@@ -3269,7 +3318,9 @@ impl LodClassifierDevice {
             color_format,
             depth_format,
             sample_count,
+            true,
         )?;
+        let highlight = highlight.expect("requested highlight pipeline");
         let wire = pipelines.pop().expect("requested wire pipeline");
         let stretch = pipelines.pop().expect("requested stretch pipeline");
         let lod = pipelines.pop().expect("requested LOD pipeline");
@@ -3283,6 +3334,7 @@ impl LodClassifierDevice {
             lod,
             stretch,
             wire,
+            highlight,
         })
     }
 
@@ -3292,7 +3344,8 @@ impl LodClassifierDevice {
         color_format: wgpu::TextureFormat,
         depth_format: Option<wgpu::TextureFormat>,
         sample_count: u32,
-    ) -> Result<Vec<PatchRenderPipeline>, LodWebGpuError> {
+        include_highlight: bool,
+    ) -> Result<(Vec<PatchRenderPipeline>, Option<PatchRenderPipeline>), LodWebGpuError> {
         if sample_count == 0 {
             return Err(LodWebGpuError::Payload(
                 "patch render sample count must be nonzero".to_string(),
@@ -3300,7 +3353,7 @@ impl LodClassifierDevice {
         }
         let source = quilting_shaders::compile_patch_render_device_wgsl()
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
-        let fragment_entry_points = styles
+        let mut fragment_entry_points = styles
             .iter()
             .copied()
             .map(|style| {
@@ -3341,9 +3394,16 @@ impl LodClassifierDevice {
                         )));
                     }
                 };
-                Ok((style, geometry, entry_point))
+                Ok((PatchPipelineKind::Style(style), geometry, entry_point))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        if include_highlight {
+            fragment_entry_points.push((
+                PatchPipelineKind::Highlight,
+                RenderGeometry::Triangles,
+                quilting_shaders::PATCH_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT,
+            ));
+        }
         let module = self
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -3401,11 +3461,11 @@ impl LodClassifierDevice {
                 });
         let pbr_texture_bind_group_layout = fragment_entry_points
             .iter()
-            .any(|(style, _, _)| *style == RenderStyle::Pbr)
+            .any(|(kind, _, _)| *kind == PatchPipelineKind::Style(RenderStyle::Pbr))
             .then(|| pbr_resources::create_pbr_texture_bind_group_layout(&self.device));
         let pbr_environment_bind_group_layout = fragment_entry_points
             .iter()
-            .any(|(style, _, _)| *style == RenderStyle::Pbr)
+            .any(|(kind, _, _)| *kind == PatchPipelineKind::Style(RenderStyle::Pbr))
             .then(|| pbr_environment::create_pbr_environment_bind_group_layout(&self.device));
         let depth_stencil = depth_format.map(|format| wgpu::DepthStencilState {
             format,
@@ -3416,8 +3476,13 @@ impl LodClassifierDevice {
         });
         let attributes = wgpu::vertex_attr_array![0 => Float32x3];
         let mut pipelines = Vec::with_capacity(fragment_entry_points.len());
-        for (style, geometry, fragment_entry_point) in fragment_entry_points {
-            let pipeline_layout = if style == RenderStyle::Pbr {
+        for (kind, geometry, fragment_entry_point) in fragment_entry_points {
+            let uses_pbr_bindings = kind == PatchPipelineKind::Style(RenderStyle::Pbr);
+            let pipeline_depth_stencil = depth_stencil.clone().map(|mut state| {
+                state.depth_write_enabled = Some(kind != PatchPipelineKind::Highlight);
+                state
+            });
+            let pipeline_layout = if uses_pbr_bindings {
                 let pbr_texture_bind_group_layout = pbr_texture_bind_group_layout
                     .as_ref()
                     .expect("PBR pipeline request creates its texture layout");
@@ -3468,7 +3533,7 @@ impl LodClassifierDevice {
                             cull_mode: None,
                             ..Default::default()
                         },
-                        depth_stencil: depth_stencil.clone(),
+                        depth_stencil: pipeline_depth_stencil.clone(),
                         multisample: wgpu::MultisampleState {
                             count: sample_count,
                             ..Default::default()
@@ -3493,16 +3558,16 @@ impl LodClassifierDevice {
                 RenderGeometry::Lines => counter_clockwise.clone(),
             };
             pipelines.push(PatchRenderPipeline {
-                style,
+                kind,
                 geometry,
                 bind_group_layout: bind_group_layout.clone(),
-                pbr_texture_bind_group_layout: (style == RenderStyle::Pbr).then(|| {
+                pbr_texture_bind_group_layout: uses_pbr_bindings.then(|| {
                     pbr_texture_bind_group_layout
                         .as_ref()
                         .expect("PBR pipeline request creates its texture layout")
                         .clone()
                 }),
-                pbr_environment_bind_group_layout: (style == RenderStyle::Pbr).then(|| {
+                pbr_environment_bind_group_layout: uses_pbr_bindings.then(|| {
                     pbr_environment_bind_group_layout
                         .as_ref()
                         .expect("PBR pipeline request creates its environment layout")
@@ -3512,7 +3577,9 @@ impl LodClassifierDevice {
                 clockwise,
             });
         }
-        Ok(pipelines)
+        let highlight =
+            include_highlight.then(|| pipelines.pop().expect("requested highlight pipeline"));
+        Ok((pipelines, highlight))
     }
 
     /// Create the fixed-format live shadow pipeline without leaking backend
@@ -3714,12 +3781,12 @@ impl LodClassifierDevice {
             bytemuck::cast_slice(&material_words),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         );
-        let material_textures = if pipeline.style == RenderStyle::Pbr {
+        let material_textures = if pipeline.uses_pbr_bindings() {
             Some(self.create_pbr_material_texture_bindings(pipeline, &scene.materials, textures)?)
         } else {
             None
         };
-        let pbr_environment = if pipeline.style == RenderStyle::Pbr {
+        let pbr_environment = if pipeline.uses_pbr_bindings() {
             Some(self.create_pbr_environment_bindings(pipeline, environment)?)
         } else {
             None
@@ -3894,7 +3961,7 @@ impl LodClassifierDevice {
                 "in-place WebGPU scene update changed immutable model words".to_string(),
             ));
         }
-        let material_textures = if pipeline.style == RenderStyle::Pbr {
+        let material_textures = if pipeline.uses_pbr_bindings() {
             Some(self.create_pbr_material_texture_bindings(pipeline, &scene.materials, textures)?)
         } else {
             None
@@ -4907,6 +4974,7 @@ impl LodClassifierDevice {
         atlas: &'resource PackedPatchAtlas,
         target: PatchRenderTarget<'resource>,
         use_qb: bool,
+        highlight_pipeline: Option<&'resource PatchRenderPipeline>,
         resolve_pipeline: PipelineResolver,
         encode_visibility: VisibilityProducer,
     ) -> Result<PatchFrameEncoding, LodWebGpuError>
@@ -5020,6 +5088,7 @@ impl LodClassifierDevice {
                         )));
                     }
                 }
+                RenderCommand::HighlightFace { .. } if highlight_pipeline.is_some() => {}
                 unsupported => {
                     return Err(LodWebGpuError::Payload(format!(
                         "WebGPU patch renderer does not yet support command {unsupported:?}",
@@ -5123,6 +5192,43 @@ impl LodClassifierDevice {
                 )?;
                 indirect_draw_calls = indirect_draw_calls.saturating_add(1);
             }
+            if frame.options.highlight_face.is_some() {
+                let highlight_pipeline = highlight_pipeline.ok_or_else(|| {
+                    LodWebGpuError::Payload(
+                        "WebGPU patch renderer has no selection highlight pipeline".to_string(),
+                    )
+                })?;
+                for (batch_index, batch) in scene.batches.iter().enumerate() {
+                    let draw = atlas
+                        .draw(batch.id.key.lod, RenderGeometry::Triangles)
+                        .ok_or_else(|| {
+                            LodWebGpuError::Payload(format!(
+                                "packed WebGPU atlas lost highlight batch {batch_index} key {:?}",
+                                batch.id.key.lod,
+                            ))
+                        })?;
+                    let permutation_sign = if batch.id.key.parity_bucket == 0 {
+                        1
+                    } else {
+                        -1
+                    };
+                    let winding = if batch.transform.orientation_sign * permutation_sign < 0 {
+                        PatchWinding::Clockwise
+                    } else {
+                        PatchWinding::CounterClockwise
+                    };
+                    highlight_pipeline.draw_batch(
+                        &mut render_pass,
+                        bindings,
+                        visibility,
+                        draw,
+                        batch_index as u32,
+                        0,
+                        winding,
+                    )?;
+                    indirect_draw_calls = indirect_draw_calls.saturating_add(1);
+                }
+            }
         }
 
         let logical_submission = frame
@@ -5160,10 +5266,11 @@ impl LodClassifierDevice {
             &VisibilityCompactionScene,
         ) -> Result<(), LodWebGpuError>,
     {
-        if pipeline.style != frame.style || frame.style == RenderStyle::MatcapWire {
+        if pipeline.style() != Some(frame.style) || frame.style == RenderStyle::MatcapWire {
             return Err(LodWebGpuError::Payload(format!(
                 "single WebGPU patch pipeline {:?} cannot render {:?} frame",
-                pipeline.style, frame.style,
+                pipeline.style(),
+                frame.style,
             )));
         }
         self.encode_render_frame_with_pipelines(
@@ -5176,6 +5283,7 @@ impl LodClassifierDevice {
             atlas,
             target,
             use_qb,
+            None,
             |_, _| Ok(pipeline),
             encode_visibility,
         )
@@ -5215,6 +5323,7 @@ impl LodClassifierDevice {
             atlas,
             target,
             use_qb,
+            Some(&pipelines.highlight),
             |pass, geometry| pipelines.get_for_pass(pass, geometry),
             encode_visibility,
         )
@@ -5245,7 +5354,7 @@ impl LodClassifierDevice {
             &VisibilityCompactionScene,
         ) -> Result<(), LodWebGpuError>,
     {
-        if frame.style != RenderStyle::Normals || pipeline.style != RenderStyle::Normals {
+        if frame.style != RenderStyle::Normals || pipeline.style() != Some(RenderStyle::Normals) {
             return Err(LodWebGpuError::Payload(
                 "normals render entry point requires a normals frame and pipeline".to_string(),
             ));
@@ -6977,7 +7086,7 @@ fn require_normals_frame_pipeline(
     frame: &RenderFrame,
     pipeline: &PatchRenderPipeline,
 ) -> Result<(), LodWebGpuError> {
-    if frame.style == RenderStyle::Normals && pipeline.style == RenderStyle::Normals {
+    if frame.style == RenderStyle::Normals && pipeline.style() == Some(RenderStyle::Normals) {
         Ok(())
     } else {
         Err(LodWebGpuError::Payload(
@@ -7016,7 +7125,7 @@ impl PatchRenderPipeline {
         };
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bindings.bind_group, &[dynamic_offset]);
-        if self.style == RenderStyle::Pbr {
+        if self.uses_pbr_bindings() {
             let material_textures = bindings
                 .material_textures
                 .as_ref()
