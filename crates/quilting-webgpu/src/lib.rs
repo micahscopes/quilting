@@ -724,6 +724,7 @@ pub struct LodClassifierDevice {
     resident_bucket_prefix_pipeline: wgpu::ComputePipeline,
     resident_bucket_scan_pipeline: wgpu::ComputePipeline,
     resident_bucket_scatter_pipeline: wgpu::ComputePipeline,
+    resident_root_visibility_pipeline: wgpu::ComputePipeline,
     resident_root_vertex_clear_pipeline: wgpu::ComputePipeline,
     resident_root_vertex_accumulate_pipeline: wgpu::ComputePipeline,
     resident_root_topology_pipeline: wgpu::ComputePipeline,
@@ -1042,6 +1043,9 @@ impl LodClassifierDevice {
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
         let resident_buckets_source = quilting_shaders::compile_resident_buckets_wgsl()
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
+        let resident_root_visibility_source =
+            quilting_shaders::compile_resident_root_visibility_wgsl()
+                .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
         let resident_root_topology_source = quilting_shaders::compile_resident_root_topology_wgsl()
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
         let pass1_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1085,6 +1089,11 @@ impl LodClassifierDevice {
             label: Some("quilting resident geometry buckets"),
             source: wgpu::ShaderSource::Wgsl(Cow::Owned(resident_buckets_source)),
         });
+        let resident_root_visibility_module =
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("quilting resident root visibility"),
+                source: wgpu::ShaderSource::Wgsl(Cow::Owned(resident_root_visibility_source)),
+            });
         let resident_root_topology_module =
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("quilting resident root topology"),
@@ -1222,6 +1231,15 @@ impl LodClassifierDevice {
                 compilation_options: Default::default(),
                 cache: None,
             });
+        let resident_root_visibility_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("quilting resident root visibility"),
+                layout: None,
+                module: &resident_root_visibility_module,
+                entry_point: Some(quilting_shaders::RESIDENT_ROOT_VISIBILITY_DEVICE_ENTRY_POINT),
+                compilation_options: Default::default(),
+                cache: None,
+            });
         let resident_root_pipeline = |label, entry_point| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(label),
@@ -1261,6 +1279,7 @@ impl LodClassifierDevice {
             resident_bucket_prefix_pipeline,
             resident_bucket_scan_pipeline,
             resident_bucket_scatter_pipeline,
+            resident_root_visibility_pipeline,
             resident_root_vertex_clear_pipeline,
             resident_root_vertex_accumulate_pipeline,
             resident_root_topology_pipeline,

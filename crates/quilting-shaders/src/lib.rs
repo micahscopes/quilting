@@ -26,6 +26,8 @@ pub const RESIDENT_BUCKET_HISTOGRAM_DEVICE_ENTRY_POINT: &str =
 pub const RESIDENT_BUCKET_PREFIX_DEVICE_ENTRY_POINT: &str = "prefix_resident_geometry_chunks";
 pub const RESIDENT_BUCKET_SCAN_DEVICE_ENTRY_POINT: &str = "scan_resident_geometry_buckets";
 pub const RESIDENT_BUCKET_SCATTER_DEVICE_ENTRY_POINT: &str = "scatter_resident_geometry_faces";
+pub const RESIDENT_ROOT_VISIBILITY_DEVICE_ENTRY_POINT: &str =
+    "classify_resident_root_visibility";
 pub const RESIDENT_ROOT_VERTEX_CLEAR_DEVICE_ENTRY_POINT: &str =
     "clear_resident_root_vertex_lods";
 pub const RESIDENT_ROOT_VERTEX_ACCUMULATE_DEVICE_ENTRY_POINT: &str =
@@ -82,6 +84,8 @@ pub mod sources {
     pub const RESIDENT_BUCKET_TYPES: &str =
         include_str!("../shaders/compute/resident_bucket_types.wgsl");
     pub const RESIDENT_BUCKETS: &str = include_str!("../shaders/compute/resident_buckets.wgsl");
+    pub const RESIDENT_ROOT_VISIBILITY: &str =
+        include_str!("../shaders/compute/resident_visibility.wgsl");
     pub const RESIDENT_ROOT_TOPOLOGY_TYPES: &str =
         include_str!("../shaders/compute/resident_root_topology_types.wgsl");
     pub const RESIDENT_ROOT_TOPOLOGY: &str =
@@ -502,6 +506,16 @@ pub fn compile_lod_visibility_expand_module(
 
 pub fn compile_resident_buckets_module() -> Result<naga::Module, Box<dyn std::error::Error>> {
     compile_validated_compute_module(sources::RESIDENT_BUCKETS)
+}
+
+pub fn compile_resident_root_visibility_module(
+) -> Result<naga::Module, Box<dyn std::error::Error>> {
+    compile_validated_compute_module(sources::RESIDENT_ROOT_VISIBILITY)
+}
+
+pub fn compile_resident_root_visibility_wgsl(
+) -> Result<String, Box<dyn std::error::Error>> {
+    emit_wgsl(&compile_resident_root_visibility_module()?)
 }
 
 pub fn compile_resident_root_topology_module(
@@ -1295,6 +1309,25 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
                 RESIDENT_BUCKET_SCAN_DEVICE_ENTRY_POINT,
                 RESIDENT_BUCKET_SCATTER_DEVICE_ENTRY_POINT,
             ],
+        );
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .unwrap();
+
+        let source = compile_resident_root_visibility_wgsl().unwrap();
+        assert!(!source.contains("#import"));
+        assert!(!source.contains("#define_import_path"));
+        let module = naga::front::wgsl::parse_str(&source).unwrap();
+        assert_eq!(
+            module
+                .entry_points
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            [RESIDENT_ROOT_VISIBILITY_DEVICE_ENTRY_POINT],
         );
         naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),

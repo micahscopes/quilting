@@ -877,6 +877,42 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             classifier.reconcile_resident_lod_on_device(&classification, FaceLodGrading::TwoToOne);
         }
         let resident = classifier.latest_resident_lod(&root_model).unwrap();
+        assert_eq!(
+            classifier
+                .classify_resident_root_visibility_for_diagnostics(
+                    &render_frame,
+                    &root_model,
+                    &resident,
+                    &root_preparation,
+                    &root_geometry,
+                    &root_bindings,
+                    LodPose::default(),
+                    0,
+                    true,
+                )
+                .await
+                .unwrap(),
+            [0b11],
+        );
+        let mut hidden_frame = render_frame.clone();
+        hidden_frame.view.mvp = translation_matrix(100.0, 0.0, 0.0);
+        assert_eq!(
+            classifier
+                .classify_resident_root_visibility_for_diagnostics(
+                    &hidden_frame,
+                    &root_model,
+                    &resident,
+                    &root_preparation,
+                    &root_geometry,
+                    &root_bindings,
+                    LodPose::default(),
+                    0,
+                    true,
+                )
+                .await
+                .unwrap(),
+            [0],
+        );
         let root_encoding = classifier
             .render_offscreen_resident_roots(
                 &render_frame,

@@ -52,7 +52,9 @@ pub struct ResidentGeometryBucketScene {
     pub(super) bucket_count: u32,
     pub(super) chunk_count: u32,
     pub(super) eligibility_word_count: u32,
+    pub(super) uniform: wgpu::Buffer,
     pub(super) root_eligibility: wgpu::Buffer,
+    pub(super) root_visibility: wgpu::Buffer,
     pub(super) suppressed_faces: Mutex<Vec<u32>>,
     pub(super) _chunk_counts: wgpu::Buffer,
     pub(super) _chunk_offsets: wgpu::Buffer,
@@ -149,6 +151,7 @@ pub struct ResidentRootRenderBindings {
     pbr_scene_supported: bool,
     frame_words: Mutex<Vec<u32>>,
     _bucket_index_uniform: wgpu::Buffer,
+    visibility_bind_group: wgpu::BindGroup,
     bind_group: wgpu::BindGroup,
 }
 
@@ -229,6 +232,12 @@ impl ResidentGeometryBucketScene {
     /// directly instead of publishing suppressed source faces through the CPU.
     pub fn root_eligibility_buffer(&self) -> &wgpu::Buffer {
         &self.root_eligibility
+    }
+
+    /// Current camera-dependent visibility words. The resident visibility
+    /// compute pass overwrites this buffer before bucket compaction.
+    pub fn root_visibility_buffer(&self) -> &wgpu::Buffer {
+        &self.root_visibility
     }
 
     pub fn compacted_faces_buffer(&self) -> &wgpu::Buffer {
@@ -688,6 +697,22 @@ impl LodClassifierDevice {
                 )
             })
             .transpose()?;
+        let visibility_layout = self
+            .resident_root_visibility_pipeline
+            .get_bind_group_layout(0);
+        let visibility_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("quilting resident root visibility bindings"),
+            layout: &visibility_layout,
+            entries: &[
+                bind(0, &geometry.uniform),
+                bind(1, &frames),
+                bind(2, &preparation.patches.prepared_records),
+                bind(3, &geometry.root_eligibility),
+                bind(4, &domains.face_domain_rows),
+                bind(5, &domains.domain_records),
+                bind(6, &geometry.root_visibility),
+            ],
+        });
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("quilting resident root render bindings"),
             layout: &pipeline.bind_group_layout,
@@ -722,6 +747,7 @@ impl LodClassifierDevice {
             pbr_scene_supported,
             frame_words: Mutex::new(vec![0; frame_word_count]),
             _bucket_index_uniform: bucket_index_uniform,
+            visibility_bind_group,
             bind_group,
         })
     }
@@ -808,6 +834,7 @@ impl LodClassifierDevice {
         self.write_resident_root_render_frames(bindings, frame, &preparation.draw_domains, use_qb)?;
         self.write_resident_root_preparation_pose(model, preparation, pose, num_joints)?;
         self.encode_resident_root_preparation(preparation, resident, encoder)?;
+        self.encode_resident_root_visibility(preparation, geometry, bindings, encoder)?;
         self.encode_resident_geometry_buckets(geometry, resident, encoder)?;
 
         let color_load = target
@@ -1454,6 +1481,14 @@ impl LodClassifierDevice {
             bytemuck::cast_slice(&eligibility),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         );
+        let root_visibility = buffer_init_or_zero(
+            &self.device,
+            "resident root visibility bits",
+            bytemuck::cast_slice(&eligibility),
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+        );
         let atlas_draws = atlas
             .keys
             .iter()
@@ -1533,7 +1568,7 @@ impl LodClassifierDevice {
             entries: &[
                 bind(0, &uniform),
                 bind(1, resident_records),
-                bind(2, &root_eligibility),
+                bind(2, &root_visibility),
                 bind(4, &chunk_counts),
                 bind(11, &draw_domains.face_domain_rows),
                 bind(12, &draw_domains.domain_records),
@@ -1574,7 +1609,7 @@ impl LodClassifierDevice {
             entries: &[
                 bind(0, &uniform),
                 bind(1, resident_records),
-                bind(2, &root_eligibility),
+                bind(2, &root_visibility),
                 bind(5, &chunk_offsets),
                 bind(7, &bucket_ranges),
                 bind(10, &compacted_faces),
@@ -1590,7 +1625,9 @@ impl LodClassifierDevice {
             bucket_count,
             chunk_count,
             eligibility_word_count,
+            uniform,
             root_eligibility,
+            root_visibility,
             suppressed_faces: Mutex::new(Vec::new()),
             _chunk_counts: chunk_counts,
             _chunk_offsets: chunk_offsets,
@@ -1634,6 +1671,87 @@ impl LodClassifierDevice {
         self.write_resident_root_eligibility_state(scene, words, suppressed_faces)
     }
 
+    /// Classify exact current-pose rational-QB root visibility into the
+    /// device-resident bitset consumed by bucket compaction. One invocation
+    /// owns a complete 32-face word, so no atomics, clear pass, CPU payload,
+    /// or readback is required.
+    pub fn encode_resident_root_visibility(
+        &self,
+        preparation: &ResidentRootPreparationScene,
+        geometry: &ResidentGeometryBucketScene,
+        bindings: &ResidentRootRenderBindings,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<(), LodWebGpuError> {
+        if preparation.topology.model_identity != geometry.model_identity
+            || bindings.model_identity != geometry.model_identity
+            || preparation.draw_domains.domain_identity != geometry.domain_identity
+            || bindings.domain_identity != geometry.domain_identity
+            || preparation.topology.face_count != geometry.face_count
+        {
+            return Err(LodWebGpuError::Payload(
+                "resident root visibility resources belong to different epochs".to_string(),
+            ));
+        }
+        if geometry.eligibility_word_count == 0 {
+            return Ok(());
+        }
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("quilting resident root visibility"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.resident_root_visibility_pipeline);
+        pass.set_bind_group(0, &bindings.visibility_bind_group, &[]);
+        pass.dispatch_workgroups(
+            geometry.eligibility_word_count.div_ceil(LOD_WORKGROUP_SIZE),
+            1,
+            1,
+        );
+        Ok(())
+    }
+
+    /// Diagnostic-only exact readback of the production resident-root
+    /// visibility pass. Ordinary frames consume the same buffer directly in
+    /// bucket compaction and never call this method.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn classify_resident_root_visibility_for_diagnostics(
+        &self,
+        frame: &RenderFrame,
+        model: &LodClassifierModel,
+        resident: &DeviceResidentLod<'_>,
+        preparation: &ResidentRootPreparationScene,
+        geometry: &ResidentGeometryBucketScene,
+        bindings: &ResidentRootRenderBindings,
+        pose: LodPose<'_>,
+        num_joints: u32,
+        use_qb: bool,
+    ) -> Result<Vec<u32>, LodWebGpuError> {
+        self.write_resident_root_render_frames(bindings, frame, &preparation.draw_domains, use_qb)?;
+        self.write_resident_root_preparation_pose(model, preparation, pose, num_joints)?;
+        let bytes = u64::from(geometry.eligibility_word_count)
+            .checked_mul(PACKED_RECORD_BYTES)
+            .ok_or_else(|| {
+                LodWebGpuError::Payload(
+                    "resident root visibility diagnostic is too large".to_string(),
+                )
+            })?;
+        let readback = gpu_buffer(
+            &self.device,
+            "resident root visibility diagnostic readback",
+            bytes,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("resident root visibility diagnostic encoder"),
+            });
+        self.encode_resident_root_preparation(preparation, resident, &mut encoder)?;
+        self.encode_resident_root_visibility(preparation, geometry, bindings, &mut encoder)?;
+        encoder.copy_buffer_to_buffer(&geometry.root_visibility, 0, &readback, 0, bytes);
+        self.queue.submit([encoder.finish()]);
+        self.readback_words(&readback, bytes).await
+    }
+
     fn write_resident_root_eligibility_state(
         &self,
         scene: &ResidentGeometryBucketScene,
@@ -1645,6 +1763,8 @@ impl LodClassifierDevice {
         })?;
         self.queue
             .write_buffer(&scene.root_eligibility, 0, bytemuck::cast_slice(words));
+        self.queue
+            .write_buffer(&scene.root_visibility, 0, bytemuck::cast_slice(words));
         *retained_suppression = suppressed_faces;
         Ok(())
     }
