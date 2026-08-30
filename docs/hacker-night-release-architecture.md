@@ -928,9 +928,10 @@ source-face ID survives preparation and dyadic restriction, and the fragment
 shader discards nonselected patches without a pick-texture allocation or
 readback. Its diagnostic parity oracle rerenders the incumbent pick-texture
 overlay into the WebGL evidence target, allowing complete selected-face image
-comparison without changing either visible backend. Focus postprocessing and
-PBR highlight composition remain separate capability gaps. Browser-default
-promotion remains gated on live WebGL2/WebGPU image and interaction parity.
+comparison without changing either visible backend. The incumbent PBR path
+now composes the same post-style highlight before capture as well. Focus
+postprocessing remains a separate capability gap. Browser-default promotion
+remains gated on live WebGL2/WebGPU image and interaction parity.
 
 ## Tuesday cut
 

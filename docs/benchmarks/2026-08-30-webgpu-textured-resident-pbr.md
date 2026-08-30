@@ -103,6 +103,7 @@ WebGPU frame. Basic PBR retains its separate default-framebuffer capture and
 dynamic residency gate. Diagnostic selected-face evidence now reruns the
 incumbent pick-texture highlight into the same offscreen color target before
 readback, so its complete composition is compared with WebGPU's retained
-geometry-overlay pass. Focus postprocessing and PBR highlighting remain
-explicitly excluded: the former has no WebGPU implementation yet, while the
-incumbent PBR path does not currently compose its highlight before returning.
+geometry-overlay pass. The incumbent PBR path now runs that same post-style
+overlay before evidence capture, so highlighted PBR is covered as well. Focus
+postprocessing remains explicitly excluded because it has no WebGPU
+implementation yet.

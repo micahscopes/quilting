@@ -2943,12 +2943,8 @@ fn capture_current_webgl_pbr_frame_evidence(
 }
 
 #[cfg(feature = "webgpu-backend")]
-fn backend_frame_evidence_supports_composition(
-    style: RenderStyle,
-    focus_postprocess: bool,
-    highlight_face: bool,
-) -> bool {
-    !focus_postprocess && !(style == RenderStyle::Pbr && highlight_face)
+fn backend_frame_evidence_supports_composition(focus_postprocess: bool) -> bool {
+    !focus_postprocess
 }
 
 #[cfg(feature = "webgpu-backend")]
@@ -2971,13 +2967,9 @@ pub fn mr_request_backend_frame_evidence() -> Result<bool, JsValue> {
                 "backend image evidence requires a ready headless WebGPU device",
             ));
         }
-        if !backend_frame_evidence_supports_composition(
-            state.render_style,
-            state.fuzzy_enabled,
-            state.highlight_face >= 0,
-        ) {
+        if !backend_frame_evidence_supports_composition(state.fuzzy_enabled) {
             return Err(JsValue::from_str(
-                "backend image evidence does not yet support focus postprocess or PBR highlight composition",
+                "backend image evidence does not yet support focus postprocess composition",
             ));
         }
         if state.highlight_face >= 0
@@ -9411,11 +9403,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         if state.backend_evidence_requested
             && ((state.render_style != RenderStyle::Pbr
                 && !quilting_webgpu::supports_patch_presentation_style(state.render_style))
-                || !backend_frame_evidence_supports_composition(
-                    state.render_style,
-                    state.fuzzy_enabled,
-                    state.highlight_face >= 0,
-                ))
+                || !backend_frame_evidence_supports_composition(state.fuzzy_enabled))
         {
             state.backend_evidence_requested = false;
             state.backend_evidence_error = Some(
@@ -10133,6 +10121,13 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     }
                 }
 
+                // Keep selection as a post-style overlay in PBR as well as
+                // diagnostic modes. This also gives the backend oracle one
+                // complete incumbent composition to compare with WebGPU.
+                if state.highlight_face >= 0 && state.highlight_prog.is_some() {
+                    render_highlight(state.renderer.gl(), state, &camera);
+                }
+
                 #[cfg(feature = "webgpu-backend")]
                 if state.backend_evidence_requested {
                     state.backend_evidence_requested = false;
@@ -10315,27 +10310,9 @@ mod tests {
 
     #[cfg(feature = "webgpu-backend")]
     #[wasm_bindgen_test]
-    fn backend_evidence_admits_diagnostic_highlight_but_not_unimplemented_compositions() {
-        assert!(backend_frame_evidence_supports_composition(
-            RenderStyle::Wire,
-            false,
-            true,
-        ));
-        assert!(backend_frame_evidence_supports_composition(
-            RenderStyle::Normals,
-            false,
-            false,
-        ));
-        assert!(!backend_frame_evidence_supports_composition(
-            RenderStyle::Wire,
-            true,
-            false,
-        ));
-        assert!(!backend_frame_evidence_supports_composition(
-            RenderStyle::Pbr,
-            false,
-            true,
-        ));
+    fn backend_evidence_admits_highlight_but_not_focus_postprocessing() {
+        assert!(backend_frame_evidence_supports_composition(false));
+        assert!(!backend_frame_evidence_supports_composition(true));
     }
 
     #[wasm_bindgen_test]
