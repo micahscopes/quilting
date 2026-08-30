@@ -930,6 +930,51 @@ impl FocusPbrPatchRenderPipeline {
     }
 }
 
+/// Retained WebGPU resources for the complete focus render graph. The root
+/// and adaptive-overlay passes always target the fixed intermediate MRT; only
+/// the final composer pipeline depends on the presentation format. The
+/// viewport target is replaced atomically when its extent changes.
+pub struct FocusPbrRenderResources {
+    root_pipeline: ResidentRootRenderPipeline,
+    overlay_pipeline: FocusPbrPatchRenderPipeline,
+    postprocess_pipelines: FocusPostprocessPipelines,
+    target: Option<FocusPostprocessTarget>,
+}
+
+impl FocusPbrRenderResources {
+    pub const fn root_pipeline(&self) -> &ResidentRootRenderPipeline {
+        &self.root_pipeline
+    }
+
+    pub const fn overlay_pipeline(&self) -> &FocusPbrPatchRenderPipeline {
+        &self.overlay_pipeline
+    }
+
+    pub const fn postprocess_pipelines(&self) -> &FocusPostprocessPipelines {
+        &self.postprocess_pipelines
+    }
+
+    pub const fn target(&self) -> Option<&FocusPostprocessTarget> {
+        self.target.as_ref()
+    }
+
+    /// Ensure one target for the current viewport. Allocation finishes before
+    /// replacing the previous target, so an error leaves the last coherent
+    /// render graph resident. Returns whether a replacement was published.
+    pub fn ensure_target(
+        &mut self,
+        device: &LodClassifierDevice,
+        size: [u32; 2],
+    ) -> Result<bool, LodWebGpuError> {
+        if self.target.as_ref().is_some_and(|target| target.size() == size) {
+            return Ok(false);
+        }
+        let target = device.create_focus_postprocess_target(size, &self.postprocess_pipelines)?;
+        self.target = Some(target);
+        Ok(true)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PatchPipelineKind {
     Style(RenderStyle),
@@ -3948,6 +3993,26 @@ impl LodClassifierDevice {
             Some(wgpu::TextureFormat::Depth24Plus),
             1,
         )
+    }
+
+    /// Build one retained focus render graph for the requested final output
+    /// format. No partially constructed family is published on failure.
+    pub fn create_focus_pbr_render_resources(
+        &self,
+        output_format: wgpu::TextureFormat,
+    ) -> Result<FocusPbrRenderResources, LodWebGpuError> {
+        Ok(FocusPbrRenderResources {
+            root_pipeline: self.create_offscreen_resident_root_render_pipeline()?,
+            overlay_pipeline: self.create_offscreen_focus_pbr_patch_render_pipeline()?,
+            postprocess_pipelines: self.create_focus_postprocess_pipelines(output_format)?,
+            target: None,
+        })
+    }
+
+    pub fn create_offscreen_focus_pbr_render_resources(
+        &self,
+    ) -> Result<FocusPbrRenderResources, LodWebGpuError> {
+        self.create_focus_pbr_render_resources(wgpu::TextureFormat::Rgba8Unorm)
     }
 
     /// Create the fixed-format live shadow pipeline without leaking backend

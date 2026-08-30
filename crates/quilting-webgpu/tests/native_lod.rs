@@ -357,16 +357,21 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             .await
             .expect("request native WebGPU device");
         let classifier = LodClassifierDevice::new(device, queue).unwrap();
-        let focus_pipelines = classifier
-            .create_focus_postprocess_pipelines(wgpu::TextureFormat::Rgba8Unorm)
-            .expect("create retained focus postprocess pipeline family");
+        let mut focus_resources = classifier
+            .create_offscreen_focus_pbr_render_resources()
+            .expect("create retained focus render resources");
+        assert!(focus_resources
+            .ensure_target(&classifier, [32, 32])
+            .expect("create retained focus target"));
+        assert!(!focus_resources
+            .ensure_target(&classifier, [32, 32])
+            .expect("reuse retained focus target"));
+        let focus_pipelines = focus_resources.postprocess_pipelines();
         assert_eq!(
             focus_pipelines.output_format(),
             wgpu::TextureFormat::Rgba8Unorm,
         );
-        let focus_pbr_pipeline = classifier
-            .create_offscreen_focus_pbr_patch_render_pipeline()
-            .expect("create focus PBR MRT pipeline");
+        let focus_pbr_pipeline = focus_resources.overlay_pipeline();
         assert_eq!(
             focus_pbr_pipeline.color_format(),
             wgpu::TextureFormat::Rgba8Unorm,
@@ -375,9 +380,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             focus_pbr_pipeline.raw_field_format(),
             wgpu::TextureFormat::Rgba16Float,
         );
-        let focus_target = classifier
-            .create_focus_postprocess_target([32, 32], &focus_pipelines)
-            .expect("create retained focus target");
+        let focus_target = focus_resources.target().expect("retained focus target");
 
         let texture_a = TextureAssetDescriptor {
             width: 2,
@@ -940,7 +943,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             .unwrap();
         let focus_scene = classifier
             .upload_focus_pbr_patch_render_scene(
-                &focus_pbr_pipeline,
+                focus_pbr_pipeline,
                 &model,
                 render_scene.clone(),
                 &source_instances,
@@ -985,11 +988,11 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         let focus_encoding = classifier
             .render_offscreen_focus_pbr_patch_scene_with_face_visibility(
                 &focus_frame,
-                &focus_pbr_pipeline,
-                &focus_pipelines,
+                focus_pbr_pipeline,
+                focus_pipelines,
                 &focus_scene,
                 &packed_atlas,
-                &focus_target,
+                focus_target,
                 &target,
                 true,
             )
@@ -1004,7 +1007,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             panic!("complete focus PBR frame validation: {error}");
         }
         let raw_focus = classifier
-            .stage_focus_raw_field_image(&focus_target)
+            .stage_focus_raw_field_image(focus_target)
             .unwrap()
             .read()
             .await
@@ -1036,15 +1039,13 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 root_preparation.draw_domains(),
             )
             .unwrap();
-        let root_pipeline = classifier
-            .create_offscreen_resident_root_render_pipeline()
-            .unwrap();
+        let root_pipeline = focus_resources.root_pipeline();
         let root_bindings = classifier
-            .create_resident_root_render_bindings(&root_pipeline, &root_preparation, &root_geometry)
+            .create_resident_root_render_bindings(root_pipeline, &root_preparation, &root_geometry)
             .unwrap();
         let root_focus_bindings = classifier
             .create_resident_root_render_bindings_with_pbr(
-                &root_pipeline,
+                root_pipeline,
                 &root_preparation,
                 &root_geometry,
                 &render_scene,
@@ -1078,11 +1079,11 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 &resident,
                 &root_preparation,
                 &root_geometry,
-                &root_pipeline,
+                root_pipeline,
                 &root_focus_bindings,
                 &packed_atlas,
-                &focus_pipelines,
-                &focus_target,
+                focus_pipelines,
+                focus_target,
                 &target,
                 LodPose::default(),
                 0,
@@ -1099,7 +1100,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             panic!("resident root focus frame validation: {error}");
         }
         let root_focus_raw = classifier
-            .stage_focus_raw_field_image(&focus_target)
+            .stage_focus_raw_field_image(focus_target)
             .unwrap()
             .read()
             .await
@@ -1149,7 +1150,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 &resident,
                 &root_preparation,
                 &root_geometry,
-                &root_pipeline,
+                root_pipeline,
                 &root_bindings,
                 &packed_atlas,
                 &target,
@@ -1192,7 +1193,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 &resident,
                 &root_preparation,
                 &root_geometry,
-                &root_pipeline,
+                root_pipeline,
                 &root_bindings,
                 &packed_atlas,
                 &target,
@@ -1247,7 +1248,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                     &resident,
                     &root_preparation,
                     &root_geometry,
-                    &root_pipeline,
+                    root_pipeline,
                     &root_bindings,
                     &packed_atlas,
                     &target,
@@ -1303,7 +1304,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 &resident,
                 &root_preparation,
                 &root_geometry,
-                &root_pipeline,
+                root_pipeline,
                 &root_bindings,
                 &packed_atlas,
                 &target,

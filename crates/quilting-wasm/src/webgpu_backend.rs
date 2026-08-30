@@ -19,11 +19,10 @@ use quilting_renderer::compute::{
 };
 use quilting_webgpu::{
     resident_root_render_domains, AdaptiveOverlayScene, DiagnosticPatchRenderPipelines,
-    FocusPbrPatchRenderPipeline, FocusPostprocessPipelines, FocusPostprocessTarget,
-    LodClassifierDevice, LodClassifierModel, LodPose, OffscreenPatchRenderTarget,
-    PackedPatchAtlas, PatchFrameEncoding, PatchPresentationSurface, PatchRenderScene,
-    PatchRenderSceneUpdate, PbrEnvironmentMap, PbrTextureTable, ResidentGeometryBucketScene,
-    ResidentRootPreparationScene,
+    FocusPbrRenderResources, LodClassifierDevice, LodClassifierModel, LodPose,
+    OffscreenPatchRenderTarget, PackedPatchAtlas, PatchFrameEncoding, PatchPresentationSurface,
+    PatchRenderScene, PatchRenderSceneUpdate, PbrEnvironmentMap, PbrTextureTable,
+    ResidentGeometryBucketScene, ResidentRootPreparationScene,
     ResidentRootRenderBindings, ResidentRootRenderPipeline, StagedOffscreenImageReadback,
     SurfacePresentation, WebGpuAdapterSummary,
 };
@@ -46,7 +45,7 @@ struct WebGpuBackend {
     model_source: Option<PreparedLodModel>,
     pipelines: Option<DiagnosticPatchRenderPipelines>,
     resident_root_pipeline: Option<ResidentRootRenderPipeline>,
-    focus: Option<FocusBackend>,
+    focus: Option<FocusPbrRenderResources>,
     resident_roots: Option<ResidentRootBackend>,
     scene: Option<PatchRenderScene>,
     scene_source_revision: Option<u64>,
@@ -93,13 +92,6 @@ struct WebGpuBackend {
     last_resident_root_error: Option<String>,
     last_focus_error: Option<String>,
     last_error: Option<String>,
-}
-
-struct FocusBackend {
-    root_pipeline: ResidentRootRenderPipeline,
-    overlay_pipeline: FocusPbrPatchRenderPipeline,
-    postprocess_pipelines: FocusPostprocessPipelines,
-    target: Option<FocusPostprocessTarget>,
 }
 
 struct ResidentRootFocusBackend {
@@ -388,12 +380,12 @@ impl WebGpuBackend {
             focus_target_ready: self
                 .focus
                 .as_ref()
-                .is_some_and(|focus| focus.target.is_some()),
+                .is_some_and(|focus| focus.target().is_some()),
             focus_target_viewport: self
                 .focus
                 .as_ref()
-                .and_then(|focus| focus.target.as_ref())
-                .map_or([0, 0], FocusPostprocessTarget::size),
+                .and_then(FocusPbrRenderResources::target)
+                .map_or([0, 0], |target| target.size()),
             focus_target_rebuilds: self.focus_target_rebuilds,
             focus_frames: self.focus_frames,
             focus_fallbacks: self.focus_fallbacks,
@@ -545,20 +537,10 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
                         Ok(pipeline) => (Some(pipeline), None),
                         Err(error) => (None, Some(error.to_string())),
                     };
-                let (focus, focus_error) = match (|| {
-                    Ok::<_, String>(FocusBackend {
-                        root_pipeline: device
-                            .create_offscreen_resident_root_render_pipeline()
-                            .map_err(|error| error.to_string())?,
-                        overlay_pipeline: device
-                            .create_offscreen_focus_pbr_patch_render_pipeline()
-                            .map_err(|error| error.to_string())?,
-                        postprocess_pipelines: device
-                            .create_offscreen_focus_postprocess_pipelines()
-                            .map_err(|error| error.to_string())?,
-                        target: None,
-                    })
-                })() {
+                let (focus, focus_error) = match device
+                    .create_offscreen_focus_pbr_render_resources()
+                    .map_err(|error| error.to_string())
+                {
                     Ok(focus) => (Some(focus), None),
                     Err(error) => (None, Some(error)),
                 };
@@ -670,20 +652,10 @@ pub(crate) async fn initialize_presentation(
         Ok(pipeline) => (Some(pipeline), None),
         Err(error) => (None, Some(error.to_string())),
     };
-    let (focus, focus_error) = match (|| {
-        Ok::<_, String>(FocusBackend {
-            root_pipeline: device
-                .create_offscreen_resident_root_render_pipeline()
-                .map_err(|error| error.to_string())?,
-            overlay_pipeline: device
-                .create_offscreen_focus_pbr_patch_render_pipeline()
-                .map_err(|error| error.to_string())?,
-            postprocess_pipelines: device
-                .create_focus_postprocess_pipelines(presentation.color_format())
-                .map_err(|error| error.to_string())?,
-            target: None,
-        })
-    })() {
+    let (focus, focus_error) = match device
+        .create_focus_pbr_render_resources(presentation.color_format())
+        .map_err(|error| error.to_string())
+    {
         Ok(focus) => (Some(focus), None),
         Err(error) => (None, Some(error)),
     };
@@ -1203,7 +1175,7 @@ fn build_resident_root_backend(
     atlas: &PackedPatchAtlas,
     root_pipeline: &ResidentRootRenderPipeline,
     overlay_pipelines: &DiagnosticPatchRenderPipelines,
-    focus_backend: Option<&FocusBackend>,
+    focus_backend: Option<&FocusPbrRenderResources>,
     domains: ResidentRootDrawDomains,
     scene: &RenderSceneSnapshot,
     source_instances: &[f32],
@@ -1270,7 +1242,7 @@ fn rebuild_resident_root_pbr_scene(
     model: Option<&LodClassifierModel>,
     pipelines: Option<&DiagnosticPatchRenderPipelines>,
     pipeline: Option<&ResidentRootRenderPipeline>,
-    focus_backend: Option<&FocusBackend>,
+    focus_backend: Option<&FocusPbrRenderResources>,
     roots: Option<&ResidentRootBackend>,
     scene: Option<&PatchRenderScene>,
     textures: Option<&PbrTextureTable>,
@@ -1331,7 +1303,7 @@ fn rebuild_resident_root_pbr_scene(
 fn build_resident_root_focus_backend(
     device: &LodClassifierDevice,
     model: &LodClassifierModel,
-    focus_backend: Option<&FocusBackend>,
+    focus_backend: Option<&FocusPbrRenderResources>,
     preparation: &ResidentRootPreparationScene,
     geometry: &ResidentGeometryBucketScene,
     scene: &RenderSceneSnapshot,
@@ -1343,7 +1315,7 @@ fn build_resident_root_focus_backend(
     };
     let bindings = device
         .create_resident_root_render_bindings_with_pbr(
-            &focus_backend.root_pipeline,
+            focus_backend.root_pipeline(),
             preparation,
             geometry,
             scene,
@@ -1353,7 +1325,7 @@ fn build_resident_root_focus_backend(
         .map_err(|error| error.to_string())?;
     let overlay = device
         .upload_focus_adaptive_overlay_scene_with_pbr_resources(
-            &focus_backend.overlay_pipeline,
+            focus_backend.overlay_pipeline(),
             model,
             preparation,
             scene,
@@ -1830,31 +1802,21 @@ pub(crate) fn submit_frame(
             backend.target = Some(target);
             backend.target_rebuilds = backend.target_rebuilds.saturating_add(1);
         }
-        if focus_frame
-            && backend
-                .focus
-                .as_ref()
-                .and_then(|focus| focus.target.as_ref())
-                .is_none_or(|target| target.size() != view.viewport)
-        {
-            let target = (|| {
-                let device = backend
-                    .device
+        if focus_frame {
+            let target_rebuilt = {
+                let WebGpuBackend { device, focus, .. } = &mut *backend;
+                let device = device
                     .as_ref()
                     .ok_or_else(|| "ready WebGPU backend has no device".to_string())?;
-                let focus = backend
-                    .focus
-                    .as_ref()
+                let focus = focus
+                    .as_mut()
                     .ok_or_else(|| "WebGPU focus frame lost its pipeline family".to_string())?;
-                device
-                    .create_focus_postprocess_target(
-                        view.viewport,
-                        &focus.postprocess_pipelines,
-                    )
+                focus
+                    .ensure_target(device, view.viewport)
                     .map_err(|error| error.to_string())
-            })();
-            let target = match target {
-                Ok(target) => target,
+            };
+            let target_rebuilt = match target_rebuilt {
+                Ok(target_rebuilt) => target_rebuilt,
                 Err(error) => {
                     backend.focus_fallbacks = backend.focus_fallbacks.saturating_add(1);
                     backend.last_focus_error = Some(error.clone());
@@ -1865,12 +1827,9 @@ pub(crate) fn submit_frame(
                     ));
                 }
             };
-            backend
-                .focus
-                .as_mut()
-                .expect("focus target allocation checked pipeline residency")
-                .target = Some(target);
-            backend.focus_target_rebuilds = backend.focus_target_rebuilds.saturating_add(1);
+            if target_rebuilt {
+                backend.focus_target_rebuilds = backend.focus_target_rebuilds.saturating_add(1);
+            }
             backend.last_focus_error = None;
         }
         let prepared_frame = (|| {
@@ -1969,7 +1928,7 @@ pub(crate) fn submit_frame(
                             let focus_roots = roots.focus.as_ref().ok_or_else(|| {
                                 "WebGPU focus frame lost its scene residency".to_string()
                             })?;
-                            let focus_target = focus.target.as_ref().ok_or_else(|| {
+                            let focus_target = focus.target().ok_or_else(|| {
                                 "WebGPU focus frame lost its postprocess target".to_string()
                             })?;
                             match device.present_focus_resident_adaptive(
@@ -1980,12 +1939,12 @@ pub(crate) fn submit_frame(
                                 &resident,
                                 &roots.preparation,
                                 &roots.geometry,
-                                &focus.root_pipeline,
+                                focus.root_pipeline(),
                                 &focus_roots.bindings,
-                                &focus.overlay_pipeline,
+                                focus.overlay_pipeline(),
                                 focus_roots.overlay.as_ref(),
                                 atlas,
-                                &focus.postprocess_pipelines,
+                                focus.postprocess_pipelines(),
                                 focus_target,
                                 pose,
                                 num_joints,
@@ -2101,7 +2060,7 @@ pub(crate) fn submit_frame(
                             let focus_roots = roots.focus.as_ref().ok_or_else(|| {
                                 "WebGPU focus frame lost its scene residency".to_string()
                             })?;
-                            let focus_target = focus.target.as_ref().ok_or_else(|| {
+                            let focus_target = focus.target().ok_or_else(|| {
                                 "WebGPU focus frame lost its postprocess target".to_string()
                             })?;
                             device
@@ -2112,12 +2071,12 @@ pub(crate) fn submit_frame(
                                     &resident,
                                     &roots.preparation,
                                     &roots.geometry,
-                                    &focus.root_pipeline,
+                                    focus.root_pipeline(),
                                     &focus_roots.bindings,
-                                    &focus.overlay_pipeline,
+                                    focus.overlay_pipeline(),
                                     focus_roots.overlay.as_ref(),
                                     atlas,
-                                    &focus.postprocess_pipelines,
+                                    focus.postprocess_pipelines(),
                                     focus_target,
                                     target,
                                     pose,
