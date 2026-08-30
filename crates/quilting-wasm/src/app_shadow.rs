@@ -4,11 +4,12 @@ use crate::navigation::{
 };
 use hyperscape::{
     extract_packed_scene, map_pointer_turntable, map_space_mouse_camera, CameraBasis, CameraRig,
-    FocusSphere, LayerTransform, MappedSpaceMouseFrame, NavigationAction, NavigationFrame,
-    NavigationPreset, PackedAssetInstance, PackedNodeSource, PackedNodeTransformSource,
-    PackedPresentationLayerBinding, PointerTurntableGesture, PointerTurntableInput, Presentation,
-    PresentationAsset, PresentationSnapshot, SpaceMouseCameraInput, SpaceMouseMapping,
-    SurfaceAnchorTarget, SurfaceWalkControls, TurntableFrame,
+    FocusSphere, InteractionAction, InteractionHit, LayerTransform, MappedSpaceMouseFrame,
+    NavigationAction, NavigationFrame, NavigationPreset, PackedAssetInstance, PackedNodeSource,
+    PackedNodeTransformSource, PackedPresentationLayerBinding, PointerTurntableGesture,
+    PointerTurntableInput, Presentation, PresentationAsset, PresentationSnapshot,
+    SpaceMouseCameraInput, SpaceMouseMapping, SurfaceAnchorTarget, SurfaceWalkControls,
+    TurntableFrame,
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredEnvelope, CameraPresence, EntityId, EphemeralPresence,
@@ -1195,6 +1196,86 @@ impl HyperscopeAppShadow {
         )
     }
 
+    /// Resolve one backend-local pick into the shared interaction vocabulary.
+    /// A negative-one face with an empty barycentric slice means the adapter
+    /// has entity-level identity only; a nonnegative face requires exactly
+    /// three barycentric coordinates.
+    #[wasm_bindgen(js_name = setInteractionHover)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_interaction_hover(
+        &self,
+        asset: &str,
+        entity: &str,
+        source_bound_center: &[f64],
+        source_bound_radius: f64,
+        source_pivot: &[f64],
+        output_distance: f64,
+        face: i32,
+        barycentric: &[f64],
+    ) -> Result<u64, JsValue> {
+        let mut hit = InteractionHit::new(
+            asset_entity_id(asset, entity)?,
+            FocusSphere::new(
+                vector3(source_bound_center, "interaction source-bound center")?,
+                source_bound_radius,
+            )
+            .map_err(js_error)?,
+            vector3(source_pivot, "interaction source pivot")?,
+            output_distance,
+        )
+        .map_err(js_error)?;
+        match face {
+            -1 if barycentric.is_empty() => {}
+            -1 => {
+                return Err(JsValue::from_str(
+                    "entity-level interaction hover must omit barycentric coordinates",
+                ));
+            }
+            face if face >= 0 => {
+                hit = hit
+                    .with_surface(
+                        face as u32,
+                        vector3(barycentric, "interaction barycentric coordinates")?,
+                    )
+                    .map_err(js_error)?;
+            }
+            _ => {
+                return Err(JsValue::from_str(
+                    "interaction face must be -1 or nonnegative",
+                ));
+            }
+        }
+        self.dispatch_interaction(InteractionAction::SetHover(Some(hit)))
+    }
+
+    #[wasm_bindgen(js_name = clearInteractionHover)]
+    pub fn clear_interaction_hover(&self) -> Result<u64, JsValue> {
+        self.dispatch_interaction(InteractionAction::SetHover(None))
+    }
+
+    #[wasm_bindgen(js_name = pressInteractionPrimary)]
+    pub fn press_interaction_primary(&self) -> Result<u64, JsValue> {
+        self.dispatch_interaction(InteractionAction::PressPrimary)
+    }
+
+    #[wasm_bindgen(js_name = releaseInteractionPrimary)]
+    pub fn release_interaction_primary(&self) -> Result<u64, JsValue> {
+        self.dispatch_interaction(InteractionAction::ReleasePrimary)
+    }
+
+    #[wasm_bindgen(js_name = cancelInteractionPrimary)]
+    pub fn cancel_interaction_primary(&self) -> Result<u64, JsValue> {
+        self.dispatch_interaction(InteractionAction::CancelPrimary)
+    }
+
+    #[wasm_bindgen(js_name = interactionSnapshot)]
+    pub fn interaction_snapshot(&self) -> Result<JsValue, JsValue> {
+        interaction_to_js(
+            self.store.frame_snapshot(),
+            self.store.interaction_diagnostics_snapshot(),
+        )
+    }
+
     /// Apply one identity-checked AppStore focus/selection packet directly to
     /// the resident renderer. The packed node remains a backend-local handle;
     /// the application `(asset, entity)` pair must match the selected Rust state
@@ -2277,6 +2358,14 @@ impl HyperscopeAppShadow {
         Ok(sequence)
     }
 
+    fn dispatch_interaction(&self, action: InteractionAction) -> Result<u64, JsValue> {
+        let (sequence, _) = self
+            .store
+            .dispatch_semantic(SemanticAction::Interact(action))
+            .map_err(js_error)?;
+        Ok(sequence)
+    }
+
     fn surface_anchor_target(
         &self,
         eye: &[f64],
@@ -3091,6 +3180,57 @@ struct ShadowNavigationSnapshot {
 }
 
 #[derive(Serialize)]
+struct ShadowInteractionSnapshot {
+    revision: String,
+    integrated_until_seconds: f64,
+    last_applied_sequence: Option<String>,
+    hovered: Option<ShadowInteractionHit>,
+    active: Option<ShadowInteractionHit>,
+    selected: Option<ShadowInteractionIdentity>,
+    diagnostics: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ShadowInteractionIdentity {
+    asset_id: String,
+    entity_id: String,
+}
+
+impl From<hyperscape_protocol::AssetEntityId> for ShadowInteractionIdentity {
+    fn from(identity: hyperscape_protocol::AssetEntityId) -> Self {
+        Self {
+            asset_id: identity.asset.to_string(),
+            entity_id: identity.entity.to_string(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ShadowInteractionHit {
+    identity: ShadowInteractionIdentity,
+    source_bound_center: [f64; 3],
+    source_bound_radius: f64,
+    source_pivot: [f64; 3],
+    output_distance: f64,
+    face: Option<u32>,
+    barycentric: Option<[f64; 3]>,
+}
+
+impl From<InteractionHit> for ShadowInteractionHit {
+    fn from(hit: InteractionHit) -> Self {
+        Self {
+            identity: hit.identity.into(),
+            source_bound_center: hit.source_bound.center,
+            source_bound_radius: hit.source_bound.radius,
+            source_pivot: hit.source_pivot,
+            output_distance: hit.output_distance,
+            face: hit.surface.map(|surface| surface.face),
+            barycentric: hit.surface.map(|surface| surface.barycentric),
+        }
+    }
+}
+
+#[derive(Serialize)]
 struct ShadowSpaceMouseDispatch {
     preset_sequence: String,
     frame_sequence: String,
@@ -3293,6 +3433,24 @@ fn navigation_to_js(
         },
         selected_focus: frame.selected_focus.map(SelectedFocusJsSnapshot::from),
         diagnostics: navigation_diagnostics,
+    })
+}
+
+fn interaction_to_js(
+    frame: AppFrameSnapshot,
+    diagnostics: Vec<String>,
+) -> Result<JsValue, JsValue> {
+    to_js(&ShadowInteractionSnapshot {
+        revision: frame.interaction.revision.to_string(),
+        integrated_until_seconds: frame.interaction.integrated_until_seconds,
+        last_applied_sequence: frame
+            .interaction
+            .last_applied_sequence
+            .map(|sequence| sequence.to_string()),
+        hovered: frame.interaction.hovered.map(ShadowInteractionHit::from),
+        active: frame.interaction.active.map(ShadowInteractionHit::from),
+        selected: frame.interaction.selected.map(ShadowInteractionIdentity::from),
+        diagnostics,
     })
 }
 

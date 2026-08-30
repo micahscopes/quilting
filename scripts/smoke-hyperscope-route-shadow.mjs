@@ -556,6 +556,32 @@ assert.ok(
     && appStoreSource.includes('NavigationAction::SetFreeFocusSphere(target)'),
   'AppStore must atomically distinguish anchored and detached focus-sphere edits',
 );
+for (const interactionBoundaryStep of [
+  '#[wasm_bindgen(js_name = setInteractionHover)]',
+  '#[wasm_bindgen(js_name = clearInteractionHover)]',
+  '#[wasm_bindgen(js_name = pressInteractionPrimary)]',
+  '#[wasm_bindgen(js_name = releaseInteractionPrimary)]',
+  '#[wasm_bindgen(js_name = cancelInteractionPrimary)]',
+  '#[wasm_bindgen(js_name = interactionSnapshot)]',
+  '.dispatch_semantic(SemanticAction::Interact(action))',
+]) {
+  assert.ok(
+    appShadowSource.includes(interactionBoundaryStep),
+    `generated WASM interaction boundary is missing ${interactionBoundaryStep}`,
+  );
+}
+for (const interactionAuthorityStep of [
+  'interaction: InteractionController,',
+  'SemanticAction::Interact(action) => {',
+  '.advance_to(frame.elapsed_seconds, &self.navigation.focus)',
+  'activation.navigation_action(self.interaction.policy)',
+  'InteractionSnapshot::from_state(',
+]) {
+  assert.ok(
+    appStoreSource.includes(interactionAuthorityStep),
+    `AppStore interaction authority is missing ${interactionAuthorityStep}`,
+  );
+}
 for (const navigationSettingsAuthorityStep of [
   "implementationFromRoute(\n  initialNavigationParams, 'navstateimpl',\n)",
   "RUST_NAVIGATION_SETTINGS_IMPLEMENTATION !== 'js'",

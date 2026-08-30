@@ -2292,6 +2292,12 @@ impl AppStore {
         self.lock_state().navigation.diagnostics.0.clone()
     }
 
+    /// Low-rate interaction diagnostics remain separate from the allocation-
+    /// sensitive frame snapshot, just like navigation diagnostics.
+    pub fn interaction_diagnostics_snapshot(&self) -> Vec<String> {
+        self.lock_state().interaction.diagnostics.0.clone()
+    }
+
     /// Inspect the high-rate navigation error fence without cloning the
     /// diagnostic log. Input adapters use this around one atomic reducer step
     /// and only copy the final message when that step rejected its intent.
