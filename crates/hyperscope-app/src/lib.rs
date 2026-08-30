@@ -84,6 +84,7 @@ pub enum SemanticAction {
     Navigate(NavigationAction),
     Present(PresentationAction),
     Animate(AnimationAction),
+    SetNavigationSettings(NavigationSettings),
     SetRenderSettings(RenderSettings),
     SetPatchLab(PatchLabSessionIntent),
     RequestAsset {
@@ -696,6 +697,15 @@ pub struct AppRenderSnapshot {
     pub settings: RenderSettings,
 }
 
+/// Low-rate device-independent navigation preference projection. Camera and
+/// focus poses remain in [`AppFrameSnapshot`]; raw device policy remains in
+/// the platform adapter.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AppNavigationSettingsSnapshot {
+    pub revision: u64,
+    pub settings: NavigationSettings,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SelectedFocusSnapshot {
     pub identity: AssetEntityId,
@@ -848,6 +858,7 @@ pub struct AppState {
     active_presentation: Option<PresentationSnapshot>,
     presentation_animation_residency: Option<PresentationAnimationResidencyBinding>,
     animation: AnimationClock,
+    navigation_settings: NavigationSettings,
     render_settings: RenderSettings,
     patch_lab: PatchLabRuntime,
     assets: BTreeMap<AssetId, AssetRecord>,
@@ -876,6 +887,7 @@ impl Default for AppState {
             active_presentation: None,
             presentation_animation_residency: None,
             animation: AnimationClock::default(),
+            navigation_settings: NavigationSettings::default(),
             render_settings: RenderSettings::default(),
             patch_lab: PatchLabRuntime::default(),
             assets: BTreeMap::new(),
@@ -943,6 +955,13 @@ impl AppState {
         AppRenderSnapshot {
             revision: self.revision,
             settings: self.render_settings,
+        }
+    }
+
+    pub fn navigation_settings_snapshot(&self) -> AppNavigationSettingsSnapshot {
+        AppNavigationSettingsSnapshot {
+            revision: self.revision,
+            settings: self.navigation_settings,
         }
     }
 
@@ -1036,6 +1055,14 @@ impl AppState {
                                 .render_settings_changed(settings, &mut effects)?;
                         }
                         *self = staged;
+                    }
+                    SemanticAction::SetNavigationSettings(settings) => {
+                        if !input_may_run_now {
+                            return Err(ReduceError::FutureNavigationSettingsInput);
+                        }
+                        self.navigation_settings = settings
+                            .validate()
+                            .map_err(ReduceError::InvalidNavigationSettings)?;
                     }
                     SemanticAction::SetPatchLab(intent) => {
                         if !input_may_run_now {
@@ -1878,6 +1905,7 @@ pub struct AppStore {
     state: Arc<Mutex<AppState>>,
     summary: Mutable<AppSummary>,
     navigation: Mutable<AppFrameSnapshot>,
+    navigation_settings: Mutable<AppNavigationSettingsSnapshot>,
     render: Mutable<AppRenderSnapshot>,
     patch_lab: Mutable<PatchLabReadModel>,
     assets: MutableVec<AssetReadModel>,
@@ -1900,6 +1928,7 @@ impl AppStore {
     pub fn new(state: AppState) -> Self {
         let summary = state.summary();
         let navigation = state.frame_snapshot();
+        let navigation_settings = state.navigation_settings_snapshot();
         let render = state.render_snapshot();
         let patch_lab = state.patch_lab.read_model();
         let assets = state.asset_read_models();
@@ -1913,6 +1942,7 @@ impl AppStore {
             state: Arc::new(Mutex::new(state)),
             summary: Mutable::new(summary),
             navigation: Mutable::new(navigation),
+            navigation_settings: Mutable::new(navigation_settings),
             render: Mutable::new(render),
             patch_lab: Mutable::new(patch_lab),
             assets: MutableVec::new_with_values(assets),
@@ -2012,6 +2042,7 @@ impl AppStore {
         let diagnostics = state.diagnostic_read_models();
         let presentation = state.presentation_read_model();
         let navigation = state.frame_snapshot();
+        let navigation_settings = state.navigation_settings_snapshot();
         let render = state.render_snapshot();
         let patch_lab = state.patch_lab.read_model();
         let summary = state.summary();
@@ -2032,6 +2063,7 @@ impl AppStore {
         self.diagnostics.lock_mut().replace_cloned(diagnostics);
         self.presentation.set_neq(presentation);
         self.navigation.set_neq(navigation);
+        self.navigation_settings.set_neq(navigation_settings);
         self.render.set_neq(render);
         self.patch_lab.set_neq(patch_lab);
         self.summary.set_neq(summary);
@@ -2068,6 +2100,10 @@ impl AppStore {
     /// instead so UI throttling cannot delay semantic integration.
     pub fn navigation_snapshot(&self) -> AppFrameSnapshot {
         self.navigation.get_cloned()
+    }
+
+    pub fn navigation_settings_snapshot(&self) -> AppNavigationSettingsSnapshot {
+        self.navigation_settings.get()
     }
 
     pub fn render_snapshot(&self) -> AppRenderSnapshot {
@@ -2149,6 +2185,15 @@ impl AppStore {
         self.navigation.signal_cloned()
     }
 
+    /// Low-rate FRP navigation preferences published before the summary
+    /// revision fence. Views emit complete replacement intents through the
+    /// reducer instead of mutating individual control signals.
+    pub fn navigation_settings_signal(
+        &self,
+    ) -> MutableSignalCloned<AppNavigationSettingsSnapshot> {
+        self.navigation_settings.signal_cloned()
+    }
+
     /// Low-rate FRP render projection published before the summary commit
     /// fence. UI adapters queue semantic changes; they cannot mutate it.
     pub fn render_signal(&self) -> MutableSignalCloned<AppRenderSnapshot> {
@@ -2207,6 +2252,7 @@ pub enum ReduceError {
     InvalidTime,
     InvalidAnimationClock,
     InvalidPrimarySceneInstallMetadata(PrimarySceneInstallMetadataError),
+    InvalidNavigationSettings(&'static str),
     InvalidRenderSettings(&'static str),
     InputSequenceExhausted,
     AnimationClipJobExhausted,
@@ -2214,6 +2260,7 @@ pub enum ReduceError {
     FutureEffectInput,
     FuturePresentationInput,
     FutureAnimationInput,
+    FutureNavigationSettingsInput,
     FutureRenderSettingsInput,
     Navigation(&'static str),
     NavigationState(String),
@@ -2238,6 +2285,9 @@ impl fmt::Display for ReduceError {
             Self::InvalidPrimarySceneInstallMetadata(error) => {
                 write!(formatter, "primary scene installation failed validation: {error}")
             }
+            Self::InvalidNavigationSettings(message) => {
+                write!(formatter, "navigation settings failed validation: {message}")
+            }
             Self::InvalidRenderSettings(message) => {
                 write!(formatter, "render settings failed validation: {message}")
             }
@@ -2257,6 +2307,9 @@ impl fmt::Display for ReduceError {
                 .write_str("presentation input cannot be scheduled beyond the current app frame"),
             Self::FutureAnimationInput => formatter
                 .write_str("animation input cannot be scheduled beyond the current app frame"),
+            Self::FutureNavigationSettingsInput => formatter.write_str(
+                "navigation-settings input cannot be scheduled beyond the current app frame",
+            ),
             Self::FutureRenderSettingsInput => formatter.write_str(
                 "render-settings input cannot be scheduled beyond the current app frame",
             ),
@@ -2499,6 +2552,56 @@ mod tests {
             Err(ReduceError::FutureRenderSettingsInput),
         );
         assert_eq!(store.render_snapshot(), before);
+    }
+
+    #[test]
+    fn navigation_settings_are_atomic_validated_and_revision_fenced() {
+        let store = AppStore::default();
+        assert_eq!(
+            store.navigation_settings_snapshot().settings,
+            NavigationSettings::default(),
+        );
+        let settings = NavigationSettings {
+            transition_seconds: 2.5,
+            surface_walk: hyperscape::SurfaceWalkControls {
+                speed_octave_steps: 100.0,
+                body_scale_octave_steps: -50.0,
+                eye_height_octave_steps: 25.0,
+                smoothing_seconds: 0.45,
+                tangent_pull_fraction: 0.25,
+                ..Default::default()
+            },
+        };
+        let (_, commit) = store
+            .dispatch_semantic(SemanticAction::SetNavigationSettings(settings))
+            .unwrap();
+        let snapshot = store.navigation_settings_snapshot();
+        assert_eq!(snapshot.revision, commit.revision);
+        assert_eq!(snapshot.revision, store.summary_snapshot().revision);
+        assert_eq!(snapshot.settings, settings);
+
+        let before = snapshot;
+        let invalid = NavigationSettings {
+            transition_seconds: f64::NAN,
+            ..settings
+        };
+        assert_eq!(
+            store.dispatch_semantic(SemanticAction::SetNavigationSettings(invalid)),
+            Err(ReduceError::InvalidNavigationSettings(
+                "navigation transition duration must be finite and in [0,5]",
+            )),
+        );
+        assert_eq!(store.navigation_settings_snapshot(), before);
+
+        assert_eq!(
+            store.dispatch(AppEvent::Input(Timed {
+                sequence: 9,
+                at_seconds: 1.0,
+                value: SemanticAction::SetNavigationSettings(settings),
+            })),
+            Err(ReduceError::FutureNavigationSettingsInput),
+        );
+        assert_eq!(store.navigation_settings_snapshot(), before);
     }
 
     #[test]

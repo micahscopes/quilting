@@ -2267,6 +2267,7 @@ mod tests {
                 SemanticAction::Navigate(_) => "navigate",
                 SemanticAction::Present(_) => "present",
                 SemanticAction::Animate(_) => "animate",
+                SemanticAction::SetNavigationSettings(_) => "set_navigation_settings",
                 SemanticAction::SetRenderSettings(_) => "set_render_settings",
                 SemanticAction::SetPatchLab(_) => "set_patch_lab",
                 SemanticAction::RequestAsset { .. } => "request_asset",
