@@ -620,6 +620,7 @@ for (const selectedFaceEvidenceStep of [
   'fn backend_frame_evidence_supports_composition(',
   'crate::webgpu_backend::focus_evidence_prerequisites_ready()',
   'focus backend evidence requires WebGPU focus pipelines and environment residency',
+  'backend evidence focus packets do not match',
   'render_highlight_to(',
   'Some(target)',
   'render_highlight(state.renderer.gl(), state, &camera);',

@@ -2265,6 +2265,7 @@ pub(crate) struct StagedWebGpuFrameEvidence {
     pub(crate) logical_submission: RenderSubmissionStats,
     pub(crate) indirect_draw_calls: u32,
     pub(crate) source_instances: u32,
+    pub(crate) focus_postprocess: Option<quilting_core::render::FocusPostprocessPacket>,
     pub(crate) image: StagedOffscreenImageReadback,
 }
 
@@ -2298,6 +2299,9 @@ pub(crate) fn stage_frame_evidence() -> Result<StagedWebGpuFrameEvidence, String
             logical_submission: backend.last_logical_submission,
             indirect_draw_calls: backend.last_indirect_draw_calls,
             source_instances: backend.last_source_instances,
+            focus_postprocess: backend
+                .last_frame_input
+                .and_then(|frame| frame.options.focus_postprocess),
             image,
         })
     })

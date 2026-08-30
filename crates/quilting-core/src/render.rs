@@ -602,7 +602,7 @@ impl FocusPostprocessMode {
 /// state. Spheroidal coordinates are resolved from Hyperscape focus state
 /// before extraction, so this packet contains no application or navigation
 /// authority and can be consumed identically by WebGL2 and WebGPU.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct FocusPostprocessPacket {
     pub mode: FocusPostprocessMode,
     pub blur_radius_pixels: u16,
@@ -1930,6 +1930,26 @@ mod tests {
             result,
             Err(RenderContractError::InvalidFocusPostprocess)
         ));
+    }
+
+    #[test]
+    fn focus_postprocess_packet_serialization_preserves_evidence_semantics() {
+        let packet = FocusPostprocessPacket {
+            mode: FocusPostprocessMode::Hybrid,
+            blur_radius_pixels: 23,
+            blur_strength: 1.25,
+            focus_coordinate: 0.6,
+            bandwidth: 0.08,
+            normalize_range: true,
+            stretch_range: [0.15, 4.5],
+            gaussian_passes: 1,
+            kawase_passes: 3,
+            kawase_offset: 1.75,
+        };
+        let encoded = serde_json::to_string(&packet).unwrap();
+        let decoded = serde_json::from_str::<FocusPostprocessPacket>(&encoded).unwrap();
+        assert_eq!(decoded, packet);
+        decoded.validate().unwrap();
     }
 
     #[test]

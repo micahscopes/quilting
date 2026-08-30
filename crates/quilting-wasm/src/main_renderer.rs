@@ -534,6 +534,7 @@ struct WebGlFrameEvidenceCapture {
     render_call: u64,
     viewport: [u32; 2],
     submission: RenderSubmissionStats,
+    focus_postprocess: Option<FocusPostprocessPacket>,
     rgba8_bottom_left: Vec<u8>,
 }
 
@@ -549,6 +550,7 @@ struct BackendFrameEvidenceReport {
     workload_mismatch: RenderSubmissionMismatch,
     webgpu_indirect_draw_calls: u32,
     webgpu_source_instances: u32,
+    focus_postprocess: Option<FocusPostprocessPacket>,
     image: RenderImageComparison,
 }
 
@@ -2863,6 +2865,7 @@ fn capture_webgl_frame_evidence(
                 render_call,
                 viewport: [width as u32, height as u32],
                 submission,
+                focus_postprocess: None,
                 rgba8_bottom_left,
             })
         })()
@@ -2891,6 +2894,7 @@ fn capture_current_webgl_pbr_frame_evidence(
     viewport: (i32, i32),
     render_call: u64,
     submission: RenderSubmissionStats,
+    focus_postprocess: Option<FocusPostprocessPacket>,
 ) -> Result<WebGlFrameEvidenceCapture, String> {
     let (width, height) = viewport;
     if width <= 0 || height <= 0 {
@@ -2939,6 +2943,7 @@ fn capture_current_webgl_pbr_frame_evidence(
         render_call,
         viewport: [width as u32, height as u32],
         submission,
+        focus_postprocess,
         rgba8_bottom_left,
     })
 }
@@ -3048,6 +3053,11 @@ pub async fn mr_compare_backend_frame_evidence() -> Result<JsValue, JsValue> {
             webgl.render_call, webgl.viewport, staged.source_render_call, staged.viewport,
         )));
     }
+    if staged.focus_postprocess != webgl.focus_postprocess {
+        return Err(JsValue::from_str(
+            "backend evidence focus packets do not match",
+        ));
+    }
     let webgpu = staged
         .image
         .read()
@@ -3081,6 +3091,7 @@ pub async fn mr_compare_backend_frame_evidence() -> Result<JsValue, JsValue> {
         workload_mismatch,
         webgpu_indirect_draw_calls: staged.indirect_draw_calls,
         webgpu_source_instances: staged.source_instances,
+        focus_postprocess: webgl.focus_postprocess,
         image,
     })
     .map_err(|error| JsValue::from_str(&error.to_string()))
@@ -10223,6 +10234,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         state.viewport_size,
                         state.render_calls,
                         submission_stats,
+                        state.focus_postprocess,
                     ) {
                         Ok(capture) => {
                             state.backend_evidence_capture = Some(capture);

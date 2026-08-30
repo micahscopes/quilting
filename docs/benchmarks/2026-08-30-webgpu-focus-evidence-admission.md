@@ -9,6 +9,10 @@ The incumbent WebGL2 renderer captures its final composed framebuffer while the
 headless WebGPU backend renders the same Rust `RenderFrame` packet into its
 offscreen composed target. Existing frame identity, viewport, logical
 submission, and RGBA8 image comparison checks remain unchanged.
+The captured focus packet is serialized into the report, and comparison first
+rejects any WebGL2/WebGPU packet mismatch before reading the staged image. The
+evidence therefore names the exact composition semantics it measures rather
+than relying on mutable browser controls after the frame.
 
 Basic and focus PBR admission are intentionally disjoint:
 
