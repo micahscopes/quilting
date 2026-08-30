@@ -19,7 +19,7 @@ pub(crate) const PBR_NORMAL_TEXTURE_BIT: u32 = 1 << 2;
 pub(crate) const PBR_EMISSIVE_TEXTURE_BIT: u32 = 1 << 3;
 pub(crate) const PBR_OCCLUSION_TEXTURE_BIT: u32 = 1 << 4;
 pub(crate) const PBR_TRANSMISSION_TEXTURE_BIT: u32 = 1 << 5;
-const PBR_TEXTURE_CHANNELS: usize = 6;
+pub(crate) const PBR_TEXTURE_CHANNELS: usize = 6;
 
 pub(crate) struct PbrTextureResource {
     pub(crate) texture: wgpu::Texture,

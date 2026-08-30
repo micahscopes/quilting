@@ -13,6 +13,7 @@ mod pbr_environment;
 mod pbr_resources;
 mod pipeline_lowering;
 mod portable_texture_atlas;
+mod prepared_patch_pipeline;
 mod presentation;
 mod resident_roots;
 
@@ -32,6 +33,9 @@ pub use pbr_resources::{
 pub use portable_texture_atlas::{
     PortableTextureAtlasLimits, PortableTextureAtlasPlacement, PortableTextureAtlasPlan,
     PortableTextureAtlasPlanError,
+};
+pub use prepared_patch_pipeline::{
+    prepared_patch_pipeline_descriptors, PreparedPatchPipelineDescriptorError,
 };
 pub use presentation::{
     PatchPresentationSurface, PresentationSkipReason, SurfacePresentation,
