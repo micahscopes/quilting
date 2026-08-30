@@ -37,6 +37,17 @@ passed all 140 tests. The six interaction tests cover barycentric validation,
 focus-relative reach, ECS activation routing without duplicate selection,
 cross-entity cancellation, invalid-hit atomicity, and cadence invariance.
 
+`hyperscope-app` now retains the controller beside navigation and integrates it
+first on each virtual frame. Its 84-test native gate includes a three-action
+hover/press/release case proving that activation becomes the existing
+`AnchorFocus` action on the same application frame. The opt-in replay feature
+also type-checks without claiming a new serialized pointer-action schema.
+
+`HyperscopeAppShadow` exposes validated hover, clear, press, release, cancel,
+and snapshot methods. The route source smoke fences their delegation through
+`SemanticAction::Interact`; the exact `leptos-ui,webgpu-backend` WASM feature
+set passes `cargo check --target wasm32-unknown-unknown`.
+
 The command used one low-priority Cargo job and did not invoke Trunk,
 `wasm-pack`, or `wasm-opt`.
 
@@ -45,5 +56,6 @@ The command used one low-priority Cargo job and did not invoke Trunk,
 This is semantic-core evidence, not live browser authority. WebGL2/WebGPU ray
 or shape queries still need thin adapters that resolve packed renderer hits to
 the exact stable identity and enqueue these actions. Visualization such as
-hover/selection tint remains presentation policy. Generated-WASM exposure and
-a `js|shadow|rust` browser adoption gate should precede any incumbent removal.
+hover/selection tint remains presentation policy. A `js|shadow|rust` browser
+adoption gate and representative live parity evidence should precede any
+incumbent removal.

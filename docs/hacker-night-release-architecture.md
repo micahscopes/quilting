@@ -631,8 +631,11 @@ reach. Its state is deliberately ephemeral and contains no selected field; a
 same-identity press/release emits the existing `AnchorFocus` navigation action,
 and snapshots derive selection from `FocusNavigation::anchor`. This keeps
 WebGL2/WebGPU picking, selection tint, and DOM event shape outside semantic
-authority. Browser query plumbing and live rollback-gated adoption remain
-separate work; the Rust core does not yet claim live picking authority.
+authority. The generated `HyperscopeAppShadow` facade now validates and queues
+entity-level or face/barycentric hover plus primary press/release/cancel, and
+projects an interaction snapshot without mutating focus directly. Browser query
+plumbing and live rollback-gated adoption remain separate work; this boundary
+does not yet claim live picking authority.
 `selectionimpl=js|shadow|rust` is the rollback boundary: the Rust mode verifies
 the application identity against `AppStore`, joins only the backend-local packed
 node, and applies the selected focus packet directly to the resident renderer
