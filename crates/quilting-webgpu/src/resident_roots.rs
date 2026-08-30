@@ -144,6 +144,113 @@ struct ResidentRootWindingPipelines {
     clockwise: wgpu::RenderPipeline,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResidentRootPipelineKind {
+    Pbr,
+    PbrFocus,
+    Matcap,
+    Normals,
+    Lod,
+    Stretch,
+    Wire,
+    Highlight,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ResidentRootPipelinePass {
+    kind: ResidentRootPipelineKind,
+    label: &'static str,
+    fragment_entry_point: &'static str,
+    geometry: RenderGeometry,
+    depth_write: bool,
+    focus_mrt: bool,
+    uses_pbr: bool,
+}
+
+impl ResidentRootPipelinePass {
+    const fn topology(self) -> functional::PrimitiveTopology {
+        match self.geometry {
+            RenderGeometry::Triangles => functional::PrimitiveTopology::TriangleList,
+            RenderGeometry::Lines => functional::PrimitiveTopology::LineList,
+        }
+    }
+}
+
+const RESIDENT_ROOT_PIPELINE_PASSES: [ResidentRootPipelinePass; 8] = [
+    ResidentRootPipelinePass {
+        kind: ResidentRootPipelineKind::Pbr,
+        label: "quilting resident root PBR",
+        fragment_entry_point: quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_PBR_ENTRY_POINT,
+        geometry: RenderGeometry::Triangles,
+        depth_write: true,
+        focus_mrt: false,
+        uses_pbr: true,
+    },
+    ResidentRootPipelinePass {
+        kind: ResidentRootPipelineKind::PbrFocus,
+        label: "quilting resident root focus PBR",
+        fragment_entry_point: quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_PBR_FOCUS_ENTRY_POINT,
+        geometry: RenderGeometry::Triangles,
+        depth_write: true,
+        focus_mrt: true,
+        uses_pbr: true,
+    },
+    ResidentRootPipelinePass {
+        kind: ResidentRootPipelineKind::Matcap,
+        label: "quilting resident root matcap",
+        fragment_entry_point: quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_MATCAP_ENTRY_POINT,
+        geometry: RenderGeometry::Triangles,
+        depth_write: true,
+        focus_mrt: false,
+        uses_pbr: false,
+    },
+    ResidentRootPipelinePass {
+        kind: ResidentRootPipelineKind::Normals,
+        label: "quilting resident root normals",
+        fragment_entry_point: quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_NORMALS_ENTRY_POINT,
+        geometry: RenderGeometry::Triangles,
+        depth_write: true,
+        focus_mrt: false,
+        uses_pbr: false,
+    },
+    ResidentRootPipelinePass {
+        kind: ResidentRootPipelineKind::Lod,
+        label: "quilting resident root LOD",
+        fragment_entry_point: quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_LOD_ENTRY_POINT,
+        geometry: RenderGeometry::Triangles,
+        depth_write: true,
+        focus_mrt: false,
+        uses_pbr: false,
+    },
+    ResidentRootPipelinePass {
+        kind: ResidentRootPipelineKind::Stretch,
+        label: "quilting resident root stretch",
+        fragment_entry_point: quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_STRETCH_ENTRY_POINT,
+        geometry: RenderGeometry::Triangles,
+        depth_write: true,
+        focus_mrt: false,
+        uses_pbr: false,
+    },
+    ResidentRootPipelinePass {
+        kind: ResidentRootPipelineKind::Wire,
+        label: "quilting resident root wire",
+        fragment_entry_point: quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_WIRE_ENTRY_POINT,
+        geometry: RenderGeometry::Lines,
+        depth_write: true,
+        focus_mrt: false,
+        uses_pbr: false,
+    },
+    ResidentRootPipelinePass {
+        kind: ResidentRootPipelineKind::Highlight,
+        label: "quilting resident root highlight",
+        fragment_entry_point: quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT,
+        geometry: RenderGeometry::Triangles,
+        depth_write: false,
+        focus_mrt: false,
+        uses_pbr: false,
+    },
+];
+
 /// Pure pipeline family for direct source-root rendering. The returned order
 /// is stable: each semantic pass contributes counter-clockwise then clockwise
 /// state, including line rendering where winding does not affect rasterization.
@@ -213,66 +320,8 @@ pub fn resident_root_pipeline_descriptors(
     )?;
     let vertex_buffer = position_vertex_buffer()?;
     let alpha_blend = alpha_blending();
-    let passes = [
-        (
-            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_PBR_ENTRY_POINT,
-            RenderGeometry::Triangles,
-            true,
-            false,
-            true,
-        ),
-        (
-            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_PBR_FOCUS_ENTRY_POINT,
-            RenderGeometry::Triangles,
-            true,
-            true,
-            true,
-        ),
-        (
-            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_MATCAP_ENTRY_POINT,
-            RenderGeometry::Triangles,
-            true,
-            false,
-            false,
-        ),
-        (
-            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_NORMALS_ENTRY_POINT,
-            RenderGeometry::Triangles,
-            true,
-            false,
-            false,
-        ),
-        (
-            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_LOD_ENTRY_POINT,
-            RenderGeometry::Triangles,
-            true,
-            false,
-            false,
-        ),
-        (
-            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_STRETCH_ENTRY_POINT,
-            RenderGeometry::Triangles,
-            true,
-            false,
-            false,
-        ),
-        (
-            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_WIRE_ENTRY_POINT,
-            RenderGeometry::Lines,
-            true,
-            false,
-            false,
-        ),
-        (
-            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT,
-            RenderGeometry::Triangles,
-            false,
-            false,
-            false,
-        ),
-    ];
-    let mut descriptors = Vec::with_capacity(passes.len() * 2);
-    for (fragment_entry_point, geometry, depth_write, focus_mrt, uses_pbr) in passes {
+    let mut descriptors = Vec::with_capacity(RESIDENT_ROOT_PIPELINE_PASSES.len() * 2);
+    for pass in RESIDENT_ROOT_PIPELINE_PASSES {
         for front_face in [
             functional::FrontFace::CounterClockwise,
             functional::FrontFace::Clockwise,
@@ -282,7 +331,7 @@ pub fn resident_root_pipeline_descriptors(
                 blend: Some(alpha_blend),
                 write_mask: functional::ColorWriteMask::ALL,
             }];
-            if focus_mrt {
+            if pass.focus_mrt {
                 color_targets.push(functional::ColorTargetStateDescriptor {
                     format: functional::TextureFormat::Rgba16Float,
                     blend: None,
@@ -294,26 +343,23 @@ pub fn resident_root_pipeline_descriptors(
                     vertex_shader.clone(),
                     Some(shader(
                         functional::ShaderStage::Fragment,
-                        fragment_entry_point,
+                        pass.fragment_entry_point,
                     )?),
                     Vec::new(),
                 )?,
-                if uses_pbr {
+                if pass.uses_pbr {
                     pbr_layout.clone()
                 } else {
                     diagnostic_layout.clone()
                 },
                 vec![vertex_buffer.clone()],
                 functional::PrimitiveStateDescriptor {
-                    topology: match geometry {
-                        RenderGeometry::Triangles => functional::PrimitiveTopology::TriangleList,
-                        RenderGeometry::Lines => functional::PrimitiveTopology::LineList,
-                    },
+                    topology: pass.topology(),
                     strip_index_format: None,
                     front_face,
                     cull_mode: functional::CullMode::None,
                 },
-                depth_state(depth_format, depth_write)?,
+                depth_state(depth_format, pass.depth_write)?,
                 color_targets,
                 functional::MultisampleStateDescriptor {
                     count: sample_count,
@@ -328,6 +374,35 @@ pub fn resident_root_pipeline_descriptors(
 #[cfg(test)]
 mod resident_pipeline_descriptor_tests {
     use super::*;
+
+    #[test]
+    fn one_semantic_pass_plan_drives_descriptor_and_runtime_families() {
+        assert_eq!(
+            RESIDENT_ROOT_PIPELINE_PASSES
+                .iter()
+                .map(|pass| pass.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                ResidentRootPipelineKind::Pbr,
+                ResidentRootPipelineKind::PbrFocus,
+                ResidentRootPipelineKind::Matcap,
+                ResidentRootPipelineKind::Normals,
+                ResidentRootPipelineKind::Lod,
+                ResidentRootPipelineKind::Stretch,
+                ResidentRootPipelineKind::Wire,
+                ResidentRootPipelineKind::Highlight,
+            ],
+        );
+        assert!(RESIDENT_ROOT_PIPELINE_PASSES[0].uses_pbr);
+        assert!(RESIDENT_ROOT_PIPELINE_PASSES[1].uses_pbr);
+        assert!(RESIDENT_ROOT_PIPELINE_PASSES[1].focus_mrt);
+        assert_eq!(
+            RESIDENT_ROOT_PIPELINE_PASSES[6].geometry,
+            RenderGeometry::Lines,
+        );
+        assert!(!RESIDENT_ROOT_PIPELINE_PASSES[7].depth_write);
+        assert_eq!(RESIDENT_ROOT_PIPELINE_PASSES.len() * 2, 16);
+    }
 
     #[test]
     fn functional_family_covers_every_pass_winding_layout_and_attachment() {
@@ -700,18 +775,25 @@ impl LodClassifierDevice {
             pbr_portable_atlas_bind_group_layout,
             pbr_environment_bind_group_layout,
         ) = if let Some(descriptors) = descriptors {
-            if descriptors.len() != 16 {
+            let expected_descriptor_count = RESIDENT_ROOT_PIPELINE_PASSES.len() * 2;
+            if descriptors.len() != expected_descriptor_count {
                 return Err(LodWebGpuError::Payload(
-                    "functional resident-root pipeline family must contain sixteen variants"
-                        .to_string(),
+                    format!(
+                        "functional resident-root pipeline family must contain {expected_descriptor_count} variants",
+                    ),
                 ));
             }
+            let pbr_descriptor_count = RESIDENT_ROOT_PIPELINE_PASSES
+                .iter()
+                .take_while(|pass| pass.uses_pbr)
+                .count()
+                * 2;
             let pbr_layout = descriptors[0].layout();
-            let diagnostic_layout = descriptors[4].layout();
-            if descriptors[..4]
+            let diagnostic_layout = descriptors[pbr_descriptor_count].layout();
+            if descriptors[..pbr_descriptor_count]
                 .iter()
                 .any(|descriptor| descriptor.layout() != pbr_layout)
-                || descriptors[4..]
+                || descriptors[pbr_descriptor_count..]
                     .iter()
                     .any(|descriptor| descriptor.layout() != diagnostic_layout)
                 || pbr_layout.groups().len() != 3
@@ -830,13 +912,9 @@ impl LodClassifierDevice {
         });
         let attributes = wgpu::vertex_attr_array![0 => Float32x3];
         let create = |index: usize,
-                      label,
-                      fragment_entry_point,
-                      geometry,
+                      pass: ResidentRootPipelinePass,
                       front_face,
-                      pipeline_layout: &wgpu::PipelineLayout,
-                      depth_write_enabled,
-                      raw_field_format: Option<wgpu::TextureFormat>|
+                      pipeline_layout: &wgpu::PipelineLayout|
          -> Result<wgpu::RenderPipeline, LodWebGpuError> {
             if let Some(descriptors) = descriptors {
                 let descriptor = &descriptors[index];
@@ -845,24 +923,19 @@ impl LodClassifierDevice {
                         "functional resident-root pipeline is missing a fragment stage".to_string(),
                     )
                 })?;
-                let expected_topology = match geometry {
-                    RenderGeometry::Triangles => functional::PrimitiveTopology::TriangleList,
-                    RenderGeometry::Lines => functional::PrimitiveTopology::LineList,
-                };
                 let expected_front_face = match front_face {
                     wgpu::FrontFace::Ccw => functional::FrontFace::CounterClockwise,
                     wgpu::FrontFace::Cw => functional::FrontFace::Clockwise,
                 };
-                let expected_depth_write = depth_format.map(|_| depth_write_enabled);
-                if fragment.entry_point() != fragment_entry_point
-                    || descriptor.primitive().topology != expected_topology
+                let expected_depth_write = depth_format.map(|_| pass.depth_write);
+                if fragment.entry_point() != pass.fragment_entry_point
+                    || descriptor.primitive().topology != pass.topology()
                     || descriptor.primitive().front_face != expected_front_face
                     || descriptor
                         .depth_stencil()
                         .map(|state| state.depth_write_enabled)
                         != expected_depth_write
-                    || descriptor.color_targets().len()
-                        != 1 + usize::from(raw_field_format.is_some())
+                    || descriptor.color_targets().len() != 1 + usize::from(pass.focus_mrt)
                 {
                     return Err(LodWebGpuError::Payload(
                         "functional resident-root pipeline order is inconsistent".to_string(),
@@ -870,7 +943,7 @@ impl LodClassifierDevice {
                 }
                 return crate::pipeline_lowering::render_pipeline(
                     &self.device,
-                    label,
+                    pass.label,
                     pipeline_layout,
                     &module,
                     descriptor,
@@ -881,9 +954,9 @@ impl LodClassifierDevice {
                 blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                 write_mask: wgpu::ColorWrites::ALL,
             })];
-            if let Some(format) = raw_field_format {
+            if pass.focus_mrt {
                 targets.push(Some(wgpu::ColorTargetState {
-                    format,
+                    format: wgpu::TextureFormat::Rgba16Float,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 }));
@@ -891,7 +964,7 @@ impl LodClassifierDevice {
             Ok(self
                 .device
                 .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(label),
+                    label: Some(pass.label),
                     layout: Some(pipeline_layout),
                     vertex: wgpu::VertexState {
                         module: &module,
@@ -906,7 +979,7 @@ impl LodClassifierDevice {
                         }],
                     },
                     primitive: wgpu::PrimitiveState {
-                        topology: match geometry {
+                        topology: match pass.geometry {
                             RenderGeometry::Triangles => wgpu::PrimitiveTopology::TriangleList,
                             RenderGeometry::Lines => wgpu::PrimitiveTopology::LineList,
                         },
@@ -915,7 +988,7 @@ impl LodClassifierDevice {
                         ..Default::default()
                     },
                     depth_stencil: depth_stencil.clone().map(|mut state| {
-                        state.depth_write_enabled = Some(depth_write_enabled);
+                        state.depth_write_enabled = Some(pass.depth_write);
                         state
                     }),
                     multisample: wgpu::MultisampleState {
@@ -924,7 +997,7 @@ impl LodClassifierDevice {
                     },
                     fragment: Some(wgpu::FragmentState {
                         module: &module,
-                        entry_point: Some(fragment_entry_point),
+                        entry_point: Some(pass.fragment_entry_point),
                         compilation_options: Default::default(),
                         targets: &targets,
                     }),
@@ -932,125 +1005,38 @@ impl LodClassifierDevice {
                     cache: None,
                 }))
         };
-        let create_style = |base_index,
-                            label,
-                            fragment_entry_point,
-                            geometry,
-                            pipeline_layout|
-         -> Result<ResidentRootWindingPipelines, LodWebGpuError> {
-            Ok(ResidentRootWindingPipelines {
-                counter_clockwise: create(
-                    base_index,
-                    label,
-                    fragment_entry_point,
-                    geometry,
-                    wgpu::FrontFace::Ccw,
-                    pipeline_layout,
-                    true,
-                    None,
-                )?,
-                clockwise: create(
-                    base_index + 1,
-                    label,
-                    fragment_entry_point,
-                    geometry,
-                    wgpu::FrontFace::Cw,
-                    pipeline_layout,
-                    true,
-                    None,
-                )?,
-            })
-        };
+        let mut winding_pipelines = Vec::with_capacity(RESIDENT_ROOT_PIPELINE_PASSES.len());
+        for (pass_index, pass) in RESIDENT_ROOT_PIPELINE_PASSES.into_iter().enumerate() {
+            let base_index = pass_index * 2;
+            let pipeline_layout = if pass.uses_pbr {
+                &pbr_pipeline_layout
+            } else {
+                &diagnostic_pipeline_layout
+            };
+            winding_pipelines.push(ResidentRootWindingPipelines {
+                counter_clockwise: create(base_index, pass, wgpu::FrontFace::Ccw, pipeline_layout)?,
+                clockwise: create(base_index + 1, pass, wgpu::FrontFace::Cw, pipeline_layout)?,
+            });
+        }
+        let winding_pipelines: [ResidentRootWindingPipelines; 8] =
+            winding_pipelines.try_into().map_err(|_| {
+                LodWebGpuError::Payload(
+                    "resident-root pass plan did not produce eight pipeline families".to_string(),
+                )
+            })?;
+        let [pbr, pbr_focus, matcap, normals, lod, stretch, wire, highlight] = winding_pipelines;
         Ok(ResidentRootRenderPipeline {
             color_format,
             sample_count,
             bind_group_layout,
-            pbr: create_style(
-                0,
-                "quilting resident root PBR",
-                quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_PBR_ENTRY_POINT,
-                RenderGeometry::Triangles,
-                &pbr_pipeline_layout,
-            )?,
-            pbr_focus: ResidentRootWindingPipelines {
-                counter_clockwise: create(
-                    2,
-                    "quilting resident root focus PBR",
-                    quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_PBR_FOCUS_ENTRY_POINT,
-                    RenderGeometry::Triangles,
-                    wgpu::FrontFace::Ccw,
-                    &pbr_pipeline_layout,
-                    true,
-                    Some(wgpu::TextureFormat::Rgba16Float),
-                )?,
-                clockwise: create(
-                    3,
-                    "quilting resident root focus PBR",
-                    quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_PBR_FOCUS_ENTRY_POINT,
-                    RenderGeometry::Triangles,
-                    wgpu::FrontFace::Cw,
-                    &pbr_pipeline_layout,
-                    true,
-                    Some(wgpu::TextureFormat::Rgba16Float),
-                )?,
-            },
-            matcap: create_style(
-                4,
-                "quilting resident root matcap",
-                quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_MATCAP_ENTRY_POINT,
-                RenderGeometry::Triangles,
-                &diagnostic_pipeline_layout,
-            )?,
-            normals: create_style(
-                6,
-                "quilting resident root normals",
-                quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_NORMALS_ENTRY_POINT,
-                RenderGeometry::Triangles,
-                &diagnostic_pipeline_layout,
-            )?,
-            lod: create_style(
-                8,
-                "quilting resident root LOD",
-                quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_LOD_ENTRY_POINT,
-                RenderGeometry::Triangles,
-                &diagnostic_pipeline_layout,
-            )?,
-            stretch: create_style(
-                10,
-                "quilting resident root stretch",
-                quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_STRETCH_ENTRY_POINT,
-                RenderGeometry::Triangles,
-                &diagnostic_pipeline_layout,
-            )?,
-            wire: create_style(
-                12,
-                "quilting resident root wire",
-                quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_WIRE_ENTRY_POINT,
-                RenderGeometry::Lines,
-                &diagnostic_pipeline_layout,
-            )?,
-            highlight: ResidentRootWindingPipelines {
-                counter_clockwise: create(
-                    14,
-                    "quilting resident root highlight",
-                    quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT,
-                    RenderGeometry::Triangles,
-                    wgpu::FrontFace::Ccw,
-                    &diagnostic_pipeline_layout,
-                    false,
-                    None,
-                )?,
-                clockwise: create(
-                    15,
-                    "quilting resident root highlight",
-                    quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT,
-                    RenderGeometry::Triangles,
-                    wgpu::FrontFace::Cw,
-                    &diagnostic_pipeline_layout,
-                    false,
-                    None,
-                )?,
-            },
+            pbr,
+            pbr_focus,
+            matcap,
+            normals,
+            lod,
+            stretch,
+            wire,
+            highlight,
             pbr_portable_atlas_bind_group_layout,
             pbr_environment_bind_group_layout,
         })
