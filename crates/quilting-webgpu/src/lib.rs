@@ -9,6 +9,7 @@
 mod adaptive_overlay;
 mod pbr_environment;
 mod pbr_resources;
+mod portable_texture_atlas;
 mod presentation;
 mod resident_roots;
 
@@ -18,6 +19,10 @@ pub use adaptive_overlay::{
 pub use pbr_environment::{PbrEnvironmentBindings, PbrEnvironmentMap};
 pub use pbr_resources::{
     PbrMaterialTextureBindings, PbrMaterialTextureResidency, PbrTextureTable, PbrTextureTableUpdate,
+};
+pub use portable_texture_atlas::{
+    PortableTextureAtlasLimits, PortableTextureAtlasPlacement, PortableTextureAtlasPlan,
+    PortableTextureAtlasPlanError,
 };
 pub use presentation::{
     PatchPresentationSurface, PresentationSkipReason, SurfacePresentation,
