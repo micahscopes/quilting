@@ -160,8 +160,12 @@ commands directly; a mismatch falls back before the first diagnostic draw.
 `lastExecutionError` make that gate observable through the existing render
 shadow diagnostics. The default WebGL2 path still consumes the shared pass plan
 without the shadow's per-frame scene validation, so this measured cutover adds
-no default CPU scan. PBR remains on its incumbent interleaved composition path
-until transmission and focus commands are lowered explicitly.
+no default CPU scan. PBR shadow frames preflight the same exact residency and
+lower the canonical opaque/transparent order plus transmission-pyramid and
+focus-postprocess boundaries into an owned renderer plan. Browser framebuffer,
+material, and texture effects remain incumbent, but their control flow now
+follows that plan; a validation failure retains the complete legacy selection
+path for the frame.
 
 `RenderStyle` also resolves to one canonical ordered `RenderDrawPassPlan`
 slice. Each pass names its geometry and semantic batch selection (`all`, PBR
