@@ -638,8 +638,10 @@ residency is registered through an atomic `InteractionTargetTable`: transient
 packed nodes carry source bounds and optional stable asset/entity identity,
 while WebGL2/WebGPU samples carry only the packed node, source pivot, displayed
 distance, and optional surface coordinate. The Rust join rejects unknown or
-unmapped nodes before semantic dispatch and remains adapter state rather than
-durable `AppState`. Browser query plumbing now has a shadow-only first slice:
+unmapped nodes before semantic dispatch. Each replacement advances a checked
+residency epoch, preventing delayed WebGPU results from resolving a reused
+packed handle. The table remains adapter state rather than durable `AppState`.
+Browser query plumbing now has a shadow-only first slice:
 the WebGL2 pick evaluates the exact
 animated QB point in source and displayed charts only on explicit picks, while
 `selectionimpl=shadow` sends hover/press/release and compares the resulting

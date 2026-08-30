@@ -289,8 +289,9 @@ or sphere state.
    atomically joins transient packed nodes to optional stable identity and
    source bounds. WebGL2 and WebGPU queries therefore supply the same compact
    packed-node/surface sample instead of independently rebuilding semantic
-   identity. `selectionimpl=shadow` routes mouse and
-   view-center picks through hover/press/release, compares the activated stable
+   identity. A checked residency epoch rejects asynchronous query results after
+   their packed handles have been replaced. `selectionimpl=shadow` routes mouse
+   and view-center picks through hover/press/release, compares the activated stable
    identity, and falls back to the incumbent direct observer without changing
    renderer authority. Replay 0.25 records exact interaction actions and state,
    including face/barycentric detail, and rejects those events under 0.24.

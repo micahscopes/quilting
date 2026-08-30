@@ -26,7 +26,9 @@ identity in one validated replacement. A WebGL2 or WebGPU query then supplies
 only the packed node, source pivot, displayed distance, and optional
 face/barycentrics. Rust performs the join before constructing
 `InteractionHit`; an unknown or deliberately unmapped node cannot masquerade as
-semantic identity.
+semantic identity. Every replacement advances a checked residency epoch carried
+by query samples, so a delayed asynchronous WebGPU result cannot resolve a
+reused packed handle in the next scene.
 
 ## Determinism and failure policy
 
@@ -47,7 +49,7 @@ passes all 142 tests. The eight interaction tests cover barycentric validation,
 focus-relative reach, ECS activation routing without duplicate selection,
 cross-entity cancellation, invalid-hit atomicity, cadence invariance,
 asset-scoped packed-node resolution, and atomic rejection of duplicate,
-unknown, unmapped, or non-finite target samples.
+unknown, unmapped, stale-epoch, or non-finite target samples.
 
 `hyperscope-app` now retains the controller beside navigation and integrates it
 first on each virtual frame. Replay schema 0.25 records the complete semantic
