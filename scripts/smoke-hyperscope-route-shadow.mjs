@@ -70,6 +70,8 @@ assert.equal(specs.find(spec => spec.key === 'appshadow').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'rendershadow').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'adaptiveshadow').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'rootgroupshadow').kind, 'toggle');
+assert.equal(specs.find(spec => spec.key === 'navstateimpl').kind, 'implementation');
+assert.equal(specs.find(spec => spec.key === 'navstateimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'walkimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'navimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'navimpl').defaultValue, 'js');
@@ -175,10 +177,10 @@ for (const [key, value] of [
 }
 
 const browserSource = readFileSync(`${repository}/hyperscope.html`, 'utf8');
-const renderControlsSource = readFileSync(
+const renderControlsSource = [
+  `${repository}/crates/hyperscope-web/src/render_controls.rs`,
   `${repository}/crates/hyperscope-web/src/render_controls/csr.rs`,
-  'utf8',
-);
+].map(path => readFileSync(path, 'utf8')).join('\n');
 const legacyRouteNormalizerSource = browserSource.match(
   /function normalizeLegacyRouteShadow\(params\) \{[\s\S]*?\n\}/,
 )?.[0];
@@ -255,7 +257,28 @@ assert.ok(policyDefaultsSource, 'could not locate pre-WASM adapter policy defaul
 const policyDefaults = JSON.parse(JSON.stringify(
   runInNewContext(`(${policyDefaultsSource})`),
 ));
-assert.equal(Object.keys(policyDefaults).length, 18);
+assert.deepEqual(Object.keys(policyDefaults), [
+  'gfx',
+  'presentation',
+  'presentimpl',
+  'roundshadow',
+  'selectionimpl',
+  'sceneimpl',
+  'assetimpl',
+  'animclockimpl',
+  'animclipimpl',
+  'renderstateimpl',
+  'patchlabimpl',
+  'appshadow',
+  'routeimpl',
+  'rendershadow',
+  'lodimpl',
+  'adaptiveshadow',
+  'rootgroupshadow',
+  'navstateimpl',
+  'walkimpl',
+  'navimpl',
+]);
 for (const [key, value] of Object.entries(policyDefaults)) {
   assert.equal(
     rustDefaults[key],
@@ -280,9 +303,24 @@ for (const implementation of ['js', 'shadow', 'rust']) {
     ),
     implementation,
   );
+  assert.equal(
+    implementationFromRoute(
+      new URLSearchParams(`navstateimpl=${implementation}`),
+      'navstateimpl',
+    ),
+    implementation,
+  );
+  assert.deepEqual(
+    canonicalizeHyperscopeRoute([['navstateimpl', implementation]]).pairs,
+    implementation === 'js' ? [] : [['navstateimpl', implementation]],
+  );
 }
 assert.equal(
   implementationFromRoute(new URLSearchParams(), 'navimpl'),
+  'js',
+);
+assert.equal(
+  implementationFromRoute(new URLSearchParams(), 'navstateimpl'),
   'js',
 );
 assert.equal(
@@ -448,6 +486,24 @@ for (const navigationAuthorityStep of [
     `browser navigation authority adapter is missing ${navigationAuthorityStep}`,
   );
 }
+for (const navigationSettingsAuthorityStep of [
+  "implementationFromRoute(\n  initialNavigationParams, 'navstateimpl',\n)",
+  "RUST_NAVIGATION_SETTINGS_IMPLEMENTATION !== 'js'",
+  'function browserNavigationSettingsState()',
+  'app.setNavigationSettings(',
+  'function navigationSettingsContentEqual(left, right)',
+  'function applyRustNavigationSettingsProjection(navigation)',
+  "RUST_NAVIGATION_SETTINGS_IMPLEMENTATION === 'rust'",
+  'batchSignals(() => {',
+  'scheduleRustNavigationSettingsSynchronization();',
+  "set(\n        'navstateimpl',",
+  'globalThis.__hyperscopeNavigationSettings = rustNavigationSettingsDiagnostics;',
+]) {
+  assert.ok(
+    browserSource.includes(navigationSettingsAuthorityStep),
+    `browser navigation-settings adapter is missing ${navigationSettingsAuthorityStep}`,
+  );
+}
 for (const graphicsBackendStep of [
   "import * as quiltingWasmBackend from './pkg/quilting_wasm.js';",
   "const GRAPHICS_BACKEND_REQUEST = graphicsBackendFromRoute(initialBrowserParams);",
@@ -557,6 +613,12 @@ assert.throws(
   ))),
   /drifted from bootstrap/,
 );
+assert.throws(
+  () => installRouteDefaults(specs.map(spec => (
+    spec.key === 'navstateimpl' ? { ...spec, defaultValue: 'rust' } : spec
+  ))),
+  /drifted from bootstrap/,
+);
 const implicitBrowserDefaults = {
   presentation: '0',
   roundshadow: '0',
@@ -660,7 +722,7 @@ for (const directDispatchStep of [
   'project_render_controls(&store.render_snapshot())',
   'emit_committed(',
   'emit_error(error_callback,',
-  'arguments.push(&JsValue::from(sequence));',
+  'arguments.push(&JsValue::from(committed.sequence));',
 ]) {
   assert.ok(
     renderControlsSource.includes(directDispatchStep),
@@ -743,7 +805,7 @@ assert.deepEqual(
 for (const targetPolicyStep of [
   "set(\n      'aim',\n      manualCameraSemanticTargetEnabled ? '1' : '0',",
   "manualCameraSemanticTargetEnabled = initParams.aim === '1';",
-  "manualCameraSemanticTargetEnabled = params.aim === '1';",
+  "manualCameraSemanticTargetEnabled = routeCamera?.semanticTargetEnabled\n    ?? params.aim === '1';",
 ]) {
   assert.ok(
     browserSource.includes(targetPolicyStep),
@@ -835,6 +897,7 @@ for (const startupStep of [
   'const startupRoute = evaluateRustRoute(startupBrowserParams, false);',
   'startupRoute.diagnostics.length === 0',
   '&& startupRoute.renderSettings',
+  '&& startupRoute.navigationSettings',
   'new URLSearchParams(startupRoute.resolvedPairs),',
   'new URLSearchParams(startupRoute.pairs),',
   'initRenderSettings = startupRoute.renderSettings;',
@@ -842,7 +905,7 @@ for (const startupStep of [
   'initRouteSelection = startupRoute.selection ?? null;',
   'initRouteAnimationClock = startupRoute.animationClock ?? null;',
   "rustRouteShadowDiagnostics.startupSource = 'browser-fallback';",
-  "'missing-typed-render-settings'",
+  "'missing-typed-route-settings'",
   'initRouteSelection,',
   'initRouteAnimationClock,',
   "dispatchRustRenderSettings(\n        app,\n        initRenderSettings,\n        'route-startup',",
@@ -928,8 +991,10 @@ for (const exactProjection of [
 for (const exactAdmissionStep of [
   'rustRouteAdmitted ? Number(value) : finite(value, fallback, minimum, maximum);',
   'rustRouteAdmitted ? Number(value) : integer(value, fallback, minimum, maximum);',
-  'mob.mx.set(admittedNumber(params.mx, 5, -30, 30));',
-  'cameraFovDegrees.set(admittedInteger(params.fov, 75, 35, 110));',
+  'mob.mx.set(routeTransform?.centerControls[0]',
+  '?? admittedNumber(params.mx, 5, -30, 30));',
+  'cameraFovDegrees.set(routeCamera?.verticalFovDegrees',
+  '?? admittedInteger(params.fov, 75, 35, 110));',
   '$(id).max = atlasExp;',
   '$(id).value = admittedInteger(value, fallback, 0, atlasExp);',
   'fz.radius.set(admittedInteger(params.fradius, 11, 4, 128));',

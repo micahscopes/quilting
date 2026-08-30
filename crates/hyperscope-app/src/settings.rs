@@ -245,6 +245,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     numeric_spec!("walkspeed", "0", Number, -400.0, 400.0, false, 1.0),
     numeric_spec!("walkscale", "0", Number, -800.0, 800.0, false, 1.0),
     numeric_spec!("walkheight", "0", Number, -400.0, 400.0, false, 1.0),
+    spec!("navstateimpl", "js", Implementation),
     spec!("walkimpl", "js", Implementation),
     spec!("navimpl", "js", Implementation),
     spec!("selectionimpl", "rust", Implementation),
@@ -1207,6 +1208,7 @@ mod tests {
     #[test]
     fn implementation_routes_admit_only_measured_authority_modes() {
         for key in [
+            "navstateimpl",
             "walkimpl",
             "navimpl",
             "selectionimpl",

@@ -511,6 +511,7 @@ const BOOTSTRAP_POLICY_DEFAULTS = Object.freeze({
   lodimpl: 'js',
   adaptiveshadow: '0',
   rootgroupshadow: '0',
+  navstateimpl: 'js',
   walkimpl: 'js',
   navimpl: 'js',
 });
@@ -574,6 +575,9 @@ const $ = id => document.getElementById(id);
 const RUST_NAVIGATION_IMPLEMENTATION = implementationFromRoute(
   initialNavigationParams, 'navimpl',
 );
+const RUST_NAVIGATION_SETTINGS_IMPLEMENTATION = implementationFromRoute(
+  initialNavigationParams, 'navstateimpl',
+);
 const RUST_NAVIGATION_SHADOW_ENABLED =
   RUST_NAVIGATION_IMPLEMENTATION === 'shadow';
 const RUST_PRESENTATION_ENABLED =
@@ -609,6 +613,7 @@ const EXPLICIT_RUST_APP_SHADOW_ENABLED =
 const RUST_APP_SHADOW_ENABLED =
   EXPLICIT_RUST_APP_SHADOW_ENABLED
   || RUST_NAVIGATION_IMPLEMENTATION !== 'js'
+  || RUST_NAVIGATION_SETTINGS_IMPLEMENTATION !== 'js'
   || RUST_ASSET_IMPLEMENTATION !== 'js'
   || ANIMATION_CLOCK_IMPLEMENTATION !== 'js'
   || ANIMATION_CLIP_IMPLEMENTATION !== 'js'
@@ -1729,6 +1734,11 @@ function syncURL() {
       ss('walkspeed', walkSpeedSteps, PARAM_DEFAULTS.walkspeed);
       ss('walkscale', walkScaleSteps, PARAM_DEFAULTS.walkscale);
       ss('walkheight', walkHeightSteps, PARAM_DEFAULTS.walkheight);
+      set(
+        'navstateimpl',
+        RUST_NAVIGATION_SETTINGS_IMPLEMENTATION,
+        PARAM_DEFAULTS.navstateimpl,
+      );
       set('walkimpl', SURFACE_WALK_IMPLEMENTATION, PARAM_DEFAULTS.walkimpl);
       set('navimpl', RUST_NAVIGATION_IMPLEMENTATION, PARAM_DEFAULTS.navimpl);
       set('selectionimpl', RUST_SELECTION_IMPLEMENTATION, PARAM_DEFAULTS.selectionimpl);
@@ -1963,12 +1973,16 @@ effect(() => {
   spaceMouseHyperscopeRotateInvert.get();
   spaceMouseBlenderPanInvert.get();
   spaceMouseBlenderRotateInvert.get();
+  syncURL();
+});
+effect(() => {
   focusTransitionCentiseconds.get();
   walkSmoothingCentiseconds.get();
   walkTangentPullPercent.get();
   walkSpeedSteps.get();
   walkScaleSteps.get();
   walkHeightSteps.get();
+  if (wasmOk.get()) scheduleRustNavigationSettingsSynchronization();
   syncURL();
 });
 const spaceMouseStatus = $('spacemouse-status');
@@ -3998,6 +4012,23 @@ const rustAppShadowDiagnostics = {
 };
 globalThis.__hyperscopeAppShadowDiagnostics = rustAppShadowDiagnostics;
 
+const rustNavigationSettingsDiagnostics = {
+  enabled: RUST_NAVIGATION_SETTINGS_IMPLEMENTATION !== 'js',
+  implementation: RUST_NAVIGATION_SETTINGS_IMPLEMENTATION,
+  state: RUST_NAVIGATION_SETTINGS_IMPLEMENTATION === 'js'
+    ? 'disabled' : 'awaiting-wasm',
+  dispatches: 0,
+  comparisons: 0,
+  mismatches: 0,
+  authorityWrites: 0,
+  authorityRollbacks: 0,
+  errors: 0,
+  lastBrowser: null,
+  lastRust: null,
+  lastError: null,
+};
+globalThis.__hyperscopeNavigationSettings = rustNavigationSettingsDiagnostics;
+
 const rustRenderSettingsDiagnostics = {
   enabled: RUST_RENDER_SETTINGS_IMPLEMENTATION !== 'js',
   implementation: RUST_RENDER_SETTINGS_IMPLEMENTATION,
@@ -4326,6 +4357,118 @@ function backendNeutralRenderStyle(mode) {
     throw new Error(`unsupported browser render mode ${mode}`);
   }
   return style;
+}
+
+function browserNavigationSettingsState() {
+  return {
+    transitionSeconds: Number(focusTransitionCentiseconds.peek()) / 100,
+    smoothingSeconds: Number(walkSmoothingCentiseconds.peek()) / 100,
+    tangentPullFraction: Number(walkTangentPullPercent.peek()) / 100,
+    speedOctaveSteps: Number(walkSpeedSteps.peek()),
+    bodyScaleOctaveSteps: Number(walkScaleSteps.peek()),
+    eyeHeightOctaveSteps: Number(walkHeightSteps.peek()),
+  };
+}
+
+const NAVIGATION_SETTINGS_FIELDS = Object.freeze([
+  'transitionSeconds',
+  'smoothingSeconds',
+  'tangentPullFraction',
+  'speedOctaveSteps',
+  'bodyScaleOctaveSteps',
+  'eyeHeightOctaveSteps',
+]);
+
+function navigationSettingsContentEqual(left, right) {
+  return NAVIGATION_SETTINGS_FIELDS.every(field =>
+    Number.isFinite(left?.[field])
+    && Number.isFinite(right?.[field])
+    && Math.abs(left[field] - right[field]) <= 1e-12);
+}
+
+function applyRustNavigationSettingsProjection(navigation) {
+  batchSignals(() => {
+    focusTransitionCentiseconds.set(navigation.transitionSeconds * 100);
+    walkSmoothingCentiseconds.set(navigation.smoothingSeconds * 100);
+    walkTangentPullPercent.set(navigation.tangentPullFraction * 100);
+    walkSpeedSteps.set(navigation.speedOctaveSteps);
+    walkScaleSteps.set(navigation.bodyScaleOctaveSteps);
+    walkHeightSteps.set(navigation.eyeHeightOctaveSteps);
+  });
+}
+
+function dispatchRustNavigationSettings(app, settings, source) {
+  const receipt = app.setNavigationSettings(
+    ++rustAppShadowSequence,
+    settings.transitionSeconds,
+    settings.smoothingSeconds,
+    settings.tangentPullFraction,
+    settings.speedOctaveSteps,
+    settings.bodyScaleOctaveSteps,
+    settings.eyeHeightOctaveSteps,
+  );
+  rustAppShadowDiagnostics.lastCommit = receipt.commit;
+  rustNavigationSettingsDiagnostics.dispatches += 1;
+  rustNavigationSettingsDiagnostics.lastRust = receipt.navigation;
+  rustNavigationSettingsDiagnostics.lastDispatchSource = source;
+  return receipt.navigation;
+}
+
+function synchronizeRustNavigationSettings() {
+  if (RUST_NAVIGATION_SETTINGS_IMPLEMENTATION === 'js' || !wasmOk.peek()) return false;
+  let app = null;
+  try {
+    const browser = browserNavigationSettingsState();
+    app = ensureRustAppShadow('navigation-settings');
+    const committed = app.snapshot().navigationSettings;
+    const rust = navigationSettingsContentEqual(browser, committed)
+      ? committed
+      : dispatchRustNavigationSettings(app, browser, 'browser-synchronization');
+    rustNavigationSettingsDiagnostics.comparisons += 1;
+    rustNavigationSettingsDiagnostics.lastBrowser = browser;
+    rustNavigationSettingsDiagnostics.lastRust = rust;
+    if (!navigationSettingsContentEqual(browser, rust)) {
+      rustNavigationSettingsDiagnostics.mismatches += 1;
+      recordAppShadowMismatch('navigation_settings', { browser, rust });
+    }
+    if (RUST_NAVIGATION_SETTINGS_IMPLEMENTATION === 'rust') {
+      applyRustNavigationSettingsProjection(rust);
+      rustNavigationSettingsDiagnostics.authorityWrites += 1;
+    }
+    rustNavigationSettingsDiagnostics.state =
+      RUST_NAVIGATION_SETTINGS_IMPLEMENTATION === 'rust'
+        ? 'authoritative' : 'observing';
+    rustNavigationSettingsDiagnostics.lastError = null;
+    return true;
+  } catch (error) {
+    rustNavigationSettingsDiagnostics.errors += 1;
+    rustNavigationSettingsDiagnostics.lastError = error?.message || String(error);
+    if (RUST_NAVIGATION_SETTINGS_IMPLEMENTATION === 'rust' && app) {
+      try {
+        applyRustNavigationSettingsProjection(app.snapshot().navigationSettings);
+        rustNavigationSettingsDiagnostics.authorityRollbacks += 1;
+      } catch (rollbackError) {
+        rustNavigationSettingsDiagnostics.lastError +=
+          `; rollback failed: ${rollbackError?.message || String(rollbackError)}`;
+      }
+    }
+    recordAppShadowMismatch(
+      'navigation_settings_exception',
+      rustNavigationSettingsDiagnostics.lastError,
+    );
+    return false;
+  }
+}
+
+let rustNavigationSettingsSyncScheduled = false;
+function scheduleRustNavigationSettingsSynchronization() {
+  if (RUST_NAVIGATION_SETTINGS_IMPLEMENTATION === 'js'
+      || rustNavigationSettingsSyncScheduled) return;
+  rustNavigationSettingsSyncScheduled = true;
+  queueMicrotask(() => {
+    rustNavigationSettingsSyncScheduled = false;
+    synchronizeRustNavigationSettings();
+  });
 }
 
 function browserRenderSettingsState() {
