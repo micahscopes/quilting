@@ -38,7 +38,7 @@ use quilting_core::batch::{
 use quilting_core::instance_layout::InstanceWriter;
 use quilting_core::material::{
     pbr_material_for_index, EnvironmentMapAsset, EnvironmentMapDescriptor, PbrAlphaMode,
-    PbrMaterial,
+    PbrMaterial, Rgba8TextureAsset, TextureAssetDescriptor, TextureWrapMode,
 };
 use quilting_core::render::{
     render_draw_passes, FocusFieldPacket, PbrDrawClass, RenderBatchSnapshot, RenderCommand,
@@ -1714,7 +1714,7 @@ impl LodClassifierDevice {
                         key: RenderBatchKey {
                             lod: [1; 3],
                             parity_bucket: 0,
-                            material_index: 1_000_000,
+                            material_index: 1,
                             render_node_index: 9,
                         },
                         layer: RenderBatchLayer::RetainedRoot,
@@ -1748,7 +1748,7 @@ impl LodClassifierDevice {
                         key: RenderBatchKey {
                             lod: [1; 3],
                             parity_bucket: 0,
-                            material_index: 1_000_000,
+                            material_index: 1,
                             render_node_index: 9,
                         },
                         layer: RenderBatchLayer::AdaptiveOverlay,
@@ -2105,22 +2105,39 @@ impl LodClassifierDevice {
         // orientation while retaining identity coordinates to exercise parity
         // bucketing. Make the PBR material double-sided so the raster proof is
         // independent of that intentionally inconsistent fixture metadata.
-        let mut pbr_render_scene = render_scene.clone();
-        pbr_render_scene.materials = vec![PbrMaterial {
+        let mut pbr_material = PbrMaterial {
             double_sided: true,
             ..PbrMaterial::default()
-        }];
+        };
+        pbr_material.textures.base_color = Some(0);
+        let mut pbr_render_scene = render_scene.clone();
+        pbr_render_scene.materials = vec![PbrMaterial::default(), pbr_material];
+        let pbr_texture_descriptor = TextureAssetDescriptor {
+            width: 1,
+            height: 1,
+            wrap_s: TextureWrapMode::Repeat,
+            wrap_t: TextureWrapMode::Repeat,
+        };
+        let pbr_texture_pixels = [0, 0, 255, 255];
+        let pbr_textures = self.upload_pbr_texture_table(&[Rgba8TextureAsset::new(
+            pbr_texture_descriptor,
+            &pbr_texture_pixels,
+        )
+        .map_err(|error| LodWebGpuError::Conformance(error.to_string()))?])?;
         let pbr_bindings = self.create_resident_root_render_bindings_with_pbr(
             &pipeline,
             &preparation,
             &geometry,
             &pbr_render_scene,
-            None,
+            Some(&pbr_textures),
             Some(&environment),
         )?;
-        if !pbr_bindings.supports_resident_untextured_pbr() {
+        if pbr_bindings.supports_resident_untextured_pbr()
+            || !pbr_bindings.supports_resident_basic_pbr()
+            || pbr_bindings.resident_pbr_material_slot() != Some(1)
+        {
             return Err(LodWebGpuError::Conformance(
-                "resident root PBR rejected factor-only material residency".to_string(),
+                "resident root PBR rejected exact single-material texture residency".to_string(),
             ));
         }
         let pbr_overlay_pipeline = overlay_pipelines
@@ -2132,7 +2149,7 @@ impl LodClassifierDevice {
                 &model,
                 &preparation,
                 &pbr_render_scene,
-                None,
+                Some(&pbr_textures),
                 Some(&environment),
             )?
             .ok_or_else(|| {
@@ -2140,9 +2157,11 @@ impl LodClassifierDevice {
                     "resident PBR conformance lost its adaptive overlay".to_string(),
                 )
             })?;
-        if !pbr_overlay.supports_resident_untextured_pbr() {
+        if pbr_overlay.supports_resident_untextured_pbr()
+            || !pbr_overlay.supports_resident_basic_pbr()
+        {
             return Err(LodWebGpuError::Conformance(
-                "adaptive PBR rejected factor-only material residency".to_string(),
+                "adaptive PBR rejected exact material-batched texture residency".to_string(),
             ));
         }
         if !pbr_bindings.supports_resident_root_frame(RenderStyle::Pbr, true)
@@ -2253,6 +2272,7 @@ impl LodClassifierDevice {
         let pbr_signature = render_image_signature(pbr_image, 0);
         if pbr_signature.covered_pixels == 0
             || pbr_signature.covered_pixels >= u64::from(WIDTH) * u64::from(HEIGHT)
+            || pbr_signature.channel_sums[2] <= pbr_signature.channel_sums[0] * 2
         {
             return Err(LodWebGpuError::Conformance(format!(
                 "resident adaptive PBR produced implausible image evidence: {pbr_signature:?}",

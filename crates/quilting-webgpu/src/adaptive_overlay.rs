@@ -75,6 +75,28 @@ impl AdaptiveOverlayScene {
                 .as_ref()
                 .is_some_and(PbrEnvironmentBindings::is_resident)
     }
+
+    /// Adaptive batches retain their material draw boundary, so authored
+    /// textures are exact whenever every referenced image is resident and the
+    /// shared environment epoch is complete.
+    pub fn supports_resident_basic_pbr(&self) -> bool {
+        self.pbr_scene_supported
+            && self
+                .bindings
+                .material_textures
+                .as_ref()
+                .is_some_and(|textures| {
+                    textures
+                        .residency()
+                        .iter()
+                        .all(|material| material.unresolved_mask() == 0)
+                })
+            && self
+                .bindings
+                .pbr_environment
+                .as_ref()
+                .is_some_and(PbrEnvironmentBindings::is_resident)
+    }
 }
 
 impl LodClassifierDevice {
@@ -334,7 +356,7 @@ impl LodClassifierDevice {
             })?;
         }
         let pbr_supported = frame.style == RenderStyle::Pbr
-            && overlay.supports_resident_untextured_pbr()
+            && overlay.supports_resident_basic_pbr()
             && validate_basic_pbr_frame(scene, frame.options).is_ok();
         if !(supports_patch_presentation_style(frame.style) || pbr_supported)
             || render_draw_passes(frame.style)
@@ -509,13 +531,15 @@ impl LodClassifierDevice {
                 } else {
                     PatchWinding::CounterClockwise
                 };
+                let material_slot =
+                    patch_pbr_material_slot(&scene.materials, batch.id.key.material_index)?;
                 pipeline.draw_batch(
                     &mut pass,
                     &overlay.bindings,
                     &overlay.visibility,
                     draw,
                     batch_index as u32,
-                    0,
+                    material_slot,
                     winding,
                 )?;
                 indirect_draw_calls = indirect_draw_calls.saturating_add(1);

@@ -1400,7 +1400,7 @@ pub(crate) fn submit_frame(
                 let adaptive_layer_supported = roots
                     .overlay
                     .as_ref()
-                    .is_none_or(AdaptiveOverlayScene::supports_resident_untextured_pbr);
+                    .is_none_or(AdaptiveOverlayScene::supports_resident_basic_pbr);
                 roots
                     .bindings
                     .supports_resident_root_frame(style, adaptive_layer_supported)

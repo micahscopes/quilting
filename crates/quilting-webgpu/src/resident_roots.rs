@@ -43,6 +43,38 @@ pub fn resident_root_render_domains(
         .map_err(|error| error.to_string())
 }
 
+fn resident_root_pbr_material_slot(
+    domains: &[ResidentRootDrawDomain],
+    materials: &[PbrMaterial],
+    textures: &PbrMaterialTextureBindings,
+) -> Result<Option<u32>, LodWebGpuError> {
+    if textures
+        .residency()
+        .iter()
+        .all(|material| material.referenced_mask() == 0)
+    {
+        return Ok(Some(0));
+    }
+
+    let mut active_slots = domains
+        .iter()
+        .filter(|domain| domain.enabled)
+        .map(|domain| patch_pbr_material_slot(materials, domain.material_index));
+    let Some(first) = active_slots.next().transpose()? else {
+        return Ok(Some(0));
+    };
+    for slot in active_slots {
+        if slot? != first {
+            return Ok(None);
+        }
+    }
+    Ok(textures
+        .residency()
+        .get(first as usize)
+        .is_some_and(|material| material.unresolved_mask() == 0)
+        .then_some(first))
+}
+
 /// Retained root-only geometry buckets derived from packed resident LOD.
 pub struct ResidentGeometryBucketScene {
     pub(super) model_identity: u64,
@@ -148,6 +180,7 @@ pub struct ResidentRootRenderBindings {
     _materials: wgpu::Buffer,
     material_textures: Option<PbrMaterialTextureBindings>,
     pbr_environment: Option<PbrEnvironmentBindings>,
+    pbr_material_slot: Option<u32>,
     pbr_scene_supported: bool,
     frame_words: Mutex<Vec<u32>>,
     _bucket_index_uniform: wgpu::Buffer,
@@ -183,9 +216,9 @@ impl ResidentRootRenderBindings {
 
     /// The portable root pipeline binds one sampled-texture group for the
     /// complete indirect bucket. It is therefore exact while every authored
-    /// material is factor-only; textured material domains stay on the
-    /// material-batched prepared renderer until a shared texture-addressing
-    /// scheme removes that draw boundary.
+    /// material is factor-only. This narrower diagnostic remains useful even
+    /// though [`Self::supports_resident_basic_pbr`] also admits one exact
+    /// textured material shared by every enabled root domain.
     pub fn supports_resident_untextured_pbr(&self) -> bool {
         self.pbr_scene_supported
             && self.pbr_texture_residency().is_some_and(|residency| {
@@ -198,11 +231,28 @@ impl ResidentRootRenderBindings {
                 .is_some_and(PbrEnvironmentBindings::is_resident)
     }
 
+    /// The direct root path can bind one portable material texture group for
+    /// all indirect atlas/parity buckets. Factor-only scenes may therefore
+    /// share the placeholder group, while textured scenes require every
+    /// enabled root domain to resolve to one fully resident material slot.
+    pub fn resident_pbr_material_slot(&self) -> Option<u32> {
+        (self.pbr_scene_supported
+            && self
+                .pbr_environment_bindings()
+                .is_some_and(PbrEnvironmentBindings::is_resident))
+        .then_some(self.pbr_material_slot)
+        .flatten()
+    }
+
+    pub fn supports_resident_basic_pbr(&self) -> bool {
+        self.resident_pbr_material_slot().is_some()
+    }
+
     /// Decide whether this coherent binding epoch can execute one frame from
     /// device-resident roots without semantic lowering. Diagnostic styles can
     /// composite their sparse overlay; PBR additionally requires the caller
-    /// to prove that its absent or retained adaptive layer has equivalent
-    /// factor-only material and environment bindings.
+    /// to prove that its absent or retained adaptive layer has exact material
+    /// and environment bindings.
     pub fn supports_resident_root_frame(
         &self,
         style: RenderStyle,
@@ -211,7 +261,7 @@ impl ResidentRootRenderBindings {
         supports_resident_root_render_style(style)
             || (style == RenderStyle::Pbr
                 && adaptive_layer_supported
-                && self.supports_resident_untextured_pbr())
+                && self.supports_resident_basic_pbr())
     }
 }
 
@@ -689,6 +739,11 @@ impl LodClassifierDevice {
                 )
             })
             .transpose()?;
+        let pbr_material_slot = material_textures
+            .as_ref()
+            .map(|textures| resident_root_pbr_material_slot(&domains.domains, materials, textures))
+            .transpose()?
+            .flatten();
         let pbr_environment = retain_pbr_resources
             .then(|| {
                 self.create_pbr_environment_bindings_for_layout(
@@ -744,6 +799,7 @@ impl LodClassifierDevice {
             _materials: material_buffer,
             material_textures,
             pbr_environment,
+            pbr_material_slot,
             pbr_scene_supported,
             frame_words: Mutex::new(vec![0; frame_word_count]),
             _bucket_index_uniform: bucket_index_uniform,
@@ -802,10 +858,10 @@ impl LodClassifierDevice {
     ) -> Result<ResidentRootFrameEncoding, LodWebGpuError> {
         let draw_passes = render_draw_passes(frame.style);
         if frame.style == RenderStyle::Pbr
-            && (!bindings.supports_resident_untextured_pbr() || frame.options.focus_postprocess)
+            && (!bindings.supports_resident_basic_pbr() || frame.options.focus_postprocess)
         {
             return Err(LodWebGpuError::Payload(
-                "resident root PBR requires factor-only materials, resident IBL, and no focus post-process"
+                "resident root PBR requires one exact texture binding, resident IBL, and no focus post-process"
                     .to_string(),
             ));
         }
@@ -879,10 +935,15 @@ impl LodClassifierDevice {
                 .for_pass(draw.pass)
                 .expect("resident root pass support was validated above");
             if draw.pass == RenderPass::PbrOpaque {
+                let material_slot = bindings.resident_pbr_material_slot().ok_or_else(|| {
+                    LodWebGpuError::Payload(
+                        "resident root PBR has no exact material texture slot".to_string(),
+                    )
+                })?;
                 let material_textures = bindings
                     .material_textures
                     .as_ref()
-                    .and_then(|bindings| bindings.bind_group(0))
+                    .and_then(|bindings| bindings.bind_group(material_slot))
                     .ok_or_else(|| {
                         LodWebGpuError::Payload(
                             "resident root PBR has no default material texture binding".to_string(),
