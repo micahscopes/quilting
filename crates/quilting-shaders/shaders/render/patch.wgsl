@@ -1,4 +1,4 @@
-#import quilting::render::patch_vertex::{PatchPbrMaterial, PatchRenderFrame, PatchVertexOutput, evaluate_prepared_patch_vertex, shade_patch_highlight, shade_patch_lod, shade_patch_matcap, shade_patch_normals, shade_patch_stretch, shade_patch_wire}
+#import quilting::render::patch_vertex::{PatchPbrMaterial, PatchRenderFrame, PatchVertexOutput, evaluate_prepared_patch_vertex, patch_focus_raw_field, shade_patch_highlight, shade_patch_lod, shade_patch_matcap, shade_patch_normals, shade_patch_stretch, shade_patch_wire}
 #import quilting::render::patch_pbr::shade_textured_patch_pbr
 #import quilting::surface::patch_prepare::PreparedPatchRecord
 #import quilting::compute::visibility_compaction_types::CompactedBatchRangeRecord
@@ -88,5 +88,24 @@ fn render_patch_pbr(
         input,
         material,
         frames[draw_batch.batch_index].modes.w,
+    );
+}
+
+struct PatchPbrFocusOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) raw_field: vec4<f32>,
+}
+
+@fragment
+fn render_patch_pbr_focus(
+    @builtin(front_facing) front_facing: bool,
+    input: PatchVertexOutput,
+) -> PatchPbrFocusOutput {
+    let frame = frames[draw_batch.batch_index];
+    let material_index = u32(max(frame.modes.z, 0));
+    let material = pbr_materials[material_index];
+    return PatchPbrFocusOutput(
+        shade_textured_patch_pbr(front_facing, input, material, frame.modes.w),
+        patch_focus_raw_field(input, frame),
     );
 }

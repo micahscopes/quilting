@@ -43,6 +43,7 @@ pub const PATCH_RENDER_DEVICE_MATCAP_ENTRY_POINT: &str = "render_patch_matcap";
 pub const PATCH_RENDER_DEVICE_WIRE_ENTRY_POINT: &str = "render_patch_wire";
 pub const PATCH_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT: &str = "render_patch_highlight";
 pub const PATCH_RENDER_DEVICE_PBR_ENTRY_POINT: &str = "render_patch_pbr";
+pub const PATCH_RENDER_DEVICE_PBR_FOCUS_ENTRY_POINT: &str = "render_patch_pbr_focus";
 pub const RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT: &str = "render_resident_root_vertex";
 pub const RESIDENT_ROOT_RENDER_DEVICE_NORMALS_ENTRY_POINT: &str = "render_resident_root_normals";
 pub const RESIDENT_ROOT_RENDER_DEVICE_LOD_ENTRY_POINT: &str = "render_resident_root_lod";
@@ -85,8 +86,7 @@ pub mod sources {
     pub const PREPARED_VISIBILITY: &str =
         include_str!("../shaders/compute/prepared_visibility.wgsl");
     pub const PATCH_RENDER_DEVICE: &str = include_str!("../shaders/render/patch.wgsl");
-    pub const FOCUS_POSTPROCESS: &str =
-        include_str!("../shaders/render/focus_postprocess.wgsl");
+    pub const FOCUS_POSTPROCESS: &str = include_str!("../shaders/render/focus_postprocess.wgsl");
     pub const RESIDENT_ROOT_RENDER_DEVICE: &str =
         include_str!("../shaders/render/resident_root_patch.wgsl");
     pub const LOD_PASS1: &str = include_str!("../shaders/compute/lod_pass1.wgsl");
@@ -946,6 +946,7 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             PATCH_RENDER_DEVICE_WIRE_ENTRY_POINT,
             PATCH_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT,
             PATCH_RENDER_DEVICE_PBR_ENTRY_POINT,
+            PATCH_RENDER_DEVICE_PBR_FOCUS_ENTRY_POINT,
         ] {
             let fragment = module
                 .entry_points
@@ -968,7 +969,7 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             .update(module.to_ctx())
             .expect("patch render layouts");
         for (name, expected_size) in [
-            ("PatchRenderFrame", 240),
+            ("PatchRenderFrame", 256),
             ("PatchPbrMaterial", 160),
             ("PbrEnvironmentUniform", 16),
             ("DrawBatchIndex", 16),
@@ -995,7 +996,7 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             .iter()
             .map(|entry| (entry.name.as_str(), entry.stage))
             .collect::<Vec<_>>();
-        assert_eq!(entries.len(), 8);
+        assert_eq!(entries.len(), 9);
         assert!(entries.contains(&(
             PATCH_RENDER_DEVICE_VERTEX_ENTRY_POINT,
             naga::ShaderStage::Vertex,
@@ -1026,6 +1027,10 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
         )));
         assert!(entries.contains(&(
             PATCH_RENDER_DEVICE_PBR_ENTRY_POINT,
+            naga::ShaderStage::Fragment,
+        )));
+        assert!(entries.contains(&(
+            PATCH_RENDER_DEVICE_PBR_FOCUS_ENTRY_POINT,
             naga::ShaderStage::Fragment,
         )));
     }
@@ -1064,7 +1069,9 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             4,
         );
         let mut layouter = naga::proc::Layouter::default();
-        layouter.update(module.to_ctx()).expect("focus pass layouts");
+        layouter
+            .update(module.to_ctx())
+            .expect("focus pass layouts");
         let (uniform, _) = module
             .types
             .iter()
@@ -1082,7 +1089,10 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             FOCUS_KAWASE_ENTRY_POINT,
             FOCUS_DIRECTIONAL_BLUR_ENTRY_POINT,
         ] {
-            assert!(emitted.contains(&format!("fn {name}")), "missing emitted {name}");
+            assert!(
+                emitted.contains(&format!("fn {name}")),
+                "missing emitted {name}"
+            );
         }
     }
 
@@ -1146,7 +1156,7 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             .update(module.to_ctx())
             .expect("resident root render layouts");
         for (name, expected_size) in [
-            ("PatchRenderFrame", 240),
+            ("PatchRenderFrame", 256),
             ("DrawRootBucketIndex", 16),
             ("ResidentBucketRangeRecord", 20),
             ("ResidentDrawDomainRecord", 16),

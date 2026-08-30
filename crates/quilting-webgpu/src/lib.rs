@@ -101,8 +101,8 @@ const PREPARED_PATCH_RECORD_WORDS: usize = 52;
 const PREPARED_PATCH_RECORD_BYTES: u64 = 208;
 const PATCH_SUBJECT_RECORD_BYTES: u64 = 128;
 const PATCH_SUBJECT_RECORD_WORDS: usize = 32;
-const PATCH_RENDER_FRAME_WORDS: usize = 60;
-const PATCH_RENDER_FRAME_BYTES: u64 = 240;
+const PATCH_RENDER_FRAME_WORDS: usize = 64;
+const PATCH_RENDER_FRAME_BYTES: u64 = 256;
 const PATCH_PBR_MATERIAL_WORDS: usize = 40;
 const PATCH_PBR_MATERIAL_BYTES: u64 = 160;
 
@@ -330,6 +330,7 @@ pub struct PatchRenderFrame {
     pub selected_face: Option<u32>,
     pub mobius: [f32; 16],
     pub camera_position: [f32; 3],
+    pub focus: FocusFieldPacket,
 }
 
 impl PatchRenderFrame {
@@ -373,6 +374,7 @@ impl PatchRenderFrame {
             selected_face: frame.options.highlight_face,
             mobius: transform.mobius,
             camera_position: frame.view.camera_position,
+            focus: frame.view.focus,
         }
     }
 
@@ -383,7 +385,9 @@ impl PatchRenderFrame {
             .chain(self.mv)
             .chain(self.mobius)
             .chain(self.camera_position)
+            .chain(self.focus.sphere)
             .any(|value| !value.is_finite())
+            || self.focus.sphere[3] <= 0.0
         {
             return Err(LodWebGpuError::Payload(
                 "patch render frame contains non-finite values".to_string(),
@@ -401,10 +405,14 @@ impl PatchRenderFrame {
         words[34] = self.material_slot;
         words[35] = self.selected_node.unwrap_or(u32::MAX);
         words[36] = self.selected_face.unwrap_or(u32::MAX);
+        words[37] = u32::from(self.focus.enabled);
         for (word, value) in words[40..56].iter_mut().zip(self.mobius) {
             *word = value.to_bits();
         }
         for (word, value) in words[56..59].iter_mut().zip(self.camera_position) {
+            *word = value.to_bits();
+        }
+        for (word, value) in words[60..64].iter_mut().zip(self.focus.sphere) {
             *word = value.to_bits();
         }
         Ok(words)
@@ -526,14 +534,19 @@ mod patch_pbr_material_tests {
             selected_face: Some(29),
             mobius,
             camera_position: [4.0, 5.0, 6.0],
+            focus: FocusFieldPacket {
+                sphere: [7.0, 8.0, 9.0, 10.0],
+                enabled: true,
+            },
         };
         let words = frame.to_words().unwrap();
         assert_eq!(words.len(), PATCH_RENDER_FRAME_WORDS);
         assert_eq!(words[32..37], [1, 2, 17, 23, 29]);
-        assert_eq!(words[37..40], [0; 3]);
+        assert_eq!(words[37..40], [1, 0, 0]);
         assert_eq!(words[40..56], mobius.map(f32::to_bits));
         assert_eq!(words[56..59], [4.0, 5.0, 6.0].map(f32::to_bits));
         assert_eq!(words[59], 0);
+        assert_eq!(words[60..64], [7.0, 8.0, 9.0, 10.0].map(f32::to_bits));
     }
 
     #[test]

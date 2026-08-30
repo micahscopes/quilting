@@ -11,13 +11,15 @@ struct PatchRenderFrame {
     // x = use rational QB; y = procedural matcap style; z = material slot;
     // w = selected semantic node.
     modes: vec4<i32>,
-    // x = selected source face or u32::MAX; yzw reserved.
+    // x = selected source face or u32::MAX; y = focus field enabled; zw reserved.
     selection: vec4<u32>,
     mob_a: vec4<f32>,
     mob_b: vec4<f32>,
     mob_c: vec4<f32>,
     mob_d: vec4<f32>,
     camera_pos: vec4<f32>,
+    // Source-space focus center xyz + positive radius.
+    focus_sphere: vec4<f32>,
 }
 
 struct PatchVertexOutput {
@@ -40,6 +42,22 @@ struct PatchVertexOutput {
     @location(12) mobius_stretch: f32,
     @location(13) source_position_ws: vec3<f32>,
     @location(14) @interpolate(flat) node_id: f32,
+}
+
+fn patch_focus_raw_field(
+    input: PatchVertexOutput,
+    frame: PatchRenderFrame,
+) -> vec4<f32> {
+    let dof_distance = max(length(input.position_vs), 0.001);
+    let dof_depth = clamp(log2(dof_distance) / 10.0 + 0.5, 0.0, 1.0);
+    let focus_radius = max(frame.focus_sphere.w, 1e-4);
+    let focus_radius_ratio = distance(input.source_position_ws, frame.focus_sphere.xyz)
+        / focus_radius;
+    // Normalized geodesic polar coordinate of the round S3 compactification
+    // under stereographic projection. Sphere inversion sends u to 1-u.
+    let focus_geodesic = 0.6366197723675814 * atan(focus_radius_ratio);
+    let focus_field = select(0.0, focus_geodesic, frame.selection.y != 0u);
+    return vec4<f32>(input.mobius_stretch, dof_depth, focus_field, 1.0);
 }
 
 // Authored PBR values shared by the stable material table and per-material
