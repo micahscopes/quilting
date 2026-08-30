@@ -76,6 +76,27 @@ pub fn mr_webgpu_backend_diagnostics() -> JsValue {
     serde_wasm_bindgen::to_value(&webgpu_backend::diagnostics()).unwrap_or(JsValue::NULL)
 }
 
+/// Opt-in asynchronous query against the latest coherent prepared-patch
+/// WebGPU frame. The result still carries the interaction-target epoch and a
+/// transient packed node; application code must join it through the current
+/// Rust interaction target table before publishing hover or selection.
+#[cfg(feature = "webgpu-backend")]
+#[wasm_bindgen(js_name = "mr_queryWebGpuPatch")]
+pub async fn mr_query_webgpu_patch(
+    pixel_x: u32,
+    pixel_y: u32,
+    target_epoch: u32,
+) -> Result<JsValue, JsValue> {
+    let staged = webgpu_backend::stage_pick([pixel_x, pixel_y], target_epoch)
+        .map_err(|error| JsValue::from_str(&error))?;
+    let readback = staged
+        .read()
+        .await
+        .map_err(|error| JsValue::from_str(&error))?;
+    serde_wasm_bindgen::to_value(&readback)
+        .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
 /// Performance.mark/measure helper for profiling in Chrome DevTools.
 /// Works in both Window and Worker contexts.
 pub fn perf_mark(name: &str) {

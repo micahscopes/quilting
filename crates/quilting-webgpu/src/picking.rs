@@ -348,6 +348,34 @@ impl LodClassifierDevice {
         )
     }
 
+    /// Convenience submission for a query against already-completed retained
+    /// frame state. The returned map remains asynchronous; only command
+    /// encoding and queue submission happen here.
+    pub fn stage_patch_render_scene_pick(
+        &self,
+        pipeline: &PatchPickPipeline,
+        scene: &PatchRenderScene,
+        atlas: &PackedPatchAtlas,
+        target: &PatchPickTarget,
+        request: PatchPickRequest,
+    ) -> Result<StagedPatchPickReadback, LodWebGpuError> {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quilting staged one-pixel patch pick"),
+            });
+        let readback = self.encode_patch_render_scene_pick(
+            &mut encoder,
+            pipeline,
+            scene,
+            atlas,
+            target,
+            request,
+        )?;
+        self.queue.submit([encoder.finish()]);
+        Ok(readback)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn encode_patch_pick(
         &self,

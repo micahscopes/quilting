@@ -20,10 +20,11 @@ use quilting_renderer::compute::{
 use quilting_webgpu::{
     resident_root_render_domains, AdaptiveOverlayScene, DiagnosticPatchRenderPipelines,
     FocusPbrRenderResources, LodClassifierDevice, LodClassifierModel, LodPose,
-    OffscreenPatchRenderTarget, PackedPatchAtlas, PatchFrameEncoding, PatchPresentationSurface,
-    PatchRenderScene, PatchRenderSceneUpdate, PbrEnvironmentMap, PbrTextureTable,
-    ResidentGeometryBucketScene, ResidentRootPreparationScene, ResidentRootRenderBindings,
-    ResidentRootRenderPipeline, StagedOffscreenImageReadback, SurfacePresentation,
+    OffscreenPatchRenderTarget, PackedPatchAtlas, PatchFrameEncoding, PatchPickPipeline,
+    PatchPickRequest, PatchPickTarget, PatchPresentationSurface, PatchRenderScene,
+    PatchRenderSceneUpdate, PbrEnvironmentMap, PbrTextureTable, ResidentGeometryBucketScene,
+    ResidentRootPreparationScene, ResidentRootRenderBindings, ResidentRootRenderPipeline,
+    StagedOffscreenImageReadback, StagedPatchPickReadback, SurfacePresentation,
     WebGpuAdapterSummary,
 };
 use serde::Serialize;
@@ -44,6 +45,8 @@ struct WebGpuBackend {
     model: Option<LodClassifierModel>,
     model_source: Option<PreparedLodModel>,
     pipelines: Option<DiagnosticPatchRenderPipelines>,
+    pick_pipeline: Option<PatchPickPipeline>,
+    pick_target: Option<PatchPickTarget>,
     resident_root_pipeline: Option<ResidentRootRenderPipeline>,
     focus: Option<FocusPbrRenderResources>,
     resident_roots: Option<ResidentRootBackend>,
@@ -83,6 +86,9 @@ struct WebGpuBackend {
     focus_target_rebuilds: u64,
     focus_frames: u64,
     focus_fallbacks: u64,
+    pick_requests: u64,
+    pick_submissions: u64,
+    pick_failures: u64,
     last_device_lod_epoch: Option<u64>,
     last_frame_revision: u64,
     last_source_render_call: u64,
@@ -90,9 +96,11 @@ struct WebGpuBackend {
     last_source_instances: u32,
     last_logical_submission: RenderSubmissionStats,
     last_viewport: [u32; 2],
+    last_frame_used_resident_roots: bool,
     last_frame_failure: Option<String>,
     last_resident_root_error: Option<String>,
     last_focus_error: Option<String>,
+    last_pick_error: Option<String>,
     last_error: Option<String>,
 }
 
@@ -243,6 +251,11 @@ pub(crate) struct WebGpuBackendDiagnostics {
     focus_target_rebuilds: u64,
     focus_frames: u64,
     focus_fallbacks: u64,
+    pick_pipeline_ready: bool,
+    pick_target_ready: bool,
+    pick_requests: u64,
+    pick_submissions: u64,
+    pick_failures: u64,
     last_device_lod_epoch: Option<u64>,
     last_frame_revision: u64,
     last_source_render_call: u64,
@@ -250,9 +263,11 @@ pub(crate) struct WebGpuBackendDiagnostics {
     last_source_instances: u32,
     last_logical_submission: RenderSubmissionStats,
     last_viewport: [u32; 2],
+    last_frame_used_resident_roots: bool,
     last_frame_failure: Option<String>,
     last_resident_root_error: Option<String>,
     last_focus_error: Option<String>,
+    last_pick_error: Option<String>,
     last_error: Option<String>,
 }
 
@@ -502,6 +517,11 @@ impl WebGpuBackend {
             focus_target_rebuilds: self.focus_target_rebuilds,
             focus_frames: self.focus_frames,
             focus_fallbacks: self.focus_fallbacks,
+            pick_pipeline_ready: self.pick_pipeline.is_some(),
+            pick_target_ready: self.pick_target.is_some(),
+            pick_requests: self.pick_requests,
+            pick_submissions: self.pick_submissions,
+            pick_failures: self.pick_failures,
             last_device_lod_epoch: self.last_device_lod_epoch,
             last_frame_revision: self.last_frame_revision,
             last_source_render_call: self.last_source_render_call,
@@ -509,9 +529,11 @@ impl WebGpuBackend {
             last_source_instances: self.last_source_instances,
             last_logical_submission: self.last_logical_submission,
             last_viewport: self.last_viewport,
+            last_frame_used_resident_roots: self.last_frame_used_resident_roots,
             last_frame_failure: self.last_frame_failure.clone(),
             last_resident_root_error: self.last_resident_root_error.clone(),
             last_focus_error: self.last_focus_error.clone(),
+            last_pick_error: self.last_pick_error.clone(),
             last_error: self.last_error.clone(),
         }
     }
@@ -535,6 +557,13 @@ impl WebGpuBackend {
         self.frame_failures = self.frame_failures.saturating_add(1);
         self.last_frame_failure = Some(error.clone());
         self.last_error = Some(error.clone());
+        error
+    }
+
+    fn reject_pick(&mut self, error: impl ToString) -> String {
+        let error = error.to_string();
+        self.pick_failures = self.pick_failures.saturating_add(1);
+        self.last_pick_error = Some(error.clone());
         error
     }
 
@@ -623,6 +652,31 @@ impl WebGpuBackend {
     }
 }
 
+fn create_pick_resources(
+    device: &LodClassifierDevice,
+    pipelines: &DiagnosticPatchRenderPipelines,
+) -> (
+    Option<PatchPickPipeline>,
+    Option<PatchPickTarget>,
+    Option<String>,
+) {
+    let Some(compatible) = pipelines.get(RenderStyle::Pbr) else {
+        return (
+            None,
+            None,
+            Some("WebGPU pick pipeline requires the prepared PBR layout".to_string()),
+        );
+    };
+    match device.create_patch_pick_pipeline(compatible) {
+        Ok(pipeline) => (
+            Some(pipeline),
+            Some(device.create_patch_pick_target()),
+            None,
+        ),
+        Err(error) => (None, None, Some(error.to_string())),
+    }
+}
+
 pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
     let should_request = BACKEND.with(|slot| {
         let mut backend = slot.borrow_mut();
@@ -645,6 +699,8 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
                     .create_offscreen_diagnostic_patch_render_pipelines()
                     .map_err(|error| error.to_string())
                     .map_err(|error| BACKEND.with(|slot| slot.borrow_mut().fail(error)))?;
+                let (pick_pipeline, pick_target, pick_error) =
+                    create_pick_resources(&device, &pipelines);
                 let (resident_root_pipeline, resident_root_error) =
                     match device.create_offscreen_resident_root_render_pipeline() {
                         Ok(pipeline) => (Some(pipeline), None),
@@ -668,6 +724,8 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
                     backend.model = None;
                     backend.model_source = None;
                     backend.pipelines = Some(pipelines);
+                    backend.pick_pipeline = pick_pipeline;
+                    backend.pick_target = pick_target;
                     backend.resident_root_pipeline = resident_root_pipeline;
                     backend.focus = focus;
                     backend.resident_roots = None;
@@ -678,6 +736,7 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
                     backend.presentation = None;
                     backend.last_frame_input = None;
                     backend.last_device_lod_epoch = None;
+                    backend.last_frame_used_resident_roots = false;
                     backend.last_face_visibility_bits.clear();
                     backend.next_face_visibility_bits.clear();
                     backend.last_joint_matrices.clear();
@@ -689,6 +748,7 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
                     }
                     backend.last_resident_root_error = resident_root_error;
                     backend.last_focus_error = focus_error;
+                    backend.last_pick_error = pick_error;
                     if focus_failed {
                         backend.focus_fallbacks = backend.focus_fallbacks.saturating_add(1);
                     }
@@ -757,6 +817,7 @@ pub(crate) async fn initialize_presentation(
         )
         .map_err(|error| error.to_string())
         .map_err(|error| BACKEND.with(|slot| slot.borrow_mut().fail(error)))?;
+    let (pick_pipeline, pick_target, pick_error) = create_pick_resources(&device, &pipelines);
     let (resident_root_pipeline, resident_root_error) = match device
         .create_resident_root_render_pipeline(
             presentation.color_format(),
@@ -784,6 +845,8 @@ pub(crate) async fn initialize_presentation(
         backend.model = None;
         backend.model_source = None;
         backend.pipelines = Some(pipelines);
+        backend.pick_pipeline = pick_pipeline;
+        backend.pick_target = pick_target;
         backend.resident_root_pipeline = resident_root_pipeline;
         backend.focus = focus;
         backend.resident_roots = None;
@@ -794,6 +857,7 @@ pub(crate) async fn initialize_presentation(
         backend.presentation = Some(presentation);
         backend.last_frame_input = None;
         backend.last_device_lod_epoch = None;
+        backend.last_frame_used_resident_roots = false;
         backend.last_face_visibility_bits.clear();
         backend.next_face_visibility_bits.clear();
         backend.last_joint_matrices.clear();
@@ -804,6 +868,7 @@ pub(crate) async fn initialize_presentation(
         }
         backend.last_resident_root_error = resident_root_error;
         backend.last_focus_error = focus_error;
+        backend.last_pick_error = pick_error;
         if focus_failed {
             backend.focus_fallbacks = backend.focus_fallbacks.saturating_add(1);
         }
@@ -2282,6 +2347,7 @@ pub(crate) fn submit_frame(
                 backend.last_source_instances = source_instance_count;
                 backend.last_logical_submission = logical_submission;
                 backend.last_viewport = view.viewport;
+                backend.last_frame_used_resident_roots = resident_root_frame;
                 if device_lod_epoch.is_some() {
                     backend.device_lod_frames = backend.device_lod_frames.saturating_add(1);
                     backend.last_face_visibility_bits.clear();
@@ -2349,6 +2415,124 @@ pub(crate) struct StagedWebGpuFrameEvidence {
     pub(crate) source_instances: u32,
     pub(crate) focus_postprocess: Option<quilting_core::render::FocusPostprocessPacket>,
     pub(crate) image: StagedOffscreenImageReadback,
+}
+
+/// One opt-in query staged after the latest coherent prepared-patch frame.
+/// The readback owns its device resources, so no thread-local backend borrow
+/// survives across the asynchronous map.
+pub(crate) struct StagedWebGpuPick {
+    frame_revision: u64,
+    source_render_call: u64,
+    readback: StagedPatchPickReadback,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WebGpuPickHit {
+    target_epoch: u32,
+    packed_node: u32,
+    source_face: u32,
+    source_barycentric: [f32; 3],
+    source_position: [f32; 3],
+    output_distance: f32,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WebGpuPickReadback {
+    frame_revision: u64,
+    source_render_call: u64,
+    hit: Option<WebGpuPickHit>,
+}
+
+impl StagedWebGpuPick {
+    pub(crate) async fn read(self) -> Result<WebGpuPickReadback, String> {
+        let hit = self
+            .readback
+            .read()
+            .await
+            .map_err(|error| error.to_string())?
+            .map(|sample| WebGpuPickHit {
+                target_epoch: sample.target_epoch,
+                packed_node: sample.packed_node,
+                source_face: sample.source_face,
+                source_barycentric: sample.source_barycentric,
+                source_position: sample.source_position,
+                output_distance: sample.output_distance,
+            });
+        Ok(WebGpuPickReadback {
+            frame_revision: self.frame_revision,
+            source_render_call: self.source_render_call,
+            hit,
+        })
+    }
+}
+
+/// Stage a one-pixel prepared-patch query against the latest completed frame.
+/// Resident-root frames are rejected until their root and sparse-overlay draw
+/// domains share this query pass; silently reading the ordinary scene would
+/// return stale geometry.
+pub(crate) fn stage_pick(pixel: [u32; 2], target_epoch: u32) -> Result<StagedWebGpuPick, String> {
+    BACKEND.with(|slot| {
+        let mut backend = slot.borrow_mut();
+        backend.pick_requests = backend.pick_requests.saturating_add(1);
+        if backend.state != "ready"
+            || backend.last_frame_revision == 0
+            || backend.last_frame_input.is_none()
+        {
+            return Err(backend.reject_pick("WebGPU picking requires one completed coherent frame"));
+        }
+        if backend.last_frame_used_resident_roots {
+            return Err(backend.reject_pick(
+                "WebGPU resident-root picking is not implemented yet; use the incumbent picker",
+            ));
+        }
+        let request = match PatchPickRequest::new(backend.last_viewport, pixel, target_epoch) {
+            Ok(request) => request,
+            Err(error) => return Err(backend.reject_pick(error)),
+        };
+        let result = (|| {
+            let WebGpuBackend {
+                device,
+                atlas,
+                pick_pipeline,
+                pick_target,
+                scene,
+                ..
+            } = &*backend;
+            let device = device
+                .as_ref()
+                .ok_or_else(|| "ready WebGPU backend has no device".to_string())?;
+            let atlas = atlas
+                .as_ref()
+                .ok_or_else(|| "WebGPU picking requires atlas residency".to_string())?;
+            let pipeline = pick_pipeline
+                .as_ref()
+                .ok_or_else(|| "WebGPU picking has no retained pipeline".to_string())?;
+            let target = pick_target
+                .as_ref()
+                .ok_or_else(|| "WebGPU picking has no retained target".to_string())?;
+            let scene = scene
+                .as_ref()
+                .ok_or_else(|| "WebGPU picking requires scene residency".to_string())?;
+            let readback = device
+                .stage_patch_render_scene_pick(pipeline, scene, atlas, target, request)
+                .map_err(|error| error.to_string())?;
+            Ok::<_, String>(readback)
+        })();
+        match result {
+            Ok(readback) => {
+                backend.pick_submissions = backend.pick_submissions.saturating_add(1);
+                backend.last_pick_error = None;
+                Ok(StagedWebGpuPick {
+                    frame_revision: backend.last_frame_revision,
+                    source_render_call: backend.last_source_render_call,
+                    readback,
+                })
+            }
+            Err(error) => Err(backend.reject_pick(error)),
+        }
+    })
 }
 
 /// Stage a one-shot copy of the latest completed shadow frame. Queue ordering
@@ -2444,6 +2628,37 @@ fn render_style_name(style: RenderStyle) -> &'static str {
 mod tests {
     use super::*;
     use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[test]
+    fn pick_readback_serialization_keeps_epoch_and_source_chart_semantics() {
+        let readback = WebGpuPickReadback {
+            frame_revision: 17,
+            source_render_call: 23,
+            hit: Some(WebGpuPickHit {
+                target_epoch: 29,
+                packed_node: 7,
+                source_face: 42,
+                source_barycentric: [0.125, 0.25, 0.625],
+                source_position: [1.5, -2.0, 0.75],
+                output_distance: 4.25,
+            }),
+        };
+        let json = serde_json::to_value(readback).unwrap();
+        assert_eq!(json["frameRevision"], 17);
+        assert_eq!(json["sourceRenderCall"], 23);
+        assert_eq!(json["hit"]["targetEpoch"], 29);
+        assert_eq!(json["hit"]["packedNode"], 7);
+        assert_eq!(json["hit"]["sourceFace"], 42);
+        assert_eq!(
+            json["hit"]["sourceBarycentric"],
+            serde_json::json!([0.125, 0.25, 0.625])
+        );
+        assert_eq!(
+            json["hit"]["sourcePosition"],
+            serde_json::json!([1.5, -2.0, 0.75])
+        );
+        assert_eq!(json["hit"]["outputDistance"], 4.25);
+    }
 
     #[wasm_bindgen_test]
     fn browser_texture_descriptor_adapts_only_the_legacy_gl_wire_values() {
