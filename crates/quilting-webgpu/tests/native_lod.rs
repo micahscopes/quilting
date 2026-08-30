@@ -972,6 +972,21 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         if let Some(error) = focus_error_scope.pop().await {
             panic!("complete focus PBR frame validation: {error}");
         }
+        let raw_focus = classifier
+            .stage_focus_raw_field_image(&focus_target)
+            .unwrap()
+            .read()
+            .await
+            .unwrap();
+        assert_eq!(raw_focus.size(), [32, 32]);
+        assert!(raw_focus.covered_texels() > 0);
+        for channel in 0..3 {
+            let [minimum, maximum] = raw_focus.covered_channel_range(channel).unwrap();
+            assert!(minimum.is_finite());
+            assert!(maximum.is_finite());
+            assert!(minimum >= 0.0);
+            assert!(maximum <= 1.0);
+        }
         assert!(
             offscreen_signature(&classifier, &target)
                 .await

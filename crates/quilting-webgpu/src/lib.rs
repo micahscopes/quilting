@@ -19,6 +19,7 @@ pub use adaptive_overlay::{
 };
 pub use focus_postprocess::{
     FocusPostprocessEncoding, FocusPostprocessPipelines, FocusPostprocessTarget,
+    FocusRawFieldImage, StagedFocusRawFieldReadback,
 };
 pub use pbr_environment::{PbrEnvironmentBindings, PbrEnvironmentMap};
 pub use pbr_resources::{

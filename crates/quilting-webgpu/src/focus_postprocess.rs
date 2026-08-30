@@ -6,6 +6,7 @@
 //! support before the composed output has evidence.
 
 use crate::{LodClassifierDevice, LodWebGpuError};
+use futures_channel::oneshot;
 use quilting_core::focus_postprocess::{
     FocusBlurSurface, FocusPingPong, FocusPostprocessSchedule, FOCUS_JFA_DOWNSAMPLE,
 };
@@ -33,7 +34,7 @@ pub struct FocusPostprocessPipelines {
 pub struct FocusPostprocessTarget {
     size: [u32; 2],
     output_format: wgpu::TextureFormat,
-    _raw_field: wgpu::Texture,
+    raw_field: wgpu::Texture,
     raw_field_view: wgpu::TextureView,
     _selected_weight: wgpu::Texture,
     selected_weight_view: wgpu::TextureView,
@@ -56,6 +57,75 @@ pub struct FocusPostprocessTarget {
     uniform_stride_bytes: u64,
     bind_groups: BTreeMap<(FocusTextureSlot, FocusTextureSlot), wgpu::BindGroup>,
     scratch: Mutex<FocusEncodingScratch>,
+}
+
+/// Explicit diagnostic copy of the raw PBR focus MRT. Production focus
+/// composition never constructs this staging resource.
+pub struct StagedFocusRawFieldReadback {
+    #[cfg(not(target_arch = "wasm32"))]
+    device: wgpu::Device,
+    buffer: wgpu::Buffer,
+    size: [u32; 2],
+    bytes_per_row: usize,
+    byte_len: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FocusRawFieldImage {
+    size: [u32; 2],
+    texels: Vec<[f32; 4]>,
+}
+
+impl FocusRawFieldImage {
+    pub const fn size(&self) -> [u32; 2] {
+        self.size
+    }
+
+    pub fn texels(&self) -> &[[f32; 4]] {
+        &self.texels
+    }
+
+    pub fn covered_texels(&self) -> usize {
+        self.texels.iter().filter(|texel| texel[3] > 0.5).count()
+    }
+
+    pub fn covered_channel_range(&self, channel: usize) -> Option<[f32; 2]> {
+        if channel >= 4 {
+            return None;
+        }
+        self.texels
+            .iter()
+            .filter(|texel| texel[3] > 0.5 && texel[channel].is_finite())
+            .map(|texel| texel[channel])
+            .fold(None, |range, value| {
+                Some(range.map_or([value, value], |[minimum, maximum]| {
+                    [minimum.min(value), maximum.max(value)]
+                }))
+            })
+    }
+}
+
+impl StagedFocusRawFieldReadback {
+    pub async fn read(self) -> Result<FocusRawFieldImage, LodWebGpuError> {
+        let slice = self.buffer.slice(..self.byte_len);
+        let (sender, receiver) = oneshot::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|error| LodWebGpuError::Poll(error.to_string()))?;
+        receiver
+            .await
+            .map_err(|_| LodWebGpuError::Mapping("map callback was canceled".to_string()))?
+            .map_err(|error| LodWebGpuError::Mapping(error.to_string()))?;
+        let mapped = slice.get_mapped_range();
+        let image = decode_focus_raw_field(&mapped, self.size, self.bytes_per_row)?;
+        drop(mapped);
+        self.buffer.unmap();
+        Ok(image)
+    }
 }
 
 impl FocusPostprocessTarget {
@@ -425,7 +495,7 @@ impl LodClassifierDevice {
         let mut target = FocusPostprocessTarget {
             size,
             output_format: pipelines.output_format,
-            _raw_field: raw_field,
+            raw_field,
             raw_field_view,
             _selected_weight: selected_weight,
             selected_weight_view,
@@ -484,6 +554,72 @@ impl LodClassifierDevice {
             target.bind_groups.insert(pair, bind_group);
         }
         Ok(target)
+    }
+
+    /// Stage the most recently submitted raw focus MRT for parity evidence.
+    /// This is an explicit copy/map boundary and is never called by the
+    /// production frame encoder.
+    pub fn stage_focus_raw_field_image(
+        &self,
+        target: &FocusPostprocessTarget,
+    ) -> Result<StagedFocusRawFieldReadback, LodWebGpuError> {
+        const BYTES_PER_TEXEL: u32 = 8;
+        let unpadded_bytes_per_row =
+            target.size[0].checked_mul(BYTES_PER_TEXEL).ok_or_else(|| {
+                LodWebGpuError::Payload("focus raw-field row size overflowed".to_string())
+            })?;
+        let bytes_per_row = unpadded_bytes_per_row
+            .div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            .checked_mul(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            .ok_or_else(|| {
+                LodWebGpuError::Payload("focus raw-field padded row size overflowed".to_string())
+            })?;
+        let byte_len = u64::from(bytes_per_row)
+            .checked_mul(u64::from(target.size[1]))
+            .ok_or_else(|| {
+                LodWebGpuError::Payload("focus raw-field readback size overflowed".to_string())
+            })?;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("quilting focus raw-field evidence readback"),
+            size: byte_len,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quilting focus raw-field evidence copy"),
+            });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target.raw_field,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(target.size[1]),
+                },
+            },
+            wgpu::Extent3d {
+                width: target.size[0],
+                height: target.size[1],
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit([encoder.finish()]);
+        Ok(StagedFocusRawFieldReadback {
+            #[cfg(not(target_arch = "wasm32"))]
+            device: self.device.clone(),
+            buffer,
+            size: target.size,
+            bytes_per_row: bytes_per_row as usize,
+            byte_len,
+        })
     }
 
     pub fn encode_focus_postprocess(
@@ -788,6 +924,44 @@ fn blur_slot(surface: FocusBlurSurface) -> Result<FocusTextureSlot, LodWebGpuErr
     }
 }
 
+fn decode_focus_raw_field(
+    bytes: &[u8],
+    size: [u32; 2],
+    bytes_per_row: usize,
+) -> Result<FocusRawFieldImage, LodWebGpuError> {
+    const BYTES_PER_TEXEL: usize = 8;
+    let width = usize::try_from(size[0])
+        .map_err(|_| LodWebGpuError::Mapping("focus raw-field width exceeds usize".to_string()))?;
+    let height = usize::try_from(size[1])
+        .map_err(|_| LodWebGpuError::Mapping("focus raw-field height exceeds usize".to_string()))?;
+    let row_bytes = width.checked_mul(BYTES_PER_TEXEL).ok_or_else(|| {
+        LodWebGpuError::Mapping("focus raw-field row length overflowed".to_string())
+    })?;
+    let required = bytes_per_row.checked_mul(height).ok_or_else(|| {
+        LodWebGpuError::Mapping("focus raw-field mapped length overflowed".to_string())
+    })?;
+    if bytes_per_row < row_bytes || bytes.len() < required {
+        return Err(LodWebGpuError::Mapping(format!(
+            "focus raw-field mapping is malformed: {} bytes, stride {bytes_per_row}, payload row {row_bytes}, height {height}",
+            bytes.len(),
+        )));
+    }
+    let texel_count = width.checked_mul(height).ok_or_else(|| {
+        LodWebGpuError::Mapping("focus raw-field texel count overflowed".to_string())
+    })?;
+    let mut texels = Vec::with_capacity(texel_count);
+    for row in bytes.chunks_exact(bytes_per_row).take(height) {
+        for texel in row[..row_bytes].chunks_exact(BYTES_PER_TEXEL) {
+            texels.push(std::array::from_fn(|channel| {
+                let offset = channel * 2;
+                half::f16::from_bits(u16::from_le_bytes([texel[offset], texel[offset + 1]]))
+                    .to_f32()
+            }));
+        }
+    }
+    Ok(FocusRawFieldImage { size, texels })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -853,5 +1027,24 @@ mod tests {
             .any(|pair| pair == (pass.source_a, pass.source_b))));
         assert_eq!(passes.last().unwrap().destination, FocusDestination::Output);
         assert!(passes.len() <= FOCUS_PASS_CAPACITY);
+    }
+
+    #[test]
+    fn raw_field_decoder_discards_padding_and_reports_covered_ranges() {
+        let encode = |texel: [f32; 4]| {
+            texel
+                .into_iter()
+                .flat_map(|value| half::f16::from_f32(value).to_bits().to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let mut bytes = vec![0; 32];
+        bytes[..8].copy_from_slice(&encode([0.25, 0.5, 0.75, 1.0]));
+        bytes[8..16].copy_from_slice(&encode([0.0, 0.0, 0.0, 0.0]));
+        let image = decode_focus_raw_field(&bytes, [2, 1], 32).unwrap();
+        assert_eq!(image.size(), [2, 1]);
+        assert_eq!(image.covered_texels(), 1);
+        assert_eq!(image.covered_channel_range(0), Some([0.25, 0.25]));
+        assert_eq!(image.covered_channel_range(2), Some([0.75, 0.75]));
+        assert_eq!(image.covered_channel_range(4), None);
     }
 }
