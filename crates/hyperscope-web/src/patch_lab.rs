@@ -13,6 +13,11 @@ use hyperscope_app::{
     PATCH_LAB_PHASE_TURN_MICRORADIANS,
 };
 
+#[cfg(all(feature = "csr", target_arch = "wasm32"))]
+mod csr;
+#[cfg(all(feature = "csr", target_arch = "wasm32"))]
+pub use csr::mount_patch_lab_controls;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PatchLabControlIntent {
     pub active: bool,

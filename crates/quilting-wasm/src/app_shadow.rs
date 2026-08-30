@@ -274,6 +274,27 @@ impl HyperscopeAppShadow {
         );
     }
 
+    /// Mount the Rust-authoritative Patch Lab control island. User edits
+    /// dispatch directly through AppStore; the host receives only committed
+    /// backend-neutral jobs and the few explicitly platform-owned actions.
+    #[cfg(feature = "leptos-ui")]
+    #[wasm_bindgen(js_name = mountPatchLabControls)]
+    pub fn mount_patch_lab_controls(
+        &self,
+        parent: web_sys::HtmlElement,
+        on_commit: js_sys::Function,
+        on_platform_action: js_sys::Function,
+        on_error: js_sys::Function,
+    ) {
+        hyperscope_web::patch_lab::mount_patch_lab_controls(
+            parent,
+            self.store.clone(),
+            on_commit,
+            on_platform_action,
+            on_error,
+        );
+    }
+
     #[wasm_bindgen(js_name = requestAsset)]
     #[allow(clippy::too_many_arguments)]
     pub fn request_asset(
