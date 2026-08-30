@@ -39,6 +39,8 @@
 //!   backend parity gates; never part of the warm frame path.
 //! - [`render_pipeline`] — immutable shader, binding-layout, and pipeline
 //!   descriptions suitable for functional planning and backend memoization.
+//! - [`render_memo`] — device-epoch caches that lower those immutable keys to
+//!   retained WebGL/WebGPU resources without hiding lifecycle invalidation.
 //! - [`source_bounds`] — backend-neutral post-model, pre-conformal bounds for
 //!   selection, focus fitting, spatial indexing, and navigation scale.
 //! - [`screen_plan`] — bounded backend-neutral scene frontiers that combine
@@ -77,6 +79,7 @@ pub mod focus_postprocess;
 pub mod material;
 pub mod render_evidence;
 pub mod render_pipeline;
+pub mod render_memo;
 pub mod source_bounds;
 pub mod screen_metric;
 pub mod screen_domain;

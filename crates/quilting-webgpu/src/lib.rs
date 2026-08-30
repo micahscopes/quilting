@@ -61,6 +61,8 @@ use quilting_core::render_evidence::{
     render_image_signature, RenderImageChannelOrder, RenderImageOrigin, RenderImageSignature,
     Rgba8ImageView,
 };
+use quilting_core::render_memo::{DeviceMemo, DeviceMemoDiagnostics};
+use quilting_core::render_pipeline::{ShaderModuleDescriptor, ShaderStage, ShaderTarget};
 use quilting_core::screen_partition::ScreenPatchLeafId;
 use quilting_renderer::compute::{
     pack_lod_classification, pack_wgsl_adaptive_overlay_scene_words, pack_wgsl_lod_atlas_words,
@@ -775,6 +777,7 @@ pub struct LodClassifierDevice {
     device: wgpu::Device,
     queue: wgpu::Queue,
     next_model_identity: Mutex<u64>,
+    render_shader_modules: Mutex<DeviceMemo<ShaderModuleDescriptor, wgpu::ShaderModule>>,
     pass1_pipeline: wgpu::ComputePipeline,
     pass2_pipeline: wgpu::ComputePipeline,
     resident_seed_pipeline: wgpu::ComputePipeline,
@@ -1457,6 +1460,7 @@ impl LodClassifierDevice {
             device,
             queue,
             next_model_identity: Mutex::new(1),
+            render_shader_modules: Mutex::new(DeviceMemo::new(0)),
             pass1_pipeline,
             pass2_pipeline,
             resident_seed_pipeline,
@@ -1492,6 +1496,49 @@ impl LodClassifierDevice {
     /// the caller's subsequent command submission on this same queue.
     pub fn queue(&self) -> &wgpu::Queue {
         &self.queue
+    }
+
+    /// Lower one immutable composable WGSL descriptor once per device. The
+    /// raw entry source and complete compiler catalog form the cache key;
+    /// flattening and `wgpu` module creation occur only on a miss.
+    pub(crate) fn memoized_render_shader_module(
+        &self,
+        label: &'static str,
+        source: &'static str,
+        representative_entry_point: &'static str,
+        compile: impl FnOnce() -> Result<String, Box<dyn std::error::Error>>,
+    ) -> Result<wgpu::ShaderModule, LodWebGpuError> {
+        let descriptor = ShaderModuleDescriptor::new(
+            label,
+            source,
+            quilting_shaders::compiler_catalog_revision(),
+            ShaderStage::Vertex,
+            representative_entry_point,
+            ShaderTarget::Wgsl,
+            Vec::new(),
+        )
+        .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
+        let mut modules = self.render_shader_modules.lock().map_err(|_| {
+            LodWebGpuError::Payload("WebGPU render shader memo was poisoned".to_string())
+        })?;
+        let module = modules.get_or_try_insert_with(descriptor, |descriptor| {
+            let source = compile().map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
+            Ok::<_, LodWebGpuError>(self.device.create_shader_module(
+                wgpu::ShaderModuleDescriptor {
+                    label: Some(descriptor.label()),
+                    source: wgpu::ShaderSource::Wgsl(Cow::Owned(source)),
+                },
+            ))
+        })?;
+        Ok(module.clone())
+    }
+
+    /// Observable cache state for functional render diagnostics and tests.
+    pub fn render_shader_memo_diagnostics(&self) -> DeviceMemoDiagnostics {
+        self.render_shader_modules
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .diagnostics()
     }
 
     /// Upload Hyperscope's existing seven-word packed-atlas metadata and three
@@ -3710,8 +3757,6 @@ impl LodClassifierDevice {
                 "focus MRT pipeline creation requires exactly the PBR style".to_string(),
             ));
         }
-        let source = quilting_shaders::compile_patch_render_device_wgsl()
-            .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
         let mut fragment_entry_points = styles
             .iter()
             .copied()
@@ -3767,12 +3812,12 @@ impl LodClassifierDevice {
                 quilting_shaders::PATCH_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT,
             ));
         }
-        let module = self
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("quilting prepared QB render"),
-                source: wgpu::ShaderSource::Wgsl(Cow::Owned(source)),
-            });
+        let module = self.memoized_render_shader_module(
+            "quilting prepared QB render",
+            quilting_shaders::sources::PATCH_RENDER_DEVICE,
+            quilting_shaders::PATCH_RENDER_DEVICE_VERTEX_ENTRY_POINT,
+            quilting_shaders::compile_patch_render_device_wgsl,
+        )?;
         let bind_group_layout =
             self.device
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

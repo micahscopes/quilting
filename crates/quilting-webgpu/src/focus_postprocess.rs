@@ -11,7 +11,6 @@ use quilting_core::focus_postprocess::{
     FocusBlurSurface, FocusPingPong, FocusPostprocessSchedule, FOCUS_JFA_DOWNSAMPLE,
 };
 use quilting_core::render::FocusPostprocessPacket;
-use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
 use std::sync::Mutex;
@@ -293,14 +292,12 @@ impl LodClassifierDevice {
         &self,
         output_format: wgpu::TextureFormat,
     ) -> Result<FocusPostprocessPipelines, LodWebGpuError> {
-        let source = quilting_shaders::compile_focus_postprocess_wgsl()
-            .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
-        let module = self
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("quilting focus postprocess"),
-                source: wgpu::ShaderSource::Wgsl(Cow::Owned(source)),
-            });
+        let module = self.memoized_render_shader_module(
+            "quilting focus postprocess",
+            quilting_shaders::sources::FOCUS_POSTPROCESS,
+            quilting_shaders::FOCUS_POSTPROCESS_VERTEX_ENTRY_POINT,
+            quilting_shaders::compile_focus_postprocess_wgsl,
+        )?;
         let bind_group_layout =
             self.device
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

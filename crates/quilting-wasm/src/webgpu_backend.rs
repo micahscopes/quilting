@@ -188,6 +188,11 @@ pub(crate) struct WebGpuBackendDiagnostics {
     presentation_frames: u64,
     presentation_skips: u64,
     presentation_losses: u64,
+    render_shader_module_hits: u64,
+    render_shader_module_misses: u64,
+    render_shader_module_failed_creations: u64,
+    render_shader_module_invalidations: u64,
+    render_shader_module_entries: usize,
     initialization_attempts: u64,
     atlas_uploads: u64,
     texture_uploads: u64,
@@ -248,6 +253,11 @@ impl WebGpuBackend {
             .presentation
             .as_ref()
             .map(PatchPresentationSurface::diagnostics);
+        let render_shader_memo = self
+            .device
+            .as_ref()
+            .map(LodClassifierDevice::render_shader_memo_diagnostics)
+            .unwrap_or_default();
         let pbr_texture_residency = self
             .scene
             .as_ref()
@@ -342,6 +352,11 @@ impl WebGpuBackend {
             presentation_losses: presentation
                 .as_ref()
                 .map_or(0, |presentation| presentation.surface_losses),
+            render_shader_module_hits: render_shader_memo.hits,
+            render_shader_module_misses: render_shader_memo.misses,
+            render_shader_module_failed_creations: render_shader_memo.failed_creations,
+            render_shader_module_invalidations: render_shader_memo.invalidations,
+            render_shader_module_entries: render_shader_memo.resident_entries,
             initialization_attempts: self.initialization_attempts,
             atlas_uploads: self.atlas_uploads,
             texture_uploads: self.texture_uploads,

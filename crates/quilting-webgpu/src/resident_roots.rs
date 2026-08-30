@@ -376,14 +376,12 @@ impl LodClassifierDevice {
                 "resident root render sample count must be nonzero".to_string(),
             ));
         }
-        let source = quilting_shaders::compile_resident_root_render_device_wgsl()
-            .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
-        let module = self
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("quilting resident root render"),
-                source: wgpu::ShaderSource::Wgsl(Cow::Owned(source)),
-            });
+        let module = self.memoized_render_shader_module(
+            "quilting resident root render",
+            quilting_shaders::sources::RESIDENT_ROOT_RENDER_DEVICE,
+            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT,
+            quilting_shaders::compile_resident_root_render_device_wgsl,
+        )?;
         let bind_group_layout =
             self.device
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

@@ -381,6 +381,11 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             wgpu::TextureFormat::Rgba16Float,
         );
         let focus_target = focus_resources.target().expect("retained focus target");
+        let initial_shader_memo = classifier.render_shader_memo_diagnostics();
+        assert_eq!(initial_shader_memo.misses, 3);
+        assert_eq!(initial_shader_memo.hits, 0);
+        assert_eq!(initial_shader_memo.failed_creations, 0);
+        assert_eq!(initial_shader_memo.resident_entries, 3);
 
         let texture_a = TextureAssetDescriptor {
             width: 2,
@@ -474,6 +479,10 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 1,
             )
             .unwrap();
+        let reused_shader_memo = classifier.render_shader_memo_diagnostics();
+        assert_eq!(reused_shader_memo.misses, 3);
+        assert_eq!(reused_shader_memo.hits, 1);
+        assert_eq!(reused_shader_memo.resident_entries, 3);
         let mut first_material = PbrMaterial::default();
         first_material.textures = PbrTextureReferences {
             base_color: Some(0),
