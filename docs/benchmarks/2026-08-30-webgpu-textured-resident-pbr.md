@@ -92,3 +92,14 @@ wire image, and passed on the Radeon 780M RADV Vulkan adapter. The shader ABI
 tests, strict focused Clippy gate, and exact `wasm32-unknown-unknown`
 `leptos-ui,webgpu-backend` build also pass. Live Chrome visual parity remains a
 separate promotion gate.
+
+## Diagnostic image oracle
+
+The opt-in browser comparison is no longer hard-coded to re-render Normals.
+For every WebGPU-supported diagnostic style—Matcap, Wire, Matcap+Wire, Normals,
+LOD, and Stretch—the WebGL evidence target now renders the exact current Rust
+`RenderStyle` and compares its workload and RGBA image with the same staged
+WebGPU frame. Basic PBR retains its separate default-framebuffer capture and
+dynamic residency gate. Focus postprocessing and selected-face highlighting
+remain explicitly excluded from this oracle until their incumbent auxiliary
+passes can be captured without silently comparing different compositions.

@@ -2729,6 +2729,7 @@ fn submit_webgpu_frame(
 #[cfg(feature = "webgpu-backend")]
 fn capture_webgl_frame_evidence(
     renderer: &Renderer,
+    style: RenderStyle,
     viewport: (i32, i32),
     render_call: u64,
     camera: &Camera,
@@ -2824,7 +2825,7 @@ fn capture_webgl_frame_evidence(
             gl.enable(glow::DEPTH_TEST);
             gl.enable(glow::BLEND);
             gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
-            let submission = renderer.render(RenderStyle::Normals, camera, batches);
+            let submission = renderer.render(style, camera, batches);
             if submission != incumbent_submission {
                 return Err(format!(
                     "WebGL evidence rerender changed submission work: incumbent={incumbent_submission:?}, evidence={submission:?}",
@@ -2939,9 +2940,11 @@ pub fn mr_request_backend_frame_evidence() -> Result<bool, JsValue> {
         let state = state
             .as_mut()
             .ok_or_else(|| JsValue::from_str("renderer is not initialized"))?;
-        if !matches!(state.render_style, RenderStyle::Normals | RenderStyle::Pbr) {
+        if state.render_style != RenderStyle::Pbr
+            && !quilting_webgpu::supports_patch_presentation_style(state.render_style)
+        {
             return Err(JsValue::from_str(
-                "backend image evidence currently requires normals or basic PBR mode",
+                "backend image evidence requires a WebGPU-supported diagnostic or basic PBR mode",
             ));
         }
         if !crate::webgpu_backend::shadow_evidence_ready() {
@@ -9371,7 +9374,8 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         let render_started_ms = browser_now_ms();
         #[cfg(feature = "webgpu-backend")]
         if state.backend_evidence_requested
-            && (!matches!(state.render_style, RenderStyle::Normals | RenderStyle::Pbr)
+            && ((state.render_style != RenderStyle::Pbr
+                && !quilting_webgpu::supports_patch_presentation_style(state.render_style))
                 || state.fuzzy_enabled
                 || state.highlight_face >= 0)
         {
@@ -9413,8 +9417,8 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         }
         refresh_render_shadow_scene(state);
 
-        // The explicitly selected WebGPU normals backend submits before any
-        // WebGL frame work. A valid presentation frame needs none of the
+        // The explicitly selected WebGPU backend submits before any WebGL
+        // frame work. A valid presentation frame needs none of the
         // incumbent's prepared or camera-visibility buffers: `mr_pick`
         // refreshes both for its exact pick camera, while a later fallback or
         // mode switch observes the deliberately retained dirty stamps below.
@@ -10151,6 +10155,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
             state.backend_evidence_requested = false;
             match capture_webgl_frame_evidence(
                 &state.renderer,
+                state.render_style,
                 state.viewport_size,
                 state.render_calls,
                 &camera,
