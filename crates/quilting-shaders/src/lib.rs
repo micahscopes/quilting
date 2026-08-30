@@ -4,11 +4,75 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::sync::{Arc, OnceLock};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EntryPointStage {
     Vertex,
     Fragment,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ReflectedBindingKind {
+    UniformBuffer,
+    StorageBuffer,
+    SampledTexture,
+    DepthTexture,
+    StorageTexture,
+    ExternalTexture,
+    Sampler,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ReflectedEntryBinding {
+    pub group: u32,
+    pub binding: u32,
+    pub name: String,
+    pub kind: ReflectedBindingKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryBindingReflectionError {
+    MissingEntryPoint {
+        stage: EntryPointStage,
+        entry_point: String,
+    },
+    MissingResourceName {
+        group: u32,
+        binding: u32,
+    },
+    UnsupportedResource {
+        group: u32,
+        binding: u32,
+        detail: String,
+    },
+    Validation(String),
+}
+
+impl std::fmt::Display for EntryBindingReflectionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingEntryPoint { stage, entry_point } => {
+                write!(formatter, "missing {stage:?} entry point '{entry_point}'")
+            }
+            Self::MissingResourceName { group, binding } => {
+                write!(
+                    formatter,
+                    "resource at ({group}, {binding}) has no source name"
+                )
+            }
+            Self::UnsupportedResource {
+                group,
+                binding,
+                detail,
+            } => write!(
+                formatter,
+                "resource at ({group}, {binding}) cannot be reflected: {detail}"
+            ),
+            Self::Validation(detail) => write!(formatter, "shader validation failed: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for EntryBindingReflectionError {}
 
 /// Entry names produced by the pinned Naga WGSL writer. Naga reserves the
 /// source spelling while flattening and deterministically appends `_`.
@@ -275,6 +339,89 @@ pub fn compile_shader(
     })?;
 
     Ok(module)
+}
+
+/// Reflect the resources actually reachable from one graphics entry point.
+///
+/// This operates on the composed Naga module, after imports and shader
+/// definitions have been resolved. The result therefore describes compiler
+/// input rather than relying on backend-generated GLSL identifiers.
+pub fn reflect_graphics_entry_bindings(
+    module: &naga::Module,
+    stage: EntryPointStage,
+    entry_point: &str,
+) -> Result<Vec<ReflectedEntryBinding>, EntryBindingReflectionError> {
+    let naga_stage = match stage {
+        EntryPointStage::Vertex => naga::ShaderStage::Vertex,
+        EntryPointStage::Fragment => naga::ShaderStage::Fragment,
+    };
+    let entry_index = module
+        .entry_points
+        .iter()
+        .position(|entry| entry.stage == naga_stage && entry.name == entry_point)
+        .ok_or_else(|| EntryBindingReflectionError::MissingEntryPoint {
+            stage,
+            entry_point: entry_point.to_owned(),
+        })?;
+    let info = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(module)
+    .map_err(|error| EntryBindingReflectionError::Validation(error.to_string()))?;
+    let entry_info = info.get_entry_point(entry_index);
+    let mut bindings = Vec::new();
+    for (handle, variable) in module.global_variables.iter() {
+        if entry_info[handle].is_empty() {
+            continue;
+        }
+        let Some(resource) = variable.binding else {
+            continue;
+        };
+        let kind = match variable.space {
+            naga::AddressSpace::Uniform => ReflectedBindingKind::UniformBuffer,
+            naga::AddressSpace::Storage { .. } => ReflectedBindingKind::StorageBuffer,
+            naga::AddressSpace::Handle => match &module.types[variable.ty].inner {
+                naga::TypeInner::Image { class, .. } => match class {
+                    naga::ImageClass::Sampled { .. } => ReflectedBindingKind::SampledTexture,
+                    naga::ImageClass::Depth { .. } => ReflectedBindingKind::DepthTexture,
+                    naga::ImageClass::Storage { .. } => ReflectedBindingKind::StorageTexture,
+                    naga::ImageClass::External => ReflectedBindingKind::ExternalTexture,
+                },
+                naga::TypeInner::Sampler { .. } => ReflectedBindingKind::Sampler,
+                inner => {
+                    return Err(EntryBindingReflectionError::UnsupportedResource {
+                        group: resource.group,
+                        binding: resource.binding,
+                        detail: format!("handle-space type {inner:?}"),
+                    });
+                }
+            },
+            ref space => {
+                return Err(EntryBindingReflectionError::UnsupportedResource {
+                    group: resource.group,
+                    binding: resource.binding,
+                    detail: format!("address space {space:?}"),
+                });
+            }
+        };
+        let name =
+            variable
+                .name
+                .clone()
+                .ok_or(EntryBindingReflectionError::MissingResourceName {
+                    group: resource.group,
+                    binding: resource.binding,
+                })?;
+        bindings.push(ReflectedEntryBinding {
+            group: resource.group,
+            binding: resource.binding,
+            name,
+            kind,
+        });
+    }
+    bindings.sort();
+    Ok(bindings)
 }
 
 /// Emit a naga Module as GLSL ES 300 (for WebGL2).
@@ -674,6 +821,46 @@ mod tests {
     fn composer_loads_all_modules() {
         let composer = create_composer();
         assert!(composer.is_ok(), "Failed: {:?}", composer.err());
+    }
+
+    #[test]
+    fn entry_binding_reflection_excludes_unreachable_resources() {
+        const PROBE: &str = r#"
+struct ProbeUniforms { offset: vec4<f32> }
+
+@group(1) @binding(0) var<uniform> probe: ProbeUniforms;
+@group(1) @binding(1) var image: texture_2d<f32>;
+@group(1) @binding(2) var unused_sampler: sampler;
+@group(1) @binding(3) var<uniform> unused_probe: ProbeUniforms;
+
+@vertex
+fn probe_vertex(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+    return probe.offset + textureLoad(image, vec2<i32>(i32(index), 0), 0);
+}
+"#;
+        let module = compile_shader(PROBE, HashMap::new()).unwrap();
+        assert_eq!(
+            reflect_graphics_entry_bindings(&module, EntryPointStage::Vertex, "probe_vertex")
+                .unwrap(),
+            vec![
+                ReflectedEntryBinding {
+                    group: 1,
+                    binding: 0,
+                    name: "probe".into(),
+                    kind: ReflectedBindingKind::UniformBuffer,
+                },
+                ReflectedEntryBinding {
+                    group: 1,
+                    binding: 1,
+                    name: "image".into(),
+                    kind: ReflectedBindingKind::SampledTexture,
+                },
+            ]
+        );
+        assert!(matches!(
+            reflect_graphics_entry_bindings(&module, EntryPointStage::Fragment, "probe_vertex"),
+            Err(EntryBindingReflectionError::MissingEntryPoint { .. })
+        ));
     }
 
     #[test]
