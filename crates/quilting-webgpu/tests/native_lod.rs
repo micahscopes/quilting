@@ -1675,21 +1675,25 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 matcap_style: MatcapStyle::GoldenSoft,
                 ..render_frame.options
             };
-            let frame = RenderFrame::build(
+            let plan = diagnostic_scene.command_plan(style, options).unwrap();
+            assert!(plan
+                .scene()
+                .shares_snapshot_with(diagnostic_scene.validated_scene()));
+            let frame = RenderFrame::from_command_plan(
                 20 + revision as u64,
                 render_frame.pose,
-                style,
                 render_frame.view,
                 options,
-                &render_scene,
+                &plan,
             )
             .unwrap();
             let error_scope = classifier
                 .device()
                 .push_error_scope(wgpu::ErrorFilter::Validation);
             let encoding = classifier
-                .render_offscreen_supported_patch_scene_with_face_visibility(
+                .render_offscreen_supported_patch_render_plan_with_face_visibility(
                     &frame,
+                    &plan,
                     &diagnostic_pipelines,
                     &diagnostic_scene,
                     &packed_atlas,
@@ -1705,7 +1709,10 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             assert_eq!(encoding.indirect_draw_calls, expected_draws);
             assert_eq!(
                 encoding.logical_submission,
-                frame.expected_submission_stats(&render_scene).unwrap()
+                frame
+                    .execution_with_command_plan(&plan)
+                    .unwrap()
+                    .submission_stats()
             );
             let image = classifier
                 .stage_offscreen_patch_render_target_image(&target)

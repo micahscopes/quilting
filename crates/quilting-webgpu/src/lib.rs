@@ -61,9 +61,10 @@ use quilting_core::material::{
 };
 use quilting_core::render::{
     render_draw_passes, FocusFieldPacket, PbrDrawClass, RenderBatchSnapshot,
-    RenderEntityTransform, RenderFrame, RenderFrameOptions, RenderGeometry, RenderPass,
-    RenderPoseIdentity, RenderSceneSnapshot, RenderStyle, RenderSubmissionStats, RenderView,
-    ResolvedRenderCommand, ResidentRootDrawDomain, ResidentRootDrawDomains,
+    RenderCommandPlan, RenderEntityTransform, RenderFrame, RenderFrameOptions, RenderGeometry,
+    RenderPass, RenderPoseIdentity, RenderSceneSnapshot, RenderStyle, RenderSubmissionStats,
+    RenderView, ResolvedRenderCommand, ResidentRootDrawDomain, ResidentRootDrawDomains,
+    ValidatedRenderScene,
 };
 use quilting_core::render_evidence::{
     render_image_signature, RenderImageChannelOrder, RenderImageOrigin, RenderImageSignature,
@@ -1135,7 +1136,7 @@ pub struct PatchRenderBindings {
 /// groups from different scene epochs.
 pub struct PatchRenderScene {
     model_identity: u64,
-    scene: RenderSceneSnapshot,
+    scene: ValidatedRenderScene,
     patches: PatchPreparationScene,
     visibility: VisibilityCompactionScene,
     face_visibility: FaceVisibilityExpansionScene,
@@ -4578,11 +4579,16 @@ impl LodClassifierDevice {
         textures: Option<&PbrTextureTable>,
     ) -> Result<PatchRenderScene, LodWebGpuError> {
         scene.revision = revision;
+        let scene = ValidatedRenderScene::new(scene).map_err(|error| {
+            LodWebGpuError::Payload(format!("retained WebGPU render scene: {error}"))
+        })?;
+        let snapshot = scene.snapshot();
         let patch_words =
-            pack_wgsl_patch_preparation_scene_words(&model.prepared, &scene, source_instances)
+            pack_wgsl_patch_preparation_scene_words(&model.prepared, snapshot, source_instances)
                 .map_err(LodWebGpuError::Payload)?;
         let visibility_words =
-            pack_wgsl_visibility_compaction_scene_words(&scene).map_err(LodWebGpuError::Payload)?;
+            pack_wgsl_visibility_compaction_scene_words(snapshot)
+                .map_err(LodWebGpuError::Payload)?;
         let patches = self.upload_patch_preparation_scene(model, patch_words)?;
         let visibility = self.upload_visibility_compaction_scene(visibility_words)?;
         let face_visibility = self.create_face_visibility_expansion_scene(
@@ -4591,8 +4597,13 @@ impl LodClassifierDevice {
             &visibility,
             model.prepared.residency.num_faces,
         )?;
-        let bindings =
-            self.create_patch_render_bindings(pipeline, &scene, &patches, &visibility, textures)?;
+        let bindings = self.create_patch_render_bindings(
+            pipeline,
+            snapshot,
+            &patches,
+            &visibility,
+            textures,
+        )?;
         Ok(PatchRenderScene {
             model_identity: model.identity,
             scene,
@@ -4667,8 +4678,15 @@ impl LodClassifierDevice {
                 "in-place WebGPU scene update changed immutable model words".to_string(),
             ));
         }
+        let scene = ValidatedRenderScene::new(scene).map_err(|error| {
+            LodWebGpuError::Payload(format!("retained WebGPU render scene update: {error}"))
+        })?;
         let material_textures = if pipeline.uses_pbr_bindings() {
-            Some(self.create_pbr_material_texture_bindings(pipeline, &scene.materials, textures)?)
+            Some(self.create_pbr_material_texture_bindings(
+                pipeline,
+                &scene.snapshot().materials,
+                textures,
+            )?)
         } else {
             None
         };
@@ -4722,7 +4740,7 @@ impl LodClassifierDevice {
     ) -> Result<(), LodWebGpuError> {
         let candidate = self.create_pbr_material_texture_bindings(
             pipeline,
-            &retained.scene.materials,
+            &retained.scene.snapshot().materials,
             textures,
         )?;
         if candidate.material_count() != retained.bindings.material_count {
@@ -4979,7 +4997,7 @@ impl LodClassifierDevice {
         self.encode_diagnostic_render_frame(
             encoder,
             frame,
-            &scene.scene,
+            scene.scene.snapshot(),
             pipeline,
             &scene.bindings,
             &scene.patches,
@@ -5015,7 +5033,7 @@ impl LodClassifierDevice {
         self.encode_supported_render_frame(
             encoder,
             frame,
-            &scene.scene,
+            scene.scene.snapshot(),
             pipelines,
             &scene.bindings,
             &scene.patches,
@@ -5023,6 +5041,47 @@ impl LodClassifierDevice {
             atlas,
             target,
             use_qb,
+            encode_visibility,
+        )
+    }
+
+    /// Encode through the exact immutable command allocation retained for this
+    /// scene epoch. This is the allocation-free high-rate path; the adjacent
+    /// frame API remains available as a rollback and validation oracle.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_supported_patch_render_plan<'resource, VisibilityProducer>(
+        &'resource self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &RenderFrame,
+        plan: &RenderCommandPlan,
+        pipelines: &'resource DiagnosticPatchRenderPipelines,
+        scene: &'resource PatchRenderScene,
+        atlas: &'resource PackedPatchAtlas,
+        target: PatchRenderTarget<'resource>,
+        use_qb: bool,
+        encode_visibility: VisibilityProducer,
+    ) -> Result<PatchFrameEncoding, LodWebGpuError>
+    where
+        VisibilityProducer: FnOnce(
+            &mut wgpu::CommandEncoder,
+            &PatchPreparationScene,
+            &VisibilityCompactionScene,
+        ) -> Result<(), LodWebGpuError>,
+    {
+        self.encode_render_frame_with_pipelines(
+            encoder,
+            frame,
+            scene.scene.snapshot(),
+            Some(plan),
+            &scene.bindings,
+            &scene.patches,
+            &scene.visibility,
+            atlas,
+            target,
+            None,
+            use_qb,
+            Some(&pipelines.highlight),
+            |pass, geometry| pipelines.get_for_pass(pass, geometry),
             encode_visibility,
         )
     }
@@ -5138,7 +5197,8 @@ impl LodClassifierDevice {
         let scene_encoding = self.encode_render_frame_with_pipelines(
             encoder,
             frame,
-            &scene.scene,
+            scene.scene.snapshot(),
+            None,
             &scene.bindings,
             &scene.patches,
             &scene.visibility,
@@ -5526,6 +5586,33 @@ impl LodClassifierDevice {
         )
     }
 
+    /// Retained-command counterpart to
+    /// [`Self::render_offscreen_supported_patch_scene_with_face_visibility`].
+    /// The command plan and semantic scene must share the exact validated
+    /// epoch; frame submission then performs no scene scan or command rebuild.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_offscreen_supported_patch_render_plan_with_face_visibility(
+        &self,
+        frame: &RenderFrame,
+        plan: &RenderCommandPlan,
+        pipelines: &DiagnosticPatchRenderPipelines,
+        scene: &PatchRenderScene,
+        atlas: &PackedPatchAtlas,
+        target: &OffscreenPatchRenderTarget,
+        use_qb: bool,
+    ) -> Result<PatchFrameEncoding, LodWebGpuError> {
+        self.render_offscreen_supported_patch_scene_with_face_visibility_plan_and_clear(
+            frame,
+            pipelines,
+            scene,
+            Some(plan),
+            atlas,
+            target,
+            use_qb,
+            wgpu::Color::TRANSPARENT,
+        )
+    }
+
     /// Submit any supported diagnostic frame from a device-resident LOD
     /// epoch. This is the rollback-independent counterpart to the compact
     /// CPU-bitset adapter above and performs no readback.
@@ -5640,6 +5727,30 @@ impl LodClassifierDevice {
         use_qb: bool,
         clear_color: wgpu::Color,
     ) -> Result<PatchFrameEncoding, LodWebGpuError> {
+        self.render_offscreen_supported_patch_scene_with_face_visibility_plan_and_clear(
+            frame,
+            pipelines,
+            scene,
+            None,
+            atlas,
+            target,
+            use_qb,
+            clear_color,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_offscreen_supported_patch_scene_with_face_visibility_plan_and_clear(
+        &self,
+        frame: &RenderFrame,
+        pipelines: &DiagnosticPatchRenderPipelines,
+        scene: &PatchRenderScene,
+        command_plan: Option<&RenderCommandPlan>,
+        atlas: &PackedPatchAtlas,
+        target: &OffscreenPatchRenderTarget,
+        use_qb: bool,
+        clear_color: wgpu::Color,
+    ) -> Result<PatchFrameEncoding, LodWebGpuError> {
         if frame.view.viewport != target.size {
             return Err(LodWebGpuError::Payload(format!(
                 "offscreen target {:?} does not match frame viewport {:?}",
@@ -5651,11 +5762,14 @@ impl LodClassifierDevice {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("quilting live offscreen diagnostic frame"),
             });
-        let encoding = self.encode_supported_patch_render_scene(
+        let encoding = self.encode_render_frame_with_pipelines(
             &mut encoder,
             frame,
-            pipelines,
-            scene,
+            scene.scene.snapshot(),
+            command_plan,
+            &scene.bindings,
+            &scene.patches,
+            &scene.visibility,
             atlas,
             PatchRenderTarget {
                 color_view: &target.color_view,
@@ -5664,7 +5778,10 @@ impl LodClassifierDevice {
                 clear_color: Some(clear_color),
                 clear_depth: Some(1.0),
             },
+            None,
             use_qb,
+            Some(&pipelines.highlight),
+            |pass, geometry| pipelines.get_for_pass(pass, geometry),
             |encoder, _, _| {
                 self.encode_face_visibility_expansion(scene, encoder);
                 Ok(())
@@ -5807,6 +5924,7 @@ impl LodClassifierDevice {
         encoder: &mut wgpu::CommandEncoder,
         frame: &RenderFrame,
         scene: &RenderSceneSnapshot,
+        command_plan: Option<&RenderCommandPlan>,
         bindings: &'resource PatchRenderBindings,
         patches: &'resource PatchPreparationScene,
         visibility: &'resource VisibilityCompactionScene,
@@ -5829,9 +5947,17 @@ impl LodClassifierDevice {
             &VisibilityCompactionScene,
         ) -> Result<(), LodWebGpuError>,
     {
-        let execution = frame
-            .execution(scene)
-            .map_err(|error| LodWebGpuError::Payload(format!("render frame contract: {error}")))?;
+        let execution = if let Some(plan) = command_plan {
+            if !plan.scene().contains_snapshot(scene) {
+                return Err(LodWebGpuError::Payload(
+                    "retained WebGPU command plan belongs to a different scene epoch".to_string(),
+                ));
+            }
+            frame.execution_with_command_plan(plan)
+        } else {
+            frame.execution(scene)
+        }
+        .map_err(|error| LodWebGpuError::Payload(format!("render frame contract: {error}")))?;
         if frame.style == RenderStyle::Pbr {
             if raw_field_target.is_some() {
                 validate_focus_pbr_frame(scene, frame.options)?;
@@ -6139,6 +6265,7 @@ impl LodClassifierDevice {
             encoder,
             frame,
             scene,
+            None,
             bindings,
             patches,
             visibility,
@@ -6180,6 +6307,7 @@ impl LodClassifierDevice {
             encoder,
             frame,
             scene,
+            None,
             bindings,
             patches,
             visibility,
@@ -7806,7 +7934,25 @@ impl PatchPreparationScene {
 
 impl PatchRenderScene {
     pub fn scene(&self) -> &RenderSceneSnapshot {
+        self.scene.snapshot()
+    }
+
+    pub fn validated_scene(&self) -> &ValidatedRenderScene {
         &self.scene
+    }
+
+    /// Create one immutable low-rate command plan for this exact retained
+    /// scene epoch. Cloned plans and frames share both scene and command
+    /// allocations; style/command-presence changes deliberately require a new
+    /// plan.
+    pub fn command_plan(
+        &self,
+        style: RenderStyle,
+        options: RenderFrameOptions,
+    ) -> Result<RenderCommandPlan, LodWebGpuError> {
+        RenderCommandPlan::build(&self.scene, style, options).map_err(|error| {
+            LodWebGpuError::Payload(format!("retained WebGPU command plan: {error}"))
+        })
     }
 
     pub fn patch_count(&self) -> u32 {
@@ -7831,7 +7977,7 @@ impl PatchRenderScene {
     /// Whether this retained epoch can execute the declared basic PBR subset
     /// without semantic lowering or placeholder substitution.
     pub fn supports_resident_basic_pbr_frame(&self, options: RenderFrameOptions) -> bool {
-        supports_basic_pbr_frame(&self.scene, options)
+        supports_basic_pbr_frame(self.scene.snapshot(), options)
             && self.pbr_texture_residency().is_some_and(|residency| {
                 residency
                     .iter()
@@ -7845,7 +7991,7 @@ impl PatchRenderScene {
     /// Whether this coherent scene epoch can execute the focus-aware PBR
     /// path without lowering authored materials or substituting resources.
     pub fn supports_resident_focus_pbr_frame(&self, options: RenderFrameOptions) -> bool {
-        supports_focus_pbr_frame(&self.scene, options)
+        supports_focus_pbr_frame(self.scene.snapshot(), options)
             && self.pbr_texture_residency().is_some_and(|residency| {
                 residency
                     .iter()
