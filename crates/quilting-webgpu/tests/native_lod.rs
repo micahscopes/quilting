@@ -326,6 +326,13 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             .await
             .expect("request native WebGPU device");
         let classifier = LodClassifierDevice::new(device, queue).unwrap();
+        let focus_pipelines = classifier
+            .create_focus_postprocess_pipelines(wgpu::TextureFormat::Rgba8Unorm)
+            .expect("create retained focus postprocess pipeline family");
+        assert_eq!(
+            focus_pipelines.output_format(),
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
 
         let texture_a = TextureAssetDescriptor {
             width: 2,

@@ -52,6 +52,13 @@ pub const RESIDENT_ROOT_RENDER_DEVICE_WIRE_ENTRY_POINT: &str = "render_resident_
 pub const RESIDENT_ROOT_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT: &str =
     "render_resident_root_highlight";
 pub const RESIDENT_ROOT_RENDER_DEVICE_PBR_ENTRY_POINT: &str = "render_resident_root_pbr";
+pub const FOCUS_POSTPROCESS_VERTEX_ENTRY_POINT: &str = "focus_fullscreen_vertex";
+pub const FOCUS_SELECT_WEIGHT_ENTRY_POINT: &str = "focus_select_weight";
+pub const FOCUS_JFA_INIT_ENTRY_POINT: &str = "focus_jfa_init";
+pub const FOCUS_JFA_STEP_ENTRY_POINT: &str = "focus_jfa_step";
+pub const FOCUS_FIRMNESS_ENTRY_POINT: &str = "focus_firmness";
+pub const FOCUS_KAWASE_ENTRY_POINT: &str = "focus_kawase";
+pub const FOCUS_DIRECTIONAL_BLUR_ENTRY_POINT: &str = "focus_directional_blur";
 
 /// All WGSL shader module sources, embedded at compile time.
 pub mod sources {
@@ -78,6 +85,8 @@ pub mod sources {
     pub const PREPARED_VISIBILITY: &str =
         include_str!("../shaders/compute/prepared_visibility.wgsl");
     pub const PATCH_RENDER_DEVICE: &str = include_str!("../shaders/render/patch.wgsl");
+    pub const FOCUS_POSTPROCESS: &str =
+        include_str!("../shaders/render/focus_postprocess.wgsl");
     pub const RESIDENT_ROOT_RENDER_DEVICE: &str =
         include_str!("../shaders/render/resident_root_patch.wgsl");
     pub const LOD_PASS1: &str = include_str!("../shaders/compute/lod_pass1.wgsl");
@@ -149,6 +158,10 @@ fn build_compiler_catalog_revision() -> Arc<str> {
         (
             "quilting::render::patch_pbr_portable",
             sources::PATCH_RENDER_PBR_PORTABLE,
+        ),
+        (
+            "quilting::render::focus_postprocess",
+            sources::FOCUS_POSTPROCESS,
         ),
         ("quilting::compute::lod_types", sources::LOD_TYPES),
         ("quilting::compute::pose", sources::POSE),
@@ -481,6 +494,21 @@ pub fn compile_patch_render_device_module() -> Result<naga::Module, Box<dyn std:
 /// Standalone WGSL containing the WebGPU QB vertex and diagnostic fragment.
 pub fn compile_patch_render_device_wgsl() -> Result<String, Box<dyn std::error::Error>> {
     emit_wgsl(&compile_patch_render_device_module()?)
+}
+
+/// Compile and validate the backend-local fullscreen focus pass family.
+pub fn compile_focus_postprocess_module() -> Result<naga::Module, Box<dyn std::error::Error>> {
+    let module = compile_shader(sources::FOCUS_POSTPROCESS, HashMap::new())?;
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)?;
+    Ok(module)
+}
+
+pub fn compile_focus_postprocess_wgsl() -> Result<String, Box<dyn std::error::Error>> {
+    emit_wgsl(&compile_focus_postprocess_module()?)
 }
 
 /// Compile and validate the source-face-indexed resident-root render entries.
@@ -1000,6 +1028,62 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             PATCH_RENDER_DEVICE_PBR_ENTRY_POINT,
             naga::ShaderStage::Fragment,
         )));
+    }
+
+    #[test]
+    fn compile_focus_postprocess_shader_family() {
+        let module = compile_focus_postprocess_module()
+            .expect("focus postprocess shader family compiles and validates");
+        let vertex = module
+            .entry_points
+            .iter()
+            .find(|entry| entry.name == FOCUS_POSTPROCESS_VERTEX_ENTRY_POINT)
+            .expect("focus fullscreen vertex entry point");
+        assert_eq!(vertex.stage, naga::ShaderStage::Vertex);
+        for name in [
+            FOCUS_SELECT_WEIGHT_ENTRY_POINT,
+            FOCUS_JFA_INIT_ENTRY_POINT,
+            FOCUS_JFA_STEP_ENTRY_POINT,
+            FOCUS_FIRMNESS_ENTRY_POINT,
+            FOCUS_KAWASE_ENTRY_POINT,
+            FOCUS_DIRECTIONAL_BLUR_ENTRY_POINT,
+        ] {
+            let fragment = module
+                .entry_points
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap_or_else(|| panic!("missing focus fragment entry point {name}"));
+            assert_eq!(fragment.stage, naga::ShaderStage::Fragment);
+        }
+        assert_eq!(
+            module
+                .global_variables
+                .iter()
+                .filter(|(_, variable)| variable.binding.is_some())
+                .count(),
+            4,
+        );
+        let mut layouter = naga::proc::Layouter::default();
+        layouter.update(module.to_ctx()).expect("focus pass layouts");
+        let (uniform, _) = module
+            .types
+            .iter()
+            .find(|(_, ty)| ty.name.as_deref() == Some("FocusPassUniform"))
+            .expect("focus uniform type");
+        assert_eq!(layouter[uniform].size, 64);
+
+        let emitted = compile_focus_postprocess_wgsl().expect("focus WGSL emits");
+        for name in [
+            FOCUS_POSTPROCESS_VERTEX_ENTRY_POINT,
+            FOCUS_SELECT_WEIGHT_ENTRY_POINT,
+            FOCUS_JFA_INIT_ENTRY_POINT,
+            FOCUS_JFA_STEP_ENTRY_POINT,
+            FOCUS_FIRMNESS_ENTRY_POINT,
+            FOCUS_KAWASE_ENTRY_POINT,
+            FOCUS_DIRECTIONAL_BLUR_ENTRY_POINT,
+        ] {
+            assert!(emitted.contains(&format!("fn {name}")), "missing emitted {name}");
+        }
     }
 
     #[test]
