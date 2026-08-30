@@ -11,7 +11,7 @@ use quilting_core::render_pipeline::{
 };
 
 /// Canonical shader-group coordinates, re-exported beside the WebGL lowering.
-pub use quilting_shaders::graphics_bind_group::{
+pub use quilting_shaders::primary_graphics_bind_group::{
     ENTITY_BATCH as ENTITY_BATCH_BIND_GROUP, FRAME_POSE as FRAME_POSE_BIND_GROUP,
     MATERIAL_STYLE as MATERIAL_STYLE_BIND_GROUP, PASS_RESOURCE as PASS_RESOURCE_BIND_GROUP,
 };

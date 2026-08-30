@@ -10,10 +10,10 @@ pub enum EntryPointStage {
     Fragment,
 }
 
-/// Stable graphics resource groups shared by WGSL sources and backend layout
-/// descriptors. Individual pipelines may omit unused groups, but a coordinate
-/// never changes responsibility between WebGL2 and WebGPU.
-pub mod graphics_bind_group {
+/// Stable resource groups for the incumbent primary graphics shader family.
+/// Compute, fullscreen, and resident-root families retain separately validated
+/// layouts until their resource models are deliberately consolidated.
+pub mod primary_graphics_bind_group {
     pub const FRAME_POSE: u32 = 0;
     pub const ENTITY_BATCH: u32 = 1;
     pub const MATERIAL_STYLE: u32 = 2;
