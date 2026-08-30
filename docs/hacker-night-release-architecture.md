@@ -654,6 +654,16 @@ semantic action stream and exact hover/active/derived-selection state, including
 optional face/barycentrics. Its golden demonstrates cadence-independent
 activation through the existing navigation owner and rejects the same events
 under 0.24 rather than assigning historical meaning retroactively.
+The staged WebGPU backend now has the corresponding opt-in prepared-patch
+query packet. A clip-space remap renders one requested viewport pixel into
+retained 1x1 identity/surface/depth attachments and asynchronously maps two
+WebGPU-aligned rows. It preserves semantic node, source face/barycentrics,
+source-chart point, displayed distance, and the interaction-target residency
+epoch without allocating a viewport-sized ID buffer. The exported query does
+not publish interaction state; its result must enter the existing Rust packed
+target join. Resident-root plus sparse-overlay frames reject this first adapter
+until both draw domains populate one shared query target, so WebGL2 remains the
+live authority rather than accepting stale ordinary-scene geometry.
 `selectionimpl=js|shadow|rust` is the rollback boundary: the Rust mode verifies
 the application identity against `AppStore`, joins only the backend-local packed
 node, and applies the selected focus packet directly to the resident renderer
