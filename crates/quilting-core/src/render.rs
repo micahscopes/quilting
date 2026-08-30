@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RenderEntityTransform {
@@ -706,7 +707,7 @@ pub fn patch_visibility_needed(
         || last_residency_revision != residency_revision
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RenderStyle {
     Pbr,
@@ -1204,6 +1205,112 @@ pub struct RenderFrame {
     pub commands: Vec<RenderCommand>,
 }
 
+/// An immutable scene that has passed the complete semantic contract once.
+/// Clones share the exact snapshot allocation, allowing command plans and
+/// backends to retain rollback-safe scene epochs without copying member tables.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValidatedRenderScene {
+    snapshot: Arc<RenderSceneSnapshot>,
+}
+
+impl ValidatedRenderScene {
+    pub fn new(snapshot: RenderSceneSnapshot) -> Result<Self, RenderContractError> {
+        snapshot.validate()?;
+        Ok(Self {
+            snapshot: Arc::new(snapshot),
+        })
+    }
+
+    pub fn snapshot(&self) -> &RenderSceneSnapshot {
+        &self.snapshot
+    }
+
+    pub fn shares_snapshot_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.snapshot, &other.snapshot)
+    }
+}
+
+impl TryFrom<RenderSceneSnapshot> for ValidatedRenderScene {
+    type Error = RenderContractError;
+
+    fn try_from(snapshot: RenderSceneSnapshot) -> Result<Self, Self::Error> {
+        Self::new(snapshot)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RenderCommandPlanKey {
+    pub style: RenderStyle,
+    pub focus_postprocess: bool,
+    pub highlight_face: Option<u32>,
+}
+
+impl RenderCommandPlanKey {
+    pub fn new(style: RenderStyle, options: RenderFrameOptions) -> Self {
+        Self {
+            style,
+            focus_postprocess: options.focus_postprocess.is_some(),
+            highlight_face: options.highlight_face,
+        }
+    }
+}
+
+/// Immutable low-rate command identity bound to one validated scene epoch.
+/// View matrices, pose samples, focus parameters, and matcap uniforms do not
+/// rebuild this plan unless they change command presence or batch cardinality.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderCommandPlan {
+    key: RenderCommandPlanKey,
+    scene: ValidatedRenderScene,
+    commands: Arc<[RenderCommand]>,
+}
+
+impl RenderCommandPlan {
+    pub fn build(
+        scene: &ValidatedRenderScene,
+        style: RenderStyle,
+        options: RenderFrameOptions,
+    ) -> Result<Self, RenderContractError> {
+        if let Some(focus) = options.focus_postprocess {
+            focus.validate()?;
+        }
+        Ok(Self {
+            key: RenderCommandPlanKey::new(style, options),
+            scene: scene.clone(),
+            commands: expected_commands(style, options, &scene.snapshot().batches)?.into(),
+        })
+    }
+
+    pub fn key(&self) -> RenderCommandPlanKey {
+        self.key
+    }
+
+    pub fn scene(&self) -> &ValidatedRenderScene {
+        &self.scene
+    }
+
+    pub fn commands(&self) -> &[RenderCommand] {
+        &self.commands
+    }
+
+    pub fn matches(
+        &self,
+        scene: &ValidatedRenderScene,
+        style: RenderStyle,
+        options: RenderFrameOptions,
+    ) -> bool {
+        self.scene.shares_snapshot_with(scene)
+            && self.key == RenderCommandPlanKey::new(style, options)
+    }
+
+    pub fn execution(&self) -> RenderExecution<'_, '_> {
+        RenderExecution {
+            commands: &self.commands,
+            scene: self.scene.snapshot(),
+        }
+    }
+}
+
 /// One validated logical command resolved against the immutable scene it
 /// addresses. Backend resources deliberately remain outside this value; a
 /// renderer uses `batch_index` to select its retained device allocation while
@@ -1235,21 +1342,22 @@ pub enum ResolvedRenderCommand<'scene> {
     },
 }
 
-/// Validated, allocation-free execution view over a [`RenderFrame`].
+/// Validated, allocation-free execution view over a frame or retained command
+/// plan.
 ///
 /// Constructing this view proves the scene revision and entire command stream
 /// before a backend can touch device state. Iteration then resolves batch
 /// references and index counts without backend-specific pass reconstruction.
 #[derive(Debug, Clone, Copy)]
 pub struct RenderExecution<'frame, 'scene> {
-    frame: &'frame RenderFrame,
+    commands: &'frame [RenderCommand],
     scene: &'scene RenderSceneSnapshot,
 }
 
 impl<'frame, 'scene> RenderExecution<'frame, 'scene> {
     pub fn iter(self) -> RenderExecutionIter<'frame, 'scene> {
         RenderExecutionIter {
-            commands: self.frame.commands.iter(),
+            commands: self.commands.iter(),
             scene: self.scene,
         }
     }
@@ -1412,7 +1520,10 @@ impl RenderFrame {
         scene: &'scene RenderSceneSnapshot,
     ) -> Result<RenderExecution<'frame, 'scene>, RenderContractError> {
         self.validate(scene)?;
-        Ok(RenderExecution { frame: self, scene })
+        Ok(RenderExecution {
+            commands: &self.commands,
+            scene,
+        })
     }
 
     /// Derive the indexed patch work implied by this validated frame. This is
@@ -2107,6 +2218,80 @@ mod tests {
         assert_eq!(
             frame.execution(&scene).unwrap_err(),
             RenderContractError::CommandSequenceMismatch
+        );
+    }
+
+    #[test]
+    fn retained_command_plan_binds_one_validated_scene_without_hot_path_rebuilds() {
+        let scene = scene();
+        let validated = ValidatedRenderScene::new(scene.clone()).unwrap();
+        let options = RenderFrameOptions::default();
+        let plan = RenderCommandPlan::build(&validated, RenderStyle::Matcap, options).unwrap();
+        assert!(plan.matches(&validated, RenderStyle::Matcap, options));
+        assert!(plan.scene().shares_snapshot_with(&validated));
+
+        let frame = RenderFrame::build(
+            14,
+            RenderPoseIdentity {
+                asset_revision: 2,
+                pose_revision: 9,
+            },
+            RenderStyle::Matcap,
+            view(),
+            options,
+            &scene,
+        )
+        .unwrap();
+        assert_eq!(plan.commands(), frame.commands.as_slice());
+        assert_eq!(
+            plan.execution().submission_stats(),
+            frame.expected_submission_stats(&scene).unwrap()
+        );
+
+        let mut uniform_only = options;
+        uniform_only.matcap_style = MatcapStyle::GoldenSoft;
+        assert!(plan.matches(&validated, RenderStyle::Matcap, uniform_only));
+
+        let equivalent_but_distinct = ValidatedRenderScene::new(scene).unwrap();
+        assert!(!plan.matches(
+            &equivalent_but_distinct,
+            RenderStyle::Matcap,
+            options,
+        ));
+        let clone = plan.clone();
+        assert!(clone.scene().shares_snapshot_with(plan.scene()));
+        assert!(std::ptr::eq(
+            clone.commands().as_ptr(),
+            plan.commands().as_ptr()
+        ));
+    }
+
+    #[test]
+    fn validated_scene_and_command_plan_fail_before_retention() {
+        let mut invalid = scene();
+        invalid.batches[0].triangle_index_count = 5;
+        assert!(matches!(
+            ValidatedRenderScene::new(invalid),
+            Err(RenderContractError::InvalidBatchGeometry { batch_index: 0 })
+        ));
+
+        let validated = ValidatedRenderScene::new(scene()).unwrap();
+        let mut options = RenderFrameOptions::default();
+        options.focus_postprocess = Some(FocusPostprocessPacket {
+            mode: FocusPostprocessMode::Spheroidal,
+            blur_radius_pixels: 11,
+            blur_strength: f32::NAN,
+            focus_coordinate: 0.5,
+            bandwidth: 0.1,
+            normalize_range: false,
+            stretch_range: [0.5, 0.5],
+            gaussian_passes: 1,
+            kawase_passes: 3,
+            kawase_offset: 1.5,
+        });
+        assert_eq!(
+            RenderCommandPlan::build(&validated, RenderStyle::Pbr, options).unwrap_err(),
+            RenderContractError::InvalidFocusPostprocess
         );
     }
 
