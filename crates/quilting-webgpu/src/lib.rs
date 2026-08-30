@@ -1652,10 +1652,10 @@ impl LodClassifierDevice {
             prepare_lod_atlas_lookup([[1, 1, 1]]).map_err(LodWebGpuError::Conformance)?;
         let mut model = self.upload_model(prepared, &atlas_lookup)?;
         let packed_atlas = self.upload_packed_patch_atlas(
-            &[1, 1, 1, 0, 3, 0, 0],
+            &[1, 1, 1, 0, 3, 0, 6],
             &[1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
             &[0, 1, 2],
-            &[],
+            &[0, 1, 1, 2, 2, 0],
         )?;
         let transform = RenderEntityTransform {
             mobius: identity_mobius(),
@@ -1698,7 +1698,7 @@ impl LodClassifierDevice {
                         },
                     ],
                     triangle_index_count: 3,
-                    line_index_count: 0,
+                    line_index_count: 6,
                     transform,
                     enabled: true,
                     pbr_class: PbrDrawClass::Opaque,
@@ -1726,7 +1726,7 @@ impl LodClassifierDevice {
                         vertex_lods: [1; 3],
                     }],
                     triangle_index_count: 3,
-                    line_index_count: 0,
+                    line_index_count: 6,
                     transform,
                     enabled: true,
                     pbr_class: PbrDrawClass::Opaque,
@@ -1769,16 +1769,19 @@ impl LodClassifierDevice {
             Some(wgpu::TextureFormat::Depth24Plus),
             1,
         )?;
-        let overlay_pipeline = self.create_patch_render_pipeline(
+        let overlay_pipelines = self.create_diagnostic_patch_render_pipelines(
             color_format,
             Some(wgpu::TextureFormat::Depth24Plus),
             1,
         )?;
+        let overlay_layout_pipeline = overlay_pipelines
+            .get(RenderStyle::Normals)
+            .expect("diagnostic pipeline family contains normals");
         let mut invalid_overlay_scene = render_scene.clone();
         invalid_overlay_scene.batches.pop();
         if self
             .upload_adaptive_overlay_scene(
-                &overlay_pipeline,
+                overlay_layout_pipeline,
                 &model,
                 &preparation,
                 &invalid_overlay_scene,
@@ -1799,7 +1802,12 @@ impl LodClassifierDevice {
             ));
         }
         let overlay = self
-            .upload_adaptive_overlay_scene(&overlay_pipeline, &model, &preparation, &render_scene)?
+            .upload_adaptive_overlay_scene(
+                overlay_layout_pipeline,
+                &model,
+                &preparation,
+                &render_scene,
+            )?
             .ok_or_else(|| {
                 LodWebGpuError::Conformance(
                     "resident render conformance lost its adaptive overlay".to_string(),
@@ -1857,7 +1865,7 @@ impl LodClassifierDevice {
                 asset_revision: 3,
                 pose_revision: 5,
             },
-            RenderStyle::Normals,
+            RenderStyle::MatcapWire,
             RenderView {
                 viewport: [WIDTH, HEIGHT],
                 mvp: identity_matrix(),
@@ -1921,7 +1929,7 @@ impl LodClassifierDevice {
                 FaceLodGrading::TwoToOne,
                 &mut encoder,
             );
-            self.encode_resident_adaptive_normals(
+            self.encode_resident_adaptive(
                 &mut encoder,
                 &frame,
                 &render_scene,
@@ -1931,7 +1939,7 @@ impl LodClassifierDevice {
                 &geometry,
                 &pipeline,
                 &bindings,
-                &overlay_pipeline,
+                &overlay_pipelines,
                 Some(&overlay),
                 &packed_atlas,
                 PatchRenderTarget {
@@ -1951,12 +1959,12 @@ impl LodClassifierDevice {
         })?;
         if encoding.roots
             != (ResidentRootFrameEncoding {
-                indirect_draw_calls: 2,
+                indirect_draw_calls: 4,
                 source_face_count: 2,
             })
             || overlay_encoding
                 != (AdaptiveOverlayFrameEncoding {
-                    indirect_draw_calls: 1,
+                    indirect_draw_calls: 2,
                     source_patch_count: 1,
                 })
         {
@@ -2058,7 +2066,7 @@ impl LodClassifierDevice {
                     asset_revision: 3,
                     pose_revision: 6,
                 },
-                RenderStyle::Normals,
+                RenderStyle::MatcapWire,
                 RenderView {
                     viewport: surface_size,
                     mvp: identity_matrix(),
@@ -2081,7 +2089,7 @@ impl LodClassifierDevice {
                         FaceLodGrading::TwoToOne,
                         encoder,
                     );
-                    self.encode_resident_adaptive_normals(
+                    self.encode_resident_adaptive(
                         encoder,
                         &presentation_frame,
                         &render_scene,
@@ -2091,7 +2099,7 @@ impl LodClassifierDevice {
                         &geometry,
                         &pipeline,
                         &bindings,
-                        &overlay_pipeline,
+                        &overlay_pipelines,
                         Some(&overlay),
                         &packed_atlas,
                         PatchRenderTarget {

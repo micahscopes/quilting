@@ -206,6 +206,7 @@ impl LodClassifierDevice {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn validate_adaptive_overlay_epoch(
         &self,
         frame: &RenderFrame,
@@ -213,6 +214,7 @@ impl LodClassifierDevice {
         model: &LodClassifierModel,
         resident: &DeviceResidentLod<'_>,
         overlay: &AdaptiveOverlayScene,
+        pipelines: &DiagnosticPatchRenderPipelines,
         validate_frame: bool,
     ) -> Result<(), LodWebGpuError> {
         if validate_frame {
@@ -220,10 +222,15 @@ impl LodClassifierDevice {
                 LodWebGpuError::Payload(format!("render frame contract: {error}"))
             })?;
         }
-        if frame.style != RenderStyle::Normals {
-            return Err(LodWebGpuError::Payload(
-                "adaptive overlay renderer currently requires normals mode".to_string(),
-            ));
+        if !supports_patch_presentation_style(frame.style)
+            || render_draw_passes(frame.style)
+                .iter()
+                .any(|draw| pipelines.get_for_pass(draw.pass, draw.geometry).is_err())
+        {
+            return Err(LodWebGpuError::Payload(format!(
+                "adaptive overlay renderer does not support {:?}",
+                frame.style,
+            )));
         }
         if overlay.model_identity != model.identity
             || resident.model_identity != model.identity
@@ -245,11 +252,11 @@ impl LodClassifierDevice {
     }
 
     /// Encode sparse leaf preparation, resident-face visibility expansion,
-    /// compaction, and one indirect draw per adaptive batch. The target may
-    /// use `Load` operations to compose over roots rendered earlier in the
-    /// same command encoder.
+    /// compaction, and one indirect draw per adaptive batch and style pass.
+    /// The target may use `Load` operations to compose over roots rendered
+    /// earlier in the same command encoder.
     #[allow(clippy::too_many_arguments)]
-    pub fn encode_adaptive_overlay_normals<'resource>(
+    pub fn encode_adaptive_overlay<'resource>(
         &'resource self,
         encoder: &mut wgpu::CommandEncoder,
         frame: &RenderFrame,
@@ -257,21 +264,21 @@ impl LodClassifierDevice {
         model: &LodClassifierModel,
         resident: &DeviceResidentLod<'_>,
         overlay: &'resource AdaptiveOverlayScene,
-        pipeline: &'resource PatchRenderPipeline,
+        pipelines: &'resource DiagnosticPatchRenderPipelines,
         atlas: &'resource PackedPatchAtlas,
         target: PatchRenderTarget<'resource>,
         pose: LodPose<'_>,
         num_joints: u32,
         use_qb: bool,
     ) -> Result<AdaptiveOverlayFrameEncoding, LodWebGpuError> {
-        self.encode_adaptive_overlay_normals_impl(
-            encoder, frame, scene, model, resident, overlay, pipeline, atlas, target, pose,
+        self.encode_adaptive_overlay_impl(
+            encoder, frame, scene, model, resident, overlay, pipelines, atlas, target, pose,
             num_joints, use_qb, true, true,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn encode_adaptive_overlay_normals_impl<'resource>(
+    fn encode_adaptive_overlay_impl<'resource>(
         &'resource self,
         encoder: &mut wgpu::CommandEncoder,
         frame: &RenderFrame,
@@ -279,7 +286,7 @@ impl LodClassifierDevice {
         model: &LodClassifierModel,
         resident: &DeviceResidentLod<'_>,
         overlay: &'resource AdaptiveOverlayScene,
-        pipeline: &'resource PatchRenderPipeline,
+        pipelines: &'resource DiagnosticPatchRenderPipelines,
         atlas: &'resource PackedPatchAtlas,
         target: PatchRenderTarget<'resource>,
         pose: LodPose<'_>,
@@ -294,6 +301,7 @@ impl LodClassifierDevice {
             model,
             resident,
             overlay,
+            pipelines,
             validate_frame,
         )?;
         if write_dynamic_pose {
@@ -303,18 +311,27 @@ impl LodClassifierDevice {
         }
         self.write_adaptive_overlay_frames(frame, overlay, use_qb)?;
 
-        for (batch_index, batch) in overlay.batches.iter().enumerate() {
-            let draw = atlas.triangle_draw(batch.id.key.lod).ok_or_else(|| {
-                LodWebGpuError::Payload(format!(
-                    "packed WebGPU atlas is missing adaptive batch {batch_index} key {:?}",
-                    batch.id.key.lod,
-                ))
-            })?;
-            if draw.index_count != batch.triangle_index_count {
-                return Err(LodWebGpuError::Payload(format!(
-                    "adaptive atlas batch {batch_index} has {} indices; expected {}",
-                    draw.index_count, batch.triangle_index_count,
-                )));
+        let draw_passes = render_draw_passes(frame.style);
+        for draw_pass in draw_passes {
+            for (batch_index, batch) in overlay.batches.iter().enumerate() {
+                let draw = atlas
+                    .draw(batch.id.key.lod, draw_pass.geometry)
+                    .ok_or_else(|| {
+                        LodWebGpuError::Payload(format!(
+                            "packed WebGPU atlas is missing adaptive batch {batch_index} key {:?} for {:?}",
+                            batch.id.key.lod, draw_pass.geometry,
+                        ))
+                    })?;
+                let expected = match draw_pass.geometry {
+                    RenderGeometry::Triangles => batch.triangle_index_count,
+                    RenderGeometry::Lines => batch.line_index_count,
+                };
+                if draw.index_count != expected {
+                    return Err(LodWebGpuError::Payload(format!(
+                        "adaptive atlas batch {batch_index} has {} {:?} indices; expected {expected}",
+                        draw.index_count, draw_pass.geometry,
+                    )));
+                }
             }
         }
 
@@ -343,7 +360,7 @@ impl LodClassifierDevice {
                     stencil_ops: None,
                 });
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("quilting adaptive overlay normals"),
+            label: Some("quilting adaptive overlay frame"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target.color_view,
                 depth_slice: None,
@@ -358,33 +375,38 @@ impl LodClassifierDevice {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        for (batch_index, batch) in overlay.batches.iter().enumerate() {
-            let draw = atlas
-                .triangle_draw(batch.id.key.lod)
-                .expect("adaptive atlas was validated before encoding");
-            let permutation_sign = if batch.id.key.parity_bucket == 0 {
-                1
-            } else {
-                -1
-            };
-            let winding = if batch.transform.orientation_sign * permutation_sign < 0 {
-                PatchWinding::Clockwise
-            } else {
-                PatchWinding::CounterClockwise
-            };
-            pipeline.draw_batch(
-                &mut pass,
-                &overlay.bindings,
-                &overlay.visibility,
-                draw,
-                batch_index as u32,
-                0,
-                winding,
-            )?;
+        let mut indirect_draw_calls = 0u32;
+        for draw_pass in draw_passes {
+            let pipeline = pipelines.get_for_pass(draw_pass.pass, draw_pass.geometry)?;
+            for (batch_index, batch) in overlay.batches.iter().enumerate() {
+                let draw = atlas
+                    .draw(batch.id.key.lod, draw_pass.geometry)
+                    .expect("adaptive atlas was validated before encoding");
+                let permutation_sign = if batch.id.key.parity_bucket == 0 {
+                    1
+                } else {
+                    -1
+                };
+                let winding = if batch.transform.orientation_sign * permutation_sign < 0 {
+                    PatchWinding::Clockwise
+                } else {
+                    PatchWinding::CounterClockwise
+                };
+                pipeline.draw_batch(
+                    &mut pass,
+                    &overlay.bindings,
+                    &overlay.visibility,
+                    draw,
+                    batch_index as u32,
+                    0,
+                    winding,
+                )?;
+                indirect_draw_calls = indirect_draw_calls.saturating_add(1);
+            }
         }
         drop(pass);
         Ok(AdaptiveOverlayFrameEncoding {
-            indirect_draw_calls: overlay.visibility.batch_count,
+            indirect_draw_calls,
             source_patch_count: overlay.patches.patch_count,
         })
     }
@@ -392,7 +414,7 @@ impl LodClassifierDevice {
     /// Compose the device-generated retained baseline and sparse adaptive
     /// replacement layer without mapping, copying, or rebuilding root records.
     #[allow(clippy::too_many_arguments)]
-    pub fn encode_resident_adaptive_normals<'resource>(
+    pub fn encode_resident_adaptive<'resource>(
         &'resource self,
         encoder: &mut wgpu::CommandEncoder,
         frame: &RenderFrame,
@@ -403,7 +425,7 @@ impl LodClassifierDevice {
         root_geometry: &'resource ResidentGeometryBucketScene,
         root_pipeline: &'resource ResidentRootRenderPipeline,
         root_bindings: &'resource ResidentRootRenderBindings,
-        overlay_pipeline: &'resource PatchRenderPipeline,
+        overlay_pipelines: &'resource DiagnosticPatchRenderPipelines,
         overlay: Option<&'resource AdaptiveOverlayScene>,
         atlas: &'resource PackedPatchAtlas,
         target: PatchRenderTarget<'resource>,
@@ -458,14 +480,14 @@ impl LodClassifierDevice {
         )?;
         let overlay_encoding = overlay
             .map(|overlay| {
-                self.encode_adaptive_overlay_normals_impl(
+                self.encode_adaptive_overlay_impl(
                     encoder,
                     frame,
                     scene,
                     model,
                     resident,
                     overlay,
-                    overlay_pipeline,
+                    overlay_pipelines,
                     atlas,
                     PatchRenderTarget {
                         color_view,

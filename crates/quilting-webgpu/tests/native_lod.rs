@@ -585,9 +585,9 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             report.resident_adaptive_rendered_pixels,
         );
         assert_ne!(report.resident_adaptive_image.rgba8_hash, 0);
-        assert_eq!(report.resident_root_indirect_draws, 2);
+        assert_eq!(report.resident_root_indirect_draws, 4);
         assert_eq!(report.adaptive_overlay_patches, 1);
-        assert_eq!(report.adaptive_overlay_indirect_draws, 1);
+        assert_eq!(report.adaptive_overlay_indirect_draws, 2);
         assert_eq!(report.coherence_words, 10);
         assert_eq!(report.prepared_patch_words, 104);
         assert!(report.rendered_patch_pixels >= 8);
