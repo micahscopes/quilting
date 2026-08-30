@@ -501,6 +501,7 @@ const BOOTSTRAP_POLICY_DEFAULTS = Object.freeze({
   animclockimpl: 'js',
   animclipimpl: 'js',
   renderstateimpl: 'js',
+  patchlabimpl: 'js',
   appshadow: '0',
   routeimpl: 'rust',
   rendershadow: '0',
@@ -597,6 +598,9 @@ const ANIMATION_CLIP_IMPLEMENTATION = implementationFromRoute(
 const RUST_RENDER_SETTINGS_IMPLEMENTATION = implementationFromRoute(
   initialBrowserParams, 'renderstateimpl',
 );
+const RUST_PATCH_LAB_IMPLEMENTATION = implementationFromRoute(
+  initialBrowserParams, 'patchlabimpl',
+);
 const EXPLICIT_RUST_APP_SHADOW_ENABLED =
   bootstrapToggleFromRoute(initialBrowserParams, 'appshadow');
 const RUST_APP_SHADOW_ENABLED =
@@ -606,6 +610,7 @@ const RUST_APP_SHADOW_ENABLED =
   || ANIMATION_CLOCK_IMPLEMENTATION !== 'js'
   || ANIMATION_CLIP_IMPLEMENTATION !== 'js'
   || RUST_RENDER_SETTINGS_IMPLEMENTATION !== 'js'
+  || RUST_PATCH_LAB_IMPLEMENTATION !== 'js'
   || RUST_SELECTION_IMPLEMENTATION !== 'js'
   || RUST_SCENE_IMPLEMENTATION !== 'js'
   || (RUST_PRESENTATION_ENABLED && RUST_PRESENTATION_IMPLEMENTATION !== 'js');
@@ -1724,6 +1729,7 @@ function syncURL() {
       set('walkimpl', SURFACE_WALK_IMPLEMENTATION, PARAM_DEFAULTS.walkimpl);
       set('navimpl', RUST_NAVIGATION_IMPLEMENTATION, PARAM_DEFAULTS.navimpl);
       set('selectionimpl', RUST_SELECTION_IMPLEMENTATION, PARAM_DEFAULTS.selectionimpl);
+      set('patchlabimpl', RUST_PATCH_LAB_IMPLEMENTATION, PARAM_DEFAULTS.patchlabimpl);
       if (patchLab.active) {
         set('lab', patchLab.shape, PARAM_DEFAULTS.lab);
         set('labfield', $('patch-lab-field').value, PARAM_DEFAULTS.labfield);

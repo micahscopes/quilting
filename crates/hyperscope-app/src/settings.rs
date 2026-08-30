@@ -248,6 +248,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("walkimpl", "js", Implementation),
     spec!("navimpl", "js", Implementation),
     spec!("selectionimpl", "rust", Implementation),
+    spec!("patchlabimpl", "js", Implementation),
     choice_spec!("lab", "0", ["0", "triangle", "plane", "cube"]),
     choice_spec!(
         "labfield",
@@ -1168,6 +1169,7 @@ mod tests {
             "walkimpl",
             "navimpl",
             "selectionimpl",
+            "patchlabimpl",
             "presentimpl",
             "assetimpl",
             "sceneimpl",
