@@ -10,6 +10,10 @@ const webGpuBackendSource = readFileSync(
   `${repository}/crates/quilting-wasm/src/webgpu_backend.rs`,
   'utf8',
 );
+const mainRendererSource = readFileSync(
+  `${repository}/crates/quilting-wasm/src/main_renderer.rs`,
+  'utf8',
+);
 const cameraControlsSource = [
   `${repository}/crates/hyperscope-web/src/camera_controls.rs`,
   `${repository}/crates/hyperscope-web/src/camera_controls/csr.rs`,
@@ -565,6 +569,18 @@ for (const stalePresentationGuard of [
   assert.ok(
     webGpuBackendSource.includes(stalePresentationGuard),
     `WebGPU stale-presentation guard is missing ${stalePresentationGuard}`,
+  );
+}
+for (const selectedFaceEvidenceStep of [
+  'fn backend_frame_evidence_supports_composition(',
+  '!focus_postprocess && !(style == RenderStyle::Pbr && highlight_face)',
+  'render_highlight_to(',
+  'Some(target)',
+  'backend image evidence requires resident WebGL highlight resources',
+]) {
+  assert.ok(
+    mainRendererSource.includes(selectedFaceEvidenceStep),
+    `WebGPU selected-face evidence is missing ${selectedFaceEvidenceStep}`,
   );
 }
 const routeDefaultsAdapterSource = browserSource.match(

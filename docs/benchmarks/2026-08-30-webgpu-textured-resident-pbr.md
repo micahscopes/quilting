@@ -100,6 +100,9 @@ For every WebGPU-supported diagnostic style—Matcap, Wire, Matcap+Wire, Normals
 LOD, and Stretch—the WebGL evidence target now renders the exact current Rust
 `RenderStyle` and compares its workload and RGBA image with the same staged
 WebGPU frame. Basic PBR retains its separate default-framebuffer capture and
-dynamic residency gate. Focus postprocessing and selected-face highlighting
-remain explicitly excluded from this oracle until their incumbent auxiliary
-passes can be captured without silently comparing different compositions.
+dynamic residency gate. Diagnostic selected-face evidence now reruns the
+incumbent pick-texture highlight into the same offscreen color target before
+readback, so its complete composition is compared with WebGPU's retained
+geometry-overlay pass. Focus postprocessing and PBR highlighting remain
+explicitly excluded: the former has no WebGPU implementation yet, while the
+incumbent PBR path does not currently compose its highlight before returning.

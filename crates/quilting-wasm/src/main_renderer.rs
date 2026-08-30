@@ -2728,7 +2728,7 @@ fn submit_webgpu_frame(
 
 #[cfg(feature = "webgpu-backend")]
 fn capture_webgl_frame_evidence(
-    renderer: &Renderer,
+    state: &MainState,
     style: RenderStyle,
     viewport: (i32, i32),
     render_call: u64,
@@ -2736,6 +2736,7 @@ fn capture_webgl_frame_evidence(
     batches: &[RenderBatch],
     incumbent_submission: RenderSubmissionStats,
 ) -> Result<WebGlFrameEvidenceCapture, String> {
+    let renderer = &state.renderer;
     let (width, height) = viewport;
     if width <= 0 || height <= 0 {
         return Err("WebGL image evidence requires a nonzero viewport".to_string());
@@ -2830,6 +2831,15 @@ fn capture_webgl_frame_evidence(
                 return Err(format!(
                     "WebGL evidence rerender changed submission work: incumbent={incumbent_submission:?}, evidence={submission:?}",
                 ));
+            }
+            if state.highlight_face >= 0 {
+                render_highlight_to(
+                    gl,
+                    state,
+                    camera,
+                    Some(target),
+                    (width, height),
+                );
             }
             let mut rgba8_bottom_left = vec![0u8; byte_len];
             gl.read_buffer(glow::COLOR_ATTACHMENT0);
@@ -2933,6 +2943,15 @@ fn capture_current_webgl_pbr_frame_evidence(
 }
 
 #[cfg(feature = "webgpu-backend")]
+fn backend_frame_evidence_supports_composition(
+    style: RenderStyle,
+    focus_postprocess: bool,
+    highlight_face: bool,
+) -> bool {
+    !focus_postprocess && !(style == RenderStyle::Pbr && highlight_face)
+}
+
+#[cfg(feature = "webgpu-backend")]
 #[wasm_bindgen(js_name = "mr_requestBackendFrameEvidence")]
 pub fn mr_request_backend_frame_evidence() -> Result<bool, JsValue> {
     STATE.with(|slot| {
@@ -2952,9 +2971,25 @@ pub fn mr_request_backend_frame_evidence() -> Result<bool, JsValue> {
                 "backend image evidence requires a ready headless WebGPU device",
             ));
         }
-        if state.fuzzy_enabled || state.highlight_face >= 0 {
+        if !backend_frame_evidence_supports_composition(
+            state.render_style,
+            state.fuzzy_enabled,
+            state.highlight_face >= 0,
+        ) {
             return Err(JsValue::from_str(
-                "backend image evidence requires focus postprocess and highlight to be disabled",
+                "backend image evidence does not yet support focus postprocess or PBR highlight composition",
+            ));
+        }
+        if state.highlight_face >= 0
+            && (state.highlight_prog.is_none()
+                || state.fullscreen_aux.is_none()
+                || state.pick_fbo.is_none()
+                || state.pick_tex.is_none()
+                || state.pick_size.0 <= 0
+                || state.pick_size.1 <= 0)
+        {
+            return Err(JsValue::from_str(
+                "backend image evidence requires resident WebGL highlight resources",
             ));
         }
         if state.viewport_size.0 <= 0 || state.viewport_size.1 <= 0 {
@@ -9376,8 +9411,11 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         if state.backend_evidence_requested
             && ((state.render_style != RenderStyle::Pbr
                 && !quilting_webgpu::supports_patch_presentation_style(state.render_style))
-                || state.fuzzy_enabled
-                || state.highlight_face >= 0)
+                || !backend_frame_evidence_supports_composition(
+                    state.render_style,
+                    state.fuzzy_enabled,
+                    state.highlight_face >= 0,
+                ))
         {
             state.backend_evidence_requested = false;
             state.backend_evidence_error = Some(
@@ -10154,7 +10192,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         if state.backend_evidence_requested {
             state.backend_evidence_requested = false;
             match capture_webgl_frame_evidence(
-                &state.renderer,
+                state,
                 state.render_style,
                 state.viewport_size,
                 state.render_calls,
@@ -10192,6 +10230,20 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
 /// Requires pick FBO + highlight program to exist (created in mr_pick).
 /// Renders pick pass to FBO, then fullscreen overlay where face ID matches.
 fn render_highlight(gl: &glow::Context, state: &MainState, camera: &quilting_renderer::pass::Camera) {
+    render_highlight_to(gl, state, camera, None, state.pick_size);
+}
+
+/// Render the incumbent pick-texture highlight into an explicit composition
+/// target. Visible rendering uses the default framebuffer; backend evidence
+/// uses its retained offscreen color/depth target so the complete selected-face
+/// composition can be compared with WebGPU.
+fn render_highlight_to(
+    gl: &glow::Context,
+    state: &MainState,
+    camera: &quilting_renderer::pass::Camera,
+    output_framebuffer: Option<glow::Framebuffer>,
+    output_viewport: (i32, i32),
+) {
     let target_id = state.highlight_face;
     let (highlight_prog, resources, pick_fbo, pick_tex) = match (
         state.highlight_prog, state.fullscreen_aux.as_ref(), state.pick_fbo, state.pick_tex,
@@ -10234,8 +10286,8 @@ fn render_highlight(gl: &glow::Context, state: &MainState, camera: &quilting_ren
         }
 
         // Fullscreen overlay: cyan where pick matches target face
-        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-        gl.viewport(0, 0, vw, vh);
+        gl.bind_framebuffer(glow::FRAMEBUFFER, output_framebuffer);
+        gl.viewport(0, 0, output_viewport.0, output_viewport.1);
         gl.use_program(Some(highlight_prog));
         gl.disable(glow::DEPTH_TEST);
         gl.enable(glow::BLEND);
@@ -10260,6 +10312,31 @@ fn render_highlight(gl: &glow::Context, state: &MainState, camera: &quilting_ren
 mod tests {
     use super::*;
     use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[cfg(feature = "webgpu-backend")]
+    #[wasm_bindgen_test]
+    fn backend_evidence_admits_diagnostic_highlight_but_not_unimplemented_compositions() {
+        assert!(backend_frame_evidence_supports_composition(
+            RenderStyle::Wire,
+            false,
+            true,
+        ));
+        assert!(backend_frame_evidence_supports_composition(
+            RenderStyle::Normals,
+            false,
+            false,
+        ));
+        assert!(!backend_frame_evidence_supports_composition(
+            RenderStyle::Wire,
+            true,
+            false,
+        ));
+        assert!(!backend_frame_evidence_supports_composition(
+            RenderStyle::Pbr,
+            false,
+            true,
+        ));
+    }
 
     #[wasm_bindgen_test]
     fn admitted_ordinary_world_model_overrides_conformal_source_only() {

@@ -926,8 +926,11 @@ readback is optional conformance/telemetry rather than a frame dependency.
 Selection highlighting is also a retained post-style indirect pass: the stable
 source-face ID survives preparation and dyadic restriction, and the fragment
 shader discards nonselected patches without a pick-texture allocation or
-readback. Browser-default promotion remains gated on live WebGL2/WebGPU image
-and interaction parity.
+readback. Its diagnostic parity oracle rerenders the incumbent pick-texture
+overlay into the WebGL evidence target, allowing complete selected-face image
+comparison without changing either visible backend. Focus postprocessing and
+PBR highlight composition remain separate capability gaps. Browser-default
+promotion remains gated on live WebGL2/WebGPU image and interaction parity.
 
 ## Tuesday cut
 
