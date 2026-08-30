@@ -391,6 +391,25 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         assert_eq!(initial_focus_pipeline_memo.hits, 0);
         assert_eq!(initial_focus_pipeline_memo.failed_creations, 0);
         assert_eq!(initial_focus_pipeline_memo.resident_entries, 1);
+        let initial_prepared_pipeline_memo = classifier.prepared_patch_pipeline_memo_diagnostics();
+        assert_eq!(initial_prepared_pipeline_memo.misses, 1);
+        assert_eq!(initial_prepared_pipeline_memo.hits, 0);
+        assert_eq!(initial_prepared_pipeline_memo.failed_creations, 0);
+        assert_eq!(initial_prepared_pipeline_memo.resident_entries, 1);
+
+        let _reused_focus_overlay = classifier
+            .create_offscreen_focus_pbr_patch_render_pipeline()
+            .expect("reuse retained functional prepared-patch focus family");
+        let reused_prepared_pipeline_memo = classifier.prepared_patch_pipeline_memo_diagnostics();
+        assert_eq!(reused_prepared_pipeline_memo.misses, 1);
+        assert_eq!(reused_prepared_pipeline_memo.hits, 1);
+        assert_eq!(reused_prepared_pipeline_memo.failed_creations, 0);
+        assert_eq!(reused_prepared_pipeline_memo.resident_entries, 1);
+        assert_eq!(
+            classifier.render_shader_memo_diagnostics(),
+            initial_shader_memo,
+            "a prepared-patch family hit must not revisit shader lowering",
+        );
 
         let _reused_focus_pipelines = classifier
             .create_offscreen_focus_postprocess_pipelines()

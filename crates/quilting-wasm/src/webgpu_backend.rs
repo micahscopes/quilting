@@ -198,6 +198,11 @@ pub(crate) struct WebGpuBackendDiagnostics {
     focus_postprocess_pipeline_failed_creations: u64,
     focus_postprocess_pipeline_invalidations: u64,
     focus_postprocess_pipeline_entries: usize,
+    prepared_patch_pipeline_hits: u64,
+    prepared_patch_pipeline_misses: u64,
+    prepared_patch_pipeline_failed_creations: u64,
+    prepared_patch_pipeline_invalidations: u64,
+    prepared_patch_pipeline_entries: usize,
     resident_root_pipeline_hits: u64,
     resident_root_pipeline_misses: u64,
     resident_root_pipeline_failed_creations: u64,
@@ -272,6 +277,11 @@ impl WebGpuBackend {
             .device
             .as_ref()
             .map(LodClassifierDevice::focus_postprocess_pipeline_memo_diagnostics)
+            .unwrap_or_default();
+        let prepared_patch_pipeline_memo = self
+            .device
+            .as_ref()
+            .map(LodClassifierDevice::prepared_patch_pipeline_memo_diagnostics)
             .unwrap_or_default();
         let resident_root_pipeline_memo = self
             .device
@@ -383,6 +393,11 @@ impl WebGpuBackend {
                 .failed_creations,
             focus_postprocess_pipeline_invalidations: focus_postprocess_pipeline_memo.invalidations,
             focus_postprocess_pipeline_entries: focus_postprocess_pipeline_memo.resident_entries,
+            prepared_patch_pipeline_hits: prepared_patch_pipeline_memo.hits,
+            prepared_patch_pipeline_misses: prepared_patch_pipeline_memo.misses,
+            prepared_patch_pipeline_failed_creations: prepared_patch_pipeline_memo.failed_creations,
+            prepared_patch_pipeline_invalidations: prepared_patch_pipeline_memo.invalidations,
+            prepared_patch_pipeline_entries: prepared_patch_pipeline_memo.resident_entries,
             resident_root_pipeline_hits: resident_root_pipeline_memo.hits,
             resident_root_pipeline_misses: resident_root_pipeline_memo.misses,
             resident_root_pipeline_failed_creations: resident_root_pipeline_memo.failed_creations,

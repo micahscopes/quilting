@@ -71,7 +71,7 @@ use quilting_core::render_evidence::{
 };
 use quilting_core::render_memo::{DeviceMemo, DeviceMemoDiagnostics};
 use quilting_core::render_pipeline::{
-    RenderPipelineDescriptor, ShaderModuleDescriptor, ShaderStage, ShaderTarget,
+    self as functional, RenderPipelineDescriptor, ShaderModuleDescriptor, ShaderStage, ShaderTarget,
 };
 use quilting_core::screen_partition::ScreenPatchLeafId;
 use quilting_renderer::compute::{
@@ -790,6 +790,12 @@ pub struct LodClassifierDevice {
     render_shader_modules: Mutex<DeviceMemo<ShaderModuleDescriptor, wgpu::ShaderModule>>,
     focus_postprocess_render_pipelines:
         Mutex<DeviceMemo<Vec<RenderPipelineDescriptor>, FocusPostprocessPipelines>>,
+    prepared_patch_render_pipelines: Mutex<
+        DeviceMemo<
+            Vec<RenderPipelineDescriptor>,
+            (Vec<PatchRenderPipeline>, Option<PatchRenderPipeline>),
+        >,
+    >,
     resident_root_render_pipelines:
         Mutex<DeviceMemo<Vec<RenderPipelineDescriptor>, ResidentRootRenderPipeline>>,
     pass1_pipeline: wgpu::ComputePipeline,
@@ -917,6 +923,7 @@ pub struct PatchPreparationScene {
 /// Retained WebGPU graphics pipelines for one prepared QB surface mode.
 /// Winding is pipeline state in WebGPU, so both variants share one explicit
 /// bind-group layout instead of recompiling or mutating state per batch.
+#[derive(Clone)]
 pub struct PatchRenderPipeline {
     kind: PatchPipelineKind,
     geometry: RenderGeometry,
@@ -1476,6 +1483,7 @@ impl LodClassifierDevice {
             next_model_identity: Mutex::new(1),
             render_shader_modules: Mutex::new(DeviceMemo::new(0)),
             focus_postprocess_render_pipelines: Mutex::new(DeviceMemo::new(0)),
+            prepared_patch_render_pipelines: Mutex::new(DeviceMemo::new(0)),
             resident_root_render_pipelines: Mutex::new(DeviceMemo::new(0)),
             pass1_pipeline,
             pass2_pipeline,
@@ -1572,6 +1580,16 @@ impl LodClassifierDevice {
     /// or an application-owned focus setting.
     pub fn focus_postprocess_pipeline_memo_diagnostics(&self) -> DeviceMemoDiagnostics {
         self.focus_postprocess_render_pipelines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .diagnostics()
+    }
+
+    /// Observable cache state for prepared/adaptive patch graphics families.
+    /// Exact backend-neutral descriptor vectors are retained for this device;
+    /// unsupported nonportable formats deliberately bypass the memo.
+    pub fn prepared_patch_pipeline_memo_diagnostics(&self) -> DeviceMemoDiagnostics {
+        self.prepared_patch_render_pipelines
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .diagnostics()
@@ -3783,9 +3801,75 @@ impl LodClassifierDevice {
         include_highlight: bool,
         pbr_raw_field_format: Option<wgpu::TextureFormat>,
     ) -> Result<(Vec<PatchRenderPipeline>, Option<PatchRenderPipeline>), LodWebGpuError> {
-        if sample_count == 0 {
+        let functional_color_format =
+            crate::pipeline_lowering::functional_texture_format(color_format);
+        let functional_depth_format = depth_format.map_or(Some(None), |format| {
+            crate::pipeline_lowering::functional_texture_format(format).map(Some)
+        });
+        let functional_raw_field_format = pbr_raw_field_format.map_or(Some(None), |format| {
+            crate::pipeline_lowering::functional_texture_format(format).map(Some)
+        });
+        if let (
+            Some(functional_color_format),
+            Some(functional_depth_format),
+            Some(functional_raw_field_format),
+        ) = (
+            functional_color_format,
+            functional_depth_format,
+            functional_raw_field_format,
+        ) {
+            let descriptors = prepared_patch_pipeline_descriptors(
+                styles,
+                functional_color_format,
+                functional_depth_format,
+                sample_count,
+                include_highlight,
+                functional_raw_field_format,
+            )
+            .map_err(|error| LodWebGpuError::Payload(error.to_string()))?;
+            let mut pipelines = self.prepared_patch_render_pipelines.lock().map_err(|_| {
+                LodWebGpuError::Payload(
+                    "WebGPU prepared-patch render pipeline memo was poisoned".to_string(),
+                )
+            })?;
+            let family = pipelines.get_or_try_insert_with(descriptors, |descriptors| {
+                self.build_diagnostic_patch_render_pipelines_for(
+                    styles,
+                    color_format,
+                    depth_format,
+                    sample_count,
+                    include_highlight,
+                    pbr_raw_field_format,
+                    Some(descriptors.as_slice()),
+                )
+            })?;
+            return Ok(family.clone());
+        }
+        self.build_diagnostic_patch_render_pipelines_for(
+            styles,
+            color_format,
+            depth_format,
+            sample_count,
+            include_highlight,
+            pbr_raw_field_format,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_diagnostic_patch_render_pipelines_for(
+        &self,
+        styles: &[RenderStyle],
+        color_format: wgpu::TextureFormat,
+        depth_format: Option<wgpu::TextureFormat>,
+        sample_count: u32,
+        include_highlight: bool,
+        pbr_raw_field_format: Option<wgpu::TextureFormat>,
+        descriptors: Option<&[RenderPipelineDescriptor]>,
+    ) -> Result<(Vec<PatchRenderPipeline>, Option<PatchRenderPipeline>), LodWebGpuError> {
+        if sample_count == 0 || !sample_count.is_power_of_two() {
             return Err(LodWebGpuError::Payload(
-                "patch render sample count must be nonzero".to_string(),
+                "patch render sample count must be a nonzero power of two".to_string(),
             ));
         }
         if pbr_raw_field_format.is_some() && (include_highlight || styles != [RenderStyle::Pbr]) {
@@ -3848,69 +3932,172 @@ impl LodClassifierDevice {
                 quilting_shaders::PATCH_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT,
             ));
         }
+        let expected_descriptor_count = fragment_entry_points
+            .iter()
+            .map(|(_, geometry, _)| match geometry {
+                RenderGeometry::Triangles => 2,
+                RenderGeometry::Lines => 1,
+            })
+            .sum::<usize>();
+        if descriptors.is_some_and(|descriptors| descriptors.len() != expected_descriptor_count) {
+            return Err(LodWebGpuError::Payload(format!(
+                "functional prepared-patch family must contain {expected_descriptor_count} variants",
+            )));
+        }
         let module = self.memoized_render_shader_module(
             "quilting prepared QB render",
             quilting_shaders::sources::PATCH_RENDER_DEVICE,
             quilting_shaders::PATCH_RENDER_DEVICE_VERTEX_ENTRY_POINT,
             quilting_shaders::compile_patch_render_device_wgsl,
         )?;
-        let bind_group_layout =
-            self.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("quilting prepared QB render bindings"),
-                    entries: &[
-                        render_buffer_layout_visible(
-                            0,
-                            wgpu::BufferBindingType::Storage { read_only: true },
-                            PATCH_RENDER_FRAME_BYTES,
-                            false,
-                            wgpu::ShaderStages::VERTEX_FRAGMENT,
-                        ),
-                        render_buffer_layout_visible(
-                            1,
-                            wgpu::BufferBindingType::Storage { read_only: true },
-                            PREPARED_PATCH_RECORD_BYTES,
-                            false,
-                            wgpu::ShaderStages::VERTEX,
-                        ),
-                        render_buffer_layout_visible(
-                            2,
-                            wgpu::BufferBindingType::Storage { read_only: true },
-                            PACKED_RECORD_BYTES,
-                            false,
-                            wgpu::ShaderStages::VERTEX,
-                        ),
-                        render_buffer_layout_visible(
-                            3,
-                            wgpu::BufferBindingType::Storage { read_only: true },
-                            VISIBILITY_RANGE_RECORD_BYTES,
-                            false,
-                            wgpu::ShaderStages::VERTEX,
-                        ),
-                        render_buffer_layout_visible(
-                            4,
-                            wgpu::BufferBindingType::Uniform,
-                            DRAW_BATCH_INDEX_BYTES,
-                            true,
-                            wgpu::ShaderStages::VERTEX_FRAGMENT,
-                        ),
-                        render_buffer_layout_visible(
-                            5,
-                            wgpu::BufferBindingType::Storage { read_only: true },
-                            PATCH_PBR_MATERIAL_BYTES,
-                            false,
-                            wgpu::ShaderStages::FRAGMENT,
-                        ),
-                    ],
-                });
-        let pbr_texture_bind_group_layout = fragment_entry_points
+        let uses_pbr_family = fragment_entry_points
             .iter()
-            .any(|(kind, _, _)| *kind == PatchPipelineKind::Style(RenderStyle::Pbr))
-            .then(|| pbr_resources::create_pbr_texture_bind_group_layout(&self.device));
-        let pbr_environment_bind_group_layout = fragment_entry_points
-            .iter()
-            .any(|(kind, _, _)| *kind == PatchPipelineKind::Style(RenderStyle::Pbr))
-            .then(|| pbr_environment::create_pbr_environment_bind_group_layout(&self.device));
+            .any(|(kind, _, _)| *kind == PatchPipelineKind::Style(RenderStyle::Pbr));
+        let (bind_group_layout, pbr_texture_bind_group_layout, pbr_environment_bind_group_layout) =
+            if let Some(descriptors) = descriptors {
+                let first_layout = descriptors
+                    .first()
+                    .ok_or_else(|| {
+                        LodWebGpuError::Payload(
+                            "functional prepared-patch pipeline family is empty".to_string(),
+                        )
+                    })?
+                    .layout();
+                let root_layout = first_layout.groups().first().ok_or_else(|| {
+                    LodWebGpuError::Payload(
+                        "functional prepared-patch pipeline has no root bind group".to_string(),
+                    )
+                })?;
+                if descriptors
+                    .iter()
+                    .any(|descriptor| descriptor.layout().groups().first() != Some(root_layout))
+                {
+                    return Err(LodWebGpuError::Payload(
+                        "functional prepared-patch root layouts are inconsistent".to_string(),
+                    ));
+                }
+                let pbr_layout = if uses_pbr_family {
+                    Some(
+                        descriptors
+                            .iter()
+                            .find_map(|descriptor| {
+                                let entry = descriptor.program().fragment()?.entry_point();
+                                matches!(
+                                    entry,
+                                    quilting_shaders::PATCH_RENDER_DEVICE_PBR_ENTRY_POINT
+                                        | quilting_shaders::PATCH_RENDER_DEVICE_PBR_FOCUS_ENTRY_POINT
+                                )
+                                .then_some(descriptor.layout())
+                            })
+                            .ok_or_else(|| {
+                                LodWebGpuError::Payload(
+                                    "functional prepared-patch PBR layout is missing".to_string(),
+                                )
+                            })?,
+                    )
+                } else {
+                    None
+                };
+                if descriptors.iter().any(|descriptor| {
+                    let Some(fragment) = descriptor.program().fragment() else {
+                        return true;
+                    };
+                    let uses_pbr = matches!(
+                        fragment.entry_point(),
+                        quilting_shaders::PATCH_RENDER_DEVICE_PBR_ENTRY_POINT
+                            | quilting_shaders::PATCH_RENDER_DEVICE_PBR_FOCUS_ENTRY_POINT
+                    );
+                    if uses_pbr {
+                        descriptor.layout().groups().len() != 3
+                            || Some(descriptor.layout()) != pbr_layout
+                    } else {
+                        descriptor.layout().groups().len() != 1
+                    }
+                }) {
+                    return Err(LodWebGpuError::Payload(
+                        "functional prepared-patch pipeline layouts are inconsistent".to_string(),
+                    ));
+                }
+                (
+                    crate::pipeline_lowering::bind_group_layout(
+                        &self.device,
+                        "quilting prepared QB render bindings",
+                        root_layout,
+                    ),
+                    pbr_layout.map(|layout| {
+                        crate::pipeline_lowering::bind_group_layout(
+                            &self.device,
+                            "quilting PBR material texture bindings",
+                            &layout.groups()[1],
+                        )
+                    }),
+                    pbr_layout.map(|layout| {
+                        crate::pipeline_lowering::bind_group_layout(
+                            &self.device,
+                            "quilting PBR environment binding layout",
+                            &layout.groups()[2],
+                        )
+                    }),
+                )
+            } else {
+                let bind_group_layout =
+                    self.device
+                        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                            label: Some("quilting prepared QB render bindings"),
+                            entries: &[
+                                render_buffer_layout_visible(
+                                    0,
+                                    wgpu::BufferBindingType::Storage { read_only: true },
+                                    PATCH_RENDER_FRAME_BYTES,
+                                    false,
+                                    wgpu::ShaderStages::VERTEX_FRAGMENT,
+                                ),
+                                render_buffer_layout_visible(
+                                    1,
+                                    wgpu::BufferBindingType::Storage { read_only: true },
+                                    PREPARED_PATCH_RECORD_BYTES,
+                                    false,
+                                    wgpu::ShaderStages::VERTEX,
+                                ),
+                                render_buffer_layout_visible(
+                                    2,
+                                    wgpu::BufferBindingType::Storage { read_only: true },
+                                    PACKED_RECORD_BYTES,
+                                    false,
+                                    wgpu::ShaderStages::VERTEX,
+                                ),
+                                render_buffer_layout_visible(
+                                    3,
+                                    wgpu::BufferBindingType::Storage { read_only: true },
+                                    VISIBILITY_RANGE_RECORD_BYTES,
+                                    false,
+                                    wgpu::ShaderStages::VERTEX,
+                                ),
+                                render_buffer_layout_visible(
+                                    4,
+                                    wgpu::BufferBindingType::Uniform,
+                                    DRAW_BATCH_INDEX_BYTES,
+                                    true,
+                                    wgpu::ShaderStages::VERTEX_FRAGMENT,
+                                ),
+                                render_buffer_layout_visible(
+                                    5,
+                                    wgpu::BufferBindingType::Storage { read_only: true },
+                                    PATCH_PBR_MATERIAL_BYTES,
+                                    false,
+                                    wgpu::ShaderStages::FRAGMENT,
+                                ),
+                            ],
+                        });
+                (
+                    bind_group_layout,
+                    uses_pbr_family
+                        .then(|| pbr_resources::create_pbr_texture_bind_group_layout(&self.device)),
+                    uses_pbr_family.then(|| {
+                        pbr_environment::create_pbr_environment_bind_group_layout(&self.device)
+                    }),
+                )
+            };
         let depth_stencil = depth_format.map(|format| wgpu::DepthStencilState {
             format,
             depth_write_enabled: Some(true),
@@ -3920,6 +4107,7 @@ impl LodClassifierDevice {
         });
         let attributes = wgpu::vertex_attr_array![0 => Float32x3];
         let mut pipelines = Vec::with_capacity(fragment_entry_points.len());
+        let mut descriptor_index = 0usize;
         for (kind, geometry, fragment_entry_point) in fragment_entry_points {
             let uses_pbr_bindings = kind == PatchPipelineKind::Style(RenderStyle::Pbr);
             let pipeline_depth_stencil = depth_stencil.clone().map(|mut state| {
@@ -3951,38 +4139,118 @@ impl LodClassifierDevice {
                         immediate_size: 0,
                     })
             };
-            let create = |front_face| {
-                let mut targets = vec![Some(wgpu::ColorTargetState {
-                    format: color_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })];
-                if uses_pbr_bindings {
-                    if let Some(format) = pbr_raw_field_format {
-                        targets.push(Some(wgpu::ColorTargetState {
-                            format,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }));
+            let create = |index: usize,
+                          front_face: wgpu::FrontFace|
+             -> Result<wgpu::RenderPipeline, LodWebGpuError> {
+                let mut attribute_storage = Vec::new();
+                let (
+                    vertex_entry_point,
+                    resolved_fragment_entry_point,
+                    vertex_buffers,
+                    primitive,
+                    resolved_depth_stencil,
+                    multisample,
+                    targets,
+                ) = if let Some(descriptors) = descriptors {
+                    let descriptor = &descriptors[index];
+                    let fragment = descriptor.program().fragment().ok_or_else(|| {
+                        LodWebGpuError::Payload(
+                            "functional prepared-patch pipeline is missing a fragment stage"
+                                .to_string(),
+                        )
+                    })?;
+                    let expected_topology = match geometry {
+                        RenderGeometry::Triangles => functional::PrimitiveTopology::TriangleList,
+                        RenderGeometry::Lines => functional::PrimitiveTopology::LineList,
+                    };
+                    let expected_front_face = match front_face {
+                        wgpu::FrontFace::Ccw => functional::FrontFace::CounterClockwise,
+                        wgpu::FrontFace::Cw => functional::FrontFace::Clockwise,
+                    };
+                    if fragment.entry_point() != fragment_entry_point
+                        || descriptor.primitive().topology != expected_topology
+                        || descriptor.primitive().front_face != expected_front_face
+                    {
+                        return Err(LodWebGpuError::Payload(
+                            "functional prepared-patch pipeline order is inconsistent".to_string(),
+                        ));
                     }
-                }
-                self.device
-                    .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                        label: Some("quilting prepared QB diagnostic"),
-                        layout: Some(&pipeline_layout),
-                        vertex: wgpu::VertexState {
-                            module: &module,
-                            entry_point: Some(
-                                quilting_shaders::PATCH_RENDER_DEVICE_VERTEX_ENTRY_POINT,
+                    for (expected_slot, buffer) in descriptor.vertex_buffers().iter().enumerate() {
+                        if buffer.slot() != expected_slot as u32 {
+                            return Err(LodWebGpuError::Payload(
+                                "functional prepared-patch vertex slots are not contiguous"
+                                    .to_string(),
+                            ));
+                        }
+                        attribute_storage.push(
+                            buffer
+                                .attributes()
+                                .iter()
+                                .map(|attribute| wgpu::VertexAttribute {
+                                    format: crate::pipeline_lowering::vertex_format(
+                                        attribute.format,
+                                    ),
+                                    offset: attribute.offset,
+                                    shader_location: attribute.location,
+                                })
+                                .collect::<Vec<_>>(),
+                        );
+                    }
+                    let vertex_buffers = descriptor
+                        .vertex_buffers()
+                        .iter()
+                        .zip(attribute_storage.iter())
+                        .map(|(buffer, attributes)| wgpu::VertexBufferLayout {
+                            array_stride: buffer.stride(),
+                            step_mode: crate::pipeline_lowering::vertex_step_mode(
+                                buffer.step_mode(),
                             ),
-                            compilation_options: Default::default(),
-                            buffers: &[wgpu::VertexBufferLayout {
-                                array_stride: 12,
-                                step_mode: wgpu::VertexStepMode::Vertex,
-                                attributes: &attributes,
-                            }],
-                        },
-                        primitive: wgpu::PrimitiveState {
+                            attributes,
+                        })
+                        .collect::<Vec<_>>();
+                    let targets = descriptor
+                        .color_targets()
+                        .iter()
+                        .copied()
+                        .map(crate::pipeline_lowering::color_target_state)
+                        .map(|target| target.map(Some))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    (
+                        descriptor.program().vertex().entry_point(),
+                        fragment.entry_point(),
+                        vertex_buffers,
+                        crate::pipeline_lowering::primitive_state(descriptor.primitive()),
+                        descriptor
+                            .depth_stencil()
+                            .map(crate::pipeline_lowering::depth_stencil_state),
+                        crate::pipeline_lowering::multisample_state(descriptor.multisample()),
+                        targets,
+                    )
+                } else {
+                    attribute_storage.push(attributes.to_vec());
+                    let mut targets = vec![Some(wgpu::ColorTargetState {
+                        format: color_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })];
+                    if uses_pbr_bindings {
+                        if let Some(format) = pbr_raw_field_format {
+                            targets.push(Some(wgpu::ColorTargetState {
+                                format,
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::ALL,
+                            }));
+                        }
+                    }
+                    (
+                        quilting_shaders::PATCH_RENDER_DEVICE_VERTEX_ENTRY_POINT,
+                        fragment_entry_point,
+                        vec![wgpu::VertexBufferLayout {
+                            array_stride: 12,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &attribute_storage[0],
+                        }],
+                        wgpu::PrimitiveState {
                             topology: match geometry {
                                 RenderGeometry::Triangles => wgpu::PrimitiveTopology::TriangleList,
                                 RenderGeometry::Lines => wgpu::PrimitiveTopology::LineList,
@@ -3991,24 +4259,46 @@ impl LodClassifierDevice {
                             cull_mode: None,
                             ..Default::default()
                         },
-                        depth_stencil: pipeline_depth_stencil.clone(),
-                        multisample: wgpu::MultisampleState {
+                        pipeline_depth_stencil.clone(),
+                        wgpu::MultisampleState {
                             count: sample_count,
                             ..Default::default()
                         },
+                        targets,
+                    )
+                };
+                Ok(self
+                    .device
+                    .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some("quilting prepared QB diagnostic"),
+                        layout: Some(&pipeline_layout),
+                        vertex: wgpu::VertexState {
+                            module: &module,
+                            entry_point: Some(vertex_entry_point),
+                            compilation_options: Default::default(),
+                            buffers: &vertex_buffers,
+                        },
+                        primitive,
+                        depth_stencil: resolved_depth_stencil,
+                        multisample,
                         fragment: Some(wgpu::FragmentState {
                             module: &module,
-                            entry_point: Some(fragment_entry_point),
+                            entry_point: Some(resolved_fragment_entry_point),
                             compilation_options: Default::default(),
                             targets: &targets,
                         }),
                         multiview_mask: None,
                         cache: None,
-                    })
+                    }))
             };
-            let counter_clockwise = create(wgpu::FrontFace::Ccw);
+            let counter_clockwise = create(descriptor_index, wgpu::FrontFace::Ccw)?;
+            descriptor_index += 1;
             let clockwise = match geometry {
-                RenderGeometry::Triangles => create(wgpu::FrontFace::Cw),
+                RenderGeometry::Triangles => {
+                    let pipeline = create(descriptor_index, wgpu::FrontFace::Cw)?;
+                    descriptor_index += 1;
+                    pipeline
+                }
                 RenderGeometry::Lines => counter_clockwise.clone(),
             };
             pipelines.push(PatchRenderPipeline {
