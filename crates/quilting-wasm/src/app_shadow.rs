@@ -8,7 +8,7 @@ use hyperscape::{
     NavigationPreset, PackedAssetInstance, PackedNodeSource, PackedNodeTransformSource,
     PackedPresentationLayerBinding, PointerTurntableGesture, PointerTurntableInput, Presentation,
     PresentationAsset, PresentationSnapshot, SpaceMouseCameraInput, SpaceMouseMapping,
-    SurfaceAnchorTarget, TurntableFrame,
+    SurfaceAnchorTarget, SurfaceWalkControls, TurntableFrame,
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredEnvelope, CameraPresence, EntityId, EphemeralPresence,
@@ -17,18 +17,17 @@ use hyperscape_protocol::{
 };
 use hyperscope_app::{
     session_node_identity, AnimationAction, AnimationClipDescriptor,
-    AnimationClipSelectionCompletion, AnimationClipSelectionOutcome, AnimationClock, AppCommit,
-    AnimationPoseRequestDisposition, AnimationPoseScheduler, AnimationPoseStamp, AppEffect,
-    AppEvent, AppFrameSnapshot, AppStore, AssetLoadCompletion, AssetLoadOutcome, AssetLoadScope,
-    AssetMetadata, AssetStatus, AuthoredRevision, CommitDisposition, EffectCompletion, FrameTick,
-    LocalPeerDisposition, LocalPeerIngress, LocalPeerLane, LocalPeerReceipt,
-    NavigationSynchronization, PatchLabCompletion, PatchLabControls, PatchLabEffect,
-    PatchLabFailure, PatchLabField, PatchLabGeometryCompletion, PatchLabGeometryOutcome,
-    PatchLabHistogramBin, PatchLabLodCompletion, PatchLabLodOutcome, PatchLabLodSummary,
-    PatchLabReadModel, PatchLabSessionIntent, PatchLabShape, PresentationAction,
-    PresentationAnimationResidencyBinding,
-    PrimarySceneInstallCompletion, PrimarySceneInstallMetadata, PrimarySceneInstallOutcome,
-    RenderSettings, SemanticAction, Timed,
+    AnimationClipSelectionCompletion, AnimationClipSelectionOutcome, AnimationClock,
+    AnimationPoseRequestDisposition, AnimationPoseScheduler, AnimationPoseStamp, AppCommit,
+    AppEffect, AppEvent, AppFrameSnapshot, AppStore, AssetLoadCompletion, AssetLoadOutcome,
+    AssetLoadScope, AssetMetadata, AssetStatus, AuthoredRevision, CommitDisposition,
+    EffectCompletion, FrameTick, LocalPeerDisposition, LocalPeerIngress, LocalPeerLane,
+    LocalPeerReceipt, NavigationSettings, NavigationSynchronization, PatchLabCompletion,
+    PatchLabControls, PatchLabEffect, PatchLabFailure, PatchLabField, PatchLabGeometryCompletion,
+    PatchLabGeometryOutcome, PatchLabHistogramBin, PatchLabLodCompletion, PatchLabLodOutcome,
+    PatchLabLodSummary, PatchLabReadModel, PatchLabSessionIntent, PatchLabShape,
+    PresentationAction, PresentationAnimationResidencyBinding, PrimarySceneInstallCompletion,
+    PrimarySceneInstallMetadata, PrimarySceneInstallOutcome, RenderSettings, SemanticAction, Timed,
 };
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -1424,6 +1423,47 @@ impl HyperscopeAppShadow {
         })
     }
 
+    /// Replace the device-independent navigation preference packet. Raw HID
+    /// mappings and browser focus policy deliberately do not cross this
+    /// boundary; transition and walk semantics do.
+    #[wasm_bindgen(js_name = setNavigationSettings)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_navigation_settings(
+        &self,
+        sequence: u32,
+        transition_seconds: f64,
+        smoothing_seconds: f64,
+        tangent_pull_fraction: f64,
+        speed_octave_steps: f64,
+        body_scale_octave_steps: f64,
+        eye_height_octave_steps: f64,
+    ) -> Result<JsValue, JsValue> {
+        let current = self.store.navigation_settings_snapshot().settings;
+        let settings = NavigationSettings {
+            transition_seconds,
+            surface_walk: SurfaceWalkControls {
+                smoothing_seconds,
+                tangent_pull_fraction,
+                speed_octave_steps,
+                body_scale_octave_steps,
+                eye_height_octave_steps,
+                ..current.surface_walk
+            },
+        };
+        let commit = self
+            .store
+            .dispatch(AppEvent::Input(Timed {
+                sequence: u64::from(sequence),
+                at_seconds: self.store.frame_snapshot().elapsed_seconds,
+                value: SemanticAction::SetNavigationSettings(settings),
+            }))
+            .map_err(js_error)?;
+        to_js(&ShadowNavigationSettingsReceipt {
+            commit: shadow_commit(&commit),
+            navigation: self.store.navigation_settings_snapshot().into(),
+        })
+    }
+
     /// Replace the complete educational Patch Lab session through the same
     /// reducer/effect boundary used by native, replay, and future WebGPU
     /// adapters. Rust allocates job IDs and coalesces LOD work; JavaScript may
@@ -1829,6 +1869,7 @@ impl HyperscopeAppShadow {
     /// revision commit fence.
     pub fn snapshot(&self) -> Result<JsValue, JsValue> {
         let summary = self.store.summary_snapshot();
+        let navigation_settings = self.store.navigation_settings_snapshot();
         let render = self.store.render_snapshot();
         let ready_primary_asset = self.store.primary_asset_snapshot().map(|asset| {
             ShadowReadyPrimaryAsset {
@@ -1936,6 +1977,7 @@ impl HyperscopeAppShadow {
             animation_playing: summary.animation_playing,
             animation_time_seconds: summary.animation_time_seconds,
             animation_speed: summary.animation_speed,
+            navigation_settings: navigation_settings.into(),
             render_settings: render.into(),
             patch_lab: self.store.patch_lab_snapshot().into(),
             assets,
@@ -2467,6 +2509,7 @@ struct ShadowSnapshot {
     animation_playing: bool,
     animation_time_seconds: f64,
     animation_speed: f64,
+    navigation_settings: ShadowNavigationSettings,
     render_settings: ShadowRenderSettings,
     patch_lab: ShadowPatchLabReadModel,
     assets: Vec<ShadowAsset>,
@@ -2679,6 +2722,40 @@ struct ShadowPendingAnimationClip {
 struct ShadowRenderSettingsReceipt {
     commit: ShadowCommit,
     render: ShadowRenderSettings,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowNavigationSettingsReceipt {
+    commit: ShadowCommit,
+    navigation: ShadowNavigationSettings,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowNavigationSettings {
+    revision: String,
+    transition_seconds: f64,
+    smoothing_seconds: f64,
+    tangent_pull_fraction: f64,
+    speed_octave_steps: f64,
+    body_scale_octave_steps: f64,
+    eye_height_octave_steps: f64,
+}
+
+impl From<hyperscope_app::AppNavigationSettingsSnapshot> for ShadowNavigationSettings {
+    fn from(snapshot: hyperscope_app::AppNavigationSettingsSnapshot) -> Self {
+        let walk = snapshot.settings.surface_walk;
+        Self {
+            revision: snapshot.revision.to_string(),
+            transition_seconds: snapshot.settings.transition_seconds,
+            smoothing_seconds: walk.smoothing_seconds,
+            tangent_pull_fraction: walk.tangent_pull_fraction,
+            speed_octave_steps: walk.speed_octave_steps,
+            body_scale_octave_steps: walk.body_scale_octave_steps,
+            eye_height_octave_steps: walk.eye_height_octave_steps,
+        }
+    }
 }
 
 #[derive(Serialize)]
