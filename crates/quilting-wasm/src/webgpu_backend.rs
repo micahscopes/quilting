@@ -619,6 +619,7 @@ pub(crate) fn replace_image_bitmaps(
             let WebGpuBackend {
                 device,
                 pipelines,
+                model,
                 scene,
                 environment,
                 resident_root_pipeline,
@@ -631,14 +632,24 @@ pub(crate) fn replace_image_bitmaps(
             let textures = device
                 .upload_pbr_image_bitmap_table(&assets)
                 .map_err(|error| error.to_string())?;
-            let root_bindings = rebuild_resident_root_pbr_bindings(
+            let root_candidate = rebuild_resident_root_pbr_scene(
                 device,
+                model.as_ref(),
+                pipelines.as_ref(),
                 resident_root_pipeline.as_ref(),
                 resident_roots.as_ref(),
                 scene.as_ref(),
                 Some(&textures),
                 environment.as_ref(),
             )?;
+            if let Some((_, overlay)) = root_candidate.as_ref() {
+                let roots = resident_roots
+                    .as_ref()
+                    .expect("resident PBR rebuild checked root residency");
+                device
+                    .publish_adaptive_overlay_suppression(&roots.geometry, overlay.as_ref())
+                    .map_err(|error| error.to_string())?;
+            }
             if let Some(scene) = scene.as_mut() {
                 let pipeline = pipelines
                     .as_ref()
@@ -648,11 +659,12 @@ pub(crate) fn replace_image_bitmaps(
                     .replace_patch_render_scene_texture_bindings(pipeline, scene, Some(&textures))
                     .map_err(|error| error.to_string())?;
             }
-            if let Some(bindings) = root_bindings {
-                resident_roots
+            if let Some((bindings, overlay)) = root_candidate {
+                let roots = resident_roots
                     .as_mut()
-                    .expect("resident root binding rebuild checked scene presence")
-                    .bindings = bindings;
+                    .expect("resident PBR rebuild checked root residency");
+                roots.bindings = bindings;
+                roots.overlay = overlay;
             }
             Ok::<_, String>(textures)
         };
@@ -705,6 +717,7 @@ pub(crate) fn replace_environment_maps(
             let WebGpuBackend {
                 device,
                 pipelines,
+                model,
                 scene,
                 textures,
                 resident_root_pipeline,
@@ -717,14 +730,24 @@ pub(crate) fn replace_environment_maps(
             let environment = device
                 .upload_pbr_environment_map(asset)
                 .map_err(|error| error.to_string())?;
-            let root_bindings = rebuild_resident_root_pbr_bindings(
+            let root_candidate = rebuild_resident_root_pbr_scene(
                 device,
+                model.as_ref(),
+                pipelines.as_ref(),
                 resident_root_pipeline.as_ref(),
                 resident_roots.as_ref(),
                 scene.as_ref(),
                 textures.as_ref(),
                 Some(&environment),
             )?;
+            if let Some((_, overlay)) = root_candidate.as_ref() {
+                let roots = resident_roots
+                    .as_ref()
+                    .expect("resident PBR rebuild checked root residency");
+                device
+                    .publish_adaptive_overlay_suppression(&roots.geometry, overlay.as_ref())
+                    .map_err(|error| error.to_string())?;
+            }
             if let Some(scene) = scene.as_mut() {
                 let pipeline = pipelines
                     .as_ref()
@@ -738,11 +761,12 @@ pub(crate) fn replace_environment_maps(
                     )
                     .map_err(|error| error.to_string())?;
             }
-            if let Some(bindings) = root_bindings {
-                resident_roots
+            if let Some((bindings, overlay)) = root_candidate {
+                let roots = resident_roots
                     .as_mut()
-                    .expect("resident root binding rebuild checked scene presence")
-                    .bindings = bindings;
+                    .expect("resident PBR rebuild checked root residency");
+                roots.bindings = bindings;
+                roots.overlay = overlay;
             }
             Ok::<_, String>(environment)
         };
@@ -1019,7 +1043,15 @@ fn build_resident_root_backend(
             environment,
         )
         .map_err(|error| error.to_string())?;
-    let overlay = build_adaptive_overlay(device, model, overlay_pipelines, &preparation, scene)?;
+    let overlay = build_adaptive_overlay(
+        device,
+        model,
+        overlay_pipelines,
+        &preparation,
+        scene,
+        textures,
+        environment,
+    )?;
     device
         .publish_adaptive_overlay_suppression(&geometry, overlay.as_ref())
         .map_err(|error| error.to_string())?;
@@ -1032,22 +1064,28 @@ fn build_resident_root_backend(
     })
 }
 
-fn rebuild_resident_root_pbr_bindings(
+fn rebuild_resident_root_pbr_scene(
     device: &LodClassifierDevice,
+    model: Option<&LodClassifierModel>,
+    pipelines: Option<&DiagnosticPatchRenderPipelines>,
     pipeline: Option<&ResidentRootRenderPipeline>,
     roots: Option<&ResidentRootBackend>,
     scene: Option<&PatchRenderScene>,
     textures: Option<&PbrTextureTable>,
     environment: Option<&PbrEnvironmentMap>,
-) -> Result<Option<ResidentRootRenderBindings>, String> {
+) -> Result<Option<(ResidentRootRenderBindings, Option<AdaptiveOverlayScene>)>, String> {
     let Some(roots) = roots else {
         return Ok(None);
     };
     let pipeline = pipeline
         .ok_or_else(|| "resident PBR binding rebuild lost its root pipeline".to_string())?;
+    let model =
+        model.ok_or_else(|| "resident PBR binding rebuild lost its model residency".to_string())?;
+    let pipelines = pipelines
+        .ok_or_else(|| "resident PBR binding rebuild lost its pipeline family".to_string())?;
     let scene =
         scene.ok_or_else(|| "resident PBR binding rebuild lost its render scene".to_string())?;
-    device
+    let bindings = device
         .create_resident_root_render_bindings_with_pbr(
             pipeline,
             &roots.preparation,
@@ -1056,8 +1094,17 @@ fn rebuild_resident_root_pbr_bindings(
             textures,
             environment,
         )
-        .map(Some)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    let overlay = build_adaptive_overlay(
+        device,
+        model,
+        pipelines,
+        &roots.preparation,
+        scene.scene(),
+        textures,
+        environment,
+    )?;
+    Ok(Some((bindings, overlay)))
 }
 
 fn build_adaptive_overlay(
@@ -1066,12 +1113,21 @@ fn build_adaptive_overlay(
     pipelines: &DiagnosticPatchRenderPipelines,
     preparation: &ResidentRootPreparationScene,
     scene: &RenderSceneSnapshot,
+    textures: Option<&PbrTextureTable>,
+    environment: Option<&PbrEnvironmentMap>,
 ) -> Result<Option<AdaptiveOverlayScene>, String> {
     let layout_pipeline = pipelines
-        .get(RenderStyle::Normals)
-        .ok_or_else(|| "WebGPU diagnostic pipeline family lost normals".to_string())?;
+        .get(RenderStyle::Pbr)
+        .ok_or_else(|| "WebGPU diagnostic pipeline family lost PBR".to_string())?;
     device
-        .upload_adaptive_overlay_scene(layout_pipeline, model, preparation, scene)
+        .upload_adaptive_overlay_scene_with_pbr_resources(
+            layout_pipeline,
+            model,
+            preparation,
+            scene,
+            textures,
+            environment,
+        )
         .map_err(|error| error.to_string())
 }
 
@@ -1144,6 +1200,8 @@ pub(crate) fn replace_scene(
                     pipelines,
                     &retained.preparation,
                     &scene,
+                    backend.textures.as_ref(),
+                    backend.environment.as_ref(),
                 )?;
                 Ok(ResidentRootSceneCandidate::Reuse { bindings, overlay })
             }
@@ -1561,41 +1619,23 @@ pub(crate) fn submit_frame(
                             joint_matrices,
                             morph_weights: &effective_morph_weights,
                         };
-                        if style == RenderStyle::Pbr {
-                            device.present_resident_roots(
-                                presentation,
-                                &frame,
-                                scene.scene(),
-                                model,
-                                &resident,
-                                &roots.preparation,
-                                &roots.geometry,
-                                root_pipeline,
-                                &roots.bindings,
-                                atlas,
-                                pose,
-                                num_joints,
-                                true,
-                            )
-                        } else {
-                            device.present_resident_adaptive(
-                                presentation,
-                                &frame,
-                                scene.scene(),
-                                model,
-                                &resident,
-                                &roots.preparation,
-                                &roots.geometry,
-                                root_pipeline,
-                                &roots.bindings,
-                                pipelines,
-                                roots.overlay.as_ref(),
-                                atlas,
-                                pose,
-                                num_joints,
-                                true,
-                            )
-                        }
+                        device.present_resident_adaptive(
+                            presentation,
+                            &frame,
+                            scene.scene(),
+                            model,
+                            &resident,
+                            &roots.preparation,
+                            &roots.geometry,
+                            root_pipeline,
+                            &roots.bindings,
+                            pipelines,
+                            roots.overlay.as_ref(),
+                            atlas,
+                            pose,
+                            num_joints,
+                            true,
+                        )
                     } else if let Some(resident) = model
                         .as_ref()
                         .and_then(|model| device.latest_resident_lod(model))
@@ -1667,41 +1707,23 @@ pub(crate) fn submit_frame(
                             joint_matrices,
                             morph_weights: &effective_morph_weights,
                         };
-                        if style == RenderStyle::Pbr {
-                            device.render_offscreen_resident_roots(
-                                &frame,
-                                scene.scene(),
-                                model,
-                                &resident,
-                                &roots.preparation,
-                                &roots.geometry,
-                                root_pipeline,
-                                &roots.bindings,
-                                atlas,
-                                target,
-                                pose,
-                                num_joints,
-                                true,
-                            )
-                        } else {
-                            device.render_offscreen_resident_adaptive(
-                                &frame,
-                                scene.scene(),
-                                model,
-                                &resident,
-                                &roots.preparation,
-                                &roots.geometry,
-                                root_pipeline,
-                                &roots.bindings,
-                                pipelines,
-                                roots.overlay.as_ref(),
-                                atlas,
-                                target,
-                                pose,
-                                num_joints,
-                                true,
-                            )
-                        }
+                        device.render_offscreen_resident_adaptive(
+                            &frame,
+                            scene.scene(),
+                            model,
+                            &resident,
+                            &roots.preparation,
+                            &roots.geometry,
+                            root_pipeline,
+                            &roots.bindings,
+                            pipelines,
+                            roots.overlay.as_ref(),
+                            atlas,
+                            target,
+                            pose,
+                            num_joints,
+                            true,
+                        )
                     } else if let Some(resident) = resident {
                         device
                             .render_offscreen_supported_patch_scene_with_resident_lod_visibility_and_webgl_clear(
