@@ -4184,7 +4184,13 @@ function synchronizeRustPatchLabFromBrowser(context, active = patchLab.active) {
   }
 }
 
-function patchLabHistogramBins(histogram) {
+function patchLabHistogramBins(histogramBins, histogram) {
+  if (Array.isArray(histogramBins)) {
+    return histogramBins.map(bin => ({
+      edgeSubdivisions: Array.from(bin?.edgeSubdivisions || []),
+      faceCount: Number(bin?.faceCount || 0),
+    }));
+  }
   if (typeof histogram !== 'string' || !histogram.trim()) return [];
   return histogram.split(',').flatMap(entry => {
     const match = entry.trim().match(/^(\d+)\/(\d+)\/(\d+)×(\d+)$/);
@@ -4199,17 +4205,23 @@ function patchLabHistogramBins(histogram) {
 function patchLabLodSummary(result) {
   const requested = new Uint32Array(result?.requested?.buffer || result?.requested || 0);
   const resident = new Uint32Array(result?.actual?.buffer || result?.actual || 0);
+  const requestedFirstFace = Array.from(result?.requested_first_face || []);
+  const residentFirstFace = Array.from(result?.resident_first_face || []);
   const renderer = mr_debugResidentLodEdges() || {};
   return {
-    requestedFirstFace: requested.length >= 3 ? Array.from(requested.slice(0, 3)) : null,
-    residentFirstFace: resident.length >= 3 ? Array.from(resident.slice(0, 3)) : null,
+    requestedFirstFace: requestedFirstFace.length === 3
+      ? requestedFirstFace
+      : (requested.length >= 3 ? Array.from(requested.slice(0, 3)) : null),
+    residentFirstFace: residentFirstFace.length === 3
+      ? residentFirstFace
+      : (resident.length >= 3 ? Array.from(resident.slice(0, 3)) : null),
     promotedFaces: Number(result?.promoted_faces || 0),
     promotedEdges: Number(result?.promoted_edges || 0),
     sharedEdges: Number(result?.shared_edges || 0),
     sharedEdgeMismatches: Number(result?.shared_edge_mismatches || 0),
     maxFaceEdgeRatio: Number(result?.max_face_edge_ratio || 0),
     renderedTriangles: Number(renderer.residentTriangles || 0),
-    histogram: patchLabHistogramBins(result?.histogram),
+    histogram: patchLabHistogramBins(result?.histogram_bins, result?.histogram),
   };
 }
 

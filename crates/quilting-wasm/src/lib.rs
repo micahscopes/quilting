@@ -3092,6 +3092,23 @@ pub fn update_patch_lab_lods(
             .map(|(lod, count)| format!("{}/{}/{}×{}", lod[0], lod[1], lod[2], count))
             .collect::<Vec<_>>()
             .join(", ");
+        let histogram_bins = js_sys::Array::new();
+        for (edges, count) in &lods.histogram {
+            let bin = js_sys::Object::new();
+            let subdivisions = js_sys::Uint32Array::new_with_length(3);
+            subdivisions.copy_from(edges);
+            js_sys::Reflect::set(
+                &bin,
+                &"edgeSubdivisions".into(),
+                &subdivisions,
+            ).unwrap();
+            js_sys::Reflect::set(
+                &bin,
+                &"faceCount".into(),
+                &JsValue::from_f64(*count as f64),
+            ).unwrap();
+            histogram_bins.push(&bin);
+        }
 
         let result = js_sys::Object::new();
         let js_lods = js_sys::Float32Array::new_with_length(face_lods.len() as u32);
@@ -3115,6 +3132,30 @@ pub fn update_patch_lab_lods(
                 &JsValue::from_f64(value as f64)).unwrap();
         }
         js_sys::Reflect::set(&result, &"histogram".into(), &histogram.into()).unwrap();
+        js_sys::Reflect::set(
+            &result,
+            &"histogram_bins".into(),
+            &histogram_bins,
+        ).unwrap();
+        if let Some(requested_edges) = lods.requested.first() {
+            let requested_first_face = js_sys::Uint32Array::new_with_length(3);
+            requested_first_face.copy_from(requested_edges);
+            js_sys::Reflect::set(
+                &result,
+                &"requested_first_face".into(),
+                &requested_first_face,
+            ).unwrap();
+        }
+        if let Some(resident_first_face) = lods.residents.first() {
+            let resident_edges = resident_first_face.edge_lods();
+            let resident_first_face = js_sys::Uint32Array::new_with_length(3);
+            resident_first_face.copy_from(&resident_edges);
+            js_sys::Reflect::set(
+                &result,
+                &"resident_first_face".into(),
+                &resident_first_face,
+            ).unwrap();
+        }
         result.into()
     })
 }
