@@ -39,16 +39,42 @@ improvement over a full ID framebuffer, not vertex-work elimination.
 
 `PatchPickRequest` carries the current `InteractionTargetTable` residency
 epoch. `StagedPatchPickReadback` preserves that epoch across asynchronous
-mapping. The browser adapter exposes the opt-in
-`mr_queryWebGpuPatch(x, y, targetEpoch)` function, but does not mutate hover or
-selection. Its packet maps directly to
-`HyperscopeAppShadow.setPackedInteractionHover`; that existing Rust method
-rejects stale epochs and joins the transient packed node to current stable
-asset/entity identity and source bounds before semantic dispatch.
+mapping. The WASM evidence adapter runs the incumbent WebGL2 surface pick once,
+returns that result synchronously, and stages a retained WebGPU query against
+the same renderer call. Its asynchronous readback is diagnostic only. Rust
+rejects a changed retained-frame revision, source render call, or echoed target
+epoch before comparing the samples. The browser additionally discards a report
+if the current interaction-target epoch changed while the readback was in
+flight.
+
+The backend-neutral comparison packet distinguishes coverage and node/face
+identity mismatches from numeric drift. When both paths hit, it records maximum
+source barycentric error, source-position error, and displayed-distance error;
+a miss cannot masquerade as zero numeric error.
 
 The pick shader module participates in the existing device-local functional
 shader memo. The pipeline and 1x1 target are retained by the WASM backend; one
-512-byte staging buffer is currently allocated per explicit query.
+512-byte staging buffer is currently allocated per explicit query. The WASM
+adapter admits at most one staged or reading comparison at a time, so repeated
+clicks cannot create an unbounded readback queue.
+
+## Browser route and rollback
+
+`pickimpl=js` is the default and exact rollback. It does not initialize WebGPU
+solely for picking and follows the incumbent `mr_pickSurface` path.
+
+`pickimpl=shadow` initializes the offscreen WebGPU backend even when
+`gfx=webgl2`, but the visible canvas, selected surface, highlight, and semantic
+interaction remain driven by the synchronous WebGL2 result. `pickimpl=rust` is
+currently treated as the same non-authoritative measurement lane; spelling the
+future mode in a URL cannot bypass the promotion gates.
+
+Bounded browser telemetry is available at
+`globalThis.__hyperscopeBackendPickDiagnostics`. It retains scalar counters,
+maxima, the last report, and the last error rather than accumulating samples.
+It records requests, stage rejections, readbacks, stale target epochs,
+coverage/identity mismatches, numeric maxima, and stage/readback/total latency
+maxima. Warnings are emitted only on power-of-two mismatch/error counts.
 
 ## Verification
 
@@ -68,6 +94,14 @@ shader memo. The pipeline and 1x1 target are retained by the WASM backend; one
   `leptos-ui,webgpu-backend` and tests passes; and
 - no Trunk server, `wasm-pack`, `wasm-opt`, or browser process was launched.
 
+After browser routing was added, the exact WASM check passed again in 8.09
+seconds. All 22 `hyperscope-app` settings tests passed, including the opt-in
+route/default/rollback contract, and the inline browser module passed a
+JavaScript syntax check. The full source smoke reaches the expected stale
+generated-package boundary because `pkg/quilting_wasm.js` predates the new
+`pickimpl` registry entry. Regenerating that package was deliberately deferred
+rather than invoking the user-disabled Trunk/`wasm-pack`/`wasm-opt` path.
+
 All Cargo gates used one low-priority job. The unsupported native
 `quilting-wasm` test configuration still reaches pre-existing wasm-only CSR and
 WebGL symbols on a host target; it is not evidence against the passing wasm32
@@ -75,14 +109,18 @@ adapter build.
 
 ## Remaining boundary
 
-This is not live picking authority. The browser does not call the new query by
-default, and WebGL2 remains the incumbent picker. The opt-in adapter now
-selects the exact last completed ordinary, resident, or resident-focus binding
-epoch; asynchronous packets still have to pass the existing Rust target-epoch
-join before semantic dispatch. Only representative browser correctness and
-latency evidence should promote it over WebGL2.
+This is not live picking authority. The browser does not call the comparison
+path by default, and WebGL2 remains the incumbent picker in every route mode.
+The opt-in adapter selects the exact last completed ordinary, resident, or
+resident-focus binding epoch and refuses overlapping evidence. Only
+representative browser correctness and latency evidence should promote it over
+WebGL2.
 
-Measured follow-ups are to encode a requested pick in the same frame
+Promotion requires a non-optimized development package and a live browser
+matrix covering ordinary, resident-root, adaptive-overlay, focus, animated,
+conformally transformed, miss, device-loss, and target-replacement cases. It
+must show zero coverage and identity mismatches, establish scene-relative
+numeric and latency budgets, and preserve click precision and epoch rejection.
+Further measured work is to encode a requested pick in the same frame
 submission, replace per-query staging allocation with a bounded in-flight
-ring, test ordinary/root/overlay/focus packets in a live browser adapter, and
-throttle hover queries without weakening click precision or epoch rejection.
+ring, and throttle future hover queries without weakening exact clicks.
