@@ -152,38 +152,25 @@ pub fn resident_root_pipeline_descriptors(
     depth_format: Option<functional::TextureFormat>,
     sample_count: u32,
 ) -> Result<Vec<functional::RenderPipelineDescriptor>, functional::RenderPipelineDescriptorError> {
-    let buffer = |binding, visibility, uniform: bool, minimum_size, dynamic_offset| {
-        functional::BindGroupLayoutEntry {
-            binding,
-            visibility,
-            kind: if uniform {
-                functional::BindingKind::UniformBuffer {
-                    dynamic_offset,
-                    minimum_size,
-                }
-            } else {
-                functional::BindingKind::StorageBuffer {
-                    read_only: true,
-                    dynamic_offset,
-                    minimum_size,
-                }
-            },
-        }
+    use crate::functional_pipeline::{
+        alpha_blending, buffer_binding, depth_state, pbr_environment_bindings,
+        position_vertex_buffer,
     };
+
     let vertex = functional::ShaderVisibility::VERTEX;
     let fragment = functional::ShaderVisibility::FRAGMENT;
     let vertex_fragment = functional::ShaderVisibility::vertex_fragment();
     let root_bindings = functional::BindGroupLayoutDescriptor::new(
         0,
         vec![
-            buffer(0, vertex_fragment, false, PATCH_RENDER_FRAME_BYTES, false),
-            buffer(1, vertex, false, PREPARED_PATCH_RECORD_BYTES, false),
-            buffer(2, vertex, false, PACKED_RECORD_BYTES, false),
-            buffer(3, vertex, false, RESIDENT_BUCKET_RANGE_RECORD_BYTES, false),
-            buffer(4, vertex, true, DRAW_BATCH_INDEX_BYTES, true),
-            buffer(5, vertex_fragment, false, PACKED_RECORD_BYTES, false),
-            buffer(6, vertex_fragment, false, 16, false),
-            buffer(7, fragment, false, PATCH_PBR_MATERIAL_BYTES, false),
+            buffer_binding(0, vertex_fragment, false, PATCH_RENDER_FRAME_BYTES, false),
+            buffer_binding(1, vertex, false, PREPARED_PATCH_RECORD_BYTES, false),
+            buffer_binding(2, vertex, false, PACKED_RECORD_BYTES, false),
+            buffer_binding(3, vertex, false, RESIDENT_BUCKET_RANGE_RECORD_BYTES, false),
+            buffer_binding(4, vertex, true, DRAW_BATCH_INDEX_BYTES, true),
+            buffer_binding(5, vertex_fragment, false, PACKED_RECORD_BYTES, false),
+            buffer_binding(6, vertex_fragment, false, 16, false),
+            buffer_binding(7, fragment, false, PATCH_PBR_MATERIAL_BYTES, false),
         ],
     )?;
     let portable_atlas_bindings = functional::BindGroupLayoutDescriptor::new(
@@ -198,39 +185,11 @@ pub fn resident_root_pipeline_descriptors(
                     multisampled: false,
                 },
             },
-            buffer(1, fragment, false, 32, false),
-            buffer(2, fragment, false, 32, false),
+            buffer_binding(1, fragment, false, 32, false),
+            buffer_binding(2, fragment, false, 32, false),
         ],
     )?;
-    let environment_bindings = functional::BindGroupLayoutDescriptor::new(
-        2,
-        vec![
-            buffer(0, fragment, true, 16, false),
-            functional::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: fragment,
-                kind: functional::BindingKind::Texture {
-                    sample_kind: functional::TextureSampleKind::FloatFilterable,
-                    view_dimension: functional::TextureViewDimension::Cube,
-                    multisampled: false,
-                },
-            },
-            functional::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: fragment,
-                kind: functional::BindingKind::Texture {
-                    sample_kind: functional::TextureSampleKind::FloatFilterable,
-                    view_dimension: functional::TextureViewDimension::Cube,
-                    multisampled: false,
-                },
-            },
-            functional::BindGroupLayoutEntry {
-                binding: 3,
-                visibility: fragment,
-                kind: functional::BindingKind::Sampler(functional::SamplerBindingKind::Filtering),
-            },
-        ],
-    )?;
+    let environment_bindings = pbr_environment_bindings(2)?;
     let diagnostic_layout = functional::PipelineLayoutDescriptor::new(vec![root_bindings.clone()])?;
     let pbr_layout = functional::PipelineLayoutDescriptor::new(vec![
         root_bindings,
@@ -252,52 +211,8 @@ pub fn resident_root_pipeline_descriptors(
         functional::ShaderStage::Vertex,
         quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT,
     )?;
-    let vertex_buffer = functional::VertexBufferLayoutDescriptor::new(
-        0,
-        12,
-        functional::VertexStepMode::Vertex,
-        vec![functional::VertexAttributeDescriptor {
-            location: 0,
-            offset: 0,
-            format: functional::VertexFormat::Float32x3,
-        }],
-    )?;
-    let alpha_blending = functional::BlendStateDescriptor {
-        color: functional::BlendComponentDescriptor {
-            source_factor: functional::BlendFactor::SourceAlpha,
-            destination_factor: functional::BlendFactor::OneMinusSourceAlpha,
-            operation: functional::BlendOperation::Add,
-        },
-        alpha: functional::BlendComponentDescriptor {
-            source_factor: functional::BlendFactor::One,
-            destination_factor: functional::BlendFactor::OneMinusSourceAlpha,
-            operation: functional::BlendOperation::Add,
-        },
-    };
-    let stencil_ignore = functional::StencilFaceStateDescriptor {
-        compare: functional::CompareFunction::Always,
-        fail_op: functional::StencilOperation::Keep,
-        depth_fail_op: functional::StencilOperation::Keep,
-        pass_op: functional::StencilOperation::Keep,
-    };
-    let depth_state = |write_enabled| {
-        depth_format
-            .map(|format| {
-                Ok(functional::DepthStencilStateDescriptor {
-                    format,
-                    depth_write_enabled: write_enabled,
-                    depth_compare: functional::CompareFunction::LessEqual,
-                    stencil_front: stencil_ignore,
-                    stencil_back: stencil_ignore,
-                    stencil_read_mask: u32::MAX,
-                    stencil_write_mask: u32::MAX,
-                    depth_bias_constant: 0,
-                    depth_bias_slope_scale: functional::FiniteF32::new(0.0)?,
-                    depth_bias_clamp: functional::FiniteF32::new(0.0)?,
-                })
-            })
-            .transpose()
-    };
+    let vertex_buffer = position_vertex_buffer()?;
+    let alpha_blend = alpha_blending();
     let passes = [
         (
             quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_PBR_ENTRY_POINT,
@@ -364,7 +279,7 @@ pub fn resident_root_pipeline_descriptors(
         ] {
             let mut color_targets = vec![functional::ColorTargetStateDescriptor {
                 format: color_format,
-                blend: Some(alpha_blending),
+                blend: Some(alpha_blend),
                 write_mask: functional::ColorWriteMask::ALL,
             }];
             if focus_mrt {
@@ -398,7 +313,7 @@ pub fn resident_root_pipeline_descriptors(
                     front_face,
                     cull_mode: functional::CullMode::None,
                 },
-                depth_state(depth_write)?,
+                depth_state(depth_format, depth_write)?,
                 color_targets,
                 functional::MultisampleStateDescriptor {
                     count: sample_count,

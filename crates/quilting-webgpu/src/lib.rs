@@ -8,6 +8,7 @@
 
 mod adaptive_overlay;
 mod focus_postprocess;
+mod functional_pipeline;
 mod pbr_environment;
 mod pbr_resources;
 mod pipeline_lowering;
