@@ -231,6 +231,8 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
   </div>
 
   <div class="section" id="patch-lab-section">
+    <div id="patch-lab-rust" hidden></div>
+    <div id="patch-lab-browser">
     <label>Patch Lab</label>
     <div class="btns" id="patch-lab-shapes">
       <button data-shape="triangle">Tri patch</button>
@@ -275,6 +277,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
     </div>
     <div class="lab-note" id="patch-lab-policy-note">Each edge slider is a request. The active resident-LOD policy grades each face to 2:1, and the cached atlas contains only the resulting reachable triples; labels show request → resident.</div>
     <div class="lab-stats" id="patch-lab-stats">Choose a tri patch, plane, or cube.</div>
+    </div>
   </div>
 
   <div class="section">
@@ -3893,6 +3896,8 @@ let rustAnimationClipControlMountAttempted = false;
 let rustAnimationClipControlMounted = false;
 let rustNavigationStatusMountAttempted = false;
 let rustNavigationStatusMounted = false;
+let rustPatchLabViewMountAttempted = false;
+let rustPatchLabViewMounted = false;
 const rustAppShadowAssetIds = new Map();
 const browserAssetEffectHost = new BrowserAssetEffectHost(RUST_ASSET_IMPLEMENTATION);
 const rustAppShadowDiagnostics = {
@@ -4012,6 +4017,297 @@ const rustRenderSettingsDiagnostics = {
 };
 globalThis.__hyperscopeRenderSettings = rustRenderSettingsDiagnostics;
 
+const rustPatchLabDiagnostics = {
+  enabled: RUST_PATCH_LAB_IMPLEMENTATION !== 'js',
+  implementation: RUST_PATCH_LAB_IMPLEMENTATION,
+  state: RUST_PATCH_LAB_IMPLEMENTATION === 'js' ? 'disabled' : 'awaiting-wasm',
+  synchronizations: 0,
+  commits: 0,
+  effects: 0,
+  geometryCompletions: 0,
+  lodCompletions: 0,
+  staleCompletions: 0,
+  comparisons: 0,
+  mismatches: 0,
+  errors: 0,
+  pendingGeometryJob: null,
+  installedGeometryJob: null,
+  pendingLodJob: null,
+  pendingLodGeometryJob: null,
+  lastEffects: [],
+  lastBrowser: null,
+  lastRust: null,
+  lastError: null,
+  viewAuthority: 'browser-fallback',
+  viewMountAttempts: 0,
+  viewMountErrors: 0,
+};
+globalThis.__hyperscopePatchLabDiagnostics = rustPatchLabDiagnostics;
+
+function browserPatchLabIntent(active = patchLab.active) {
+  return {
+    active: Boolean(active),
+    shape: patchLab.shape || 'triangle',
+    field: $('patch-lab-field').value,
+    manualEdgeExponents: [
+      Number($('patch-lab-edge-a').value),
+      Number($('patch-lab-edge-b').value),
+      Number($('patch-lab-edge-c').value),
+    ],
+    minExponent: Number($('patch-lab-min').value),
+    maxExponent: Number($('patch-lab-max').value),
+    phaseRadians: Number($('patch-lab-phase').value),
+    bendPercent: Number($('patch-lab-bend-slider').value),
+    grid: Number($('patch-lab-grid-slider').value),
+    animate: Boolean(patchLab.animate),
+  };
+}
+
+function unwrapRustPatchLabEffect(effect) {
+  return effect?.type === 'patch_lab' ? effect.effect : effect;
+}
+
+function observeRustPatchLabEffects(effects, context) {
+  if (RUST_PATCH_LAB_IMPLEMENTATION === 'js') return;
+  if (!Array.isArray(effects)) throw new Error(`${context} returned non-array effects`);
+  const observed = [];
+  const patchTypes = new Set([
+    'build_geometry', 'cancel_geometry', 'discard_geometry',
+    'evaluate_lod', 'cancel_lod',
+  ]);
+  for (const rawEffect of effects) {
+    const effect = unwrapRustPatchLabEffect(rawEffect);
+    if (!effect || typeof effect.type !== 'string') continue;
+    if (rawEffect?.type !== 'patch_lab' && !patchTypes.has(effect.type)) continue;
+    observed.push(effect);
+    switch (effect.type) {
+      case 'build_geometry':
+        rustPatchLabDiagnostics.pendingGeometryJob = String(effect.job_id);
+        rustPatchLabDiagnostics.installedGeometryJob = null;
+        rustPatchLabDiagnostics.pendingLodJob = null;
+        rustPatchLabDiagnostics.pendingLodGeometryJob = null;
+        break;
+      case 'cancel_geometry':
+        if (rustPatchLabDiagnostics.pendingGeometryJob === String(effect.job_id)) {
+          rustPatchLabDiagnostics.pendingGeometryJob = null;
+        }
+        break;
+      case 'discard_geometry':
+        if (rustPatchLabDiagnostics.installedGeometryJob === String(effect.geometry_job_id)) {
+          rustPatchLabDiagnostics.installedGeometryJob = null;
+        }
+        break;
+      case 'evaluate_lod':
+        rustPatchLabDiagnostics.pendingLodJob = String(effect.job_id);
+        rustPatchLabDiagnostics.pendingLodGeometryJob = String(effect.geometry_job_id);
+        break;
+      case 'cancel_lod':
+        if (rustPatchLabDiagnostics.pendingLodJob === String(effect.job_id)) {
+          rustPatchLabDiagnostics.pendingLodJob = null;
+          rustPatchLabDiagnostics.pendingLodGeometryJob = null;
+        }
+        break;
+      default:
+        throw new Error(`${context} returned unknown Patch Lab effect ${effect.type}`);
+    }
+  }
+  rustPatchLabDiagnostics.effects += observed.length;
+  rustPatchLabDiagnostics.lastEffects = observed;
+}
+
+function rustPatchLabControlProjection(snapshot) {
+  const controls = snapshot?.patchLab?.controls;
+  if (!controls) return null;
+  return {
+    active: Boolean(snapshot.patchLab.active),
+    shape: controls.shape,
+    field: controls.field === 'manual_edges' ? 'edges' : controls.field,
+    manualEdgeExponents: Array.from(controls.manualEdgeExponents || []),
+    minExponent: Number(controls.minExponent),
+    maxExponent: Number(controls.maxExponent),
+    phaseMicroradians: Number(controls.phaseMicroradians),
+    bendPercent: Number(controls.bendPercent),
+    grid: Number(controls.grid),
+    animate: Boolean(controls.animate),
+  };
+}
+
+function patchLabControlProjectionMatches(browser, rust) {
+  return Boolean(rust)
+    && browser.active === rust.active
+    && browser.shape === rust.shape
+    && browser.field === rust.field
+    && (browser.field !== 'edges'
+      || browser.manualEdgeExponents.every((value, index) =>
+        value === rust.manualEdgeExponents[index]))
+    && Math.min(browser.minExponent, Number(lod.atlas.peek())) === rust.minExponent
+    && Math.min(
+      Math.max(browser.maxExponent, Math.min(browser.minExponent, Number(lod.atlas.peek()))),
+      Number(lod.atlas.peek()),
+    ) === rust.maxExponent
+    && Math.abs(
+      browser.phaseRadians * 1e6 - rust.phaseMicroradians,
+    ) <= 1.5
+    && Math.min(browser.bendPercent, 100) === rust.bendPercent
+    && Math.max(1, Math.min(browser.grid, 32)) === rust.grid
+    && browser.animate === rust.animate;
+}
+
+function synchronizeRustPatchLabFromBrowser(context, active = patchLab.active) {
+  if (RUST_PATCH_LAB_IMPLEMENTATION === 'js' || !wasmOk.peek()) return null;
+  try {
+    const app = ensureRustAppShadow('patch-lab');
+    const browser = browserPatchLabIntent(active);
+    const receipt = app.dispatchPatchLab(browser);
+    observeRustAppShadowSequence(receipt.sequence, 'Rust Patch Lab synchronization');
+    rustAppShadowDiagnostics.lastCommit = receipt.commit;
+    observeRustPatchLabEffects(receipt.commit?.effects || [], context);
+    rustPatchLabDiagnostics.synchronizations += 1;
+    rustPatchLabDiagnostics.commits += 1;
+    const rust = rustPatchLabControlProjection(app.snapshot());
+    rustPatchLabDiagnostics.comparisons += 1;
+    rustPatchLabDiagnostics.lastBrowser = browser;
+    rustPatchLabDiagnostics.lastRust = rust;
+    if (!patchLabControlProjectionMatches(browser, rust)) {
+      rustPatchLabDiagnostics.mismatches += 1;
+      recordAppShadowMismatch('patch_lab_controls', { context, browser, rust });
+    }
+    rustPatchLabDiagnostics.state = RUST_PATCH_LAB_IMPLEMENTATION === 'rust'
+      ? 'authoritative' : 'shadowing';
+    return receipt;
+  } catch (error) {
+    rustPatchLabDiagnostics.errors += 1;
+    rustPatchLabDiagnostics.lastError = error?.message || String(error);
+    rustPatchLabDiagnostics.state = 'error';
+    recordAppShadowMismatch('patch_lab_synchronization', rustPatchLabDiagnostics.lastError);
+    return null;
+  }
+}
+
+function patchLabHistogramBins(histogram) {
+  if (typeof histogram !== 'string' || !histogram.trim()) return [];
+  return histogram.split(',').flatMap(entry => {
+    const match = entry.trim().match(/^(\d+)\/(\d+)\/(\d+)×(\d+)$/);
+    if (!match) return [];
+    return [{
+      edgeSubdivisions: match.slice(1, 4).map(Number),
+      faceCount: Number(match[4]),
+    }];
+  });
+}
+
+function patchLabLodSummary(result) {
+  const requested = new Uint32Array(result?.requested?.buffer || result?.requested || 0);
+  const resident = new Uint32Array(result?.actual?.buffer || result?.actual || 0);
+  const renderer = mr_debugResidentLodEdges() || {};
+  return {
+    requestedFirstFace: requested.length >= 3 ? Array.from(requested.slice(0, 3)) : null,
+    residentFirstFace: resident.length >= 3 ? Array.from(resident.slice(0, 3)) : null,
+    promotedFaces: Number(result?.promoted_faces || 0),
+    promotedEdges: Number(result?.promoted_edges || 0),
+    sharedEdges: Number(result?.shared_edges || 0),
+    sharedEdgeMismatches: Number(result?.shared_edge_mismatches || 0),
+    maxFaceEdgeRatio: Number(result?.max_face_edge_ratio || 0),
+    renderedTriangles: Number(renderer.residentTriangles || 0),
+    histogram: patchLabHistogramBins(result?.histogram),
+  };
+}
+
+function completeRustPatchLabGeometryFromBrowser(result, context) {
+  if (RUST_PATCH_LAB_IMPLEMENTATION === 'js' || !rustAppShadow) return;
+  const jobId = rustPatchLabDiagnostics.pendingGeometryJob;
+  if (jobId == null) return;
+  try {
+    const commit = rustAppShadow.completePatchLabGeometry(
+      jobId,
+      Number(result?.num_vertices || 0),
+      Number(result?.num_faces || 0),
+    );
+    rustPatchLabDiagnostics.pendingGeometryJob = null;
+    rustPatchLabDiagnostics.installedGeometryJob = jobId;
+    rustPatchLabDiagnostics.geometryCompletions += 1;
+    rustAppShadowDiagnostics.lastCommit = commit;
+    if (commit.disposition === 'ignored_stale') rustPatchLabDiagnostics.staleCompletions += 1;
+    observeRustPatchLabEffects(commit.effects || [], context);
+  } catch (error) {
+    rustPatchLabDiagnostics.errors += 1;
+    rustPatchLabDiagnostics.lastError = error?.message || String(error);
+    recordAppShadowMismatch('patch_lab_geometry_completion', rustPatchLabDiagnostics.lastError);
+  }
+}
+
+function completeRustPatchLabLodFromBrowser(result, context) {
+  if (RUST_PATCH_LAB_IMPLEMENTATION === 'js' || !rustAppShadow) return;
+  const jobId = rustPatchLabDiagnostics.pendingLodJob;
+  const geometryJobId = rustPatchLabDiagnostics.pendingLodGeometryJob;
+  if (jobId == null || geometryJobId == null) return;
+  try {
+    const summary = patchLabLodSummary(result);
+    const commit = rustAppShadow.completePatchLabLod(jobId, geometryJobId, summary);
+    rustPatchLabDiagnostics.pendingLodJob = null;
+    rustPatchLabDiagnostics.pendingLodGeometryJob = null;
+    rustPatchLabDiagnostics.lodCompletions += 1;
+    rustAppShadowDiagnostics.lastCommit = commit;
+    if (commit.disposition === 'ignored_stale') rustPatchLabDiagnostics.staleCompletions += 1;
+    observeRustPatchLabEffects(commit.effects || [], context);
+    const latest = rustAppShadow.patchLabSnapshot()?.latestLod;
+    rustPatchLabDiagnostics.comparisons += 1;
+    if (!latest
+        || latest.sharedEdgeMismatches !== summary.sharedEdgeMismatches
+        || latest.renderedTriangles !== summary.renderedTriangles) {
+      rustPatchLabDiagnostics.mismatches += 1;
+      recordAppShadowMismatch('patch_lab_lod_completion', { context, summary, latest });
+    }
+  } catch (error) {
+    rustPatchLabDiagnostics.errors += 1;
+    rustPatchLabDiagnostics.lastError = error?.message || String(error);
+    recordAppShadowMismatch('patch_lab_lod_completion', rustPatchLabDiagnostics.lastError);
+  }
+}
+
+function failRustPatchLabGeometryFromBrowser(error, context) {
+  if (RUST_PATCH_LAB_IMPLEMENTATION === 'js' || !rustAppShadow) return;
+  const jobId = rustPatchLabDiagnostics.pendingGeometryJob;
+  if (jobId == null) return;
+  try {
+    const commit = rustAppShadow.failPatchLabGeometry(
+      jobId,
+      'browser_geometry_job_failed',
+      error?.message || String(error),
+      true,
+    );
+    rustPatchLabDiagnostics.pendingGeometryJob = null;
+    rustAppShadowDiagnostics.lastCommit = commit;
+    observeRustPatchLabEffects(commit.effects || [], context);
+  } catch (completionError) {
+    rustPatchLabDiagnostics.errors += 1;
+    rustPatchLabDiagnostics.lastError = completionError?.message || String(completionError);
+  }
+}
+
+function failRustPatchLabLodFromBrowser(error, context) {
+  if (RUST_PATCH_LAB_IMPLEMENTATION === 'js' || !rustAppShadow) return;
+  const jobId = rustPatchLabDiagnostics.pendingLodJob;
+  const geometryJobId = rustPatchLabDiagnostics.pendingLodGeometryJob;
+  if (jobId == null || geometryJobId == null) return;
+  try {
+    const commit = rustAppShadow.failPatchLabLod(
+      jobId,
+      geometryJobId,
+      'browser_lod_job_failed',
+      error?.message || String(error),
+      true,
+    );
+    rustPatchLabDiagnostics.pendingLodJob = null;
+    rustPatchLabDiagnostics.pendingLodGeometryJob = null;
+    rustAppShadowDiagnostics.lastCommit = commit;
+    observeRustPatchLabEffects(commit.effects || [], context);
+  } catch (completionError) {
+    rustPatchLabDiagnostics.errors += 1;
+    rustPatchLabDiagnostics.lastError = completionError?.message || String(completionError);
+  }
+}
+
 function backendNeutralRenderStyle(mode) {
   const style = mode === 'both' ? 'matcap_wire' : String(mode);
   if (!PRESENTATION_RENDER_MODES[style]) {
@@ -4068,6 +4364,7 @@ function dispatchRustRenderSettings(app, settings, source) {
     settings.maxFaceEdgeRatio,
   );
   rustAppShadowDiagnostics.lastCommit = receipt.commit;
+  observeRustPatchLabEffects(receipt.commit?.effects || [], `${source}-render-settings`);
   rustRenderSettingsDiagnostics.dispatches += 1;
   rustRenderSettingsDiagnostics.lastRust = receipt.render;
   rustRenderSettingsDiagnostics.lastDispatchSource = source;
@@ -4478,6 +4775,61 @@ function ensureRustNavigationStatusView() {
   }
 }
 
+function ensureRustPatchLabView() {
+  if (RUST_PATCH_LAB_IMPLEMENTATION === 'js') return false;
+  if (rustPatchLabViewMounted) return true;
+  if (rustPatchLabViewMountAttempted || !rustAppShadow) return false;
+  rustPatchLabViewMountAttempted = true;
+  rustPatchLabDiagnostics.viewMountAttempts += 1;
+  const host = $('patch-lab-rust');
+  const fallback = $('patch-lab-browser');
+  if (!host || !fallback || typeof rustAppShadow.mountPatchLabControls !== 'function') {
+    return false;
+  }
+  try {
+    rustAppShadow.mountPatchLabControls(
+      host,
+      (sequence, revision, effects) => {
+        observeRustAppShadowSequence(sequence, 'Rust Patch Lab control');
+        rustPatchLabDiagnostics.commits += 1;
+        rustAppShadowDiagnostics.lastCommit = {
+          revision: String(revision),
+          disposition: 'applied',
+          publishedUi: true,
+          effects: Array.isArray(effects) ? effects : [],
+        };
+        observeRustPatchLabEffects(effects, 'leptos-control');
+      },
+      action => {
+        if (action === 'surface_wire') renderMode.set('both');
+        else if (action === 'lod_colors') renderMode.set('lod');
+        else if (action === 'exit') location.href = patchLab.returnUrl || patchLabReturnUrl();
+      },
+      error => {
+        rustPatchLabDiagnostics.errors += 1;
+        rustPatchLabDiagnostics.lastError = String(error);
+        recordAppShadowMismatch('patch_lab_view_rejection', String(error));
+      },
+    );
+    // Shadow mode exercises the complete Leptos projection while retaining
+    // incumbent interaction. Rust authority stays behind the fallback until
+    // the worker/renderer effect host below has measured completion parity.
+    host.hidden = true;
+    fallback.hidden = false;
+    rustPatchLabViewMounted = true;
+    rustPatchLabDiagnostics.viewAuthority = RUST_PATCH_LAB_IMPLEMENTATION === 'shadow'
+      ? 'hyperscope-web-shadow' : 'browser-fallback-awaiting-effect-host';
+    return true;
+  } catch (error) {
+    host.hidden = true;
+    fallback.hidden = false;
+    rustPatchLabDiagnostics.viewMountErrors += 1;
+    rustPatchLabDiagnostics.lastError = error?.message || String(error);
+    recordAppShadowMismatch('patch_lab_view_mount', rustPatchLabDiagnostics.lastError);
+    return false;
+  }
+}
+
 function useBrowserRenderSettingsView() {
   const host = $('render-controls-rust');
   const modeFallback = $('render-mode-browser');
@@ -4586,6 +4938,7 @@ function refreshAppShadowSnapshot() {
   ensureRustAnimationControlView();
   ensureRustAnimationClipControlView();
   ensureRustNavigationStatusView();
+  ensureRustPatchLabView();
   if (!ensureRustAssetCreditsView()) renderAssetCredits(snapshot);
   return snapshot;
 }
@@ -4602,7 +4955,8 @@ function advanceRustApplicationClockToSelectionEvent(nowMs) {
   if (partialSeconds === 0) return;
   try {
     const nextElapsedSeconds = rustAppFrameElapsedSeconds + partialSeconds;
-    rustAppShadow.advanceFrameQuiet(nextElapsedSeconds, partialSeconds);
+    const emittedEffects = rustAppShadow.advanceFrameQuiet(nextElapsedSeconds, partialSeconds);
+    drainRustFrameAdapterEffects(emittedEffects, 'selection-event-frame');
     rustAppFrameElapsedSeconds = nextElapsedSeconds;
     rustAppShadowDiagnostics.eventFrameCalls += 1;
     rustAppShadowDiagnostics.eventFrameSeconds += partialSeconds;
@@ -4815,6 +5169,19 @@ function applyRustAppFocusToRenderer(navigation, selection = selectedObject) {
   }
 }
 
+function drainRustFrameAdapterEffects(emittedCount, context) {
+  if (!rustAppShadow || Number(emittedCount) <= 0) return;
+  try {
+    observeRustPatchLabEffects(rustAppShadow.drainAdapterEffects(), context);
+  } catch (error) {
+    rustAppShadowDiagnostics.frameErrors += 1;
+    recordAppShadowMismatch(
+      'frame_adapter_effect_drain',
+      error?.message || String(error),
+    );
+  }
+}
+
 function advanceRustApplicationFrame(nowMs, frameDeltaSeconds, rawFrameDeltaSeconds) {
   if (!rustAppShadow || !Number.isFinite(nowMs)) return null;
   // Selection focus uses the incumbent wall-clock timestamp rather than the
@@ -4837,7 +5204,8 @@ function advanceRustApplicationFrame(nowMs, frameDeltaSeconds, rawFrameDeltaSeco
     && nowMs >= selectionEventAtMs;
   try {
     const nextElapsedSeconds = rustAppFrameElapsedSeconds + deltaSeconds;
-    rustAppShadow.advanceFrameQuiet(nextElapsedSeconds, deltaSeconds);
+    const emittedEffects = rustAppShadow.advanceFrameQuiet(nextElapsedSeconds, deltaSeconds);
+    drainRustFrameAdapterEffects(emittedEffects, 'animation-frame');
     if (consumesSelectionEventFrame) rustAppSelectionEventAtMs = null;
     rustAppFrameElapsedSeconds = nextElapsedSeconds;
     rustAppShadowDiagnostics.frameCalls += 1;
@@ -8367,14 +8735,17 @@ async function updatePatchLabLods() {
   patchLab.updateDirty = false;
   const generation = patchLab.loadGeneration;
   const request = patchLabLodRequest();
+  synchronizeRustPatchLabFromBrowser('browser-lod-request');
   try {
     const response = await workerCall('update_patch_lab_lods', request);
     if (!patchLab.active || generation !== patchLab.loadGeneration || !response.result?.face_lods) return;
     const faceLods = new Float32Array(response.result.face_lods.buffer || response.result.face_lods);
     mr_buildBatches(faceLods);
     renderPatchLabStats(response.result, request);
+    completeRustPatchLabLodFromBrowser(response.result, 'browser-lod-completion');
     syncURL();
   } catch (error) {
+    failRustPatchLabLodFromBrowser(error, 'browser-lod-failure');
     $('patch-lab-stats').textContent = `LOD field failed: ${error.message}`;
   } finally {
     patchLab.updateInFlight = false;
@@ -8411,6 +8782,7 @@ async function loadPatchLab(
   }
   updatePatchLabControlVisibility();
   $('patch-lab-stats').textContent = `Loading ${shape} laboratory…`;
+  synchronizeRustPatchLabFromBrowser('browser-geometry-request');
 
   // The laboratory owns the current source geometry. Stop model animation and
   // authored scene updates; exiting reloads the exact pre-lab URL.
@@ -8445,6 +8817,7 @@ async function loadPatchLab(
     setRendererInstanceData(currentInstances, result.num_faces);
     mr_setFaceMaterials(new Int32Array(result.face_materials.buffer || result.face_materials));
     rebuildNodeFocusRecords();
+    completeRustPatchLabGeometryFromBrowser(result, 'browser-geometry-completion');
 
     // Shape selection starts from a stable inspection frame. Geometry edits
     // and URL restoration retain the exact authored camera/render state.
@@ -8460,6 +8833,7 @@ async function loadPatchLab(
     }
     await updatePatchLabLods();
   } catch (error) {
+    failRustPatchLabGeometryFromBrowser(error, 'browser-geometry-failure');
     $('patch-lab-stats').textContent = `Patch lab failed: ${error.message}`;
   }
 }
@@ -8521,6 +8895,7 @@ $('patch-lab-animate').addEventListener('click', () => {
 $('patch-lab-both').addEventListener('click', () => renderMode.set('both'));
 $('patch-lab-colors').addEventListener('click', () => renderMode.set('lod'));
 $('patch-lab-exit').addEventListener('click', () => {
+  synchronizeRustPatchLabFromBrowser('browser-exit', false);
   location.href = patchLab.returnUrl || patchLabReturnUrl();
 });
 effect(() => {
