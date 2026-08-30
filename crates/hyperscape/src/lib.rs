@@ -45,9 +45,11 @@ pub use navigation::{
 };
 pub use interaction::{
     InteractionAction, InteractionActionQueue, InteractionActivation, InteractionActivations,
-    InteractionController, InteractionHit, InteractionPolicy, InteractionSnapshot,
-    InteractionState, InteractionSurfacePoint, InteractionTarget, InteractionTargetError,
-    InteractionTargetSample, InteractionTargetTable, ScheduledInteractionAction,
+    InteractionController, InteractionHit, InteractionPickEvidenceDiagnostics,
+    InteractionPickEvidenceDisposition, InteractionPickEvidenceObserver,
+    InteractionPickEvidenceState, InteractionPolicy, InteractionSnapshot, InteractionState,
+    InteractionSurfacePoint, InteractionTarget, InteractionTargetError, InteractionTargetSample,
+    InteractionTargetTable, ScheduledInteractionAction,
 };
 pub use packed_scene::{
     extract_packed_presentation_scene, extract_packed_scene, PackedAssetInstance,

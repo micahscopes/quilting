@@ -12,6 +12,8 @@ use crate::{
 use bevy_ecs::prelude::{Res, ResMut, Resource};
 use bevy_time::{Time, Virtual};
 use hyperscape_protocol::AssetEntityId;
+use quilting_core::render_evidence::{RenderPickEvidenceError, RenderPickEvidenceReport};
+use serde::Serialize;
 use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::fmt;
@@ -312,6 +314,132 @@ impl InteractionTargetTable {
                 .map_err(InteractionTargetError::InvalidSample)?;
         }
         Ok(hit)
+    }
+}
+
+/// Current state of the opt-in retained-renderer pick comparison lane. This is
+/// process-local evidence, not authored scene or interaction state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InteractionPickEvidenceState {
+    #[default]
+    AwaitingRetainedFrame,
+    Reading,
+    StageRejected,
+    Shadowing,
+    StaleTargetEpoch,
+    Mismatch,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractionPickEvidenceDisposition {
+    Recorded,
+    IgnoredStale,
+}
+
+/// Bounded scalar telemetry for backend pick parity. Only the last report and
+/// error are retained; the observer never accumulates per-click samples.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InteractionPickEvidenceDiagnostics {
+    pub state: InteractionPickEvidenceState,
+    pub requests: u64,
+    pub staged: u64,
+    pub stage_rejects: u64,
+    pub readbacks: u64,
+    pub stale_results: u64,
+    pub coverage_mismatches: u64,
+    pub identity_mismatches: u64,
+    pub maximum_barycentric_error: f32,
+    pub maximum_source_position_error: f32,
+    pub maximum_output_distance_error: f32,
+    pub maximum_staging_ms: f64,
+    pub maximum_readback_ms: f64,
+    pub maximum_total_ms: f64,
+    pub errors: u64,
+    pub last_error: Option<String>,
+    pub last_report: Option<RenderPickEvidenceReport>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct InteractionPickEvidenceObserver {
+    diagnostics: InteractionPickEvidenceDiagnostics,
+}
+
+impl InteractionPickEvidenceObserver {
+    pub fn snapshot(&self) -> InteractionPickEvidenceDiagnostics {
+        self.diagnostics.clone()
+    }
+
+    pub fn record_stage(&mut self, staged: bool, rejection: Option<String>) {
+        self.diagnostics.requests = self.diagnostics.requests.saturating_add(1);
+        if staged {
+            self.diagnostics.staged = self.diagnostics.staged.saturating_add(1);
+            self.diagnostics.state = InteractionPickEvidenceState::Reading;
+            self.diagnostics.last_error = None;
+        } else {
+            self.diagnostics.stage_rejects =
+                self.diagnostics.stage_rejects.saturating_add(1);
+            self.diagnostics.state = InteractionPickEvidenceState::StageRejected;
+            self.diagnostics.last_error = rejection;
+        }
+    }
+
+    pub fn record_error(&mut self, error: impl Into<String>) {
+        self.diagnostics.errors = self.diagnostics.errors.saturating_add(1);
+        self.diagnostics.state = InteractionPickEvidenceState::Error;
+        self.diagnostics.last_error = Some(error.into());
+    }
+
+    pub fn record_report(
+        &mut self,
+        targets: &InteractionTargetTable,
+        report: RenderPickEvidenceReport,
+    ) -> Result<InteractionPickEvidenceDisposition, RenderPickEvidenceError> {
+        report.validate()?;
+        self.diagnostics.readbacks = self.diagnostics.readbacks.saturating_add(1);
+        self.diagnostics.last_report = Some(report);
+        self.diagnostics.last_error = None;
+        if report.target_epoch != targets.epoch() {
+            self.diagnostics.stale_results = self.diagnostics.stale_results.saturating_add(1);
+            self.diagnostics.state = InteractionPickEvidenceState::StaleTargetEpoch;
+            return Ok(InteractionPickEvidenceDisposition::IgnoredStale);
+        }
+
+        let comparison = report.comparison;
+        if !comparison.coverage_matches {
+            self.diagnostics.coverage_mismatches =
+                self.diagnostics.coverage_mismatches.saturating_add(1);
+        }
+        if !comparison.identity_matches {
+            self.diagnostics.identity_mismatches =
+                self.diagnostics.identity_mismatches.saturating_add(1);
+        }
+        if let Some(error) = comparison.maximum_barycentric_error {
+            self.diagnostics.maximum_barycentric_error =
+                self.diagnostics.maximum_barycentric_error.max(error);
+        }
+        if let Some(error) = comparison.maximum_source_position_error {
+            self.diagnostics.maximum_source_position_error =
+                self.diagnostics.maximum_source_position_error.max(error);
+        }
+        if let Some(error) = comparison.output_distance_error {
+            self.diagnostics.maximum_output_distance_error =
+                self.diagnostics.maximum_output_distance_error.max(error);
+        }
+        self.diagnostics.maximum_staging_ms =
+            self.diagnostics.maximum_staging_ms.max(report.staging_ms);
+        self.diagnostics.maximum_readback_ms =
+            self.diagnostics.maximum_readback_ms.max(report.readback_ms);
+        self.diagnostics.maximum_total_ms =
+            self.diagnostics.maximum_total_ms.max(report.total_ms);
+        self.diagnostics.state = if comparison.topology_matches() {
+            InteractionPickEvidenceState::Shadowing
+        } else {
+            InteractionPickEvidenceState::Mismatch
+        };
+        Ok(InteractionPickEvidenceDisposition::Recorded)
     }
 }
 
@@ -740,6 +868,7 @@ mod tests {
     use crate::HyperscapePlugin;
     use bevy_app::App;
     use hyperscape_protocol::{AssetId, EntityId};
+    use quilting_core::render_evidence::{RenderPickComparison, RenderPickHit};
     use uuid::Uuid;
 
     fn identity(asset: u128, entity: u128) -> AssetEntityId {
@@ -760,6 +889,28 @@ mod tests {
         .unwrap()
         .with_surface(7, [2.0, 1.0, 1.0])
         .unwrap()
+    }
+
+    fn pick_report(
+        target_epoch: u32,
+        expected: Option<RenderPickHit>,
+        actual: Option<RenderPickHit>,
+    ) -> RenderPickEvidenceReport {
+        RenderPickEvidenceReport {
+            webgl_render_call: 17,
+            webgpu_frame_revision: 9,
+            viewport: [1600, 900],
+            pixel: [812, 417],
+            target_epoch,
+            comparison: RenderPickComparison::between(expected, actual).unwrap(),
+            staging_ms: 0.2,
+            readback_ms: 0.8,
+            total_ms: 1.1,
+        }
+    }
+
+    fn render_hit(node: u32, face: u32, barycentric: [f32; 3]) -> RenderPickHit {
+        RenderPickHit::new(node, face, barycentric, [1.0, -2.0, 0.5], 4.0).unwrap()
     }
 
     #[test]
@@ -849,6 +1000,85 @@ mod tests {
                 actual: 8,
             }),
         );
+    }
+
+    #[test]
+    fn pick_evidence_observer_rejects_stale_target_epochs_before_parity_metrics() {
+        let targets = InteractionTargetTable::try_from_epoch(
+            9,
+            std::iter::empty::<InteractionTarget>(),
+        )
+        .unwrap();
+        let expected = render_hit(7, 3, [0.2, 0.3, 0.5]);
+        let wrong_identity = render_hit(8, 4, [0.2, 0.3, 0.5]);
+        let mut observer = InteractionPickEvidenceObserver::default();
+        observer.record_stage(true, None);
+        assert_eq!(observer.snapshot().state, InteractionPickEvidenceState::Reading);
+
+        assert_eq!(
+            observer
+                .record_report(&targets, pick_report(8, Some(expected), Some(wrong_identity)))
+                .unwrap(),
+            InteractionPickEvidenceDisposition::IgnoredStale,
+        );
+        let stale = observer.snapshot();
+        assert_eq!(stale.requests, 1);
+        assert_eq!(stale.staged, 1);
+        assert_eq!(stale.readbacks, 1);
+        assert_eq!(stale.stale_results, 1);
+        assert_eq!(stale.coverage_mismatches, 0);
+        assert_eq!(stale.identity_mismatches, 0);
+        assert_eq!(stale.state, InteractionPickEvidenceState::StaleTargetEpoch);
+
+        assert_eq!(
+            observer
+                .record_report(&targets, pick_report(9, Some(expected), Some(wrong_identity)))
+                .unwrap(),
+            InteractionPickEvidenceDisposition::Recorded,
+        );
+        let mismatch = observer.snapshot();
+        assert_eq!(mismatch.readbacks, 2);
+        assert_eq!(mismatch.identity_mismatches, 1);
+        assert_eq!(mismatch.state, InteractionPickEvidenceState::Mismatch);
+    }
+
+    #[test]
+    fn pick_evidence_observer_is_bounded_and_validates_reports_atomically() {
+        let targets = InteractionTargetTable::try_from_epoch(
+            9,
+            std::iter::empty::<InteractionTarget>(),
+        )
+        .unwrap();
+        let expected = render_hit(7, 3, [0.2, 0.3, 0.5]);
+        let actual = RenderPickHit::new(
+            7,
+            3,
+            [0.201, 0.297, 0.502],
+            [1.004, -2.0, 0.499],
+            4.006,
+        )
+        .unwrap();
+        let mut observer = InteractionPickEvidenceObserver::default();
+        observer.record_stage(false, Some("backend warming".to_string()));
+        observer.record_error("readback: device lost");
+        observer
+            .record_report(&targets, pick_report(9, Some(expected), Some(actual)))
+            .unwrap();
+        let measured = observer.snapshot();
+        assert_eq!(measured.requests, 1);
+        assert_eq!(measured.stage_rejects, 1);
+        assert_eq!(measured.errors, 1);
+        assert_eq!(measured.state, InteractionPickEvidenceState::Shadowing);
+        assert!((measured.maximum_barycentric_error - 0.003).abs() < 1.0e-6);
+        assert!((measured.maximum_source_position_error - 0.004).abs() < 1.0e-6);
+        assert!((measured.maximum_output_distance_error - 0.006).abs() < 1.0e-6);
+        assert_eq!(measured.last_report.unwrap().pixel, [812, 417]);
+        assert_eq!(measured.last_error, None);
+
+        let mut invalid = pick_report(9, Some(expected), Some(expected));
+        invalid.total_ms = -1.0;
+        assert!(observer.record_report(&targets, invalid).is_err());
+        assert_eq!(observer.snapshot(), measured);
     }
 
     #[test]

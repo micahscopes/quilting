@@ -7,14 +7,14 @@
 //! renderer handles with application identity. The module deliberately owns no
 //! GPU API and is intended for explicit parity gates, not per-frame telemetry.
 
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 
 pub const RENDER_IMAGE_MISMATCH_EXAMPLE_LIMIT: usize = 8;
 
 /// Backend-neutral source-addressed result from one depth-tested patch query.
 /// `packed_node` is deliberately transient; semantic identity is joined later
 /// through Hyperscape's epoch-fenced interaction target table.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenderPickHit {
     pub packed_node: u32,
@@ -74,6 +74,8 @@ pub enum RenderPickEvidenceError {
     NonFinite,
     OutsideSurface,
     UnnormalizedBarycentric { sum: f32 },
+    InvalidReport(&'static str),
+    InconsistentComparison,
 }
 
 impl std::fmt::Display for RenderPickEvidenceError {
@@ -87,6 +89,10 @@ impl std::fmt::Display for RenderPickEvidenceError {
                 formatter,
                 "render pick barycentric sum is {sum}; expected one",
             ),
+            Self::InvalidReport(reason) => formatter.write_str(reason),
+            Self::InconsistentComparison => formatter.write_str(
+                "render pick comparison does not match its expected and actual samples",
+            ),
         }
     }
 }
@@ -96,7 +102,7 @@ impl std::error::Error for RenderPickEvidenceError {}
 /// Exact topology plus measured numeric drift between an incumbent and a
 /// candidate renderer query. Numeric fields exist only when both renderers
 /// report a hit; a coverage mismatch cannot masquerade as zero error.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenderPickComparison {
     pub expected: Option<RenderPickHit>,
@@ -170,7 +176,63 @@ impl RenderPickComparison {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+/// One incumbent/candidate pick comparison tied to exact retained renderer and
+/// interaction-residency epochs. The packet is diagnostic evidence, never an
+/// interaction command.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderPickEvidenceReport {
+    pub webgl_render_call: u64,
+    pub webgpu_frame_revision: u64,
+    pub viewport: [u32; 2],
+    pub pixel: [u32; 2],
+    pub target_epoch: u32,
+    pub comparison: RenderPickComparison,
+    pub staging_ms: f64,
+    pub readback_ms: f64,
+    pub total_ms: f64,
+}
+
+impl RenderPickEvidenceReport {
+    pub fn validate(self) -> Result<(), RenderPickEvidenceError> {
+        if self.webgl_render_call == 0 || self.webgpu_frame_revision == 0 {
+            return Err(RenderPickEvidenceError::InvalidReport(
+                "render pick evidence requires nonzero frame identities",
+            ));
+        }
+        if self.viewport.into_iter().any(|extent| extent == 0)
+            || self.pixel[0] >= self.viewport[0]
+            || self.pixel[1] >= self.viewport[1]
+        {
+            return Err(RenderPickEvidenceError::InvalidReport(
+                "render pick evidence pixel lies outside its nonempty viewport",
+            ));
+        }
+        if [self.staging_ms, self.readback_ms, self.total_ms]
+            .into_iter()
+            .any(|duration| !duration.is_finite() || duration < 0.0)
+        {
+            return Err(RenderPickEvidenceError::InvalidReport(
+                "render pick evidence timings must be finite and nonnegative",
+            ));
+        }
+        if self.total_ms < self.staging_ms || self.total_ms < self.readback_ms {
+            return Err(RenderPickEvidenceError::InvalidReport(
+                "render pick evidence total time cannot be shorter than a measured phase",
+            ));
+        }
+        let canonical = RenderPickComparison::between(
+            self.comparison.expected,
+            self.comparison.actual,
+        )?;
+        if canonical != self.comparison {
+            return Err(RenderPickEvidenceError::InconsistentComparison);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenderPickTolerance {
     pub maximum_barycentric_error: f32,
@@ -569,6 +631,65 @@ mod tests {
         assert_eq!(
             RenderPickHit::new(7, 3, [0.2, 0.3, 0.5], [f32::NAN, 0.0, 0.0], 1.0).unwrap_err(),
             RenderPickEvidenceError::NonFinite,
+        );
+    }
+
+    fn pick_report(comparison: RenderPickComparison) -> RenderPickEvidenceReport {
+        RenderPickEvidenceReport {
+            webgl_render_call: 17,
+            webgpu_frame_revision: 9,
+            viewport: [1600, 900],
+            pixel: [812, 417],
+            target_epoch: 29,
+            comparison,
+            staging_ms: 0.2,
+            readback_ms: 0.8,
+            total_ms: 1.1,
+        }
+    }
+
+    #[test]
+    fn pick_report_round_trips_with_canonical_camel_case_fields() {
+        let hit = pick(3, 7, [0.2, 0.3, 0.5]);
+        let report = pick_report(
+            RenderPickComparison::between(Some(hit), Some(hit)).unwrap(),
+        );
+        report.validate().unwrap();
+        let json = serde_json::to_value(report).unwrap();
+        assert_eq!(json["webglRenderCall"], 17);
+        assert_eq!(json["webgpuFrameRevision"], 9);
+        assert_eq!(json["targetEpoch"], 29);
+        assert_eq!(json["comparison"]["coverageMatches"], true);
+        assert_eq!(
+            serde_json::from_value::<RenderPickEvidenceReport>(json).unwrap(),
+            report,
+        );
+    }
+
+    #[test]
+    fn pick_report_rejects_impossible_geometry_timing_and_comparison_claims() {
+        let hit = pick(3, 7, [0.2, 0.3, 0.5]);
+        let comparison = RenderPickComparison::between(Some(hit), Some(hit)).unwrap();
+
+        let mut outside = pick_report(comparison);
+        outside.pixel[0] = outside.viewport[0];
+        assert!(matches!(
+            outside.validate(),
+            Err(RenderPickEvidenceError::InvalidReport(_))
+        ));
+
+        let mut impossible_time = pick_report(comparison);
+        impossible_time.readback_ms = impossible_time.total_ms + 1.0;
+        assert!(matches!(
+            impossible_time.validate(),
+            Err(RenderPickEvidenceError::InvalidReport(_))
+        ));
+
+        let mut contradictory = pick_report(comparison);
+        contradictory.comparison.identity_matches = false;
+        assert_eq!(
+            contradictory.validate(),
+            Err(RenderPickEvidenceError::InconsistentComparison),
         );
     }
 
