@@ -130,6 +130,12 @@ low-priority job, and the inline browser module still parses. Source assertions
 explicitly reject reintroduction of direct browser calls to the raw renderer
 evidence exports or a browser-owned pick target epoch.
 
+`node scripts/smoke-backend-pick-shadow.mjs` makes that boundary independently
+executable without generated bindings. It checks the default/rollback route,
+shared validated report, Hyperscape stale fence, typed renderer/AppShadow
+calls, absence of the retired browser shuttles, and JavaScript module syntax.
+The smoke passes without compiling WASM or launching a server/browser.
+
 All Cargo gates used one low-priority job. The unsupported native
 `quilting-wasm` test configuration still reaches pre-existing wasm-only CSR and
 WebGL symbols on a host target; it is not evidence against the passing wasm32

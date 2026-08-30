@@ -1,0 +1,93 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
+
+const repository = dirname(dirname(fileURLToPath(import.meta.url)));
+const read = path => readFileSync(join(repository, path), 'utf8');
+const browser = read('hyperscope.html');
+const appShadow = read('crates/quilting-wasm/src/app_shadow.rs');
+const renderer = read('crates/quilting-wasm/src/main_renderer.rs');
+const renderEvidence = read('crates/quilting-core/src/render_evidence.rs');
+const interaction = read('crates/hyperscape/src/interaction.rs');
+const settings = read('crates/hyperscope-app/src/settings.rs');
+
+for (const required of [
+  'spec!("pickimpl", "js", Implementation)',
+  'const PICK_IMPLEMENTATION = implementationFromRoute(',
+  "initialBrowserParams, 'pickimpl'",
+  "set('pickimpl', PICK_IMPLEMENTATION, PARAM_DEFAULTS.pickimpl)",
+]) {
+  assert.ok(
+    settings.includes(required) || browser.includes(required),
+    `pick shadow rollback route is missing ${required}`,
+  );
+}
+
+for (const required of [
+  'pub struct RenderPickEvidenceReport',
+  'pub fn validate(self) -> Result<(), RenderPickEvidenceError>',
+  'RenderPickComparison::between(',
+  'if canonical != self.comparison',
+]) {
+  assert.ok(renderEvidence.includes(required), `shared pick evidence is missing ${required}`);
+}
+
+for (const required of [
+  'pub struct InteractionPickEvidenceObserver',
+  'report.target_epoch != targets.epoch()',
+  'InteractionPickEvidenceDisposition::IgnoredStale',
+  'self.diagnostics.last_report = Some(report)',
+]) {
+  assert.ok(interaction.includes(required), `Hyperscape pick observer is missing ${required}`);
+}
+
+for (const required of [
+  '#[wasm_bindgen(js_name = stageBackendPickEvidence)]',
+  '#[wasm_bindgen(js_name = readBackendPickEvidence)]',
+  '.interaction_targets',
+  'crate::main_renderer::stage_backend_pick_evidence(',
+  'crate::main_renderer::read_backend_pick_evidence().await',
+  '.record_report(&targets, report)',
+]) {
+  assert.ok(appShadow.includes(required), `AppShadow pick boundary is missing ${required}`);
+}
+
+for (const required of [
+  'pub(crate) struct BackendPickEvidenceStageReceipt',
+  'pub(crate) fn stage_backend_pick_evidence(',
+  'pub(crate) async fn read_backend_pick_evidence()',
+  'stage_backend_pick_evidence(mvp, mv, camera_pos, x, y, target_epoch).into_js()',
+  'let report = read_backend_pick_evidence()',
+]) {
+  assert.ok(renderer.includes(required), `renderer pick boundary is missing ${required}`);
+}
+
+for (const required of [
+  'const staged = app.stageBackendPickEvidence(',
+  'Promise.resolve(app.readBackendPickEvidence())',
+  'updateBackendPickDiagnostics(app.backendPickDiagnostics())',
+  'return staged?.webgl ?? null;',
+]) {
+  assert.ok(browser.includes(required), `browser pick adapter is missing ${required}`);
+}
+
+for (const retired of [
+  'quiltingWasmBackend.mr_stageBackendPickEvidence(',
+  'quiltingWasmBackend.mr_readBackendPickEvidence()',
+  'const targetEpoch = rustInteractionDiagnostics.targetEpoch;',
+  'Number(report.targetEpoch) !== currentTargetEpoch',
+]) {
+  assert.equal(browser.includes(retired), false, `browser retained forbidden shuttle ${retired}`);
+}
+
+const moduleSource = browser.match(/<script type="module">([\s\S]*?)<\/script>/)?.[1];
+assert.ok(moduleSource, 'could not extract the Hyperscope inline module');
+const syntax = spawnSync(process.execPath, ['--input-type=module', '--check'], {
+  encoding: 'utf8',
+  input: moduleSource,
+});
+assert.equal(syntax.status, 0, syntax.stderr);
+
+console.log('Backend pick shadow source smoke passed');

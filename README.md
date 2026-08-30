@@ -105,10 +105,12 @@ build; the workspace's optimized-dev overrides for `quilting-core`,
 It is intended for binding/UI iteration, not renderer performance measurements
 or rehearsals. The ordinary `trunk serve` command remains the representative
 runtime build.
-The build-policy smoke verifies these modes without compiling WASM:
+These zero-build smokes verify the packaging modes and the Rust-owned retained
+pick boundary without compiling WASM:
 
 ```sh
 node scripts/smoke-hyperscope-build-policy.mjs
+node scripts/smoke-backend-pick-shadow.mjs
 ```
 
 Opt into Binaryen only when producing the final size-optimized artifact:
