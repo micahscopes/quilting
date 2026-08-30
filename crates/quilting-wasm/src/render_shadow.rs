@@ -4,9 +4,9 @@
 //! bounded diagnostic snapshot when it explicitly calls the exported query.
 
 use quilting_core::render::{
-    RenderContractError, RenderFrame, RenderFrameOptions, RenderParityDiagnostics,
-    RenderParityObserver, RenderPoseIdentity, RenderSceneSnapshot, RenderStyle,
-    RenderSubmissionStats, RenderView,
+    RenderContractError, RenderExecution, RenderFrame, RenderFrameOptions,
+    RenderParityDiagnostics, RenderParityObserver, RenderPoseIdentity, RenderSceneSnapshot,
+    RenderStyle, RenderSubmissionStats, RenderView,
 };
 use serde::Serialize;
 use wasm_bindgen::JsValue;
@@ -20,6 +20,9 @@ pub(crate) struct RenderShadowObserver {
     frame_revision: u64,
     extraction_errors: u64,
     observation_errors: u64,
+    resolved_execution_frames: u64,
+    resolved_execution_fallbacks: u64,
+    last_execution_error: Option<String>,
     last_error: Option<String>,
 }
 
@@ -32,6 +35,9 @@ struct RenderShadowDiagnostics {
     frame_revision: u64,
     extraction_errors: u64,
     observation_errors: u64,
+    resolved_execution_frames: u64,
+    resolved_execution_fallbacks: u64,
+    last_execution_error: Option<String>,
     last_error: Option<String>,
     parity: RenderParityDiagnostics,
 }
@@ -48,6 +54,9 @@ impl RenderShadowObserver {
         self.parity.set_enabled(enabled);
         self.extraction_errors = 0;
         self.observation_errors = 0;
+        self.resolved_execution_frames = 0;
+        self.resolved_execution_fallbacks = 0;
+        self.last_execution_error = None;
         self.last_error = None;
     }
 
@@ -83,18 +92,17 @@ impl RenderShadowObserver {
         self.last_error = Some(error.to_string());
     }
 
-    pub(crate) fn observe(
+    pub(crate) fn prepare_frame(
         &mut self,
         style: RenderStyle,
         view: RenderView,
         options: RenderFrameOptions,
-        actual: RenderSubmissionStats,
-    ) {
+    ) -> Option<RenderFrame> {
         if !self.is_enabled() {
-            return;
+            return None;
         }
         let revision = self.frame_revision.saturating_add(1);
-        let built = self
+        let result = self
             .parity
             .scene()
             .ok_or(RenderContractError::ObserverSceneUnavailable)
@@ -111,17 +119,56 @@ impl RenderShadowObserver {
                     scene,
                 )
             });
-        let result = built.and_then(|frame| self.parity.observe(&frame, actual));
         match result {
-            Ok(_) => {
-                self.frame_revision = revision;
-                self.last_error = None;
-            }
+            Ok(frame) => Some(frame),
             Err(error) => {
-                self.observation_errors = self.observation_errors.saturating_add(1);
-                self.last_error = Some(error.to_string());
+                self.record_observation_error(error);
+                None
             }
         }
+    }
+
+    pub(crate) fn execution<'frame, 'scene>(
+        &'scene self,
+        frame: &'frame RenderFrame,
+    ) -> Result<RenderExecution<'frame, 'scene>, RenderContractError> {
+        let scene = self
+            .parity
+            .scene()
+            .ok_or(RenderContractError::ObserverSceneUnavailable)?;
+        frame.execution(scene)
+    }
+
+    pub(crate) fn observe_prepared(
+        &mut self,
+        frame: &RenderFrame,
+        actual: RenderSubmissionStats,
+    ) {
+        if !self.is_enabled() {
+            return;
+        }
+        match self.parity.observe(frame, actual) {
+            Ok(_) => {
+                self.frame_revision = frame.revision;
+                self.last_error = None;
+            }
+            Err(error) => self.record_observation_error(error),
+        }
+    }
+
+    fn record_observation_error(&mut self, error: impl ToString) {
+        self.observation_errors = self.observation_errors.saturating_add(1);
+        self.last_error = Some(error.to_string());
+    }
+
+    pub(crate) fn record_execution_success(&mut self) {
+        self.resolved_execution_frames = self.resolved_execution_frames.saturating_add(1);
+        self.last_execution_error = None;
+    }
+
+    pub(crate) fn record_execution_fallback(&mut self, error: impl ToString) {
+        self.resolved_execution_fallbacks = self.resolved_execution_fallbacks.saturating_add(1);
+        self.last_execution_error = Some(error.to_string());
     }
 
     pub(crate) fn to_js(&self) -> JsValue {
@@ -132,6 +179,9 @@ impl RenderShadowObserver {
             frame_revision: self.frame_revision,
             extraction_errors: self.extraction_errors,
             observation_errors: self.observation_errors,
+            resolved_execution_frames: self.resolved_execution_frames,
+            resolved_execution_fallbacks: self.resolved_execution_fallbacks,
+            last_execution_error: self.last_execution_error.clone(),
             last_error: self.last_error.clone(),
             parity: self.parity.diagnostics(),
         })

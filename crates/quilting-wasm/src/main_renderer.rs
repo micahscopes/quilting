@@ -41,8 +41,8 @@ use quilting_core::material::{
 use quilting_core::render::{
     patch_preparation_needed, patch_visibility_needed, render_draw_passes, FocusFieldPacket,
     FocusPostprocessMode, FocusPostprocessPacket, MatcapStyle, PbrDrawClass, RenderBatchSnapshot,
-    RenderEntityTransform, RenderFrameOptions, RenderPass, RenderSceneSnapshot, RenderStyle,
-    RenderSubmissionStats, RenderView,
+    RenderEntityTransform, RenderFrame, RenderFrameOptions, RenderPass, RenderSceneSnapshot,
+    RenderStyle, RenderSubmissionStats, RenderView,
 };
 #[cfg(feature = "webgpu-backend")]
 use quilting_core::render::RenderSubmissionMismatch;
@@ -2661,6 +2661,31 @@ fn extract_render_scene(renderer: &MainState) -> Result<RenderSceneSnapshot, Str
     })
 }
 
+fn current_render_view(renderer: &MainState, camera: &Camera) -> RenderView {
+    RenderView {
+        viewport: [
+            renderer.viewport_size.0.max(0) as u32,
+            renderer.viewport_size.1.max(0) as u32,
+        ],
+        mvp: camera.mvp,
+        model_view: camera.mv,
+        camera_position: camera.camera_pos,
+        selected_node: usize::try_from(renderer.selected_node).ok(),
+        focus: FocusFieldPacket {
+            sphere: renderer.focus_sphere,
+            enabled: renderer.focus_field_enabled,
+        },
+    }
+}
+
+fn current_render_frame_options(renderer: &MainState) -> RenderFrameOptions {
+    RenderFrameOptions {
+        focus_postprocess: renderer.focus_postprocess,
+        highlight_face: u32::try_from(renderer.highlight_face).ok(),
+        matcap_style: renderer.matcap_style,
+    }
+}
+
 #[cfg(feature = "webgpu-backend")]
 fn submit_webgpu_frame(
     renderer: &MainState,
@@ -2703,25 +2728,8 @@ fn submit_webgpu_frame(
     crate::webgpu_backend::submit_frame(
         renderer.render_calls,
         renderer.render_style,
-        RenderView {
-            viewport: [
-                renderer.viewport_size.0.max(0) as u32,
-                renderer.viewport_size.1.max(0) as u32,
-            ],
-            mvp: camera.mvp,
-            model_view: camera.mv,
-            camera_position: camera.camera_pos,
-            selected_node: usize::try_from(renderer.selected_node).ok(),
-            focus: FocusFieldPacket {
-                sphere: renderer.focus_sphere,
-                enabled: renderer.focus_field_enabled,
-            },
-        },
-        RenderFrameOptions {
-            focus_postprocess: renderer.focus_postprocess,
-            highlight_face: u32::try_from(renderer.highlight_face).ok(),
-            matcap_style: renderer.matcap_style,
-        },
+        current_render_view(renderer, camera),
+        current_render_frame_options(renderer),
         &renderer.classified_face_visibility,
         joint_matrices,
         morph_weights,
@@ -3109,39 +3117,21 @@ fn refresh_render_shadow_scene(renderer: &mut MainState) {
     }
 }
 
+fn prepare_render_shadow_frame(renderer: &mut MainState, camera: &Camera) -> Option<RenderFrame> {
+    let style = renderer.render_style;
+    let view = current_render_view(renderer, camera);
+    let options = current_render_frame_options(renderer);
+    renderer.render_shadow.prepare_frame(style, view, options)
+}
+
 fn observe_render_submission(
     renderer: &mut MainState,
-    camera: &Camera,
+    prepared_frame: Option<&RenderFrame>,
     actual: RenderSubmissionStats,
 ) {
-    if !renderer.render_shadow.is_enabled() {
-        return;
+    if let Some(frame) = prepared_frame {
+        renderer.render_shadow.observe_prepared(frame, actual);
     }
-    let selected_node = usize::try_from(renderer.selected_node).ok();
-    let highlight_face = u32::try_from(renderer.highlight_face).ok();
-    renderer.render_shadow.observe(
-        renderer.render_style,
-        RenderView {
-            viewport: [
-                renderer.viewport_size.0.max(0) as u32,
-                renderer.viewport_size.1.max(0) as u32,
-            ],
-            mvp: camera.mvp,
-            model_view: camera.mv,
-            camera_position: camera.camera_pos,
-            selected_node,
-            focus: FocusFieldPacket {
-                sphere: renderer.focus_sphere,
-                enabled: renderer.focus_field_enabled,
-            },
-        },
-        RenderFrameOptions {
-            focus_postprocess: renderer.focus_postprocess,
-            highlight_face,
-            matcap_style: renderer.matcap_style,
-        },
-        actual,
-    );
 }
 
 fn resolve_surface_frame_pin_faces(
@@ -9540,6 +9530,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
             }
         }
         refresh_render_shadow_scene(state);
+        let prepared_render_frame = prepare_render_shadow_frame(state, &camera);
 
         // The explicitly selected WebGPU backend submits before any WebGL
         // frame work. A valid presentation frame needs none of the
@@ -9554,7 +9545,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 state.webgpu_presentation_patch_frames = state
                     .webgpu_presentation_patch_frames
                     .saturating_add(1);
-                observe_render_submission(state, &camera, submission_stats);
+                observe_render_submission(state, prepared_render_frame.as_ref(), submission_stats);
                 state.last_render_submission = submission_stats;
                 state.render_submission_totals.merge(submission_stats);
                 state
@@ -10255,7 +10246,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 state.pbr_vertex_uniform_updates += vertex_uniform_updates;
                 state.last_render_submission = submission_stats;
                 state.render_submission_totals.merge(submission_stats);
-                observe_render_submission(state, &camera, submission_stats);
+                observe_render_submission(state, prepared_render_frame.as_ref(), submission_stats);
                 state.renderer.end_frame();
                 state
                     .render_timing
@@ -10278,9 +10269,37 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
             }
         }
 
-        let submission_stats = state
-            .renderer
-            .render(state.render_style, &camera, render_batches);
+        let resolved_submission = if let Some(frame) = prepared_render_frame.as_ref() {
+            match state.render_shadow.execution(frame) {
+                Ok(execution) => match state.renderer.render_diagnostic_execution(
+                    execution,
+                    &camera,
+                    render_batches,
+                ) {
+                    Ok(submission) => {
+                        state.render_shadow.record_execution_success();
+                        Some(submission)
+                    }
+                    Err(error) => {
+                        warn!("Resolved WebGL diagnostic frame fell back: {error}");
+                        state.render_shadow.record_execution_fallback(error);
+                        None
+                    }
+                },
+                Err(error) => {
+                    warn!("Resolved WebGL diagnostic frame was invalid: {error}");
+                    state.render_shadow.record_execution_fallback(error);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let submission_stats = resolved_submission.unwrap_or_else(|| {
+            state
+                .renderer
+                .render(state.render_style, &camera, render_batches)
+        });
         state.webgl_patch_frames = state.webgl_patch_frames.saturating_add(1);
         #[cfg(feature = "webgpu-backend")]
         if state.backend_evidence_requested {
@@ -10304,7 +10323,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 }
             }
         }
-        observe_render_submission(state, &camera, submission_stats);
+        observe_render_submission(state, prepared_render_frame.as_ref(), submission_stats);
 
         // Highlight pass: overlay picked QB patch with cyan
         if state.highlight_face >= 0 && state.highlight_prog.is_some() {
