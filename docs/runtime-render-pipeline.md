@@ -260,6 +260,15 @@ WebGPU handles without revisiting WGSL flattening or pipeline construction.
 Formats outside the portable subset continue through the explicit uncached
 builder rather than receiving a lossy key.
 
+All three functional WebGPU families now cross one mechanical effect boundary:
+`pipeline_lowering::render_pipeline`. It validates contiguous vertex slots,
+materializes borrowed vertex attributes only for the duration of pipeline
+creation, and lowers primitive, depth/stencil, multisample, blend, write-mask,
+attachment, and shader-entry state from the descriptor. Focus, prepared patch,
+and resident-root builders validate their semantic family order, then use that
+same operation. Their uncached nonportable-format fallbacks remain explicit
+rollback paths and are not presented as descriptor-backed.
+
 `quilting_renderer::memo::DeviceMemo` is the effect boundary. It maps a pure
 descriptor to a concrete backend resource, inserts only after construction has
 fully succeeded, and scopes every entry to an explicit device/context epoch.

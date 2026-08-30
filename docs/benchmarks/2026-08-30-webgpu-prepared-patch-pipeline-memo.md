@@ -28,11 +28,13 @@ so an unsupported format is never disguised by an incomplete memo key.
 
 ## Evidence
 
-- 18 `quilting-webgpu` library tests pass;
+- 20 `quilting-webgpu` library tests pass;
 - pure tests cover the 13-pipeline full family, PBR and diagnostic layout
   separation, the twelve ordinary material-texture bindings, focus MRT,
   single wire descriptor, highlight depth policy, invalid style/focus/sample
   requests, and format-sensitive memo identity;
+- shared lowering tests prove the complete vertex/fixed-state/target mapping
+  and reject noncontiguous vertex slots before a device effect;
 - the native conformance test compiles a one-miss/one-hit prepared focus-family
   assertion and verifies that the hit does not revisit shader lowering (the
   GPU body skips when the host exposes no adapter); and
