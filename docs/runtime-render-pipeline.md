@@ -242,6 +242,16 @@ Binding arrays, sparse color targets, stage override constants, and
 backend-specific primitive extensions remain explicit follow-up work rather
 than being silently omitted from a claimed complete WebGPU key.
 
+The retained WebGPU focus composer is the first concrete lowering of that
+contract. Its seven `RenderPipelineDescriptor` values authoritatively select
+the shared bind-group layout, shader entry points, primitive/multisample state,
+and color targets; the same ordered vector is the device memo key. WebGPU
+formats outside the currently named portable `TextureFormat` subset preserve
+the older uncached construction path instead of being folded into an
+incomplete key. Prepared-patch and resident-root families remain migration
+work and must not be described as functional-descriptor-backed until their
+actual lowering consumes those values too.
+
 `quilting_renderer::memo::DeviceMemo` is the effect boundary. It maps a pure
 descriptor to a concrete backend resource, inserts only after construction has
 fully succeeded, and scopes every entry to an explicit device/context epoch.

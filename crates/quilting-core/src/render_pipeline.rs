@@ -271,6 +271,9 @@ pub enum TextureFormat {
     Rg8Unorm,
     Rgba8Unorm,
     Rgba8UnormSrgb,
+    Bgra8Unorm,
+    Bgra8UnormSrgb,
+    Rgb10a2Unorm,
     R16Float,
     Rg16Float,
     Rgba16Float,
@@ -633,6 +636,10 @@ impl ColorWriteMask {
 
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
+    }
+
+    pub const fn bits(self) -> u8 {
+        self.0
     }
 }
 

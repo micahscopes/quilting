@@ -10,6 +10,7 @@ mod adaptive_overlay;
 mod focus_postprocess;
 mod pbr_environment;
 mod pbr_resources;
+mod pipeline_lowering;
 mod portable_texture_atlas;
 mod presentation;
 mod resident_roots;
@@ -19,8 +20,9 @@ pub use adaptive_overlay::{
     ResidentAdaptiveFrameEncoding,
 };
 pub use focus_postprocess::{
-    FocusPostprocessEncoding, FocusPostprocessPipelines, FocusPostprocessTarget,
-    FocusRawFieldImage, StagedFocusRawFieldReadback,
+    focus_postprocess_pipeline_descriptors, FocusPostprocessEncoding,
+    FocusPostprocessPipelines, FocusPostprocessTarget, FocusRawFieldImage,
+    StagedFocusRawFieldReadback,
 };
 pub use pbr_environment::{PbrEnvironmentBindings, PbrEnvironmentMap};
 pub use pbr_resources::{
@@ -62,7 +64,9 @@ use quilting_core::render_evidence::{
     Rgba8ImageView,
 };
 use quilting_core::render_memo::{DeviceMemo, DeviceMemoDiagnostics};
-use quilting_core::render_pipeline::{ShaderModuleDescriptor, ShaderStage, ShaderTarget};
+use quilting_core::render_pipeline::{
+    RenderPipelineDescriptor, ShaderModuleDescriptor, ShaderStage, ShaderTarget,
+};
 use quilting_core::screen_partition::ScreenPatchLeafId;
 use quilting_renderer::compute::{
     pack_lod_classification, pack_wgsl_adaptive_overlay_scene_words, pack_wgsl_lod_atlas_words,
@@ -789,6 +793,8 @@ pub struct LodClassifierDevice {
     queue: wgpu::Queue,
     next_model_identity: Mutex<u64>,
     render_shader_modules: Mutex<DeviceMemo<ShaderModuleDescriptor, wgpu::ShaderModule>>,
+    focus_postprocess_render_pipelines:
+        Mutex<DeviceMemo<Vec<RenderPipelineDescriptor>, FocusPostprocessPipelines>>,
     resident_root_render_pipelines:
         Mutex<DeviceMemo<ResidentRootPipelineKey, ResidentRootRenderPipeline>>,
     pass1_pipeline: wgpu::ComputePipeline,
@@ -1474,6 +1480,7 @@ impl LodClassifierDevice {
             queue,
             next_model_identity: Mutex::new(1),
             render_shader_modules: Mutex::new(DeviceMemo::new(0)),
+            focus_postprocess_render_pipelines: Mutex::new(DeviceMemo::new(0)),
             resident_root_render_pipelines: Mutex::new(DeviceMemo::new(0)),
             pass1_pipeline,
             pass2_pipeline,
@@ -1560,6 +1567,16 @@ impl LodClassifierDevice {
     /// without a process-global registry or hidden invalidation channel.
     pub fn resident_root_pipeline_memo_diagnostics(&self) -> DeviceMemoDiagnostics {
         self.resident_root_render_pipelines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .diagnostics()
+    }
+
+    /// Observable cache state for the focus composer pipeline family. Its key
+    /// is the complete backend-neutral descriptor vector, not a WebGPU handle
+    /// or an application-owned focus setting.
+    pub fn focus_postprocess_pipeline_memo_diagnostics(&self) -> DeviceMemoDiagnostics {
+        self.focus_postprocess_render_pipelines
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .diagnostics()

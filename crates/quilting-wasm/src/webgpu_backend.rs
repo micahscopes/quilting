@@ -22,9 +22,9 @@ use quilting_webgpu::{
     FocusPbrRenderResources, LodClassifierDevice, LodClassifierModel, LodPose,
     OffscreenPatchRenderTarget, PackedPatchAtlas, PatchFrameEncoding, PatchPresentationSurface,
     PatchRenderScene, PatchRenderSceneUpdate, PbrEnvironmentMap, PbrTextureTable,
-    ResidentGeometryBucketScene, ResidentRootPreparationScene,
-    ResidentRootRenderBindings, ResidentRootRenderPipeline, StagedOffscreenImageReadback,
-    SurfacePresentation, WebGpuAdapterSummary,
+    ResidentGeometryBucketScene, ResidentRootPreparationScene, ResidentRootRenderBindings,
+    ResidentRootRenderPipeline, StagedOffscreenImageReadback, SurfacePresentation,
+    WebGpuAdapterSummary,
 };
 use serde::Serialize;
 use std::cell::RefCell;
@@ -193,6 +193,11 @@ pub(crate) struct WebGpuBackendDiagnostics {
     render_shader_module_failed_creations: u64,
     render_shader_module_invalidations: u64,
     render_shader_module_entries: usize,
+    focus_postprocess_pipeline_hits: u64,
+    focus_postprocess_pipeline_misses: u64,
+    focus_postprocess_pipeline_failed_creations: u64,
+    focus_postprocess_pipeline_invalidations: u64,
+    focus_postprocess_pipeline_entries: usize,
     resident_root_pipeline_hits: u64,
     resident_root_pipeline_misses: u64,
     resident_root_pipeline_failed_creations: u64,
@@ -262,6 +267,11 @@ impl WebGpuBackend {
             .device
             .as_ref()
             .map(LodClassifierDevice::render_shader_memo_diagnostics)
+            .unwrap_or_default();
+        let focus_postprocess_pipeline_memo = self
+            .device
+            .as_ref()
+            .map(LodClassifierDevice::focus_postprocess_pipeline_memo_diagnostics)
             .unwrap_or_default();
         let resident_root_pipeline_memo = self
             .device
@@ -367,6 +377,12 @@ impl WebGpuBackend {
             render_shader_module_failed_creations: render_shader_memo.failed_creations,
             render_shader_module_invalidations: render_shader_memo.invalidations,
             render_shader_module_entries: render_shader_memo.resident_entries,
+            focus_postprocess_pipeline_hits: focus_postprocess_pipeline_memo.hits,
+            focus_postprocess_pipeline_misses: focus_postprocess_pipeline_memo.misses,
+            focus_postprocess_pipeline_failed_creations: focus_postprocess_pipeline_memo
+                .failed_creations,
+            focus_postprocess_pipeline_invalidations: focus_postprocess_pipeline_memo.invalidations,
+            focus_postprocess_pipeline_entries: focus_postprocess_pipeline_memo.resident_entries,
             resident_root_pipeline_hits: resident_root_pipeline_memo.hits,
             resident_root_pipeline_misses: resident_root_pipeline_memo.misses,
             resident_root_pipeline_failed_creations: resident_root_pipeline_memo.failed_creations,
