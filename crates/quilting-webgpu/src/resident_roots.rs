@@ -4,6 +4,7 @@
 //! LOD and permutation cannot be reconstructed from one source-face record.
 
 use super::*;
+use quilting_core::render_pipeline as functional;
 
 /// Diagnostic styles whose fragment inputs are unconditionally complete in
 /// the direct source-root path. PBR has an additional resource-residency gate.
@@ -141,6 +142,347 @@ pub struct ResidentRootRenderPipeline {
 struct ResidentRootWindingPipelines {
     counter_clockwise: wgpu::RenderPipeline,
     clockwise: wgpu::RenderPipeline,
+}
+
+/// Pure pipeline family for direct source-root rendering. The returned order
+/// is stable: each semantic pass contributes counter-clockwise then clockwise
+/// state, including line rendering where winding does not affect rasterization.
+pub fn resident_root_pipeline_descriptors(
+    color_format: functional::TextureFormat,
+    depth_format: Option<functional::TextureFormat>,
+    sample_count: u32,
+) -> Result<Vec<functional::RenderPipelineDescriptor>, functional::RenderPipelineDescriptorError> {
+    let buffer = |binding, visibility, uniform: bool, minimum_size, dynamic_offset| {
+        functional::BindGroupLayoutEntry {
+            binding,
+            visibility,
+            kind: if uniform {
+                functional::BindingKind::UniformBuffer {
+                    dynamic_offset,
+                    minimum_size,
+                }
+            } else {
+                functional::BindingKind::StorageBuffer {
+                    read_only: true,
+                    dynamic_offset,
+                    minimum_size,
+                }
+            },
+        }
+    };
+    let vertex = functional::ShaderVisibility::VERTEX;
+    let fragment = functional::ShaderVisibility::FRAGMENT;
+    let vertex_fragment = functional::ShaderVisibility::vertex_fragment();
+    let root_bindings = functional::BindGroupLayoutDescriptor::new(
+        0,
+        vec![
+            buffer(0, vertex_fragment, false, PATCH_RENDER_FRAME_BYTES, false),
+            buffer(1, vertex, false, PREPARED_PATCH_RECORD_BYTES, false),
+            buffer(2, vertex, false, PACKED_RECORD_BYTES, false),
+            buffer(3, vertex, false, RESIDENT_BUCKET_RANGE_RECORD_BYTES, false),
+            buffer(4, vertex, true, DRAW_BATCH_INDEX_BYTES, true),
+            buffer(5, vertex_fragment, false, PACKED_RECORD_BYTES, false),
+            buffer(6, vertex_fragment, false, 16, false),
+            buffer(7, fragment, false, PATCH_PBR_MATERIAL_BYTES, false),
+        ],
+    )?;
+    let portable_atlas_bindings = functional::BindGroupLayoutDescriptor::new(
+        1,
+        vec![
+            functional::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: fragment,
+                kind: functional::BindingKind::Texture {
+                    sample_kind: functional::TextureSampleKind::FloatUnfilterable,
+                    view_dimension: functional::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+            },
+            buffer(1, fragment, false, 32, false),
+            buffer(2, fragment, false, 32, false),
+        ],
+    )?;
+    let environment_bindings = functional::BindGroupLayoutDescriptor::new(
+        2,
+        vec![
+            buffer(0, fragment, true, 16, false),
+            functional::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: fragment,
+                kind: functional::BindingKind::Texture {
+                    sample_kind: functional::TextureSampleKind::FloatFilterable,
+                    view_dimension: functional::TextureViewDimension::Cube,
+                    multisampled: false,
+                },
+            },
+            functional::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: fragment,
+                kind: functional::BindingKind::Texture {
+                    sample_kind: functional::TextureSampleKind::FloatFilterable,
+                    view_dimension: functional::TextureViewDimension::Cube,
+                    multisampled: false,
+                },
+            },
+            functional::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: fragment,
+                kind: functional::BindingKind::Sampler(functional::SamplerBindingKind::Filtering),
+            },
+        ],
+    )?;
+    let diagnostic_layout = functional::PipelineLayoutDescriptor::new(vec![root_bindings.clone()])?;
+    let pbr_layout = functional::PipelineLayoutDescriptor::new(vec![
+        root_bindings,
+        portable_atlas_bindings,
+        environment_bindings,
+    ])?;
+    let shader = |stage, entry_point| {
+        functional::ShaderModuleDescriptor::new(
+            "quilting resident root render",
+            quilting_shaders::sources::RESIDENT_ROOT_RENDER_DEVICE,
+            quilting_shaders::compiler_catalog_revision(),
+            stage,
+            entry_point,
+            functional::ShaderTarget::Wgsl,
+            Vec::new(),
+        )
+    };
+    let vertex_shader = shader(
+        functional::ShaderStage::Vertex,
+        quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT,
+    )?;
+    let vertex_buffer = functional::VertexBufferLayoutDescriptor::new(
+        0,
+        12,
+        functional::VertexStepMode::Vertex,
+        vec![functional::VertexAttributeDescriptor {
+            location: 0,
+            offset: 0,
+            format: functional::VertexFormat::Float32x3,
+        }],
+    )?;
+    let alpha_blending = functional::BlendStateDescriptor {
+        color: functional::BlendComponentDescriptor {
+            source_factor: functional::BlendFactor::SourceAlpha,
+            destination_factor: functional::BlendFactor::OneMinusSourceAlpha,
+            operation: functional::BlendOperation::Add,
+        },
+        alpha: functional::BlendComponentDescriptor {
+            source_factor: functional::BlendFactor::One,
+            destination_factor: functional::BlendFactor::OneMinusSourceAlpha,
+            operation: functional::BlendOperation::Add,
+        },
+    };
+    let stencil_ignore = functional::StencilFaceStateDescriptor {
+        compare: functional::CompareFunction::Always,
+        fail_op: functional::StencilOperation::Keep,
+        depth_fail_op: functional::StencilOperation::Keep,
+        pass_op: functional::StencilOperation::Keep,
+    };
+    let depth_state = |write_enabled| {
+        depth_format
+            .map(|format| {
+                Ok(functional::DepthStencilStateDescriptor {
+                    format,
+                    depth_write_enabled: write_enabled,
+                    depth_compare: functional::CompareFunction::LessEqual,
+                    stencil_front: stencil_ignore,
+                    stencil_back: stencil_ignore,
+                    stencil_read_mask: u32::MAX,
+                    stencil_write_mask: u32::MAX,
+                    depth_bias_constant: 0,
+                    depth_bias_slope_scale: functional::FiniteF32::new(0.0)?,
+                    depth_bias_clamp: functional::FiniteF32::new(0.0)?,
+                })
+            })
+            .transpose()
+    };
+    let passes = [
+        (
+            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_PBR_ENTRY_POINT,
+            RenderGeometry::Triangles,
+            true,
+            false,
+            true,
+        ),
+        (
+            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_PBR_FOCUS_ENTRY_POINT,
+            RenderGeometry::Triangles,
+            true,
+            true,
+            true,
+        ),
+        (
+            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_MATCAP_ENTRY_POINT,
+            RenderGeometry::Triangles,
+            true,
+            false,
+            false,
+        ),
+        (
+            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_NORMALS_ENTRY_POINT,
+            RenderGeometry::Triangles,
+            true,
+            false,
+            false,
+        ),
+        (
+            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_LOD_ENTRY_POINT,
+            RenderGeometry::Triangles,
+            true,
+            false,
+            false,
+        ),
+        (
+            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_STRETCH_ENTRY_POINT,
+            RenderGeometry::Triangles,
+            true,
+            false,
+            false,
+        ),
+        (
+            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_WIRE_ENTRY_POINT,
+            RenderGeometry::Lines,
+            true,
+            false,
+            false,
+        ),
+        (
+            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT,
+            RenderGeometry::Triangles,
+            false,
+            false,
+            false,
+        ),
+    ];
+    let mut descriptors = Vec::with_capacity(passes.len() * 2);
+    for (fragment_entry_point, geometry, depth_write, focus_mrt, uses_pbr) in passes {
+        for front_face in [
+            functional::FrontFace::CounterClockwise,
+            functional::FrontFace::Clockwise,
+        ] {
+            let mut color_targets = vec![functional::ColorTargetStateDescriptor {
+                format: color_format,
+                blend: Some(alpha_blending),
+                write_mask: functional::ColorWriteMask::ALL,
+            }];
+            if focus_mrt {
+                color_targets.push(functional::ColorTargetStateDescriptor {
+                    format: functional::TextureFormat::Rgba16Float,
+                    blend: None,
+                    write_mask: functional::ColorWriteMask::ALL,
+                });
+            }
+            descriptors.push(functional::RenderPipelineDescriptor::new(
+                functional::GraphicsProgramDescriptor::new(
+                    vertex_shader.clone(),
+                    Some(shader(
+                        functional::ShaderStage::Fragment,
+                        fragment_entry_point,
+                    )?),
+                    Vec::new(),
+                )?,
+                if uses_pbr {
+                    pbr_layout.clone()
+                } else {
+                    diagnostic_layout.clone()
+                },
+                vec![vertex_buffer.clone()],
+                functional::PrimitiveStateDescriptor {
+                    topology: match geometry {
+                        RenderGeometry::Triangles => functional::PrimitiveTopology::TriangleList,
+                        RenderGeometry::Lines => functional::PrimitiveTopology::LineList,
+                    },
+                    strip_index_format: None,
+                    front_face,
+                    cull_mode: functional::CullMode::None,
+                },
+                depth_state(depth_write)?,
+                color_targets,
+                functional::MultisampleStateDescriptor {
+                    count: sample_count,
+                    ..Default::default()
+                },
+            )?);
+        }
+    }
+    Ok(descriptors)
+}
+
+#[cfg(test)]
+mod resident_pipeline_descriptor_tests {
+    use super::*;
+
+    #[test]
+    fn functional_family_covers_every_pass_winding_layout_and_attachment() {
+        let descriptors = resident_root_pipeline_descriptors(
+            functional::TextureFormat::Bgra8UnormSrgb,
+            Some(functional::TextureFormat::Depth24Plus),
+            4,
+        )
+        .unwrap();
+        assert_eq!(descriptors.len(), 16);
+        for pair in descriptors.chunks_exact(2) {
+            assert_eq!(
+                pair[0].primitive().front_face,
+                functional::FrontFace::CounterClockwise,
+            );
+            assert_eq!(
+                pair[1].primitive().front_face,
+                functional::FrontFace::Clockwise,
+            );
+            assert_eq!(pair[0].multisample().count, 4);
+            assert_eq!(pair[1].multisample().count, 4);
+        }
+        assert_eq!(descriptors[0].layout().groups().len(), 3);
+        assert_eq!(descriptors[4].layout().groups().len(), 1);
+        assert_eq!(
+            descriptors[0].layout().groups()[0],
+            descriptors[4].layout().groups()[0],
+        );
+        assert_eq!(descriptors[0].vertex_buffers().len(), 1);
+        assert_eq!(descriptors[0].vertex_buffers()[0].stride(), 12);
+        assert_eq!(descriptors[2].color_targets().len(), 2);
+        assert_eq!(
+            descriptors[2].color_targets()[1].format,
+            functional::TextureFormat::Rgba16Float,
+        );
+        assert_eq!(descriptors[0].color_targets().len(), 1);
+        assert_eq!(
+            descriptors[12].primitive().topology,
+            functional::PrimitiveTopology::LineList,
+        );
+        assert!(descriptors[12].depth_stencil().unwrap().depth_write_enabled);
+        assert!(!descriptors[14].depth_stencil().unwrap().depth_write_enabled);
+        assert_eq!(
+            descriptors[14].program().fragment().unwrap().entry_point(),
+            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT,
+        );
+
+        let rgba = resident_root_pipeline_descriptors(
+            functional::TextureFormat::Rgba8Unorm,
+            Some(functional::TextureFormat::Depth24Plus),
+            4,
+        )
+        .unwrap();
+        assert_ne!(descriptors, rgba);
+        let mut memo = quilting_core::render_memo::DeviceMemo::new(0);
+        memo.get_or_try_insert_with(descriptors.clone(), |_| Ok::<_, ()>(3))
+            .unwrap();
+        assert_eq!(
+            *memo
+                .get_or_try_insert_with(descriptors, |_| Ok::<_, ()>(4))
+                .unwrap(),
+            3,
+        );
+        assert_eq!(memo.diagnostics().hits, 1);
+        assert_eq!(memo.diagnostics().misses, 1);
+        assert_eq!(
+            resident_root_pipeline_descriptors(functional::TextureFormat::Rgba8Unorm, None, 3,),
+            Err(functional::RenderPipelineDescriptorError::InvalidMultisampleCount),
+        );
+    }
 }
 
 /// Retained per-domain frames and source-face indirection for root rendering.
