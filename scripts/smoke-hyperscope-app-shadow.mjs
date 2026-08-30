@@ -311,6 +311,55 @@ assert.equal(directResume.commit.disposition, 'applied');
 assert.equal(directResume.playing, false);
 directAnimationApp.free();
 
+const animationPoseApp = new HyperscopeAppShadow();
+const animationPosePacket = new Float64Array(4);
+assert.throws(
+  () => animationPoseApp.writeAnimationPoseRequest(0.05, 0.5, new Float64Array(3)),
+  /exactly four f64 values/,
+);
+assert.equal(animationPoseApp.writeAnimationPoseRequest(0.1, 1, animationPosePacket), 1);
+assert.deepEqual(Array.from(animationPosePacket), [0.1, 1, 1, 1]);
+const firstAnimationPose = Array.from(animationPosePacket);
+assert.equal(animationPoseApp.writeAnimationPoseRequest(0.2, 2, animationPosePacket), 2);
+assert.deepEqual(Array.from(animationPosePacket), [0.2, 2, 2, 1]);
+assert.equal(animationPoseApp.writeAnimationPoseRequest(0.3, 3, animationPosePacket), 2);
+assert.deepEqual(Array.from(animationPosePacket), [0.3, 3, 3, 1]);
+assert.equal(
+  animationPoseApp.completeAnimationPoseRequest(9, 9, 99, 1, true, animationPosePacket),
+  0,
+  'a stale completion must not release the physical worker job',
+);
+assert.ok(Array.from(animationPosePacket).every(Number.isNaN));
+assert.equal(
+  animationPoseApp.completeAnimationPoseRequest(...firstAnimationPose, true, animationPosePacket),
+  2,
+);
+assert.deepEqual(
+  Array.from(animationPosePacket),
+  [0.3, 3, 3, 1],
+  'only the newest coalesced pose should dispatch after completion',
+);
+const latestAnimationPose = Array.from(animationPosePacket);
+assert.equal(animationPoseApp.rebaseAnimationPoseSchedule(), 2);
+assert.equal(animationPoseApp.writeAnimationPoseRequest(0.4, 4, animationPosePacket), 2);
+assert.deepEqual(Array.from(animationPosePacket), [0.4, 4, 1, 2]);
+assert.equal(
+  animationPoseApp.completeAnimationPoseRequest(
+    ...latestAnimationPose,
+    true,
+    animationPosePacket,
+  ),
+  2,
+  'settling a retired epoch should release the current coalesced pose',
+);
+assert.deepEqual(Array.from(animationPosePacket), [0.4, 4, 1, 2]);
+assert.equal(
+  animationPoseApp.completeAnimationPoseRequest(0.4, 4, 1, 2, false, animationPosePacket),
+  1,
+);
+assert.ok(Array.from(animationPosePacket).every(Number.isNaN));
+animationPoseApp.free();
+
 const reverseAnimationApp = new HyperscopeAppShadow();
 reverseAnimationApp.dispatchAnimationClock(true, 0.1, -1);
 reverseAnimationApp.advanceFrameQuiet(0.25, 0.25);
@@ -1592,12 +1641,12 @@ assert.equal(
   ),
 );
 assertNavigationParity(clockApp.tickNavigation(0), clockIncumbent.tick(0));
-assert.equal(clockApp.advanceFrameQuiet(0.25, 0.25), undefined);
+assert.equal(clockApp.advanceFrameQuiet(0.25, 0.25), 0);
 assertNavigationParity(clockApp.navigationSnapshot(), clockIncumbent.tick(0.25));
 const beforeRejectedFrame = clockApp.navigationSnapshot();
 assert.throws(() => clockApp.advanceFrameQuiet(0.24, -0.01), /time/);
 assert.deepEqual(clockApp.navigationSnapshot(), beforeRejectedFrame);
-assert.equal(clockApp.advanceFrameQuiet(1, 0.75), undefined);
+assert.equal(clockApp.advanceFrameQuiet(1, 0.75), 0);
 assertNavigationParity(clockApp.navigationSnapshot(), clockIncumbent.tick(0.75));
 assert.equal(clockApp.navigationSnapshot().focus.focus_transition_remaining, undefined);
 clockApp.free();
