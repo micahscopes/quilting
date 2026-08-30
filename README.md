@@ -89,6 +89,17 @@ trunk serve
 
 then open <http://localhost:8093>.
 
+The Trunk hook compiles optimized Rust at a default ceiling of two Cargo jobs,
+but skips Binaryen's expensive whole-module `wasm-opt` pass. This remains true
+for `trunk serve --release`, so an interactive rebuild cannot accidentally turn
+into an unbounded artifact-size build. Override the job ceiling with
+`HYPERSCOPE_BUILD_JOBS`; opt into Binaryen only when producing the final
+size-optimized artifact:
+
+```sh
+HYPERSCOPE_WASM_OPT=1 HYPERSCOPE_BUILD_JOBS=2 trunk build --release
+```
+
 The checked-in six-cue presentation is available at
 `http://127.0.0.1:8093/?presentation=1&glb=horse.glb`. For a reproducible
 offline release build, filesystem preflight, browser rehearsal, and recovery

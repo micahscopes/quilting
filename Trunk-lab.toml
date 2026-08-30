@@ -14,5 +14,5 @@ watch = [
 
 [[hooks]]
 stage = "pre_build"
-command = "wasm-pack"
-command_arguments = ["build", "--target", "web", "--out-dir", "../../pkg", "crates/quilting-wasm"]
+command = "bash"
+command_arguments = ["scripts/build-remesh-lab-wasm.sh"]

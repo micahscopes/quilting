@@ -23,6 +23,15 @@ node scripts/smoke-render-shadow.mjs
 node scripts/smoke-local-peer-relay.mjs
 ```
 
+The ordinary build keeps Rust release optimization, caps Cargo at two jobs, and
+deliberately skips the expensive whole-module `wasm-opt` pass. That is the
+recommended rehearsal and presentation build. Only a final artifact whose
+download size is being measured should opt into Binaryen explicitly:
+
+```sh
+HYPERSCOPE_WASM_OPT=1 HYPERSCOPE_BUILD_JOBS=2 trunk build --release
+```
+
 With Blender installed, also run
 `node scripts/smoke-blender-browser-relay.mjs`. It must report one
 Blender-authored edit, one browser presence frame, three received frames, the
