@@ -593,6 +593,24 @@ for (const interactionAuthorityStep of [
     `AppStore interaction authority is missing ${interactionAuthorityStep}`,
   );
 }
+for (const browserInteractionShadowStep of [
+  'function mirrorSelectedObjectInteractionToApp(nowMs = performance.now())',
+  "RUST_SELECTION_IMPLEMENTATION !== 'shadow'",
+  'rustAppShadow.setInteractionHover(',
+  'rustAppShadow.pressInteractionPrimary();',
+  'rustAppShadow.releaseInteractionPrimary();',
+  'const interaction = rustAppShadow.interactionSnapshot();',
+  'function mirrorSelectedObjectDirectToApp(nowMs = performance.now())',
+  'const pickedSurface = pickSurfaceAtCanvasPixel(x, y);',
+  'pickedSurface?.source_position',
+  'pickedSurface?.output_position',
+  'globalThis.__hyperscopeInteractionDiagnostics = rustInteractionDiagnostics;',
+]) {
+  assert.ok(
+    browserSource.includes(browserInteractionShadowStep),
+    `browser interaction shadow is missing ${browserInteractionShadowStep}`,
+  );
+}
 for (const navigationSettingsAuthorityStep of [
   "implementationFromRoute(\n  initialNavigationParams, 'navstateimpl',\n)",
   "RUST_NAVIGATION_SETTINGS_IMPLEMENTATION !== 'js'",

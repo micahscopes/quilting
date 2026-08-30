@@ -4088,6 +4088,23 @@ const rustAppShadowDiagnostics = {
 };
 globalThis.__hyperscopeAppShadowDiagnostics = rustAppShadowDiagnostics;
 
+const rustInteractionDiagnostics = {
+  enabled: RUST_SELECTION_IMPLEMENTATION === 'shadow',
+  implementation: RUST_SELECTION_IMPLEMENTATION === 'shadow' ? 'shadow' : 'inactive',
+  state: RUST_SELECTION_IMPLEMENTATION === 'shadow' ? 'awaiting-pick' : 'disabled',
+  dispatches: 0,
+  exactSurfacePicks: 0,
+  entityOnlyPicks: 0,
+  comparisons: 0,
+  mismatches: 0,
+  fallbacks: 0,
+  errors: 0,
+  lastInput: null,
+  lastSnapshot: null,
+  lastError: null,
+};
+globalThis.__hyperscopeInteractionDiagnostics = rustInteractionDiagnostics;
+
 const rustNavigationSettingsDiagnostics = {
   enabled: RUST_NAVIGATION_SETTINGS_IMPLEMENTATION !== 'js',
   implementation: RUST_NAVIGATION_SETTINGS_IMPLEMENTATION,
@@ -7499,7 +7516,98 @@ function detachAppSelectionShadow(reason) {
   }
 }
 
+function mirrorSelectedObjectInteractionToApp(nowMs = performance.now()) {
+  if (RUST_SELECTION_IMPLEMENTATION !== 'shadow'
+      || !rustAppShadow || !selectedObject?.identity) return 'unobserved';
+  const target = focusSphereFromBound(selectedObject.bound, FOCUS_SPHERE_MARGIN, 0.02);
+  if (!target) return 'invalid';
+  const surface = selectedObject.surface;
+  const outputPoint = surface?.outputPosition || selectedObject.outputAnchor;
+  const cameraEye = activeCameraFrame().eye;
+  const outputDistance = outputPoint?.length === 3
+    ? Math.hypot(...outputPoint.map((value, axis) => value - cameraEye[axis]))
+    : NaN;
+  const exactSurface = surface?.face === selectedObject.face
+    && surface.barycentric?.length === 3
+    && surface.barycentric.every(Number.isFinite);
+  const input = {
+    node: selectedObject.node,
+    face: exactSurface ? surface.face : null,
+    barycentric: exactSurface ? surface.barycentric.slice() : null,
+    sourcePosition: surface?.sourcePosition?.slice() || null,
+    outputPosition: surface?.outputPosition?.slice() || null,
+    outputDistance,
+  };
+  rustInteractionDiagnostics.lastInput = input;
+  try {
+    if (!Number.isFinite(outputDistance)) {
+      throw new Error('interaction pick has no finite displayed-chart distance');
+    }
+    advanceRustApplicationClockToSelectionEvent(nowMs);
+    synchronizeRustApplicationPresentationFromBrowser();
+    rustAppShadow.setInteractionHover(
+      selectedObject.identity.assetId,
+      selectedObject.identity.entityId,
+      new Float64Array(selectedObject.bound.center),
+      selectedObject.bound.radius,
+      new Float64Array(selectedObject.sourceAnchor),
+      outputDistance,
+      exactSurface ? surface.face : -1,
+      new Float64Array(exactSurface ? surface.barycentric : []),
+    );
+    rustAppShadow.pressInteractionPrimary();
+    rustAppShadow.releaseInteractionPrimary();
+    const navigation = rustAppShadow.tickNavigation(0);
+    const interaction = rustAppShadow.interactionSnapshot();
+    rustInteractionDiagnostics.dispatches += 1;
+    rustInteractionDiagnostics[exactSurface ? 'exactSurfacePicks' : 'entityOnlyPicks'] += 1;
+    rustInteractionDiagnostics.comparisons += 1;
+    rustInteractionDiagnostics.lastSnapshot = interaction;
+    const selected = interaction?.selected;
+    const matched = selected?.asset_id === selectedObject.identity.assetId
+      && selected?.entity_id === selectedObject.identity.entityId
+      && interaction?.hovered?.identity?.asset_id === selectedObject.identity.assetId
+      && interaction?.hovered?.identity?.entity_id === selectedObject.identity.entityId
+      && interaction?.active == null;
+    if (!matched) {
+      rustInteractionDiagnostics.mismatches += 1;
+      throw new Error('interaction reducer did not activate the incumbent picked identity');
+    }
+    rustAppShadowSelectionQueued = true;
+    rustAppSelectionTransitionActive =
+      Number(navigation.focus?.focus_transition_remaining || 0) > 0;
+    rustAppShadowDiagnostics.mappedSelectionPicks += 1;
+    rustAppShadowDiagnostics.selectionDispatches += 1;
+    compareAppSelectedFocus({
+      ...selectedObject.identity,
+      node: selectedObject.node,
+      bound: selectedObject.bound,
+      sourcePivot: selectedObject.sourceAnchor,
+      margin: target.margin,
+    }, navigation.selected_focus);
+    compareAppSelectionTransitionFrame(navigation, nowMs);
+    rustInteractionDiagnostics.state = 'observing';
+    rustInteractionDiagnostics.lastError = null;
+    refreshAppShadowSnapshot();
+    return 'mapped';
+  } catch (error) {
+    rustInteractionDiagnostics.errors += 1;
+    rustInteractionDiagnostics.lastError = error?.message || String(error);
+    recordAppShadowMismatch('interaction_shadow', rustInteractionDiagnostics.lastError);
+    return 'error';
+  }
+}
+
 function mirrorSelectedObjectToApp(nowMs = performance.now()) {
+  if (RUST_SELECTION_IMPLEMENTATION === 'shadow') {
+    const interactionResult = mirrorSelectedObjectInteractionToApp(nowMs);
+    if (interactionResult === 'mapped') return interactionResult;
+    rustInteractionDiagnostics.fallbacks += 1;
+  }
+  return mirrorSelectedObjectDirectToApp(nowMs);
+}
+
+function mirrorSelectedObjectDirectToApp(nowMs = performance.now()) {
   if (!rustAppShadow || !selectedObject) return 'unobserved';
   const identity = selectedObject.identity;
   if (!identity) {
@@ -7985,7 +8093,10 @@ function restorePendingRouteSelection(context) {
   return true;
 }
 
-function selectObjectFromFace(faceId, { highlightFace = false } = {}) {
+function selectObjectFromFace(
+  faceId,
+  { highlightFace = false, pickedSurface = null } = {},
+) {
   if (faceId < 0 || faceId >= currentFaceNodes.length || !currentInstances) {
     clearSelectedObject('No object at view center');
     mr_highlightFace(-1);
@@ -8010,6 +8121,21 @@ function selectObjectFromFace(faceId, { highlightFace = false } = {}) {
   // browser and AppStore anchor paths, or their transition clocks diverge.
   rustPresentationTransitionActive = false;
   rustAppPresentationPoseReady = false;
+  const pickedBarycentric = Array.from(pickedSurface?.barycentric || [], Number);
+  const pickedSourcePosition = Array.from(pickedSurface?.source_position || [], Number);
+  const pickedOutputPosition = Array.from(pickedSurface?.output_position || [], Number);
+  const surface = Number(pickedSurface?.face) === faceId
+    && pickedBarycentric.length === 3
+    && pickedBarycentric.every(Number.isFinite)
+    ? {
+      face: faceId,
+      barycentric: pickedBarycentric,
+      sourcePosition: pickedSourcePosition.length === 3
+        && pickedSourcePosition.every(Number.isFinite) ? pickedSourcePosition : null,
+      outputPosition: pickedOutputPosition.length === 3
+        && pickedOutputPosition.every(Number.isFinite) ? pickedOutputPosition : null,
+    }
+    : null;
   selectedObject = {
     node,
     face: faceId,
@@ -8018,6 +8144,7 @@ function selectObjectFromFace(faceId, { highlightFace = false } = {}) {
     sourceAnchor,
     outputAnchor: applyMobiusPoint(currentMobius, sourceAnchor) || sourceAnchor.slice(),
     outputRadius: bound.radius,
+    surface,
   };
   retainRouteSelectionIdentity(selectedObject.identity);
   refreshSelectedObjectAnchor();
@@ -8052,16 +8179,18 @@ function selectObjectFromFace(faceId, { highlightFace = false } = {}) {
 }
 
 function selectObjectAtViewCenter() {
-  const faceId = pickFaceAtCanvasPixel(
-    Math.floor(canvas.width * 0.5),
-    Math.floor(canvas.height * 0.5),
-  );
+  const x = Math.floor(canvas.width * 0.5);
+  const y = Math.floor(canvas.height * 0.5);
+  const pickedSurface = pickSurfaceAtCanvasPixel(x, y);
+  const faceId = Number.isInteger(Number(pickedSurface?.face))
+    ? Number(pickedSurface.face)
+    : pickFaceAtCanvasPixel(x, y);
   if (faceId < 0 && selectedObject) return reframeSelectedObject();
   if (faceId < 0) {
     selectionLabel('No object at view center · no recovery selection');
     return false;
   }
-  return selectObjectFromFace(faceId);
+  return selectObjectFromFace(faceId, { pickedSurface });
 }
 
 let mouseDragDistance = Infinity;
@@ -8071,13 +8200,19 @@ canvas.addEventListener('click', e => {
   const rect = canvas.getBoundingClientRect();
   const x = Math.floor((e.clientX - rect.left) * (canvas.width / rect.width));
   const y = Math.floor((e.clientY - rect.top) * (canvas.height / rect.height));
-  const faceId = pickFaceAtCanvasPixel(x, y);
+  const pickedSurface = pickSurfaceAtCanvasPixel(x, y);
+  const faceId = Number.isInteger(Number(pickedSurface?.face))
+    ? Number(pickedSurface.face)
+    : pickFaceAtCanvasPixel(x, y);
   if (faceId < 0) {
     clearSelectedObject('Focus sphere unanchored');
     mr_highlightFace(-1);
     return;
   }
-  selectObjectFromFace(faceId, { highlightFace: e.ctrlKey || e.metaKey });
+  selectObjectFromFace(faceId, {
+    highlightFace: e.ctrlKey || e.metaKey,
+    pickedSurface,
+  });
 });
 
 canvas.addEventListener('contextmenu', e => {
