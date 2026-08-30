@@ -43,9 +43,9 @@ mapping. The WASM evidence adapter runs the incumbent WebGL2 surface pick once,
 returns that result synchronously, and stages a retained WebGPU query against
 the same renderer call. Its asynchronous readback is diagnostic only. Rust
 rejects a changed retained-frame revision, source render call, or echoed target
-epoch before comparing the samples. The browser additionally discards a report
-if the current interaction-target epoch changed while the readback was in
-flight.
+epoch before comparing the samples. The shared `RenderPickEvidenceReport`
+validates nonzero frame identities, pixel/viewport geometry, nonnegative
+timings, and a comparison recomputed from its own expected/actual samples.
 
 The backend-neutral comparison packet distinguishes coverage and node/face
 identity mismatches from numeric drift. When both paths hit, it records maximum
@@ -69,12 +69,20 @@ interaction remain driven by the synchronous WebGL2 result. `pickimpl=rust` is
 currently treated as the same non-authoritative measurement lane; spelling the
 future mode in a URL cannot bypass the promotion gates.
 
-Bounded browser telemetry is available at
-`globalThis.__hyperscopeBackendPickDiagnostics`. It retains scalar counters,
-maxima, the last report, and the last error rather than accumulating samples.
-It records requests, stage rejections, readbacks, stale target epochs,
+Hyperscape's `InteractionPickEvidenceObserver` owns bounded telemetry and checks
+each report against the actual Rust `InteractionTargetTable` epoch. A stale
+readback increments only the stale fence; it cannot contaminate parity metrics
+or enter semantic interaction. The observer retains scalar counters, maxima,
+the last report, and the last error rather than accumulating samples. It
+records requests, stage rejections, readbacks, stale target epochs,
 coverage/identity mismatches, numeric maxima, and stage/readback/total latency
-maxima. Warnings are emitted only on power-of-two mismatch/error counts.
+maxima.
+
+`HyperscopeAppShadow` exposes that observer as a process-local WASM adapter.
+The browser only forwards stage/read/error packets and projects the returned
+snapshot at `globalThis.__hyperscopeBackendPickDiagnostics`; it no longer owns
+epoch rejection, comparison validation, counters, or maxima. Warnings are
+emitted only on power-of-two mismatch/error counts.
 
 ## Verification
 
@@ -101,6 +109,13 @@ JavaScript syntax check. The full source smoke reaches the expected stale
 generated-package boundary because `pkg/quilting_wasm.js` predates the new
 `pickimpl` registry entry. Regenerating that package was deliberately deferred
 rather than invoking the user-disabled Trunk/`wasm-pack`/`wasm-opt` path.
+
+The subsequent Rust-ownership pass adds two report-validation tests and two
+interaction-observer tests. They prove canonical camel-case round trips,
+rejection of contradictory comparisons and impossible timing/viewport data,
+atomic stale-epoch rejection before metric updates, bounded last-report state,
+and independent topology/numeric maxima. All four pass. The exact WASM adapter
+check passes again, and the thinner inline browser module still parses.
 
 All Cargo gates used one low-priority job. The unsupported native
 `quilting-wasm` test configuration still reaches pre-existing wasm-only CSR and
