@@ -880,9 +880,8 @@ pub const fn supports_patch_presentation_style(style: RenderStyle) -> bool {
 }
 
 /// Whether the current authored-factor and material-texture PBR pipeline can
-/// render a shared scene within its declared feature subset. This remains
-/// separate from the live-style predicate until environment IBL and browser
-/// image resources have backend-parity evidence.
+/// render a shared scene within its declared feature subset. Unlike the static
+/// diagnostic-style predicate above, this depends on coherent scene residency.
 pub fn supports_basic_pbr_frame(scene: &RenderSceneSnapshot, options: RenderFrameOptions) -> bool {
     validate_basic_pbr_frame(scene, options).is_ok()
 }
@@ -6868,6 +6867,18 @@ impl PatchRenderScene {
             && self
                 .pbr_environment_bindings()
                 .is_some_and(PbrEnvironmentBindings::is_resident)
+    }
+
+    /// Whether this coherent scene epoch can be presented without semantic
+    /// lowering. Diagnostic styles are unconditional; PBR is admitted only
+    /// after its authored subset, texture table, and environment are exact.
+    pub fn supports_resident_patch_presentation_frame(
+        &self,
+        style: RenderStyle,
+        options: RenderFrameOptions,
+    ) -> bool {
+        supports_patch_presentation_style(style)
+            || (style == RenderStyle::Pbr && self.supports_resident_basic_pbr_frame(options))
     }
 }
 

@@ -29,6 +29,27 @@ The strict `quilting-webgpu` Clippy gate and the required Radeon 780M RADV
 Vulkan `native_lod` test pass. Browser promotion remains opt-in and still uses
 the shared capability predicates; live Chrome parity is a separate gate.
 
+## Capability-gated presentation cut
+
+The browser presentation path no longer treats every PBR request as
+shadow-only. A retained scene may present PBR only when the authored basic-PBR
+subset is supported, every referenced texture is exact, and the environment
+bindings are resident. The WASM diagnostics expose that coherent fact as
+`pbrPresentationReady`; the canvas becomes visible only after an actual PBR
+surface frame has also been submitted. Diagnostic styles remain
+unconditionally supported by the existing static predicate.
+
+An incumbent-required frame clears the retained presentation witness. This is
+important when a previously valid PBR scene later enables unsupported focus
+postprocessing: the browser falls back to WebGL2 instead of leaving a stale
+WebGPU image above the current frame.
+
+The Radeon conformance test proves both sides of the dynamic predicate before
+and after environment residency, then executes the existing multi-material
+textured raster proof. Exact WASM and browser-route smokes pass. A live Chrome
+visual/parity capture is still required before changing the default graphics
+backend.
+
 ## Portable multi-material direction
 
 `wgpu 29` marks both dynamically indexed texture binding arrays and

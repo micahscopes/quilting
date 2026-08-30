@@ -6,6 +6,10 @@ import { runInNewContext } from 'node:vm';
 const repository = fileURLToPath(new URL('..', import.meta.url));
 const packageUrl = pathToFileURL(`${repository}/pkg/quilting_wasm.js`).href;
 const wasmPath = `${repository}/pkg/quilting_wasm_bg.wasm`;
+const webGpuBackendSource = readFileSync(
+  `${repository}/crates/quilting-wasm/src/webgpu_backend.rs`,
+  'utf8',
+);
 const {
   default: init,
   canonicalizeHyperscopeRoute,
@@ -513,7 +517,7 @@ for (const graphicsBackendStep of [
   'quiltingWasmBackend.mr_uploadWebGpuComposedModel(',
   "graphicsBackendDiagnostics.state = 'presentation-ready';",
   "graphicsBackendDiagnostics.state = 'presenting';",
-  'function webGpuPresentationSupportsRenderMode(mode)',
+  'function webGpuPresentationSupportsRenderMode(mode, residency = null)',
   'residency?.presentationStyle === graphicsBackendDiagnostics.renderMode',
   "presentationCanvas.classList.toggle('webgpu-presenting', presenting);",
   "webglCanvas.classList.toggle('webgpu-input-layer', presenting);",
@@ -526,7 +530,7 @@ for (const graphicsBackendStep of [
   );
 }
 const webGpuModeSupportSource = browserSource.match(
-  /function webGpuPresentationSupportsRenderMode\(mode\) \{[\s\S]*?\n\}/,
+  /function webGpuPresentationSupportsRenderMode\(mode, residency = null\) \{[\s\S]*?\n\}/,
 )?.[0];
 assert.ok(webGpuModeSupportSource, 'could not locate WebGPU mode support predicate');
 const webGpuPresentationSupportsRenderMode = runInNewContext(
@@ -535,8 +539,26 @@ const webGpuPresentationSupportsRenderMode = runInNewContext(
 for (const mode of ['matcap', 'wire', 'normals', 'both', 'lod', 'stretch']) {
   assert.equal(webGpuPresentationSupportsRenderMode(mode), true, `${mode} should use WebGPU`);
 }
-for (const mode of ['pbr']) {
-  assert.equal(webGpuPresentationSupportsRenderMode(mode), false, `${mode} should use WebGL2`);
+assert.equal(webGpuPresentationSupportsRenderMode('pbr'), false);
+assert.equal(webGpuPresentationSupportsRenderMode('pbr', {
+  pbrPresentationReady: true,
+  presentationStyle: 'pbr',
+  presentationFrames: 1,
+}), true, 'proven resident PBR should use WebGPU');
+assert.equal(webGpuPresentationSupportsRenderMode('pbr', {
+  pbrPresentationReady: true,
+  presentationStyle: 'wire',
+  presentationFrames: 1,
+}), false, 'PBR must not expose a retained frame from another style');
+for (const stalePresentationGuard of [
+  'fn incumbent_required(&mut self) -> LiveFrameDisposition',
+  'self.last_frame_input = None;',
+  'scene.supports_resident_patch_presentation_frame(style, options)',
+]) {
+  assert.ok(
+    webGpuBackendSource.includes(stalePresentationGuard),
+    `WebGPU stale-presentation guard is missing ${stalePresentationGuard}`,
+  );
 }
 const routeDefaultsAdapterSource = browserSource.match(
   /const BOOTSTRAP_PARAM_DEFAULTS = Object\.freeze\(\{[\s\S]*?\n\}\);\nlet PARAM_DEFAULTS = BOOTSTRAP_PARAM_DEFAULTS;\n\nfunction installRustControlDefaults\(specs\) \{[\s\S]*?\n\}/,

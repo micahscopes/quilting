@@ -147,6 +147,7 @@ pub(crate) struct WebGpuBackendDiagnostics {
     pbr_texture_references: usize,
     pbr_texture_resident_references: usize,
     pbr_texture_unresolved_references: usize,
+    pbr_presentation_ready: bool,
     model_ready: bool,
     model_faces: usize,
     scene_ready: bool,
@@ -197,6 +198,16 @@ pub(crate) struct WebGpuBackendDiagnostics {
 }
 
 impl WebGpuBackend {
+    fn incumbent_required(&mut self) -> LiveFrameDisposition {
+        // A retained surface is only evidence for its exact last frame. If the
+        // current request cannot be represented, clear that witness so the
+        // browser exposes WebGL2 instead of a stale WebGPU image.
+        if self.presentation.is_some() {
+            self.last_frame_input = None;
+        }
+        LiveFrameDisposition::IncumbentRequired
+    }
+
     fn diagnostics(&self) -> WebGpuBackendDiagnostics {
         let presentation = self
             .presentation
@@ -255,6 +266,12 @@ impl WebGpuBackend {
                 .iter()
                 .map(|residency| residency.unresolved_mask().count_ones() as usize)
                 .sum(),
+            pbr_presentation_ready: self.scene.as_ref().is_some_and(|scene| {
+                scene.supports_resident_patch_presentation_frame(
+                    RenderStyle::Pbr,
+                    RenderFrameOptions::default(),
+                )
+            }),
             model_ready: self.model.is_some(),
             model_faces: self
                 .model_source
@@ -1348,29 +1365,20 @@ pub(crate) fn submit_frame(
 ) -> Result<LiveFrameDisposition, String> {
     BACKEND.with(|slot| {
         let mut backend = slot.borrow_mut();
-        let shadow_only_pbr = style == RenderStyle::Pbr && backend.presentation.is_none();
-        if backend.state != "ready"
-            || (!quilting_webgpu::supports_patch_presentation_style(style) && !shadow_only_pbr)
-        {
-            return Ok(LiveFrameDisposition::IncumbentRequired);
+        if backend.state != "ready" {
+            return Ok(backend.incumbent_required());
         }
         // Atlas/model/scene residency arrives asynchronously during ordinary
         // application startup. Frames before the first coherent scene are
         // inert lifecycle gaps, not failed render attempts.
-        if backend.scene.is_none() {
-            return Ok(LiveFrameDisposition::IncumbentRequired);
-        }
-        if style == RenderStyle::Pbr
-            && !backend
-                .scene
-                .as_ref()
-                .expect("scene presence checked above")
-                .supports_resident_basic_pbr_frame(options)
-        {
-            return Ok(LiveFrameDisposition::IncumbentRequired);
+        let Some(scene) = backend.scene.as_ref() else {
+            return Ok(backend.incumbent_required());
+        };
+        if !scene.supports_resident_patch_presentation_frame(style, options) {
+            return Ok(backend.incumbent_required());
         }
         if view.viewport[0] == 0 || view.viewport[1] == 0 {
-            return Ok(LiveFrameDisposition::IncumbentRequired);
+            return Ok(backend.incumbent_required());
         }
         backend.frame_attempts = backend.frame_attempts.saturating_add(1);
         let frame_revision = backend.frame_attempts;

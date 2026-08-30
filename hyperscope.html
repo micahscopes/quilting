@@ -661,9 +661,13 @@ const graphicsBackendDiagnostics = {
 };
 globalThis.__hyperscopeGraphicsBackend = graphicsBackendDiagnostics;
 
-function webGpuPresentationSupportsRenderMode(mode) {
-  return mode === 'matcap' || mode === 'wire' || mode === 'normals'
+function webGpuPresentationSupportsRenderMode(mode, residency = null) {
+  const diagnosticStyle = mode === 'matcap' || mode === 'wire' || mode === 'normals'
     || mode === 'both' || mode === 'lod' || mode === 'stretch';
+  return diagnosticStyle || (mode === 'pbr'
+    && residency?.pbrPresentationReady === true
+    && residency?.presentationStyle === 'pbr'
+    && (residency?.presentationFrames || 0) > 0);
 }
 
 function synchronizeGraphicsBackendPresentation() {
@@ -674,7 +678,10 @@ function synchronizeGraphicsBackendPresentation() {
     || (residency?.frameFailures || 0) > 0
     || (residency?.presentationLosses || 0) > 0;
   const presenting = GRAPHICS_BACKEND_REQUEST === 'webgpu'
-    && webGpuPresentationSupportsRenderMode(graphicsBackendDiagnostics.renderMode)
+    && webGpuPresentationSupportsRenderMode(
+      graphicsBackendDiagnostics.renderMode,
+      residency,
+    )
     && graphicsBackendDiagnostics.presentationArmed
     && residency?.state === 'ready'
     && residency?.presentationReady === true
@@ -695,7 +702,8 @@ function synchronizeGraphicsBackendPresentation() {
       graphicsBackendDiagnostics.fallbackReason = null;
     } else if (residency?.presentationReady) {
       graphicsBackendDiagnostics.state = webGpuPresentationSupportsRenderMode(
-        graphicsBackendDiagnostics.renderMode
+        graphicsBackendDiagnostics.renderMode,
+        residency,
       )
         ? 'presentation-ready' : 'unsupported-mode';
       graphicsBackendDiagnostics.fallbackReason = null;
@@ -11223,7 +11231,8 @@ function frame(ts) {
   mr_render(mvp, view, frameCameraPos);
   if (GRAPHICS_BACKEND_REQUEST === 'webgpu') {
     graphicsBackendDiagnostics.presentationArmed = webGpuPresentationSupportsRenderMode(
-      renderMode.peek()
+      renderMode.peek(),
+      graphicsBackendDiagnostics.residency,
     );
     const refreshDue = ts - graphicsBackendDiagnostics.lastRefreshAt >= 250;
     if (graphicsBackendDiagnostics.effective !== 'webgpu' || refreshDue) {

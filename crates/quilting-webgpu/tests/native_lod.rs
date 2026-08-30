@@ -1343,6 +1343,14 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             .unwrap()
             .is_resident());
         assert!(!diagnostic_scene.supports_resident_basic_pbr_frame(RenderFrameOptions::default()));
+        assert!(!diagnostic_scene.supports_resident_patch_presentation_frame(
+            RenderStyle::Pbr,
+            RenderFrameOptions::default(),
+        ));
+        assert!(diagnostic_scene.supports_resident_patch_presentation_frame(
+            RenderStyle::Wire,
+            RenderFrameOptions::default(),
+        ));
         classifier
             .write_patch_render_pose_state(&model, &diagnostic_scene, LodPose::default(), 0)
             .unwrap();
@@ -1439,6 +1447,10 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             Some(environment_descriptor),
         );
         assert!(diagnostic_scene.supports_resident_basic_pbr_frame(RenderFrameOptions::default()));
+        assert!(diagnostic_scene.supports_resident_patch_presentation_frame(
+            RenderStyle::Pbr,
+            RenderFrameOptions::default(),
+        ));
         let environment_frame = RenderFrame::build(
             90,
             render_frame.pose,
