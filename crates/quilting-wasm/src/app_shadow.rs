@@ -1418,7 +1418,7 @@ impl HyperscopeAppShadow {
         self.complete_patch_lab(PatchLabCompletion::Lod(PatchLabLodCompletion {
             job_id: parse_patch_lab_job_id(job_id)?,
             geometry_job_id: parse_patch_lab_job_id(geometry_job_id)?,
-            outcome: PatchLabLodOutcome::Evaluated(summary.into()),
+            outcome: PatchLabLodOutcome::Evaluated(summary.try_into_summary()?),
         }))
     }
 
@@ -2191,28 +2191,41 @@ struct ShadowPatchLabLodSummaryInput {
     shared_edges: u32,
     shared_edge_mismatches: u32,
     max_face_edge_ratio: u32,
-    rendered_triangles: u64,
+    /// Browser renderer accounting arrives as a JavaScript Number. Admission
+    /// below requires an exact safe integer before it enters Rust's `u64`
+    /// semantic model.
+    rendered_triangles: f64,
     #[serde(default)]
     histogram: Vec<ShadowPatchLabHistogramBin>,
 }
 
-impl From<ShadowPatchLabLodSummaryInput> for PatchLabLodSummary {
-    fn from(summary: ShadowPatchLabLodSummaryInput) -> Self {
-        Self {
-            requested_first_face: summary.requested_first_face,
-            resident_first_face: summary.resident_first_face,
-            promoted_faces: summary.promoted_faces,
-            promoted_edges: summary.promoted_edges,
-            shared_edges: summary.shared_edges,
-            shared_edge_mismatches: summary.shared_edge_mismatches,
-            max_face_edge_ratio: summary.max_face_edge_ratio,
-            rendered_triangles: summary.rendered_triangles,
-            histogram: summary
+impl ShadowPatchLabLodSummaryInput {
+    fn try_into_summary(self) -> Result<PatchLabLodSummary, JsValue> {
+        const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+        if !self.rendered_triangles.is_finite()
+            || self.rendered_triangles < 0.0
+            || self.rendered_triangles.fract() != 0.0
+            || self.rendered_triangles > MAX_SAFE_INTEGER
+        {
+            return Err(JsValue::from_str(
+                "Patch Lab rendered triangle count must be an exact nonnegative JavaScript integer",
+            ));
+        }
+        Ok(PatchLabLodSummary {
+            requested_first_face: self.requested_first_face,
+            resident_first_face: self.resident_first_face,
+            promoted_faces: self.promoted_faces,
+            promoted_edges: self.promoted_edges,
+            shared_edges: self.shared_edges,
+            shared_edge_mismatches: self.shared_edge_mismatches,
+            max_face_edge_ratio: self.max_face_edge_ratio,
+            rendered_triangles: self.rendered_triangles as u64,
+            histogram: self
                 .histogram
                 .into_iter()
                 .map(PatchLabHistogramBin::from)
                 .collect(),
-        }
+        })
     }
 }
 
