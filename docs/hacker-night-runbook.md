@@ -13,6 +13,7 @@ trunk build --release
 cargo run -p hyperscope-app --features replay --bin hyperscope-replay -- --check
 cargo run -p hyperscope-app --features replay --bin hyperscope-replay -- --navigation --check
 cargo run -p hyperscope-app --features replay --bin hyperscope-replay -- --orchestration --check
+cargo run -p hyperscope-app --features replay --bin hyperscope-replay -- --interaction --check
 cargo run -p hyperscape --bin hyperscope-preflight
 node --test tests/*.test.mjs
 node scripts/smoke-hyperscope-presentation.mjs
@@ -63,16 +64,18 @@ fields and ownership boundaries live in the
 
 The ordinary preflight must print `PASS`, matching source/build fingerprints,
 and the checked bundle size. It rejects a coherent but stale `dist/` as well as
-missing presentation/runtime assets. The three replay commands must print:
+missing presentation/runtime assets. The four replay commands must print:
 
 ```text
-PASS fnv1a-128-json:4855accdee4f28b48ae954ebb4ab99cb
-PASS fnv1a-128-json:a89d8fdeeb12474d28ae4bf38faf5c01
-PASS fnv1a-128-json:8e6b83ab648451471bd246457cc790a6
+PASS fnv1a-128-json:f299ef1ee8b1501638d2711f3faf6b15
+PASS fnv1a-128-json:00ea1d0f0b20d4ab1d7ef2415c7069d0
+PASS fnv1a-128-json:8c32a885eec8cf33a917031d925d25b5
+PASS fnv1a-128-json:f54a1cb70b765f3e6b9106558a1cae6e
 ```
 
 They are deterministic regression oracles for the cue walkthrough,
-navigation, and orchestration/history paths; any mismatch must be reviewed.
+navigation, orchestration/history, and interaction paths; any mismatch must be
+reviewed.
 
 For a public downloadable archive, use the stricter gate:
 

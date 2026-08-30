@@ -16,6 +16,8 @@ const ORCHESTRATION_REPLAY: &str =
     include_str!("../../fixtures/orchestration.app-replay.json");
 const ORCHESTRATION_GOLDEN: &str =
     include_str!("../../fixtures/orchestration.replay.fingerprint");
+const INTERACTION_REPLAY: &str = include_str!("../../fixtures/interaction.app-replay.json");
+const INTERACTION_GOLDEN: &str = include_str!("../../fixtures/interaction.replay.fingerprint");
 
 #[derive(Debug, Default)]
 struct Options {
@@ -28,6 +30,7 @@ struct Options {
 enum Source {
     NavigationOracle,
     OrchestrationOracle,
+    InteractionOracle,
     Script(String),
     Presentation(String),
 }
@@ -50,6 +53,7 @@ fn execute() -> Result<(), String> {
         None => Ok(HACKER_NIGHT_GOLDEN.trim()),
         Some(Source::NavigationOracle) => Ok(NAVIGATION_GOLDEN.trim()),
         Some(Source::OrchestrationOracle) => Ok(ORCHESTRATION_GOLDEN.trim()),
+        Some(Source::InteractionOracle) => Ok(INTERACTION_GOLDEN.trim()),
         Some(Source::Script(_) | Source::Presentation(_)) => {
             Err("--check only applies to an embedded oracle".to_owned())
         }
@@ -103,6 +107,7 @@ fn parse_options() -> Result<Option<Options>, String> {
             )?,
             "--navigation" => set_source(&mut options, Source::NavigationOracle)?,
             "--orchestration" => set_source(&mut options, Source::OrchestrationOracle)?,
+            "--interaction" => set_source(&mut options, Source::InteractionOracle)?,
             "--fingerprint" => options.fingerprint_only = true,
             "--check" => options.check = true,
             "-h" | "--help" => {
@@ -121,7 +126,7 @@ fn parse_options() -> Result<Option<Options>, String> {
 fn set_source(options: &mut Options, source: Source) -> Result<(), String> {
     if options.source.is_some() {
         Err(
-            "choose at most one replay source: --navigation, --orchestration, --script, or --presentation"
+            "choose at most one replay source: --navigation, --orchestration, --interaction, --script, or --presentation"
                 .to_owned(),
         )
     } else {
@@ -136,6 +141,8 @@ fn load_script(source: Option<Source>) -> Result<AppReplayScript, String> {
             .map_err(|error| format!("embedded navigation replay is invalid: {error}")),
         Some(Source::OrchestrationOracle) => serde_json::from_str(ORCHESTRATION_REPLAY)
             .map_err(|error| format!("embedded orchestration replay is invalid: {error}")),
+        Some(Source::InteractionOracle) => serde_json::from_str(INTERACTION_REPLAY)
+            .map_err(|error| format!("embedded interaction replay is invalid: {error}")),
         Some(Source::Script(path)) => {
             let json = fs::read_to_string(&path)
                 .map_err(|error| format!("could not read replay script {path:?}: {error}"))?;
@@ -157,13 +164,14 @@ fn load_script(source: Option<Source>) -> Result<AppReplayScript, String> {
 
 fn print_help() {
     println!(
-        "Usage: hyperscope-replay [--navigation | --orchestration | --script PATH | --presentation PATH] [--fingerprint | --check]\n\
+        "Usage: hyperscope-replay [--navigation | --orchestration | --interaction | --script PATH | --presentation PATH] [--fingerprint | --check]\n\
          \n\
          Replays versioned semantic application events without a browser or renderer.\n\
          With no source, walks the embedded hacker-night presentation.\n\
          \n\
            --navigation         Replay the embedded semantic navigation oracle\n\
            --orchestration      Replay the embedded effects/presence/authored oracle\n\
+           --interaction        Replay the embedded semantic interaction oracle\n\
            --script PATH        Replay a serialized AppReplayScript\n\
            --presentation PATH  Build a complete cue walkthrough from a presentation\n\
            --fingerprint        Print only the qualified deterministic fingerprint\n\
