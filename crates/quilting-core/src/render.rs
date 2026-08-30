@@ -1251,7 +1251,7 @@ pub struct RenderFrame {
     pub style: RenderStyle,
     pub view: RenderView,
     pub options: RenderFrameOptions,
-    pub commands: Vec<RenderCommand>,
+    pub commands: Arc<[RenderCommand]>,
 }
 
 /// An immutable scene that has passed the complete semantic contract once.
@@ -1553,7 +1553,7 @@ impl RenderFrame {
         if let Some(focus) = options.focus_postprocess {
             focus.validate()?;
         }
-        let commands = expected_commands(style, options, &scene.batches)?;
+        let commands = expected_commands(style, options, &scene.batches)?.into();
         Ok(Self {
             revision,
             scene_revision: scene.revision,
@@ -1562,6 +1562,34 @@ impl RenderFrame {
             view,
             options,
             commands,
+        })
+    }
+
+    /// Build one high-rate frame by borrowing the immutable command identity
+    /// of a retained low-rate plan. View, pose, and uniform-only options may
+    /// change every frame without allocating or rebuilding the command stream.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_command_plan(
+        revision: u64,
+        pose: RenderPoseIdentity,
+        view: RenderView,
+        options: RenderFrameOptions,
+        plan: &RenderCommandPlan,
+    ) -> Result<Self, RenderContractError> {
+        view.validate()?;
+        if let Some(focus) = options.focus_postprocess {
+            focus.validate()?;
+        }
+        let style = plan.key.style;
+        plan.validate_for(plan.scene(), style, options)?;
+        Ok(Self {
+            revision,
+            scene_revision: plan.scene().snapshot().revision,
+            pose,
+            style,
+            view,
+            options,
+            commands: Arc::clone(&plan.commands),
         })
     }
 
@@ -1577,8 +1605,39 @@ impl RenderFrame {
                 scene: scene.revision,
             });
         }
-        if self.commands != expected_commands(self.style, self.options, &scene.batches)? {
+        if self.commands.as_ref()
+            != expected_commands(self.style, self.options, &scene.batches)?.as_slice()
+        {
             return Err(RenderContractError::CommandSequenceMismatch);
+        }
+        Ok(())
+    }
+
+    /// Validate a frame against the exact retained plan that created it.
+    ///
+    /// Unlike [`Self::validate`], this does not revalidate the immutable scene
+    /// or allocate an expected command vector. Pointer identity proves that
+    /// the frame still carries the plan's canonical command allocation; the
+    /// key admits only uniform-only changes such as matcap profile or focus
+    /// field values.
+    pub fn validate_with_command_plan(
+        &self,
+        plan: &RenderCommandPlan,
+    ) -> Result<(), RenderContractError> {
+        self.view.validate()?;
+        if let Some(focus) = self.options.focus_postprocess {
+            focus.validate()?;
+        }
+        let scene_revision = plan.scene().snapshot().revision;
+        if self.scene_revision != scene_revision {
+            return Err(RenderContractError::SceneRevisionMismatch {
+                frame: self.scene_revision,
+                scene: scene_revision,
+            });
+        }
+        plan.validate_for(plan.scene(), self.style, self.options)?;
+        if !Arc::ptr_eq(&self.commands, &plan.commands) {
+            return Err(RenderContractError::CommandPlanMismatch);
         }
         Ok(())
     }
@@ -1594,6 +1653,16 @@ impl RenderFrame {
             commands: &self.commands,
             scene,
         })
+    }
+
+    /// Expose the retained plan's allocation-free execution after proving the
+    /// high-rate frame still belongs to that exact scene/command epoch.
+    pub fn execution_with_command_plan<'plan>(
+        &self,
+        plan: &'plan RenderCommandPlan,
+    ) -> Result<RenderExecution<'plan, 'plan>, RenderContractError> {
+        self.validate_with_command_plan(plan)?;
+        Ok(plan.execution())
     }
 
     /// Derive the indexed patch work implied by this validated frame. This is
@@ -2291,7 +2360,7 @@ mod tests {
             &scene,
         )
         .unwrap();
-        frame.commands.swap(0, 1);
+        Arc::make_mut(&mut frame.commands).swap(0, 1);
 
         assert_eq!(
             frame.execution(&scene).unwrap_err(),
@@ -2324,10 +2393,47 @@ mod tests {
             &scene,
         )
         .unwrap();
-        assert_eq!(plan.commands(), frame.commands.as_slice());
+        assert_eq!(plan.commands(), frame.commands.as_ref());
         assert_eq!(
             plan.execution().submission_stats(),
             frame.expected_submission_stats(&scene).unwrap()
+        );
+
+        let planned_frame = RenderFrame::from_command_plan(
+            15,
+            frame.pose,
+            frame.view,
+            options,
+            &plan,
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&planned_frame.commands, &plan.commands));
+        assert_eq!(
+            planned_frame
+                .execution_with_command_plan(&plan)
+                .unwrap()
+                .submission_stats(),
+            plan.execution().submission_stats(),
+        );
+
+        let mut uniform_only_frame_options = options;
+        uniform_only_frame_options.matcap_style = MatcapStyle::SoftStudio;
+        let uniform_only_frame = RenderFrame::from_command_plan(
+            16,
+            planned_frame.pose,
+            planned_frame.view,
+            uniform_only_frame_options,
+            &plan,
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(
+            &planned_frame.commands,
+            &uniform_only_frame.commands,
+        ));
+
+        assert_eq!(
+            frame.execution_with_command_plan(&plan).unwrap_err(),
+            RenderContractError::CommandPlanMismatch,
         );
 
         let mut uniform_only = options;
@@ -2526,7 +2632,7 @@ mod tests {
             &scene,
         )
         .unwrap();
-        frame.commands.pop();
+        frame.commands = frame.commands[..frame.commands.len() - 1].into();
         assert_eq!(
             frame.validate(&scene),
             Err(RenderContractError::CommandSequenceMismatch)
