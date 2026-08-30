@@ -21,8 +21,11 @@ use hyperscope_app::{
     AppEffect, AppEvent, AppFrameSnapshot, AppStore, AssetLoadCompletion, AssetLoadOutcome,
     AssetLoadScope, AssetMetadata, AssetStatus, AuthoredRevision, CommitDisposition,
     EffectCompletion, FrameTick, LocalPeerDisposition, LocalPeerIngress, LocalPeerLane,
-    LocalPeerReceipt, NavigationSynchronization, PatchLabEffect, PresentationAction,
-    PresentationAnimationResidencyBinding,
+    LocalPeerReceipt, NavigationSynchronization, PatchLabCompletion, PatchLabControls,
+    PatchLabEffect, PatchLabFailure, PatchLabField, PatchLabGeometryCompletion,
+    PatchLabGeometryOutcome, PatchLabHistogramBin, PatchLabLodCompletion, PatchLabLodOutcome,
+    PatchLabLodSummary, PatchLabReadModel, PatchLabSessionIntent, PatchLabShape,
+    PresentationAction, PresentationAnimationResidencyBinding,
     PrimarySceneInstallCompletion, PrimarySceneInstallMetadata, PrimarySceneInstallOutcome,
     RenderSettings, SemanticAction, Timed,
 };
@@ -1293,6 +1296,110 @@ impl HyperscopeAppShadow {
         })
     }
 
+    /// Replace the complete educational Patch Lab session through the same
+    /// reducer/effect boundary used by native, replay, and future WebGPU
+    /// adapters. Rust allocates job IDs and coalesces LOD work; JavaScript may
+    /// execute the emitted effects but does not own job lifetime.
+    #[wasm_bindgen(js_name = dispatchPatchLab)]
+    pub fn dispatch_patch_lab(&self, input: JsValue) -> Result<JsValue, JsValue> {
+        let input: ShadowPatchLabIntentInput =
+            serde_wasm_bindgen::from_value(input).map_err(js_error)?;
+        let intent = input.into_intent()?;
+        let (sequence, commit) = self
+            .store
+            .dispatch_semantic(SemanticAction::SetPatchLab(intent))
+            .map_err(js_error)?;
+        to_js(&ShadowDirectSemanticReceipt {
+            sequence: sequence.to_string(),
+            commit: shadow_commit(&commit),
+        })
+    }
+
+    /// Complete one Rust-issued Patch Lab geometry job. The decoded geometry
+    /// remains adapter-owned until renderer installation; this completion
+    /// records only the backend-neutral evidence needed to schedule LOD work.
+    #[wasm_bindgen(js_name = completePatchLabGeometry)]
+    pub fn complete_patch_lab_geometry(
+        &self,
+        job_id: &str,
+        vertex_count: u32,
+        face_count: u32,
+    ) -> Result<JsValue, JsValue> {
+        self.complete_patch_lab(PatchLabCompletion::Geometry(PatchLabGeometryCompletion {
+            job_id: parse_patch_lab_job_id(job_id)?,
+            outcome: PatchLabGeometryOutcome::Built {
+                vertex_count,
+                face_count,
+            },
+        }))
+    }
+
+    #[wasm_bindgen(js_name = failPatchLabGeometry)]
+    pub fn fail_patch_lab_geometry(
+        &self,
+        job_id: &str,
+        code: &str,
+        message: &str,
+        retryable: bool,
+    ) -> Result<JsValue, JsValue> {
+        self.complete_patch_lab(PatchLabCompletion::Geometry(PatchLabGeometryCompletion {
+            job_id: parse_patch_lab_job_id(job_id)?,
+            outcome: PatchLabGeometryOutcome::Failed(PatchLabFailure {
+                code: code.to_owned(),
+                message: message.to_owned(),
+                retryable,
+            }),
+        }))
+    }
+
+    /// Complete one Rust-issued LOD evaluation with a compact semantic
+    /// summary. Renderer buffers stay out of application state and can be
+    /// installed independently by WebGL2 or WebGPU adapters.
+    #[wasm_bindgen(js_name = completePatchLabLod)]
+    pub fn complete_patch_lab_lod(
+        &self,
+        job_id: &str,
+        geometry_job_id: &str,
+        summary: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let summary: ShadowPatchLabLodSummaryInput =
+            serde_wasm_bindgen::from_value(summary).map_err(js_error)?;
+        self.complete_patch_lab(PatchLabCompletion::Lod(PatchLabLodCompletion {
+            job_id: parse_patch_lab_job_id(job_id)?,
+            geometry_job_id: parse_patch_lab_job_id(geometry_job_id)?,
+            outcome: PatchLabLodOutcome::Evaluated(summary.into()),
+        }))
+    }
+
+    #[wasm_bindgen(js_name = failPatchLabLod)]
+    pub fn fail_patch_lab_lod(
+        &self,
+        job_id: &str,
+        geometry_job_id: &str,
+        code: &str,
+        message: &str,
+        retryable: bool,
+    ) -> Result<JsValue, JsValue> {
+        self.complete_patch_lab(PatchLabCompletion::Lod(PatchLabLodCompletion {
+            job_id: parse_patch_lab_job_id(job_id)?,
+            geometry_job_id: parse_patch_lab_job_id(geometry_job_id)?,
+            outcome: PatchLabLodOutcome::Failed(PatchLabFailure {
+                code: code.to_owned(),
+                message: message.to_owned(),
+                retryable,
+            }),
+        }))
+    }
+
+    /// Read the committed Patch Lab projection without exposing reducer
+    /// internals or renderer-owned buffers.
+    #[wasm_bindgen(js_name = patchLabSnapshot)]
+    pub fn patch_lab_snapshot(&self) -> Result<JsValue, JsValue> {
+        to_js(&ShadowPatchLabReadModel::from(
+            self.store.patch_lab_snapshot(),
+        ))
+    }
+
     /// Write `[playing, unwrapped_time_seconds, speed]` without allocating a
     /// per-frame JavaScript object. The browser can shadow or consume this
     /// packet after `advanceFrameQuiet`.
@@ -1702,6 +1809,7 @@ impl HyperscopeAppShadow {
             animation_time_seconds: summary.animation_time_seconds,
             animation_speed: summary.animation_speed,
             render_settings: render.into(),
+            patch_lab: self.store.patch_lab_snapshot().into(),
             assets,
             loading_assets: summary.loading_assets,
             loading_primary_scene_asset: summary
@@ -1958,6 +2066,128 @@ impl HyperscopeAppShadow {
             .map_err(js_error)?;
         commit_to_js(&commit)
     }
+
+    fn complete_patch_lab(&self, completion: PatchLabCompletion) -> Result<JsValue, JsValue> {
+        let commit = self
+            .store
+            .dispatch(AppEvent::EffectCompleted(EffectCompletion::PatchLab(
+                completion,
+            )))
+            .map_err(js_error)?;
+        commit_to_js(&commit)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ShadowPatchLabIntentInput {
+    active: bool,
+    shape: String,
+    field: String,
+    manual_edge_exponents: [u8; 3],
+    min_exponent: u8,
+    max_exponent: u8,
+    phase_radians: f64,
+    bend_percent: u8,
+    grid: u8,
+    animate: bool,
+}
+
+impl ShadowPatchLabIntentInput {
+    fn into_intent(self) -> Result<PatchLabSessionIntent, JsValue> {
+        let shape = PatchLabShape::from_wire_name(&self.shape)
+            .ok_or_else(|| JsValue::from_str("unknown Patch Lab shape"))?;
+        let field = match self.field.as_str() {
+            // The URL and incumbent browser label predate the core enum's
+            // unambiguous wire name. Admit both at this platform boundary.
+            "edges" => PatchLabField::ManualEdges,
+            value => PatchLabField::from_wire_name(value)
+                .ok_or_else(|| JsValue::from_str("unknown Patch Lab LOD field"))?,
+        };
+        if !self.phase_radians.is_finite() {
+            return Err(JsValue::from_str("Patch Lab phase must be finite"));
+        }
+        let phase_microradians = ((self
+            .phase_radians
+            .rem_euclid(std::f64::consts::TAU)
+            * 1_000_000.0)
+            .round() as u32)
+            % hyperscope_app::PATCH_LAB_PHASE_TURN_MICRORADIANS;
+        Ok(PatchLabSessionIntent {
+            active: self.active,
+            controls: PatchLabControls {
+                shape,
+                field,
+                manual_edge_exponents: self.manual_edge_exponents,
+                min_exponent: self.min_exponent,
+                max_exponent: self.max_exponent,
+                phase_microradians,
+                bend_percent: self.bend_percent,
+                grid: self.grid,
+                animate: self.animate,
+            },
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ShadowPatchLabLodSummaryInput {
+    requested_first_face: Option<[u32; 3]>,
+    resident_first_face: Option<[u32; 3]>,
+    promoted_faces: u32,
+    promoted_edges: u32,
+    shared_edges: u32,
+    shared_edge_mismatches: u32,
+    max_face_edge_ratio: u32,
+    rendered_triangles: u64,
+    #[serde(default)]
+    histogram: Vec<ShadowPatchLabHistogramBin>,
+}
+
+impl From<ShadowPatchLabLodSummaryInput> for PatchLabLodSummary {
+    fn from(summary: ShadowPatchLabLodSummaryInput) -> Self {
+        Self {
+            requested_first_face: summary.requested_first_face,
+            resident_first_face: summary.resident_first_face,
+            promoted_faces: summary.promoted_faces,
+            promoted_edges: summary.promoted_edges,
+            shared_edges: summary.shared_edges,
+            shared_edge_mismatches: summary.shared_edge_mismatches,
+            max_face_edge_ratio: summary.max_face_edge_ratio,
+            rendered_triangles: summary.rendered_triangles,
+            histogram: summary
+                .histogram
+                .into_iter()
+                .map(PatchLabHistogramBin::from)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ShadowPatchLabHistogramBin {
+    edge_subdivisions: [u32; 3],
+    face_count: u32,
+}
+
+impl From<ShadowPatchLabHistogramBin> for PatchLabHistogramBin {
+    fn from(bin: ShadowPatchLabHistogramBin) -> Self {
+        Self {
+            edge_subdivisions: bin.edge_subdivisions,
+            face_count: bin.face_count,
+        }
+    }
+}
+
+impl From<PatchLabHistogramBin> for ShadowPatchLabHistogramBin {
+    fn from(bin: PatchLabHistogramBin) -> Self {
+        Self {
+            edge_subdivisions: bin.edge_subdivisions,
+            face_count: bin.face_count,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -2097,6 +2327,7 @@ struct ShadowSnapshot {
     animation_time_seconds: f64,
     animation_speed: f64,
     render_settings: ShadowRenderSettings,
+    patch_lab: ShadowPatchLabReadModel,
     assets: Vec<ShadowAsset>,
     loading_assets: usize,
     loading_primary_scene_asset: Option<String>,
@@ -2111,6 +2342,138 @@ struct ShadowSnapshot {
     authored_entities: Vec<ShadowAuthoredEntity>,
     diagnostics: Vec<ShadowDiagnostic>,
     presentation: Option<ShadowPresentation>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowPatchLabReadModel {
+    active: bool,
+    controls: ShadowPatchLabControls,
+    pending_geometry_job: Option<String>,
+    installed_geometry: Option<ShadowPatchLabGeometryReadModel>,
+    pending_lod_job: Option<String>,
+    lod_dirty: bool,
+    latest_lod: Option<ShadowPatchLabLodSummary>,
+    last_error: Option<ShadowPatchLabFailure>,
+}
+
+impl From<PatchLabReadModel> for ShadowPatchLabReadModel {
+    fn from(model: PatchLabReadModel) -> Self {
+        Self {
+            active: model.active,
+            controls: model.controls.into(),
+            pending_geometry_job: model.pending_geometry_job.map(|job| job.to_string()),
+            installed_geometry: model.installed_geometry.map(Into::into),
+            pending_lod_job: model.pending_lod_job.map(|job| job.to_string()),
+            lod_dirty: model.lod_dirty,
+            latest_lod: model.latest_lod.map(Into::into),
+            last_error: model.last_error.map(Into::into),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowPatchLabControls {
+    shape: &'static str,
+    field: &'static str,
+    manual_edge_exponents: [u8; 3],
+    min_exponent: u8,
+    max_exponent: u8,
+    phase_microradians: u32,
+    phase_radians: f64,
+    bend_percent: u8,
+    grid: u8,
+    animate: bool,
+}
+
+impl From<PatchLabControls> for ShadowPatchLabControls {
+    fn from(controls: PatchLabControls) -> Self {
+        Self {
+            shape: controls.shape.wire_name(),
+            field: controls.field.wire_name(),
+            manual_edge_exponents: controls.manual_edge_exponents,
+            min_exponent: controls.min_exponent,
+            max_exponent: controls.max_exponent,
+            phase_microradians: controls.phase_microradians,
+            phase_radians: controls.phase_radians(),
+            bend_percent: controls.bend_percent,
+            grid: controls.grid,
+            animate: controls.animate,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowPatchLabGeometryReadModel {
+    job_id: String,
+    shape: &'static str,
+    grid: u8,
+    bend_percent: u8,
+    vertex_count: u32,
+    face_count: u32,
+}
+
+impl From<hyperscope_app::PatchLabGeometryReadModel> for ShadowPatchLabGeometryReadModel {
+    fn from(model: hyperscope_app::PatchLabGeometryReadModel) -> Self {
+        Self {
+            job_id: model.job_id.to_string(),
+            shape: model.geometry.shape.wire_name(),
+            grid: model.geometry.grid,
+            bend_percent: model.geometry.bend_percent,
+            vertex_count: model.vertex_count,
+            face_count: model.face_count,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowPatchLabLodSummary {
+    requested_first_face: Option<[u32; 3]>,
+    resident_first_face: Option<[u32; 3]>,
+    promoted_faces: u32,
+    promoted_edges: u32,
+    shared_edges: u32,
+    shared_edge_mismatches: u32,
+    max_face_edge_ratio: u32,
+    rendered_triangles: u64,
+    histogram: Vec<ShadowPatchLabHistogramBin>,
+}
+
+impl From<PatchLabLodSummary> for ShadowPatchLabLodSummary {
+    fn from(summary: PatchLabLodSummary) -> Self {
+        Self {
+            requested_first_face: summary.requested_first_face,
+            resident_first_face: summary.resident_first_face,
+            promoted_faces: summary.promoted_faces,
+            promoted_edges: summary.promoted_edges,
+            shared_edges: summary.shared_edges,
+            shared_edge_mismatches: summary.shared_edge_mismatches,
+            max_face_edge_ratio: summary.max_face_edge_ratio,
+            rendered_triangles: summary.rendered_triangles,
+            histogram: summary.histogram.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowPatchLabFailure {
+    code: String,
+    message: String,
+    retryable: bool,
+}
+
+impl From<PatchLabFailure> for ShadowPatchLabFailure {
+    fn from(failure: PatchLabFailure) -> Self {
+        Self {
+            code: failure.code,
+            message: failure.message,
+            retryable: failure.retryable,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -2735,6 +3098,12 @@ fn to_js(value: &impl Serialize) -> Result<JsValue, JsValue> {
 
 fn js_error(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
+}
+
+fn parse_patch_lab_job_id(value: &str) -> Result<u64, JsValue> {
+    value
+        .parse::<u64>()
+        .map_err(|error| js_error(format!("Patch Lab job ID is invalid: {error}")))
 }
 
 #[allow(clippy::too_many_arguments)]
