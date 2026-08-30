@@ -629,6 +629,23 @@ for (const stalePresentationGuard of [
     `WebGPU stale-presentation guard is missing ${stalePresentationGuard}`,
   );
 }
+for (const retainedFramePlanStep of [
+  'command_plan: Option<RenderCommandPlan>',
+  'fn build_render_frame(',
+  '!plan.matches(scene.validated_scene(), style, options)',
+  'RenderFrame::from_command_plan(',
+  'command_plan_builds',
+]) {
+  assert.ok(
+    webGpuBackendSource.includes(retainedFramePlanStep),
+    `WebGPU retained frame-plan path is missing ${retainedFramePlanStep}`,
+  );
+}
+assert.equal(
+  webGpuBackendSource.includes('RenderFrame::build('),
+  false,
+  'ordinary WebGPU browser frames must not rebuild and revalidate commands',
+);
 for (const selectedFaceEvidenceStep of [
   'fn backend_frame_evidence_supports_composition(',
   'crate::webgpu_backend::focus_evidence_prerequisites_ready()',

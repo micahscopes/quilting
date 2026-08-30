@@ -11,8 +11,8 @@ use quilting_core::material::{
     EnvironmentMapAsset, EnvironmentMapDescriptor, TextureAssetDescriptor, TextureWrapMode,
 };
 use quilting_core::render::{
-    RenderFrame, RenderFrameOptions, RenderPoseIdentity, RenderSceneSnapshot, RenderStyle,
-    RenderSubmissionStats, RenderView, ResidentRootDrawDomains,
+    RenderCommandPlan, RenderFrame, RenderFrameOptions, RenderPoseIdentity, RenderSceneSnapshot,
+    RenderStyle, RenderSubmissionStats, RenderView, ResidentRootDrawDomains,
 };
 use quilting_renderer::compute::{
     prepare_lod_dispatch_state, LodAtlasLookup, PreparedLodModel, WgslLodDispatchMetrics,
@@ -49,6 +49,7 @@ struct WebGpuBackend {
     resident_roots: Option<ResidentRootBackend>,
     scene: Option<PatchRenderScene>,
     scene_source_revision: Option<u64>,
+    command_plan: Option<RenderCommandPlan>,
     target: Option<OffscreenPatchRenderTarget>,
     presentation: Option<PatchPresentationSurface>,
     last_frame_input: Option<LiveFrameInput>,
@@ -65,6 +66,7 @@ struct WebGpuBackend {
     scene_uploads: u64,
     scene_rebuilds: u64,
     scene_updates: u64,
+    command_plan_builds: u64,
     target_rebuilds: u64,
     frame_attempts: u64,
     frames_submitted: u64,
@@ -179,6 +181,7 @@ pub(crate) struct WebGpuBackendDiagnostics {
     scene_ready: bool,
     scene_batches: u32,
     scene_instances: u32,
+    command_plan_ready: bool,
     target_ready: bool,
     target_viewport: [u32; 2],
     presentation_ready: bool,
@@ -216,6 +219,7 @@ pub(crate) struct WebGpuBackendDiagnostics {
     scene_uploads: u64,
     scene_rebuilds: u64,
     scene_updates: u64,
+    command_plan_builds: u64,
     target_rebuilds: u64,
     frame_attempts: u64,
     frames_submitted: u64,
@@ -253,6 +257,52 @@ pub(crate) struct WebGpuBackendDiagnostics {
 }
 
 impl WebGpuBackend {
+    /// Build a high-rate frame from the one low-rate plan owned by the
+    /// currently resident validated scene. Style and command-presence changes
+    /// replace the plan; camera, pose, focus values, and other uniform-only
+    /// inputs retain its exact command allocation.
+    fn build_render_frame(
+        &mut self,
+        frame_revision: u64,
+        scene_source_revision: u64,
+        style: RenderStyle,
+        view: RenderView,
+        options: RenderFrameOptions,
+    ) -> Result<RenderFrame, String> {
+        let needs_plan = {
+            let scene = self
+                .scene
+                .as_ref()
+                .ok_or_else(|| "WebGPU render frame requires scene residency".to_string())?;
+            self.command_plan
+                .as_ref()
+                .is_none_or(|plan| !plan.matches(scene.validated_scene(), style, options))
+        };
+        if needs_plan {
+            let plan = self
+                .scene
+                .as_ref()
+                .expect("resident scene presence was checked above")
+                .command_plan(style, options)
+                .map_err(|error| error.to_string())?;
+            self.command_plan = Some(plan);
+            self.command_plan_builds = self.command_plan_builds.saturating_add(1);
+        }
+        RenderFrame::from_command_plan(
+            frame_revision,
+            RenderPoseIdentity {
+                asset_revision: scene_source_revision,
+                pose_revision: frame_revision,
+            },
+            view,
+            options,
+            self.command_plan
+                .as_ref()
+                .expect("a successful resident plan build must publish its plan"),
+        )
+        .map_err(|error| error.to_string())
+    }
+
     fn incumbent_required(&mut self) -> LiveFrameDisposition {
         // A retained surface is only evidence for its exact last frame. If the
         // current request cannot be represented, clear that witness so the
@@ -355,6 +405,7 @@ impl WebGpuBackend {
             scene_ready: self.scene.is_some(),
             scene_batches: self.scene.as_ref().map_or(0, PatchRenderScene::batch_count),
             scene_instances: self.scene.as_ref().map_or(0, PatchRenderScene::patch_count),
+            command_plan_ready: self.command_plan.is_some(),
             target_ready: self.target.is_some(),
             target_viewport: self
                 .target
@@ -411,6 +462,7 @@ impl WebGpuBackend {
             scene_uploads: self.scene_uploads,
             scene_rebuilds: self.scene_rebuilds,
             scene_updates: self.scene_updates,
+            command_plan_builds: self.command_plan_builds,
             target_rebuilds: self.target_rebuilds,
             frame_attempts: self.frame_attempts,
             frames_submitted: self.frames_submitted,
@@ -621,6 +673,7 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
                     backend.resident_roots = None;
                     backend.scene = None;
                     backend.scene_source_revision = None;
+                    backend.command_plan = None;
                     backend.target = None;
                     backend.presentation = None;
                     backend.last_frame_input = None;
@@ -736,6 +789,7 @@ pub(crate) async fn initialize_presentation(
         backend.resident_roots = None;
         backend.scene = None;
         backend.scene_source_revision = None;
+        backend.command_plan = None;
         backend.target = None;
         backend.presentation = Some(presentation);
         backend.last_frame_input = None;
@@ -1029,6 +1083,7 @@ pub(crate) fn replace_atlas(
                 backend.last_resident_root_error = None;
                 backend.scene = None;
                 backend.scene_source_revision = None;
+                backend.command_plan = None;
                 backend.last_frame_input = None;
                 backend.last_device_lod_epoch = None;
                 backend.last_face_visibility_bits.clear();
@@ -1074,6 +1129,7 @@ pub(crate) fn replace_model(
                 backend.last_resident_root_error = None;
                 backend.scene = None;
                 backend.scene_source_revision = None;
+                backend.command_plan = None;
                 backend.last_frame_input = None;
                 backend.last_device_lod_epoch = None;
                 backend.last_face_visibility_bits.clear();
@@ -1580,6 +1636,7 @@ pub(crate) fn replace_scene(
                 backend.scene_source_revision = Some(source_revision);
                 backend.scene_uploads = next_revision;
                 backend.scene_updates = backend.scene_updates.saturating_add(1);
+                backend.command_plan = None;
                 backend.last_frame_input = None;
                 backend.next_morph_weights.clear();
                 backend.publish_resident_scene(resident_root_candidate, resident_root_failure);
@@ -1633,6 +1690,7 @@ pub(crate) fn replace_scene(
                 backend.scene_source_revision = Some(source_revision);
                 backend.scene_uploads = next_revision;
                 backend.scene_rebuilds = backend.scene_rebuilds.saturating_add(1);
+                backend.command_plan = None;
                 backend.last_frame_input = None;
                 backend.last_face_visibility_bits.clear();
                 backend.next_face_visibility_bits.clear();
@@ -1812,6 +1870,22 @@ pub(crate) fn submit_frame(
         }
         let visibility_upload_required = device_lod_epoch.is_none()
             && backend.last_face_visibility_bits != face_visibility_bits;
+        let frame = match backend.build_render_frame(
+            frame_revision,
+            scene_source_revision,
+            style,
+            view,
+            options,
+        ) {
+            Ok(frame) => frame,
+            Err(error) => {
+                return Err(backend.reject_frame(
+                    face_visibility_bits,
+                    effective_morph_weights,
+                    error,
+                ));
+            }
+        };
 
         if backend.presentation.is_some() {
             let resize = {
@@ -1906,18 +1980,6 @@ pub(crate) fn submit_frame(
                 .scene
                 .as_ref()
                 .ok_or_else(|| "WebGPU render frame requires scene residency".to_string())?;
-            let frame = RenderFrame::build(
-                frame_revision,
-                RenderPoseIdentity {
-                    asset_revision: scene_source_revision,
-                    pose_revision: frame_revision,
-                },
-                style,
-                view,
-                options,
-                scene.scene(),
-            )
-            .map_err(|error| error.to_string())?;
             if !resident_root_frame {
                 device
                     .write_patch_render_pose_state(
