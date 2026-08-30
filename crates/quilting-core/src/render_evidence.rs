@@ -1,14 +1,198 @@
-//! Backend-neutral diagnostic image evidence.
+//! Backend-neutral diagnostic render evidence.
 //!
 //! WebGL2 reads framebuffer rows bottom-first while WebGPU staging copies use
 //! texture-native rows, and surface formats may expose RGBA or BGRA bytes.
 //! This module removes those representation differences before comparison. It
-//! deliberately owns no GPU API and is intended for explicit parity gates,
-//! not per-frame telemetry.
+//! It also compares one source-addressed pick without conflating transient
+//! renderer handles with application identity. The module deliberately owns no
+//! GPU API and is intended for explicit parity gates, not per-frame telemetry.
 
 use serde::{Serialize, Serializer};
 
 pub const RENDER_IMAGE_MISMATCH_EXAMPLE_LIMIT: usize = 8;
+
+/// Backend-neutral source-addressed result from one depth-tested patch query.
+/// `packed_node` is deliberately transient; semantic identity is joined later
+/// through Hyperscape's epoch-fenced interaction target table.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderPickHit {
+    pub packed_node: u32,
+    pub source_face: u32,
+    pub source_barycentric: [f32; 3],
+    pub source_position: [f32; 3],
+    pub output_distance: f32,
+}
+
+impl RenderPickHit {
+    pub fn new(
+        packed_node: u32,
+        source_face: u32,
+        source_barycentric: [f32; 3],
+        source_position: [f32; 3],
+        output_distance: f32,
+    ) -> Result<Self, RenderPickEvidenceError> {
+        let hit = Self {
+            packed_node,
+            source_face,
+            source_barycentric,
+            source_position,
+            output_distance,
+        };
+        hit.validate()?;
+        Ok(hit)
+    }
+
+    pub fn validate(self) -> Result<(), RenderPickEvidenceError> {
+        if self
+            .source_barycentric
+            .into_iter()
+            .chain(self.source_position)
+            .chain([self.output_distance])
+            .any(|value| !value.is_finite())
+        {
+            return Err(RenderPickEvidenceError::NonFinite);
+        }
+        if self.output_distance < 0.0
+            || self
+                .source_barycentric
+                .into_iter()
+                .any(|coordinate| coordinate < -1.0e-4)
+        {
+            return Err(RenderPickEvidenceError::OutsideSurface);
+        }
+        let sum = self.source_barycentric.into_iter().sum::<f32>();
+        if (sum - 1.0).abs() > 1.0e-3 {
+            return Err(RenderPickEvidenceError::UnnormalizedBarycentric { sum });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RenderPickEvidenceError {
+    NonFinite,
+    OutsideSurface,
+    UnnormalizedBarycentric { sum: f32 },
+}
+
+impl std::fmt::Display for RenderPickEvidenceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NonFinite => formatter.write_str("render pick contains a non-finite value"),
+            Self::OutsideSurface => {
+                formatter.write_str("render pick lies outside the rendered surface")
+            }
+            Self::UnnormalizedBarycentric { sum } => write!(
+                formatter,
+                "render pick barycentric sum is {sum}; expected one",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RenderPickEvidenceError {}
+
+/// Exact topology plus measured numeric drift between an incumbent and a
+/// candidate renderer query. Numeric fields exist only when both renderers
+/// report a hit; a coverage mismatch cannot masquerade as zero error.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderPickComparison {
+    pub expected: Option<RenderPickHit>,
+    pub actual: Option<RenderPickHit>,
+    pub coverage_matches: bool,
+    pub identity_matches: bool,
+    pub maximum_barycentric_error: Option<f32>,
+    pub maximum_source_position_error: Option<f32>,
+    pub output_distance_error: Option<f32>,
+}
+
+impl RenderPickComparison {
+    pub fn between(
+        expected: Option<RenderPickHit>,
+        actual: Option<RenderPickHit>,
+    ) -> Result<Self, RenderPickEvidenceError> {
+        if let Some(hit) = expected {
+            hit.validate()?;
+        }
+        if let Some(hit) = actual {
+            hit.validate()?;
+        }
+        let coverage_matches = expected.is_some() == actual.is_some();
+        let identity_matches = match (expected, actual) {
+            (Some(expected), Some(actual)) => {
+                expected.packed_node == actual.packed_node
+                    && expected.source_face == actual.source_face
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        let errors = expected.zip(actual).map(|(expected, actual)| {
+            (
+                maximum_absolute_error(expected.source_barycentric, actual.source_barycentric),
+                maximum_absolute_error(expected.source_position, actual.source_position),
+                (expected.output_distance - actual.output_distance).abs(),
+            )
+        });
+        Ok(Self {
+            expected,
+            actual,
+            coverage_matches,
+            identity_matches,
+            maximum_barycentric_error: errors.map(|errors| errors.0),
+            maximum_source_position_error: errors.map(|errors| errors.1),
+            output_distance_error: errors.map(|errors| errors.2),
+        })
+    }
+
+    pub fn topology_matches(self) -> bool {
+        self.coverage_matches && self.identity_matches
+    }
+
+    pub fn within(self, tolerance: RenderPickTolerance) -> bool {
+        if !self.topology_matches() {
+            return false;
+        }
+        match (
+            self.maximum_barycentric_error,
+            self.maximum_source_position_error,
+            self.output_distance_error,
+        ) {
+            (None, None, None) => true,
+            (Some(barycentric), Some(source_position), Some(output_distance)) => {
+                barycentric <= tolerance.maximum_barycentric_error
+                    && source_position <= tolerance.maximum_source_position_error
+                    && output_distance <= tolerance.maximum_output_distance_error
+            }
+            _ => false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderPickTolerance {
+    pub maximum_barycentric_error: f32,
+    pub maximum_source_position_error: f32,
+    pub maximum_output_distance_error: f32,
+}
+
+impl RenderPickTolerance {
+    pub const EXACT: Self = Self {
+        maximum_barycentric_error: 0.0,
+        maximum_source_position_error: 0.0,
+        maximum_output_distance_error: 0.0,
+    };
+}
+
+fn maximum_absolute_error<const N: usize>(expected: [f32; N], actual: [f32; N]) -> f32 {
+    expected
+        .into_iter()
+        .zip(actual)
+        .map(|(expected, actual)| (expected - actual).abs())
+        .fold(0.0, f32::max)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderImageOrigin {
@@ -327,6 +511,66 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pick(face: u32, node: u32, barycentric: [f32; 3]) -> RenderPickHit {
+        RenderPickHit::new(node, face, barycentric, [1.0, -2.0, 0.5], 4.0).unwrap()
+    }
+
+    #[test]
+    fn pick_comparison_keeps_misses_distinct_from_zero_error_hits() {
+        let misses = RenderPickComparison::between(None, None).unwrap();
+        assert!(misses.topology_matches());
+        assert!(misses.within(RenderPickTolerance::EXACT));
+        assert_eq!(misses.maximum_barycentric_error, None);
+
+        let expected = pick(3, 7, [0.2, 0.3, 0.5]);
+        let coverage_mismatch = RenderPickComparison::between(Some(expected), None).unwrap();
+        assert!(!coverage_mismatch.coverage_matches);
+        assert!(!coverage_mismatch.identity_matches);
+        assert!(!coverage_mismatch.within(RenderPickTolerance {
+            maximum_barycentric_error: 1.0,
+            maximum_source_position_error: 1.0,
+            maximum_output_distance_error: 1.0,
+        }));
+        assert_eq!(coverage_mismatch.maximum_barycentric_error, None);
+    }
+
+    #[test]
+    fn pick_comparison_reports_topology_and_numeric_drift_independently() {
+        let expected = pick(3, 7, [0.2, 0.3, 0.5]);
+        let actual =
+            RenderPickHit::new(7, 3, [0.201, 0.297, 0.502], [1.004, -2.0, 0.499], 4.006).unwrap();
+        let comparison = RenderPickComparison::between(Some(expected), Some(actual)).unwrap();
+        assert!(comparison.topology_matches());
+        assert!((comparison.maximum_barycentric_error.unwrap() - 0.003).abs() < 1.0e-6);
+        assert!((comparison.maximum_source_position_error.unwrap() - 0.004).abs() < 1.0e-6);
+        assert!((comparison.output_distance_error.unwrap() - 0.006).abs() < 1.0e-6);
+        assert!(comparison.within(RenderPickTolerance {
+            maximum_barycentric_error: 0.004,
+            maximum_source_position_error: 0.005,
+            maximum_output_distance_error: 0.007,
+        }));
+        assert!(!comparison.within(RenderPickTolerance::EXACT));
+
+        let wrong_face =
+            RenderPickComparison::between(Some(expected), Some(pick(4, 7, [0.2, 0.3, 0.5])))
+                .unwrap();
+        assert!(wrong_face.coverage_matches);
+        assert!(!wrong_face.identity_matches);
+        assert!(!wrong_face.topology_matches());
+    }
+
+    #[test]
+    fn malformed_pick_evidence_fails_before_comparison() {
+        assert_eq!(
+            RenderPickHit::new(7, 3, [0.2, 0.3, 0.4], [0.0; 3], 1.0).unwrap_err(),
+            RenderPickEvidenceError::UnnormalizedBarycentric { sum: 0.9 },
+        );
+        assert_eq!(
+            RenderPickHit::new(7, 3, [0.2, 0.3, 0.5], [f32::NAN, 0.0, 0.0], 1.0).unwrap_err(),
+            RenderPickEvidenceError::NonFinite,
+        );
+    }
 
     #[test]
     fn origin_channel_order_and_row_padding_normalize_exactly() {
