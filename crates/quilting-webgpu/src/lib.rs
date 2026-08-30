@@ -12,6 +12,7 @@ mod functional_pipeline;
 mod pbr_environment;
 mod pbr_resources;
 mod pipeline_lowering;
+mod picking;
 mod portable_texture_atlas;
 mod prepared_patch_pipeline;
 mod presentation;
@@ -29,6 +30,10 @@ pub use focus_postprocess::{
 pub use pbr_environment::{PbrEnvironmentBindings, PbrEnvironmentMap};
 pub use pbr_resources::{
     PbrMaterialTextureBindings, PbrMaterialTextureResidency, PbrTextureTable, PbrTextureTableUpdate,
+};
+pub use picking::{
+    PatchPickEncoding, PatchPickPipeline, PatchPickRequest, PatchPickSample, PatchPickTarget,
+    StagedPatchPickReadback,
 };
 pub use portable_texture_atlas::{
     PortableTextureAtlasLimits, PortableTextureAtlasPlacement, PortableTextureAtlasPlan,
@@ -6991,15 +6996,70 @@ impl LodClassifierDevice {
         }
         let words_per_row = PADDED_BYTES_PER_ROW as usize / std::mem::size_of::<u32>();
         let pixels = self.readback_words(&readback, readback_bytes).await?;
-        let rendered = pixels
+        let rendered_pixels = pixels
             .chunks_exact(words_per_row)
             .take(HEIGHT as usize)
-            .flat_map(|row| &row[..WIDTH as usize])
-            .filter(|&&pixel| pixel != 0)
-            .count();
+            .enumerate()
+            .flat_map(|(y, row)| {
+                row[..WIDTH as usize]
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(x, &pixel)| (pixel != 0).then_some([x as u32, y as u32]))
+            })
+            .collect::<Vec<_>>();
+        let rendered = rendered_pixels.len();
         if !(8..WIDTH as usize * HEIGHT as usize).contains(&rendered) {
             return Err(LodWebGpuError::Conformance(format!(
                 "patch render produced an implausible {rendered}-pixel footprint"
+            )));
+        }
+
+        // Query a pixel proven to be covered by the ordinary render pass. The
+        // second submission deliberately reuses its prepared records, frame
+        // table, compacted indirect arguments, and packed atlas.
+        let pick_error_scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let pick_pipeline = self.create_patch_pick_pipeline(&pipeline)?;
+        let pick_target = self.create_patch_pick_target();
+        let pick_request = PatchPickRequest::new([WIDTH, HEIGHT], rendered_pixels[0], 91)?;
+        let mut pick_encoder =
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("patch render one-pixel pick conformance"),
+                });
+        let staged_pick = self.encode_patch_pick(
+            &mut pick_encoder,
+            &pick_pipeline,
+            &render_scene,
+            &bindings,
+            patches,
+            &visibility,
+            &packed_atlas,
+            &pick_target,
+            pick_request,
+        )?;
+        if staged_pick.encoding().indirect_draw_calls != 2 {
+            return Err(LodWebGpuError::Conformance(format!(
+                "patch pick encoded {} indirect draws; expected 2",
+                staged_pick.encoding().indirect_draw_calls,
+            )));
+        }
+        self.queue.submit([pick_encoder.finish()]);
+        if let Some(error) = pick_error_scope.pop().await {
+            return Err(LodWebGpuError::Conformance(format!(
+                "patch pick submission failed validation: {error}"
+            )));
+        }
+        let picked = staged_pick.read().await?.ok_or_else(|| {
+            LodWebGpuError::Conformance("rendered patch pixel produced no pick".to_string())
+        })?;
+        if picked.target_epoch != 91
+            || picked.packed_node != 7
+            || picked.source_face != 0
+            || (picked.source_barycentric.into_iter().sum::<f32>() - 1.0).abs() > 1.0e-5
+            || picked.output_distance <= 0.0
+        {
+            return Err(LodWebGpuError::Conformance(format!(
+                "patch pick returned an incoherent sample: {picked:?}"
             )));
         }
         Ok((rendered, encoding.indirect_draw_calls as usize))
