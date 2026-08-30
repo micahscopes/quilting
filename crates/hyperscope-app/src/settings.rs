@@ -190,6 +190,7 @@ macro_rules! choice_spec {
 pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("glb", "horse.glb", Text),
     spec!("gfx", "webgl2", RenderBackend),
+    spec!("pickimpl", "js", Implementation),
     spec!("mode", "pbr", RenderMode),
     choice_spec!(
         "xform",
@@ -1293,6 +1294,7 @@ mod tests {
     #[test]
     fn implementation_routes_admit_only_measured_authority_modes() {
         for key in [
+            "pickimpl",
             "navstateimpl",
             "walkimpl",
             "navimpl",
@@ -1452,6 +1454,23 @@ mod tests {
             vec![("selectionimpl", "js")]
         );
         assert!(rollback_route.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn retained_gpu_pick_comparison_is_opt_in() {
+        let default_route = HyperscopeRoute::from_pairs([("pickimpl", "js")]);
+        assert_eq!(default_route.value("pickimpl"), Some("js"));
+        assert!(default_route.canonical_pairs().is_empty());
+
+        for implementation in ["shadow", "rust"] {
+            let route = HyperscopeRoute::from_pairs([("pickimpl", implementation)]);
+            assert_eq!(route.value("pickimpl"), Some(implementation));
+            assert_eq!(
+                route.canonical_pairs(),
+                vec![("pickimpl", implementation)]
+            );
+            assert!(route.diagnostics().is_empty());
+        }
     }
 
     #[test]

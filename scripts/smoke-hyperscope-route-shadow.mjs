@@ -109,6 +109,8 @@ assert.equal(specs.find(spec => spec.key === 'selasset').kind, 'optional_uuid');
 assert.equal(specs.find(spec => spec.key === 'selentity').kind, 'optional_uuid');
 assert.equal(specs.find(spec => spec.key === 'selectionimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'selectionimpl').defaultValue, 'rust');
+assert.equal(specs.find(spec => spec.key === 'pickimpl').kind, 'implementation');
+assert.equal(specs.find(spec => spec.key === 'pickimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'presentimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'presentimpl').defaultValue, 'rust');
 assert.equal(specs.find(spec => spec.key === 'assetimpl').kind, 'implementation');
@@ -291,6 +293,7 @@ const policyDefaults = JSON.parse(JSON.stringify(
 ));
 assert.deepEqual(Object.keys(policyDefaults), [
   'gfx',
+  'pickimpl',
   'presentation',
   'presentimpl',
   'roundshadow',
@@ -422,6 +425,7 @@ for (const routeDefaultStep of [
 }
 for (const selectionDefaultStep of [
   "implementationFromRoute(\n  initialBrowserParams, 'selectionimpl',\n)",
+  "implementationFromRoute(\n  initialBrowserParams, 'pickimpl',\n)",
 ]) {
   assert.ok(
     browserSource.includes(selectionDefaultStep),
@@ -575,8 +579,8 @@ for (const interactionBoundaryStep of [
 for (const exactPickStep of [
   '.sample_face_in_parent_chart(',
   '.output_patch_for_face(',
-  '("source_position", source_position)',
-  '("output_position", output_position)',
+  '("source_position", surface.source_position)',
+  '("output_position", surface.output_position)',
 ]) {
   assert.ok(
     mainRendererSource.includes(exactPickStep),
@@ -610,6 +614,10 @@ for (const browserInteractionShadowStep of [
   'pickedSurface?.source_position',
   'pickedSurface?.output_position',
   'globalThis.__hyperscopeInteractionDiagnostics = rustInteractionDiagnostics;',
+  'globalThis.__hyperscopeBackendPickDiagnostics = backendPickDiagnostics;',
+  'quiltingWasmBackend.mr_stageBackendPickEvidence(',
+  'quiltingWasmBackend.mr_readBackendPickEvidence()',
+  "PICK_IMPLEMENTATION !== 'js'",
 ]) {
   assert.ok(
     browserSource.includes(browserInteractionShadowStep),

@@ -507,6 +507,7 @@ import { BrowserAssetEffectHost } from './asset_effect_host.mjs?rev=decoded-prov
 // lifecycle boundary against ControlSpec before application state is applied.
 const BOOTSTRAP_POLICY_DEFAULTS = Object.freeze({
   gfx: 'webgl2',
+  pickimpl: 'js',
   presentation: '0',
   presentimpl: 'rust',
   roundshadow: '0',
@@ -602,6 +603,9 @@ const RUST_ROUND_SHADOW_ENABLED =
 const RUST_SELECTION_IMPLEMENTATION = implementationFromRoute(
   initialBrowserParams, 'selectionimpl',
 );
+const PICK_IMPLEMENTATION = implementationFromRoute(
+  initialBrowserParams, 'pickimpl',
+);
 const RUST_SCENE_IMPLEMENTATION = implementationFromRoute(
   initialBrowserParams, 'sceneimpl',
 );
@@ -631,6 +635,7 @@ const RUST_APP_SHADOW_ENABLED =
   || ANIMATION_CLIP_IMPLEMENTATION !== 'js'
   || RUST_RENDER_SETTINGS_IMPLEMENTATION !== 'js'
   || RUST_PATCH_LAB_IMPLEMENTATION !== 'js'
+  || PICK_IMPLEMENTATION !== 'js'
   || RUST_SELECTION_IMPLEMENTATION !== 'js'
   || RUST_SCENE_IMPLEMENTATION !== 'js'
   || (RUST_PRESENTATION_ENABLED && RUST_PRESENTATION_IMPLEMENTATION !== 'js');
@@ -641,7 +646,8 @@ const RUST_ROUTE_SHADOW_ENABLED = RUST_ROUTE_IMPLEMENTATION !== 'js';
 const RUST_RENDER_SHADOW_ENABLED =
   bootstrapToggleFromRoute(initialBrowserParams, 'rendershadow');
 const GRAPHICS_BACKEND_REQUEST = graphicsBackendFromRoute(initialBrowserParams);
-const WEBGPU_SHADOW_ENABLED = GRAPHICS_BACKEND_REQUEST !== 'webgl2';
+const WEBGPU_SHADOW_ENABLED = GRAPHICS_BACKEND_REQUEST !== 'webgl2'
+  || PICK_IMPLEMENTATION !== 'js';
 const LOD_IMPLEMENTATION = implementationFromRoute(
   initialBrowserParams, 'lodimpl',
 );
@@ -672,6 +678,97 @@ const graphicsBackendDiagnostics = {
   },
 };
 globalThis.__hyperscopeGraphicsBackend = graphicsBackendDiagnostics;
+
+const backendPickDiagnostics = {
+  enabled: PICK_IMPLEMENTATION !== 'js',
+  requested: PICK_IMPLEMENTATION,
+  effective: 'webgl2',
+  state: PICK_IMPLEMENTATION === 'js' ? 'disabled' : 'awaiting-retained-frame',
+  requests: 0,
+  staged: 0,
+  stageRejects: 0,
+  readbacks: 0,
+  staleResults: 0,
+  coverageMismatches: 0,
+  identityMismatches: 0,
+  maximumBarycentricError: 0,
+  maximumSourcePositionError: 0,
+  maximumOutputDistanceError: 0,
+  maximumStagingMs: 0,
+  maximumReadbackMs: 0,
+  maximumTotalMs: 0,
+  errors: 0,
+  lastError: null,
+  lastReport: null,
+};
+globalThis.__hyperscopeBackendPickDiagnostics = backendPickDiagnostics;
+
+function recordBackendPickError(error, phase) {
+  backendPickDiagnostics.errors += 1;
+  backendPickDiagnostics.state = `${phase}-error`;
+  backendPickDiagnostics.lastError = error?.message || String(error);
+  const count = backendPickDiagnostics.errors;
+  if (count === 1 || (count & (count - 1)) === 0) {
+    console.warn(`WebGPU pick ${phase} evidence failed; WebGL2 remains authoritative:`, error);
+  }
+}
+
+function recordBackendPickEvidence(report) {
+  if (!report?.comparison || !Number.isInteger(Number(report.targetEpoch))) {
+    recordBackendPickError('malformed retained pick evidence', 'readback');
+    return;
+  }
+  backendPickDiagnostics.readbacks += 1;
+  backendPickDiagnostics.lastReport = report;
+  const currentTargetEpoch = rustInteractionDiagnostics.targetEpoch;
+  if (!Number.isInteger(currentTargetEpoch)
+      || Number(report.targetEpoch) !== currentTargetEpoch) {
+    backendPickDiagnostics.staleResults += 1;
+    backendPickDiagnostics.state = 'stale-target-epoch';
+    return;
+  }
+  const comparison = report.comparison;
+  if (!comparison.coverageMatches) backendPickDiagnostics.coverageMismatches += 1;
+  if (!comparison.identityMatches) backendPickDiagnostics.identityMismatches += 1;
+  for (const [field, diagnostic] of [
+    ['maximumBarycentricError', 'maximumBarycentricError'],
+    ['maximumSourcePositionError', 'maximumSourcePositionError'],
+    ['outputDistanceError', 'maximumOutputDistanceError'],
+  ]) {
+    const value = Number(comparison[field]);
+    if (Number.isFinite(value)) {
+      backendPickDiagnostics[diagnostic] = Math.max(
+        backendPickDiagnostics[diagnostic],
+        value,
+      );
+    }
+  }
+  for (const [field, diagnostic] of [
+    ['stagingMs', 'maximumStagingMs'],
+    ['readbackMs', 'maximumReadbackMs'],
+    ['totalMs', 'maximumTotalMs'],
+  ]) {
+    const value = Number(report[field]);
+    if (Number.isFinite(value)) {
+      backendPickDiagnostics[diagnostic] = Math.max(
+        backendPickDiagnostics[diagnostic],
+        value,
+      );
+    }
+  }
+  const mismatches = backendPickDiagnostics.coverageMismatches
+    + backendPickDiagnostics.identityMismatches;
+  backendPickDiagnostics.state = mismatches === 0 ? 'shadowing' : 'mismatch';
+  if (mismatches > 0 && (mismatches === 1 || (mismatches & (mismatches - 1)) === 0)) {
+    console.warn('WebGPU retained pick topology drift; WebGL2 remains authoritative:', report);
+  }
+}
+
+function readBackendPickEvidence() {
+  Promise.resolve(quiltingWasmBackend.mr_readBackendPickEvidence())
+    .then(recordBackendPickEvidence)
+    .catch(error => recordBackendPickError(error, 'readback'));
+}
 
 function webGpuPresentationSupportsRenderMode(mode, residency = null) {
   const diagnosticStyle = mode === 'matcap' || mode === 'wire' || mode === 'normals'
@@ -1696,6 +1793,7 @@ function syncURL() {
     const set = (k, v, def) => { if (v !== def) p.set(k, v); };
     set('glb', currentGlb, PARAM_DEFAULTS.glb);
     set('gfx', GRAPHICS_BACKEND_REQUEST, PARAM_DEFAULTS.gfx);
+    set('pickimpl', PICK_IMPLEMENTATION, PARAM_DEFAULTS.pickimpl);
     // Signal-driven params — wrapped in try/catch to handle TDZ during early syncURL calls
     try {
       const ss = (k, sig, def) => set(k, String(sig.peek()), def);
@@ -7033,6 +7131,39 @@ function pickFaceAtCanvasPixel(x, y) {
 
 function pickSurfaceAtCanvasPixel(x, y) {
   if (!preparePickCamera()) return null;
+  const targetEpoch = rustInteractionDiagnostics.targetEpoch;
+  if (PICK_IMPLEMENTATION !== 'js'
+      && Number.isInteger(targetEpoch)
+      && typeof quiltingWasmBackend.mr_stageBackendPickEvidence === 'function'
+      && typeof quiltingWasmBackend.mr_readBackendPickEvidence === 'function') {
+    backendPickDiagnostics.requests += 1;
+    try {
+      const staged = quiltingWasmBackend.mr_stageBackendPickEvidence(
+        pickMvp,
+        pickView,
+        pickCameraPos,
+        x,
+        y,
+        targetEpoch,
+      );
+      if (staged?.staged) {
+        backendPickDiagnostics.staged += 1;
+        backendPickDiagnostics.state = 'reading';
+        backendPickDiagnostics.lastError = null;
+        readBackendPickEvidence();
+      } else {
+        backendPickDiagnostics.stageRejects += 1;
+        backendPickDiagnostics.state = 'stage-rejected';
+        backendPickDiagnostics.lastError = staged?.error || 'retained pick was not staged';
+      }
+      return staged?.webgl ?? null;
+    } catch (error) {
+      recordBackendPickError(error, 'stage');
+    }
+  } else if (PICK_IMPLEMENTATION !== 'js') {
+    backendPickDiagnostics.state = Number.isInteger(targetEpoch)
+      ? 'awaiting-wasm' : 'awaiting-target-epoch';
+  }
   return mr_pickSurface(pickMvp, pickView, pickCameraPos, x, y);
 }
 
@@ -13409,11 +13540,13 @@ phase('wasm', [], async () => {
     }
   }
   if (!mr_init('cv')) throw 'renderer init failed';
-  if (GRAPHICS_BACKEND_REQUEST === 'webgpu-shadow') {
+  if (GRAPHICS_BACKEND_REQUEST === 'webgpu-shadow'
+      || (GRAPHICS_BACKEND_REQUEST === 'webgl2' && PICK_IMPLEMENTATION !== 'js')) {
     try {
       graphicsBackendDiagnostics.residency =
         await quiltingWasmBackend.mr_initWebGpuBackend();
-      graphicsBackendDiagnostics.state = 'shadow-ready';
+      graphicsBackendDiagnostics.state = GRAPHICS_BACKEND_REQUEST === 'webgpu-shadow'
+        ? 'shadow-ready' : 'pick-shadow-ready';
     } catch (error) {
       graphicsBackendDiagnostics.state = 'fallback';
       graphicsBackendDiagnostics.fallbackReason = error?.message || String(error);
