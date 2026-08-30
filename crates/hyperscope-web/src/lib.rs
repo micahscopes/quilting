@@ -6,6 +6,9 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(any(feature = "patch-lab", feature = "render-controls"))]
+mod controls;
+
 #[cfg(feature = "animation-control")]
 pub mod animation_control;
 
@@ -23,6 +26,9 @@ pub mod navigation_status;
 
 #[cfg(feature = "presentation-card")]
 pub mod presentation_card;
+
+#[cfg(feature = "patch-lab")]
+pub mod patch_lab;
 
 #[cfg(feature = "render-controls")]
 pub mod render_controls;

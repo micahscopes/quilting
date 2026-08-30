@@ -5,20 +5,14 @@
 //! replacement intent, so a view never performs a split read/modify/write over
 //! independently ordered browser signals.
 
-use hyperscope_app::{hyperscope_control_spec, AppRenderSnapshot, RenderSettings};
+use crate::controls::numeric_control_domain;
+pub use crate::controls::NumericControlViewDomain;
+use hyperscope_app::{AppRenderSnapshot, RenderSettings};
 
 #[cfg(all(feature = "csr", target_arch = "wasm32"))]
 mod csr;
 #[cfg(all(feature = "csr", target_arch = "wasm32"))]
 pub use csr::mount_render_controls;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct NumericControlViewDomain {
-    pub minimum: f64,
-    pub maximum: f64,
-    pub integral: bool,
-    pub step: f64,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RenderControlIntent {
@@ -121,22 +115,10 @@ pub fn project_render_controls(snapshot: &AppRenderSnapshot) -> RenderControlsVi
             atlas_exponent: settings.atlas_exponent,
             max_face_edge_ratio: settings.max_face_edge_ratio,
         },
-        resolution: numeric_domain("res"),
-        density: numeric_domain("density"),
-        pixel_floor: numeric_domain("minpx"),
-        atlas: numeric_domain("atlas"),
-    }
-}
-
-fn numeric_domain(key: &str) -> NumericControlViewDomain {
-    let domain = hyperscope_control_spec(key)
-        .and_then(|spec| spec.numeric_domain)
-        .unwrap_or_else(|| panic!("render control {key} must have a numeric domain"));
-    NumericControlViewDomain {
-        minimum: domain.minimum,
-        maximum: domain.maximum,
-        integral: domain.integral,
-        step: domain.step,
+        resolution: numeric_control_domain("res"),
+        density: numeric_control_domain("density"),
+        pixel_floor: numeric_control_domain("minpx"),
+        atlas: numeric_control_domain("atlas"),
     }
 }
 

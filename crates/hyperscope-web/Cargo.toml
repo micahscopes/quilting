@@ -13,12 +13,14 @@ animation-control = ["dep:hyperscope-app"]
 asset-credits = ["dep:hyperscape-protocol", "dep:hyperscope-app"]
 navigation-status = ["dep:hyperscope-app"]
 presentation-card = ["dep:hyperscope-app"]
+patch-lab = ["dep:hyperscope-app"]
 render-controls = ["dep:hyperscope-app"]
 csr = [
     "animation-control",
     "asset-credits",
     "navigation-status",
     "presentation-card",
+    "patch-lab",
     "render-controls",
     "dep:futures-signals",
     "dep:js-sys",
