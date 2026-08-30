@@ -3,8 +3,9 @@ set -euo pipefail
 
 # Trunk runs pre-build hooks for both `serve` and release builds. Keep Rust's
 # release optimization by default for renderer performance, but offer an
-# explicit unoptimized Rust lane for binding/UI iteration. Binaryen's expensive
-# whole-module wasm-opt pass remains a separate artifact-production choice.
+# explicit development-profile lane for binding/UI iteration. Workspace-level
+# numeric-crate overrides still apply. Binaryen's expensive whole-module
+# wasm-opt pass remains a separate artifact-production choice.
 case "${HYPERSCOPE_WASM_PROFILE:-release}" in
     release)
         wasm_pack_mode=(--release)

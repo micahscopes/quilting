@@ -99,9 +99,12 @@ into an unbounded artifact-size build. Override the job ceiling with
 HYPERSCOPE_WASM_PROFILE=dev HYPERSCOPE_BUILD_JOBS=1 trunk serve
 ```
 
-That explicit fast lane also disables Rust optimization and is intended for
-binding/UI iteration, not renderer performance measurements or rehearsals.
-The ordinary `trunk serve` command remains the representative runtime build.
+That explicit fast lane disables optimization for the top-level WASM/app
+build; the workspace's optimized-dev overrides for `quilting-core`,
+`distressed-blue-noise`, and `cdt` still apply so tessellation remains usable.
+It is intended for binding/UI iteration, not renderer performance measurements
+or rehearsals. The ordinary `trunk serve` command remains the representative
+runtime build.
 The build-policy smoke verifies these modes without compiling WASM:
 
 ```sh

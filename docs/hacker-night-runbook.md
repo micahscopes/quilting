@@ -34,8 +34,10 @@ For binding/UI-only iteration, use the explicitly non-representative fast lane:
 HYPERSCOPE_WASM_PROFILE=dev HYPERSCOPE_BUILD_JOBS=1 trunk serve
 ```
 
-Do not use that development-profile artifact for renderer performance or
-release-size evidence. The zero-build policy check is:
+The main WASM/app uses Cargo's development profile, while the three numeric
+crates retain their workspace optimized-dev overrides. Do not use that artifact
+for renderer performance or release-size evidence. The zero-build policy check
+is:
 
 ```sh
 node scripts/smoke-hyperscope-build-policy.mjs
