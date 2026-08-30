@@ -2453,6 +2453,7 @@ mod tests {
         match event {
             AppEvent::Input(timed) => match &timed.value {
                 SemanticAction::Navigate(_) => "navigate",
+                SemanticAction::Interact(_) => "interact",
                 SemanticAction::Present(_) => "present",
                 SemanticAction::Animate(_) => "animate",
                 SemanticAction::SetNavigationSettings(_) => "set_navigation_settings",

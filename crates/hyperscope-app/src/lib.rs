@@ -26,10 +26,11 @@ pub use settings::*;
 use futures_signals::signal::{Mutable, MutableSignalCloned};
 use futures_signals::signal_vec::{MutableSignalVec, MutableVec};
 use hyperscape::{
-    extract_packed_presentation_scene, CameraRig, FocusNavigation, FocusSphere, NavigationAction,
-    NavigationController, NavigationPreset, PackedPresentationLayerBinding,
-    PackedPresentationNode, PackedPresentationSceneError, Presentation, PresentationAsset,
-    PresentationRuntime, PresentationSnapshot, PresentationTessellation, RenderStyle,
+    extract_packed_presentation_scene, CameraRig, FocusNavigation, FocusSphere, InteractionAction,
+    InteractionController, InteractionSnapshot, NavigationAction, NavigationController,
+    NavigationPreset, PackedPresentationLayerBinding, PackedPresentationNode,
+    PackedPresentationSceneError, Presentation, PresentationAsset, PresentationRuntime,
+    PresentationSnapshot, PresentationTessellation, RenderStyle, ScheduledInteractionAction,
     ScheduledNavigationAction, SphereReflectionState,
 };
 use hyperscape_protocol::{
@@ -83,6 +84,7 @@ impl<T> Timed<T> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SemanticAction {
     Navigate(NavigationAction),
+    Interact(InteractionAction),
     Present(PresentationAction),
     Animate(AnimationAction),
     SetNavigationSettings(NavigationSettings),
@@ -734,6 +736,8 @@ pub struct AppFrameSnapshot {
     /// chart. Source selection survives a projection pole; only the derived
     /// output values become absent.
     pub selected_focus: Option<SelectedFocusSnapshot>,
+    /// Ephemeral hover/press state with selection derived from `focus.anchor`.
+    pub interaction: InteractionSnapshot,
     pub reflection: SphereReflectionState,
     pub camera_transition_remaining: Option<f64>,
     pub surface_anchor_transition_remaining: Option<f64>,
@@ -950,6 +954,7 @@ pub struct AppState {
     /// participate in that ordering domain.
     next_direct_input_sequence: Option<u64>,
     navigation: NavigationController,
+    interaction: InteractionController,
     presentation: Option<PresentationRuntime>,
     active_presentation: Option<PresentationSnapshot>,
     presentation_animation_residency: Option<PresentationAnimationResidencyBinding>,
@@ -979,6 +984,7 @@ impl Default for AppState {
             frame_elapsed_seconds: 0.0,
             next_direct_input_sequence: Some(0),
             navigation: NavigationController::default(),
+            interaction: InteractionController::default(),
             presentation: None,
             active_presentation: None,
             presentation_animation_residency: None,
@@ -1022,6 +1028,10 @@ impl AppState {
             &self.navigation.focus,
             self.navigation.runtime.reflection,
         );
+        let interaction = InteractionSnapshot::from_state(
+            &self.interaction.state,
+            &self.navigation.focus,
+        );
         AppFrameSnapshot {
             revision: self.revision,
             elapsed_seconds: self.frame_elapsed_seconds,
@@ -1036,6 +1046,7 @@ impl AppState {
             camera: self.navigation.camera,
             focus: self.navigation.focus.clone(),
             selected_focus,
+            interaction,
             reflection: self.navigation.runtime.reflection,
             camera_transition_remaining,
             surface_anchor_transition_remaining,
@@ -1099,6 +1110,17 @@ impl AppState {
                                 action,
                             })
                             .map_err(ReduceError::Navigation)?;
+                        publish_ui = false;
+                    }
+                    SemanticAction::Interact(action) => {
+                        self.interaction
+                            .queue
+                            .insert(ScheduledInteractionAction {
+                                sequence: timed.sequence,
+                                at_seconds: timed.at_seconds,
+                                action,
+                            })
+                            .map_err(ReduceError::Interaction)?;
                         publish_ui = false;
                     }
                     SemanticAction::Present(action) => {
@@ -1316,6 +1338,21 @@ impl AppState {
                     return Err(ReduceError::InvalidTime);
                 }
                 let next_animation = self.animation.advanced(frame.delta_seconds)?;
+                let activations = self
+                    .interaction
+                    .advance_to(frame.elapsed_seconds, &self.navigation.focus)
+                    .map_err(ReduceError::Interaction)?;
+                for activation in activations {
+                    if let Err(error) = self.navigation.schedule(
+                        activation.at_seconds,
+                        activation.navigation_action(self.interaction.policy),
+                    ) {
+                        self.interaction.diagnostics.0.push(format!(
+                            "interaction activation {} could not enter navigation: {error}",
+                            activation.sequence
+                        ));
+                    }
+                }
                 self.navigation
                     .advance_to(frame.elapsed_seconds)
                     .map_err(ReduceError::Navigation)?;
@@ -2442,6 +2479,7 @@ pub enum ReduceError {
     FutureNavigationSettingsInput,
     FutureRenderSettingsInput,
     Navigation(&'static str),
+    Interaction(&'static str),
     NavigationState(String),
     Presentation(String),
     PresentationAnimation(String),
@@ -2493,6 +2531,9 @@ impl fmt::Display for ReduceError {
                 "render-settings input cannot be scheduled beyond the current app frame",
             ),
             Self::Navigation(message) => write!(formatter, "navigation event failed: {message}"),
+            Self::Interaction(message) => {
+                write!(formatter, "interaction event failed: {message}")
+            }
             Self::NavigationState(message) => {
                 write!(formatter, "navigation synchronization failed: {message}")
             }
@@ -3979,6 +4020,56 @@ mod tests {
             duration_seconds: 0.0,
             easing: hyperscape::TransitionEasing::SmootherStep,
         }
+    }
+
+    fn interaction_hit(identity: AssetEntityId) -> hyperscape::InteractionHit {
+        hyperscape::InteractionHit::new(
+            identity,
+            FocusSphere::new([2.0, 1.0, -1.0], 0.5).unwrap(),
+            [2.1, 1.0, -1.0],
+            1.0,
+        )
+        .unwrap()
+        .with_surface(9, [2.0, 1.0, 1.0])
+        .unwrap()
+    }
+
+    #[test]
+    fn interaction_activation_selects_through_the_same_app_frame_navigation_boundary() {
+        let store = AppStore::default();
+        let hit = interaction_hit(selection_identity());
+        for (expected_sequence, action) in [
+            (0, InteractionAction::SetHover(Some(hit))),
+            (1, InteractionAction::PressPrimary),
+            (2, InteractionAction::ReleasePrimary),
+        ] {
+            let (sequence, commit) = store
+                .dispatch_semantic(SemanticAction::Interact(action))
+                .unwrap();
+            assert_eq!(sequence, expected_sequence);
+            assert!(!commit.published_ui);
+        }
+        let pending = store.frame_snapshot();
+        assert_eq!(pending.interaction.hovered, None);
+        assert_eq!(pending.interaction.selected, None);
+        assert_eq!(pending.pending_navigation_actions, 0);
+
+        store
+            .dispatch(AppEvent::Frame(FrameTick {
+                elapsed_seconds: 0.0,
+                delta_seconds: 0.0,
+            }))
+            .unwrap();
+
+        let committed = store.frame_snapshot();
+        assert_eq!(committed.interaction.hovered, Some(hit));
+        assert_eq!(committed.interaction.active, None);
+        assert_eq!(committed.interaction.last_applied_sequence, Some(2));
+        assert_eq!(committed.interaction.selected, Some(hit.identity));
+        assert_eq!(committed.selected_focus.unwrap().identity, hit.identity);
+        assert_eq!(committed.focus.anchor.unwrap().source_pivot, hit.source_pivot);
+        assert_eq!(committed.pending_navigation_actions, 0);
+        assert_eq!(committed.last_applied_navigation_sequence, Some(0));
     }
 
     #[test]
