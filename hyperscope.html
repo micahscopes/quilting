@@ -1531,7 +1531,7 @@ function phaseReady(name) { return phases[name]?.done?.peek() ?? false; }
 // Dedicated readiness signal — defined early so effects can subscribe via .get()
 const wasmOk = signal(false, 'wasmOk');
 // Bind a signal to a DOM slider (bidirectional)
-function bindSlider(id, sig, displayFn, onInput = null) {
+function bindSlider(id, sig, displayFn, onInput = null, onRequest = null) {
   const el = $(id);
   const label = $(id + '-v');
   const updateDisplay = value => {
@@ -1544,9 +1544,15 @@ function bindSlider(id, sig, displayFn, onInput = null) {
   updateDisplay(sig.peek());
   el.addEventListener('input', () => {
     const requested = parseFloat(el.value);
-    sig.set(requested);
+    const handled = onRequest ? onRequest(requested) : null;
+    if (handled == null) sig.set(requested);
+    else if (parseFloat(el.value) !== sig.peek()) el.value = sig.peek();
     updateDisplay(sig.peek());
-    if (onInput) onInput(sig.peek(), Object.is(sig.peek(), requested));
+    if (onInput) onInput(
+      sig.peek(),
+      handled === true || (handled == null && Object.is(sig.peek(), requested)),
+      handled,
+    );
   });
   // Keep slider in sync if signal is set programmatically
   effect(() => {
@@ -3574,34 +3580,40 @@ function applyRustCameraSnapshot(snapshot) {
   return true;
 }
 
+let rustNavigationProjectionDepth = 0;
 function applyRustNavigationSnapshot(snapshot, selection = null) {
   if (!snapshot?.camera || !snapshot?.focus) return false;
-  const focus = snapshot.focus;
-  focusSphere.active = focus.focus_enabled;
-  focusSphere.center = Array.from(focus.center);
-  focusSphere.radius = focus.radius;
-  const selectedFocus = selection ? snapshot.selected_focus : null;
-  focusSphere.margin = selectedFocus?.margin ?? null;
-  focusSphere.anchorNode = selection?.node ?? null;
-  focusSphere.anchorRadius = selection?.bound?.radius ?? null;
-  focusSphereTransition = null;
-  if (selection) {
-    selection.outputAnchor = selectedFocus?.output_pivot
-      ? Array.from(selectedFocus.output_pivot)
-      : null;
-    selection.outputRadius = Number.isFinite(selectedFocus?.output_radius)
-      ? selectedFocus.output_radius
-      : null;
+  rustNavigationProjectionDepth += 1;
+  try {
+    const focus = snapshot.focus;
+    focusSphere.active = focus.focus_enabled;
+    focusSphere.center = Array.from(focus.center);
+    focusSphere.radius = focus.radius;
+    const selectedFocus = selection ? snapshot.selected_focus : null;
+    focusSphere.margin = selectedFocus?.margin ?? null;
+    focusSphere.anchorNode = selection?.node ?? null;
+    focusSphere.anchorRadius = selection?.bound?.radius ?? null;
+    focusSphereTransition = null;
+    if (selection) {
+      selection.outputAnchor = selectedFocus?.output_pivot
+        ? Array.from(selectedFocus.output_pivot)
+        : null;
+      selection.outputRadius = Number.isFinite(selectedFocus?.output_radius)
+        ? selectedFocus.output_radius
+        : null;
+    }
+    batchSignals(() => {
+      mob.mx.set(focus.center[0] * 10);
+      mob.my.set(focus.center[1] * 10);
+      mob.mz.set(focus.center[2] * 10);
+      mob.mr.set(focus.radius * 10);
+      mob.xform.set(focus.inversion_enabled ? 'sphere_reflection' : 'identity');
+    });
+    applyRustFocusFieldProjection(snapshot);
+    return applyRustCameraSnapshot(snapshot);
+  } finally {
+    rustNavigationProjectionDepth -= 1;
   }
-  batchSignals(() => {
-    mob.mx.set(focus.center[0] * 10);
-    mob.my.set(focus.center[1] * 10);
-    mob.mz.set(focus.center[2] * 10);
-    mob.mr.set(focus.radius * 10);
-    mob.xform.set(focus.inversion_enabled ? 'sphere_reflection' : 'identity');
-  });
-  applyRustFocusFieldProjection(snapshot);
-  return applyRustCameraSnapshot(snapshot);
 }
 
 function applyRustPresentationNavigation(snapshot) {
@@ -7640,7 +7652,7 @@ function dispatchRustFocusSphereGeometry(sphere, preserveAnchor, source) {
   if (RUST_SELECTION_IMPLEMENTATION !== 'rust' || !rustAppShadow) return null;
   // An unmapped renderer selection deliberately retains the incumbent local
   // sphere. Rust must not detach or reinterpret it as an authored anchor.
-  if (selectedObject && (!preserveAnchor || !rustAppShadowSelectionQueued)) return null;
+  if (selectedObject && !rustAppShadowSelectionQueued) return null;
   rustAppShadowDiagnostics.focusSphereEditDispatches += 1;
   rustAppShadowDiagnostics.lastFocusSphereEditSource = source;
   try {
@@ -8243,6 +8255,23 @@ const mob = {
   mx: signal(5, 'mx'), my: signal(0, 'my'), mz: signal(0, 'mz'), mr: signal(20, 'mr'),
 };
 bindBtnGroup('xform-btns', mob.xform);
+function dispatchManualFocusSphereControl(id, requested) {
+  if (RUST_SELECTION_IMPLEMENTATION !== 'rust' || !rustAppShadow) return null;
+  const controls = [mob.mx.peek(), mob.my.peek(), mob.mz.peek(), mob.mr.peek()];
+  const controlIndex = { mx: 0, my: 1, mz: 2, mr: 3 }[id];
+  controls[controlIndex] = requested;
+  const anchored = id === 'mr'
+    && selectedObject
+    && rustAppShadowSelectionQueued
+    && focusSphere.anchorNode === selectedObject.node
+    && focusSphere.anchorRadius > 0;
+  return dispatchRustFocusSphereGeometry({
+    center: anchored
+      ? Array.from(selectedObject.bound.center)
+      : controls.slice(0, 3).map(value => value / 10),
+    radius: Math.max(controls[3] / 10, 0.011),
+  }, Boolean(anchored), `manual-focus-${id}`);
+}
 function commitManualFocusSphereInput(id, accepted) {
   if (!accepted) return;
   focusSphereTransition = null;
@@ -8259,16 +8288,16 @@ function commitManualFocusSphereInput(id, accepted) {
 }
 bindSlider('mx', mob.mx, v => (v/10).toFixed(2), (_, accepted) => {
   commitManualFocusSphereInput('mx', accepted);
-});
+}, requested => dispatchManualFocusSphereControl('mx', requested));
 bindSlider('my', mob.my, v => (v/10).toFixed(2), (_, accepted) => {
   commitManualFocusSphereInput('my', accepted);
-});
+}, requested => dispatchManualFocusSphereControl('my', requested));
 bindSlider('mz', mob.mz, v => (v/10).toFixed(2), (_, accepted) => {
   commitManualFocusSphereInput('mz', accepted);
-});
+}, requested => dispatchManualFocusSphereControl('mz', requested));
 bindSlider('mr', mob.mr, v => (v/10).toFixed(2), (_, accepted) => {
   commitManualFocusSphereInput('mr', accepted);
-});
+}, requested => dispatchManualFocusSphereControl('mr', requested));
 
 function computeMobius(type, cx, cy, cz, r) {
   if (type === 'sphere_reflection' && r > 0.01) {
@@ -8486,13 +8515,19 @@ function fitOrToggleInversionToSelection(nowMs = performance.now()) {
   const rustGesture = dispatchAppSelectedInversionGesture(nowMs);
   if (RUST_SELECTION_IMPLEMENTATION === 'rust' && rustGesture.observed) {
     const subject = `Node ${selectedObject.node}`;
+    const retainsSelectedAnchor = Boolean(rustGesture.navigation?.selected_focus);
+    const navigationApplied = retainsSelectedAnchor
+      ? applyRustSelectedFocusNavigation(rustGesture.navigation)
+      : applyRustNavigationSnapshot(rustGesture.navigation);
     if (!rustGesture.accepted
-        || !applyRustSelectedFocusNavigation(rustGesture.navigation)) {
+        || !navigationApplied) {
       selectionLabel(`${subject} · inversion unchanged at pole`);
       return false;
     }
     applyRustAppFocusToRenderer(rustGesture.navigation);
-    compareAppSelectionTransitionFrame(rustGesture.navigation, nowMs);
+    if (retainsSelectedAnchor) {
+      compareAppSelectionTransitionFrame(rustGesture.navigation, nowMs);
+    }
     selectionLabel(`${subject} · inversion ${rustGesture.desiredEnabled ? 'on' : 'off'}`);
     return true;
   }
@@ -8763,7 +8798,12 @@ effect(() => {
   if (restoringManualReflectionControls) return;
   const m = computeMobius(type, center[0], center[1], center[2], radius);
   const nextReflection = manualReflectionState(type, center, radius);
-  const reflectionTransport = transportManualCamera(previousManualReflection, nextReflection);
+  const reflectionTransport = rustNavigationProjectionDepth > 0
+    ? {
+      accepted: true,
+      cameraTransported: !sameManualReflection(previousManualReflection, nextReflection),
+    }
+    : transportManualCamera(previousManualReflection, nextReflection);
   if (!reflectionTransport.accepted) {
     restoreManualReflectionControls(previousManualReflection);
     return;

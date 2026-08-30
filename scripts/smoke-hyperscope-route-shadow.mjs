@@ -520,12 +520,16 @@ for (const navigationAuthorityStep of [
 }
 for (const focusSphereAuthorityStep of [
   'function dispatchRustFocusSphereGeometry(sphere, preserveAnchor, source)',
+  'function dispatchManualFocusSphereControl(id, requested)',
   'rustAppShadow.editFocusSphere(',
   'const navigation = rustAppShadow.tickNavigation(0);',
   '? applyRustSelectedFocusNavigation(navigation)',
   ': applyRustNavigationSnapshot(navigation);',
   "{ center: nextCenter, radius: nextRadius },\n          'spacemouse-inversion',",
   "}, 'focus-wheel');",
+  "requested => dispatchManualFocusSphereControl('mr', requested)",
+  'rustNavigationProjectionDepth > 0',
+  'const retainsSelectedAnchor = Boolean(rustGesture.navigation?.selected_focus);',
 ]) {
   assert.ok(
     browserSource.includes(focusSphereAuthorityStep),
