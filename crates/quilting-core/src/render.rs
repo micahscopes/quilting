@@ -949,7 +949,7 @@ pub struct RenderParityDiagnostics {
 #[derive(Debug, Default)]
 pub struct RenderParityObserver {
     enabled: bool,
-    scene: Option<RenderSceneSnapshot>,
+    scene: Option<ValidatedRenderScene>,
     scene_rebuilds: u64,
     frames_observed: u64,
     matching_frames: u64,
@@ -975,16 +975,27 @@ impl RenderParityObserver {
     /// Validate before replacing the retained scene, so a failed extraction
     /// never destroys the last comparison oracle.
     pub fn replace_scene(&mut self, scene: RenderSceneSnapshot) -> Result<(), RenderContractError> {
+        let scene = ValidatedRenderScene::new(scene)?;
+        self.replace_validated_scene(scene)
+    }
+
+    pub fn replace_validated_scene(
+        &mut self,
+        scene: ValidatedRenderScene,
+    ) -> Result<(), RenderContractError> {
         if !self.enabled {
             return Err(RenderContractError::ObserverDisabled);
         }
-        scene.validate()?;
         self.scene = Some(scene);
         self.scene_rebuilds = self.scene_rebuilds.saturating_add(1);
         Ok(())
     }
 
     pub fn scene(&self) -> Option<&RenderSceneSnapshot> {
+        self.scene.as_ref().map(ValidatedRenderScene::snapshot)
+    }
+
+    pub fn validated_scene(&self) -> Option<&ValidatedRenderScene> {
         self.scene.as_ref()
     }
 
@@ -996,14 +1007,52 @@ impl RenderParityObserver {
         if !self.enabled {
             return Err(RenderContractError::ObserverDisabled);
         }
-        let scene = self
-            .scene
-            .as_ref()
-            .ok_or(RenderContractError::ObserverSceneUnavailable)?;
-        let expected = frame.expected_submission_stats(scene)?;
+        let (scene_revision, expected) = {
+            let scene = self
+                .scene
+                .as_ref()
+                .ok_or(RenderContractError::ObserverSceneUnavailable)?;
+            (
+                scene.snapshot().revision,
+                frame.execution(scene.snapshot())?.submission_stats(),
+            )
+        };
+        Ok(self.record_comparison(frame.revision, scene_revision, expected, actual))
+    }
+
+    pub fn observe_execution(
+        &mut self,
+        frame_revision: u64,
+        execution: RenderExecution<'_, '_>,
+        actual: RenderSubmissionStats,
+    ) -> Result<RenderParityComparison, RenderContractError> {
+        if !self.enabled {
+            return Err(RenderContractError::ObserverDisabled);
+        }
+        let scene_revision = {
+            let scene = self
+                .scene
+                .as_ref()
+                .ok_or(RenderContractError::ObserverSceneUnavailable)?;
+            if !scene.contains_snapshot(execution.scene()) {
+                return Err(RenderContractError::ExecutionSceneMismatch);
+            }
+            scene.snapshot().revision
+        };
+        let expected = execution.submission_stats();
+        Ok(self.record_comparison(frame_revision, scene_revision, expected, actual))
+    }
+
+    fn record_comparison(
+        &mut self,
+        frame_revision: u64,
+        scene_revision: u64,
+        expected: RenderSubmissionStats,
+        actual: RenderSubmissionStats,
+    ) -> RenderParityComparison {
         let comparison = RenderParityComparison {
-            frame_revision: frame.revision,
-            scene_revision: scene.revision,
+            frame_revision,
+            scene_revision,
             expected,
             actual,
             mismatch: RenderSubmissionMismatch::between(expected, actual),
@@ -1015,13 +1064,13 @@ impl RenderParityObserver {
             self.mismatching_frames = self.mismatching_frames.saturating_add(1);
         }
         self.last = Some(comparison);
-        Ok(comparison)
+        comparison
     }
 
     pub fn diagnostics(&self) -> RenderParityDiagnostics {
         RenderParityDiagnostics {
             enabled: self.enabled,
-            scene_revision: self.scene.as_ref().map(|scene| scene.revision),
+            scene_revision: self.scene.as_ref().map(|scene| scene.snapshot().revision),
             scene_rebuilds: self.scene_rebuilds,
             frames_observed: self.frames_observed,
             matching_frames: self.matching_frames,
@@ -1228,6 +1277,10 @@ impl ValidatedRenderScene {
     pub fn shares_snapshot_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.snapshot, &other.snapshot)
     }
+
+    pub fn contains_snapshot(&self, snapshot: &RenderSceneSnapshot) -> bool {
+        std::ptr::eq(self.snapshot(), snapshot)
+    }
 }
 
 impl TryFrom<RenderSceneSnapshot> for ValidatedRenderScene {
@@ -1364,6 +1417,10 @@ impl<'frame, 'scene> RenderExecution<'frame, 'scene> {
 
     pub fn batches(self) -> &'scene [RenderBatchSnapshot] {
         &self.scene.batches
+    }
+
+    pub fn scene(self) -> &'scene RenderSceneSnapshot {
+        self.scene
     }
 
     /// Derive the exact logical indexed work without revalidating or allocating.
@@ -1689,6 +1746,7 @@ pub enum RenderContractError {
     CompactionBatchShapeMismatch,
     SceneRevisionMismatch { frame: u64, scene: u64 },
     CommandSequenceMismatch,
+    ExecutionSceneMismatch,
     ObserverDisabled,
     ObserverSceneUnavailable,
 }
@@ -1800,6 +1858,9 @@ impl fmt::Display for RenderContractError {
             ),
             Self::CommandSequenceMismatch => {
                 formatter.write_str("render command sequence is not canonical")
+            }
+            Self::ExecutionSceneMismatch => {
+                formatter.write_str("render execution does not reference the observed scene epoch")
             }
             Self::ObserverDisabled => formatter.write_str("render parity observer is disabled"),
             Self::ObserverSceneUnavailable => {
@@ -2749,6 +2810,38 @@ mod tests {
 
         observer.set_enabled(false);
         assert_eq!(observer.diagnostics(), RenderParityDiagnostics::default());
+    }
+
+    #[test]
+    fn parity_observer_accepts_only_execution_from_its_retained_scene_epoch() {
+        let scene = ValidatedRenderScene::new(scene()).unwrap();
+        let plan = RenderCommandPlan::build(
+            &scene,
+            RenderStyle::Matcap,
+            RenderFrameOptions::default(),
+        )
+        .unwrap();
+        let expected = plan.execution().submission_stats();
+        let mut observer = RenderParityObserver::default();
+        observer.set_enabled(true);
+        observer.replace_validated_scene(scene.clone()).unwrap();
+        assert!(observer
+            .observe_execution(22, plan.execution(), expected)
+            .unwrap()
+            .is_match());
+
+        let distinct = ValidatedRenderScene::new(scene.snapshot().clone()).unwrap();
+        let distinct_plan = RenderCommandPlan::build(
+            &distinct,
+            RenderStyle::Matcap,
+            RenderFrameOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            observer.observe_execution(23, distinct_plan.execution(), expected),
+            Err(RenderContractError::ExecutionSceneMismatch)
+        );
+        assert_eq!(observer.diagnostics().frames_observed, 1);
     }
 
     #[test]
