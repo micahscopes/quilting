@@ -2373,6 +2373,75 @@ impl LodClassifierDevice {
                 "resident root render produced an implausible {rendered}-pixel footprint",
             )));
         }
+        let words_per_row = PADDED_BYTES_PER_ROW as usize / std::mem::size_of::<u32>();
+        let covered_pixel = |x_range: std::ops::Range<usize>| {
+            pixels
+                .chunks_exact(words_per_row)
+                .take(HEIGHT as usize)
+                .enumerate()
+                .find_map(|(y, row)| {
+                    x_range
+                        .clone()
+                        .find(|&x| row[x] != 0)
+                        .map(|x| [x as u32, y as u32])
+                })
+        };
+        // The left source root is suppressed and can only be visible through
+        // its sparse dyadic replacement. The right source face remains a
+        // resident root. Querying one proven rasterized pixel in each half
+        // therefore exercises both passes and their shared one-pixel depth.
+        let overlay_pixel = covered_pixel(0..WIDTH as usize / 2).ok_or_else(|| {
+            LodWebGpuError::Conformance(
+                "resident adaptive image has no covered overlay pixel".to_string(),
+            )
+        })?;
+        let root_pixel = covered_pixel(WIDTH as usize / 2..WIDTH as usize).ok_or_else(|| {
+            LodWebGpuError::Conformance(
+                "resident adaptive image has no covered root pixel".to_string(),
+            )
+        })?;
+        let pick_pipeline = self.create_patch_pick_pipeline(overlay_layout_pipeline)?;
+        let root_pick_pipeline =
+            self.create_resident_root_pick_pipeline(&pipeline, &pick_pipeline)?;
+        let pick_target = self.create_patch_pick_target();
+        for (pixel, epoch, expected_face, expected_node) in
+            [(overlay_pixel, 92, 0, 7), (root_pixel, 93, 1, 8)]
+        {
+            let request = PatchPickRequest::new([WIDTH, HEIGHT], pixel, epoch)?;
+            let staged = self.stage_resident_adaptive_pick(
+                &root_pick_pipeline,
+                &pick_pipeline,
+                &render_scene,
+                &preparation,
+                &geometry,
+                &bindings,
+                Some(&overlay),
+                &packed_atlas,
+                &pick_target,
+                request,
+            )?;
+            if staged.encoding().indirect_draw_calls != 3 {
+                return Err(LodWebGpuError::Conformance(format!(
+                    "resident adaptive pick encoded {} indirect draws; expected 3",
+                    staged.encoding().indirect_draw_calls,
+                )));
+            }
+            let picked = staged.read().await?.ok_or_else(|| {
+                LodWebGpuError::Conformance(format!(
+                    "resident adaptive covered pixel {pixel:?} produced no pick",
+                ))
+            })?;
+            if picked.target_epoch != epoch
+                || picked.source_face != expected_face
+                || picked.packed_node != expected_node
+                || (picked.source_barycentric.into_iter().sum::<f32>() - 1.0).abs() > 1.0e-5
+                || picked.output_distance <= 0.0
+            {
+                return Err(LodWebGpuError::Conformance(format!(
+                    "resident adaptive pick returned an incoherent sample: {picked:?}",
+                )));
+            }
+        }
         let environment_descriptor = EnvironmentMapDescriptor {
             prefiltered_face_size: 1,
             prefiltered_mip_count: 1,
