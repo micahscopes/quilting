@@ -418,6 +418,39 @@ pub struct RouteSpaceMouseSettings {
     pub blender_rotate_invert_mask: u8,
 }
 
+/// Device-independent navigation preferences owned by the application.
+///
+/// Raw HID policy, axis maps, and browser focus permissions remain adapter
+/// concerns. These values instead change semantic transitions and surface
+/// locomotion, so mouse, SpaceMouse, replay, Blender, and future game inputs
+/// must all observe one committed packet.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NavigationSettings {
+    pub transition_seconds: f64,
+    pub surface_walk: SurfaceWalkControls,
+}
+
+impl Default for NavigationSettings {
+    fn default() -> Self {
+        Self {
+            transition_seconds: 0.7,
+            surface_walk: SurfaceWalkControls::default(),
+        }
+    }
+}
+
+impl NavigationSettings {
+    pub fn validate(self) -> Result<Self, &'static str> {
+        if !self.transition_seconds.is_finite() || !(0.0..=5.0).contains(&self.transition_seconds) {
+            return Err("navigation transition duration must be finite and in [0,5]");
+        }
+        self.surface_walk
+            .metrics(1.0, false)
+            .map_err(|_| "surface-walk controls are invalid")?;
+        Ok(self)
+    }
+}
+
 /// One typed startup value for browser, replay, and future Blender navigation
 /// adapters. URL/UI units are converted here; adapters consume semantic
 /// seconds and fractions and do not maintain a parallel route parser.
@@ -427,6 +460,18 @@ pub struct RouteNavigationSettings {
     pub camera: RouteCameraSettings,
     pub space_mouse: RouteSpaceMouseSettings,
     pub surface_walk: SurfaceWalkControls,
+}
+
+impl RouteNavigationSettings {
+    /// Project startup-only camera, transform, and HID values away, retaining
+    /// the semantic packet that belongs in `hyperscope-app` state.
+    pub fn application_settings(self) -> Result<NavigationSettings, &'static str> {
+        NavigationSettings {
+            transition_seconds: self.camera.focus_transition_seconds,
+            surface_walk: self.surface_walk,
+        }
+        .validate()
+    }
 }
 
 /// Decoded route values with deterministic first-value semantics. Invalid
@@ -491,7 +536,11 @@ impl HyperscopeRoute {
         if asset_present == entity_present {
             return;
         }
-        let missing_key = if asset_present { "selentity" } else { "selasset" };
+        let missing_key = if asset_present {
+            "selentity"
+        } else {
+            "selasset"
+        };
         self.diagnostics.push(RouteDiagnostic {
             code: RouteDiagnosticCode::InvalidValue,
             key: missing_key.to_owned(),
@@ -569,9 +618,7 @@ impl HyperscopeRoute {
     pub fn render_settings(&self) -> Result<RenderSettings, &'static str> {
         let style = match self.value("mode") {
             Some("both") => "matcap_wire",
-            Some(style @ ("pbr" | "matcap" | "wire" | "normals" | "lod" | "stretch")) => {
-                style
-            }
+            Some(style @ ("pbr" | "matcap" | "wire" | "normals" | "lod" | "stretch")) => style,
             _ => return Err("route render mode is invalid"),
         };
         let resolution_level = self
@@ -754,10 +801,7 @@ impl HyperscopeRoute {
                 )? / 100.0,
             },
             space_mouse: RouteSpaceMouseSettings {
-                move_sensitivity: number(
-                    "smmove",
-                    "route SpaceMouse move sensitivity is invalid",
-                )?,
+                move_sensitivity: number("smmove", "route SpaceMouse move sensitivity is invalid")?,
                 rotate_sensitivity: number(
                     "smrotate",
                     "route SpaceMouse rotation sensitivity is invalid",
@@ -841,10 +885,7 @@ mod tests {
         assert_eq!(resolved.len(), HYPERSCOPE_CONTROL_SPECS.len());
         assert_eq!(resolved[0], ("glb", "horse.glb"));
         assert_eq!(
-            resolved
-                .iter()
-                .copied()
-                .find(|(key, _)| *key == "mode"),
+            resolved.iter().copied().find(|(key, _)| *key == "mode"),
             Some(("mode", "lod")),
         );
         assert_eq!(resolved.last(), Some(&("rootgroupshadow", "0")));
@@ -916,10 +957,7 @@ mod tests {
             })
         );
 
-        let defaults = HyperscopeRoute::from_pairs([
-            ("animtime", "0.0"),
-            ("animspeed", "1.00"),
-        ]);
+        let defaults = HyperscopeRoute::from_pairs([("animtime", "0.0"), ("animspeed", "1.00")]);
         assert!(defaults.canonical_pairs().is_empty());
         assert_eq!(
             defaults.animation_clock().unwrap(),
@@ -937,17 +975,17 @@ mod tests {
         assert!(HyperscopeRoute::from_pairs([("animspeed", "1000001")])
             .animation_clock()
             .is_err());
-        assert_eq!(invalid.diagnostics()[0].code, RouteDiagnosticCode::InvalidValue);
+        assert_eq!(
+            invalid.diagnostics()[0].code,
+            RouteDiagnosticCode::InvalidValue
+        );
     }
 
     #[test]
     fn selected_identity_route_is_atomic_and_canonical() {
         let asset = "60000000-0000-4000-8000-000000000001";
         let entity = "70000000-0000-4000-8000-000000000001";
-        let selected = HyperscopeRoute::from_pairs([
-            ("selentity", entity),
-            ("selasset", asset),
-        ]);
+        let selected = HyperscopeRoute::from_pairs([("selentity", entity), ("selasset", asset)]);
         assert_eq!(selected.value("selasset"), Some(asset));
         assert_eq!(selected.value("selentity"), Some(entity));
         assert_eq!(
@@ -972,7 +1010,10 @@ mod tests {
         ] {
             let partial = HyperscopeRoute::from_pairs([(key, value)]);
             assert_eq!(partial.diagnostics().len(), 1);
-            assert_eq!(partial.diagnostics()[0].code, RouteDiagnosticCode::InvalidValue);
+            assert_eq!(
+                partial.diagnostics()[0].code,
+                RouteDiagnosticCode::InvalidValue
+            );
             assert_eq!(partial.diagnostics()[0].key, missing_key);
             assert!(partial.selected_identity().is_err());
         }
@@ -1200,10 +1241,7 @@ mod tests {
 
         for implementation in ["shadow", "rust"] {
             let route = HyperscopeRoute::from_pairs([("navimpl", implementation)]);
-            assert_eq!(
-                route.canonical_pairs(),
-                vec![("navimpl", implementation)]
-            );
+            assert_eq!(route.canonical_pairs(), vec![("navimpl", implementation)]);
             assert!(route.diagnostics().is_empty());
         }
     }
@@ -1248,7 +1286,10 @@ mod tests {
         ]);
         assert!(route.diagnostics().is_empty());
         let settings = route.navigation_settings().unwrap();
-        assert_eq!(settings.transform.kind, RouteTransformKind::SphereReflection);
+        assert_eq!(
+            settings.transform.kind,
+            RouteTransformKind::SphereReflection
+        );
         assert_eq!(settings.transform.kind.wire_name(), "sphere_reflection");
         assert_eq!(settings.transform.center_controls, [-2.5, 0.0, 0.0]);
         assert_eq!(settings.transform.radius_control, 7.25);
@@ -1267,6 +1308,10 @@ mod tests {
         assert_eq!(settings.surface_walk.speed_octave_steps, 100.0);
         assert_eq!(settings.surface_walk.body_scale_octave_steps, -100.0);
         assert_eq!(settings.surface_walk.eye_height_octave_steps, 50.0);
+        let application = settings.application_settings().unwrap();
+        assert_eq!(application.transition_seconds, 2.5);
+        assert_eq!(application.surface_walk.smoothing_seconds, 0.45);
+        assert_eq!(application.surface_walk.tangent_pull_fraction, 0.25);
     }
 
     #[test]
@@ -1274,6 +1319,13 @@ mod tests {
         let invalid = HyperscopeRoute::from_pairs([("walksmooth", "151")]);
         assert_eq!(invalid.diagnostics().len(), 1);
         assert!(invalid.navigation_settings().is_err());
+
+        let mut settings = NavigationSettings::default();
+        settings.transition_seconds = f64::NAN;
+        assert!(settings.validate().is_err());
+        let mut settings = NavigationSettings::default();
+        settings.surface_walk.minimum_near = 1.0;
+        assert!(settings.validate().is_err());
     }
 
     #[test]
