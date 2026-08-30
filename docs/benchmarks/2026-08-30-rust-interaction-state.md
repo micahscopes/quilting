@@ -40,10 +40,19 @@ focus-relative reach, ECS activation routing without duplicate selection,
 cross-entity cancellation, invalid-hit atomicity, and cadence invariance.
 
 `hyperscope-app` now retains the controller beside navigation and integrates it
-first on each virtual frame. Its 84-test native gate includes a three-action
-hover/press/release case proving that activation becomes the existing
-`AnchorFocus` action on the same application frame. The opt-in replay feature
-also type-checks without claiming a new serialized pointer-action schema.
+first on each virtual frame. Replay schema 0.25 records the complete semantic
+interaction vocabulary and its read model: asset/entity identity, source bound
+and pivot, displayed distance, optional face/barycentrics, hover, active press,
+derived selection, sequence fence, and diagnostics. Schema 0.24 remains
+readable but rejects interaction events rather than silently reinterpreting
+them.
+
+The replay fixture proves that hover/press/release selects through the existing
+navigation authority on the same application frame, retains exact surface
+identity, round-trips through JSON, produces a stable golden fingerprint, and
+is invariant to frame partitioning. A nil asset identity is rejected without a
+partial selection. The full replay-enabled native gate passes all 117 library
+tests.
 
 `HyperscopeAppShadow` exposes validated hover, clear, press, release, cancel,
 and snapshot methods. The route source smoke fences their delegation through

@@ -288,28 +288,26 @@ or sphere state.
    displayed charts on demand. `selectionimpl=shadow` routes mouse and
    view-center picks through hover/press/release, compares the activated stable
    identity, and falls back to the incumbent direct observer without changing
-   renderer authority. Live shadow evidence, Rust-default promotion, broader
-   hover cadence, shape queries, and visualization policy remain. Selection tint
-   remains presentation; neither it nor a backend-local face index becomes
-   selection authority.
-6. **Persistence and replay — native oracle complete.** Replay version 0.17
+   renderer authority. Replay 0.25 records exact interaction actions and state,
+   including face/barycentric detail, and rejects those events under 0.24.
+   Live shadow evidence, Rust-default promotion, broader hover cadence, shape
+   queries, and visualization policy remain. Selection tint remains
+   presentation; neither it nor a backend-local face index becomes selection
+   authority.
+6. **Persistence and replay — native oracle complete.** Replay version 0.25
    serializes asset-scoped stable entity references, selected source
-   bounds/pivots, derived
-   output-chart pivots/radii, detached spheres, camera rig state, and every
-   current high-level navigation action, including complete lens and explicit
-   aim-mode edits. It accepts 0.4 anchor events by defaulting the omitted pivot
-   to the bound center, accepts 0.5 without that migration, accepts 0.6 camera
-   policy actions, and rejects every pre-0.7 unscoped focus anchor rather than
-   inventing asset scope. Checked navigation and
-   Version 0.17 adds a deterministic primary animation clock without
-   reinterpreting 0.16; version 0.16 added selected-object aim and selected
-   reframe entered at 0.15. Checked navigation and orchestration fixtures cover
-   transition cadence, asset effects,
-   presence/authored lanes, deterministic authored asset/entity materialization,
-   and atomic rejection. Older supported schemas remain readable with their
-   original scoped semantics. Browser input capture and
-   networking must carry semantic actions or authoritative state deltas, never
-   raw HID reports.
+   bounds/pivots, derived output-chart pivots/radii, detached spheres, camera
+   rig state, the complete high-level navigation vocabulary, semantic
+   interaction actions, and exact ephemeral interaction observations. The
+   interaction golden proves JSON round-trip, surface identity retention,
+   activation through navigation authority, cadence invariance, legacy
+   rejection, and invalid-hit atomicity. Navigation and orchestration fixtures
+   cover transition cadence, asset effects, presence/authored lanes,
+   deterministic authored asset/entity materialization, and atomic rejection.
+   Older supported schemas remain readable with their original semantics;
+   specifically, 0.24 is not reinterpreted as containing pointer actions.
+   Browser input capture and networking must carry semantic actions or
+   authoritative state deltas, never raw HID reports.
 7. **WebGPU backend.** Upload the extracted focus packet as frame/view data,
    classify the field in WGSL, and retain the same weight-channel meaning. GPU
    visibility compaction and indirect draws remain independent of interaction

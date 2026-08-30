@@ -641,6 +641,11 @@ stable identity. Exact ray hits bypass proximity range; explicitly named
 proximity hits use focus-radius-aware reach. Any facade/version error falls back
 to the incumbent direct observer. Live evidence and Rust-default promotion
 remain separate work; this boundary does not yet claim live picking authority.
+Replay schema 0.25 is the offline interaction oracle: it records the complete
+semantic action stream and exact hover/active/derived-selection state, including
+optional face/barycentrics. Its golden demonstrates cadence-independent
+activation through the existing navigation owner and rejects the same events
+under 0.24 rather than assigning historical meaning retroactively.
 `selectionimpl=js|shadow|rust` is the rollback boundary: the Rust mode verifies
 the application identity against `AppStore`, joins only the backend-local packed
 node, and applies the selected focus packet directly to the resident renderer
