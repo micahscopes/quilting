@@ -106,12 +106,14 @@ It is intended for binding/UI iteration, not renderer performance measurements
 or rehearsals. The ordinary `trunk serve` command remains the representative
 runtime build.
 These zero-build smokes verify the packaging modes and the Rust-owned retained
-pick and navigation-settings boundaries without compiling WASM:
+pick, navigation-settings, and render-settings boundaries without compiling
+WASM:
 
 ```sh
 node scripts/smoke-hyperscope-build-policy.mjs
 node scripts/smoke-backend-pick-shadow.mjs
 node scripts/smoke-navigation-settings-boundary.mjs
+node scripts/smoke-render-settings-boundary.mjs
 ```
 
 Opt into Binaryen only when producing the final size-optimized artifact:

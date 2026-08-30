@@ -31,7 +31,8 @@ use hyperscope_app::{
     PatchLabHistogramBin, PatchLabLodCompletion, PatchLabLodOutcome, PatchLabLodSummary,
     PatchLabReadModel, PatchLabSessionIntent, PatchLabShape, PresentationAction,
     PresentationAnimationResidencyBinding, PrimarySceneInstallCompletion,
-    PrimarySceneInstallMetadata, PrimarySceneInstallOutcome, RenderSettings, SemanticAction, Timed,
+    PrimarySceneInstallMetadata, PrimarySceneInstallOutcome, RenderSettings,
+    RenderSettingsSynchronizationDisposition, SemanticAction, Timed,
 };
 use quilting_core::render_evidence::RenderPickEvidenceReport;
 use serde::{Deserialize, Serialize};
@@ -1808,20 +1809,17 @@ impl HyperscopeAppShadow {
         kawase_passes: u8,
         kawase_offset: f64,
     ) -> Result<JsValue, JsValue> {
-        let settings = RenderSettings::from_wire_values(
-            style,
+        let settings = ShadowRenderSettingsInput {
+            style: style.to_owned(),
             resolution_level,
             density,
             screen_attenuation,
             min_pixels_per_subdivision,
             atlas_exponent,
             max_face_edge_ratio,
-        )
-        .and_then(|settings| {
-            settings.with_focus_postprocess(FocusPostprocessSettings {
+            focus_postprocess: ShadowFocusPostprocessInput {
                 enabled: focus_enabled,
-                mode: FocusPostprocessMode::from_wire_index(focus_mode)
-                    .ok_or("unknown focus postprocess mode")?,
+                mode: focus_mode,
                 blur_radius_pixels,
                 blur_strength,
                 focus_coordinate,
@@ -1830,8 +1828,9 @@ impl HyperscopeAppShadow {
                 gaussian_passes,
                 kawase_passes,
                 kawase_offset,
-            })
-        })
+            },
+        }
+        .into_settings()
         .map_err(js_error)?;
         let commit = self
             .store
@@ -1844,6 +1843,31 @@ impl HyperscopeAppShadow {
         to_js(&ShadowRenderSettingsReceipt {
             commit: shadow_commit(&commit),
             render: self.store.render_snapshot().into(),
+        })
+    }
+
+    /// Idempotently reconcile one complete backend-neutral render packet.
+    /// Rust owns decoding, equality, sequence allocation, and every Patch Lab
+    /// effect; JavaScript forwards a value and executes returned effects.
+    #[wasm_bindgen(js_name = synchronizeRenderSettings)]
+    pub fn synchronize_render_settings(&self, input: JsValue) -> Result<JsValue, JsValue> {
+        let input: ShadowRenderSettingsInput =
+            serde_wasm_bindgen::from_value(input).map_err(js_error)?;
+        let settings = input.into_settings().map_err(js_error)?;
+        let synchronization = self
+            .store
+            .synchronize_render_settings(settings)
+            .map_err(js_error)?;
+        let matches_input = synchronization.snapshot.settings == settings;
+        to_js(&ShadowRenderSettingsSynchronizationReceipt {
+            disposition: match synchronization.disposition {
+                RenderSettingsSynchronizationDisposition::Unchanged => "unchanged",
+                RenderSettingsSynchronizationDisposition::Committed => "committed",
+            },
+            sequence: synchronization.sequence.map(|sequence| sequence.to_string()),
+            commit: synchronization.commit.as_ref().map(shadow_commit),
+            matches_input,
+            render: synchronization.snapshot.into(),
         })
     }
 
@@ -3198,6 +3222,73 @@ struct ShadowPendingAnimationClip {
 struct ShadowRenderSettingsReceipt {
     commit: ShadowCommit,
     render: ShadowRenderSettings,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowRenderSettingsSynchronizationReceipt {
+    disposition: &'static str,
+    sequence: Option<String>,
+    commit: Option<ShadowCommit>,
+    matches_input: bool,
+    render: ShadowRenderSettings,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ShadowRenderSettingsInput {
+    style: String,
+    resolution_level: u8,
+    density: f64,
+    screen_attenuation: bool,
+    min_pixels_per_subdivision: f64,
+    atlas_exponent: u8,
+    max_face_edge_ratio: u8,
+    focus_postprocess: ShadowFocusPostprocessInput,
+}
+
+impl ShadowRenderSettingsInput {
+    fn into_settings(self) -> Result<RenderSettings, &'static str> {
+        RenderSettings::from_wire_values(
+            &self.style,
+            self.resolution_level,
+            self.density,
+            self.screen_attenuation,
+            self.min_pixels_per_subdivision,
+            self.atlas_exponent,
+            self.max_face_edge_ratio,
+        )
+        .and_then(|settings| {
+            settings.with_focus_postprocess(FocusPostprocessSettings {
+                enabled: self.focus_postprocess.enabled,
+                mode: FocusPostprocessMode::from_wire_index(self.focus_postprocess.mode)
+                    .ok_or("unknown focus postprocess mode")?,
+                blur_radius_pixels: self.focus_postprocess.blur_radius_pixels,
+                blur_strength: self.focus_postprocess.blur_strength,
+                focus_coordinate: self.focus_postprocess.focus_coordinate,
+                bandwidth: self.focus_postprocess.bandwidth,
+                normalize_range: self.focus_postprocess.normalize_range,
+                gaussian_passes: self.focus_postprocess.gaussian_passes,
+                kawase_passes: self.focus_postprocess.kawase_passes,
+                kawase_offset: self.focus_postprocess.kawase_offset,
+            })
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ShadowFocusPostprocessInput {
+    enabled: bool,
+    mode: u8,
+    blur_radius_pixels: u16,
+    blur_strength: f64,
+    focus_coordinate: f64,
+    bandwidth: f64,
+    normalize_range: bool,
+    gaussian_passes: u8,
+    kawase_passes: u8,
+    kawase_offset: f64,
 }
 
 #[derive(Serialize)]

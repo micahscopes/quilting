@@ -4745,30 +4745,6 @@ function browserRenderSettingsState() {
   };
 }
 
-function focusPostprocessContentEqual(left, right) {
-  return left?.enabled === right?.enabled
-    && left?.mode === right?.mode
-    && left?.blurRadiusPixels === right?.blurRadiusPixels
-    && left?.blurStrength === right?.blurStrength
-    && left?.focusCoordinate === right?.focusCoordinate
-    && left?.bandwidth === right?.bandwidth
-    && left?.normalizeRange === right?.normalizeRange
-    && left?.gaussianPasses === right?.gaussianPasses
-    && left?.kawasePasses === right?.kawasePasses
-    && left?.kawaseOffset === right?.kawaseOffset;
-}
-
-function renderSettingsContentEqual(left, right) {
-  return left?.style === right?.style
-    && left?.resolutionLevel === right?.resolutionLevel
-    && left?.density === right?.density
-    && left?.screenAttenuation === right?.screenAttenuation
-    && left?.minPixelsPerSubdivision === right?.minPixelsPerSubdivision
-    && left?.atlasExponent === right?.atlasExponent
-    && left?.maxFaceEdgeRatio === right?.maxFaceEdgeRatio
-    && focusPostprocessContentEqual(left?.focusPostprocess, right?.focusPostprocess);
-}
-
 function applyRustRenderSettingsProjection(render) {
   const mode = PRESENTATION_RENDER_MODES[render.style];
   if (!mode) throw new Error(`unsupported Rust render style ${render.style}`);
@@ -4795,33 +4771,19 @@ function applyRustRenderSettingsProjection(render) {
   });
 }
 
-function dispatchRustRenderSettings(app, settings, source) {
-  const receipt = app.setRenderSettings(
-    ++rustAppShadowSequence,
-    settings.style,
-    settings.resolutionLevel,
-    settings.density,
-    settings.screenAttenuation,
-    settings.minPixelsPerSubdivision,
-    settings.atlasExponent,
-    settings.maxFaceEdgeRatio,
-    settings.focusPostprocess.enabled,
-    settings.focusPostprocess.mode,
-    settings.focusPostprocess.blurRadiusPixels,
-    settings.focusPostprocess.blurStrength,
-    settings.focusPostprocess.focusCoordinate,
-    settings.focusPostprocess.bandwidth,
-    settings.focusPostprocess.normalizeRange,
-    settings.focusPostprocess.gaussianPasses,
-    settings.focusPostprocess.kawasePasses,
-    settings.focusPostprocess.kawaseOffset,
-  );
-  rustAppShadowDiagnostics.lastCommit = receipt.commit;
-  observeRustPatchLabEffects(receipt.commit?.effects || [], `${source}-render-settings`);
-  rustRenderSettingsDiagnostics.dispatches += 1;
+function synchronizeRustRenderSettingsPacket(app, settings, source) {
+  const receipt = app.synchronizeRenderSettings(settings);
+  if (receipt.sequence != null) {
+    observeRustAppShadowSequence(receipt.sequence, `Rust ${source} render settings`);
+  }
+  if (receipt.commit) {
+    rustAppShadowDiagnostics.lastCommit = receipt.commit;
+    observeRustPatchLabEffects(receipt.commit.effects || [], `${source}-render-settings`);
+  }
+  if (receipt.disposition === 'committed') rustRenderSettingsDiagnostics.dispatches += 1;
   rustRenderSettingsDiagnostics.lastRust = receipt.render;
   rustRenderSettingsDiagnostics.lastDispatchSource = source;
-  return receipt.render;
+  return receipt;
 }
 
 function synchronizeRustRenderSettings() {
@@ -4830,15 +4792,16 @@ function synchronizeRustRenderSettings() {
   try {
     const browser = browserRenderSettingsState();
     app = ensureRustAppShadow('render-settings');
-    const committed = app.snapshot().renderSettings;
-    let rust = committed;
+    const receipt = synchronizeRustRenderSettingsPacket(
+      app,
+      browser,
+      'browser-synchronization',
+    );
+    const rust = receipt.render;
     rustRenderSettingsDiagnostics.comparisons += 1;
-    if (!renderSettingsContentEqual(browser, committed)) {
-      rust = dispatchRustRenderSettings(app, browser, 'browser-synchronization');
-    }
     rustRenderSettingsDiagnostics.lastBrowser = browser;
     rustRenderSettingsDiagnostics.lastRust = rust;
-    if (!renderSettingsContentEqual(browser, rust)) {
+    if (!receipt.matchesInput) {
       rustRenderSettingsDiagnostics.mismatches += 1;
       recordAppShadowMismatch('render_settings', { browser, rust });
     }
@@ -13525,12 +13488,12 @@ phase('wasm', [], async () => {
       && initRenderSettings) {
     try {
       const app = ensureRustAppShadow('render-route-startup');
-      const committedRender = dispatchRustRenderSettings(
+      const receipt = synchronizeRustRenderSettingsPacket(
         app,
         initRenderSettings,
         'route-startup',
       );
-      if (!renderSettingsContentEqual(committedRender, initRenderSettings)) {
+      if (!receipt.matchesInput) {
         throw new Error('Rust route render commit changed admitted settings');
       }
       rustRenderSettingsDiagnostics.state = 'route-committed';

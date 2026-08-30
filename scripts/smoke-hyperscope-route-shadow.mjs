@@ -905,9 +905,9 @@ for (const renderSettingsStep of [
   "implementationFromRoute(\n  initialBrowserParams, 'renderstateimpl',\n)",
   'function browserRenderSettingsState()',
   "const style = mode === 'both' ? 'matcap_wire' : String(mode);",
-  'app.setRenderSettings(',
-  'function dispatchRustRenderSettings(app, settings, source)',
-  'function renderSettingsContentEqual(left, right)',
+  'app.synchronizeRenderSettings(settings)',
+  'function synchronizeRustRenderSettingsPacket(app, settings, source)',
+  'if (!receipt.matchesInput)',
   "RUST_RENDER_SETTINGS_IMPLEMENTATION === 'rust'",
   'applyRustRenderSettingsProjection(app.snapshot().renderSettings);',
   'scheduleRustRenderSettingsSynchronization();',
@@ -928,10 +928,21 @@ const renderSettingsBoundary = browserSource.slice(
   browserSource.indexOf('function ensureRustAppShadow('),
 );
 assert.equal(
-  Array.from(renderSettingsBoundary.matchAll(/\.setRenderSettings\(/g)).length,
+  Array.from(renderSettingsBoundary.matchAll(/\.synchronizeRenderSettings\(/g)).length,
   1,
-  'all browser render-setting dispatches must share one sequence/effect adapter',
+  'all browser render-setting synchronization must share one Rust sequence/effect adapter',
 );
+for (const retiredRenderSettingsSemantic of [
+  '.setRenderSettings(',
+  'function renderSettingsContentEqual(left, right)',
+  'function focusPostprocessContentEqual(left, right)',
+]) {
+  assert.equal(
+    renderSettingsBoundary.includes(retiredRenderSettingsSemantic),
+    false,
+    `browser render-settings boundary must not retain ${retiredRenderSettingsSemantic}`,
+  );
+}
 const renderControlMountBoundary = browserSource.slice(
   browserSource.indexOf('rustAppShadow.mountRenderControls('),
   browserSource.indexOf(
@@ -940,7 +951,7 @@ const renderControlMountBoundary = browserSource.slice(
   ),
 );
 assert.ok(
-  !renderControlMountBoundary.includes('dispatchRustRenderSettings(')
+  !renderControlMountBoundary.includes('synchronizeRustRenderSettingsPacket(')
     && renderControlMountBoundary.includes('acceptRustRenderSettingsViewCommit,'),
   'the Leptos callback must adapt an already committed Rust projection, not dispatch browser intent',
 );
@@ -950,7 +961,7 @@ const renderControlCommitBoundary = browserSource.slice(
 );
 assert.ok(
   renderControlCommitBoundary.includes('applyRustRenderSettingsProjection(rust);')
-    && !renderControlCommitBoundary.includes('dispatchRustRenderSettings('),
+    && !renderControlCommitBoundary.includes('synchronizeRustRenderSettingsPacket('),
   'the shared render/focus callback must project committed Rust state without redispatch',
 );
 for (const directDispatchStep of [
@@ -1180,7 +1191,7 @@ for (const startupStep of [
   "'missing-typed-route-settings'",
   'initRouteSelection,',
   'initRouteAnimationClock,',
-  "dispatchRustRenderSettings(\n        app,\n        initRenderSettings,\n        'route-startup',",
+  "synchronizeRustRenderSettingsPacket(\n        app,\n        initRenderSettings,\n        'route-startup',",
   "rustRenderSettingsDiagnostics.state = 'route-committed';",
 ]) {
   assert.ok(

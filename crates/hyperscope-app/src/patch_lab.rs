@@ -831,13 +831,11 @@ mod tests {
             max_face_edge_ratio: 4,
             ..RenderSettings::default()
         };
-        let (_, changed) = store
-            .dispatch_semantic(SemanticAction::SetRenderSettings(render))
-            .unwrap();
+        let changed = store.synchronize_render_settings(render).unwrap();
         let normalized = controls.normalized(3);
         assert_eq!(store.patch_lab_snapshot().controls, normalized);
         assert_eq!(
-            changed.effects,
+            changed.commit.unwrap().effects,
             vec![AppEffect::PatchLab(PatchLabEffect::EvaluateLod {
                 job_id: 2,
                 geometry_job_id: 0,
