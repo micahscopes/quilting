@@ -17,7 +17,9 @@ mod resident_roots;
 pub use adaptive_overlay::{
     AdaptiveOverlayFrameEncoding, AdaptiveOverlayScene, ResidentAdaptiveFrameEncoding,
 };
-pub use focus_postprocess::FocusPostprocessPipelines;
+pub use focus_postprocess::{
+    FocusPostprocessEncoding, FocusPostprocessPipelines, FocusPostprocessTarget,
+};
 pub use pbr_environment::{PbrEnvironmentBindings, PbrEnvironmentMap};
 pub use pbr_resources::{
     PbrMaterialTextureBindings, PbrMaterialTextureResidency, PbrTextureTable, PbrTextureTableUpdate,
