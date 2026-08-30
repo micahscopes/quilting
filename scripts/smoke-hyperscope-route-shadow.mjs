@@ -532,6 +532,8 @@ for (const focusSphereAuthorityStep of [
   "requested => dispatchManualFocusSphereControl('mr', requested)",
   "bindBtnGroup('xform-btns', mob.xform, dispatchManualInversionControl);",
   'rustNavigationProjectionDepth > 0',
+  'const reflectionMobius = packedMobiusOrNull(snapshot.reflection_mobius);',
+  '? rustProjectedReflectionMobius',
   'const retainsSelectedAnchor = Boolean(rustGesture.navigation?.selected_focus);',
 ]) {
   assert.ok(
@@ -543,6 +545,10 @@ assert.ok(
   appShadowSource.includes('#[wasm_bindgen(js_name = editFocusSphere)]')
     && appShadowSource.includes('.dispatch_focus_sphere_edit(target, preserve_anchor)'),
   'generated WASM facade must delegate focus-sphere semantics to AppStore',
+);
+assert.ok(
+  appShadowSource.includes('frame.reflection.mobius().coefficients_f32()'),
+  'generated WASM navigation packet must carry the Rust-authored conformal chart',
 );
 assert.ok(
   appStoreSource.includes('pub fn dispatch_focus_sphere_edit(')

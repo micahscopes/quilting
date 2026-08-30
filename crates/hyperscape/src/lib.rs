@@ -10,7 +10,7 @@ use bevy_ecs::prelude::*;
 use bevy_time::{Time, Virtual};
 use hyperscape_protocol::{EntityId, WireError};
 use quilting_core::{
-    AnchorState, ConformalFrameForest, FrameId, Mobius, OpenRoundSide, RoundSideOrientation,
+    AnchorState, ConformalFrameForest, FrameId, OpenRoundSide, RoundSideOrientation,
     RoundWallRelation, RoundWallSet, WallId,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -876,27 +876,6 @@ fn record_transform_history(
     }
 }
 
-fn mobius_uniform(transform: Mobius) -> [f32; 16] {
-    [
-        transform.a.w as f32,
-        transform.a.x as f32,
-        transform.a.y as f32,
-        transform.a.z as f32,
-        transform.b.w as f32,
-        transform.b.x as f32,
-        transform.b.y as f32,
-        transform.b.z as f32,
-        transform.c.w as f32,
-        transform.c.x as f32,
-        transform.c.y as f32,
-        transform.c.z as f32,
-        transform.d.w as f32,
-        transform.d.x as f32,
-        transform.d.y as f32,
-        transform.d.z as f32,
-    ]
-}
-
 fn extract_hyperscope_packets(
     scene: Res<ConformalScene>,
     mut extraction: ResMut<HyperscopeExtraction>,
@@ -925,7 +904,7 @@ fn extract_hyperscope_packets(
                         extraction.0.push(HyperscopePacket {
                             subject,
                             camera: camera_entity,
-                            mobius: mobius_uniform(mobius),
+                            mobius: mobius.coefficients_f32(),
                             orientation_sign: chain.orientation_sign(),
                             euclidean_model,
                             camera_eye: camera_model
@@ -1184,7 +1163,7 @@ mod tests {
         assert_eq!(extraction.0[0].subject, target);
         assert_eq!(extraction.0[0].camera, camera);
         let packet = extraction.0[0].mobius;
-        let mobius = Mobius::new(
+        let mobius = quilting_core::Mobius::new(
             Quat::new(
                 packet[0] as f64,
                 packet[1] as f64,

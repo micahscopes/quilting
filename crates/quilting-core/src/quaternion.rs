@@ -246,6 +246,32 @@ impl Mobius {
         Self::new(Quat::ONE, Quat::ZERO, Quat::ZERO, Quat::ONE)
     }
 
+    /// Pack the four quaternion coefficients in the backend-neutral renderer
+    /// order `[a, b, c, d]`, with each quaternion stored as `[w, x, y, z]`.
+    ///
+    /// Keeping this conversion beside the conformal primitive prevents scene
+    /// extraction, WebGL2, and WebGPU from restating the matrix convention.
+    pub fn coefficients_f32(self) -> [f32; 16] {
+        [
+            self.a.w as f32,
+            self.a.x as f32,
+            self.a.y as f32,
+            self.a.z as f32,
+            self.b.w as f32,
+            self.b.x as f32,
+            self.b.y as f32,
+            self.b.z as f32,
+            self.c.w as f32,
+            self.c.x as f32,
+            self.c.y as f32,
+            self.c.z as f32,
+            self.d.w as f32,
+            self.d.x as f32,
+            self.d.y as f32,
+            self.d.z as f32,
+        ]
+    }
+
     /// Check if this is an identity or near-identity transform.
     /// Returns true if c ≈ 0 (no conformal curvature — affine transform).
     /// The threshold matches the shader's predicate; see [`AFFINE_C_NORM_SQ`].
@@ -463,6 +489,29 @@ mod tests {
             Mobius::sphere_reflection(Quat::from_point(2.0, 0.5, -1.0), 1.7),
             point,
             tangent,
+        );
+    }
+
+    #[test]
+    fn coefficient_packet_has_one_canonical_quaternion_order() {
+        assert_eq!(
+            Mobius::identity().coefficients_f32(),
+            [
+                1.0, 0.0, 0.0, 0.0, // a
+                0.0, 0.0, 0.0, 0.0, // b
+                0.0, 0.0, 0.0, 0.0, // c
+                1.0, 0.0, 0.0, 0.0, // d
+            ]
+        );
+        assert_eq!(
+            Mobius::sphere_reflection(Quat::from_point(2.0, -3.0, 4.0), 5.0)
+                .coefficients_f32(),
+            [
+                0.0, 2.0, -3.0, 4.0, // a
+                4.0, 0.0, 0.0, 0.0, // b = |center|^2 - radius^2
+                1.0, 0.0, 0.0, 0.0, // c
+                0.0, -2.0, 3.0, -4.0, // d
+            ]
         );
     }
 

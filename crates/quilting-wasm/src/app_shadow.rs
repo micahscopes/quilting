@@ -3083,6 +3083,7 @@ struct ShadowNavigationSnapshot {
     pending_actions: usize,
     last_applied_sequence: Option<u64>,
     reflection: &'static str,
+    reflection_mobius: [f32; 16],
     camera: ShadowCameraSnapshot,
     focus: ShadowFocusSnapshot,
     selected_focus: Option<SelectedFocusJsSnapshot>,
@@ -3245,6 +3246,7 @@ fn navigation_to_js(
     navigation_diagnostics: Vec<String>,
 ) -> Result<JsValue, JsValue> {
     let basis = frame.camera.basis();
+    let reflection_mobius = frame.reflection.mobius().coefficients_f32();
     let focus_transition_remaining = frame
         .focus
         .transition
@@ -3258,6 +3260,7 @@ fn navigation_to_js(
             hyperscape::SphereReflectionState::Identity => "identity",
             hyperscape::SphereReflectionState::Sphere(_) => "sphere_reflection",
         },
+        reflection_mobius,
         camera: ShadowCameraSnapshot {
             eye: frame.camera.eye,
             orientation: [

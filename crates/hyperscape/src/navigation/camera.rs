@@ -1,6 +1,6 @@
 use super::FocusSphere;
 use bevy_ecs::prelude::{Component, Resource};
-use quilting_core::Quat;
+use quilting_core::{Mobius, Quat};
 use std::error::Error;
 use std::fmt;
 
@@ -869,6 +869,19 @@ pub struct ReflectionTransport<const N: usize> {
 }
 
 impl SphereReflectionState {
+    /// The exact conformal chart consumed by scene extraction and every
+    /// renderer backend. Navigation owns which chart is active; Quilting owns
+    /// its quaternionic Möbius representation.
+    pub fn mobius(self) -> Mobius {
+        match self {
+            Self::Identity => Mobius::identity(),
+            Self::Sphere(sphere) => Mobius::sphere_reflection(
+                Quat::from_point(sphere.center[0], sphere.center[1], sphere.center[2]),
+                sphere.radius,
+            ),
+        }
+    }
+
     pub fn orientation_sign(self) -> i8 {
         match self {
             Self::Identity => 1,
@@ -1339,6 +1352,35 @@ mod tests {
         assert_point_close(camera.basis().up, original.basis().up);
         assert_point_close(camera.basis().forward, original.basis().forward);
         assert!((camera.control_distance - original.control_distance).abs() < EPS);
+    }
+
+    #[test]
+    fn reflection_state_exposes_the_exact_quilting_chart() {
+        let identity = SphereReflectionState::Identity;
+        assert_eq!(identity.mobius(), Mobius::identity());
+        assert_eq!(identity.orientation_sign(), 1);
+
+        let reflection = SphereReflectionState::Sphere(
+            FocusSphere::new([0.5, -0.25, 1.0], 1.75).unwrap(),
+        );
+        assert_eq!(reflection.orientation_sign(), -1);
+        assert_eq!(
+            reflection.mobius().coefficients_f32(),
+            Mobius::sphere_reflection(Quat::from_point(0.5, -0.25, 1.0), 1.75)
+                .coefficients_f32(),
+        );
+
+        let point = [2.0, 0.75, -0.5];
+        let transported = identity
+            .transport_point_and_directions::<0>(reflection, point, [])
+            .unwrap();
+        assert_point_close(
+            reflection
+                .mobius()
+                .apply(Quat::from_point(point[0], point[1], point[2]))
+                .to_point(),
+            transported.point,
+        );
     }
 
     #[test]
