@@ -27,6 +27,9 @@ still runs; it is not assigned a misleading functional key.
 - the pure descriptor test verifies all seven passes, the shared four-binding
   layout, intermediate formats, final surface format, and duplicate blur entry
   point with distinct attachment state;
+- a semantic-plan test fixes the seven retained handle kinds and attachment
+  classes; descriptor generation and named runtime-field assignment both
+  iterate that plan instead of maintaining a second index table;
 - the native conformance path expects one family miss, then one hit, one
   resident family, and no shader-memo traffic on the hit;
 - WASM diagnostics expose focus-pipeline hit, miss, failed-creation,

@@ -28,7 +28,7 @@ so an unsupported format is never disguised by an incomplete memo key.
 
 ## Evidence
 
-- 22 `quilting-webgpu` library tests pass;
+- 23 `quilting-webgpu` library tests pass;
 - pure tests cover the 13-pipeline full family, PBR and diagnostic layout
   separation, the twelve ordinary material-texture bindings, focus MRT,
   single wire descriptor, highlight depth policy, invalid style/focus/sample

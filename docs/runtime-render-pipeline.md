@@ -284,6 +284,13 @@ and depth-write policy. The sixteen winding descriptors and the sixteen
 retained WebGPU handles are built by iterating that plan; named fields are only
 assigned after the complete family succeeds.
 
+Focus postprocessing completes the pattern with one seven-pass retained-family
+plan. Select-weight, JFA init/step, firmness, Kawase, intermediate directional
+blur, and final directional blur each name their label, fragment entry, and
+attachment class once. Pure descriptors and runtime handles iterate the same
+plan, while the separate per-frame `FocusPipelineKind` continues to describe
+scheduled executions rather than retained GPU identity.
+
 `quilting_renderer::memo::DeviceMemo` is the effect boundary. It maps a pure
 descriptor to a concrete backend resource, inserts only after construction has
 fully succeeded, and scopes every entry to an explicit device/context epoch.
