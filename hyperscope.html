@@ -4097,6 +4097,7 @@ const rustInteractionDiagnostics = {
   entityOnlyPicks: 0,
   targetReplacements: 0,
   boundTargets: 0,
+  targetEpoch: null,
   packedDispatches: 0,
   legacyDispatches: 0,
   comparisons: 0,
@@ -6918,14 +6919,13 @@ function replaceRustInteractionTargets() {
     };
   });
   try {
-    const accepted = rustAppShadow.replaceInteractionTargets(JSON.stringify(targets));
-    if (accepted !== targets.length) {
-      throw new Error(
-        `Rust retained ${accepted} of ${targets.length} interaction targets`,
-      );
+    const epoch = rustAppShadow.replaceInteractionTargets(JSON.stringify(targets));
+    if (!Number.isInteger(epoch) || epoch <= 0) {
+      throw new Error(`Rust returned invalid interaction target epoch ${epoch}`);
     }
     rustInteractionDiagnostics.targetReplacements += 1;
-    rustInteractionDiagnostics.boundTargets = accepted;
+    rustInteractionDiagnostics.boundTargets = targets.length;
+    rustInteractionDiagnostics.targetEpoch = epoch;
     if (rustInteractionDiagnostics.enabled) {
       rustInteractionDiagnostics.state = 'awaiting-pick';
     }
@@ -7594,7 +7594,11 @@ function mirrorSelectedObjectInteractionToApp(nowMs = performance.now()) {
     advanceRustApplicationClockToSelectionEvent(nowMs);
     synchronizeRustApplicationPresentationFromBrowser();
     if (typeof rustAppShadow.setPackedInteractionHover === 'function') {
+      if (!Number.isInteger(rustInteractionDiagnostics.targetEpoch)) {
+        throw new Error('interaction target table has no current residency epoch');
+      }
       rustAppShadow.setPackedInteractionHover(
+        rustInteractionDiagnostics.targetEpoch,
         selectedObject.node,
         new Float64Array(selectedObject.sourceAnchor),
         outputDistance,

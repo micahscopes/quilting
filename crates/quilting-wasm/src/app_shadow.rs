@@ -1228,14 +1228,19 @@ impl HyperscopeAppShadow {
                 InteractionTarget::new(input.packed_node, identity, source_bound).map_err(js_error)
             })
             .collect::<Result<Vec<_>, JsValue>>()?;
-        let table = InteractionTargetTable::try_from_targets(targets).map_err(js_error)?;
-        let count = u32::try_from(table.len())
-            .map_err(|_| JsValue::from_str("interaction target count exceeds u32"))?;
+        let epoch = self
+            .interaction_targets
+            .try_borrow()
+            .map_err(|_| JsValue::from_str("interaction targets are already borrowed"))?
+            .epoch()
+            .checked_add(1)
+            .ok_or_else(|| JsValue::from_str("interaction target epoch is exhausted"))?;
+        let table = InteractionTargetTable::try_from_epoch(epoch, targets).map_err(js_error)?;
         *self
             .interaction_targets
             .try_borrow_mut()
             .map_err(|_| JsValue::from_str("interaction targets are already borrowed"))? = table;
-        Ok(count)
+        Ok(epoch)
     }
 
     /// Resolve one WebGL2/WebGPU packed-node sample through the current Rust
@@ -1244,13 +1249,15 @@ impl HyperscopeAppShadow {
     #[allow(clippy::too_many_arguments)]
     pub fn set_packed_interaction_hover(
         &self,
+        target_epoch: u32,
         packed_node: u32,
         source_pivot: &[f64],
         output_distance: f64,
         face: i32,
         barycentric: &[f64],
     ) -> Result<u64, JsValue> {
-        let mut sample = InteractionTargetSample::new(
+        let mut sample = InteractionTargetSample::new_for_epoch(
+            target_epoch,
             packed_node,
             vector3(source_pivot, "interaction source pivot")?,
             output_distance,

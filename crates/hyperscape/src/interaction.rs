@@ -161,6 +161,7 @@ impl InteractionTarget {
 /// residency table supplies them atomically.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct InteractionTargetSample {
+    pub target_epoch: u32,
     pub packed_node: u32,
     pub source_pivot: [f64; 3],
     pub output_distance: f64,
@@ -173,7 +174,17 @@ impl InteractionTargetSample {
         source_pivot: [f64; 3],
         output_distance: f64,
     ) -> Result<Self, InteractionTargetError> {
+        Self::new_for_epoch(0, packed_node, source_pivot, output_distance)
+    }
+
+    pub fn new_for_epoch(
+        target_epoch: u32,
+        packed_node: u32,
+        source_pivot: [f64; 3],
+        output_distance: f64,
+    ) -> Result<Self, InteractionTargetError> {
         let sample = Self {
+            target_epoch,
             packed_node,
             source_pivot,
             output_distance,
@@ -224,11 +235,19 @@ impl InteractionTargetSample {
 /// authored/application mutation.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct InteractionTargetTable {
+    epoch: u32,
     targets: BTreeMap<u32, InteractionTarget>,
 }
 
 impl InteractionTargetTable {
     pub fn try_from_targets(
+        targets: impl IntoIterator<Item = InteractionTarget>,
+    ) -> Result<Self, InteractionTargetError> {
+        Self::try_from_epoch(0, targets)
+    }
+
+    pub fn try_from_epoch(
+        epoch: u32,
         targets: impl IntoIterator<Item = InteractionTarget>,
     ) -> Result<Self, InteractionTargetError> {
         let mut resolved = BTreeMap::new();
@@ -244,7 +263,14 @@ impl InteractionTargetTable {
                 ));
             }
         }
-        Ok(Self { targets: resolved })
+        Ok(Self {
+            epoch,
+            targets: resolved,
+        })
+    }
+
+    pub fn epoch(&self) -> u32 {
+        self.epoch
     }
 
     pub fn len(&self) -> usize {
@@ -259,6 +285,12 @@ impl InteractionTargetTable {
         &self,
         sample: InteractionTargetSample,
     ) -> Result<InteractionHit, InteractionTargetError> {
+        if sample.target_epoch != self.epoch {
+            return Err(InteractionTargetError::StaleTargetEpoch {
+                expected: self.epoch,
+                actual: sample.target_epoch,
+            });
+        }
         sample.validate()?;
         let target = self
             .targets
@@ -292,6 +324,10 @@ pub enum InteractionTargetError {
     },
     UnknownPackedNode(u32),
     UnmappedPackedNode(u32),
+    StaleTargetEpoch {
+        expected: u32,
+        actual: u32,
+    },
     InvalidSample(&'static str),
 }
 
@@ -314,6 +350,10 @@ impl fmt::Display for InteractionTargetError {
             Self::UnmappedPackedNode(node) => write!(
                 formatter,
                 "interaction query references packed node {node} without stable identity",
+            ),
+            Self::StaleTargetEpoch { expected, actual } => write!(
+                formatter,
+                "interaction query target epoch {actual} is stale; current epoch is {expected}",
             ),
             Self::InvalidSample(reason) => {
                 write!(formatter, "interaction query sample is invalid: {reason}")
@@ -793,6 +833,21 @@ mod tests {
             Err(InteractionTargetError::InvalidSample(
                 "interaction source pivot must be finite"
             )),
+        );
+
+        let current = InteractionTargetTable::try_from_epoch(
+            9,
+            [InteractionTarget::new(3, Some(identity(1, 2)), bound).unwrap()],
+        )
+        .unwrap();
+        assert_eq!(
+            current.resolve(
+                InteractionTargetSample::new_for_epoch(8, 3, [0.0; 3], 1.0).unwrap(),
+            ),
+            Err(InteractionTargetError::StaleTargetEpoch {
+                expected: 9,
+                actual: 8,
+            }),
         );
     }
 
