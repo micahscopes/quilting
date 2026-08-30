@@ -17,8 +17,9 @@ pub struct AdaptiveOverlayScene {
     batches: Vec<RenderBatchSnapshot>,
     pub(super) patches: PatchPreparationScene,
     visibility: VisibilityCompactionScene,
-    face_visibility: FaceVisibilityExpansionScene,
     bindings: PatchRenderBindings,
+    _patch_frame_rows: wgpu::Buffer,
+    prepared_visibility_bind_group: wgpu::BindGroup,
     pbr_scene_supported: bool,
 }
 
@@ -178,12 +179,6 @@ impl LodClassifierDevice {
         let patches =
             self.upload_adaptive_overlay_preparation_scene(model, roots, words.preparation)?;
         let visibility = self.upload_visibility_compaction_scene(words.visibility)?;
-        let face_visibility = self.create_face_visibility_expansion_scene(
-            model,
-            &patches,
-            &visibility,
-            model.prepared.residency.num_faces,
-        )?;
         let bindings = self.create_patch_render_bindings_with_environment(
             pipeline,
             scene,
@@ -196,6 +191,36 @@ impl LodClassifierDevice {
             .iter()
             .map(|&index| scene.batches[index as usize].clone())
             .collect::<Vec<_>>();
+        let mut patch_frame_rows = Vec::with_capacity(patches.patch_count as usize);
+        for (frame_row, batch) in batches.iter().enumerate() {
+            let frame_row = u32::try_from(frame_row)
+                .map_err(|_| LodWebGpuError::Payload("adaptive frame row exceeds u32".into()))?;
+            patch_frame_rows.extend(std::iter::repeat_n(frame_row, batch.members.len()));
+        }
+        if patch_frame_rows.len() != patches.patch_count as usize {
+            return Err(LodWebGpuError::Payload(
+                "adaptive frame rows do not cover the prepared patch domain".to_string(),
+            ));
+        }
+        let patch_frame_rows = buffer_init_or_zero(
+            &self.device,
+            "adaptive patch frame rows",
+            bytemuck::cast_slice(&patch_frame_rows),
+            wgpu::BufferUsages::STORAGE,
+        );
+        let prepared_visibility_layout = self.prepared_visibility_pipeline.get_bind_group_layout(0);
+        let prepared_visibility_bind_group =
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("adaptive prepared visibility bindings"),
+                layout: &prepared_visibility_layout,
+                entries: &[
+                    bind(0, &patches.uniform),
+                    bind(1, &bindings.frames),
+                    bind(2, &patches.prepared_records),
+                    bind(3, &patch_frame_rows),
+                    bind(4, &visibility.source_visibility),
+                ],
+            });
         Ok(Some(AdaptiveOverlayScene {
             model_identity: model.identity,
             scene_revision: scene.revision,
@@ -204,8 +229,9 @@ impl LodClassifierDevice {
             batches,
             patches,
             visibility,
-            face_visibility,
             bindings,
+            _patch_frame_rows: patch_frame_rows,
+            prepared_visibility_bind_group,
             pbr_scene_supported: pipeline.style == RenderStyle::Pbr
                 && supports_basic_pbr_frame(scene, RenderFrameOptions::default()),
         }))
@@ -268,6 +294,27 @@ impl LodClassifierDevice {
             bytemuck::cast_slice(words.as_slice()),
         );
         Ok(())
+    }
+
+    fn encode_adaptive_overlay_visibility(
+        &self,
+        overlay: &AdaptiveOverlayScene,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        if overlay.patches.patch_count == 0 {
+            return;
+        }
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("quilting adaptive prepared visibility"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.prepared_visibility_pipeline);
+        pass.set_bind_group(0, &overlay.prepared_visibility_bind_group, &[]);
+        pass.dispatch_workgroups(
+            overlay.patches.patch_count.div_ceil(LOD_WORKGROUP_SIZE),
+            1,
+            1,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -407,11 +454,7 @@ impl LodClassifierDevice {
         }
 
         self.encode_patch_preparation(&overlay.patches, encoder);
-        self.encode_resident_lod_visibility_expansion(
-            &overlay.face_visibility,
-            overlay.patches.patch_count,
-            encoder,
-        );
+        self.encode_adaptive_overlay_visibility(overlay, encoder);
         self.encode_visibility_compaction(&overlay.visibility, encoder);
 
         let color_load = target

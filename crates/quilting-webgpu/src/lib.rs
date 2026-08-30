@@ -718,6 +718,7 @@ pub struct LodClassifierDevice {
     resident_reconcile_4_to_1_pipeline: wgpu::ComputePipeline,
     resident_pack_pipeline: wgpu::ComputePipeline,
     patch_prepare_pipeline: wgpu::ComputePipeline,
+    prepared_visibility_pipeline: wgpu::ComputePipeline,
     visibility_expand_pipeline: wgpu::ComputePipeline,
     lod_visibility_expand_pipeline: wgpu::ComputePipeline,
     resident_bucket_histogram_pipeline: wgpu::ComputePipeline,
@@ -1030,6 +1031,8 @@ impl LodClassifierDevice {
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
         let patch_prepare_source = quilting_shaders::compile_patch_prepare_compute_wgsl()
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
+        let prepared_visibility_source = quilting_shaders::compile_prepared_visibility_wgsl()
+            .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
         let visibility_expand_source = quilting_shaders::compile_visibility_expand_wgsl()
             .map_err(|error| LodWebGpuError::Shader(error.to_string()))?;
         let lod_visibility_expand_source =
@@ -1064,6 +1067,11 @@ impl LodClassifierDevice {
             label: Some("quilting patch preparation"),
             source: wgpu::ShaderSource::Wgsl(Cow::Owned(patch_prepare_source)),
         });
+        let prepared_visibility_module =
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("quilting prepared patch visibility"),
+                source: wgpu::ShaderSource::Wgsl(Cow::Owned(prepared_visibility_source)),
+            });
         let visibility_expand_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("quilting face visibility expansion"),
             source: wgpu::ShaderSource::Wgsl(Cow::Owned(visibility_expand_source)),
@@ -1147,6 +1155,15 @@ impl LodClassifierDevice {
                 layout: None,
                 module: &patch_prepare_module,
                 entry_point: Some(quilting_shaders::PATCH_PREPARE_DEVICE_ENTRY_POINT),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let prepared_visibility_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("quilting prepared patch visibility"),
+                layout: None,
+                module: &prepared_visibility_module,
+                entry_point: Some(quilting_shaders::PREPARED_VISIBILITY_DEVICE_ENTRY_POINT),
                 compilation_options: Default::default(),
                 cache: None,
             });
@@ -1273,6 +1290,7 @@ impl LodClassifierDevice {
             resident_reconcile_4_to_1_pipeline,
             resident_pack_pipeline,
             patch_prepare_pipeline,
+            prepared_visibility_pipeline,
             visibility_expand_pipeline,
             lod_visibility_expand_pipeline,
             resident_bucket_histogram_pipeline,

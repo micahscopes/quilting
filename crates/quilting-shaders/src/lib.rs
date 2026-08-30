@@ -36,6 +36,8 @@ pub const RESIDENT_ROOT_TOPOLOGY_DEVICE_ENTRY_POINT: &str = "emit_resident_root_
 pub const VISIBILITY_SCAN_DEVICE_ENTRY_POINT: &str = "scan_visible_batches";
 pub const VISIBILITY_SCATTER_DEVICE_ENTRY_POINT: &str = "scatter_visible_instances";
 pub const PATCH_PREPARE_DEVICE_ENTRY_POINT: &str = "prepare_patch_instances";
+pub const PREPARED_VISIBILITY_DEVICE_ENTRY_POINT: &str =
+    "classify_prepared_patch_visibility";
 pub const PATCH_RENDER_DEVICE_VERTEX_ENTRY_POINT: &str = "render_patch_vertex";
 pub const PATCH_RENDER_DEVICE_NORMALS_ENTRY_POINT: &str = "render_patch_normals";
 pub const PATCH_RENDER_DEVICE_LOD_ENTRY_POINT: &str = "render_patch_lod";
@@ -69,6 +71,8 @@ pub mod sources {
     pub const PATCH_PREPARE_TYPES: &str =
         include_str!("../shaders/compute/patch_prepare_types.wgsl");
     pub const PATCH_PREPARE_COMPUTE: &str = include_str!("../shaders/compute/patch_prepare.wgsl");
+    pub const PREPARED_VISIBILITY: &str =
+        include_str!("../shaders/compute/prepared_visibility.wgsl");
     pub const PATCH_RENDER_DEVICE: &str = include_str!("../shaders/render/patch.wgsl");
     pub const RESIDENT_ROOT_RENDER_DEVICE: &str =
         include_str!("../shaders/render/resident_root_patch.wgsl");
@@ -516,6 +520,15 @@ pub fn compile_resident_root_visibility_module(
 pub fn compile_resident_root_visibility_wgsl(
 ) -> Result<String, Box<dyn std::error::Error>> {
     emit_wgsl(&compile_resident_root_visibility_module()?)
+}
+
+pub fn compile_prepared_visibility_module(
+) -> Result<naga::Module, Box<dyn std::error::Error>> {
+    compile_validated_compute_module(sources::PREPARED_VISIBILITY)
+}
+
+pub fn compile_prepared_visibility_wgsl() -> Result<String, Box<dyn std::error::Error>> {
+    emit_wgsl(&compile_prepared_visibility_module()?)
 }
 
 pub fn compile_resident_root_topology_module(
@@ -1309,6 +1322,25 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
                 RESIDENT_BUCKET_SCAN_DEVICE_ENTRY_POINT,
                 RESIDENT_BUCKET_SCATTER_DEVICE_ENTRY_POINT,
             ],
+        );
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .unwrap();
+
+        let source = compile_prepared_visibility_wgsl().unwrap();
+        assert!(!source.contains("#import"));
+        assert!(!source.contains("#define_import_path"));
+        let module = naga::front::wgsl::parse_str(&source).unwrap();
+        assert_eq!(
+            module
+                .entry_points
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            [PREPARED_VISIBILITY_DEVICE_ENTRY_POINT],
         );
         naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
