@@ -19,7 +19,8 @@ publishing resources, and an in-place update validates its candidate before
 issuing queue writes. The scene can create an exact command plan, and the
 prepared-patch encoder accepts only a plan whose snapshot allocation is the
 same retained epoch. The existing snapshot/frame encoder remains the rollback
-path.
+path. The focus-PBR scene/raw MRT plus Rust-scheduled focus composition accepts
+the same retained plan and keeps its legacy entry point as the parity oracle.
 
 This removes two warm-frame costs from the planned prepared-patch path:
 
@@ -45,9 +46,9 @@ usable graphics adapter and reported its existing explicit skip.
 
 ## Remaining boundary
 
-The planned encoder currently covers the coherent prepared-patch diagnostic
-family, including composite matcap/wire and selection highlight ordering.
-Focus-PBR, resident-root, and adaptive-overlay WebGPU entry points still admit
-legacy frames directly. They should consume the same retained epoch in small
-steps, retaining their legacy calls until browser image/workload parity is
-recorded on the user-run server.
+The planned encoder covers the coherent prepared-patch diagnostic family,
+including composite matcap/wire and selection highlight ordering, plus the
+focus-PBR scene/raw-field and postprocess chain. Resident-root and
+adaptive-overlay WebGPU entry points still admit legacy frames directly. They
+should consume the same retained epoch in small steps, retaining their legacy
+calls until browser image/workload parity is recorded on the user-run server.

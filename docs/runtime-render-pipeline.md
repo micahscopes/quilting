@@ -165,10 +165,12 @@ than a second unproven snapshot. Its planned prepared-patch encoder consumes a
 frame and command plan sharing that exact epoch; atlas admission, ordered draw
 traversal, highlight admission, and workload accounting all use the retained
 execution view. The original snapshot/frame encoder remains as a rollback and
-parity oracle. Focus-PBR, resident-root, and adaptive-overlay entry points still
-need the same explicit retained-plan admission before this migration is
-complete. Extending the command enum fails closed until a backend handles the
-new command. With `rendershadow=1`,
+parity oracle. The focus-PBR scene/raw-field pass and its Rust-scheduled
+postprocess now admit the same retained plan while keeping the legacy entry
+point beside it. Resident-root and adaptive-overlay entry points still need
+explicit retained-plan admission before this migration is complete. Extending
+the command enum fails closed until a backend handles the new command. With
+`rendershadow=1`,
 non-PBR WebGL2 styles preflight every retained batch against that resolved scene
 and execute its draw commands directly; a mismatch falls back before the first
 diagnostic draw.
