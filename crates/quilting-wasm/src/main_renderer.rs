@@ -49,7 +49,7 @@ use quilting_core::render::RenderSubmissionMismatch;
 #[cfg(feature = "webgpu-backend")]
 use quilting_core::render_evidence::{
     compare_render_images, RenderImageChannelOrder, RenderImageComparison, RenderImageOrigin,
-    Rgba8ImageView,
+    RenderPickComparison, RenderPickHit, Rgba8ImageView,
 };
 use quilting_core::screen_partition::ScreenPartitionPolicy;
 use quilting_core::screen_leaf_lod::{
@@ -554,6 +554,43 @@ struct BackendFrameEvidenceReport {
     image: RenderImageComparison,
 }
 
+#[derive(Clone, Copy)]
+struct ResolvedSurfacePick {
+    face: u32,
+    node: u32,
+    barycentric: [f32; 3],
+    source_position: Option<[f64; 3]>,
+    output_position: Option<[f64; 3]>,
+}
+
+#[cfg(feature = "webgpu-backend")]
+struct BackendPickEvidenceCapture {
+    webgl_render_call: u64,
+    webgpu_frame_revision: u64,
+    viewport: [u32; 2],
+    pixel: [u32; 2],
+    target_epoch: u32,
+    expected: Option<RenderPickHit>,
+    staged: crate::webgpu_backend::StagedWebGpuPick,
+    staging_ms: f64,
+    started_ms: f64,
+}
+
+#[cfg(feature = "webgpu-backend")]
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackendPickEvidenceReport {
+    webgl_render_call: u64,
+    webgpu_frame_revision: u64,
+    viewport: [u32; 2],
+    pixel: [u32; 2],
+    target_epoch: u32,
+    comparison: RenderPickComparison,
+    staging_ms: f64,
+    readback_ms: f64,
+    total_ms: f64,
+}
+
 struct MainState {
     renderer: Renderer,
     /// Authoritative drawable size, updated with the GL viewport by mr_resize.
@@ -609,6 +646,10 @@ struct MainState {
     backend_evidence_capture: Option<WebGlFrameEvidenceCapture>,
     #[cfg(feature = "webgpu-backend")]
     backend_evidence_error: Option<String>,
+    #[cfg(feature = "webgpu-backend")]
+    backend_pick_evidence: Option<BackendPickEvidenceCapture>,
+    #[cfg(feature = "webgpu-backend")]
+    backend_pick_evidence_reading: bool,
     /// Opt-in comparison between backend-neutral frame commands and actual
     /// indexed WebGL patch submissions.
     render_shadow: RenderShadowObserver,
@@ -2108,6 +2149,10 @@ pub fn mr_init(canvas_id: &str) -> bool {
             backend_evidence_capture: None,
             #[cfg(feature = "webgpu-backend")]
             backend_evidence_error: None,
+            #[cfg(feature = "webgpu-backend")]
+            backend_pick_evidence: None,
+            #[cfg(feature = "webgpu-backend")]
+            backend_pick_evidence_reading: false,
             render_shadow: RenderShadowObserver::default(),
             render_shadow_scene_dirty: true,
             validated_render_scene: None,
@@ -4125,6 +4170,96 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
 /// Pick a stable source-surface address. The face ID and barycentric seed are
 /// captured by the same depth-tested pass, so animated or conformally mapped
 /// geometry cannot produce a face/coordinate mismatch.
+fn resolve_surface_pick(state: &MainState, face: i32) -> Option<ResolvedSurfacePick> {
+    let face = u32::try_from(face).ok()?;
+    let face_index = usize::try_from(face).ok()?;
+    let barycentric = state.last_pick_barycentric?;
+    let node_index = *state.face_nodes.get(face_index)?;
+    let node = u32::try_from(node_index).ok()?;
+    let barycentric_f64 = barycentric.map(f64::from);
+    let conformal = conformal_state_for_node(state, node_index);
+    let source_position = state
+        .surface_runtime
+        .sample_face_in_parent_chart(
+            &state.cached_instances,
+            face_index,
+            barycentric_f64,
+            conformal.euclidean_model,
+        )
+        .ok()
+        .map(|sample| sample.output_position);
+    let output_position = state
+        .surface_runtime
+        .output_patch_for_face(
+            &state.cached_instances,
+            face_index,
+            conformal.mobius,
+            conformal.euclidean_model,
+        )
+        .ok()
+        .map(|patch| patch.eval(barycentric_f64[1], barycentric_f64[2]).to_point())
+        .filter(|point| point.iter().all(|coordinate| coordinate.is_finite()));
+    Some(ResolvedSurfacePick {
+        face,
+        node,
+        barycentric,
+        source_position,
+        output_position,
+    })
+}
+
+fn surface_pick_to_js(surface: ResolvedSurfacePick) -> JsValue {
+    let result = js_sys::Object::new();
+    let barycentric = js_sys::Float32Array::new_with_length(3);
+    barycentric.copy_from(&surface.barycentric);
+    js_sys::Reflect::set(
+        &result,
+        &"face".into(),
+        &JsValue::from_f64(surface.face as f64),
+    )
+    .ok();
+    js_sys::Reflect::set(
+        &result,
+        &"node".into(),
+        &JsValue::from_f64(surface.node as f64),
+    )
+    .ok();
+    js_sys::Reflect::set(&result, &"barycentric".into(), &barycentric).ok();
+    for (name, position) in [
+        ("source_position", surface.source_position),
+        ("output_position", surface.output_position),
+    ] {
+        if let Some(position) = position {
+            let array = js_sys::Float64Array::new_with_length(3);
+            array.copy_from(&position);
+            js_sys::Reflect::set(&result, &name.into(), &array).ok();
+        }
+    }
+    result.into()
+}
+
+#[cfg(feature = "webgpu-backend")]
+fn render_pick_hit(
+    surface: ResolvedSurfacePick,
+    camera_position: [f32; 3],
+) -> Option<RenderPickHit> {
+    let source_position = surface.source_position?.map(|coordinate| coordinate as f32);
+    let output_position = surface.output_position?;
+    let squared_distance = output_position
+        .into_iter()
+        .zip(camera_position)
+        .map(|(output, camera)| (output - f64::from(camera)).powi(2))
+        .sum::<f64>();
+    RenderPickHit::new(
+        surface.node,
+        surface.face,
+        surface.barycentric,
+        source_position,
+        squared_distance.sqrt() as f32,
+    )
+    .ok()
+}
+
 #[wasm_bindgen(js_name = "mr_pickSurface")]
 pub fn mr_pick_surface(
     mvp: &[f32],
@@ -4142,51 +4277,220 @@ pub fn mr_pick_surface(
         let Some(state) = state.as_ref() else {
             return JsValue::NULL;
         };
-        let Some(barycentric) = state.last_pick_barycentric else {
-            return JsValue::NULL;
-        };
-        let result = js_sys::Object::new();
-        let barycentric_array = js_sys::Float32Array::new_with_length(3);
-        barycentric_array.copy_from(&barycentric);
-        let node = state.face_nodes.get(face as usize).copied().unwrap_or(0);
-        let barycentric_f64 = barycentric.map(f64::from);
-        let conformal = conformal_state_for_node(state, node);
-        let source_position = state
-            .surface_runtime
-            .sample_face_in_parent_chart(
-                &state.cached_instances,
-                face as usize,
-                barycentric_f64,
-                conformal.euclidean_model,
-            )
-            .ok()
-            .map(|sample| sample.output_position);
-        let output_position = state
-            .surface_runtime
-            .output_patch_for_face(
-                &state.cached_instances,
-                face as usize,
-                conformal.mobius,
-                conformal.euclidean_model,
-            )
-            .ok()
-            .map(|patch| patch.eval(barycentric_f64[1], barycentric_f64[2]).to_point())
-            .filter(|point| point.iter().all(|coordinate| coordinate.is_finite()));
-        js_sys::Reflect::set(&result, &"face".into(), &JsValue::from_f64(face as f64)).ok();
-        js_sys::Reflect::set(&result, &"node".into(), &JsValue::from_f64(node as f64)).ok();
-        js_sys::Reflect::set(&result, &"barycentric".into(), &barycentric_array).ok();
-        for (name, position) in [
-            ("source_position", source_position),
-            ("output_position", output_position),
-        ] {
-            if let Some(position) = position {
-                let array = js_sys::Float64Array::new_with_length(3);
-                array.copy_from(&position);
-                js_sys::Reflect::set(&result, &name.into(), &array).ok();
-            }
-        }
-        result.into()
+        resolve_surface_pick(state, face)
+            .map(surface_pick_to_js)
+            .unwrap_or(JsValue::NULL)
     })
+}
+
+/// Stage an opt-in backend comparison while returning the incumbent WebGL2
+/// surface synchronously. The staged WebGPU query observes retained frame
+/// state and never becomes interaction authority.
+#[cfg(feature = "webgpu-backend")]
+#[wasm_bindgen(js_name = "mr_stageBackendPickEvidence")]
+pub fn mr_stage_backend_pick_evidence(
+    mvp: &[f32],
+    mv: &[f32],
+    camera_pos: &[f32],
+    x: i32,
+    y: i32,
+    target_epoch: u32,
+) -> JsValue {
+    let result = js_sys::Object::new();
+    js_sys::Reflect::set(&result, &"staged".into(), &JsValue::FALSE).ok();
+    js_sys::Reflect::set(&result, &"webgl".into(), &JsValue::NULL).ok();
+    let started_ms = browser_now_ms();
+    let face = mr_pick(mvp, mv, camera_pos, x, y);
+    let surface = STATE.with(|state| {
+        let state = state.borrow();
+        state
+            .as_ref()
+            .and_then(|state| resolve_surface_pick(state, face))
+    });
+    if let Some(surface) = surface {
+        js_sys::Reflect::set(&result, &"webgl".into(), &surface_pick_to_js(surface)).ok();
+    }
+
+    let staged = STATE.with(|slot| -> Result<(u64, u64, f64), String> {
+        let mut state = slot.borrow_mut();
+        let state = state
+            .as_mut()
+            .ok_or_else(|| "renderer is not initialized".to_string())?;
+        if state.backend_pick_evidence.is_some() || state.backend_pick_evidence_reading {
+            return Err("a backend pick comparison is already in flight".to_string());
+        }
+        let pixel = [
+            u32::try_from(x).map_err(|_| "pick x is outside the viewport".to_string())?,
+            u32::try_from(y).map_err(|_| "pick y is outside the viewport".to_string())?,
+        ];
+        let viewport = [
+            u32::try_from(state.viewport_size.0)
+                .map_err(|_| "pick viewport width is invalid".to_string())?,
+            u32::try_from(state.viewport_size.1)
+                .map_err(|_| "pick viewport height is invalid".to_string())?,
+        ];
+        if pixel[0] >= viewport[0] || pixel[1] >= viewport[1] {
+            return Err("pick pixel is outside the viewport".to_string());
+        }
+        let camera_position = [
+            camera_pos.first().copied().unwrap_or(0.0),
+            camera_pos.get(1).copied().unwrap_or(0.0),
+            camera_pos.get(2).copied().unwrap_or(0.0),
+        ];
+        let expected = match surface {
+            Some(surface) => Some(render_pick_hit(surface, camera_position).ok_or_else(|| {
+                "incumbent pick could not be expressed as render evidence".to_string()
+            })?),
+            None => None,
+        };
+        let webgl_render_call = state.render_calls;
+        let stage_started_ms = browser_now_ms();
+        let webgpu = crate::webgpu_backend::stage_pick(pixel, target_epoch)?;
+        let staging_ms = (browser_now_ms() - stage_started_ms).max(0.0);
+        if webgpu.source_render_call() != webgl_render_call {
+            return Err(format!(
+                "backend pick frame mismatch: WebGL2 render call {webgl_render_call}, WebGPU source render call {}",
+                webgpu.source_render_call(),
+            ));
+        }
+        let webgpu_frame_revision = webgpu.frame_revision();
+        state.backend_pick_evidence = Some(BackendPickEvidenceCapture {
+            webgl_render_call,
+            webgpu_frame_revision,
+            viewport,
+            pixel,
+            target_epoch,
+            expected,
+            staged: webgpu,
+            staging_ms,
+            started_ms,
+        });
+        Ok((webgpu_frame_revision, webgl_render_call, staging_ms))
+    });
+
+    match staged {
+        Ok((frame_revision, render_call, staging_ms)) => {
+            js_sys::Reflect::set(&result, &"staged".into(), &JsValue::TRUE).ok();
+            js_sys::Reflect::set(
+                &result,
+                &"webgpuFrameRevision".into(),
+                &JsValue::from_f64(frame_revision as f64),
+            )
+            .ok();
+            js_sys::Reflect::set(
+                &result,
+                &"webglRenderCall".into(),
+                &JsValue::from_f64(render_call as f64),
+            )
+            .ok();
+            js_sys::Reflect::set(
+                &result,
+                &"stagingMs".into(),
+                &JsValue::from_f64(staging_ms),
+            )
+            .ok();
+        }
+        Err(error) => {
+            js_sys::Reflect::set(&result, &"error".into(), &JsValue::from_str(&error)).ok();
+        }
+    }
+    result.into()
+}
+
+/// Read the single bounded backend pick comparison staged by
+/// `mr_stageBackendPickEvidence`.
+#[cfg(feature = "webgpu-backend")]
+#[wasm_bindgen(js_name = "mr_readBackendPickEvidence")]
+pub async fn mr_read_backend_pick_evidence() -> Result<JsValue, JsValue> {
+    let capture = STATE.with(|slot| -> Result<BackendPickEvidenceCapture, JsValue> {
+        let mut state = slot.borrow_mut();
+        let state = state
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("renderer is not initialized"))?;
+        if state.backend_pick_evidence_reading {
+            return Err(JsValue::from_str(
+                "a backend pick comparison readback is already in flight",
+            ));
+        }
+        let capture = state
+            .backend_pick_evidence
+            .take()
+            .ok_or_else(|| JsValue::from_str("no backend pick comparison is staged"))?;
+        state.backend_pick_evidence_reading = true;
+        Ok(capture)
+    })?;
+
+    let BackendPickEvidenceCapture {
+        webgl_render_call,
+        webgpu_frame_revision,
+        viewport,
+        pixel,
+        target_epoch,
+        expected,
+        staged,
+        staging_ms,
+        started_ms,
+    } = capture;
+    let readback_started_ms = browser_now_ms();
+    let report = async {
+        let readback = staged.read().await?;
+        if readback.frame_revision != webgpu_frame_revision {
+            return Err(format!(
+                "backend pick revision changed: staged {webgpu_frame_revision}, read {}",
+                readback.frame_revision,
+            ));
+        }
+        if readback.source_render_call != webgl_render_call {
+            return Err(format!(
+                "backend pick source changed: WebGL2 render call {webgl_render_call}, WebGPU read {}",
+                readback.source_render_call,
+            ));
+        }
+        let actual = match readback.hit {
+            Some(hit) => {
+                if hit.target_epoch != target_epoch {
+                    return Err(format!(
+                        "backend pick target epoch changed: staged {target_epoch}, read {}",
+                        hit.target_epoch,
+                    ));
+                }
+                Some(
+                    RenderPickHit::new(
+                        hit.packed_node,
+                        hit.source_face,
+                        hit.source_barycentric,
+                        hit.source_position,
+                        hit.output_distance,
+                    )
+                    .map_err(|error| error.to_string())?,
+                )
+            }
+            None => None,
+        };
+        let comparison = RenderPickComparison::between(expected, actual)
+            .map_err(|error| error.to_string())?;
+        let completed_ms = browser_now_ms();
+        Ok(BackendPickEvidenceReport {
+            webgl_render_call,
+            webgpu_frame_revision,
+            viewport,
+            pixel,
+            target_epoch,
+            comparison,
+            staging_ms,
+            readback_ms: (completed_ms - readback_started_ms).max(0.0),
+            total_ms: (completed_ms - started_ms).max(0.0),
+        })
+    }
+    .await;
+
+    STATE.with(|slot| {
+        if let Some(state) = slot.borrow_mut().as_mut() {
+            state.backend_pick_evidence_reading = false;
+        }
+    });
+    let report = report.map_err(|error| JsValue::from_str(&error))?;
+    serde_wasm_bindgen::to_value(&report).map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
 fn surface_snapshot_to_js(snapshot: Result<SurfaceRuntimeSnapshot, String>) -> JsValue {

@@ -2469,23 +2469,31 @@ pub(crate) struct StagedWebGpuPick {
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WebGpuPickHit {
-    target_epoch: u32,
-    packed_node: u32,
-    source_face: u32,
-    source_barycentric: [f32; 3],
-    source_position: [f32; 3],
-    output_distance: f32,
+    pub(crate) target_epoch: u32,
+    pub(crate) packed_node: u32,
+    pub(crate) source_face: u32,
+    pub(crate) source_barycentric: [f32; 3],
+    pub(crate) source_position: [f32; 3],
+    pub(crate) output_distance: f32,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WebGpuPickReadback {
-    frame_revision: u64,
-    source_render_call: u64,
-    hit: Option<WebGpuPickHit>,
+    pub(crate) frame_revision: u64,
+    pub(crate) source_render_call: u64,
+    pub(crate) hit: Option<WebGpuPickHit>,
 }
 
 impl StagedWebGpuPick {
+    pub(crate) fn frame_revision(&self) -> u64 {
+        self.frame_revision
+    }
+
+    pub(crate) fn source_render_call(&self) -> u64 {
+        self.source_render_call
+    }
+
     pub(crate) async fn read(self) -> Result<WebGpuPickReadback, String> {
         let hit = self
             .readback
