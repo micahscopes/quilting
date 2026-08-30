@@ -308,12 +308,25 @@ The binding schema will be normalized before WebGPU execution:
 | 2 | material/style uniforms and material textures |
 | 3 | pass resources: scene color, transmission, blur/focus, highlight |
 
-The current WGSL happens to reuse group 0/binding 1 for the vertex joint block
-and a fragment material block. WebGL tolerates this because stage-specific GLSL
-block names are bound after linking; a WebGPU pipeline layout cannot. The
-descriptor/cache migration must therefore land with reflected `(group,
-binding, stage, kind)` metadata and deterministic WebGL lowering, replacing
-generated-name substring heuristics before WebGPU is treated as equivalent.
+The legacy WebGL WGSL reuses some group-0 coordinates for distinct vertex and
+fragment resources. WebGL tolerates this because stage-specific GLSL names are
+bound after linking; a WebGPU pipeline layout has one resource per `(group,
+binding)` and cannot. WebGL program identity now retains the original WGSL
+source name, `(group, binding, stage)`, resource class, emitted GLSL name, and
+assigned UBO point or texture unit. That provenance is checked against Naga's
+reachable-resource reflection for the selected composed entry point. The
+catalog no longer claims inactive `face_data`, suppression-mask, sheen LUT, or
+blurred-scene bindings merely because another entry or an unreachable
+declaration shares the source module.
+
+The resulting incompatibility is finite and explicit: matcap and wire each
+conflict at `(0, 1)`; PBR conflicts at `(0, 1)`, `(0, 2)`, and `(0, 3)`; the
+normals, stretch, pick, patch-preparation, and visibility programs have no
+cross-stage slot conflict. This is diagnostic evidence, not a lossy conversion
+to `PipelineLayoutDescriptor`. The remaining migration is to give distinct
+logical resources non-overlapping WGSL coordinates (and specify full buffer,
+texture, and sampler layout policy), then lower that one portable layout into
+both APIs before WebGL/WebGPU binding equivalence is claimed.
 
 ## Atlas topology and grading policy
 
