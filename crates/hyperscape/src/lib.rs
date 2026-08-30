@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use uuid::Uuid;
 
 pub mod interchange;
+pub mod interaction;
 pub mod navigation;
 pub mod packed_scene;
 #[cfg(not(target_arch = "wasm32"))]
@@ -41,6 +42,11 @@ pub use navigation::{
     SurfaceWalkRecoveryRequest, SurfaceWalkReflectionTransport, SurfaceWalkRuntime,
     SurfaceWalkRuntimeError, SurfaceWalkStepRequest, SurfaceWalkUpdate, TransitionEasing,
     TurntableFrame,
+};
+pub use interaction::{
+    InteractionAction, InteractionActionQueue, InteractionActivation, InteractionActivations,
+    InteractionController, InteractionHit, InteractionPolicy, InteractionSnapshot,
+    InteractionState, InteractionSurfacePoint, ScheduledInteractionAction,
 };
 pub use packed_scene::{
     extract_packed_presentation_scene, extract_packed_scene, PackedAssetInstance,
@@ -397,6 +403,10 @@ impl Plugin for HyperscapePlugin {
             .init_resource::<ChamberAggregateState>()
             .init_resource::<TransformHistory>()
             .init_resource::<FocusNavigation>()
+            .init_resource::<InteractionPolicy>()
+            .init_resource::<InteractionActionQueue>()
+            .init_resource::<InteractionState>()
+            .init_resource::<InteractionActivations>()
             .init_resource::<CameraRig>()
             .init_resource::<NavigationActionQueue>()
             .init_resource::<NavigationRuntime>()
@@ -420,7 +430,13 @@ impl Plugin for HyperscapePlugin {
             )
             .add_systems(
                 Update,
-                navigation::action::apply_navigation_actions.in_set(HyperscapeSet::Interaction),
+                (
+                    interaction::apply_interaction_actions,
+                    interaction::route_interaction_activations,
+                    navigation::action::apply_navigation_actions,
+                )
+                    .chain()
+                    .in_set(HyperscapeSet::Interaction),
             )
             .add_systems(
                 Update,
