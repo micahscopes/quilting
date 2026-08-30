@@ -352,6 +352,77 @@ pub(crate) fn multisample_state(
     }
 }
 
+/// Fully lowered fixed state whose borrowed vertex attributes remain scoped
+/// to one backend construction effect. Keeping this value callback-local
+/// avoids self-referential storage while giving every pipeline family the
+/// same mechanical descriptor lowering.
+pub(crate) struct LoweredRenderPipelineState<'descriptor, 'attributes> {
+    pub(crate) vertex_entry_point: &'descriptor str,
+    pub(crate) fragment_entry_point: Option<&'descriptor str>,
+    pub(crate) vertex_buffers: Vec<wgpu::VertexBufferLayout<'attributes>>,
+    pub(crate) primitive: wgpu::PrimitiveState,
+    pub(crate) depth_stencil: Option<wgpu::DepthStencilState>,
+    pub(crate) multisample: wgpu::MultisampleState,
+    pub(crate) targets: Vec<Option<wgpu::ColorTargetState>>,
+}
+
+pub(crate) fn with_render_pipeline_state<'descriptor, Output, Effect>(
+    descriptor: &'descriptor functional::RenderPipelineDescriptor,
+    effect: Effect,
+) -> Result<Output, LodWebGpuError>
+where
+    Effect: for<'attributes> FnOnce(LoweredRenderPipelineState<'descriptor, 'attributes>) -> Output,
+{
+    let mut attribute_storage = Vec::with_capacity(descriptor.vertex_buffers().len());
+    for (expected_slot, buffer) in descriptor.vertex_buffers().iter().enumerate() {
+        if buffer.slot() != expected_slot as u32 {
+            return Err(LodWebGpuError::Payload(
+                "functional render-pipeline vertex slots are not contiguous".to_string(),
+            ));
+        }
+        attribute_storage.push(
+            buffer
+                .attributes()
+                .iter()
+                .map(|attribute| wgpu::VertexAttribute {
+                    format: vertex_format(attribute.format),
+                    offset: attribute.offset,
+                    shader_location: attribute.location,
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
+    let vertex_buffers = descriptor
+        .vertex_buffers()
+        .iter()
+        .zip(attribute_storage.iter())
+        .map(|(buffer, attributes)| wgpu::VertexBufferLayout {
+            array_stride: buffer.stride(),
+            step_mode: vertex_step_mode(buffer.step_mode()),
+            attributes,
+        })
+        .collect::<Vec<_>>();
+    let targets = descriptor
+        .color_targets()
+        .iter()
+        .copied()
+        .map(color_target_state)
+        .map(|target| target.map(Some))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(effect(LoweredRenderPipelineState {
+        vertex_entry_point: descriptor.program().vertex().entry_point(),
+        fragment_entry_point: descriptor
+            .program()
+            .fragment()
+            .map(functional::ShaderModuleDescriptor::entry_point),
+        vertex_buffers,
+        primitive: primitive_state(descriptor.primitive()),
+        depth_stencil: descriptor.depth_stencil().map(depth_stencil_state),
+        multisample: multisample_state(descriptor.multisample()),
+        targets,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -417,5 +488,89 @@ mod tests {
         assert_eq!(depth.format, wgpu::TextureFormat::Depth24Plus);
         assert_eq!(depth.depth_write_enabled, Some(false));
         assert_eq!(depth.depth_compare, Some(wgpu::CompareFunction::LessEqual));
+    }
+
+    fn functional_pipeline(vertex_slot: u32) -> functional::RenderPipelineDescriptor {
+        let shader = |stage, entry_point| {
+            functional::ShaderModuleDescriptor::new(
+                "lowering test",
+                "synthetic shader source",
+                "synthetic compiler revision",
+                stage,
+                entry_point,
+                functional::ShaderTarget::Wgsl,
+                Vec::new(),
+            )
+            .unwrap()
+        };
+        functional::RenderPipelineDescriptor::new(
+            functional::GraphicsProgramDescriptor::new(
+                shader(functional::ShaderStage::Vertex, "vertex_main"),
+                Some(shader(functional::ShaderStage::Fragment, "fragment_main")),
+                Vec::new(),
+            )
+            .unwrap(),
+            functional::PipelineLayoutDescriptor::new(Vec::new()).unwrap(),
+            vec![functional::VertexBufferLayoutDescriptor::new(
+                vertex_slot,
+                12,
+                functional::VertexStepMode::Vertex,
+                vec![functional::VertexAttributeDescriptor {
+                    location: 3,
+                    offset: 0,
+                    format: functional::VertexFormat::Float32x3,
+                }],
+            )
+            .unwrap()],
+            functional::PrimitiveStateDescriptor {
+                topology: functional::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: functional::FrontFace::Clockwise,
+                cull_mode: functional::CullMode::Back,
+            },
+            None,
+            vec![functional::ColorTargetStateDescriptor {
+                format: functional::TextureFormat::Rgba8Unorm,
+                blend: None,
+                write_mask: functional::ColorWriteMask::ALL,
+            }],
+            functional::MultisampleStateDescriptor::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn complete_pipeline_lowering_keeps_borrows_inside_one_effect() {
+        let observation = with_render_pipeline_state(&functional_pipeline(0), |state| {
+            (
+                state.vertex_entry_point.to_string(),
+                state.fragment_entry_point.map(str::to_string),
+                state.vertex_buffers.len(),
+                state.vertex_buffers[0].array_stride,
+                state.vertex_buffers[0].attributes[0].shader_location,
+                state.primitive.front_face,
+                state.primitive.cull_mode,
+                state.depth_stencil.is_none(),
+                state.multisample.count,
+                state.targets[0].as_ref().unwrap().format,
+            )
+        })
+        .unwrap();
+        assert_eq!(observation.0, "vertex_main");
+        assert_eq!(observation.1.as_deref(), Some("fragment_main"));
+        assert_eq!(observation.2, 1);
+        assert_eq!(observation.3, 12);
+        assert_eq!(observation.4, 3);
+        assert_eq!(observation.5, wgpu::FrontFace::Cw);
+        assert_eq!(observation.6, Some(wgpu::Face::Back));
+        assert!(observation.7);
+        assert_eq!(observation.8, 1);
+        assert_eq!(observation.9, wgpu::TextureFormat::Rgba8Unorm);
+    }
+
+    #[test]
+    fn complete_pipeline_lowering_rejects_noncontiguous_vertex_slots() {
+        let error = with_render_pipeline_state(&functional_pipeline(2), |_| ()).unwrap_err();
+        assert!(error.to_string().contains("not contiguous"));
     }
 }
