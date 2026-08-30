@@ -175,6 +175,26 @@ impl Renderer {
         )
     }
 
+    /// Render a validated backend-neutral diagnostic command stream against
+    /// the retained WebGL resources. The legacy [`Self::render`] path remains
+    /// available for atomic fallback until browser image parity is sustained.
+    pub fn render_diagnostic_execution(
+        &self,
+        execution: quilting_core::render::RenderExecution<'_, '_>,
+        camera: &pass::Camera,
+        batches: &[pass::RenderBatch],
+    ) -> Result<quilting_core::render::RenderSubmissionStats, pass::WebGlRenderExecutionError> {
+        pass::render_diagnostic_execution(
+            &self.gl,
+            &self.programs,
+            execution,
+            camera,
+            batches,
+            &self.vtx_ubo,
+            &self.wire_ubo,
+        )
+    }
+
     /// Prepare one resident patch batch from the current animation pose and
     /// entity transform. The destination is consumed directly by later draws.
     pub fn prepare_patch_batch(

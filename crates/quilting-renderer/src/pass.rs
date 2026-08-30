@@ -1,9 +1,10 @@
 //! Render passes: configure GL state and issue draw calls per render mode.
 
 use glow::HasContext;
+use quilting_core::batch::RenderBatchLayer;
 use quilting_core::render::{
-    render_draw_passes, PbrDrawClass, RenderBatchSelection, RenderGeometry, RenderPass,
-    RenderStyle, RenderSubmissionStats,
+    render_draw_passes, PbrDrawClass, RenderBatchSelection, RenderBatchSnapshot, RenderExecution,
+    RenderGeometry, RenderPass, RenderStyle, RenderSubmissionStats, ResolvedRenderCommand,
 };
 
 use crate::buffer::{MeshBuffers, MeshDraw, VertexUniformBuf, WireUniformBuf};
@@ -46,6 +47,55 @@ pub struct RenderBatch {
     /// Inverse-transpose linear part of `euclidean_model`.
     pub euclidean_normal: [f32; 16],
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebGlBatchField {
+    TriangleIndexCount,
+    LineIndexCount,
+    InstanceCount,
+    SourceRootSuppression,
+    PermutationParity,
+    Material,
+    DrawClass,
+    RenderNode,
+    ConformalTransform,
+    Orientation,
+    EuclideanModel,
+    EuclideanNormal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebGlRenderExecutionError {
+    BatchCount {
+        expected: usize,
+        actual: usize,
+    },
+    BatchMismatch {
+        batch_index: u32,
+        field: WebGlBatchField,
+    },
+    UnsupportedCommand(&'static str),
+}
+
+impl std::fmt::Display for WebGlRenderExecutionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BatchCount { expected, actual } => write!(
+                formatter,
+                "WebGL has {actual} retained batches; resolved frame requires {expected}",
+            ),
+            Self::BatchMismatch { batch_index, field } => write!(
+                formatter,
+                "WebGL batch {batch_index} does not match resolved {field:?}",
+            ),
+            Self::UnsupportedCommand(command) => {
+                write!(formatter, "WebGL diagnostic executor does not support {command}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for WebGlRenderExecutionError {}
 
 pub const IDENTITY_MATRIX: [f32; 16] = [
     1.0, 0.0, 0.0, 0.0,
@@ -118,6 +168,98 @@ pub fn same_vertex_uniform_state(a: &RenderBatch, b: &RenderBatch) -> bool {
         && a.euclidean_normal == b.euclidean_normal
 }
 
+fn validate_batch_residency(
+    batch_index: u32,
+    expected: &RenderBatchSnapshot,
+    actual: &RenderBatch,
+) -> Result<(), WebGlRenderExecutionError> {
+    let mismatch = |field| WebGlRenderExecutionError::BatchMismatch { batch_index, field };
+    if u32::try_from(actual.mesh.num_tri_indices).ok() != Some(expected.triangle_index_count) {
+        return Err(mismatch(WebGlBatchField::TriangleIndexCount));
+    }
+    if u32::try_from(actual.mesh.num_line_indices).ok() != Some(expected.line_index_count) {
+        return Err(mismatch(WebGlBatchField::LineIndexCount));
+    }
+    if u32::try_from(actual.mesh.num_instances).ok() != expected.active_instance_count().ok() {
+        return Err(mismatch(WebGlBatchField::InstanceCount));
+    }
+    if actual.suppress_source_roots != (expected.id.layer == RenderBatchLayer::RetainedRoot) {
+        return Err(mismatch(WebGlBatchField::SourceRootSuppression));
+    }
+    if actual.perm_parity != expected.id.key.parity() {
+        return Err(mismatch(WebGlBatchField::PermutationParity));
+    }
+    if actual.material_index != expected.id.key.material_index {
+        return Err(mismatch(WebGlBatchField::Material));
+    }
+    if actual.pbr_class != expected.pbr_class {
+        return Err(mismatch(WebGlBatchField::DrawClass));
+    }
+    if actual.render_node_index != expected.id.key.render_node_index {
+        return Err(mismatch(WebGlBatchField::RenderNode));
+    }
+    if actual.mobius != expected.transform.mobius {
+        return Err(mismatch(WebGlBatchField::ConformalTransform));
+    }
+    if actual.orientation_sign != expected.transform.orientation_sign {
+        return Err(mismatch(WebGlBatchField::Orientation));
+    }
+    if actual.euclidean_model != expected.transform.euclidean_model {
+        return Err(mismatch(WebGlBatchField::EuclideanModel));
+    }
+    if actual.euclidean_normal != expected.transform.euclidean_normal {
+        return Err(mismatch(WebGlBatchField::EuclideanNormal));
+    }
+    Ok(())
+}
+
+/// Prove that a validated semantic frame addresses the exact retained WebGL
+/// allocations before the first device call. PBR composition is admitted by a
+/// separate executor because its transmission and focus commands interleave
+/// framebuffer work with patch draws.
+pub fn validate_diagnostic_execution(
+    execution: RenderExecution<'_, '_>,
+    batches: &[RenderBatch],
+) -> Result<(), WebGlRenderExecutionError> {
+    if execution.batches().len() != batches.len() {
+        return Err(WebGlRenderExecutionError::BatchCount {
+            expected: execution.batches().len(),
+            actual: batches.len(),
+        });
+    }
+    for (batch_index, (expected, actual)) in execution
+        .batches()
+        .iter()
+        .zip(batches)
+        .enumerate()
+    {
+        validate_batch_residency(batch_index as u32, expected, actual)?;
+    }
+    for command in execution {
+        match command {
+            ResolvedRenderCommand::PreparePatches { .. }
+            | ResolvedRenderCommand::ResolveVisibility { .. }
+            | ResolvedRenderCommand::HighlightFace { .. } => {}
+            ResolvedRenderCommand::DrawPatches { pass, .. }
+                if !matches!(pass, RenderPass::PbrOpaque | RenderPass::PbrTransparent) => {}
+            ResolvedRenderCommand::DrawPatches { .. } => {
+                return Err(WebGlRenderExecutionError::UnsupportedCommand("PBR draw"));
+            }
+            ResolvedRenderCommand::BuildTransmissionPyramid => {
+                return Err(WebGlRenderExecutionError::UnsupportedCommand(
+                    "transmission pyramid",
+                ));
+            }
+            ResolvedRenderCommand::FocusPostProcess => {
+                return Err(WebGlRenderExecutionError::UnsupportedCommand(
+                    "focus postprocess",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Combine authored/affine orientation with the canonical atlas permutation.
 /// Odd S3 permutations reflect barycentric space and therefore reverse winding.
 pub fn batch_orientation_sign(orientation_sign: i8, perm_parity: f32) -> i8 {
@@ -187,6 +329,56 @@ fn upload_batch_ubo_if_changed<'a>(
     *previous = Some(batch);
 }
 
+#[allow(clippy::too_many_arguments)]
+fn draw_batch<'a>(
+    gl: &glow::Context,
+    camera: &Camera,
+    vtx_ubo: &VertexUniformBuf,
+    vertex_state: &mut Option<&'a RenderBatch>,
+    batch_index: usize,
+    batch: &'a RenderBatch,
+    pass: RenderPass,
+    geometry: RenderGeometry,
+) -> RenderSubmissionStats {
+    apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
+    upload_batch_ubo_if_changed(gl, vtx_ubo, camera, vertex_state, batch);
+
+    let (vertex_array, primitive, count, offset) = match geometry {
+        RenderGeometry::Triangles => (
+            batch.mesh.tri_vao,
+            glow::TRIANGLES,
+            batch.mesh.num_tri_indices,
+            batch.mesh.tri_index_offset,
+        ),
+        RenderGeometry::Lines => (
+            batch.mesh.line_vao,
+            glow::LINES,
+            batch.mesh.num_line_indices,
+            batch.mesh.line_index_offset,
+        ),
+    };
+    unsafe {
+        gl.bind_vertex_array(Some(vertex_array));
+        gl.draw_elements_instanced(
+            primitive,
+            count,
+            glow::UNSIGNED_INT,
+            offset,
+            batch.mesh.num_instances,
+        );
+    }
+    let mut stats = RenderSubmissionStats::default();
+    record_indexed_submission(
+        &mut stats,
+        batch_index,
+        pass,
+        geometry,
+        count,
+        batch.mesh.num_instances,
+    );
+    stats
+}
+
 fn draw_batches(
     gl: &glow::Context,
     camera: &Camera,
@@ -199,44 +391,18 @@ fn draw_batches(
     let mut stats = RenderSubmissionStats::default();
     let mut vertex_state = None;
     for (batch_index, batch) in batches.iter().enumerate() {
-        if !selection.includes(batch.pbr_class) {
-            continue;
+        if selection.includes(batch.pbr_class) {
+            stats.merge(draw_batch(
+                gl,
+                camera,
+                vtx_ubo,
+                &mut vertex_state,
+                batch_index,
+                batch,
+                pass,
+                geometry,
+            ));
         }
-        apply_batch_winding(gl, batch.orientation_sign, batch.perm_parity);
-        upload_batch_ubo_if_changed(gl, vtx_ubo, camera, &mut vertex_state, batch);
-
-        let (vertex_array, primitive, count, offset) = match geometry {
-            RenderGeometry::Triangles => (
-                batch.mesh.tri_vao,
-                glow::TRIANGLES,
-                batch.mesh.num_tri_indices,
-                batch.mesh.tri_index_offset,
-            ),
-            RenderGeometry::Lines => (
-                batch.mesh.line_vao,
-                glow::LINES,
-                batch.mesh.num_line_indices,
-                batch.mesh.line_index_offset,
-            ),
-        };
-        unsafe {
-            gl.bind_vertex_array(Some(vertex_array));
-            gl.draw_elements_instanced(
-                primitive,
-                count,
-                glow::UNSIGNED_INT,
-                offset,
-                batch.mesh.num_instances,
-            );
-        }
-        record_indexed_submission(
-            &mut stats,
-            batch_index,
-            pass,
-            geometry,
-            count,
-            batch.mesh.num_instances,
-        );
     }
     stats
 }
@@ -266,6 +432,18 @@ pub fn record_indexed_submission(
 }
 
 /// Render a frame using the backend-neutral ordered draw-pass plan.
+fn program_for_pass(programs: &Programs, pass: RenderPass) -> glow::Program {
+    match pass {
+        RenderPass::PbrOpaque | RenderPass::PbrTransparent => programs.pbr,
+        RenderPass::Matcap | RenderPass::Lod => programs.matcap,
+        RenderPass::Wire => programs.wire,
+        RenderPass::Normals => programs.normals,
+        RenderPass::Stretch => programs.stretch,
+    }
+}
+
+/// Legacy rollback dispatcher. New diagnostic paths should consume
+/// [`RenderExecution`] through [`render_diagnostic_execution`].
 pub fn render_frame(
     gl: &glow::Context,
     programs: &Programs,
@@ -279,13 +457,7 @@ pub fn render_frame(
     vtx_ubo.bind(gl);
 
     for draw_pass in render_draw_passes(style) {
-        let program = match draw_pass.pass {
-            RenderPass::PbrOpaque | RenderPass::PbrTransparent => programs.pbr,
-            RenderPass::Matcap | RenderPass::Lod => programs.matcap,
-            RenderPass::Wire => programs.wire,
-            RenderPass::Normals => programs.normals,
-            RenderPass::Stretch => programs.stretch,
-        };
+        let program = program_for_pass(programs, draw_pass.pass);
         unsafe {
             gl.use_program(Some(program));
         }
@@ -310,6 +482,64 @@ pub fn render_frame(
         gl.bind_vertex_array(None);
     }
     stats
+}
+
+/// Execute canonical diagnostic patch draws against exact retained WebGL
+/// resources. The complete semantic/resource preflight runs before any GL
+/// state mutation, so callers can fall back to [`render_frame`] atomically.
+#[allow(clippy::too_many_arguments)]
+pub fn render_diagnostic_execution(
+    gl: &glow::Context,
+    programs: &Programs,
+    execution: RenderExecution<'_, '_>,
+    camera: &Camera,
+    batches: &[RenderBatch],
+    vtx_ubo: &VertexUniformBuf,
+    wire_ubo: &WireUniformBuf,
+) -> Result<RenderSubmissionStats, WebGlRenderExecutionError> {
+    validate_diagnostic_execution(execution, batches)?;
+
+    let mut stats = RenderSubmissionStats::default();
+    let mut active_pass = None;
+    let mut vertex_state = None;
+    vtx_ubo.bind(gl);
+    for command in execution {
+        let ResolvedRenderCommand::DrawPatches {
+            batch_index,
+            pass,
+            geometry,
+            ..
+        } = command
+        else {
+            continue;
+        };
+        if active_pass != Some(pass) {
+            unsafe {
+                gl.use_program(Some(program_for_pass(programs, pass)));
+            }
+            if pass == RenderPass::Wire {
+                wire_ubo.upload(gl, [0.0; 3], true);
+                wire_ubo.bind(gl);
+            }
+            active_pass = Some(pass);
+            vertex_state = None;
+        }
+        let batch = &batches[batch_index as usize];
+        stats.merge(draw_batch(
+            gl,
+            camera,
+            vtx_ubo,
+            &mut vertex_state,
+            batch_index as usize,
+            batch,
+            pass,
+            geometry,
+        ));
+    }
+    unsafe {
+        gl.bind_vertex_array(None);
+    }
+    Ok(stats)
 }
 
 /// Identity Möbius transform: a=1, b=0, c=0, d=1 (as quaternions).
@@ -366,6 +596,99 @@ pub fn render_original_wireframe(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quilting_core::batch::{RenderBatchId, RenderBatchKey, RenderBatchMember};
+    use quilting_core::render::{
+        FocusFieldPacket, RenderEntityTransform, RenderFrame, RenderFrameOptions,
+        RenderPoseIdentity, RenderSceneSnapshot, RenderView,
+    };
+    use quilting_core::screen_partition::ScreenPatchLeafId;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn resident_fixture(enabled: bool) -> (RenderSceneSnapshot, RenderBatch) {
+        let key = RenderBatchKey {
+            lod: [1; 3],
+            parity_bucket: 0,
+            material_index: 0,
+            render_node_index: 0,
+        };
+        let snapshot = RenderBatchSnapshot {
+            id: RenderBatchId::complete(key),
+            members: vec![RenderBatchMember {
+                face_index: 0,
+                leaf_id: ScreenPatchLeafId::ROOT,
+                node_index: 0,
+                edge_lods: [1; 3],
+                permutation_index: 0,
+                vertex_lods: [1; 3],
+            }],
+            triangle_index_count: 6,
+            line_index_count: 6,
+            transform: RenderEntityTransform {
+                mobius: IDENTITY_MOBIUS,
+                orientation_sign: 1,
+                euclidean_model: IDENTITY_MATRIX,
+                euclidean_normal: IDENTITY_MATRIX,
+            },
+            enabled,
+            pbr_class: PbrDrawClass::Opaque,
+        };
+        let vao = glow::NativeVertexArray(std::num::NonZeroU32::new(1).unwrap());
+        let batch = RenderBatch {
+            mesh: MeshDraw {
+                tri_vao: vao,
+                line_vao: vao,
+                num_tri_indices: 6,
+                num_line_indices: 6,
+                tri_index_offset: 0,
+                line_index_offset: 0,
+                num_instances: i32::from(enabled),
+            },
+            suppress_source_roots: false,
+            perm_parity: 1.0,
+            material_index: 0,
+            pbr_class: PbrDrawClass::Opaque,
+            render_node_index: 0,
+            mobius: IDENTITY_MOBIUS,
+            orientation_sign: 1,
+            euclidean_model: IDENTITY_MATRIX,
+            euclidean_normal: IDENTITY_MATRIX,
+        };
+        (
+            RenderSceneSnapshot {
+                revision: 4,
+                materials: Vec::new(),
+                suppressed_root_faces: Vec::new(),
+                batches: vec![snapshot],
+            },
+            batch,
+        )
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn frame(scene: &RenderSceneSnapshot, style: RenderStyle) -> RenderFrame {
+        RenderFrame::build(
+            7,
+            RenderPoseIdentity {
+                asset_revision: 2,
+                pose_revision: 3,
+            },
+            style,
+            RenderView {
+                viewport: [640, 480],
+                mvp: IDENTITY_MATRIX,
+                model_view: IDENTITY_MATRIX,
+                camera_position: [0.0, 0.0, 3.0],
+                selected_node: None,
+                focus: FocusFieldPacket {
+                    sphere: [0.0, 0.0, 0.0, 1.0],
+                    enabled: false,
+                },
+            },
+            RenderFrameOptions::default(),
+            scene,
+        )
+        .unwrap()
+    }
 
     #[test]
     fn signed_submission_counts_are_validated_before_accounting() {
@@ -409,5 +732,59 @@ mod tests {
         assert_eq!(stats.submitted_instances, 2);
         assert_eq!(stats.triangles, 8);
         assert_eq!(stats.lines, 0);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn diagnostic_execution_fails_closed_on_stale_webgl_residency() {
+        let (scene, batch) = resident_fixture(true);
+        let frame = frame(&scene, RenderStyle::Matcap);
+        validate_diagnostic_execution(frame.execution(&scene).unwrap(), &[batch]).unwrap();
+
+        let mut stale = batch;
+        stale.mesh.num_instances = 0;
+        assert_eq!(
+            validate_diagnostic_execution(frame.execution(&scene).unwrap(), &[stale]),
+            Err(WebGlRenderExecutionError::BatchMismatch {
+                batch_index: 0,
+                field: WebGlBatchField::InstanceCount,
+            })
+        );
+        stale = batch;
+        stale.mesh.num_tri_indices = 3;
+        assert_eq!(
+            validate_diagnostic_execution(frame.execution(&scene).unwrap(), &[stale]),
+            Err(WebGlRenderExecutionError::BatchMismatch {
+                batch_index: 0,
+                field: WebGlBatchField::TriangleIndexCount,
+            })
+        );
+        assert_eq!(
+            validate_diagnostic_execution(frame.execution(&scene).unwrap(), &[]),
+            Err(WebGlRenderExecutionError::BatchCount {
+                expected: 1,
+                actual: 0,
+            })
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn diagnostic_execution_preserves_zero_work_and_rejects_pbr() {
+        let (hidden_scene, hidden_batch) = resident_fixture(false);
+        let hidden_frame = frame(&hidden_scene, RenderStyle::Wire);
+        let execution = hidden_frame.execution(&hidden_scene).unwrap();
+        validate_diagnostic_execution(execution, &[hidden_batch]).unwrap();
+        let stats = execution.submission_stats();
+        assert_eq!(stats.draw_calls, 1);
+        assert_eq!(stats.zero_instance_draw_calls, 1);
+        assert_eq!(stats.submitted_instances, 0);
+
+        let (scene, batch) = resident_fixture(true);
+        let pbr = frame(&scene, RenderStyle::Pbr);
+        assert_eq!(
+            validate_diagnostic_execution(pbr.execution(&scene).unwrap(), &[batch]),
+            Err(WebGlRenderExecutionError::UnsupportedCommand("PBR draw"))
+        );
     }
 }

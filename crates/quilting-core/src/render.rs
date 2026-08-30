@@ -1254,6 +1254,10 @@ impl<'frame, 'scene> RenderExecution<'frame, 'scene> {
         }
     }
 
+    pub fn batches(self) -> &'scene [RenderBatchSnapshot] {
+        &self.scene.batches
+    }
+
     /// Derive the exact logical indexed work without revalidating or allocating.
     pub fn submission_stats(self) -> RenderSubmissionStats {
         let mut stats = RenderSubmissionStats::default();
