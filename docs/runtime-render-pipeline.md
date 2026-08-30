@@ -269,6 +269,14 @@ and resident-root builders validate their semantic family order, then use that
 same operation. Their uncached nonportable-format fallbacks remain explicit
 rollback paths and are not presented as descriptor-backed.
 
+Prepared/adaptive rendering also has one semantic pass plan above that effect
+boundary. Style support, ordinary versus focus PBR entry points, triangle or
+line geometry, highlight depth policy, winding multiplicity, and retained
+pipeline kind are selected once in `prepared_patch_pipeline`. Both the pure
+descriptor vector and runtime family builder iterate that same plan, so adding
+a style cannot silently change the memo key without changing the pipelines it
+constructs.
+
 `quilting_renderer::memo::DeviceMemo` is the effect boundary. It maps a pure
 descriptor to a concrete backend resource, inserts only after construction has
 fully succeeded, and scopes every entry to an explicit device/context epoch.
