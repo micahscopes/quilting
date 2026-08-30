@@ -407,6 +407,25 @@ impl HyperscopeAppShadow {
         );
     }
 
+    /// Mount the focus-composition portion of the same Rust render policy in
+    /// its established sidebar section. This view shares AppStore and reducer
+    /// authority with `mountRenderControls`.
+    #[cfg(feature = "leptos-ui")]
+    #[wasm_bindgen(js_name = mountFocusPostprocessControls)]
+    pub fn mount_focus_postprocess_controls(
+        &self,
+        parent: web_sys::HtmlElement,
+        on_commit: js_sys::Function,
+        on_error: js_sys::Function,
+    ) {
+        hyperscope_web::render_controls::mount_focus_postprocess_controls(
+            parent,
+            self.store.clone(),
+            on_commit,
+            on_error,
+        );
+    }
+
     /// Mount the Rust-authoritative Patch Lab control island. User edits
     /// dispatch directly through AppStore; the host receives only committed
     /// backend-neutral jobs and the few explicitly platform-owned actions.

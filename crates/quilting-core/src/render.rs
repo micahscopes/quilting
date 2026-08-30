@@ -564,6 +564,81 @@ pub struct FocusFieldPacket {
     pub enabled: bool,
 }
 
+/// Backend-neutral scalar field used to build a focus-composition mask.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FocusPostprocessMode {
+    DepthOfField,
+    #[default]
+    ConformalStretch,
+    Hybrid,
+    Spheroidal,
+}
+
+impl FocusPostprocessMode {
+    pub const fn wire_index(self) -> u8 {
+        match self {
+            Self::DepthOfField => 0,
+            Self::ConformalStretch => 1,
+            Self::Hybrid => 2,
+            Self::Spheroidal => 3,
+        }
+    }
+
+    pub const fn from_wire_index(index: u8) -> Option<Self> {
+        match index {
+            0 => Some(Self::DepthOfField),
+            1 => Some(Self::ConformalStretch),
+            2 => Some(Self::Hybrid),
+            3 => Some(Self::Spheroidal),
+            _ => None,
+        }
+    }
+}
+
+/// Fully resolved focus-composition request consumed by a render backend.
+///
+/// `RenderFrameOptions::focus_postprocess == None` is the effective disabled
+/// state. Spheroidal coordinates are resolved from Hyperscape focus state
+/// before extraction, so this packet contains no application or navigation
+/// authority and can be consumed identically by WebGL2 and WebGPU.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FocusPostprocessPacket {
+    pub mode: FocusPostprocessMode,
+    pub blur_radius_pixels: u16,
+    pub blur_strength: f32,
+    pub focus_coordinate: f32,
+    pub bandwidth: f32,
+    pub normalize_range: bool,
+    pub stretch_range: [f32; 2],
+    pub gaussian_passes: u8,
+    pub kawase_passes: u8,
+    pub kawase_offset: f32,
+}
+
+impl FocusPostprocessPacket {
+    pub fn validate(self) -> Result<Self, RenderContractError> {
+        let valid_stretch_range = finite(self.stretch_range)
+            && (!self.normalize_range || self.stretch_range[0] <= self.stretch_range[1]);
+        if !(4..=128).contains(&self.blur_radius_pixels)
+            || !self.blur_strength.is_finite()
+            || !(0.1..=3.0).contains(&self.blur_strength)
+            || !self.focus_coordinate.is_finite()
+            || !(0.0..=1.0).contains(&self.focus_coordinate)
+            || !self.bandwidth.is_finite()
+            || !(0.01..=0.5).contains(&self.bandwidth)
+            || !valid_stretch_range
+            || !(1..=4).contains(&self.gaussian_passes)
+            || self.kawase_passes > 4
+            || !self.kawase_offset.is_finite()
+            || !(0.1..=3.0).contains(&self.kawase_offset)
+        {
+            return Err(RenderContractError::InvalidFocusPostprocess);
+        }
+        Ok(self)
+    }
+}
+
 impl Default for FocusFieldPacket {
     fn default() -> Self {
         Self {
@@ -1111,9 +1186,9 @@ impl MatcapStyle {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct RenderFrameOptions {
-    pub focus_postprocess: bool,
+    pub focus_postprocess: Option<FocusPostprocessPacket>,
     pub highlight_face: Option<u32>,
     pub matcap_style: MatcapStyle,
 }
@@ -1141,6 +1216,9 @@ impl RenderFrame {
     ) -> Result<Self, RenderContractError> {
         scene.validate()?;
         view.validate()?;
+        if let Some(focus) = options.focus_postprocess {
+            focus.validate()?;
+        }
         let commands = expected_commands(style, options, &scene.batches)?;
         Ok(Self {
             revision,
@@ -1156,6 +1234,9 @@ impl RenderFrame {
     pub fn validate(&self, scene: &RenderSceneSnapshot) -> Result<(), RenderContractError> {
         scene.validate()?;
         self.view.validate()?;
+        if let Some(focus) = self.options.focus_postprocess {
+            focus.validate()?;
+        }
         if self.scene_revision != scene.revision {
             return Err(RenderContractError::SceneRevisionMismatch {
                 frame: self.scene_revision,
@@ -1288,7 +1369,7 @@ fn expected_commands(
         }
         append_draw_commands(&mut commands, batches, *draw_pass)?;
     }
-    if style == RenderStyle::Pbr && options.focus_postprocess {
+    if style == RenderStyle::Pbr && options.focus_postprocess.is_some() {
         commands.push(RenderCommand::FocusPostProcess);
     }
     if style != RenderStyle::Pbr {
@@ -1325,6 +1406,7 @@ fn append_draw_commands(
 pub enum RenderContractError {
     InvalidTransform,
     InvalidView,
+    InvalidFocusPostprocess,
     InvalidMaterial { material_index: usize },
     InvalidBatchKey { batch_index: usize },
     InvalidBatchGeometry { batch_index: usize },
@@ -1368,6 +1450,9 @@ impl fmt::Display for RenderContractError {
         match self {
             Self::InvalidTransform => formatter.write_str("render transform is invalid"),
             Self::InvalidView => formatter.write_str("render view is invalid"),
+            Self::InvalidFocusPostprocess => {
+                formatter.write_str("focus postprocess packet is invalid")
+            }
             Self::InvalidMaterial { material_index } => {
                 write!(formatter, "render material {material_index} is invalid")
             }
@@ -1732,7 +1817,18 @@ mod tests {
             RenderStyle::Pbr,
             view(),
             RenderFrameOptions {
-                focus_postprocess: true,
+                focus_postprocess: Some(FocusPostprocessPacket {
+                    mode: FocusPostprocessMode::Spheroidal,
+                    blur_radius_pixels: 11,
+                    blur_strength: 1.0,
+                    focus_coordinate: 0.5,
+                    bandwidth: 0.1,
+                    normalize_range: false,
+                    stretch_range: [0.5, 0.5],
+                    gaussian_passes: 1,
+                    kawase_passes: 3,
+                    kawase_offset: 1.5,
+                }),
                 highlight_face: Some(0),
                 ..RenderFrameOptions::default()
             },
@@ -1803,6 +1899,40 @@ mod tests {
     }
 
     #[test]
+    fn render_frame_rejects_invalid_focus_postprocess_before_backend_dispatch() {
+        let scene = scene();
+        let result = RenderFrame::build(
+            12,
+            RenderPoseIdentity {
+                asset_revision: 2,
+                pose_revision: 9,
+            },
+            RenderStyle::Pbr,
+            view(),
+            RenderFrameOptions {
+                focus_postprocess: Some(FocusPostprocessPacket {
+                    mode: FocusPostprocessMode::ConformalStretch,
+                    blur_radius_pixels: 11,
+                    blur_strength: f32::NAN,
+                    focus_coordinate: 0.5,
+                    bandwidth: 0.1,
+                    normalize_range: false,
+                    stretch_range: [0.5, 0.5],
+                    gaussian_passes: 1,
+                    kawase_passes: 3,
+                    kawase_offset: 1.5,
+                }),
+                ..RenderFrameOptions::default()
+            },
+            &scene,
+        );
+        assert!(matches!(
+            result,
+            Err(RenderContractError::InvalidFocusPostprocess)
+        ));
+    }
+
+    #[test]
     fn matcap_wire_has_two_ordered_draw_passes_and_highlight() {
         let mut scene = scene();
         scene.batches.truncate(2);
@@ -1815,7 +1945,7 @@ mod tests {
             RenderStyle::MatcapWire,
             view(),
             RenderFrameOptions {
-                focus_postprocess: false,
+                focus_postprocess: None,
                 highlight_face: Some(4),
                 ..RenderFrameOptions::default()
             },

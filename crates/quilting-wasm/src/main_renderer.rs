@@ -40,8 +40,9 @@ use quilting_core::material::{
 };
 use quilting_core::render::{
     patch_preparation_needed, patch_visibility_needed, render_draw_passes, FocusFieldPacket,
-    MatcapStyle, PbrDrawClass, RenderBatchSnapshot, RenderEntityTransform, RenderFrameOptions,
-    RenderPass, RenderSceneSnapshot, RenderStyle, RenderSubmissionStats, RenderView,
+    FocusPostprocessMode, FocusPostprocessPacket, MatcapStyle, PbrDrawClass, RenderBatchSnapshot,
+    RenderEntityTransform, RenderFrameOptions, RenderPass, RenderSceneSnapshot, RenderStyle,
+    RenderSubmissionStats, RenderView,
 };
 #[cfg(feature = "webgpu-backend")]
 use quilting_core::render::RenderSubmissionMismatch;
@@ -745,7 +746,7 @@ struct MainState {
     // Fuzzy-vision JFA blur pipeline
     fuzzy: Option<fuzzy_vision::JfaPipeline>,
     fuzzy_enabled: bool,
-    fuzzy_mode: u32, // 0=DoF, 1=conformal, 2=hybrid, 3=selection field
+    focus_postprocess: Option<FocusPostprocessPacket>,
     fuzzy_debug: u32, // 0=off, 1=smoothed weight, 2=jfa, 3=firmness
     fuzzy_weight_fbo: Option<glow::Framebuffer>,
     fuzzy_weight_tex: Option<glow::Texture>,
@@ -2160,7 +2161,7 @@ pub fn mr_init(canvas_id: &str) -> bool {
             pbr_fbo_size: (0, 0),
             fuzzy,
             fuzzy_enabled: false,
-            fuzzy_mode: 0,
+            focus_postprocess: None,
             fuzzy_debug: 0,
             fuzzy_weight_fbo: None,
             fuzzy_weight_tex: None,
@@ -2715,7 +2716,7 @@ fn submit_webgpu_frame(
             },
         },
         RenderFrameOptions {
-            focus_postprocess: renderer.fuzzy_enabled,
+            focus_postprocess: renderer.focus_postprocess,
             highlight_face: u32::try_from(renderer.highlight_face).ok(),
             matcap_style: renderer.matcap_style,
         },
@@ -2943,8 +2944,10 @@ fn capture_current_webgl_pbr_frame_evidence(
 }
 
 #[cfg(feature = "webgpu-backend")]
-fn backend_frame_evidence_supports_composition(focus_postprocess: bool) -> bool {
-    !focus_postprocess
+fn backend_frame_evidence_supports_composition(
+    focus_postprocess: Option<FocusPostprocessPacket>,
+) -> bool {
+    focus_postprocess.is_none()
 }
 
 #[cfg(feature = "webgpu-backend")]
@@ -2967,7 +2970,7 @@ pub fn mr_request_backend_frame_evidence() -> Result<bool, JsValue> {
                 "backend image evidence requires a ready headless WebGPU device",
             ));
         }
-        if !backend_frame_evidence_supports_composition(state.fuzzy_enabled) {
+        if !backend_frame_evidence_supports_composition(state.focus_postprocess) {
             return Err(JsValue::from_str(
                 "backend image evidence does not yet support focus postprocess composition",
             ));
@@ -2997,7 +3000,7 @@ pub fn mr_request_backend_frame_evidence() -> Result<bool, JsValue> {
             }
             let scene = extract_render_scene(state).map_err(|error| JsValue::from_str(&error))?;
             let options = RenderFrameOptions {
-                focus_postprocess: state.fuzzy_enabled,
+                focus_postprocess: state.focus_postprocess,
                 highlight_face: u32::try_from(state.highlight_face).ok(),
                 matcap_style: state.matcap_style,
             };
@@ -3117,7 +3120,7 @@ fn observe_render_submission(
             },
         },
         RenderFrameOptions {
-            focus_postprocess: renderer.fuzzy_enabled,
+            focus_postprocess: renderer.focus_postprocess,
             highlight_face,
             matcap_style: renderer.matcap_style,
         },
@@ -3570,29 +3573,103 @@ fn runtime_diagnostic_snapshot_to_js(snapshot: &RuntimeDiagnosticSnapshot) -> Js
         .unwrap_or(JsValue::NULL)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn focus_postprocess_packet(
+    max_distance: f32,
+    blur_strength: f32,
+    mode: u32,
+    focus: f32,
+    bandwidth: f32,
+    normalize: bool,
+    stretch_min: f32,
+    stretch_max: f32,
+    blur_passes: u32,
+    kawase_passes: u32,
+    kawase_offset: f32,
+) -> Result<FocusPostprocessPacket, &'static str> {
+    let blur_radius_pixels = u16::try_from(max_distance as i64)
+        .ok()
+        .filter(|radius| f32::from(*radius) == max_distance)
+        .ok_or("focus blur radius must be an exact u16")?;
+    let mode = u8::try_from(mode)
+        .ok()
+        .and_then(FocusPostprocessMode::from_wire_index)
+        .ok_or("focus postprocess mode is invalid")?;
+    let gaussian_passes = u8::try_from(blur_passes)
+        .map_err(|_| "Gaussian pass count does not fit u8")?;
+    let kawase_passes =
+        u8::try_from(kawase_passes).map_err(|_| "Kawase pass count does not fit u8")?;
+    FocusPostprocessPacket {
+        mode,
+        blur_radius_pixels,
+        blur_strength,
+        focus_coordinate: focus,
+        bandwidth,
+        normalize_range: normalize,
+        stretch_range: [stretch_min, stretch_max],
+        gaussian_passes,
+        kawase_passes,
+        kawase_offset,
+    }
+    .validate()
+    .map_err(|_| "focus postprocess packet is outside the renderer contract")
+}
+
 #[wasm_bindgen(js_name = "mr_setFuzzy")]
-pub fn mr_set_fuzzy(enabled: bool, max_distance: f32, blur_strength: f32, mode: u32, focus: f32, bandwidth: f32, normalize: bool, stretch_min: f32, stretch_max: f32, blur_passes: u32, kawase_passes: u32, kawase_offset: f32) {
-    STATE.with(|s| {
-        if let Some(ref mut st) = *s.borrow_mut() {
-            st.fuzzy_enabled = enabled;
-            st.fuzzy_mode = mode;
-            if let Some(ref mut fv) = st.fuzzy {
-                let mut cfg = fv.config().clone();
-                cfg.max_distance = max_distance;
-                cfg.blur_strength = blur_strength;
-                cfg.focus = focus;
-                cfg.bandwidth = bandwidth;
-                cfg.normalize = normalize;
-                cfg.cpu_stretch_min = stretch_min;
-                cfg.cpu_stretch_max = stretch_max;
-                cfg.blur_passes = blur_passes.max(1);
-                cfg.kawase_passes = kawase_passes;
-                cfg.kawase_offset = kawase_offset;
-                cfg.blur_mode = mode;
-                fv.set_config(cfg);
-            }
+#[allow(clippy::too_many_arguments)]
+pub fn mr_set_fuzzy(
+    enabled: bool,
+    max_distance: f32,
+    blur_strength: f32,
+    mode: u32,
+    focus: f32,
+    bandwidth: f32,
+    normalize: bool,
+    stretch_min: f32,
+    stretch_max: f32,
+    blur_passes: u32,
+    kawase_passes: u32,
+    kawase_offset: f32,
+) -> bool {
+    let Ok(packet) = focus_postprocess_packet(
+        max_distance,
+        blur_strength,
+        mode,
+        focus,
+        bandwidth,
+        normalize,
+        stretch_min,
+        stretch_max,
+        blur_passes,
+        kawase_passes,
+        kawase_offset,
+    ) else {
+        return false;
+    };
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return false;
+        };
+        state.fuzzy_enabled = enabled;
+        state.focus_postprocess = enabled.then_some(packet);
+        if let Some(fuzzy) = state.fuzzy.as_mut() {
+            let mut config = fuzzy.config().clone();
+            config.max_distance = f32::from(packet.blur_radius_pixels);
+            config.blur_strength = packet.blur_strength;
+            config.focus = packet.focus_coordinate;
+            config.bandwidth = packet.bandwidth;
+            config.normalize = packet.normalize_range;
+            config.cpu_stretch_min = packet.stretch_range[0];
+            config.cpu_stretch_max = packet.stretch_range[1];
+            config.blur_passes = u32::from(packet.gaussian_passes);
+            config.kawase_passes = u32::from(packet.kawase_passes);
+            config.kawase_offset = packet.kawase_offset;
+            config.blur_mode = u32::from(packet.mode.wire_index());
+            fuzzy.set_config(config);
         }
-    });
+        true
+    })
 }
 
 #[wasm_bindgen(js_name = "mr_setFuzzyDebug")]
@@ -9403,7 +9480,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         if state.backend_evidence_requested
             && ((state.render_style != RenderStyle::Pbr
                 && !quilting_webgpu::supports_patch_presentation_style(state.render_style))
-                || !backend_frame_evidence_supports_composition(state.fuzzy_enabled))
+                || !backend_frame_evidence_supports_composition(state.focus_postprocess))
         {
             state.backend_evidence_requested = false;
             state.backend_evidence_error = Some(
@@ -9427,7 +9504,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         #[cfg(feature = "webgpu-backend")]
         if state.backend_evidence_requested && state.render_style == RenderStyle::Pbr {
             let options = RenderFrameOptions {
-                focus_postprocess: state.fuzzy_enabled,
+                focus_postprocess: state.focus_postprocess,
                 highlight_face: u32::try_from(state.highlight_face).ok(),
                 matcap_style: state.matcap_style,
             };
@@ -10311,8 +10388,30 @@ mod tests {
     #[cfg(feature = "webgpu-backend")]
     #[wasm_bindgen_test]
     fn backend_evidence_admits_highlight_but_not_focus_postprocessing() {
-        assert!(backend_frame_evidence_supports_composition(false));
-        assert!(!backend_frame_evidence_supports_composition(true));
+        assert!(backend_frame_evidence_supports_composition(None));
+        let focus = focus_postprocess_packet(
+            11.0, 1.0, 3, 0.5, 0.1, false, 0.5, 0.5, 1, 3, 1.5,
+        )
+        .unwrap();
+        assert!(!backend_frame_evidence_supports_composition(Some(focus)));
+    }
+
+    #[wasm_bindgen_test]
+    fn focus_postprocess_packet_preserves_exact_backend_semantics() {
+        let focus = focus_postprocess_packet(
+            48.0, 1.75, 3, 0.25, 0.08, true, 0.2, 4.5, 2, 4, 2.25,
+        )
+        .unwrap();
+        assert_eq!(focus.mode, FocusPostprocessMode::Spheroidal);
+        assert_eq!(focus.blur_radius_pixels, 48);
+        assert_eq!(focus.focus_coordinate, 0.25);
+        assert_eq!(focus.stretch_range, [0.2, 4.5]);
+        assert_eq!(focus.gaussian_passes, 2);
+        assert_eq!(focus.kawase_passes, 4);
+        assert!(focus_postprocess_packet(
+            48.5, 1.75, 3, 0.25, 0.08, true, 0.2, 4.5, 2, 4, 2.25,
+        )
+        .is_err());
     }
 
     #[wasm_bindgen_test]

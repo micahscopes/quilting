@@ -837,7 +837,8 @@ impl LodClassifierDevice {
     ) -> Result<ResidentRootFrameEncoding, LodWebGpuError> {
         let draw_passes = render_draw_passes(frame.style);
         if frame.style == RenderStyle::Pbr
-            && (!bindings.supports_resident_basic_pbr() || frame.options.focus_postprocess)
+            && (!bindings.supports_resident_basic_pbr()
+                || frame.options.focus_postprocess.is_some())
         {
             return Err(LodWebGpuError::Payload(
                 "resident root PBR requires one exact texture binding, resident IBL, and no focus post-process"

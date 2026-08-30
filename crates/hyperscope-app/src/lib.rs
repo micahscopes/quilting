@@ -36,6 +36,7 @@ use hyperscape_protocol::{
     AssetDescriptor, AssetEntityId, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId,
     EphemeralPresence, PeerId, PresenceEnvelope, RequestId, WireTransform,
 };
+pub use quilting_core::render::FocusPostprocessMode;
 pub use quilting_gltf::GltfAssetMetadata as AssetMetadata;
 use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
@@ -93,42 +94,6 @@ pub enum SemanticAction {
         scope: AssetLoadScope,
     },
     CancelAsset(AssetId),
-}
-
-/// Backend-neutral interpretation of the scalar field consumed by the focus
-/// postprocess. The spheroidal mode reads its effective field coordinate and
-/// aperture from Hyperscape navigation state; the other modes use the values
-/// retained in [`FocusPostprocessSettings`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "replay", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "replay", serde(rename_all = "snake_case"))]
-pub enum FocusPostprocessMode {
-    DepthOfField,
-    #[default]
-    ConformalStretch,
-    Hybrid,
-    Spheroidal,
-}
-
-impl FocusPostprocessMode {
-    pub const fn wire_index(self) -> u8 {
-        match self {
-            Self::DepthOfField => 0,
-            Self::ConformalStretch => 1,
-            Self::Hybrid => 2,
-            Self::Spheroidal => 3,
-        }
-    }
-
-    pub const fn from_wire_index(index: u8) -> Option<Self> {
-        match index {
-            0 => Some(Self::DepthOfField),
-            1 => Some(Self::ConformalStretch),
-            2 => Some(Self::Hybrid),
-            3 => Some(Self::Spheroidal),
-            _ => None,
-        }
-    }
 }
 
 /// Renderer policy for focus-aware image composition.

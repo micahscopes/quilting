@@ -643,7 +643,18 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         assert!(!supports_basic_pbr_frame(
             &render_scene,
             RenderFrameOptions {
-                focus_postprocess: true,
+                focus_postprocess: Some(quilting_core::render::FocusPostprocessPacket {
+                    mode: quilting_core::render::FocusPostprocessMode::Spheroidal,
+                    blur_radius_pixels: 11,
+                    blur_strength: 1.0,
+                    focus_coordinate: 0.5,
+                    bandwidth: 0.1,
+                    normalize_range: false,
+                    stretch_range: [0.5, 0.5],
+                    gaussian_passes: 1,
+                    kawase_passes: 3,
+                    kawase_offset: 1.5,
+                }),
                 ..RenderFrameOptions::default()
             },
         ));

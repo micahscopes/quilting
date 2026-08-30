@@ -945,7 +945,7 @@ fn validate_basic_pbr_frame(
             "basic WebGPU PBR requires a nonempty scene".to_string(),
         ));
     }
-    if options.focus_postprocess {
+    if options.focus_postprocess.is_some() {
         return Err(LodWebGpuError::Payload(
             "basic WebGPU PBR does not yet support focus post-processing".to_string(),
         ));

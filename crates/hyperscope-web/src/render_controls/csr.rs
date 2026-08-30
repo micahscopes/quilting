@@ -4,7 +4,7 @@ use super::{
 };
 use crate::effect_js::patch_lab_effect_to_js;
 use futures_signals::signal::SignalExt as _;
-use hyperscope_app::AppStore;
+use hyperscope_app::{AppStore, FocusPostprocessMode};
 use js_sys::{Array, Function};
 use leptos::mount::mount_to;
 use leptos::prelude::*;
@@ -19,6 +19,13 @@ const RENDER_STYLES: &[(&str, &str)] = &[
     ("matcap_wire", "Both"),
     ("normals", "Normals"),
     ("stretch", "Stretch"),
+];
+
+const FOCUS_MODES: &[(FocusPostprocessMode, &str)] = &[
+    (FocusPostprocessMode::DepthOfField, "DoF"),
+    (FocusPostprocessMode::ConformalStretch, "Conformal"),
+    (FocusPostprocessMode::Hybrid, "Hybrid"),
+    (FocusPostprocessMode::Spheroidal, "Selection"),
 ];
 
 /// Mount the explicit Rust-authority render controls over the committed
@@ -39,6 +46,27 @@ pub fn mount_render_controls(
         });
         wasm_bindgen_futures::spawn_local(updates);
         view! { <RenderControls controls store on_commit on_error /> }
+    })
+    .forget();
+}
+
+/// Mount focus-composition controls over the same committed render signal as
+/// the main render island. Keeping this as a second view mount preserves the
+/// established sidebar grouping without creating a second state authority.
+pub fn mount_focus_postprocess_controls(
+    parent: web_sys::HtmlElement,
+    store: AppStore,
+    on_commit: Function,
+    on_error: Function,
+) {
+    mount_to(parent, move || {
+        let (controls, set_controls) = signal(project_render_controls(&store.render_snapshot()));
+        let updates = store.render_signal().for_each(move |render| {
+            set_controls.set(project_render_controls(&render));
+            async {}
+        });
+        wasm_bindgen_futures::spawn_local(updates);
+        view! { <FocusPostprocessControls controls store on_commit on_error /> }
     })
     .forget();
 }
@@ -205,6 +233,253 @@ fn RenderControls(
                         >{format!("{ratio}:1")}</button>
                     }
                 }).collect_view()}
+            </div>
+        </div>
+    }
+}
+
+#[component]
+fn FocusPostprocessControls(
+    controls: ReadSignal<RenderControlsViewModel>,
+    store: AppStore,
+    on_commit: Function,
+    on_error: Function,
+) -> impl IntoView {
+    let on_commit = SendWrapper::new(on_commit);
+    let on_error = SendWrapper::new(on_error);
+    let mode_buttons = FOCUS_MODES
+        .iter()
+        .map(|&(mode, label)| {
+            let store = store.clone();
+            let on_commit = on_commit.clone();
+            let on_error = on_error.clone();
+            view! {
+                <button
+                    type="button"
+                    class:a=move || controls.read().value.focus_postprocess.mode == mode
+                    aria-pressed=move || {
+                        (controls.read().value.focus_postprocess.mode == mode).to_string()
+                    }
+                    on:click=move |_| submit_intent(&store, &on_commit, &on_error, |current| {
+                        current.with_focus_mode(mode)
+                    })
+                >{label}</button>
+            }
+        })
+        .collect_view();
+
+    view! {
+        <div id="focus-postprocess-controls-rust-view">
+            <label>"Fuzzy Vision"</label>
+            <div class="toggle-row">
+                <input
+                    type="checkbox"
+                    role="switch"
+                    prop:checked=move || controls.read().value.focus_postprocess.enabled
+                    on:change={
+                        let store = store.clone();
+                        let on_commit = on_commit.clone();
+                        let on_error = on_error.clone();
+                        move |event| submit_intent(&store, &on_commit, &on_error, |current| {
+                            current.with_focus_enabled(event_target_checked(&event))
+                        })
+                    }
+                />
+                <span class="toggle-label">"Enable blur"</span>
+            </div>
+            <div class="btns">{mode_buttons}</div>
+
+            <label>"Blur radius"</label>
+            <div class="sr">
+                <input
+                    type="range"
+                    min=move || controls.read().focus_radius.minimum
+                    max=move || controls.read().focus_radius.maximum
+                    step=move || controls.read().focus_radius.step
+                    prop:value=move || controls.read().value.focus_postprocess.blur_radius_pixels
+                    on:input={
+                        let store = store.clone();
+                        let on_commit = on_commit.clone();
+                        let on_error = on_error.clone();
+                        move |event| if let Ok(value) = event_target_value(&event).parse::<u16>() {
+                            submit_intent(&store, &on_commit, &on_error, |current| {
+                                current.with_focus_radius(value)
+                            });
+                        }
+                    }
+                />
+                <span class="v">{move || controls.read().value.focus_postprocess.blur_radius_pixels}</span>
+            </div>
+
+            <label>"Blur strength"</label>
+            <div class="sr">
+                <input
+                    type="range"
+                    min=move || controls.read().focus_strength.minimum
+                    max=move || controls.read().focus_strength.maximum
+                    step=move || controls.read().focus_strength.step
+                    prop:value=move || controls.read().value.focus_postprocess.blur_strength * 10.0
+                    on:input={
+                        let store = store.clone();
+                        let on_commit = on_commit.clone();
+                        let on_error = on_error.clone();
+                        move |event| if let Ok(value) = event_target_value(&event).parse::<f64>() {
+                            submit_intent(&store, &on_commit, &on_error, |current| {
+                                current.with_focus_strength(value / 10.0)
+                            });
+                        }
+                    }
+                />
+                <span class="v">{move || format!(
+                    "{:.2}", controls.read().value.focus_postprocess.blur_strength,
+                )}</span>
+            </div>
+
+            <div class="toggle-row">
+                <input
+                    type="checkbox"
+                    role="switch"
+                    prop:checked=move || controls.read().value.focus_postprocess.normalize_range
+                    on:change={
+                        let store = store.clone();
+                        let on_commit = on_commit.clone();
+                        let on_error = on_error.clone();
+                        move |event| submit_intent(&store, &on_commit, &on_error, |current| {
+                            current.with_focus_normalization(event_target_checked(&event))
+                        })
+                    }
+                />
+                <span class="toggle-label">"Normalize range"</span>
+            </div>
+
+            <label>{move || match controls.read().value.focus_postprocess.mode {
+                FocusPostprocessMode::DepthOfField => "Focal distance (near ← → far)",
+                FocusPostprocessMode::ConformalStretch => "Focus (squash ← → expand)",
+                FocusPostprocessMode::Hybrid => "Focus (combined)",
+                FocusPostprocessMode::Spheroidal => "Focal shell (origin ← sphere → infinity)",
+            }}</label>
+            <div class="sr">
+                <input
+                    type="range"
+                    min=move || controls.read().focus_coordinate.minimum
+                    max=move || controls.read().focus_coordinate.maximum
+                    step=move || controls.read().focus_coordinate.step
+                    prop:value=move || controls.read().value.focus_postprocess.focus_coordinate * 100.0
+                    on:input={
+                        let store = store.clone();
+                        let on_commit = on_commit.clone();
+                        let on_error = on_error.clone();
+                        move |event| if let Ok(value) = event_target_value(&event).parse::<f64>() {
+                            submit_intent(&store, &on_commit, &on_error, |current| {
+                                current.with_focus_coordinate(value / 100.0)
+                            });
+                        }
+                    }
+                />
+                <span class="v">{move || format!(
+                    "{:.3}",
+                    (controls.read().value.focus_postprocess.focus_coordinate - 0.5) * 2.0,
+                )}</span>
+            </div>
+
+            <label>{move || if controls.read().value.focus_postprocess.mode
+                == FocusPostprocessMode::DepthOfField {
+                "Aperture"
+            } else if controls.read().value.focus_postprocess.mode
+                == FocusPostprocessMode::Spheroidal {
+                "Angular aperture"
+            } else {
+                "Bandwidth"
+            }}</label>
+            <div class="sr">
+                <input
+                    type="range"
+                    min=move || controls.read().focus_bandwidth.minimum
+                    max=move || controls.read().focus_bandwidth.maximum
+                    step=move || controls.read().focus_bandwidth.step
+                    prop:value=move || controls.read().value.focus_postprocess.bandwidth * 100.0
+                    on:input={
+                        let store = store.clone();
+                        let on_commit = on_commit.clone();
+                        let on_error = on_error.clone();
+                        move |event| if let Ok(value) = event_target_value(&event).parse::<f64>() {
+                            submit_intent(&store, &on_commit, &on_error, |current| {
+                                current.with_focus_bandwidth(value / 100.0)
+                            });
+                        }
+                    }
+                />
+                <span class="v">{move || format!(
+                    "{:.3}", controls.read().value.focus_postprocess.bandwidth,
+                )}</span>
+            </div>
+
+            <label>"Quality (Gaussian passes)"</label>
+            <div class="sr">
+                <input
+                    type="range"
+                    min=move || controls.read().gaussian_passes.minimum
+                    max=move || controls.read().gaussian_passes.maximum
+                    step=move || controls.read().gaussian_passes.step
+                    prop:value=move || controls.read().value.focus_postprocess.gaussian_passes
+                    on:input={
+                        let store = store.clone();
+                        let on_commit = on_commit.clone();
+                        let on_error = on_error.clone();
+                        move |event| if let Ok(value) = event_target_value(&event).parse::<u8>() {
+                            submit_intent(&store, &on_commit, &on_error, |current| {
+                                current.with_gaussian_passes(value)
+                            });
+                        }
+                    }
+                />
+                <span class="v">{move || controls.read().value.focus_postprocess.gaussian_passes}</span>
+            </div>
+
+            <label>"Mask smooth (Kawase passes)"</label>
+            <div class="sr">
+                <input
+                    type="range"
+                    min=move || controls.read().kawase_passes.minimum
+                    max=move || controls.read().kawase_passes.maximum
+                    step=move || controls.read().kawase_passes.step
+                    prop:value=move || controls.read().value.focus_postprocess.kawase_passes
+                    on:input={
+                        let store = store.clone();
+                        let on_commit = on_commit.clone();
+                        let on_error = on_error.clone();
+                        move |event| if let Ok(value) = event_target_value(&event).parse::<u8>() {
+                            submit_intent(&store, &on_commit, &on_error, |current| {
+                                current.with_kawase_passes(value)
+                            });
+                        }
+                    }
+                />
+                <span class="v">{move || controls.read().value.focus_postprocess.kawase_passes}</span>
+            </div>
+
+            <label>"Mask smooth offset"</label>
+            <div class="sr">
+                <input
+                    type="range"
+                    min=move || controls.read().kawase_offset.minimum
+                    max=move || controls.read().kawase_offset.maximum
+                    step=move || controls.read().kawase_offset.step
+                    prop:value=move || controls.read().value.focus_postprocess.kawase_offset * 10.0
+                    on:input={
+                        let store = store.clone();
+                        let on_commit = on_commit.clone();
+                        let on_error = on_error.clone();
+                        move |event| if let Ok(value) = event_target_value(&event).parse::<f64>() {
+                            submit_intent(&store, &on_commit, &on_error, |current| {
+                                current.with_kawase_offset(value / 10.0)
+                            });
+                        }
+                    }
+                />
+                <span class="v">{move || format!(
+                    "{:.2}", controls.read().value.focus_postprocess.kawase_offset,
+                )}</span>
             </div>
         </div>
     }

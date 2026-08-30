@@ -8,14 +8,14 @@
 use crate::controls::numeric_control_domain;
 pub use crate::controls::NumericControlViewDomain;
 use hyperscope_app::{
-    AppEffect, AppRenderSnapshot, AppStore, FocusPostprocessSettings, PatchLabEffect, ReduceError,
-    RenderSettings, SemanticAction,
+    AppEffect, AppRenderSnapshot, AppStore, FocusPostprocessMode, FocusPostprocessSettings,
+    PatchLabEffect, ReduceError, RenderSettings, SemanticAction,
 };
 
 #[cfg(all(feature = "csr", target_arch = "wasm32"))]
 mod csr;
 #[cfg(all(feature = "csr", target_arch = "wasm32"))]
-pub use csr::mount_render_controls;
+pub use csr::{mount_focus_postprocess_controls, mount_render_controls};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RenderControlIntent {
@@ -105,6 +105,13 @@ pub struct RenderControlsViewModel {
     pub density: NumericControlViewDomain,
     pub pixel_floor: NumericControlViewDomain,
     pub atlas: NumericControlViewDomain,
+    pub focus_radius: NumericControlViewDomain,
+    pub focus_strength: NumericControlViewDomain,
+    pub focus_coordinate: NumericControlViewDomain,
+    pub focus_bandwidth: NumericControlViewDomain,
+    pub gaussian_passes: NumericControlViewDomain,
+    pub kawase_passes: NumericControlViewDomain,
+    pub kawase_offset: NumericControlViewDomain,
 }
 
 impl RenderControlsViewModel {
@@ -156,6 +163,86 @@ impl RenderControlsViewModel {
             ..self.value
         }
     }
+
+    pub fn with_focus_enabled(self, enabled: bool) -> RenderControlIntent {
+        self.with_focus_postprocess(FocusPostprocessSettings {
+            enabled,
+            ..self.value.focus_postprocess
+        })
+    }
+
+    pub fn with_focus_mode(self, mode: FocusPostprocessMode) -> RenderControlIntent {
+        self.with_focus_postprocess(FocusPostprocessSettings {
+            mode,
+            ..self.value.focus_postprocess
+        })
+    }
+
+    pub fn with_focus_radius(self, blur_radius_pixels: u16) -> RenderControlIntent {
+        self.with_focus_postprocess(FocusPostprocessSettings {
+            blur_radius_pixels,
+            ..self.value.focus_postprocess
+        })
+    }
+
+    pub fn with_focus_strength(self, blur_strength: f64) -> RenderControlIntent {
+        self.with_focus_postprocess(FocusPostprocessSettings {
+            blur_strength,
+            ..self.value.focus_postprocess
+        })
+    }
+
+    pub fn with_focus_coordinate(self, focus_coordinate: f64) -> RenderControlIntent {
+        self.with_focus_postprocess(FocusPostprocessSettings {
+            focus_coordinate,
+            ..self.value.focus_postprocess
+        })
+    }
+
+    pub fn with_focus_bandwidth(self, bandwidth: f64) -> RenderControlIntent {
+        self.with_focus_postprocess(FocusPostprocessSettings {
+            bandwidth,
+            ..self.value.focus_postprocess
+        })
+    }
+
+    pub fn with_focus_normalization(self, normalize_range: bool) -> RenderControlIntent {
+        self.with_focus_postprocess(FocusPostprocessSettings {
+            normalize_range,
+            ..self.value.focus_postprocess
+        })
+    }
+
+    pub fn with_gaussian_passes(self, gaussian_passes: u8) -> RenderControlIntent {
+        self.with_focus_postprocess(FocusPostprocessSettings {
+            gaussian_passes,
+            ..self.value.focus_postprocess
+        })
+    }
+
+    pub fn with_kawase_passes(self, kawase_passes: u8) -> RenderControlIntent {
+        self.with_focus_postprocess(FocusPostprocessSettings {
+            kawase_passes,
+            ..self.value.focus_postprocess
+        })
+    }
+
+    pub fn with_kawase_offset(self, kawase_offset: f64) -> RenderControlIntent {
+        self.with_focus_postprocess(FocusPostprocessSettings {
+            kawase_offset,
+            ..self.value.focus_postprocess
+        })
+    }
+
+    fn with_focus_postprocess(
+        self,
+        focus_postprocess: FocusPostprocessSettings,
+    ) -> RenderControlIntent {
+        RenderControlIntent {
+            focus_postprocess,
+            ..self.value
+        }
+    }
 }
 
 pub fn project_render_controls(snapshot: &AppRenderSnapshot) -> RenderControlsViewModel {
@@ -176,6 +263,13 @@ pub fn project_render_controls(snapshot: &AppRenderSnapshot) -> RenderControlsVi
         density: numeric_control_domain("density"),
         pixel_floor: numeric_control_domain("minpx"),
         atlas: numeric_control_domain("atlas"),
+        focus_radius: numeric_control_domain("fradius"),
+        focus_strength: numeric_control_domain("fstr"),
+        focus_coordinate: numeric_control_domain("ffocus"),
+        focus_bandwidth: numeric_control_domain("fbw"),
+        gaussian_passes: numeric_control_domain("fqual"),
+        kawase_passes: numeric_control_domain("fkaw"),
+        kawase_offset: numeric_control_domain("fkoff"),
     }
 }
 
@@ -220,6 +314,20 @@ mod tests {
         assert_eq!(view.with_density(125.0).density, 125.0);
         assert_eq!(view.with_style("lod").style, "lod");
         assert_eq!(view.with_grading(2).max_face_edge_ratio, 2);
+        assert_eq!(view.focus_radius.maximum, 128.0);
+        assert_eq!(view.focus_strength.step, 0.1);
+        assert_eq!(
+            view.with_focus_mode(FocusPostprocessMode::Spheroidal)
+                .focus_postprocess
+                .mode,
+            FocusPostprocessMode::Spheroidal,
+        );
+        assert_eq!(
+            view.with_focus_strength(1.75)
+                .focus_postprocess
+                .blur_strength,
+            1.75,
+        );
         assert_eq!(view.value.into_settings().unwrap(), snapshot.settings);
         assert_eq!(
             RenderControlIntent {
