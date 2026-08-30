@@ -147,17 +147,28 @@ command by compacting visible instances and emitting indirect draw counts.
 The command contract deliberately says nothing about transform feedback,
 storage buffers, or GPU handles.
 
-`RenderFrame::execution` and the immutable `RenderCommandPlan` expose the same
-validated, allocation-free lowering seam. A plan shares one `Arc`-backed
-`ValidatedRenderScene` epoch and rebuilds only when the scene, render style, or
-command-presence key changes. Camera matrices, pose samples, focus parameters,
-and uniform-only matcap changes therefore neither rescan the scene nor allocate
-a command vector. Both paths reject a stale/distinct scene or a noncanonical
-command sequence before device work, then resolve every batch command to the
-immutable batch metadata and exact index count it addresses. WebGPU validation,
-atlas admission, ordered draw traversal, highlight admission, and workload
-accounting consume that one view; extending the command enum therefore fails
-closed until the backend handles the new command. With `rendershadow=1`,
+`RenderFrame::execution` is the compatibility oracle: it validates the supplied
+scene and regenerates the expected command sequence before exposing a lowering
+view. The immutable `RenderCommandPlan` is the allocation-free production seam.
+A plan shares one `Arc`-backed `ValidatedRenderScene` epoch and rebuilds only
+when the scene, render style, or command-presence key changes.
+`RenderFrame::from_command_plan` shares that plan's exact `Arc<[RenderCommand]>`;
+`execution_with_command_plan` checks scene revision, command key, and allocation
+identity without rescanning the scene or allocating an expected vector. Camera
+matrices, pose samples, focus parameters, and uniform-only matcap changes can
+therefore remain high-rate data. Both paths reject a stale/distinct scene or a
+noncanonical command sequence before device work, then resolve every batch
+command to the immutable batch metadata and exact index count it addresses.
+
+WebGPU's retained `PatchRenderScene` now owns the validated scene epoch rather
+than a second unproven snapshot. Its planned prepared-patch encoder consumes a
+frame and command plan sharing that exact epoch; atlas admission, ordered draw
+traversal, highlight admission, and workload accounting all use the retained
+execution view. The original snapshot/frame encoder remains as a rollback and
+parity oracle. Focus-PBR, resident-root, and adaptive-overlay entry points still
+need the same explicit retained-plan admission before this migration is
+complete. Extending the command enum fails closed until a backend handles the
+new command. With `rendershadow=1`,
 non-PBR WebGL2 styles preflight every retained batch against that resolved scene
 and execute its draw commands directly; a mismatch falls back before the first
 diagnostic draw.
