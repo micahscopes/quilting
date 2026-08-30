@@ -12,7 +12,9 @@ use crate::{
 use bevy_ecs::prelude::{Res, ResMut, Resource};
 use bevy_time::{Time, Virtual};
 use hyperscape_protocol::AssetEntityId;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
+use std::error::Error;
+use std::fmt;
 
 const BARYCENTRIC_EPSILON: f64 = 1.0e-9;
 
@@ -117,6 +119,210 @@ impl InteractionHit {
         Ok(())
     }
 }
+
+/// One renderer-resident node joined to source geometry and optional stable
+/// identity. `packed_node` is process-local and must never escape as semantic
+/// selection identity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InteractionTarget {
+    pub packed_node: u32,
+    pub identity: Option<AssetEntityId>,
+    pub source_bound: FocusSphere,
+}
+
+impl InteractionTarget {
+    pub fn new(
+        packed_node: u32,
+        identity: Option<AssetEntityId>,
+        source_bound: FocusSphere,
+    ) -> Result<Self, InteractionTargetError> {
+        if identity.is_some_and(|identity| identity.validate().is_err()) {
+            return Err(InteractionTargetError::InvalidTarget {
+                packed_node,
+                reason: "interaction target identity must be non-nil",
+            });
+        }
+        FocusSphere::new(source_bound.center, source_bound.radius).map_err(|reason| {
+            InteractionTargetError::InvalidTarget {
+                packed_node,
+                reason,
+            }
+        })?;
+        Ok(Self {
+            packed_node,
+            identity,
+            source_bound,
+        })
+    }
+}
+
+/// Backend-local result after a renderer has resolved its ray/depth query.
+/// Stable identity and source bounds are deliberately absent; the current
+/// residency table supplies them atomically.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InteractionTargetSample {
+    pub packed_node: u32,
+    pub source_pivot: [f64; 3],
+    pub output_distance: f64,
+    pub surface: Option<InteractionSurfacePoint>,
+}
+
+impl InteractionTargetSample {
+    pub fn new(
+        packed_node: u32,
+        source_pivot: [f64; 3],
+        output_distance: f64,
+    ) -> Result<Self, InteractionTargetError> {
+        let sample = Self {
+            packed_node,
+            source_pivot,
+            output_distance,
+            surface: None,
+        };
+        sample.validate()?;
+        Ok(sample)
+    }
+
+    pub fn with_surface(
+        mut self,
+        face: u32,
+        barycentric: [f64; 3],
+    ) -> Result<Self, InteractionTargetError> {
+        self.surface = Some(
+            InteractionSurfacePoint::new(face, barycentric)
+                .map_err(InteractionTargetError::InvalidSample)?,
+        );
+        Ok(self)
+    }
+
+    fn validate(self) -> Result<(), InteractionTargetError> {
+        if self
+            .source_pivot
+            .into_iter()
+            .any(|coordinate| !coordinate.is_finite())
+        {
+            return Err(InteractionTargetError::InvalidSample(
+                "interaction source pivot must be finite",
+            ));
+        }
+        if !self.output_distance.is_finite() || self.output_distance < 0.0 {
+            return Err(InteractionTargetError::InvalidSample(
+                "interaction output distance must be finite and nonnegative",
+            ));
+        }
+        if let Some(surface) = self.surface {
+            surface
+                .validate()
+                .map_err(InteractionTargetError::InvalidSample)?;
+        }
+        Ok(())
+    }
+}
+
+/// Atomic backend-neutral join from transient renderer handles to semantic
+/// interaction targets. Replacing the table is a residency operation, not an
+/// authored/application mutation.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct InteractionTargetTable {
+    targets: BTreeMap<u32, InteractionTarget>,
+}
+
+impl InteractionTargetTable {
+    pub fn try_from_targets(
+        targets: impl IntoIterator<Item = InteractionTarget>,
+    ) -> Result<Self, InteractionTargetError> {
+        let mut resolved = BTreeMap::new();
+        for target in targets {
+            let target = InteractionTarget::new(
+                target.packed_node,
+                target.identity,
+                target.source_bound,
+            )?;
+            if resolved.insert(target.packed_node, target).is_some() {
+                return Err(InteractionTargetError::DuplicatePackedNode(
+                    target.packed_node,
+                ));
+            }
+        }
+        Ok(Self { targets: resolved })
+    }
+
+    pub fn len(&self) -> usize {
+        self.targets.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.targets.is_empty()
+    }
+
+    pub fn resolve(
+        &self,
+        sample: InteractionTargetSample,
+    ) -> Result<InteractionHit, InteractionTargetError> {
+        sample.validate()?;
+        let target = self
+            .targets
+            .get(&sample.packed_node)
+            .ok_or(InteractionTargetError::UnknownPackedNode(sample.packed_node))?;
+        let identity = target
+            .identity
+            .ok_or(InteractionTargetError::UnmappedPackedNode(sample.packed_node))?;
+        let mut hit = InteractionHit::new(
+            identity,
+            target.source_bound,
+            sample.source_pivot,
+            sample.output_distance,
+        )
+        .map_err(InteractionTargetError::InvalidSample)?;
+        if let Some(surface) = sample.surface {
+            hit = hit
+                .with_surface(surface.face, surface.barycentric)
+                .map_err(InteractionTargetError::InvalidSample)?;
+        }
+        Ok(hit)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractionTargetError {
+    DuplicatePackedNode(u32),
+    InvalidTarget {
+        packed_node: u32,
+        reason: &'static str,
+    },
+    UnknownPackedNode(u32),
+    UnmappedPackedNode(u32),
+    InvalidSample(&'static str),
+}
+
+impl fmt::Display for InteractionTargetError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicatePackedNode(node) => {
+                write!(formatter, "interaction target table repeats packed node {node}")
+            }
+            Self::InvalidTarget {
+                packed_node,
+                reason,
+            } => write!(
+                formatter,
+                "interaction target for packed node {packed_node} is invalid: {reason}",
+            ),
+            Self::UnknownPackedNode(node) => {
+                write!(formatter, "interaction query references unknown packed node {node}")
+            }
+            Self::UnmappedPackedNode(node) => write!(
+                formatter,
+                "interaction query references packed node {node} without stable identity",
+            ),
+            Self::InvalidSample(reason) => {
+                write!(formatter, "interaction query sample is invalid: {reason}")
+            }
+        }
+    }
+}
+
+impl Error for InteractionTargetError {}
 
 /// Scale-aware interaction and selection policy.
 #[derive(Resource, Debug, Clone, Copy, PartialEq)]
@@ -526,6 +732,68 @@ mod tests {
         );
         assert!(InteractionSurfacePoint::new(4, [f64::NAN, 0.0, 1.0]).is_err());
         assert!(InteractionSurfacePoint::new(4, [-1.0, 0.0, 1.0]).is_err());
+    }
+
+    #[test]
+    fn target_table_joins_transient_nodes_to_asset_scoped_identity() {
+        let shared_entity = 0x33;
+        let table = InteractionTargetTable::try_from_targets([
+            InteractionTarget::new(
+                7,
+                Some(identity(0x11, shared_entity)),
+                FocusSphere::new([1.0, 2.0, 3.0], 2.0).unwrap(),
+            )
+            .unwrap(),
+            InteractionTarget::new(
+                8,
+                Some(identity(0x22, shared_entity)),
+                FocusSphere::new([-1.0, 0.0, 1.0], 0.5).unwrap(),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let resolved = table
+            .resolve(
+                InteractionTargetSample::new(8, [-0.75, 0.0, 1.0], 4.0)
+                    .unwrap()
+                    .with_surface(19, [2.0, 1.0, 1.0])
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(resolved.identity, identity(0x22, shared_entity));
+        assert_eq!(resolved.source_bound.radius, 0.5);
+        assert_eq!(resolved.source_pivot, [-0.75, 0.0, 1.0]);
+        assert_eq!(resolved.surface.unwrap().face, 19);
+        assert_eq!(resolved.surface.unwrap().barycentric, [0.5, 0.25, 0.25]);
+    }
+
+    #[test]
+    fn target_table_rejects_duplicate_unknown_unmapped_and_invalid_samples() {
+        let bound = FocusSphere::new([0.0; 3], 1.0).unwrap();
+        let duplicate = InteractionTarget::new(3, Some(identity(1, 2)), bound).unwrap();
+        assert_eq!(
+            InteractionTargetTable::try_from_targets([duplicate, duplicate]),
+            Err(InteractionTargetError::DuplicatePackedNode(3)),
+        );
+
+        let table = InteractionTargetTable::try_from_targets([
+            InteractionTarget::new(3, None, bound).unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(
+            table.resolve(InteractionTargetSample::new(4, [0.0; 3], 1.0).unwrap()),
+            Err(InteractionTargetError::UnknownPackedNode(4)),
+        );
+        assert_eq!(
+            table.resolve(InteractionTargetSample::new(3, [0.0; 3], 1.0).unwrap()),
+            Err(InteractionTargetError::UnmappedPackedNode(3)),
+        );
+        assert_eq!(
+            InteractionTargetSample::new(3, [f64::NAN, 0.0, 0.0], 1.0),
+            Err(InteractionTargetError::InvalidSample(
+                "interaction source pivot must be finite"
+            )),
+        );
     }
 
     #[test]
