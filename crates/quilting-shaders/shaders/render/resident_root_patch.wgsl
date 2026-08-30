@@ -1,5 +1,5 @@
 #import quilting::render::patch_vertex::{PatchPbrMaterial, PatchRenderFrame, PatchVertexOutput, evaluate_prepared_patch_vertex, shade_patch_lod, shade_patch_matcap, shade_patch_normals, shade_patch_stretch, shade_patch_wire}
-#import quilting::render::patch_pbr::shade_textured_patch_pbr
+#import quilting::render::patch_pbr_portable::shade_portable_patch_pbr
 #import quilting::surface::patch_prepare::PreparedPatchRecord
 #import quilting::compute::resident_bucket_types::{ResidentBucketRangeRecord, ResidentDrawDomainRecord}
 
@@ -89,10 +89,11 @@ fn render_resident_root_pbr(
         domain.material_index,
         domain.material_index < material_count,
     );
-    return shade_textured_patch_pbr(
+    return shade_portable_patch_pbr(
         front_facing,
         input,
         pbr_materials[material_index],
+        material_index,
         frames[domain_row].modes.w,
     );
 }

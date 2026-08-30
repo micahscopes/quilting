@@ -43,8 +43,21 @@ pub struct PbrTextureTable {
 pub struct PortablePbrTextureAtlas {
     plan: PortableTextureAtlasPlan,
     texture: wgpu::Texture,
-    _view: wgpu::TextureView,
-    _descriptor_records: wgpu::Buffer,
+    view: wgpu::TextureView,
+    descriptor_records: wgpu::Buffer,
+}
+
+pub(crate) struct PbrPortableAtlasBindings {
+    pub(crate) bind_group: wgpu::BindGroup,
+    residency: Vec<PbrMaterialTextureResidency>,
+    _fallback_atlas: Option<PortablePbrTextureAtlas>,
+    _material_texture_records: wgpu::Buffer,
+}
+
+impl PbrPortableAtlasBindings {
+    pub(crate) fn residency(&self) -> &[PbrMaterialTextureResidency] {
+        &self.residency
+    }
 }
 
 /// Per-material evidence separating authored references from resources that
@@ -152,6 +165,68 @@ pub enum PbrTextureTableUpdate {
 }
 
 impl LodClassifierDevice {
+    pub(crate) fn create_pbr_portable_atlas_bindings_for_layout(
+        &self,
+        layout: &wgpu::BindGroupLayout,
+        materials: &[PbrMaterial],
+        textures: Option<&PbrTextureTable>,
+    ) -> Result<PbrPortableAtlasBindings, LodWebGpuError> {
+        let fallback_atlas = textures
+            .is_none()
+            .then(|| create_portable_pbr_texture_atlas(&self.device, &[]))
+            .transpose()?;
+        let atlas = textures
+            .map(|textures| &textures.portable_atlas)
+            .or(fallback_atlas.as_ref())
+            .expect("resident texture table or fallback atlas exists");
+        let default_material = PbrMaterial::default();
+        let material_count = materials.len().max(1);
+        let mut residency = Vec::with_capacity(material_count);
+        let mut material_records = Vec::with_capacity(material_count);
+        for material_slot in 0..material_count {
+            let material = materials.get(material_slot).unwrap_or(&default_material);
+            material
+                .validate()
+                .map_err(|error| LodWebGpuError::Payload(error.to_string()))?;
+            residency.push(portable_material_residency(material, textures));
+            let references = material.textures;
+            material_records.push([
+                references.base_color.unwrap_or(u32::MAX),
+                references.metallic_roughness.unwrap_or(u32::MAX),
+                references.normal.unwrap_or(u32::MAX),
+                references.emissive.unwrap_or(u32::MAX),
+                references.occlusion.unwrap_or(u32::MAX),
+                references.transmission.unwrap_or(u32::MAX),
+                u32::MAX,
+                u32::MAX,
+            ]);
+        }
+        let material_texture_records = buffer_init_or_zero(
+            &self.device,
+            "quilting portable PBR material texture records",
+            bytemuck::cast_slice(&material_records),
+            wgpu::BufferUsages::STORAGE,
+        );
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("quilting portable PBR atlas bindings"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&atlas.view),
+                },
+                crate::bind(1, &atlas.descriptor_records),
+                crate::bind(2, &material_texture_records),
+            ],
+        });
+        Ok(PbrPortableAtlasBindings {
+            bind_group,
+            residency,
+            _fallback_atlas: fallback_atlas,
+            _material_texture_records: material_texture_records,
+        })
+    }
+
     /// Resolve every stable material slot to one portable sampled-texture bind
     /// group. Missing authored channels and unavailable decoded slots receive
     /// channel-correct placeholders; residency diagnostics retain the
@@ -558,6 +633,46 @@ pub(crate) fn create_pbr_texture_bind_group_layout(device: &wgpu::Device) -> wgp
     })
 }
 
+pub(crate) fn create_pbr_portable_atlas_bind_group_layout(
+    device: &wgpu::Device,
+) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("quilting portable PBR atlas binding layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: std::num::NonZeroU64::new(32),
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: std::num::NonZeroU64::new(32),
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
 #[derive(Clone, Copy)]
 enum TextureInterpretation {
     Linear,
@@ -605,6 +720,32 @@ pub(crate) fn pbr_texture_reference_mask(textures: PbrTextureReferences) -> u32 
     ]
     .into_iter()
     .fold(0, |mask, (index, bit)| mask | index.map_or(0, |_| bit))
+}
+
+fn portable_material_residency(
+    material: &PbrMaterial,
+    textures: Option<&PbrTextureTable>,
+) -> PbrMaterialTextureResidency {
+    let references = [
+        (material.textures.base_color, PBR_BASE_COLOR_TEXTURE_BIT),
+        (
+            material.textures.metallic_roughness,
+            PBR_METALLIC_ROUGHNESS_TEXTURE_BIT,
+        ),
+        (material.textures.normal, PBR_NORMAL_TEXTURE_BIT),
+        (material.textures.emissive, PBR_EMISSIVE_TEXTURE_BIT),
+        (material.textures.occlusion, PBR_OCCLUSION_TEXTURE_BIT),
+        (material.textures.transmission, PBR_TRANSMISSION_TEXTURE_BIT),
+    ];
+    let resident_mask = references.iter().fold(0, |mask, &(slot, bit)| {
+        let resident =
+            slot.is_some_and(|slot| textures.is_some_and(|table| table.resource(slot).is_some()));
+        mask | if resident { bit } else { 0 }
+    });
+    PbrMaterialTextureResidency {
+        referenced_mask: pbr_texture_reference_mask(material.textures),
+        resident_mask,
+    }
 }
 
 fn create_placeholder_resources(
@@ -759,8 +900,8 @@ fn create_portable_pbr_texture_atlas(
     Ok(PortablePbrTextureAtlas {
         plan,
         texture,
-        _view: view,
-        _descriptor_records: descriptor_records,
+        view,
+        descriptor_records,
     })
 }
 

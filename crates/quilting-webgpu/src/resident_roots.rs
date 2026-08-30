@@ -5,8 +5,8 @@
 
 use super::*;
 
-/// Styles whose fragment inputs are complete in the direct source-root path.
-/// PBR remains on the established material-bound prepared-patch renderer.
+/// Diagnostic styles whose fragment inputs are unconditionally complete in
+/// the direct source-root path. PBR has an additional resource-residency gate.
 pub fn supports_resident_root_render_style(style: RenderStyle) -> bool {
     style != RenderStyle::Pbr
 }
@@ -41,38 +41,6 @@ pub fn resident_root_render_domains(
     ResidentRootDrawDomains::build(scene, face_count)
         .map(Some)
         .map_err(|error| error.to_string())
-}
-
-fn resident_root_pbr_material_slot(
-    domains: &[ResidentRootDrawDomain],
-    materials: &[PbrMaterial],
-    textures: &PbrMaterialTextureBindings,
-) -> Result<Option<u32>, LodWebGpuError> {
-    if textures
-        .residency()
-        .iter()
-        .all(|material| material.referenced_mask() == 0)
-    {
-        return Ok(Some(0));
-    }
-
-    let mut active_slots = domains
-        .iter()
-        .filter(|domain| domain.enabled)
-        .map(|domain| patch_pbr_material_slot(materials, domain.material_index));
-    let Some(first) = active_slots.next().transpose()? else {
-        return Ok(Some(0));
-    };
-    for slot in active_slots {
-        if slot? != first {
-            return Ok(None);
-        }
-    }
-    Ok(textures
-        .residency()
-        .get(first as usize)
-        .is_some_and(|material| material.unresolved_mask() == 0)
-        .then_some(first))
 }
 
 /// Retained root-only geometry buckets derived from packed resident LOD.
@@ -154,7 +122,7 @@ pub struct ResidentRootDrawDomainOutput {
 /// device-generated atlas/parity bucket plan.
 pub struct ResidentRootRenderPipeline {
     bind_group_layout: wgpu::BindGroupLayout,
-    pbr_texture_bind_group_layout: wgpu::BindGroupLayout,
+    pbr_portable_atlas_bind_group_layout: wgpu::BindGroupLayout,
     pbr_environment_bind_group_layout: wgpu::BindGroupLayout,
     pbr: ResidentRootWindingPipelines,
     matcap: ResidentRootWindingPipelines,
@@ -178,9 +146,8 @@ pub struct ResidentRootRenderBindings {
     bucket_index_uniform_stride: u32,
     frames: wgpu::Buffer,
     _materials: wgpu::Buffer,
-    material_textures: Option<PbrMaterialTextureBindings>,
+    portable_material_textures: Option<pbr_resources::PbrPortableAtlasBindings>,
     pbr_environment: Option<PbrEnvironmentBindings>,
-    pbr_material_slot: Option<u32>,
     pbr_scene_supported: bool,
     frame_words: Mutex<Vec<u32>>,
     _bucket_index_uniform: wgpu::Buffer,
@@ -205,20 +172,17 @@ pub struct ResidentRootPreparationScene {
 
 impl ResidentRootRenderBindings {
     pub fn pbr_texture_residency(&self) -> Option<&[PbrMaterialTextureResidency]> {
-        self.material_textures
+        self.portable_material_textures
             .as_ref()
-            .map(PbrMaterialTextureBindings::residency)
+            .map(pbr_resources::PbrPortableAtlasBindings::residency)
     }
 
     pub fn pbr_environment_bindings(&self) -> Option<&PbrEnvironmentBindings> {
         self.pbr_environment.as_ref()
     }
 
-    /// The portable root pipeline binds one sampled-texture group for the
-    /// complete indirect bucket. It is therefore exact while every authored
-    /// material is factor-only. This narrower diagnostic remains useful even
-    /// though [`Self::supports_resident_basic_pbr`] also admits one exact
-    /// textured material shared by every enabled root domain.
+    /// This narrower diagnostic distinguishes factor-only scenes from the
+    /// general portable-atlas path admitted by [`Self::supports_resident_basic_pbr`].
     pub fn supports_resident_untextured_pbr(&self) -> bool {
         self.pbr_scene_supported
             && self.pbr_texture_residency().is_some_and(|residency| {
@@ -231,21 +195,16 @@ impl ResidentRootRenderBindings {
                 .is_some_and(PbrEnvironmentBindings::is_resident)
     }
 
-    /// The direct root path can bind one portable material texture group for
-    /// all indirect atlas/parity buckets. Factor-only scenes may therefore
-    /// share the placeholder group, while textured scenes require every
-    /// enabled root domain to resolve to one fully resident material slot.
-    pub fn resident_pbr_material_slot(&self) -> Option<u32> {
-        (self.pbr_scene_supported
+    pub fn supports_resident_basic_pbr(&self) -> bool {
+        self.pbr_scene_supported
+            && self.pbr_texture_residency().is_some_and(|residency| {
+                residency
+                    .iter()
+                    .all(|material| material.unresolved_mask() == 0)
+            })
             && self
                 .pbr_environment_bindings()
-                .is_some_and(PbrEnvironmentBindings::is_resident))
-        .then_some(self.pbr_material_slot)
-        .flatten()
-    }
-
-    pub fn supports_resident_basic_pbr(&self) -> bool {
-        self.resident_pbr_material_slot().is_some()
+                .is_some_and(PbrEnvironmentBindings::is_resident)
     }
 
     /// Decide whether this coherent binding epoch can execute one frame from
@@ -474,8 +433,8 @@ impl LodClassifierDevice {
                         ),
                     ],
                 });
-        let pbr_texture_bind_group_layout =
-            pbr_resources::create_pbr_texture_bind_group_layout(&self.device);
+        let pbr_portable_atlas_bind_group_layout =
+            pbr_resources::create_pbr_portable_atlas_bind_group_layout(&self.device);
         let pbr_environment_bind_group_layout =
             pbr_environment::create_pbr_environment_bind_group_layout(&self.device);
         let diagnostic_pipeline_layout =
@@ -491,7 +450,7 @@ impl LodClassifierDevice {
                     label: Some("quilting resident root PBR pipeline layout"),
                     bind_group_layouts: &[
                         Some(&bind_group_layout),
-                        Some(&pbr_texture_bind_group_layout),
+                        Some(&pbr_portable_atlas_bind_group_layout),
                         Some(&pbr_environment_bind_group_layout),
                     ],
                     immediate_size: 0,
@@ -608,7 +567,7 @@ impl LodClassifierDevice {
                 RenderGeometry::Lines,
                 &diagnostic_pipeline_layout,
             ),
-            pbr_texture_bind_group_layout,
+            pbr_portable_atlas_bind_group_layout,
             pbr_environment_bind_group_layout,
         })
     }
@@ -730,20 +689,15 @@ impl LodClassifierDevice {
             bytemuck::cast_slice(&material_words),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         );
-        let material_textures = retain_pbr_resources
+        let portable_material_textures = retain_pbr_resources
             .then(|| {
-                self.create_pbr_material_texture_bindings_for_layout(
-                    &pipeline.pbr_texture_bind_group_layout,
+                self.create_pbr_portable_atlas_bindings_for_layout(
+                    &pipeline.pbr_portable_atlas_bind_group_layout,
                     materials,
                     textures,
                 )
             })
             .transpose()?;
-        let pbr_material_slot = material_textures
-            .as_ref()
-            .map(|textures| resident_root_pbr_material_slot(&domains.domains, materials, textures))
-            .transpose()?
-            .flatten();
         let pbr_environment = retain_pbr_resources
             .then(|| {
                 self.create_pbr_environment_bindings_for_layout(
@@ -797,9 +751,8 @@ impl LodClassifierDevice {
             bucket_index_uniform_stride,
             frames,
             _materials: material_buffer,
-            material_textures,
+            portable_material_textures,
             pbr_environment,
-            pbr_material_slot,
             pbr_scene_supported,
             frame_words: Mutex::new(vec![0; frame_word_count]),
             _bucket_index_uniform: bucket_index_uniform,
@@ -935,21 +888,15 @@ impl LodClassifierDevice {
                 .for_pass(draw.pass)
                 .expect("resident root pass support was validated above");
             if draw.pass == RenderPass::PbrOpaque {
-                let material_slot = bindings.resident_pbr_material_slot().ok_or_else(|| {
-                    LodWebGpuError::Payload(
-                        "resident root PBR has no exact material texture slot".to_string(),
-                    )
-                })?;
-                let material_textures = bindings
-                    .material_textures
+                let portable_material_textures = bindings
+                    .portable_material_textures
                     .as_ref()
-                    .and_then(|bindings| bindings.bind_group(material_slot))
                     .ok_or_else(|| {
                         LodWebGpuError::Payload(
-                            "resident root PBR has no default material texture binding".to_string(),
+                            "resident root PBR has no portable texture atlas binding".to_string(),
                         )
                     })?;
-                pass.set_bind_group(1, material_textures, &[]);
+                pass.set_bind_group(1, &portable_material_textures.bind_group, &[]);
                 let environment = bindings.pbr_environment.as_ref().ok_or_else(|| {
                     LodWebGpuError::Payload(
                         "resident root PBR has no environment binding".to_string(),

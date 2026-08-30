@@ -63,6 +63,10 @@ pub mod sources {
     pub const PATCH_VISIBILITY: &str = include_str!("../shaders/surface/patch_visibility.wgsl");
     pub const PATCH_RENDER_VERTEX: &str = include_str!("../shaders/render/patch_vertex.wgsl");
     pub const PATCH_RENDER_PBR: &str = include_str!("../shaders/render/patch_pbr.wgsl");
+    pub const PATCH_RENDER_PBR_LIGHTING: &str =
+        include_str!("../shaders/render/patch_pbr_lighting.wgsl");
+    pub const PATCH_RENDER_PBR_PORTABLE: &str =
+        include_str!("../shaders/render/patch_pbr_portable.wgsl");
     pub const PBR: &str = include_str!("../shaders/lighting/pbr.wgsl");
     pub const MATCAP: &str = include_str!("../shaders/lighting/matcap.wgsl");
     pub const DENSITY: &str = include_str!("../shaders/viz/density.wgsl");
@@ -137,7 +141,15 @@ fn build_compiler_catalog_revision() -> Arc<str> {
             "quilting::render::patch_vertex",
             sources::PATCH_RENDER_VERTEX,
         ),
+        (
+            "quilting::render::patch_pbr_lighting",
+            sources::PATCH_RENDER_PBR_LIGHTING,
+        ),
         ("quilting::render::patch_pbr", sources::PATCH_RENDER_PBR),
+        (
+            "quilting::render::patch_pbr_portable",
+            sources::PATCH_RENDER_PBR_PORTABLE,
+        ),
         ("quilting::compute::lod_types", sources::LOD_TYPES),
         ("quilting::compute::pose", sources::POSE),
         (
@@ -194,7 +206,15 @@ pub fn create_composer() -> Result<Composer, Box<dyn std::error::Error>> {
             "quilting::render::patch_vertex",
             sources::PATCH_RENDER_VERTEX,
         ),
+        (
+            "quilting::render::patch_pbr_lighting",
+            sources::PATCH_RENDER_PBR_LIGHTING,
+        ),
         ("quilting::render::patch_pbr", sources::PATCH_RENDER_PBR),
+        (
+            "quilting::render::patch_pbr_portable",
+            sources::PATCH_RENDER_PBR_PORTABLE,
+        ),
         ("quilting::compute::lod_types", sources::LOD_TYPES),
         ("quilting::compute::pose", sources::POSE),
         (
@@ -989,8 +1009,8 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
                 .iter()
                 .filter(|(_, variable)| variable.binding.is_some())
                 .count(),
-            22,
-            "eight resident bindings, ten sampled texture bindings, and four environment bindings",
+            15,
+            "eight resident bindings, three portable texture bindings, and four environment bindings",
         );
         let entries = module
             .entry_points
@@ -1039,6 +1059,8 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             ("DrawRootBucketIndex", 16),
             ("ResidentBucketRangeRecord", 20),
             ("ResidentDrawDomainRecord", 16),
+            ("PbrPortableTextureRecord", 32),
+            ("PbrPortableMaterialTextures", 32),
         ] {
             let (handle, _) = module
                 .types

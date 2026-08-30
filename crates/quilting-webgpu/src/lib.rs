@@ -1719,29 +1719,47 @@ impl LodClassifierDevice {
                         key: RenderBatchKey {
                             lod: [1; 3],
                             parity_bucket: 0,
-                            material_index: 1,
-                            render_node_index: 9,
+                            material_index: 0,
+                            render_node_index: 8,
                         },
                         layer: RenderBatchLayer::RetainedRoot,
                     },
-                    members: vec![
-                        RenderBatchMember {
-                            face_index: 0,
-                            leaf_id: ScreenPatchLeafId::ROOT,
-                            node_index: 7,
-                            edge_lods: [1; 3],
-                            permutation_index: 0,
-                            vertex_lods: [1; 3],
+                    members: vec![RenderBatchMember {
+                        face_index: 0,
+                        leaf_id: ScreenPatchLeafId::ROOT,
+                        node_index: 7,
+                        edge_lods: [1; 3],
+                        permutation_index: 0,
+                        vertex_lods: [1; 3],
+                    }],
+                    triangle_index_count: 3,
+                    line_index_count: 6,
+                    transform,
+                    enabled: true,
+                    pbr_class: PbrDrawClass::Opaque,
+                },
+                RenderBatchSnapshot {
+                    id: RenderBatchId {
+                        key: RenderBatchKey {
+                            lod: [1; 3],
+                            parity_bucket: 0,
+                            material_index: 0,
+                            render_node_index: 8,
                         },
-                        RenderBatchMember {
-                            face_index: 1,
-                            leaf_id: ScreenPatchLeafId::ROOT,
-                            node_index: 8,
-                            edge_lods: [1; 3],
-                            permutation_index: 0,
-                            vertex_lods: [1; 3],
-                        },
-                    ],
+                        layer: RenderBatchLayer::AdaptiveOverlay,
+                    },
+                    members: vec![RenderBatchMember {
+                        face_index: 0,
+                        leaf_id: ScreenPatchLeafId::ROOT.child(3).ok_or_else(|| {
+                            LodWebGpuError::Conformance(
+                                "resident overlay conformance child is missing".to_string(),
+                            )
+                        })?,
+                        node_index: 7,
+                        edge_lods: [1; 3],
+                        permutation_index: 0,
+                        vertex_lods: [1; 3],
+                    }],
                     triangle_index_count: 3,
                     line_index_count: 6,
                     transform,
@@ -1756,16 +1774,12 @@ impl LodClassifierDevice {
                             material_index: 1,
                             render_node_index: 9,
                         },
-                        layer: RenderBatchLayer::AdaptiveOverlay,
+                        layer: RenderBatchLayer::RetainedRoot,
                     },
                     members: vec![RenderBatchMember {
-                        face_index: 0,
-                        leaf_id: ScreenPatchLeafId::ROOT.child(3).ok_or_else(|| {
-                            LodWebGpuError::Conformance(
-                                "resident overlay conformance child is missing".to_string(),
-                            )
-                        })?,
-                        node_index: 7,
+                        face_index: 1,
+                        leaf_id: ScreenPatchLeafId::ROOT,
+                        node_index: 8,
                         edge_lods: [1; 3],
                         permutation_index: 0,
                         vertex_lods: [1; 3],
@@ -1823,7 +1837,9 @@ impl LodClassifierDevice {
             .get(RenderStyle::Normals)
             .expect("diagnostic pipeline family contains normals");
         let mut invalid_overlay_scene = render_scene.clone();
-        invalid_overlay_scene.batches.pop();
+        invalid_overlay_scene
+            .batches
+            .retain(|batch| batch.id.layer != RenderBatchLayer::AdaptiveOverlay);
         if self
             .upload_adaptive_overlay_scene(
                 overlay_layout_pipeline,
@@ -2110,13 +2126,19 @@ impl LodClassifierDevice {
         // orientation while retaining identity coordinates to exercise parity
         // bucketing. Make the PBR material double-sided so the raster proof is
         // independent of that intentionally inconsistent fixture metadata.
+        let mut untextured_material = PbrMaterial {
+            base_color: [0.0, 0.0, 0.0, 1.0],
+            double_sided: true,
+            ..PbrMaterial::default()
+        };
+        untextured_material.roughness = 1.0;
         let mut pbr_material = PbrMaterial {
             double_sided: true,
             ..PbrMaterial::default()
         };
         pbr_material.textures.base_color = Some(0);
         let mut pbr_render_scene = render_scene.clone();
-        pbr_render_scene.materials = vec![PbrMaterial::default(), pbr_material];
+        pbr_render_scene.materials = vec![untextured_material, pbr_material];
         let pbr_texture_descriptor = TextureAssetDescriptor {
             width: 1,
             height: 1,
@@ -2139,10 +2161,17 @@ impl LodClassifierDevice {
         )?;
         if pbr_bindings.supports_resident_untextured_pbr()
             || !pbr_bindings.supports_resident_basic_pbr()
-            || pbr_bindings.resident_pbr_material_slot() != Some(1)
+            || pbr_bindings
+                .pbr_texture_residency()
+                .is_none_or(|residency| {
+                    residency.len() != 2
+                        || residency[0].referenced_mask() != 0
+                        || residency[1].resident_mask() != pbr_resources::PBR_BASE_COLOR_TEXTURE_BIT
+                })
         {
             return Err(LodWebGpuError::Conformance(
-                "resident root PBR rejected exact single-material texture residency".to_string(),
+                "resident root PBR rejected exact multi-material portable texture residency"
+                    .to_string(),
             ));
         }
         let pbr_overlay_pipeline = overlay_pipelines
