@@ -18,10 +18,10 @@ use quilting_renderer::compute::{
     prepare_lod_dispatch_state, LodAtlasLookup, PreparedLodModel, WgslLodDispatchMetrics,
 };
 use quilting_webgpu::{
-    resident_root_render_domains, DiagnosticPatchRenderPipelines, LodClassifierDevice,
-    LodClassifierModel, LodPose, OffscreenPatchRenderTarget, PackedPatchAtlas, PatchFrameEncoding,
-    PatchPresentationSurface, PatchRenderScene, PatchRenderSceneUpdate, PbrEnvironmentMap,
-    PbrTextureTable, ResidentGeometryBucketScene, ResidentRootPreparationScene,
+    resident_root_render_domains, AdaptiveOverlayScene, DiagnosticPatchRenderPipelines,
+    LodClassifierDevice, LodClassifierModel, LodPose, OffscreenPatchRenderTarget, PackedPatchAtlas,
+    PatchFrameEncoding, PatchPresentationSurface, PatchRenderScene, PatchRenderSceneUpdate,
+    PbrEnvironmentMap, PbrTextureTable, ResidentGeometryBucketScene, ResidentRootPreparationScene,
     ResidentRootRenderBindings, ResidentRootRenderPipeline, StagedOffscreenImageReadback,
     SurfacePresentation, WebGpuAdapterSummary,
 };
@@ -93,6 +93,13 @@ struct ResidentRootBackend {
     preparation: ResidentRootPreparationScene,
     geometry: ResidentGeometryBucketScene,
     bindings: ResidentRootRenderBindings,
+    overlay: Option<AdaptiveOverlayScene>,
+}
+
+enum ResidentRootSceneCandidate {
+    Unavailable,
+    Reuse(Option<AdaptiveOverlayScene>),
+    Replace(ResidentRootBackend),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -352,6 +359,50 @@ impl WebGpuBackend {
             self.last_resident_root_error = Some(error);
         } else {
             self.last_resident_root_error = None;
+        }
+    }
+
+    fn publish_resident_scene(
+        &mut self,
+        candidate: ResidentRootSceneCandidate,
+        failure: Option<String>,
+    ) {
+        match candidate {
+            ResidentRootSceneCandidate::Reuse(overlay) if failure.is_none() => {
+                let publication = self
+                    .device
+                    .as_ref()
+                    .zip(self.resident_roots.as_mut())
+                    .ok_or_else(|| {
+                        "resident root reuse lost its device or retained scene".to_string()
+                    })
+                    .and_then(|(device, resident)| {
+                        device
+                            .publish_adaptive_overlay_suppression(
+                                &resident.geometry,
+                                overlay.as_ref(),
+                            )
+                            .map_err(|error| error.to_string())?;
+                        resident.overlay = overlay;
+                        Ok(())
+                    });
+                match publication {
+                    Ok(()) => {
+                        self.resident_root_scene_reuses =
+                            self.resident_root_scene_reuses.saturating_add(1);
+                        self.last_resident_root_error = None;
+                    }
+                    Err(error) => self.publish_resident_roots(None, Some(error)),
+                }
+            }
+            ResidentRootSceneCandidate::Replace(candidate) if failure.is_none() => {
+                self.publish_resident_roots(Some(candidate), None);
+            }
+            ResidentRootSceneCandidate::Unavailable
+            | ResidentRootSceneCandidate::Reuse(_)
+            | ResidentRootSceneCandidate::Replace(_) => {
+                self.publish_resident_roots(None, failure);
+            }
         }
     }
 }
@@ -906,7 +957,8 @@ fn build_resident_root_backend(
     device: &LodClassifierDevice,
     model: &LodClassifierModel,
     atlas: &PackedPatchAtlas,
-    pipeline: &ResidentRootRenderPipeline,
+    root_pipeline: &ResidentRootRenderPipeline,
+    overlay_pipelines: &DiagnosticPatchRenderPipelines,
     domains: ResidentRootDrawDomains,
     scene: &RenderSceneSnapshot,
     source_instances: &[f32],
@@ -918,14 +970,34 @@ fn build_resident_root_backend(
         .upload_resident_geometry_bucket_scene(model, atlas, preparation.draw_domains())
         .map_err(|error| error.to_string())?;
     let bindings = device
-        .create_resident_root_render_bindings(pipeline, &preparation, &geometry)
+        .create_resident_root_render_bindings(root_pipeline, &preparation, &geometry)
+        .map_err(|error| error.to_string())?;
+    let overlay = build_adaptive_overlay(device, model, overlay_pipelines, &preparation, scene)?;
+    device
+        .publish_adaptive_overlay_suppression(&geometry, overlay.as_ref())
         .map_err(|error| error.to_string())?;
     Ok(ResidentRootBackend {
         domains,
         preparation,
         geometry,
         bindings,
+        overlay,
     })
+}
+
+fn build_adaptive_overlay(
+    device: &LodClassifierDevice,
+    model: &LodClassifierModel,
+    pipelines: &DiagnosticPatchRenderPipelines,
+    preparation: &ResidentRootPreparationScene,
+    scene: &RenderSceneSnapshot,
+) -> Result<Option<AdaptiveOverlayScene>, String> {
+    let layout_pipeline = pipelines
+        .get(RenderStyle::Normals)
+        .ok_or_else(|| "WebGPU diagnostic pipeline family lost normals".to_string())?;
+    device
+        .upload_adaptive_overlay_scene(layout_pipeline, model, preparation, scene)
+        .map_err(|error| error.to_string())
 }
 
 /// Publish one device-side render scene derived from shared backend-neutral
@@ -943,22 +1015,24 @@ pub(crate) fn replace_scene(
             return Ok(false);
         }
         let next_revision = backend.scene_uploads.saturating_add(1);
+        let mut scene = scene;
+        scene.revision = next_revision;
         let resident_root_domains = backend
             .model_source
             .as_ref()
             .ok_or_else(|| "WebGPU resident roots require immutable model residency".to_string())
             .and_then(|source| resident_root_render_domains(&scene, source.residency.num_faces));
-        let mut resident_root_reused = false;
         let resident_root_candidate = match (
             backend.device.as_ref(),
             backend.model.as_ref(),
             backend.atlas.as_ref(),
             backend.resident_root_pipeline.as_ref(),
+            backend.pipelines.as_ref(),
             resident_root_domains,
         ) {
-            (_, _, _, _, Ok(None)) => Ok(None),
-            (_, _, _, None, Ok(Some(_))) => Ok(None),
-            (_, _, _, _, Ok(Some(domains)))
+            (_, _, _, _, _, Ok(None)) => Ok(ResidentRootSceneCandidate::Unavailable),
+            (_, _, _, None, _, Ok(Some(_))) => Ok(ResidentRootSceneCandidate::Unavailable),
+            (Some(device), Some(model), _, Some(_), Some(pipelines), Ok(Some(domains)))
                 if backend
                     .resident_roots
                     .as_ref()
@@ -969,28 +1043,38 @@ pub(crate) fn replace_scene(
                 // domains therefore distinguish authored state changes from
                 // CPU-only LOD bucket churn without retaining another copy of
                 // the 208-byte source record per face.
-                resident_root_reused = true;
-                Ok(None)
+                let preparation = &backend
+                    .resident_roots
+                    .as_ref()
+                    .expect("resident root reuse guard checked presence")
+                    .preparation;
+                build_adaptive_overlay(device, model, pipelines, preparation, &scene)
+                    .map(ResidentRootSceneCandidate::Reuse)
             }
-            (Some(device), Some(model), Some(atlas), Some(pipeline), Ok(Some(domains))) => {
-                build_resident_root_backend(
-                    device,
-                    model,
-                    atlas,
-                    pipeline,
-                    domains,
-                    &scene,
-                    source_instances,
-                )
-                .map(Some)
-            }
-            (_, _, _, _, Err(error)) => Err(error),
+            (
+                Some(device),
+                Some(model),
+                Some(atlas),
+                Some(root_pipeline),
+                Some(overlay_pipelines),
+                Ok(Some(domains)),
+            ) => build_resident_root_backend(
+                device,
+                model,
+                atlas,
+                root_pipeline,
+                overlay_pipelines,
+                domains,
+                &scene,
+                source_instances,
+            )
+            .map(ResidentRootSceneCandidate::Replace),
+            (_, _, _, _, _, Err(error)) => Err(error),
             _ => Err("WebGPU resident roots require model, atlas, and pipeline residency".into()),
         };
-        let (mut resident_root_candidate, mut resident_root_failure) = match resident_root_candidate
-        {
+        let (resident_root_candidate, resident_root_failure) = match resident_root_candidate {
             Ok(candidate) => (candidate, None),
-            Err(error) => (None, Some(error)),
+            Err(error) => (ResidentRootSceneCandidate::Unavailable, Some(error)),
         };
         let update_result = {
             let WebGpuBackend {
@@ -1026,16 +1110,7 @@ pub(crate) fn replace_scene(
                 backend.scene_updates = backend.scene_updates.saturating_add(1);
                 backend.last_frame_input = None;
                 backend.next_morph_weights.clear();
-                if resident_root_reused {
-                    backend.resident_root_scene_reuses =
-                        backend.resident_root_scene_reuses.saturating_add(1);
-                    backend.last_resident_root_error = None;
-                } else {
-                    backend.publish_resident_roots(
-                        resident_root_candidate.take(),
-                        resident_root_failure.take(),
-                    );
-                }
+                backend.publish_resident_scene(resident_root_candidate, resident_root_failure);
                 backend.last_error = None;
                 return Ok(true);
             }
@@ -1090,16 +1165,7 @@ pub(crate) fn replace_scene(
                 backend.last_face_visibility_bits.clear();
                 backend.next_face_visibility_bits.clear();
                 backend.next_morph_weights.clear();
-                if resident_root_reused {
-                    backend.resident_root_scene_reuses =
-                        backend.resident_root_scene_reuses.saturating_add(1);
-                    backend.last_resident_root_error = None;
-                } else {
-                    backend.publish_resident_roots(
-                        resident_root_candidate.take(),
-                        resident_root_failure.take(),
-                    );
-                }
+                backend.publish_resident_scene(resident_root_candidate, resident_root_failure);
                 backend.last_error = None;
                 Ok(true)
             }
@@ -1386,7 +1452,7 @@ pub(crate) fn submit_frame(
                         let root_pipeline = resident_root_pipeline.as_ref().ok_or_else(|| {
                             "WebGPU resident root frame lost its pipeline residency".to_string()
                         })?;
-                        device.present_resident_roots(
+                        device.present_resident_adaptive(
                             presentation,
                             &frame,
                             scene.scene(),
@@ -1396,6 +1462,8 @@ pub(crate) fn submit_frame(
                             &roots.geometry,
                             root_pipeline,
                             &roots.bindings,
+                            pipelines,
+                            roots.overlay.as_ref(),
                             atlas,
                             LodPose {
                                 joint_matrices,
@@ -1471,7 +1539,7 @@ pub(crate) fn submit_frame(
                         let root_pipeline = backend.resident_root_pipeline.as_ref().ok_or_else(|| {
                             "WebGPU resident root frame lost its pipeline residency".to_string()
                         })?;
-                        device.render_offscreen_resident_roots(
+                        device.render_offscreen_resident_adaptive(
                             &frame,
                             scene.scene(),
                             model,
@@ -1480,6 +1548,8 @@ pub(crate) fn submit_frame(
                             &roots.geometry,
                             root_pipeline,
                             &roots.bindings,
+                            pipelines,
+                            roots.overlay.as_ref(),
                             atlas,
                             target,
                             LodPose {

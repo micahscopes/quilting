@@ -15,18 +15,8 @@ pub fn supports_resident_root_render_style(style: RenderStyle) -> bool {
 /// without consulting the CPU-authored batch topology. Adaptive leaves remain
 /// on their sparse overlay path until their partition is device-resident too.
 pub fn supports_resident_root_render_scene(scene: &RenderSceneSnapshot, face_count: usize) -> bool {
-    matches!(resident_root_render_domains(scene, face_count), Ok(Some(_)))
-}
-
-/// Extract the exact LOD-independent root state used to decide whether a live
-/// scene publication can reuse its retained topology, preparation, domains,
-/// and bindings. `None` is a supported fallback, not a malformed scene.
-pub fn resident_root_render_domains(
-    scene: &RenderSceneSnapshot,
-    face_count: usize,
-) -> Result<Option<ResidentRootDrawDomains>, String> {
-    if !scene.suppressed_root_faces.is_empty()
-        || scene.batches.iter().any(|batch| {
+    scene.suppressed_root_faces.is_empty()
+        && !scene.batches.iter().any(|batch| {
             batch.id.layer == RenderBatchLayer::AdaptiveOverlay
                 || batch.members.is_empty()
                 || batch
@@ -34,7 +24,18 @@ pub fn resident_root_render_domains(
                     .iter()
                     .any(|member| member.leaf_id != ScreenPatchLeafId::ROOT)
         })
-    {
+        && matches!(resident_root_render_domains(scene, face_count), Ok(Some(_)))
+}
+
+/// Extract the exact LOD-independent root state used by both root-only and
+/// root-plus-adaptive rendering. Sparse adaptive members are validated with
+/// the scene but do not create root domains. `None` remains a supported
+/// fallback for future scene forms without a complete source-root layer.
+pub fn resident_root_render_domains(
+    scene: &RenderSceneSnapshot,
+    face_count: usize,
+) -> Result<Option<ResidentRootDrawDomains>, String> {
+    if scene.batches.iter().any(|batch| batch.members.is_empty()) {
         return Ok(None);
     }
     ResidentRootDrawDomains::build(scene, face_count)

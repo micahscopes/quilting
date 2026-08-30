@@ -513,4 +513,144 @@ impl LodClassifierDevice {
             overlay: overlay_encoding,
         })
     }
+
+    /// Submit one retained-root plus sparse adaptive frame to the offscreen
+    /// target without mapping either the classifier or compaction outputs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_offscreen_resident_adaptive(
+        &self,
+        frame: &RenderFrame,
+        scene: &RenderSceneSnapshot,
+        model: &LodClassifierModel,
+        resident: &DeviceResidentLod<'_>,
+        roots: &ResidentRootPreparationScene,
+        root_geometry: &ResidentGeometryBucketScene,
+        root_pipeline: &ResidentRootRenderPipeline,
+        root_bindings: &ResidentRootRenderBindings,
+        overlay_pipelines: &DiagnosticPatchRenderPipelines,
+        overlay: Option<&AdaptiveOverlayScene>,
+        atlas: &PackedPatchAtlas,
+        target: &OffscreenPatchRenderTarget,
+        pose: LodPose<'_>,
+        num_joints: u32,
+        use_qb: bool,
+    ) -> Result<PatchFrameEncoding, LodWebGpuError> {
+        if frame.view.viewport != target.size {
+            return Err(LodWebGpuError::Payload(format!(
+                "offscreen target {:?} does not match frame viewport {:?}",
+                target.size, frame.view.viewport,
+            )));
+        }
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quilting resident adaptive offscreen frame"),
+            });
+        let encoding = self.encode_resident_adaptive(
+            &mut encoder,
+            frame,
+            scene,
+            model,
+            resident,
+            roots,
+            root_geometry,
+            root_pipeline,
+            root_bindings,
+            overlay_pipelines,
+            overlay,
+            atlas,
+            PatchRenderTarget {
+                color_view: &target.color_view,
+                resolve_target: None,
+                depth_stencil_view: Some(&target.depth_view),
+                clear_color: Some(wgpu::Color {
+                    r: 0.2,
+                    g: 0.2,
+                    b: 0.3,
+                    a: 0.0,
+                }),
+                clear_depth: Some(1.0),
+            },
+            pose,
+            num_joints,
+            use_qb,
+        )?;
+        self.queue.submit([encoder.finish()]);
+        Ok(resident_adaptive_frame_evidence(encoding))
+    }
+
+    /// Present one retained-root plus sparse adaptive frame through the same
+    /// device-only encoder used by the offscreen path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn present_resident_adaptive(
+        &self,
+        surface: &mut PatchPresentationSurface,
+        frame: &RenderFrame,
+        scene: &RenderSceneSnapshot,
+        model: &LodClassifierModel,
+        resident: &DeviceResidentLod<'_>,
+        roots: &ResidentRootPreparationScene,
+        root_geometry: &ResidentGeometryBucketScene,
+        root_pipeline: &ResidentRootRenderPipeline,
+        root_bindings: &ResidentRootRenderBindings,
+        overlay_pipelines: &DiagnosticPatchRenderPipelines,
+        overlay: Option<&AdaptiveOverlayScene>,
+        atlas: &PackedPatchAtlas,
+        pose: LodPose<'_>,
+        num_joints: u32,
+        use_qb: bool,
+    ) -> Result<SurfacePresentation<PatchFrameEncoding>, LodWebGpuError> {
+        surface.present_with(
+            self,
+            "quilting resident adaptive presentation frame",
+            |encoder, mut target| {
+                target.clear_color = Some(wgpu::Color {
+                    r: 0.2,
+                    g: 0.2,
+                    b: 0.3,
+                    a: 1.0,
+                });
+                target.clear_depth = Some(1.0);
+                self.encode_resident_adaptive(
+                    encoder,
+                    frame,
+                    scene,
+                    model,
+                    resident,
+                    roots,
+                    root_geometry,
+                    root_pipeline,
+                    root_bindings,
+                    overlay_pipelines,
+                    overlay,
+                    atlas,
+                    target,
+                    pose,
+                    num_joints,
+                    use_qb,
+                )
+                .map(resident_adaptive_frame_evidence)
+            },
+        )
+    }
+}
+
+fn resident_adaptive_frame_evidence(encoding: ResidentAdaptiveFrameEncoding) -> PatchFrameEncoding {
+    let overlay_draws = encoding
+        .overlay
+        .map_or(0, |overlay| overlay.indirect_draw_calls);
+    let overlay_patches = encoding
+        .overlay
+        .map_or(0, |overlay| overlay.source_patch_count);
+    PatchFrameEncoding {
+        logical_submission: encoding.logical_submission,
+        indirect_draw_calls: encoding
+            .roots
+            .indirect_draw_calls
+            .saturating_add(overlay_draws),
+        source_instance_count: encoding
+            .roots
+            .source_face_count
+            .saturating_add(overlay_patches),
+    }
 }
