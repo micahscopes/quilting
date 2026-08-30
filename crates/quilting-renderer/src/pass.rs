@@ -217,7 +217,7 @@ fn validate_batch_residency(
 /// allocations before the first device call. PBR composition is admitted by a
 /// separate executor because its transmission and focus commands interleave
 /// framebuffer work with patch draws.
-pub fn validate_diagnostic_execution(
+fn validate_execution_residency(
     execution: RenderExecution<'_, '_>,
     batches: &[RenderBatch],
 ) -> Result<(), WebGlRenderExecutionError> {
@@ -235,6 +235,14 @@ pub fn validate_diagnostic_execution(
     {
         validate_batch_residency(batch_index as u32, expected, actual)?;
     }
+    Ok(())
+}
+
+pub fn validate_diagnostic_execution(
+    execution: RenderExecution<'_, '_>,
+    batches: &[RenderBatch],
+) -> Result<(), WebGlRenderExecutionError> {
+    validate_execution_residency(execution, batches)?;
     for command in execution {
         match command {
             ResolvedRenderCommand::PreparePatches { .. }
@@ -258,6 +266,151 @@ pub fn validate_diagnostic_execution(
         }
     }
     Ok(())
+}
+
+/// Preflight the interleaved PBR command subset without issuing device calls.
+/// The WASM compositor still owns framebuffer and material resources while
+/// this gate moves draw/pass selection onto the shared command authority.
+pub fn validate_pbr_execution(
+    execution: RenderExecution<'_, '_>,
+    batches: &[RenderBatch],
+) -> Result<(), WebGlRenderExecutionError> {
+    validate_execution_residency(execution, batches)?;
+    for command in execution {
+        match command {
+            ResolvedRenderCommand::PreparePatches { .. }
+            | ResolvedRenderCommand::ResolveVisibility { .. }
+            | ResolvedRenderCommand::BuildTransmissionPyramid
+            | ResolvedRenderCommand::FocusPostProcess => {}
+            ResolvedRenderCommand::DrawPatches { pass, .. }
+                if matches!(pass, RenderPass::PbrOpaque | RenderPass::PbrTransparent) => {}
+            ResolvedRenderCommand::DrawPatches { .. } => {
+                return Err(WebGlRenderExecutionError::UnsupportedCommand(
+                    "diagnostic draw",
+                ));
+            }
+            ResolvedRenderCommand::HighlightFace { .. } => {
+                return Err(WebGlRenderExecutionError::UnsupportedCommand(
+                    "diagnostic highlight",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Owned lowering of one validated PBR command stream for the incumbent
+/// compositor. Owning only batch indices releases the scene borrow before the
+/// WASM adapter mutates browser framebuffer resources. It is built only by the
+/// opt-in shadow route; the default dispatcher allocates nothing here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebGlPbrCommandPlan {
+    opaque_batches: Vec<usize>,
+    transparent_batches: Vec<usize>,
+    build_transmission_pyramid: bool,
+    focus_postprocess: bool,
+}
+
+impl WebGlPbrCommandPlan {
+    pub fn build(
+        execution: RenderExecution<'_, '_>,
+        batches: &[RenderBatch],
+    ) -> Result<Self, WebGlRenderExecutionError> {
+        validate_pbr_execution(execution, batches)?;
+        let mut plan = Self {
+            opaque_batches: Vec::new(),
+            transparent_batches: Vec::new(),
+            build_transmission_pyramid: false,
+            focus_postprocess: false,
+        };
+        for command in execution {
+            match command {
+                ResolvedRenderCommand::DrawPatches {
+                    batch_index,
+                    pass: RenderPass::PbrOpaque,
+                    ..
+                } => plan.opaque_batches.push(batch_index as usize),
+                ResolvedRenderCommand::DrawPatches {
+                    batch_index,
+                    pass: RenderPass::PbrTransparent,
+                    ..
+                } => plan.transparent_batches.push(batch_index as usize),
+                ResolvedRenderCommand::BuildTransmissionPyramid => {
+                    plan.build_transmission_pyramid = true;
+                }
+                ResolvedRenderCommand::FocusPostProcess => plan.focus_postprocess = true,
+                _ => {}
+            }
+        }
+        Ok(plan)
+    }
+
+    pub fn batches(&self, pass: RenderPass) -> &[usize] {
+        match pass {
+            RenderPass::PbrOpaque => &self.opaque_batches,
+            RenderPass::PbrTransparent => &self.transparent_batches,
+            _ => &[],
+        }
+    }
+
+    pub fn builds_transmission_pyramid(&self) -> bool {
+        self.build_transmission_pyramid
+    }
+
+    pub fn runs_focus_postprocess(&self) -> bool {
+        self.focus_postprocess
+    }
+}
+
+pub enum WebGlPbrDraws<'a> {
+    Resolved {
+        indices: std::slice::Iter<'a, usize>,
+        batches: &'a [RenderBatch],
+    },
+    Legacy {
+        batches: std::iter::Enumerate<std::slice::Iter<'a, RenderBatch>>,
+        selection: RenderBatchSelection,
+    },
+}
+
+impl<'a> Iterator for WebGlPbrDraws<'a> {
+    type Item = (usize, &'a RenderBatch);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Resolved { indices, batches } => {
+                let batch_index = *indices.next()?;
+                Some((batch_index, &batches[batch_index]))
+            }
+            Self::Legacy { batches, selection } => batches
+                .find(|(_, batch)| selection.includes(batch.pbr_class)),
+        }
+    }
+}
+
+/// Iterate PBR draws from the resolved command plan when present, or from the
+/// incumbent semantic pass selection without allocating in the default path.
+pub fn webgl_pbr_draws<'a>(
+    plan: Option<&'a WebGlPbrCommandPlan>,
+    batches: &'a [RenderBatch],
+    pass: RenderPass,
+) -> WebGlPbrDraws<'a> {
+    if let Some(plan) = plan {
+        WebGlPbrDraws::Resolved {
+            indices: plan.batches(pass).iter(),
+            batches,
+        }
+    } else {
+        let selection = render_draw_passes(RenderStyle::Pbr)
+            .iter()
+            .find(|draw_pass| draw_pass.pass == pass)
+            .expect("PBR draw pass is canonical")
+            .batches;
+        WebGlPbrDraws::Legacy {
+            batches: batches.iter().enumerate(),
+            selection,
+        }
+    }
 }
 
 /// Combine authored/affine orientation with the canonical atlas permutation.
@@ -782,9 +935,36 @@ mod tests {
 
         let (scene, batch) = resident_fixture(true);
         let pbr = frame(&scene, RenderStyle::Pbr);
+        validate_pbr_execution(pbr.execution(&scene).unwrap(), &[batch]).unwrap();
+        let plan = WebGlPbrCommandPlan::build(pbr.execution(&scene).unwrap(), &[batch]).unwrap();
+        assert_eq!(plan.batches(RenderPass::PbrOpaque), &[0]);
+        assert!(plan.batches(RenderPass::PbrTransparent).is_empty());
+        assert!(!plan.builds_transmission_pyramid());
+        assert!(!plan.runs_focus_postprocess());
+        assert_eq!(
+            webgl_pbr_draws(Some(&plan), &[batch], RenderPass::PbrOpaque)
+                .map(|(batch_index, _)| batch_index)
+                .collect::<Vec<_>>(),
+            vec![0],
+        );
+        assert_eq!(
+            webgl_pbr_draws(None, &[batch], RenderPass::PbrOpaque)
+                .map(|(batch_index, _)| batch_index)
+                .collect::<Vec<_>>(),
+            vec![0],
+        );
         assert_eq!(
             validate_diagnostic_execution(pbr.execution(&scene).unwrap(), &[batch]),
             Err(WebGlRenderExecutionError::UnsupportedCommand("PBR draw"))
         );
+
+        let (mut scene, mut batch) = resident_fixture(true);
+        scene.batches[0].pbr_class = PbrDrawClass::Transmission;
+        batch.pbr_class = PbrDrawClass::Transmission;
+        let pbr = frame(&scene, RenderStyle::Pbr);
+        let plan = WebGlPbrCommandPlan::build(pbr.execution(&scene).unwrap(), &[batch]).unwrap();
+        assert!(plan.batches(RenderPass::PbrOpaque).is_empty());
+        assert_eq!(plan.batches(RenderPass::PbrTransparent), &[0]);
+        assert!(plan.builds_transmission_pyramid());
     }
 }

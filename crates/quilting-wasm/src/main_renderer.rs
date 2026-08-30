@@ -29,7 +29,7 @@ use quilting_renderer::compute::{
 use quilting_renderer::pass::{
     affine_normal_matrix, affine_orientation_sign, apply_batch_winding,
     camera_for_batch, record_indexed_submission, same_vertex_uniform_state, Camera, RenderBatch,
-    IDENTITY_MATRIX,
+    webgl_pbr_draws, WebGlPbrCommandPlan, IDENTITY_MATRIX,
 };
 use quilting_renderer::Renderer;
 use quilting_renderer::texture::TextureCache;
@@ -39,8 +39,8 @@ use quilting_core::material::{
     pbr_material_for_index, PbrAlphaMode, PbrMaterial, PbrTextureReferences,
 };
 use quilting_core::render::{
-    patch_preparation_needed, patch_visibility_needed, render_draw_passes, FocusFieldPacket,
-    FocusPostprocessMode, FocusPostprocessPacket, MatcapStyle, PbrDrawClass, RenderBatchSnapshot,
+    patch_preparation_needed, patch_visibility_needed, FocusFieldPacket, FocusPostprocessMode,
+    FocusPostprocessPacket, MatcapStyle, PbrDrawClass, RenderBatchSnapshot,
     RenderEntityTransform, RenderFrame, RenderFrameOptions, RenderPass, RenderSceneSnapshot,
     RenderStyle, RenderSubmissionStats, RenderView,
 };
@@ -9638,14 +9638,43 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 state.skipped_patch_visibility_frames.saturating_add(1);
             state.last_visibility_patch_instances = 0;
         }
-        let has_transmission = if state.render_style == RenderStyle::Pbr {
-            state
-                .render_batches
-                .iter()
-                .any(|batch| batch.pbr_class == PbrDrawClass::Transmission)
+        let resolved_pbr_plan = if state.render_style == RenderStyle::Pbr {
+            prepared_render_frame.as_ref().and_then(|frame| {
+                let execution = match state.render_shadow.execution(frame) {
+                    Ok(execution) => execution,
+                    Err(error) => {
+                        state.render_shadow.record_execution_fallback(error);
+                        return None;
+                    }
+                };
+                match WebGlPbrCommandPlan::build(
+                    execution,
+                    state.render_batches.as_slice(),
+                ) {
+                    Ok(plan) => Some(plan),
+                    Err(error) => {
+                        warn!("Resolved WebGL PBR frame fell back: {error}");
+                        state.render_shadow.record_execution_fallback(error);
+                        None
+                    }
+                }
+            })
         } else {
-            false
+            None
         };
+        let has_transmission = resolved_pbr_plan.as_ref().map_or_else(
+            || {
+                state.render_style == RenderStyle::Pbr
+                    && state
+                        .render_batches
+                        .iter()
+                        .any(|batch| batch.pbr_class == PbrDrawClass::Transmission)
+            },
+            WebGlPbrCommandPlan::builds_transmission_pyramid,
+        );
+        let focus_postprocess_requested = resolved_pbr_plan
+            .as_ref()
+            .map_or(state.fuzzy_enabled, WebGlPbrCommandPlan::runs_focus_postprocess);
         if has_transmission && state.blur_program.is_none() {
             match resolve_auxiliary_program(state, AuxiliaryProgram::Blur) {
                 Ok(program) => state.blur_program = Some(program),
@@ -9655,7 +9684,6 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
             }
         }
         let render_batches = state.render_batches.as_slice();
-
         let gl = state.renderer.gl();
         state.renderer.begin_frame();
         state.renderer.joint_ubo().bind(gl);
@@ -9709,12 +9737,6 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
 
         match state.render_style {
             RenderStyle::Pbr => {
-                let pbr_draw_passes = render_draw_passes(RenderStyle::Pbr);
-                let opaque_draw_pass = pbr_draw_passes[0];
-                let transparent_draw_pass = pbr_draw_passes[1];
-                debug_assert_eq!(opaque_draw_pass.pass, RenderPass::PbrOpaque);
-                debug_assert_eq!(transparent_draw_pass.pass, RenderPass::PbrTransparent);
-
                 // Env cubemaps: bind once (shared across all batches)
                 unsafe {
                     gl.active_texture(glow::TEXTURE0 + 5);
@@ -9729,7 +9751,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
 
                 // Set up MRT FBO for PBR: color (attachment 0) + weight (attachment 1)
                 // Only for conformal mode (mode 1) — radial mode blits from default FB.
-                if state.fuzzy_enabled && true /* all fuzzy modes use MRT */ {
+                if focus_postprocess_requested && true /* all fuzzy modes use MRT */ {
                     unsafe {
                         let (vw, vh) = state.viewport_size;
 
@@ -9811,13 +9833,16 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 let mut active_vertex_state: Option<&RenderBatch> = None;
 
                 // Pass 1: opaque non-transmission
-                for (batch_index, batch) in render_batches.iter().enumerate() {
+                for (batch_index, batch) in webgl_pbr_draws(
+                    resolved_pbr_plan.as_ref(),
+                    render_batches,
+                    RenderPass::PbrOpaque,
+                ) {
                     let (material_slot, mat) = pbr_material_for_index(
                         &state.materials,
                         &default_mat,
                         batch.material_index,
                     );
-                    if !opaque_draw_pass.batches.includes(batch.pbr_class) { continue; }
 
                     // glTF spec: cull back faces for single-sided materials
                     unsafe {
@@ -9871,8 +9896,8 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     record_indexed_submission(
                         &mut submission_stats,
                         batch_index,
-                        opaque_draw_pass.pass,
-                        opaque_draw_pass.geometry,
+                        RenderPass::PbrOpaque,
+                        quilting_core::render::RenderGeometry::Triangles,
                         batch.mesh.num_tri_indices,
                         batch.mesh.num_instances,
                     );
@@ -10021,13 +10046,16 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 // Pass 2: transmission + transparent
                 active_material = None;
                 active_vertex_state = None;
-                for (batch_index, batch) in render_batches.iter().enumerate() {
+                for (batch_index, batch) in webgl_pbr_draws(
+                    resolved_pbr_plan.as_ref(),
+                    render_batches,
+                    RenderPass::PbrTransparent,
+                ) {
                     let (material_slot, mat) = pbr_material_for_index(
                         &state.materials,
                         &default_mat,
                         batch.material_index,
                     );
-                    if !transparent_draw_pass.batches.includes(batch.pbr_class) { continue; }
 
                     let is_blend = mat.alpha_mode == PbrAlphaMode::Blend;
                     let is_transmission = mat.transmission_factor > 0.0;
@@ -10095,8 +10123,8 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     record_indexed_submission(
                         &mut submission_stats,
                         batch_index,
-                        transparent_draw_pass.pass,
-                        transparent_draw_pass.geometry,
+                        RenderPass::PbrTransparent,
+                        quilting_core::render::RenderGeometry::Triangles,
                         batch.mesh.num_tri_indices,
                         batch.mesh.num_instances,
                     );
@@ -10108,7 +10136,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 }
 
                 // --- Fuzzy-vision post-process ---
-                if state.fuzzy_enabled {
+                if focus_postprocess_requested {
                     if let Some(ref mut fv) = state.fuzzy {
                         unsafe {
                             let (vw, vh) = state.viewport_size;
@@ -10246,6 +10274,9 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 state.pbr_vertex_uniform_updates += vertex_uniform_updates;
                 state.last_render_submission = submission_stats;
                 state.render_submission_totals.merge(submission_stats);
+                if resolved_pbr_plan.is_some() {
+                    state.render_shadow.record_execution_success();
+                }
                 observe_render_submission(state, prepared_render_frame.as_ref(), submission_stats);
                 state.renderer.end_frame();
                 state
