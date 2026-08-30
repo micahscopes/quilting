@@ -8,8 +8,8 @@
 use crate::controls::numeric_control_domain;
 pub use crate::controls::NumericControlViewDomain;
 use hyperscope_app::{
-    AppEffect, AppRenderSnapshot, AppStore, PatchLabEffect, ReduceError, RenderSettings,
-    SemanticAction,
+    AppEffect, AppRenderSnapshot, AppStore, FocusPostprocessSettings, PatchLabEffect, ReduceError,
+    RenderSettings, SemanticAction,
 };
 
 #[cfg(all(feature = "csr", target_arch = "wasm32"))]
@@ -26,6 +26,7 @@ pub struct RenderControlIntent {
     pub min_pixels_per_subdivision: f64,
     pub atlas_exponent: u8,
     pub max_face_edge_ratio: u8,
+    pub focus_postprocess: FocusPostprocessSettings,
 }
 
 impl RenderControlIntent {
@@ -41,6 +42,7 @@ impl RenderControlIntent {
             self.atlas_exponent,
             self.max_face_edge_ratio,
         )
+        .and_then(|settings| settings.with_focus_postprocess(self.focus_postprocess))
     }
 }
 
@@ -168,6 +170,7 @@ pub fn project_render_controls(snapshot: &AppRenderSnapshot) -> RenderControlsVi
             min_pixels_per_subdivision: settings.tessellation.min_pixels_per_subdivision,
             atlas_exponent: settings.atlas_exponent,
             max_face_edge_ratio: settings.max_face_edge_ratio,
+            focus_postprocess: settings.focus_postprocess,
         },
         resolution: numeric_control_domain("res"),
         density: numeric_control_domain("density"),
@@ -200,6 +203,7 @@ mod tests {
                 },
                 atlas_exponent: 9,
                 max_face_edge_ratio: 4,
+                ..RenderSettings::default()
             },
         };
         let view = project_render_controls(&snapshot);

@@ -95,6 +95,111 @@ pub enum SemanticAction {
     CancelAsset(AssetId),
 }
 
+/// Backend-neutral interpretation of the scalar field consumed by the focus
+/// postprocess. The spheroidal mode reads its effective field coordinate and
+/// aperture from Hyperscape navigation state; the other modes use the values
+/// retained in [`FocusPostprocessSettings`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "replay", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "replay", serde(rename_all = "snake_case"))]
+pub enum FocusPostprocessMode {
+    DepthOfField,
+    #[default]
+    ConformalStretch,
+    Hybrid,
+    Spheroidal,
+}
+
+impl FocusPostprocessMode {
+    pub const fn wire_index(self) -> u8 {
+        match self {
+            Self::DepthOfField => 0,
+            Self::ConformalStretch => 1,
+            Self::Hybrid => 2,
+            Self::Spheroidal => 3,
+        }
+    }
+
+    pub const fn from_wire_index(index: u8) -> Option<Self> {
+        match index {
+            0 => Some(Self::DepthOfField),
+            1 => Some(Self::ConformalStretch),
+            2 => Some(Self::Hybrid),
+            3 => Some(Self::Spheroidal),
+            _ => None,
+        }
+    }
+}
+
+/// Renderer policy for focus-aware image composition.
+///
+/// Values use renderer-facing semantic units, not browser slider units. In
+/// particular, strength and Kawase offset are direct scalars, while focus and
+/// bandwidth are normalized coordinates. This value deliberately contains no
+/// GPU handles and is suitable for replay, FRP projection, WebGL2 extraction,
+/// and WebGPU extraction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "replay", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "replay", serde(rename_all = "camelCase"))]
+pub struct FocusPostprocessSettings {
+    /// Requested enable state for depth, stretch, and hybrid modes. Effective
+    /// spheroidal enablement comes from Hyperscape's focus navigation state.
+    pub enabled: bool,
+    pub mode: FocusPostprocessMode,
+    pub blur_radius_pixels: u16,
+    pub blur_strength: f64,
+    pub focus_coordinate: f64,
+    pub bandwidth: f64,
+    pub normalize_range: bool,
+    pub gaussian_passes: u8,
+    pub kawase_passes: u8,
+    pub kawase_offset: f64,
+}
+
+impl Default for FocusPostprocessSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: FocusPostprocessMode::ConformalStretch,
+            blur_radius_pixels: 11,
+            blur_strength: 3.0,
+            focus_coordinate: 0.62,
+            bandwidth: 0.10,
+            normalize_range: false,
+            gaussian_passes: 1,
+            kawase_passes: 3,
+            kawase_offset: 1.5,
+        }
+    }
+}
+
+impl FocusPostprocessSettings {
+    pub fn validate(self) -> Result<Self, &'static str> {
+        if !(4..=128).contains(&self.blur_radius_pixels) {
+            return Err("focus blur radius must be in [4,128]");
+        }
+        if !self.blur_strength.is_finite() || !(0.1..=3.0).contains(&self.blur_strength) {
+            return Err("focus blur strength must be finite and in [0.1,3]");
+        }
+        if !self.focus_coordinate.is_finite() || !(0.0..=1.0).contains(&self.focus_coordinate) {
+            return Err("focus coordinate must be finite and in [0,1]");
+        }
+        if !self.bandwidth.is_finite() || !(0.01..=0.5).contains(&self.bandwidth) {
+            return Err("focus bandwidth must be finite and in [0.01,0.5]");
+        }
+        if !(1..=4).contains(&self.gaussian_passes) {
+            return Err("Gaussian pass count must be in [1,4]");
+        }
+        if self.kawase_passes > 4 {
+            return Err("Kawase pass count must be in [0,4]");
+        }
+        if !self.kawase_offset.is_finite() || !(0.1..=3.0).contains(&self.kawase_offset) {
+            return Err("Kawase offset must be finite and in [0.1,3]");
+        }
+        Ok(self)
+    }
+}
+
 /// One atomic, renderer-independent application rendering policy.
 ///
 /// Environment assets and backend resource handles remain adapter concerns;
@@ -110,6 +215,8 @@ pub struct RenderSettings {
     pub tessellation: PresentationTessellation,
     pub atlas_exponent: u8,
     pub max_face_edge_ratio: u8,
+    #[cfg_attr(feature = "replay", serde(default))]
+    pub focus_postprocess: FocusPostprocessSettings,
 }
 
 impl Default for RenderSettings {
@@ -120,6 +227,7 @@ impl Default for RenderSettings {
             tessellation: PresentationTessellation::default(),
             atlas_exponent: 7,
             max_face_edge_ratio: 2,
+            focus_postprocess: FocusPostprocessSettings::default(),
         }
     }
 }
@@ -148,6 +256,18 @@ impl RenderSettings {
             },
             atlas_exponent,
             max_face_edge_ratio,
+            focus_postprocess: FocusPostprocessSettings::default(),
+        }
+        .validate()
+    }
+
+    pub fn with_focus_postprocess(
+        self,
+        focus_postprocess: FocusPostprocessSettings,
+    ) -> Result<Self, &'static str> {
+        Self {
+            focus_postprocess,
+            ..self
         }
         .validate()
     }
@@ -172,6 +292,7 @@ impl RenderSettings {
         if !matches!(self.max_face_edge_ratio, 2 | 4) {
             return Err("maximum face-edge ratio must be 2 or 4");
         }
+        self.focus_postprocess.validate()?;
         Ok(self)
     }
 
@@ -2552,6 +2673,7 @@ mod tests {
             },
             atlas_exponent: 9,
             max_face_edge_ratio: 4,
+            ..RenderSettings::default()
         };
 
         let commit = store
@@ -2586,6 +2708,25 @@ mod tests {
         );
         assert_eq!(store.render_snapshot(), before);
         assert_eq!(store.summary_snapshot().revision, before.revision);
+
+        let invalid_focus = RenderSettings {
+            focus_postprocess: FocusPostprocessSettings {
+                gaussian_passes: 0,
+                ..settings.focus_postprocess
+            },
+            ..settings
+        };
+        assert_eq!(
+            store.dispatch(AppEvent::Input(Timed {
+                sequence: 2,
+                at_seconds: 0.0,
+                value: SemanticAction::SetRenderSettings(invalid_focus),
+            })),
+            Err(ReduceError::InvalidRenderSettings(
+                "Gaussian pass count must be in [1,4]",
+            )),
+        );
+        assert_eq!(store.render_snapshot(), before);
 
         assert_eq!(
             store.dispatch(AppEvent::Input(Timed {
@@ -2664,6 +2805,7 @@ mod tests {
             },
             atlas_exponent: 9,
             max_face_edge_ratio: 4,
+            ..RenderSettings::default()
         };
         store
             .dispatch(AppEvent::Input(Timed {

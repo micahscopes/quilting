@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::RenderSettings;
+use crate::{FocusPostprocessMode, FocusPostprocessSettings, RenderSettings};
 use hyperscape::SurfaceWalkControls;
 use hyperscape_protocol::{AssetEntityId, AssetId, EntityId};
 
@@ -649,6 +649,53 @@ impl HyperscopeRoute {
             .value("lodratio")
             .and_then(|value| value.parse::<u8>().ok())
             .ok_or("route face-edge ratio is invalid")?;
+        let focus_enabled = match self.value("fuzzy") {
+            Some("0") => false,
+            Some("1") => true,
+            _ => return Err("route focus postprocess enable value is invalid"),
+        };
+        let focus_mode = self
+            .value("fmode")
+            .and_then(|value| value.parse::<u8>().ok())
+            .and_then(FocusPostprocessMode::from_wire_index)
+            .ok_or("route focus postprocess mode is invalid")?;
+        let blur_radius_pixels = self
+            .value("fradius")
+            .and_then(|value| value.parse::<u16>().ok())
+            .ok_or("route focus blur radius is invalid")?;
+        let blur_strength = self
+            .value("fstr")
+            .and_then(|value| value.parse::<f64>().ok())
+            .map(|value| value / 10.0)
+            .ok_or("route focus blur strength is invalid")?;
+        let focus_coordinate = self
+            .value("ffocus")
+            .and_then(|value| value.parse::<f64>().ok())
+            .map(|value| value / 100.0)
+            .ok_or("route focus coordinate is invalid")?;
+        let bandwidth = self
+            .value("fbw")
+            .and_then(|value| value.parse::<f64>().ok())
+            .map(|value| value / 100.0)
+            .ok_or("route focus bandwidth is invalid")?;
+        let normalize_range = match self.value("fnorm") {
+            Some("0") => false,
+            Some("1") => true,
+            _ => return Err("route focus normalization value is invalid"),
+        };
+        let gaussian_passes = self
+            .value("fqual")
+            .and_then(|value| value.parse::<u8>().ok())
+            .ok_or("route Gaussian pass count is invalid")?;
+        let kawase_passes = self
+            .value("fkaw")
+            .and_then(|value| value.parse::<u8>().ok())
+            .ok_or("route Kawase pass count is invalid")?;
+        let kawase_offset = self
+            .value("fkoff")
+            .and_then(|value| value.parse::<f64>().ok())
+            .map(|value| value / 10.0)
+            .ok_or("route Kawase offset is invalid")?;
 
         RenderSettings::from_wire_values(
             style,
@@ -659,6 +706,20 @@ impl HyperscopeRoute {
             atlas_exponent,
             max_face_edge_ratio,
         )
+        .and_then(|settings| {
+            settings.with_focus_postprocess(FocusPostprocessSettings {
+                enabled: focus_enabled,
+                mode: focus_mode,
+                blur_radius_pixels,
+                blur_strength,
+                focus_coordinate,
+                bandwidth,
+                normalize_range,
+                gaussian_passes,
+                kawase_passes,
+                kawase_offset,
+            })
+        })
     }
 
     /// Resolve the optional stable asset-scoped selection carried by a route.
@@ -1123,6 +1184,16 @@ mod tests {
             ("minpx", "48.25"),
             ("atlas", "9"),
             ("lodratio", "4"),
+            ("fuzzy", "1"),
+            ("fmode", "2"),
+            ("fradius", "24"),
+            ("fstr", "17.5"),
+            ("ffocus", "31.25"),
+            ("fbw", "8.5"),
+            ("fnorm", "1"),
+            ("fqual", "2"),
+            ("fkaw", "4"),
+            ("fkoff", "22.5"),
         ]);
         assert_eq!(
             route.render_settings().unwrap(),
@@ -1136,6 +1207,18 @@ mod tests {
                 },
                 atlas_exponent: 9,
                 max_face_edge_ratio: 4,
+                focus_postprocess: FocusPostprocessSettings {
+                    enabled: true,
+                    mode: FocusPostprocessMode::Hybrid,
+                    blur_radius_pixels: 24,
+                    blur_strength: 1.75,
+                    focus_coordinate: 0.3125,
+                    bandwidth: 0.085,
+                    normalize_range: true,
+                    gaussian_passes: 2,
+                    kawase_passes: 4,
+                    kawase_offset: 2.25,
+                },
             }
         );
         assert_eq!(

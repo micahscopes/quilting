@@ -1,3 +1,4 @@
+use crate::app_shadow::FocusPostprocessShadow;
 use hyperscope_app::{HyperscopeRoute, HYPERSCOPE_CONTROL_SPECS};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
@@ -53,6 +54,7 @@ struct RouteRenderSettings {
     min_pixels_per_subdivision: f64,
     atlas_exponent: u8,
     max_face_edge_ratio: u8,
+    focus_postprocess: FocusPostprocessShadow,
 }
 
 #[derive(Serialize)]
@@ -165,6 +167,7 @@ pub fn canonicalize_hyperscope_route(pairs: JsValue) -> Result<JsValue, JsValue>
             min_pixels_per_subdivision: settings.tessellation.min_pixels_per_subdivision,
             atlas_exponent: settings.atlas_exponent,
             max_face_edge_ratio: settings.max_face_edge_ratio,
+            focus_postprocess: settings.focus_postprocess.into(),
         });
     let selection = route
         .selected_identity()

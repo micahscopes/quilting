@@ -244,6 +244,17 @@ fn emit_committed(callback: &Function, committed: &RenderControlCommit) {
     arguments.push(&JsValue::from_f64(intent.min_pixels_per_subdivision));
     arguments.push(&JsValue::from_f64(f64::from(intent.atlas_exponent)));
     arguments.push(&JsValue::from_f64(f64::from(intent.max_face_edge_ratio)));
+    let focus = intent.focus_postprocess;
+    arguments.push(&JsValue::from_bool(focus.enabled));
+    arguments.push(&JsValue::from_f64(f64::from(focus.mode.wire_index())));
+    arguments.push(&JsValue::from_f64(f64::from(focus.blur_radius_pixels)));
+    arguments.push(&JsValue::from_f64(focus.blur_strength));
+    arguments.push(&JsValue::from_f64(focus.focus_coordinate));
+    arguments.push(&JsValue::from_f64(focus.bandwidth));
+    arguments.push(&JsValue::from_bool(focus.normalize_range));
+    arguments.push(&JsValue::from_f64(f64::from(focus.gaussian_passes)));
+    arguments.push(&JsValue::from_f64(f64::from(focus.kawase_passes)));
+    arguments.push(&JsValue::from_f64(focus.kawase_offset));
     arguments.push(&JsValue::from(committed.sequence));
     let effects = Array::new();
     for effect in &committed.patch_lab_effects {

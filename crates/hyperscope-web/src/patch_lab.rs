@@ -239,6 +239,7 @@ mod tests {
                 tessellation: PresentationTessellation::default(),
                 atlas_exponent: 8,
                 max_face_edge_ratio: 4,
+                ..RenderSettings::default()
             },
         }
     }

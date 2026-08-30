@@ -4612,7 +4612,32 @@ function browserRenderSettingsState() {
     minPixelsPerSubdivision: Number(lod.minPx.peek()),
     atlasExponent: Number(lod.atlas.peek()),
     maxFaceEdgeRatio: Number(lod.grading.peek()),
+    focusPostprocess: {
+      enabled: Boolean(fz.enabled.peek()),
+      mode: Number(fz.mode.peek()),
+      blurRadiusPixels: Number(fz.radius.peek()),
+      blurStrength: Number(fz.strength.peek()) / 10,
+      focusCoordinate: Number(fz.focus.peek()) / 100,
+      bandwidth: Number(fz.bandwidth.peek()) / 100,
+      normalizeRange: Boolean(fz.normalize.peek()),
+      gaussianPasses: Number(fz.quality.peek()),
+      kawasePasses: Number(fz.kawase.peek()),
+      kawaseOffset: Number(fz.kawaseOff.peek()) / 10,
+    },
   };
+}
+
+function focusPostprocessContentEqual(left, right) {
+  return left?.enabled === right?.enabled
+    && left?.mode === right?.mode
+    && left?.blurRadiusPixels === right?.blurRadiusPixels
+    && left?.blurStrength === right?.blurStrength
+    && left?.focusCoordinate === right?.focusCoordinate
+    && left?.bandwidth === right?.bandwidth
+    && left?.normalizeRange === right?.normalizeRange
+    && left?.gaussianPasses === right?.gaussianPasses
+    && left?.kawasePasses === right?.kawasePasses
+    && left?.kawaseOffset === right?.kawaseOffset;
 }
 
 function renderSettingsContentEqual(left, right) {
@@ -4622,7 +4647,8 @@ function renderSettingsContentEqual(left, right) {
     && left?.screenAttenuation === right?.screenAttenuation
     && left?.minPixelsPerSubdivision === right?.minPixelsPerSubdivision
     && left?.atlasExponent === right?.atlasExponent
-    && left?.maxFaceEdgeRatio === right?.maxFaceEdgeRatio;
+    && left?.maxFaceEdgeRatio === right?.maxFaceEdgeRatio
+    && focusPostprocessContentEqual(left?.focusPostprocess, right?.focusPostprocess);
 }
 
 function applyRustRenderSettingsProjection(render) {
@@ -4636,6 +4662,18 @@ function applyRustRenderSettingsProjection(render) {
     lod.minPx.set(render.minPixelsPerSubdivision);
     lod.atlas.set(render.atlasExponent);
     lod.grading.set(String(render.maxFaceEdgeRatio));
+    const focus = render.focusPostprocess;
+    if (!focus) throw new Error('Rust render settings omitted focus postprocess policy');
+    fz.enabled.set(focus.enabled);
+    fz.mode.set(String(focus.mode));
+    fz.radius.set(focus.blurRadiusPixels);
+    fz.strength.set(focus.blurStrength * 10);
+    fz.focus.set(focus.focusCoordinate * 100);
+    fz.bandwidth.set(focus.bandwidth * 100);
+    fz.normalize.set(focus.normalizeRange);
+    fz.quality.set(focus.gaussianPasses);
+    fz.kawase.set(focus.kawasePasses);
+    fz.kawaseOff.set(focus.kawaseOffset * 10);
   });
 }
 
@@ -4649,6 +4687,16 @@ function dispatchRustRenderSettings(app, settings, source) {
     settings.minPixelsPerSubdivision,
     settings.atlasExponent,
     settings.maxFaceEdgeRatio,
+    settings.focusPostprocess.enabled,
+    settings.focusPostprocess.mode,
+    settings.focusPostprocess.blurRadiusPixels,
+    settings.focusPostprocess.blurStrength,
+    settings.focusPostprocess.focusCoordinate,
+    settings.focusPostprocess.bandwidth,
+    settings.focusPostprocess.normalizeRange,
+    settings.focusPostprocess.gaussianPasses,
+    settings.focusPostprocess.kawasePasses,
+    settings.focusPostprocess.kawaseOffset,
   );
   rustAppShadowDiagnostics.lastCommit = receipt.commit;
   observeRustPatchLabEffects(receipt.commit?.effects || [], `${source}-render-settings`);
@@ -5314,6 +5362,16 @@ function ensureRustRenderSettingsView() {
         minPixelsPerSubdivision,
         atlasExponent,
         maxFaceEdgeRatio,
+        focusEnabled,
+        focusMode,
+        blurRadiusPixels,
+        blurStrength,
+        focusCoordinate,
+        focusBandwidth,
+        normalizeFocusRange,
+        gaussianPasses,
+        kawasePasses,
+        kawaseOffset,
         sequence,
         effects,
       ) => {
@@ -5327,6 +5385,18 @@ function ensureRustRenderSettingsView() {
             minPixelsPerSubdivision,
             atlasExponent,
             maxFaceEdgeRatio,
+            focusPostprocess: {
+              enabled: focusEnabled,
+              mode: focusMode,
+              blurRadiusPixels,
+              blurStrength,
+              focusCoordinate,
+              bandwidth: focusBandwidth,
+              normalizeRange: normalizeFocusRange,
+              gaussianPasses,
+              kawasePasses,
+              kawaseOffset,
+            },
           };
           rustRenderSettingsDiagnostics.dispatches += 1;
           rustRenderSettingsDiagnostics.lastRust = rust;
@@ -9675,16 +9745,28 @@ applyParams = function(
   patchLab.lastAnimatedAt = performance.now();
   $('patch-lab-animate').classList.toggle('on', patchLab.animate);
   updatePatchLabControlVisibility();
-  fz.enabled.set(params.fuzzy === '1');
-  fz.mode.set(rustRouteAdmitted ? params.fmode : params.fmode || '0');
-  fz.radius.set(admittedInteger(params.fradius, 11, 4, 128));
-  fz.strength.set(admittedNumber(params.fstr, 30, 1, 30));
-  fz.focus.set(admittedNumber(params.ffocus, 62, 0, 100));
-  fz.bandwidth.set(admittedNumber(params.fbw, 10, 1, 50));
-  fz.normalize.set(params.fnorm === '1');
-  fz.quality.set(admittedInteger(params.fqual, 1, 1, 4));
-  fz.kawase.set(admittedInteger(params.fkaw, 3, 0, 4));
-  fz.kawaseOff.set(admittedNumber(params.fkoff, 15, 1, 30));
+  const admittedFocus = validatedRenderSettings?.focusPostprocess;
+  fz.enabled.set(admittedFocus?.enabled ?? params.fuzzy === '1');
+  fz.mode.set(admittedFocus ? String(admittedFocus.mode) : params.fmode || '0');
+  fz.radius.set(admittedFocus?.blurRadiusPixels
+    ?? admittedInteger(params.fradius, 11, 4, 128));
+  fz.strength.set(admittedFocus
+    ? admittedFocus.blurStrength * 10
+    : admittedNumber(params.fstr, 30, 1, 30));
+  fz.focus.set(admittedFocus
+    ? admittedFocus.focusCoordinate * 100
+    : admittedNumber(params.ffocus, 62, 0, 100));
+  fz.bandwidth.set(admittedFocus
+    ? admittedFocus.bandwidth * 100
+    : admittedNumber(params.fbw, 10, 1, 50));
+  fz.normalize.set(admittedFocus?.normalizeRange ?? params.fnorm === '1');
+  fz.quality.set(admittedFocus?.gaussianPasses
+    ?? admittedInteger(params.fqual, 1, 1, 4));
+  fz.kawase.set(admittedFocus?.kawasePasses
+    ?? admittedInteger(params.fkaw, 3, 0, 4));
+  fz.kawaseOff.set(admittedFocus
+    ? admittedFocus.kawaseOffset * 10
+    : admittedNumber(params.fkoff, 15, 1, 30));
 };
 
 // --- IndexedDB for dropped GLBs and versioned generated assets ---

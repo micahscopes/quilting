@@ -21,12 +21,13 @@ use hyperscope_app::{
     AnimationPoseRequestDisposition, AnimationPoseScheduler, AnimationPoseStamp, AppCommit,
     AppEffect, AppEvent, AppFrameSnapshot, AppStore, AssetLoadCompletion, AssetLoadOutcome,
     AssetLoadScope, AssetMetadata, AssetStatus, AuthoredRevision, CommitDisposition,
-    EffectCompletion, FrameTick, LocalPeerDisposition, LocalPeerIngress, LocalPeerLane,
-    LocalPeerReceipt, NavigationSettings, NavigationSynchronization, PatchLabCompletion,
-    PatchLabControls, PatchLabEffect, PatchLabFailure, PatchLabField, PatchLabGeometryCompletion,
-    PatchLabGeometryOutcome, PatchLabHistogramBin, PatchLabLodCompletion, PatchLabLodOutcome,
-    PatchLabLodSummary, PatchLabReadModel, PatchLabSessionIntent, PatchLabShape,
-    PresentationAction, PresentationAnimationResidencyBinding, PrimarySceneInstallCompletion,
+    EffectCompletion, FocusPostprocessMode, FocusPostprocessSettings, FrameTick,
+    LocalPeerDisposition, LocalPeerIngress, LocalPeerLane, LocalPeerReceipt, NavigationSettings,
+    NavigationSynchronization, PatchLabCompletion, PatchLabControls, PatchLabEffect,
+    PatchLabFailure, PatchLabField, PatchLabGeometryCompletion, PatchLabGeometryOutcome,
+    PatchLabHistogramBin, PatchLabLodCompletion, PatchLabLodOutcome, PatchLabLodSummary,
+    PatchLabReadModel, PatchLabSessionIntent, PatchLabShape, PresentationAction,
+    PresentationAnimationResidencyBinding, PrimarySceneInstallCompletion,
     PrimarySceneInstallMetadata, PrimarySceneInstallOutcome, RenderSettings, SemanticAction, Timed,
 };
 use serde::{Deserialize, Serialize};
@@ -1461,6 +1462,16 @@ impl HyperscopeAppShadow {
         min_pixels_per_subdivision: f64,
         atlas_exponent: u8,
         max_face_edge_ratio: u8,
+        focus_enabled: bool,
+        focus_mode: u8,
+        blur_radius_pixels: u16,
+        blur_strength: f64,
+        focus_coordinate: f64,
+        focus_bandwidth: f64,
+        normalize_focus_range: bool,
+        gaussian_passes: u8,
+        kawase_passes: u8,
+        kawase_offset: f64,
     ) -> Result<JsValue, JsValue> {
         let settings = RenderSettings::from_wire_values(
             style,
@@ -1471,6 +1482,21 @@ impl HyperscopeAppShadow {
             atlas_exponent,
             max_face_edge_ratio,
         )
+        .and_then(|settings| {
+            settings.with_focus_postprocess(FocusPostprocessSettings {
+                enabled: focus_enabled,
+                mode: FocusPostprocessMode::from_wire_index(focus_mode)
+                    .ok_or("unknown focus postprocess mode")?,
+                blur_radius_pixels,
+                blur_strength,
+                focus_coordinate,
+                bandwidth: focus_bandwidth,
+                normalize_range: normalize_focus_range,
+                gaussian_passes,
+                kawase_passes,
+                kawase_offset,
+            })
+        })
         .map_err(js_error)?;
         let commit = self
             .store
@@ -2832,6 +2858,39 @@ struct ShadowRenderSettings {
     min_pixels_per_subdivision: f64,
     atlas_exponent: u8,
     max_face_edge_ratio: u8,
+    focus_postprocess: FocusPostprocessShadow,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FocusPostprocessShadow {
+    enabled: bool,
+    mode: u8,
+    blur_radius_pixels: u16,
+    blur_strength: f64,
+    focus_coordinate: f64,
+    bandwidth: f64,
+    normalize_range: bool,
+    gaussian_passes: u8,
+    kawase_passes: u8,
+    kawase_offset: f64,
+}
+
+impl From<FocusPostprocessSettings> for FocusPostprocessShadow {
+    fn from(settings: FocusPostprocessSettings) -> Self {
+        Self {
+            enabled: settings.enabled,
+            mode: settings.mode.wire_index(),
+            blur_radius_pixels: settings.blur_radius_pixels,
+            blur_strength: settings.blur_strength,
+            focus_coordinate: settings.focus_coordinate,
+            bandwidth: settings.bandwidth,
+            normalize_range: settings.normalize_range,
+            gaussian_passes: settings.gaussian_passes,
+            kawase_passes: settings.kawase_passes,
+            kawase_offset: settings.kawase_offset,
+        }
+    }
 }
 
 impl From<hyperscope_app::AppRenderSnapshot> for ShadowRenderSettings {
@@ -2845,6 +2904,7 @@ impl From<hyperscope_app::AppRenderSnapshot> for ShadowRenderSettings {
             min_pixels_per_subdivision: snapshot.settings.tessellation.min_pixels_per_subdivision,
             atlas_exponent: snapshot.settings.atlas_exponent,
             max_face_edge_ratio: snapshot.settings.max_face_edge_ratio,
+            focus_postprocess: snapshot.settings.focus_postprocess.into(),
         }
     }
 }
