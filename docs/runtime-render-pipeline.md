@@ -277,6 +277,13 @@ descriptor vector and runtime family builder iterate that same plan, so adding
 a style cannot silently change the memo key without changing the pipelines it
 constructs.
 
+Resident-root rendering applies the same rule to its eight named families.
+PBR, focus PBR, matcap, normals, LOD, stretch, wire, and highlight now share
+one ordered plan containing shader entry, layout class, geometry, focus MRT,
+and depth-write policy. The sixteen winding descriptors and the sixteen
+retained WebGPU handles are built by iterating that plan; named fields are only
+assigned after the complete family succeeds.
+
 `quilting_renderer::memo::DeviceMemo` is the effect boundary. It maps a pure
 descriptor to a concrete backend resource, inserts only after construction has
 fully succeeded, and scopes every entry to an explicit device/context epoch.

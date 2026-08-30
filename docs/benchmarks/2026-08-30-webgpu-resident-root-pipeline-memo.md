@@ -36,6 +36,10 @@ registry and no frame-varying state in the key.
 - the pure family test covers every pass/winding pair, shared versus PBR
   layouts, vertex layout, focus MRT, wire topology, highlight depth policy,
   sample count, format-sensitive identity, and invalid sample rejection;
+- one semantic-plan test fixes the PBR, focus PBR, matcap, normals, LOD,
+  stretch, wire, and highlight order. Descriptor construction and named
+  runtime handle assignment both iterate this plan instead of maintaining
+  parallel index/entry-point tables;
 - the native conformance path asserts one miss followed by one hit for the
   fixed offscreen resident-root family, and asserts that the hit does not
   revisit shader lowering;
