@@ -54,6 +54,10 @@ The next portable-binding step is to renumber distinct logical resources and
 attach complete buffer/texture/sampler policy, with the existing WebGL plan
 retained until browser image parity is demonstrated.
 
+That follow-up is now implemented and recorded in
+`2026-08-30-portable-primary-binding-layout.md`; this table remains the frozen
+pre-migration oracle rather than a description of current coordinates.
+
 ## Verification
 
 - 26 `quilting-shaders` library tests passed, including reachable-resource

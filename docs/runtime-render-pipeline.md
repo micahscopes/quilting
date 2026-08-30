@@ -325,34 +325,41 @@ created them. This cache is derived runtime state: FRP may publish a changed
 render plan or descriptor, but HHHS must never replicate GPU handles, cache
 contents, compilation status, or per-frame bindings.
 
-The binding schema will be normalized before WebGPU execution:
+The primary graphics WGSL now uses one collision-free binding namespace:
 
 | Group | Stable responsibility |
 |---|---|
-| 0 | frame and pose: view, joints, skinning, morph, source-face data |
-| 1 | entity/batch: Möbius packet, Euclidean model/normal, QB enablement |
+| 0 | pose and source data: joints, skinning, morph, source-face data |
+| 1 | entity/batch draw packet: view, Möbius packet, Euclidean model/normal, QB enablement |
 | 2 | material/style uniforms and material textures |
 | 3 | pass resources: scene color, transmission, blur/focus, highlight |
 
-The legacy WebGL WGSL reuses some group-0 coordinates for distinct vertex and
-fragment resources. WebGL tolerates this because stage-specific GLSL names are
-bound after linking; a WebGPU pipeline layout has one resource per `(group,
-binding)` and cannot. WebGL program identity now retains the original WGSL
-source name, `(group, binding, stage)`, resource class, emitted GLSL name, and
-assigned UBO point or texture unit. That provenance is checked against Naga's
-reachable-resource reflection for the selected composed entry point. The
-catalog no longer claims inactive `face_data`, suppression-mask, sheen LUT, or
-blurred-scene bindings merely because another entry or an unreachable
-declaration shares the source module.
+The current group-1 `Uniforms` block still combines view fields with per-batch
+entity state because that is the incumbent WebGL payload; its actual update
+frequency is per draw. Splitting immutable frame fields from entity state is a
+later payload migration and no longer requires another namespace change.
 
-The resulting incompatibility is finite and explicit: matcap and wire each
-conflict at `(0, 1)`; PBR conflicts at `(0, 1)`, `(0, 2)`, and `(0, 3)`; the
-normals, stretch, pick, patch-preparation, and visibility programs have no
-cross-stage slot conflict. This is diagnostic evidence, not a lossy conversion
-to `PipelineLayoutDescriptor`. The remaining migration is to give distinct
-logical resources non-overlapping WGSL coordinates (and specify full buffer,
-texture, and sampler layout policy), then lower that one portable layout into
-both APIs before WebGL/WebGPU binding equivalence is claimed.
+WebGL program identity retains the original WGSL source name, `(group,
+binding, stage)`, complete portable resource policy, emitted GLSL name, and
+assigned UBO point or texture unit. Uniform blocks record their exact minimum
+size; textures record sample kind, dimension, and multisampling; samplers record
+filtering policy. That provenance is checked against Naga's reachable-resource
+reflection for the selected composed entry point. The catalog does not claim
+inactive `face_data`, suppression-mask, sheen LUT, or blurred-scene bindings
+merely because another entry or an unreachable declaration shares the source
+module.
+
+Every primary program now has zero cross-stage slot conflicts.
+`WebGlBindingPlan::portable_layout` converts the exact reachable interface into
+the shared `PipelineLayoutDescriptor`, inserting explicit empty positional
+groups only when a program omits an intermediate responsibility. A deliberate
+legacy collision fails before conversion. WebGL continues to lower the same
+plan to its established UBO points and texture units; the superseded heuristic
+name-probing binder has been deleted. This proves that the primary shader
+interface is representable by either API. It does not yet claim resource-model
+or image equivalence with the live resident-root WebGPU pipelines, whose
+storage/atlas layouts remain separately validated until shared extraction is
+promoted.
 
 ## Atlas topology and grading policy
 
