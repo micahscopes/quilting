@@ -26,8 +26,23 @@ node scripts/smoke-local-peer-relay.mjs
 
 The ordinary build keeps Rust release optimization, caps Cargo at two jobs, and
 deliberately skips the expensive whole-module `wasm-opt` pass. That is the
-recommended rehearsal and presentation build. Only a final artifact whose
-download size is being measured should opt into Binaryen explicitly:
+recommended rehearsal and presentation build.
+
+For binding/UI-only iteration, use the explicitly non-representative fast lane:
+
+```sh
+HYPERSCOPE_WASM_PROFILE=dev HYPERSCOPE_BUILD_JOBS=1 trunk serve
+```
+
+Do not use that development-profile artifact for renderer performance or
+release-size evidence. The zero-build policy check is:
+
+```sh
+node scripts/smoke-hyperscope-build-policy.mjs
+```
+
+Only a final artifact whose download size is being measured should opt into
+Binaryen explicitly:
 
 ```sh
 HYPERSCOPE_WASM_OPT=1 HYPERSCOPE_BUILD_JOBS=2 trunk build --release

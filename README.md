@@ -93,8 +93,22 @@ The Trunk hook compiles optimized Rust at a default ceiling of two Cargo jobs,
 but skips Binaryen's expensive whole-module `wasm-opt` pass. This remains true
 for `trunk serve --release`, so an interactive rebuild cannot accidentally turn
 into an unbounded artifact-size build. Override the job ceiling with
-`HYPERSCOPE_BUILD_JOBS`; opt into Binaryen only when producing the final
-size-optimized artifact:
+`HYPERSCOPE_BUILD_JOBS`. For the fastest low-CPU source iteration:
+
+```sh
+HYPERSCOPE_WASM_PROFILE=dev HYPERSCOPE_BUILD_JOBS=1 trunk serve
+```
+
+That explicit fast lane also disables Rust optimization and is intended for
+binding/UI iteration, not renderer performance measurements or rehearsals.
+The ordinary `trunk serve` command remains the representative runtime build.
+The build-policy smoke verifies these modes without compiling WASM:
+
+```sh
+node scripts/smoke-hyperscope-build-policy.mjs
+```
+
+Opt into Binaryen only when producing the final size-optimized artifact:
 
 ```sh
 HYPERSCOPE_WASM_OPT=1 HYPERSCOPE_BUILD_JOBS=2 trunk build --release

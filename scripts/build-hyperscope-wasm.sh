@@ -2,10 +2,24 @@
 set -euo pipefail
 
 # Trunk runs pre-build hooks for both `serve` and release builds. Keep Rust's
-# release optimization for renderer performance, but make Binaryen's expensive
-# whole-module wasm-opt pass an explicit artifact-production choice. In
-# particular, `trunk serve --release` must remain a bounded interactive build.
-wasm_pack_mode=(--release)
+# release optimization by default for renderer performance, but offer an
+# explicit unoptimized Rust lane for binding/UI iteration. Binaryen's expensive
+# whole-module wasm-opt pass remains a separate artifact-production choice.
+case "${HYPERSCOPE_WASM_PROFILE:-release}" in
+    release)
+        wasm_pack_mode=(--release)
+        ;;
+    dev)
+        wasm_pack_mode=(--dev)
+        ;;
+    profiling)
+        wasm_pack_mode=(--profiling)
+        ;;
+    *)
+        echo "error: HYPERSCOPE_WASM_PROFILE must be release, dev, or profiling" >&2
+        exit 2
+        ;;
+esac
 if [[ "${HYPERSCOPE_WASM_OPT:-0}" != "1" ]]; then
     wasm_pack_mode+=(--no-opt)
 fi
