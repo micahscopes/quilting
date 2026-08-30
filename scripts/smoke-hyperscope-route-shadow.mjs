@@ -569,6 +569,10 @@ for (const interactionBoundaryStep of [
   '#[wasm_bindgen(js_name = releaseInteractionPrimary)]',
   '#[wasm_bindgen(js_name = cancelInteractionPrimary)]',
   '#[wasm_bindgen(js_name = interactionSnapshot)]',
+  '#[wasm_bindgen(js_name = recordBackendPickStage)]',
+  '#[wasm_bindgen(js_name = recordBackendPickEvidence)]',
+  '#[wasm_bindgen(js_name = recordBackendPickError)]',
+  '#[wasm_bindgen(js_name = backendPickDiagnostics)]',
   '.dispatch_semantic(SemanticAction::Interact(action))',
 ]) {
   assert.ok(
@@ -618,12 +622,19 @@ for (const browserInteractionShadowStep of [
   'quiltingWasmBackend.mr_stageBackendPickEvidence(',
   'quiltingWasmBackend.mr_readBackendPickEvidence()',
   "PICK_IMPLEMENTATION !== 'js'",
+  '.recordBackendPickStage(Boolean(staged)',
+  '.recordBackendPickEvidence(report)',
 ]) {
   assert.ok(
     browserSource.includes(browserInteractionShadowStep),
     `browser interaction shadow is missing ${browserInteractionShadowStep}`,
   );
 }
+assert.equal(
+  browserSource.includes('Number(report.targetEpoch) !== currentTargetEpoch'),
+  false,
+  'browser glue must not own retained-pick target-epoch rejection',
+);
 for (const navigationSettingsAuthorityStep of [
   "implementationFromRoute(\n  initialNavigationParams, 'navstateimpl',\n)",
   "RUST_NAVIGATION_SETTINGS_IMPLEMENTATION !== 'js'",
