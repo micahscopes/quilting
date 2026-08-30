@@ -676,6 +676,13 @@ pub struct PatchRenderTarget<'a> {
     pub clear_depth: Option<f32>,
 }
 
+#[derive(Clone, Copy)]
+struct FocusFrameTarget<'a> {
+    color_view: &'a wgpu::TextureView,
+    depth_stencil_view: &'a wgpu::TextureView,
+    size: [u32; 2],
+}
+
 /// Backend-owned offscreen attachments for live shadow rendering. This keeps
 /// texture formats and raw `wgpu` handles out of the WASM/application layer;
 /// promotion can later replace this target with a surface view while reusing
@@ -2648,6 +2655,104 @@ impl LodClassifierDevice {
                 return Err(LodWebGpuError::Conformance(format!(
                     "offscreen/presentation encoding mismatch: offscreen={encoding:?}, \
                      presentation={presented_encoding:?}",
+                )));
+            }
+
+            let surface_focus_pipelines =
+                self.create_focus_postprocess_pipelines(surface.color_format())?;
+            let surface_focus_target =
+                self.create_focus_postprocess_target(surface_size, &surface_focus_pipelines)?;
+            let mut surface_focus_view = focus_view;
+            surface_focus_view.viewport = surface_size;
+            let surface_focus_frame = RenderFrame::build(
+                20,
+                pbr_frame.pose,
+                RenderStyle::Pbr,
+                surface_focus_view,
+                RenderFrameOptions {
+                    focus_postprocess: focus_frame.options.focus_postprocess,
+                    ..RenderFrameOptions::default()
+                },
+                &pbr_render_scene,
+            )
+            .map_err(|error| LodWebGpuError::Conformance(error.to_string()))?;
+            let surface_focus_error_scope =
+                self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let mut surface_focus_prepare =
+                self.device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("resident adaptive focus presentation preparation"),
+                    });
+            let surface_focus_classification =
+                self.encode_lod_classification(&mut model, &mut surface_focus_prepare)?;
+            let surface_focus_resident = self.encode_resident_lod_reconciliation(
+                &surface_focus_classification,
+                FaceLodGrading::TwoToOne,
+                &mut surface_focus_prepare,
+            );
+            self.queue.submit([surface_focus_prepare.finish()]);
+            let surface_focus_presented = self.present_focus_resident_adaptive(
+                surface,
+                &surface_focus_frame,
+                &pbr_render_scene,
+                surface_focus_classification.model,
+                &surface_focus_resident,
+                &preparation,
+                &geometry,
+                &focus_root_pipeline,
+                &focus_root_bindings,
+                &focus_overlay_pipeline,
+                Some(&focus_overlay),
+                &packed_atlas,
+                &surface_focus_pipelines,
+                &surface_focus_target,
+                LodPose::default(),
+                0,
+                true,
+            )?;
+            let SurfacePresentation::Presented(surface_focus_encoding) = surface_focus_presented
+            else {
+                return Err(LodWebGpuError::Conformance(format!(
+                    "resident adaptive focus surface frame was not presented: \
+                     {surface_focus_presented:?}",
+                )));
+            };
+            let expected_surface_focus_encoding = FocusPatchFrameEncoding {
+                scene: PatchFrameEncoding {
+                    logical_submission: focus_encoding.scene.logical_submission,
+                    indirect_draw_calls: focus_encoding
+                        .scene
+                        .roots
+                        .indirect_draw_calls
+                        .saturating_add(
+                            focus_encoding
+                                .scene
+                                .overlay
+                                .map_or(0, |overlay| overlay.indirect_draw_calls),
+                        ),
+                    source_instance_count: focus_encoding
+                        .scene
+                        .roots
+                        .source_face_count
+                        .saturating_add(
+                            focus_encoding
+                                .scene
+                                .overlay
+                                .map_or(0, |overlay| overlay.source_patch_count),
+                        ),
+                },
+                postprocess: focus_encoding.postprocess,
+            };
+            if surface_focus_encoding != expected_surface_focus_encoding {
+                return Err(LodWebGpuError::Conformance(format!(
+                    "offscreen/presentation focus encoding mismatch: \
+                     offscreen={expected_surface_focus_encoding:?}, \
+                     presentation={surface_focus_encoding:?}",
+                )));
+            }
+            if let Some(error) = surface_focus_error_scope.pop().await {
+                return Err(LodWebGpuError::Conformance(format!(
+                    "resident adaptive focus presentation failed validation: {error}",
                 )));
             }
         }

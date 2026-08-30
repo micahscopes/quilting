@@ -829,6 +829,54 @@ impl LodClassifierDevice {
         num_joints: u32,
         use_qb: bool,
     ) -> Result<FocusResidentAdaptiveFrameEncoding, LodWebGpuError> {
+        self.encode_focus_resident_adaptive_to_target(
+            encoder,
+            frame,
+            scene,
+            model,
+            resident,
+            roots,
+            root_geometry,
+            root_pipeline,
+            root_bindings,
+            overlay_pipeline,
+            overlay,
+            atlas,
+            focus_pipelines,
+            focus_target,
+            FocusFrameTarget {
+                color_view: &output_target.color_view,
+                depth_stencil_view: &output_target.depth_view,
+                size: output_target.size,
+            },
+            pose,
+            num_joints,
+            use_qb,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_focus_resident_adaptive_to_target<'resource>(
+        &'resource self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &RenderFrame,
+        scene: &RenderSceneSnapshot,
+        model: &LodClassifierModel,
+        resident: &DeviceResidentLod<'_>,
+        roots: &'resource ResidentRootPreparationScene,
+        root_geometry: &'resource ResidentGeometryBucketScene,
+        root_pipeline: &'resource ResidentRootRenderPipeline,
+        root_bindings: &'resource ResidentRootRenderBindings,
+        overlay_pipeline: &'resource FocusPbrPatchRenderPipeline,
+        overlay: Option<&'resource AdaptiveOverlayScene>,
+        atlas: &'resource PackedPatchAtlas,
+        focus_pipelines: &FocusPostprocessPipelines,
+        focus_target: &'resource FocusPostprocessTarget,
+        output_target: FocusFrameTarget<'resource>,
+        pose: LodPose<'_>,
+        num_joints: u32,
+        use_qb: bool,
+    ) -> Result<FocusResidentAdaptiveFrameEncoding, LodWebGpuError> {
         frame
             .validate(scene)
             .map_err(|error| LodWebGpuError::Payload(format!("render frame contract: {error}")))?;
@@ -883,7 +931,7 @@ impl LodClassifierDevice {
             PatchRenderTarget {
                 color_view: focus_target.scene_color_view(),
                 resolve_target: None,
-                depth_stencil_view: Some(&output_target.depth_view),
+                depth_stencil_view: Some(output_target.depth_stencil_view),
                 clear_color: Some(wgpu::Color::TRANSPARENT),
                 clear_depth: Some(1.0),
             },
@@ -906,7 +954,7 @@ impl LodClassifierDevice {
                     PatchRenderTarget {
                         color_view: focus_target.scene_color_view(),
                         resolve_target: None,
-                        depth_stencil_view: Some(&output_target.depth_view),
+                        depth_stencil_view: Some(output_target.depth_stencil_view),
                         clear_color: None,
                         clear_depth: None,
                     },
@@ -926,7 +974,7 @@ impl LodClassifierDevice {
             encoder,
             focus_pipelines,
             focus_target,
-            &output_target.color_view,
+            output_target.color_view,
             packet,
         )?;
         let logical_submission = frame
@@ -995,6 +1043,80 @@ impl LodClassifierDevice {
             scene: resident_adaptive_frame_evidence(encoding.scene),
             postprocess: encoding.postprocess,
         })
+    }
+
+    /// Present the fully composed root-plus-overlay focus image directly into
+    /// the acquired surface view. The intermediate scene/raw textures remain
+    /// retained and offscreen; the final scheduled blur pass targets the
+    /// surface in the same submission.
+    #[allow(clippy::too_many_arguments)]
+    pub fn present_focus_resident_adaptive(
+        &self,
+        surface: &mut PatchPresentationSurface,
+        frame: &RenderFrame,
+        scene: &RenderSceneSnapshot,
+        model: &LodClassifierModel,
+        resident: &DeviceResidentLod<'_>,
+        roots: &ResidentRootPreparationScene,
+        root_geometry: &ResidentGeometryBucketScene,
+        root_pipeline: &ResidentRootRenderPipeline,
+        root_bindings: &ResidentRootRenderBindings,
+        overlay_pipeline: &FocusPbrPatchRenderPipeline,
+        overlay: Option<&AdaptiveOverlayScene>,
+        atlas: &PackedPatchAtlas,
+        focus_pipelines: &FocusPostprocessPipelines,
+        focus_target: &FocusPostprocessTarget,
+        pose: LodPose<'_>,
+        num_joints: u32,
+        use_qb: bool,
+    ) -> Result<SurfacePresentation<FocusPatchFrameEncoding>, LodWebGpuError> {
+        let surface_size = surface.size();
+        if focus_pipelines.output_format() != surface.color_format()
+            || focus_target.output_format() != surface.color_format()
+        {
+            return Err(LodWebGpuError::Payload(
+                "focus composition output format does not match presentation surface".to_string(),
+            ));
+        }
+        surface.present_with(
+            self,
+            "quilting resident adaptive focus presentation",
+            |encoder, target| {
+                let depth_stencil_view = target.depth_stencil_view.ok_or_else(|| {
+                    LodWebGpuError::Payload(
+                        "focus presentation surface has no depth attachment".to_string(),
+                    )
+                })?;
+                self.encode_focus_resident_adaptive_to_target(
+                    encoder,
+                    frame,
+                    scene,
+                    model,
+                    resident,
+                    roots,
+                    root_geometry,
+                    root_pipeline,
+                    root_bindings,
+                    overlay_pipeline,
+                    overlay,
+                    atlas,
+                    focus_pipelines,
+                    focus_target,
+                    FocusFrameTarget {
+                        color_view: target.color_view,
+                        depth_stencil_view,
+                        size: surface_size,
+                    },
+                    pose,
+                    num_joints,
+                    use_qb,
+                )
+                .map(|encoding| FocusPatchFrameEncoding {
+                    scene: resident_adaptive_frame_evidence(encoding.scene),
+                    postprocess: encoding.postprocess,
+                })
+            },
+        )
     }
 
     /// Submit one retained-root plus sparse adaptive frame to the offscreen
