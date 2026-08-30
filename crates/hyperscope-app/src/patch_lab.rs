@@ -52,12 +52,19 @@ impl PatchLabControls {
         self.grid = self.grid.clamp(1, 32);
         self.min_exponent = self.min_exponent.min(atlas_exponent);
         self.max_exponent = self.max_exponent.clamp(self.min_exponent, atlas_exponent);
-        self.manual_edge_exponents = self
-            .manual_edge_exponents
-            .map(|value| value.clamp(self.min_exponent, self.max_exponent));
         if self.shape != PatchLabShape::Triangle && self.field == PatchLabField::ManualEdges {
             self.field = PatchLabField::Wave;
         }
+        self.manual_edge_exponents = if self.field == PatchLabField::ManualEdges {
+            // Direct requests intentionally span the complete resident atlas;
+            // the spatial field's min/max band is hidden and semantically
+            // unrelated in this mode.
+            self.manual_edge_exponents
+                .map(|value| value.min(atlas_exponent))
+        } else {
+            self.manual_edge_exponents
+                .map(|value| value.clamp(self.min_exponent, self.max_exponent))
+        };
         self
     }
 
@@ -634,6 +641,31 @@ mod tests {
                 }),
             },
         )))
+    }
+
+    #[test]
+    fn manual_edges_ignore_the_spatial_field_band() {
+        let controls = PatchLabControls {
+            field: PatchLabField::ManualEdges,
+            manual_edge_exponents: [0, 7, 9],
+            min_exponent: 3,
+            max_exponent: 5,
+            ..PatchLabControls::default()
+        }
+        .normalized(8);
+        assert_eq!(controls.manual_edge_exponents, [0, 7, 8]);
+        assert_eq!(controls.min_exponent, 3);
+        assert_eq!(controls.max_exponent, 5);
+
+        let spatial = PatchLabControls {
+            field: PatchLabField::Wave,
+            manual_edge_exponents: [0, 7, 9],
+            min_exponent: 3,
+            max_exponent: 5,
+            ..PatchLabControls::default()
+        }
+        .normalized(8);
+        assert_eq!(spatial.manual_edge_exponents, [3, 5, 5]);
     }
 
     #[test]
