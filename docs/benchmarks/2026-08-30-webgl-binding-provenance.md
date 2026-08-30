@@ -15,9 +15,10 @@ binding plan now retains:
 
 `quilting-shaders` reflects resources reachable from one composed Naga entry
 point. Renderer tests compare that reflection with every primary WebGL program
-and both transform-feedback programs. A changed source coordinate or stage is
-therefore a program-cache miss even if Naga happens to emit the same mutable GL
-name.
+and both transform-feedback programs. The browser-only blur and highlight
+programs use the same canonical source-interface projection and reflection
+check. A changed source coordinate or stage is therefore a program-cache miss
+even if Naga happens to emit the same mutable GL name.
 
 ## Cruft removed
 
@@ -46,6 +47,7 @@ Exact provenance reports these cross-stage coordinate collisions:
 | PBR | `(0, 1)`, `(0, 2)`, `(0, 3)` |
 | normals, stretch, pick | none |
 | preparation, visibility | none |
+| blur, highlight | none |
 
 No automatic WebGPU layout is synthesized from an incompatible legacy plan.
 The next portable-binding step is to renumber distinct logical resources and
@@ -59,4 +61,7 @@ retained until browser image parity is demonstrated.
 - 79 `quilting-renderer` library tests passed, including reflection equality,
   exact conflict coordinates, canonical ordering, duplicate-site rejection,
   compute-stage rejection, and transform-feedback interfaces;
+- the exact `wasm32-unknown-unknown` check for `quilting-wasm` with
+  `leptos-ui,webgpu-backend` and tests passed, including the auxiliary program
+  descriptors;
 - no Trunk server, browser, WASM optimizer, or release build was launched.
