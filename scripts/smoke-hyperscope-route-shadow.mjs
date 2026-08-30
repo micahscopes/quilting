@@ -558,6 +558,8 @@ assert.ok(
 );
 for (const interactionBoundaryStep of [
   '#[wasm_bindgen(js_name = setInteractionHover)]',
+  '#[wasm_bindgen(js_name = replaceInteractionTargets)]',
+  '#[wasm_bindgen(js_name = setPackedInteractionHover)]',
   '#[wasm_bindgen(js_name = clearInteractionHover)]',
   '#[wasm_bindgen(js_name = pressInteractionPrimary)]',
   '#[wasm_bindgen(js_name = releaseInteractionPrimary)]',
@@ -596,6 +598,9 @@ for (const interactionAuthorityStep of [
 for (const browserInteractionShadowStep of [
   'function mirrorSelectedObjectInteractionToApp(nowMs = performance.now())',
   "RUST_SELECTION_IMPLEMENTATION !== 'shadow'",
+  'function replaceRustInteractionTargets()',
+  'rustAppShadow.replaceInteractionTargets(JSON.stringify(targets))',
+  'rustAppShadow.setPackedInteractionHover(',
   'rustAppShadow.setInteractionHover(',
   'rustAppShadow.pressInteractionPrimary();',
   'rustAppShadow.releaseInteractionPrimary();',

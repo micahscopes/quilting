@@ -4095,6 +4095,10 @@ const rustInteractionDiagnostics = {
   dispatches: 0,
   exactSurfacePicks: 0,
   entityOnlyPicks: 0,
+  targetReplacements: 0,
+  boundTargets: 0,
+  packedDispatches: 0,
+  legacyDispatches: 0,
   comparisons: 0,
   mismatches: 0,
   fallbacks: 0,
@@ -6891,6 +6895,49 @@ const focusSphere = {
   anchorRadius: null,
 };
 
+function replaceRustInteractionTargets() {
+  if (!rustAppShadow
+      || typeof rustAppShadow.replaceInteractionTargets !== 'function') {
+    if (rustInteractionDiagnostics.enabled) {
+      rustInteractionDiagnostics.state = 'awaiting-target-resolver';
+    }
+    return false;
+  }
+  const targets = Array.from(nodeFocusRecords, ([packedNode, sourceBound]) => {
+    const identity = packedNodeIdentities.get(packedNode);
+    return {
+      packedNode,
+      identity: identity ? {
+        assetId: identity.assetId,
+        entityId: identity.entityId,
+      } : null,
+      sourceBound: {
+        center: sourceBound.center,
+        radius: sourceBound.radius,
+      },
+    };
+  });
+  try {
+    const accepted = rustAppShadow.replaceInteractionTargets(JSON.stringify(targets));
+    if (accepted !== targets.length) {
+      throw new Error(
+        `Rust retained ${accepted} of ${targets.length} interaction targets`,
+      );
+    }
+    rustInteractionDiagnostics.targetReplacements += 1;
+    rustInteractionDiagnostics.boundTargets = accepted;
+    if (rustInteractionDiagnostics.enabled) {
+      rustInteractionDiagnostics.state = 'awaiting-pick';
+    }
+    return true;
+  } catch (error) {
+    rustInteractionDiagnostics.errors += 1;
+    rustInteractionDiagnostics.lastError = error?.message || String(error);
+    recordAppShadowMismatch('interaction_targets', rustInteractionDiagnostics.lastError);
+    return false;
+  }
+}
+
 function rebuildNodeFocusRecords() {
   const started = performance.now();
   const rendererBounds = mr_sourceFocusBounds();
@@ -6917,6 +6964,7 @@ function rebuildNodeFocusRecords() {
   modelPayloadTelemetry.focusUniqueVertices = Array.from(nodeFocusRecords.values())
     .reduce((total, record) => total + record.vertexCount, 0);
   modelPayloadTelemetry.focusSceneRadius = sceneSourceBound?.radius || 0;
+  replaceRustInteractionTargets();
   return nodeFocusRecords;
 }
 
@@ -7545,16 +7593,28 @@ function mirrorSelectedObjectInteractionToApp(nowMs = performance.now()) {
     }
     advanceRustApplicationClockToSelectionEvent(nowMs);
     synchronizeRustApplicationPresentationFromBrowser();
-    rustAppShadow.setInteractionHover(
-      selectedObject.identity.assetId,
-      selectedObject.identity.entityId,
-      new Float64Array(selectedObject.bound.center),
-      selectedObject.bound.radius,
-      new Float64Array(selectedObject.sourceAnchor),
-      outputDistance,
-      exactSurface ? surface.face : -1,
-      new Float64Array(exactSurface ? surface.barycentric : []),
-    );
+    if (typeof rustAppShadow.setPackedInteractionHover === 'function') {
+      rustAppShadow.setPackedInteractionHover(
+        selectedObject.node,
+        new Float64Array(selectedObject.sourceAnchor),
+        outputDistance,
+        exactSurface ? surface.face : -1,
+        new Float64Array(exactSurface ? surface.barycentric : []),
+      );
+      rustInteractionDiagnostics.packedDispatches += 1;
+    } else {
+      rustAppShadow.setInteractionHover(
+        selectedObject.identity.assetId,
+        selectedObject.identity.entityId,
+        new Float64Array(selectedObject.bound.center),
+        selectedObject.bound.radius,
+        new Float64Array(selectedObject.sourceAnchor),
+        outputDistance,
+        exactSurface ? surface.face : -1,
+        new Float64Array(exactSurface ? surface.barycentric : []),
+      );
+      rustInteractionDiagnostics.legacyDispatches += 1;
+    }
     rustAppShadow.pressInteractionPrimary();
     rustAppShadow.releaseInteractionPrimary();
     const navigation = rustAppShadow.tickNavigation(0);
@@ -12893,6 +12953,7 @@ async function initializePresentationComposition() {
   uploadSameContextLodResidency(totalVertices, primaryFaces);
 
   packedNodeIdentities = composedNodeIdentities;
+  replaceRustInteractionTargets();
   presentationComposition.ready = true;
   presentationComposition.primaryAssetId = primaryAsset.id;
   presentationComposition.totalFaces = totalFaces;
