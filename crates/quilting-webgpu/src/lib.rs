@@ -33,7 +33,7 @@ pub use pbr_resources::{
 };
 pub use picking::{
     PatchPickEncoding, PatchPickPipeline, PatchPickRequest, PatchPickSample, PatchPickTarget,
-    StagedPatchPickReadback,
+    ResidentRootPickPipeline, StagedPatchPickReadback,
 };
 pub use portable_texture_atlas::{
     PortableTextureAtlasLimits, PortableTextureAtlasPlacement, PortableTextureAtlasPlan,

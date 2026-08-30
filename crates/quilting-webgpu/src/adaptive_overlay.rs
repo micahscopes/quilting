@@ -10,14 +10,14 @@ use super::*;
 /// Retained GPU resources for only the adaptive replacement batches in one
 /// validated backend-neutral scene.
 pub struct AdaptiveOverlayScene {
-    model_identity: u64,
-    scene_revision: u64,
-    suppressed_root_faces: Vec<u32>,
-    source_batch_indices: Vec<u32>,
-    batches: Vec<RenderBatchSnapshot>,
+    pub(super) model_identity: u64,
+    pub(super) scene_revision: u64,
+    pub(super) suppressed_root_faces: Vec<u32>,
+    pub(super) source_batch_indices: Vec<u32>,
+    pub(super) batches: Vec<RenderBatchSnapshot>,
     pub(super) patches: PatchPreparationScene,
-    visibility: VisibilityCompactionScene,
-    bindings: PatchRenderBindings,
+    pub(super) visibility: VisibilityCompactionScene,
+    pub(super) bindings: PatchRenderBindings,
     _patch_frame_rows: wgpu::Buffer,
     prepared_visibility_bind_group: wgpu::BindGroup,
     pbr_scene_supported: bool,

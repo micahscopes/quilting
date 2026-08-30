@@ -125,7 +125,7 @@ pub struct ResidentRootDrawDomainOutput {
 pub struct ResidentRootRenderPipeline {
     pub(super) color_format: wgpu::TextureFormat,
     pub(super) sample_count: u32,
-    bind_group_layout: wgpu::BindGroupLayout,
+    pub(super) bind_group_layout: wgpu::BindGroupLayout,
     pbr_portable_atlas_bind_group_layout: wgpu::BindGroupLayout,
     pbr_environment_bind_group_layout: wgpu::BindGroupLayout,
     pbr: ResidentRootWindingPipelines,
@@ -477,11 +477,11 @@ mod resident_pipeline_descriptor_tests {
 
 /// Retained per-domain frames and source-face indirection for root rendering.
 pub struct ResidentRootRenderBindings {
-    model_identity: u64,
-    domain_identity: u64,
+    pub(super) model_identity: u64,
+    pub(super) domain_identity: u64,
     domain_count: u32,
-    bucket_count: u32,
-    bucket_index_uniform_stride: u32,
+    pub(super) bucket_count: u32,
+    pub(super) bucket_index_uniform_stride: u32,
     frames: wgpu::Buffer,
     _materials: wgpu::Buffer,
     portable_material_textures: Option<pbr_resources::PbrPortableAtlasBindings>,
@@ -490,7 +490,7 @@ pub struct ResidentRootRenderBindings {
     frame_words: Mutex<Vec<u32>>,
     _bucket_index_uniform: wgpu::Buffer,
     visibility_bind_group: wgpu::BindGroup,
-    bind_group: wgpu::BindGroup,
+    pub(super) bind_group: wgpu::BindGroup,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
