@@ -79,10 +79,16 @@ coverage/identity mismatches, numeric maxima, and stage/readback/total latency
 maxima.
 
 `HyperscopeAppShadow` exposes that observer as a process-local WASM adapter.
-The browser only forwards stage/read/error packets and projects the returned
-snapshot at `globalThis.__hyperscopeBackendPickDiagnostics`; it no longer owns
+It reads the current `InteractionTargetTable` epoch itself, stages the renderer
+query, awaits the typed Rust report, and records the report directly. Neither
+the target epoch nor the comparison report is serialized through JavaScript.
+The browser supplies only the camera/pixel request, returns the synchronous
+incumbent surface to existing interaction code, and projects the resulting
+snapshot at `globalThis.__hyperscopeBackendPickDiagnostics`; it does not own
 epoch rejection, comparison validation, counters, or maxima. Warnings are
-emitted only on power-of-two mismatch/error counts.
+emitted only on power-of-two mismatch/error counts. The lower-level `mr_*`
+exports remain available for conformance and rollback, but are not used by the
+application adapter.
 
 ## Verification
 
@@ -116,6 +122,13 @@ rejection of contradictory comparisons and impossible timing/viewport data,
 atomic stale-epoch rejection before metric updates, bounded last-report state,
 and independent topology/numeric maxima. All four pass. The exact WASM adapter
 check passes again, and the thinner inline browser module still parses.
+
+The final orchestration pass replaces the remaining browser target-epoch and
+report shuttle with typed crate-internal stage/read functions called by
+`HyperscopeAppShadow`. The exact WASM check passes in 13.91 seconds with one
+low-priority job, and the inline browser module still parses. Source assertions
+explicitly reject reintroduction of direct browser calls to the raw renderer
+evidence exports or a browser-owned pick target epoch.
 
 All Cargo gates used one low-priority job. The unsupported native
 `quilting-wasm` test configuration still reaches pre-existing wasm-only CSR and
