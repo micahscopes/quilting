@@ -184,7 +184,12 @@ impl InteractionPolicy {
 /// events are adapter concerns and must resolve to this vocabulary first.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InteractionAction {
+    /// Accept a hit already resolved by an exact screen ray, XR ray, or other
+    /// query whose own geometry defines its reach.
     SetHover(Option<InteractionHit>),
+    /// Accept a nearby hit only when it lies within the scale-aware focus
+    /// reach. Game proximity queries use this instead of weakening ray picks.
+    SetProximityHover(Option<InteractionHit>),
     PressPrimary,
     ReleasePrimary,
     CancelPrimary,
@@ -398,6 +403,13 @@ fn apply_interaction_action(
     let previous_active = state.active;
     let activation = match scheduled.action {
         InteractionAction::SetHover(hit) => {
+            if let Some(hit) = hit {
+                hit.validate()?;
+            }
+            state.hovered = hit;
+            None
+        }
+        InteractionAction::SetProximityHover(hit) => {
             state.hovered = match hit {
                 Some(hit) if policy.admits(focus, hit)? => Some(hit),
                 Some(_) | None => None,
@@ -526,16 +538,22 @@ mod tests {
         controller.policy.minimum_output_reach = 0.25;
         controller.policy.focus_radius_reach = 2.0;
         controller
-            .push(InteractionAction::SetHover(Some(hit(1, 2, 0.24))))
+            .push(InteractionAction::SetProximityHover(Some(hit(1, 2, 0.24))))
             .unwrap();
         controller.advance_to(0.0, &focus).unwrap();
         assert!(controller.state.hovered.is_some());
         controller
-            .push(InteractionAction::SetHover(Some(hit(1, 2, 0.26))))
+            .push(InteractionAction::SetProximityHover(Some(hit(1, 2, 0.26))))
             .unwrap();
         controller.advance_to(0.0, &focus).unwrap();
         assert_eq!(controller.state.hovered, None);
         assert!(controller.diagnostics.0.is_empty());
+
+        controller
+            .push(InteractionAction::SetHover(Some(hit(1, 2, 100.0))))
+            .unwrap();
+        controller.advance_to(0.0, &focus).unwrap();
+        assert!(controller.state.hovered.is_some());
     }
 
     #[test]
