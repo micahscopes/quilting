@@ -8,8 +8,9 @@
 use crate::controls::numeric_control_domain;
 pub use crate::controls::NumericControlViewDomain;
 use hyperscope_app::{
-    AppRenderSnapshot, PatchLabControls, PatchLabField, PatchLabReadModel, PatchLabSessionIntent,
-    PatchLabShape, PATCH_LAB_PHASE_TURN_MICRORADIANS,
+    AppEffect, AppRenderSnapshot, AppStore, PatchLabControls, PatchLabEffect, PatchLabField,
+    PatchLabReadModel, PatchLabSessionIntent, PatchLabShape, ReduceError, SemanticAction,
+    PATCH_LAB_PHASE_TURN_MICRORADIANS,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +26,37 @@ impl From<PatchLabControlIntent> for PatchLabSessionIntent {
             controls: intent.controls,
         }
     }
+}
+
+/// One committed UI edit plus only the asynchronous work a platform adapter
+/// must perform. Geometry and renderer buffers never enter the FRP model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchLabControlCommit {
+    pub sequence: u64,
+    pub revision: u64,
+    pub state: PatchLabReadModel,
+    pub effects: Vec<PatchLabEffect>,
+}
+
+pub fn set_patch_lab_session(
+    store: &AppStore,
+    intent: PatchLabSessionIntent,
+) -> Result<PatchLabControlCommit, ReduceError> {
+    let (sequence, commit) = store.dispatch_semantic(SemanticAction::SetPatchLab(intent))?;
+    let effects = commit
+        .effects
+        .into_iter()
+        .filter_map(|effect| match effect {
+            AppEffect::PatchLab(effect) => Some(effect),
+            _ => None,
+        })
+        .collect();
+    Ok(PatchLabControlCommit {
+        sequence,
+        revision: commit.revision,
+        state: store.patch_lab_snapshot(),
+        effects,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -257,5 +289,22 @@ mod tests {
             .with_phase_radians(std::f64::consts::TAU + 0.25)
             .unwrap();
         assert_eq!(phase.controls.phase_microradians, 250_000);
+    }
+
+    #[test]
+    fn view_dispatch_returns_only_committed_patch_jobs() {
+        let store = AppStore::default();
+        let view =
+            project_patch_lab_controls(&store.patch_lab_snapshot(), &store.render_snapshot());
+        let committed =
+            set_patch_lab_session(&store, view.activate_shape(PatchLabShape::Triangle)).unwrap();
+        assert_eq!(committed.sequence, 0);
+        assert_eq!(committed.revision, 1);
+        assert!(committed.state.active);
+        assert_eq!(committed.effects.len(), 1);
+        assert!(matches!(
+            committed.effects[0],
+            PatchLabEffect::BuildGeometry { job_id: 0, .. }
+        ));
     }
 }
