@@ -618,8 +618,8 @@ for (const stalePresentationGuard of [
 }
 for (const selectedFaceEvidenceStep of [
   'fn backend_frame_evidence_supports_composition(',
-  'focus_postprocess.is_none()',
-  'backend image evidence does not yet support focus postprocess composition',
+  'crate::webgpu_backend::focus_evidence_prerequisites_ready()',
+  'focus backend evidence requires WebGPU focus pipelines and environment residency',
   'render_highlight_to(',
   'Some(target)',
   'render_highlight(state.renderer.gl(), state, &camera);',

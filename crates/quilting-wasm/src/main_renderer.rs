@@ -2947,7 +2947,7 @@ fn capture_current_webgl_pbr_frame_evidence(
 fn backend_frame_evidence_supports_composition(
     focus_postprocess: Option<FocusPostprocessPacket>,
 ) -> bool {
-    focus_postprocess.is_none()
+    focus_postprocess.is_none() || crate::webgpu_backend::focus_evidence_prerequisites_ready()
 }
 
 #[cfg(feature = "webgpu-backend")]
@@ -2972,7 +2972,7 @@ pub fn mr_request_backend_frame_evidence() -> Result<bool, JsValue> {
         }
         if !backend_frame_evidence_supports_composition(state.focus_postprocess) {
             return Err(JsValue::from_str(
-                "backend image evidence does not yet support focus postprocess composition",
+                "focus backend evidence requires WebGPU focus pipelines and environment residency",
             ));
         }
         if state.highlight_face >= 0
@@ -3004,9 +3004,14 @@ pub fn mr_request_backend_frame_evidence() -> Result<bool, JsValue> {
                 highlight_face: u32::try_from(state.highlight_face).ok(),
                 matcap_style: state.matcap_style,
             };
-            if !quilting_webgpu::supports_basic_pbr_frame(&scene, options) {
+            let supported = if options.focus_postprocess.is_some() {
+                quilting_webgpu::supports_focus_pbr_frame(&scene, options)
+            } else {
+                quilting_webgpu::supports_basic_pbr_frame(&scene, options)
+            };
+            if !supported {
                 return Err(JsValue::from_str(
-                    "PBR backend evidence requires opaque materials without transmission, sheen, or focus post-processing",
+                    "PBR backend evidence requires opaque materials without transmission or sheen and an exactly supported composition path",
                 ));
             }
         }
@@ -9508,8 +9513,13 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 highlight_face: u32::try_from(state.highlight_face).ok(),
                 matcap_style: state.matcap_style,
             };
-            let supported = extract_render_scene(state)
-                .is_ok_and(|scene| quilting_webgpu::supports_basic_pbr_frame(&scene, options));
+            let supported = extract_render_scene(state).is_ok_and(|scene| {
+                if options.focus_postprocess.is_some() {
+                    quilting_webgpu::supports_focus_pbr_frame(&scene, options)
+                } else {
+                    quilting_webgpu::supports_basic_pbr_frame(&scene, options)
+                }
+            });
             if !supported {
                 state.backend_evidence_requested = false;
                 state.backend_evidence_error = Some(
@@ -10387,7 +10397,7 @@ mod tests {
 
     #[cfg(feature = "webgpu-backend")]
     #[wasm_bindgen_test]
-    fn backend_evidence_admits_highlight_but_not_focus_postprocessing() {
+    fn backend_evidence_requires_ready_focus_residency() {
         assert!(backend_frame_evidence_supports_composition(None));
         let focus = focus_postprocess_packet(
             11.0, 1.0, 3, 0.5, 0.1, false, 0.5, 0.5, 1, 3, 1.5,

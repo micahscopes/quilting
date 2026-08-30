@@ -221,6 +221,7 @@ pub(crate) struct WebGpuBackendDiagnostics {
     resident_root_fallbacks: u64,
     focus_pipeline_ready: bool,
     focus_scene_ready: bool,
+    focus_evidence_ready: bool,
     focus_target_ready: bool,
     focus_target_viewport: [u32; 2],
     focus_target_rebuilds: u64,
@@ -377,6 +378,13 @@ impl WebGpuBackend {
                 .resident_roots
                 .as_ref()
                 .is_some_and(|roots| roots.focus.is_some()),
+            focus_evidence_ready: self.presentation.is_none()
+                && self.focus.is_some()
+                && self.environment.is_some()
+                && self
+                    .resident_roots
+                    .as_ref()
+                    .is_some_and(|roots| roots.focus.is_some()),
             focus_target_ready: self
                 .focus
                 .as_ref()
@@ -1166,6 +1174,14 @@ pub(crate) fn shadow_evidence_ready() -> bool {
 
 pub(crate) fn pbr_evidence_ready() -> bool {
     shadow_evidence_ready() && BACKEND.with(|slot| slot.borrow().environment.is_some())
+}
+
+pub(crate) fn focus_evidence_prerequisites_ready() -> bool {
+    shadow_evidence_ready()
+        && BACKEND.with(|slot| {
+            let backend = slot.borrow();
+            backend.focus.is_some() && backend.environment.is_some()
+        })
 }
 
 pub(crate) fn record_frame_prerequisite_failure(error: impl ToString) {
