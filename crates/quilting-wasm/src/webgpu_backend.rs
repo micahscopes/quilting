@@ -23,9 +23,9 @@ use quilting_webgpu::{
     OffscreenPatchRenderTarget, PackedPatchAtlas, PatchFrameEncoding, PatchPickPipeline,
     PatchPickRequest, PatchPickTarget, PatchPresentationSurface, PatchRenderScene,
     PatchRenderSceneUpdate, PbrEnvironmentMap, PbrTextureTable, ResidentGeometryBucketScene,
-    ResidentRootPreparationScene, ResidentRootRenderBindings, ResidentRootRenderPipeline,
-    StagedOffscreenImageReadback, StagedPatchPickReadback, SurfacePresentation,
-    WebGpuAdapterSummary,
+    ResidentRootPickPipeline, ResidentRootPreparationScene, ResidentRootRenderBindings,
+    ResidentRootRenderPipeline, StagedOffscreenImageReadback, StagedPatchPickReadback,
+    SurfacePresentation, WebGpuAdapterSummary,
 };
 use serde::Serialize;
 use std::cell::RefCell;
@@ -48,6 +48,7 @@ struct WebGpuBackend {
     pick_pipeline: Option<PatchPickPipeline>,
     pick_target: Option<PatchPickTarget>,
     resident_root_pipeline: Option<ResidentRootRenderPipeline>,
+    resident_root_pick_pipeline: Option<ResidentRootPickPipeline>,
     focus: Option<FocusPbrRenderResources>,
     resident_roots: Option<ResidentRootBackend>,
     scene: Option<PatchRenderScene>,
@@ -252,6 +253,7 @@ pub(crate) struct WebGpuBackendDiagnostics {
     focus_frames: u64,
     focus_fallbacks: u64,
     pick_pipeline_ready: bool,
+    resident_root_pick_pipeline_ready: bool,
     pick_target_ready: bool,
     pick_requests: u64,
     pick_submissions: u64,
@@ -518,6 +520,7 @@ impl WebGpuBackend {
             focus_frames: self.focus_frames,
             focus_fallbacks: self.focus_fallbacks,
             pick_pipeline_ready: self.pick_pipeline.is_some(),
+            resident_root_pick_pipeline_ready: self.resident_root_pick_pipeline.is_some(),
             pick_target_ready: self.pick_target.is_some(),
             pick_requests: self.pick_requests,
             pick_submissions: self.pick_submissions,
@@ -677,6 +680,23 @@ fn create_pick_resources(
     }
 }
 
+fn create_resident_root_pick_resource(
+    device: &LodClassifierDevice,
+    root_pipeline: Option<&ResidentRootRenderPipeline>,
+    pick_pipeline: Option<&PatchPickPipeline>,
+) -> (Option<ResidentRootPickPipeline>, Option<String>) {
+    let Some(root_pipeline) = root_pipeline else {
+        return (None, None);
+    };
+    let Some(pick_pipeline) = pick_pipeline else {
+        return (None, None);
+    };
+    match device.create_resident_root_pick_pipeline(root_pipeline, pick_pipeline) {
+        Ok(pipeline) => (Some(pipeline), None),
+        Err(error) => (None, Some(error.to_string())),
+    }
+}
+
 pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
     let should_request = BACKEND.with(|slot| {
         let mut backend = slot.borrow_mut();
@@ -699,13 +719,22 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
                     .create_offscreen_diagnostic_patch_render_pipelines()
                     .map_err(|error| error.to_string())
                     .map_err(|error| BACKEND.with(|slot| slot.borrow_mut().fail(error)))?;
-                let (pick_pipeline, pick_target, pick_error) =
+                let (pick_pipeline, pick_target, mut pick_error) =
                     create_pick_resources(&device, &pipelines);
                 let (resident_root_pipeline, resident_root_error) =
                     match device.create_offscreen_resident_root_render_pipeline() {
                         Ok(pipeline) => (Some(pipeline), None),
                         Err(error) => (None, Some(error.to_string())),
                     };
+                let (resident_root_pick_pipeline, resident_root_pick_error) =
+                    create_resident_root_pick_resource(
+                        &device,
+                        resident_root_pipeline.as_ref(),
+                        pick_pipeline.as_ref(),
+                    );
+                if let Some(error) = resident_root_pick_error {
+                    pick_error = Some(error);
+                }
                 let (focus, focus_error) = match device
                     .create_offscreen_focus_pbr_render_resources()
                     .map_err(|error| error.to_string())
@@ -727,6 +756,7 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
                     backend.pick_pipeline = pick_pipeline;
                     backend.pick_target = pick_target;
                     backend.resident_root_pipeline = resident_root_pipeline;
+                    backend.resident_root_pick_pipeline = resident_root_pick_pipeline;
                     backend.focus = focus;
                     backend.resident_roots = None;
                     backend.scene = None;
@@ -817,7 +847,7 @@ pub(crate) async fn initialize_presentation(
         )
         .map_err(|error| error.to_string())
         .map_err(|error| BACKEND.with(|slot| slot.borrow_mut().fail(error)))?;
-    let (pick_pipeline, pick_target, pick_error) = create_pick_resources(&device, &pipelines);
+    let (pick_pipeline, pick_target, mut pick_error) = create_pick_resources(&device, &pipelines);
     let (resident_root_pipeline, resident_root_error) = match device
         .create_resident_root_render_pipeline(
             presentation.color_format(),
@@ -827,6 +857,15 @@ pub(crate) async fn initialize_presentation(
         Ok(pipeline) => (Some(pipeline), None),
         Err(error) => (None, Some(error.to_string())),
     };
+    let (resident_root_pick_pipeline, resident_root_pick_error) =
+        create_resident_root_pick_resource(
+            &device,
+            resident_root_pipeline.as_ref(),
+            pick_pipeline.as_ref(),
+        );
+    if let Some(error) = resident_root_pick_error {
+        pick_error = Some(error);
+    }
     let (focus, focus_error) = match device
         .create_focus_pbr_render_resources(presentation.color_format())
         .map_err(|error| error.to_string())
@@ -848,6 +887,7 @@ pub(crate) async fn initialize_presentation(
         backend.pick_pipeline = pick_pipeline;
         backend.pick_target = pick_target;
         backend.resident_root_pipeline = resident_root_pipeline;
+        backend.resident_root_pick_pipeline = resident_root_pick_pipeline;
         backend.focus = focus;
         backend.resident_roots = None;
         backend.scene = None;
@@ -2468,10 +2508,10 @@ impl StagedWebGpuPick {
     }
 }
 
-/// Stage a one-pixel prepared-patch query against the latest completed frame.
-/// Resident-root frames are rejected until their root and sparse-overlay draw
-/// domains share this query pass; silently reading the ordinary scene would
-/// return stale geometry.
+/// Stage a one-pixel query against the latest completed prepared-patch frame.
+/// Resident frames consume their current root buckets and sparse overlay;
+/// ordinary frames consume their current compacted scene. Neither path reruns
+/// LoD, visibility, preparation, or compaction.
 pub(crate) fn stage_pick(pixel: [u32; 2], target_epoch: u32) -> Result<StagedWebGpuPick, String> {
     BACKEND.with(|slot| {
         let mut backend = slot.borrow_mut();
@@ -2482,21 +2522,22 @@ pub(crate) fn stage_pick(pixel: [u32; 2], target_epoch: u32) -> Result<StagedWeb
         {
             return Err(backend.reject_pick("WebGPU picking requires one completed coherent frame"));
         }
-        if backend.last_frame_used_resident_roots {
-            return Err(backend.reject_pick(
-                "WebGPU resident-root picking is not implemented yet; use the incumbent picker",
-            ));
-        }
         let request = match PatchPickRequest::new(backend.last_viewport, pixel, target_epoch) {
             Ok(request) => request,
             Err(error) => return Err(backend.reject_pick(error)),
         };
+        let resident_frame = backend.last_frame_used_resident_roots;
+        let focus_frame = backend
+            .last_frame_input
+            .is_some_and(|frame| frame.options.focus_postprocess.is_some());
         let result = (|| {
             let WebGpuBackend {
                 device,
                 atlas,
                 pick_pipeline,
                 pick_target,
+                resident_root_pick_pipeline,
+                resident_roots,
                 scene,
                 ..
             } = &*backend;
@@ -2515,9 +2556,37 @@ pub(crate) fn stage_pick(pixel: [u32; 2], target_epoch: u32) -> Result<StagedWeb
             let scene = scene
                 .as_ref()
                 .ok_or_else(|| "WebGPU picking requires scene residency".to_string())?;
-            let readback = device
-                .stage_patch_render_scene_pick(pipeline, scene, atlas, target, request)
-                .map_err(|error| error.to_string())?;
+            let readback = if resident_frame {
+                let root_pipeline = resident_root_pick_pipeline.as_ref().ok_or_else(|| {
+                    "WebGPU resident picking has no retained root pipeline".to_string()
+                })?;
+                let roots = resident_roots.as_ref().ok_or_else(|| {
+                    "WebGPU resident picking requires root scene residency".to_string()
+                })?;
+                let (root_bindings, overlay) = if focus_frame {
+                    let focus = roots.focus.as_ref().ok_or_else(|| {
+                        "WebGPU resident focus picking lost its binding epoch".to_string()
+                    })?;
+                    (&focus.bindings, focus.overlay.as_ref())
+                } else {
+                    (&roots.bindings, roots.overlay.as_ref())
+                };
+                device.stage_resident_adaptive_pick(
+                    root_pipeline,
+                    pipeline,
+                    scene.scene(),
+                    &roots.preparation,
+                    &roots.geometry,
+                    root_bindings,
+                    overlay,
+                    atlas,
+                    target,
+                    request,
+                )
+            } else {
+                device.stage_patch_render_scene_pick(pipeline, scene, atlas, target, request)
+            }
+            .map_err(|error| error.to_string())?;
             Ok::<_, String>(readback)
         })();
         match result {
