@@ -8,6 +8,32 @@ use crate::LodWebGpuError;
 use quilting_core::render_pipeline as functional;
 use std::num::NonZeroU64;
 
+pub(crate) fn functional_texture_format(
+    format: wgpu::TextureFormat,
+) -> Option<functional::TextureFormat> {
+    Some(match format {
+        wgpu::TextureFormat::R8Unorm => functional::TextureFormat::R8Unorm,
+        wgpu::TextureFormat::Rg8Unorm => functional::TextureFormat::Rg8Unorm,
+        wgpu::TextureFormat::Rgba8Unorm => functional::TextureFormat::Rgba8Unorm,
+        wgpu::TextureFormat::Rgba8UnormSrgb => functional::TextureFormat::Rgba8UnormSrgb,
+        wgpu::TextureFormat::Bgra8Unorm => functional::TextureFormat::Bgra8Unorm,
+        wgpu::TextureFormat::Bgra8UnormSrgb => functional::TextureFormat::Bgra8UnormSrgb,
+        wgpu::TextureFormat::Rgb10a2Unorm => functional::TextureFormat::Rgb10a2Unorm,
+        wgpu::TextureFormat::R16Float => functional::TextureFormat::R16Float,
+        wgpu::TextureFormat::Rg16Float => functional::TextureFormat::Rg16Float,
+        wgpu::TextureFormat::Rgba16Float => functional::TextureFormat::Rgba16Float,
+        wgpu::TextureFormat::R32Float => functional::TextureFormat::R32Float,
+        wgpu::TextureFormat::Rg32Float => functional::TextureFormat::Rg32Float,
+        wgpu::TextureFormat::Rgba32Float => functional::TextureFormat::Rgba32Float,
+        wgpu::TextureFormat::R32Uint => functional::TextureFormat::R32Uint,
+        wgpu::TextureFormat::Rgba32Uint => functional::TextureFormat::Rgba32Uint,
+        wgpu::TextureFormat::Depth24Plus => functional::TextureFormat::Depth24Plus,
+        wgpu::TextureFormat::Depth24PlusStencil8 => functional::TextureFormat::Depth24PlusStencil8,
+        wgpu::TextureFormat::Depth32Float => functional::TextureFormat::Depth32Float,
+        _ => return None,
+    })
+}
+
 pub(crate) fn texture_format(format: functional::TextureFormat) -> wgpu::TextureFormat {
     match format {
         functional::TextureFormat::R8Unorm => wgpu::TextureFormat::R8Unorm,
@@ -170,6 +196,106 @@ pub(crate) fn primitive_state(
     }
 }
 
+pub(crate) fn vertex_format(format: functional::VertexFormat) -> wgpu::VertexFormat {
+    match format {
+        functional::VertexFormat::Uint8x2 => wgpu::VertexFormat::Uint8x2,
+        functional::VertexFormat::Uint8x4 => wgpu::VertexFormat::Uint8x4,
+        functional::VertexFormat::Sint8x2 => wgpu::VertexFormat::Sint8x2,
+        functional::VertexFormat::Sint8x4 => wgpu::VertexFormat::Sint8x4,
+        functional::VertexFormat::Unorm8x2 => wgpu::VertexFormat::Unorm8x2,
+        functional::VertexFormat::Unorm8x4 => wgpu::VertexFormat::Unorm8x4,
+        functional::VertexFormat::Snorm8x2 => wgpu::VertexFormat::Snorm8x2,
+        functional::VertexFormat::Snorm8x4 => wgpu::VertexFormat::Snorm8x4,
+        functional::VertexFormat::Uint16x2 => wgpu::VertexFormat::Uint16x2,
+        functional::VertexFormat::Uint16x4 => wgpu::VertexFormat::Uint16x4,
+        functional::VertexFormat::Sint16x2 => wgpu::VertexFormat::Sint16x2,
+        functional::VertexFormat::Sint16x4 => wgpu::VertexFormat::Sint16x4,
+        functional::VertexFormat::Unorm16x2 => wgpu::VertexFormat::Unorm16x2,
+        functional::VertexFormat::Unorm16x4 => wgpu::VertexFormat::Unorm16x4,
+        functional::VertexFormat::Snorm16x2 => wgpu::VertexFormat::Snorm16x2,
+        functional::VertexFormat::Snorm16x4 => wgpu::VertexFormat::Snorm16x4,
+        functional::VertexFormat::Float16x2 => wgpu::VertexFormat::Float16x2,
+        functional::VertexFormat::Float16x4 => wgpu::VertexFormat::Float16x4,
+        functional::VertexFormat::Float32 => wgpu::VertexFormat::Float32,
+        functional::VertexFormat::Float32x2 => wgpu::VertexFormat::Float32x2,
+        functional::VertexFormat::Float32x3 => wgpu::VertexFormat::Float32x3,
+        functional::VertexFormat::Float32x4 => wgpu::VertexFormat::Float32x4,
+        functional::VertexFormat::Uint32 => wgpu::VertexFormat::Uint32,
+        functional::VertexFormat::Uint32x2 => wgpu::VertexFormat::Uint32x2,
+        functional::VertexFormat::Uint32x3 => wgpu::VertexFormat::Uint32x3,
+        functional::VertexFormat::Uint32x4 => wgpu::VertexFormat::Uint32x4,
+        functional::VertexFormat::Sint32 => wgpu::VertexFormat::Sint32,
+        functional::VertexFormat::Sint32x2 => wgpu::VertexFormat::Sint32x2,
+        functional::VertexFormat::Sint32x3 => wgpu::VertexFormat::Sint32x3,
+        functional::VertexFormat::Sint32x4 => wgpu::VertexFormat::Sint32x4,
+    }
+}
+
+pub(crate) fn vertex_step_mode(mode: functional::VertexStepMode) -> wgpu::VertexStepMode {
+    match mode {
+        functional::VertexStepMode::Vertex => wgpu::VertexStepMode::Vertex,
+        functional::VertexStepMode::Instance => wgpu::VertexStepMode::Instance,
+    }
+}
+
+fn compare_function(compare: functional::CompareFunction) -> wgpu::CompareFunction {
+    match compare {
+        functional::CompareFunction::Never => wgpu::CompareFunction::Never,
+        functional::CompareFunction::Less => wgpu::CompareFunction::Less,
+        functional::CompareFunction::Equal => wgpu::CompareFunction::Equal,
+        functional::CompareFunction::LessEqual => wgpu::CompareFunction::LessEqual,
+        functional::CompareFunction::Greater => wgpu::CompareFunction::Greater,
+        functional::CompareFunction::NotEqual => wgpu::CompareFunction::NotEqual,
+        functional::CompareFunction::GreaterEqual => wgpu::CompareFunction::GreaterEqual,
+        functional::CompareFunction::Always => wgpu::CompareFunction::Always,
+    }
+}
+
+fn stencil_operation(operation: functional::StencilOperation) -> wgpu::StencilOperation {
+    match operation {
+        functional::StencilOperation::Keep => wgpu::StencilOperation::Keep,
+        functional::StencilOperation::Zero => wgpu::StencilOperation::Zero,
+        functional::StencilOperation::Replace => wgpu::StencilOperation::Replace,
+        functional::StencilOperation::Invert => wgpu::StencilOperation::Invert,
+        functional::StencilOperation::IncrementClamp => wgpu::StencilOperation::IncrementClamp,
+        functional::StencilOperation::DecrementClamp => wgpu::StencilOperation::DecrementClamp,
+        functional::StencilOperation::IncrementWrap => wgpu::StencilOperation::IncrementWrap,
+        functional::StencilOperation::DecrementWrap => wgpu::StencilOperation::DecrementWrap,
+    }
+}
+
+fn stencil_face_state(
+    descriptor: functional::StencilFaceStateDescriptor,
+) -> wgpu::StencilFaceState {
+    wgpu::StencilFaceState {
+        compare: compare_function(descriptor.compare),
+        fail_op: stencil_operation(descriptor.fail_op),
+        depth_fail_op: stencil_operation(descriptor.depth_fail_op),
+        pass_op: stencil_operation(descriptor.pass_op),
+    }
+}
+
+pub(crate) fn depth_stencil_state(
+    descriptor: functional::DepthStencilStateDescriptor,
+) -> wgpu::DepthStencilState {
+    wgpu::DepthStencilState {
+        format: texture_format(descriptor.format),
+        depth_write_enabled: Some(descriptor.depth_write_enabled),
+        depth_compare: Some(compare_function(descriptor.depth_compare)),
+        stencil: wgpu::StencilState {
+            front: stencil_face_state(descriptor.stencil_front),
+            back: stencil_face_state(descriptor.stencil_back),
+            read_mask: descriptor.stencil_read_mask,
+            write_mask: descriptor.stencil_write_mask,
+        },
+        bias: wgpu::DepthBiasState {
+            constant: descriptor.depth_bias_constant,
+            slope_scale: descriptor.depth_bias_slope_scale.get(),
+            clamp: descriptor.depth_bias_clamp.get(),
+        },
+    }
+}
+
 fn blend_factor(factor: functional::BlendFactor) -> wgpu::BlendFactor {
     match factor {
         functional::BlendFactor::Zero => wgpu::BlendFactor::Zero,
@@ -236,6 +362,14 @@ mod tests {
             texture_format(functional::TextureFormat::Bgra8UnormSrgb),
             wgpu::TextureFormat::Bgra8UnormSrgb,
         );
+        assert_eq!(
+            functional_texture_format(wgpu::TextureFormat::Bgra8UnormSrgb),
+            Some(functional::TextureFormat::Bgra8UnormSrgb),
+        );
+        assert_eq!(
+            vertex_format(functional::VertexFormat::Float32x3),
+            wgpu::VertexFormat::Float32x3,
+        );
         let primitive = primitive_state(functional::PrimitiveStateDescriptor {
             topology: functional::PrimitiveTopology::TriangleStrip,
             strip_index_format: Some(functional::IndexFormat::Uint32),
@@ -261,5 +395,27 @@ mod tests {
             target.write_mask,
             wgpu::ColorWrites::RED | wgpu::ColorWrites::ALPHA,
         );
+
+        let ignore = functional::StencilFaceStateDescriptor {
+            compare: functional::CompareFunction::Always,
+            fail_op: functional::StencilOperation::Keep,
+            depth_fail_op: functional::StencilOperation::Keep,
+            pass_op: functional::StencilOperation::Keep,
+        };
+        let depth = depth_stencil_state(functional::DepthStencilStateDescriptor {
+            format: functional::TextureFormat::Depth24Plus,
+            depth_write_enabled: false,
+            depth_compare: functional::CompareFunction::LessEqual,
+            stencil_front: ignore,
+            stencil_back: ignore,
+            stencil_read_mask: u32::MAX,
+            stencil_write_mask: u32::MAX,
+            depth_bias_constant: 0,
+            depth_bias_slope_scale: functional::FiniteF32::new(0.0).unwrap(),
+            depth_bias_clamp: functional::FiniteF32::new(0.0).unwrap(),
+        });
+        assert_eq!(depth.format, wgpu::TextureFormat::Depth24Plus);
+        assert_eq!(depth.depth_write_enabled, Some(false));
+        assert_eq!(depth.depth_compare, Some(wgpu::CompareFunction::LessEqual));
     }
 }

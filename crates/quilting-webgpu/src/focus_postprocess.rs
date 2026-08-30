@@ -144,18 +144,6 @@ pub fn focus_postprocess_pipeline_descriptors(
         .collect()
 }
 
-fn functional_output_format(format: wgpu::TextureFormat) -> Option<functional::TextureFormat> {
-    Some(match format {
-        wgpu::TextureFormat::Rgba8Unorm => functional::TextureFormat::Rgba8Unorm,
-        wgpu::TextureFormat::Rgba8UnormSrgb => functional::TextureFormat::Rgba8UnormSrgb,
-        wgpu::TextureFormat::Bgra8Unorm => functional::TextureFormat::Bgra8Unorm,
-        wgpu::TextureFormat::Bgra8UnormSrgb => functional::TextureFormat::Bgra8UnormSrgb,
-        wgpu::TextureFormat::Rgb10a2Unorm => functional::TextureFormat::Rgb10a2Unorm,
-        wgpu::TextureFormat::Rgba16Float => functional::TextureFormat::Rgba16Float,
-        _ => return None,
-    })
-}
-
 pub struct FocusPostprocessTarget {
     size: [u32; 2],
     output_format: wgpu::TextureFormat,
@@ -418,7 +406,9 @@ impl LodClassifierDevice {
         &self,
         output_format: wgpu::TextureFormat,
     ) -> Result<FocusPostprocessPipelines, LodWebGpuError> {
-        let Some(functional_format) = functional_output_format(output_format) else {
+        let Some(functional_format) =
+            crate::pipeline_lowering::functional_texture_format(output_format)
+        else {
             // Preserve support for backend formats outside Quilting's current
             // portable descriptor subset; those uncommon formats deliberately
             // bypass memoization rather than receiving an incomplete key.
