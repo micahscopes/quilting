@@ -364,6 +364,13 @@ impl PipelineLayoutDescriptor {
         if groups.windows(2).any(|pair| pair[0].group == pair[1].group) {
             return Err(RenderPipelineDescriptorError::DuplicateBindGroup);
         }
+        if groups
+            .iter()
+            .enumerate()
+            .any(|(index, group)| group.group != index as u32)
+        {
+            return Err(RenderPipelineDescriptorError::NonContiguousBindGroups);
+        }
         Ok(Self { groups })
     }
 
@@ -859,6 +866,7 @@ pub enum RenderPipelineDescriptorError {
     EmptyShaderVisibility,
     DuplicateBinding,
     DuplicateBindGroup,
+    NonContiguousBindGroups,
     InvalidVertexBufferLayout,
     DuplicateVertexBufferSlot,
     DuplicateVertexLocation,
@@ -888,6 +896,9 @@ impl fmt::Display for RenderPipelineDescriptorError {
             Self::EmptyShaderVisibility => "binding visibility is empty",
             Self::DuplicateBinding => "bind-group binding is not unique",
             Self::DuplicateBindGroup => "pipeline bind-group index is not unique",
+            Self::NonContiguousBindGroups => {
+                "pipeline bind groups must be contiguous and start at zero"
+            }
             Self::InvalidVertexBufferLayout => "vertex buffer layout is invalid",
             Self::DuplicateVertexBufferSlot => "vertex buffer slot is not unique",
             Self::DuplicateVertexLocation => "vertex attribute location is not unique",
@@ -1015,6 +1026,24 @@ mod tests {
         let left = BindGroupLayoutDescriptor::new(0, vec![texture, uniform]).unwrap();
         let right = BindGroupLayoutDescriptor::new(0, vec![uniform, texture]).unwrap();
         assert_eq!(left, right);
+
+        let group_two = BindGroupLayoutDescriptor::new(2, Vec::new()).unwrap();
+        assert_eq!(
+            PipelineLayoutDescriptor::new(vec![left.clone(), group_two.clone()]),
+            Err(RenderPipelineDescriptorError::NonContiguousBindGroups)
+        );
+        assert_eq!(
+            PipelineLayoutDescriptor::new(vec![group_two]),
+            Err(RenderPipelineDescriptorError::NonContiguousBindGroups)
+        );
+        let group_one = BindGroupLayoutDescriptor::new(1, Vec::new()).unwrap();
+        assert_eq!(
+            PipelineLayoutDescriptor::new(vec![left.clone(), group_one])
+                .unwrap()
+                .groups()
+                .len(),
+            2
+        );
 
         let mut altered = pipeline(shader(ShaderStage::Vertex, Vec::new()));
         altered.vertex_buffers[0].attributes[0].location = 1;
