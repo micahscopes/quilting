@@ -5657,6 +5657,7 @@ let animInFlight = false;
 let lastAnimationUiAt = -Infinity;
 const animationClockPacket = new Float64Array(3);
 const installedAnimationSamplePacket = new Float64Array(4);
+const animationPosePacket = new Float64Array(4);
 const animationClockDiagnostics = {
   implementation: ANIMATION_CLOCK_IMPLEMENTATION,
   state: ANIMATION_CLOCK_IMPLEMENTATION === 'js' ? 'browser' : 'awaiting-model',
@@ -5674,6 +5675,22 @@ const animationClockDiagnostics = {
   lastError: null,
 };
 globalThis.__hyperscopeAnimationClockDiagnostics = animationClockDiagnostics;
+
+const animationPoseDiagnostics = {
+  implementation: ANIMATION_CLOCK_IMPLEMENTATION,
+  state: ANIMATION_CLOCK_IMPLEMENTATION === 'js' ? 'browser' : 'awaiting-model',
+  requests: 0,
+  immediateDispatches: 0,
+  coalescedRequests: 0,
+  completions: 0,
+  staleCompletions: 0,
+  comparisons: 0,
+  mismatches: 0,
+  rebases: 0,
+  errors: 0,
+  lastError: null,
+};
+globalThis.__hyperscopeAnimationPoseDiagnostics = animationPoseDiagnostics;
 
 const animationClipDiagnostics = {
   implementation: ANIMATION_CLIP_IMPLEMENTATION,
@@ -9724,6 +9741,75 @@ let lodInFlight = false;
 let lodDebounceTimer = null;
 let skinTexW = 0;
 
+function animationPoseStampFromPacket() {
+  const [t, sampleTime, revision, continuityEpoch] = animationPosePacket;
+  if (!Number.isFinite(t) || !Number.isFinite(sampleTime)
+      || !Number.isSafeInteger(revision) || revision <= 0 || revision > 0xffff_ffff
+      || !Number.isSafeInteger(continuityEpoch)
+      || continuityEpoch <= 0 || continuityEpoch > 0xffff_ffff) {
+    throw new Error('Rust animation pose scheduler returned an invalid stamp');
+  }
+  return Object.freeze({ t, sampleTime, revision, continuityEpoch });
+}
+
+function animationPoseStampsEqual(left, right) {
+  return Boolean(left && right
+    && left.t === right.t
+    && left.sampleTime === right.sampleTime
+    && left.revision === right.revision
+    && left.continuityEpoch === right.continuityEpoch);
+}
+
+function recordAnimationPoseMismatch(context, browserValue, rustValue) {
+  animationPoseDiagnostics.mismatches += 1;
+  animationPoseDiagnostics.state = 'mismatch';
+  recordAppShadowMismatch('animation_pose_scheduler', {
+    context,
+    browser: browserValue,
+    rust: rustValue,
+  });
+}
+
+function requestRustAnimationPose(t, sampleTime) {
+  const app = ensureRustAppShadow('animation-pose');
+  const disposition = app.writeAnimationPoseRequest(t, sampleTime, animationPosePacket);
+  if (disposition !== 1 && disposition !== 2) {
+    throw new Error(`Rust animation pose scheduler returned disposition ${disposition}`);
+  }
+  const request = animationPoseStampFromPacket();
+  animationPoseDiagnostics.requests += 1;
+  if (disposition === 1) animationPoseDiagnostics.immediateDispatches += 1;
+  else animationPoseDiagnostics.coalescedRequests += 1;
+  animationPoseDiagnostics.state = ANIMATION_CLOCK_IMPLEMENTATION === 'rust'
+    ? 'authoritative'
+    : 'shadowing';
+  animationPoseDiagnostics.lastError = null;
+  return { disposition, request };
+}
+
+function completeRustAnimationPose(request, evaluationAvailable) {
+  const app = ensureRustAppShadow('animation-pose');
+  const disposition = app.completeAnimationPoseRequest(
+    request.t,
+    request.sampleTime,
+    request.revision,
+    request.continuityEpoch,
+    evaluationAvailable,
+    animationPosePacket,
+  );
+  if (!Number.isInteger(disposition) || disposition < 0 || disposition > 2) {
+    throw new Error(`Rust animation pose completion returned disposition ${disposition}`);
+  }
+  animationPoseDiagnostics.completions += 1;
+  if (disposition === 0) animationPoseDiagnostics.staleCompletions += 1;
+  const next = disposition === 2 ? animationPoseStampFromPacket() : null;
+  animationPoseDiagnostics.state = ANIMATION_CLOCK_IMPLEMENTATION === 'rust'
+    ? 'authoritative'
+    : 'shadowing';
+  animationPoseDiagnostics.lastError = null;
+  return { disposition, next };
+}
+
 function rebaseAnimationPoseContinuity({ resetClock = false } = {}) {
   if (animationPoseContinuityEpoch >= 0xffff_ffff) {
     throw new Error('animation pose continuity epoch exhausted');
@@ -9731,6 +9817,33 @@ function rebaseAnimationPoseContinuity({ resetClock = false } = {}) {
   animationPoseContinuityEpoch += 1;
   animationPoseRevision = 0;
   animationPosePending = null;
+  if (ANIMATION_CLOCK_IMPLEMENTATION !== 'js') {
+    try {
+      const rustEpoch = ensureRustAppShadow('animation-pose')
+        .rebaseAnimationPoseSchedule();
+      if (!Number.isSafeInteger(rustEpoch)
+          || rustEpoch <= 0 || rustEpoch > 0xffff_ffff) {
+        throw new Error(`Rust animation pose scheduler returned epoch ${rustEpoch}`);
+      }
+      animationPoseDiagnostics.rebases += 1;
+      animationPoseDiagnostics.comparisons += 1;
+      if (rustEpoch !== animationPoseContinuityEpoch) {
+        recordAnimationPoseMismatch(
+          'rebase',
+          animationPoseContinuityEpoch,
+          rustEpoch,
+        );
+      }
+      if (ANIMATION_CLOCK_IMPLEMENTATION === 'rust') {
+        animationPoseContinuityEpoch = rustEpoch;
+      }
+    } catch (error) {
+      animationPoseDiagnostics.errors += 1;
+      animationPoseDiagnostics.lastError = error?.message || String(error);
+      animationPoseDiagnostics.state = 'error';
+      if (ANIMATION_CLOCK_IMPLEMENTATION === 'rust') throw error;
+    }
+  }
   if (resetClock) animationPoseClockSeconds = 0;
   return animationPoseContinuityEpoch;
 }
@@ -9752,12 +9865,52 @@ function nextAnimationPoseRevision() {
 
 function tickAnimation(t, sampleTime = animationPoseClockSeconds) {
   if (patchLab.active || animationPoseBlocked || !gpuSkinned || !meshInfo) return;
-  const request = Object.freeze({
-    t: Number(t),
-    sampleTime: Number(sampleTime),
-    revision: nextAnimationPoseRevision(),
-    continuityEpoch: animationPoseContinuityEpoch,
-  });
+  let request;
+  if (ANIMATION_CLOCK_IMPLEMENTATION === 'rust') {
+    try {
+      const scheduled = requestRustAnimationPose(Number(t), Number(sampleTime));
+      request = scheduled.request;
+      animationPoseRevision = request.revision;
+      animationPoseContinuityEpoch = request.continuityEpoch;
+      if (scheduled.disposition === 2) return;
+    } catch (error) {
+      animationPoseDiagnostics.errors += 1;
+      animationPoseDiagnostics.lastError = error?.message || String(error);
+      animationPoseDiagnostics.state = 'error';
+      console.warn('Rust animation pose request failed:', error);
+      return;
+    }
+  } else {
+    request = Object.freeze({
+      t: Number(t),
+      sampleTime: Number(sampleTime),
+      revision: nextAnimationPoseRevision(),
+      continuityEpoch: animationPoseContinuityEpoch,
+    });
+    if (ANIMATION_CLOCK_IMPLEMENTATION === 'shadow') {
+      try {
+        const scheduled = requestRustAnimationPose(request.t, request.sampleTime);
+        animationPoseDiagnostics.comparisons += 1;
+        const expectedDisposition = animInFlight ? 2 : 1;
+        if (scheduled.disposition !== expectedDisposition
+            || !animationPoseStampsEqual(scheduled.request, request)) {
+          recordAnimationPoseMismatch(
+            'request',
+            { disposition: expectedDisposition, request },
+            scheduled,
+          );
+        }
+      } catch (error) {
+        animationPoseDiagnostics.errors += 1;
+        animationPoseDiagnostics.lastError = error?.message || String(error);
+        animationPoseDiagnostics.state = 'error';
+        recordAppShadowMismatch(
+          'animation_pose_request_exception',
+          animationPoseDiagnostics.lastError,
+        );
+      }
+    }
+  }
   if (animInFlight) {
     animationPosePending = request;
     return;
@@ -9811,11 +9964,46 @@ async function evaluateAnimationPose(request) {
     animInFlight = false;
     const pending = animationPosePending;
     animationPosePending = null;
-    if (pending
-        && pending.continuityEpoch === animationPoseContinuityEpoch
-        && !patchLab.active && !animationPoseBlocked && gpuSkinned && meshInfo) {
-      void evaluateAnimationPose(pending);
+    const evaluationAvailable = !patchLab.active
+      && !animationPoseBlocked && gpuSkinned && Boolean(meshInfo);
+    const browserNext = pending
+      && pending.continuityEpoch === animationPoseContinuityEpoch
+      && evaluationAvailable
+      ? pending
+      : null;
+    if (ANIMATION_CLOCK_IMPLEMENTATION !== 'js') {
+      try {
+        const completed = completeRustAnimationPose(request, evaluationAvailable);
+        if (ANIMATION_CLOCK_IMPLEMENTATION === 'rust') {
+          if (completed.disposition === 0) {
+            recordAnimationPoseMismatch('stale-authoritative-completion', request, null);
+          } else if (completed.next) {
+            void evaluateAnimationPose(completed.next);
+          }
+          return;
+        }
+        animationPoseDiagnostics.comparisons += 1;
+        const expectedDisposition = browserNext ? 2 : 1;
+        if (completed.disposition !== expectedDisposition
+            || !animationPoseStampsEqual(completed.next, browserNext)) {
+          recordAnimationPoseMismatch(
+            'completion',
+            { disposition: expectedDisposition, next: browserNext },
+            completed,
+          );
+        }
+      } catch (error) {
+        animationPoseDiagnostics.errors += 1;
+        animationPoseDiagnostics.lastError = error?.message || String(error);
+        animationPoseDiagnostics.state = 'error';
+        recordAppShadowMismatch(
+          'animation_pose_completion_exception',
+          animationPoseDiagnostics.lastError,
+        );
+        if (ANIMATION_CLOCK_IMPLEMENTATION === 'rust') return;
+      }
     }
+    if (browserNext) void evaluateAnimationPose(browserNext);
   }
 }
 

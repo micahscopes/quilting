@@ -21,6 +21,23 @@ Rust/generated-WASM contract while deliberately making no live-browser claim.
 - direct clock and seek inputs use store-allocated sequences, while a rejected
   non-finite clock changes neither application state nor the next sequence.
 
+The asynchronous pose lane now has the same staged authority boundary. Rust
+owns continuity epochs, revision allocation, the single physical in-flight
+job, newest-only coalescing, stale-completion rejection, and evaluator teardown.
+The generated-WASM smoke additionally proves that:
+
+- three rapid samples dispatch only the first physical job and retain only the
+  third as its follow-up;
+- an unrelated completion releases neither the real job nor its follow-up;
+- rebasing retires the old epoch without overlapping worker calls, then
+  dispatches the newest current-epoch sample when the old call settles;
+- an unavailable evaluator atomically drops queued work; and
+- a malformed output buffer changes no revision or scheduler state.
+
+`animclockimpl=shadow` compares every browser request, rebase, and completion
+against this coordinator. `animclockimpl=rust` makes the coordinator
+authoritative. The `js` default remains unchanged pending the browser gate.
+
 The complete generated application smoke, eight-cue presentation smoke,
 85-control route smoke, WASM32 build check, and all 83 `hyperscope-app` tests
 passed with these assertions.
