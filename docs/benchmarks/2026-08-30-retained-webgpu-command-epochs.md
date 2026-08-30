@@ -25,6 +25,15 @@ through the same automatic admission seam. Root and adaptive paths calculate
 logical submission evidence before encoding device work, instead of discovering
 an invalid frame only after queue submission.
 
+The live browser adapter now retains one command plan keyed by that same
+device-resident scene allocation, style, and command-presence options. Ordinary
+WebGPU frames use `RenderFrame::from_command_plan`; pose, view, focus values,
+and uniform-only changes do not allocate or validate a replacement command
+vector. Scene publication clears the old plan, and failed replacement leaves
+the prior coherent scene/plan pair available for rollback. Backend diagnostics
+report `commandPlanReady` and `commandPlanBuilds` so user-run frame traces can
+verify the intended low-rate rebuild cadence.
+
 This removes two warm-frame costs from the planned prepared-patch path:
 
 - validating immutable materials, batches, leaves, and suppression topology;
@@ -44,9 +53,10 @@ usable graphics adapter and reported its existing explicit skip.
 - the retained-plan native workload compiles and starts, but skips raster
   execution because no native adapter is available in this shell;
 - the exact `wasm32-unknown-unknown` check for `quilting-wasm` with
-  `leptos-ui,webgpu-backend` and tests passes in 1 minute 53 seconds at one
-  low-priority Cargo job after briefly waiting on another workspace's shared
-  package-cache lock;
+  `leptos-ui,webgpu-backend` and tests passes in 40.07 seconds at one
+  low-priority Cargo job after the browser-plan change;
+- the route/shadow WASM smoke suite passes and statically rejects
+  `RenderFrame::build` in the ordinary WebGPU browser adapter;
 - no Trunk server, browser, `wasm-pack`, or `wasm-opt` process was launched.
 
 ## Remaining boundary

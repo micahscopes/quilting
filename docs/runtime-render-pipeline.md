@@ -171,11 +171,20 @@ accounting use that admitted execution. Root/adaptive composition additionally
 computes its logical submission evidence before queue writes or submission;
 invalid scene/frame pairs therefore cannot partially touch device state before
 failing. Extending the command enum fails closed until a backend handles the
-new command. With
-`rendershadow=1`,
+new command. With `rendershadow=1`,
 non-PBR WebGL2 styles preflight every retained batch against that resolved scene
 and execute its draw commands directly; a mismatch falls back before the first
 diagnostic draw.
+
+The browser WebGPU adapter retains exactly one active `RenderCommandPlan` beside
+its device-resident `PatchRenderScene`. It rebuilds that plan only when the
+validated scene allocation, render style, or command-presence key changes;
+camera matrices, animation pose, focus-field values, and uniform-only options
+construct frames with `RenderFrame::from_command_plan`. Scene replacement and
+successful in-place scene publication both retire the old plan atomically.
+`commandPlanReady` and `commandPlanBuilds` expose this cache boundary in backend
+diagnostics. The route/shadow smoke oracle rejects any return of
+`RenderFrame::build` to the ordinary browser WebGPU frame path.
 `resolvedExecutionFrames`, `resolvedExecutionFallbacks`, and
 `lastExecutionError` make that gate observable through the existing render
 shadow diagnostics. Shadow scene validation and WebGL PBR lowering now happen
