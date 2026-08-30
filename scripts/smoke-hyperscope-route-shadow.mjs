@@ -573,6 +573,8 @@ for (const interactionBoundaryStep of [
   '#[wasm_bindgen(js_name = recordBackendPickEvidence)]',
   '#[wasm_bindgen(js_name = recordBackendPickError)]',
   '#[wasm_bindgen(js_name = backendPickDiagnostics)]',
+  '#[wasm_bindgen(js_name = stageBackendPickEvidence)]',
+  '#[wasm_bindgen(js_name = readBackendPickEvidence)]',
   '.dispatch_semantic(SemanticAction::Interact(action))',
 ]) {
   assert.ok(
@@ -619,11 +621,10 @@ for (const browserInteractionShadowStep of [
   'pickedSurface?.output_position',
   'globalThis.__hyperscopeInteractionDiagnostics = rustInteractionDiagnostics;',
   'globalThis.__hyperscopeBackendPickDiagnostics = backendPickDiagnostics;',
-  'quiltingWasmBackend.mr_stageBackendPickEvidence(',
-  'quiltingWasmBackend.mr_readBackendPickEvidence()',
   "PICK_IMPLEMENTATION !== 'js'",
-  '.recordBackendPickStage(Boolean(staged)',
-  '.recordBackendPickEvidence(report)',
+  'const staged = app.stageBackendPickEvidence(',
+  'Promise.resolve(app.readBackendPickEvidence())',
+  'updateBackendPickDiagnostics(app.backendPickDiagnostics())',
 ]) {
   assert.ok(
     browserSource.includes(browserInteractionShadowStep),
@@ -635,6 +636,17 @@ assert.equal(
   false,
   'browser glue must not own retained-pick target-epoch rejection',
 );
+for (const retiredBrowserPickShuttle of [
+  'quiltingWasmBackend.mr_stageBackendPickEvidence(',
+  'quiltingWasmBackend.mr_readBackendPickEvidence()',
+  'const targetEpoch = rustInteractionDiagnostics.targetEpoch;',
+]) {
+  assert.equal(
+    browserSource.includes(retiredBrowserPickShuttle),
+    false,
+    `browser glue must not retain ${retiredBrowserPickShuttle}`,
+  );
+}
 for (const navigationSettingsAuthorityStep of [
   "implementationFromRoute(\n  initialNavigationParams, 'navstateimpl',\n)",
   "RUST_NAVIGATION_SETTINGS_IMPLEMENTATION !== 'js'",

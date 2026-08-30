@@ -698,14 +698,10 @@ function updateBackendPickDiagnostics(snapshot) {
   return backendPickDiagnostics;
 }
 
-function recordBackendPickStage(staged, rejection = '') {
-  try {
-    updateBackendPickDiagnostics(
-      ensureRustAppShadow('backend-pick-stage')
-        .recordBackendPickStage(Boolean(staged), String(rejection || '')),
-    );
-  } catch (error) {
-    console.warn('Rust backend-pick stage observer unavailable:', error);
+function warnBackendPickError(error, phase) {
+  const count = Number(backendPickDiagnostics.errors) || 0;
+  if (count === 1 || (count & (count - 1)) === 0) {
+    console.warn(`WebGPU pick ${phase} evidence failed; WebGL2 remains authoritative:`, error);
   }
 }
 
@@ -719,31 +715,30 @@ function recordBackendPickError(error, phase) {
   } catch (observerError) {
     console.warn('Rust backend-pick error observer unavailable:', observerError);
   }
-  const count = Number(backendPickDiagnostics.errors) || 0;
-  if (count === 1 || (count & (count - 1)) === 0) {
-    console.warn(`WebGPU pick ${phase} evidence failed; WebGL2 remains authoritative:`, error);
-  }
+  warnBackendPickError(error, phase);
 }
 
-function recordBackendPickEvidence(report) {
-  try {
-    const snapshot = ensureRustAppShadow('backend-pick-evidence')
-      .recordBackendPickEvidence(report);
-    updateBackendPickDiagnostics(snapshot);
-    const mismatches = Number(snapshot?.coverageMismatches || 0)
-      + Number(snapshot?.identityMismatches || 0);
-    if (mismatches > 0 && (mismatches === 1 || (mismatches & (mismatches - 1)) === 0)) {
-      console.warn('WebGPU retained pick topology drift; WebGL2 remains authoritative:', report);
-    }
-  } catch (error) {
-    recordBackendPickError(error, 'observe');
-  }
-}
-
-function readBackendPickEvidence() {
-  Promise.resolve(quiltingWasmBackend.mr_readBackendPickEvidence())
-    .then(recordBackendPickEvidence)
-    .catch(error => recordBackendPickError(error, 'readback'));
+function readBackendPickEvidence(app) {
+  Promise.resolve(app.readBackendPickEvidence())
+    .then(snapshot => {
+      updateBackendPickDiagnostics(snapshot);
+      const mismatches = Number(snapshot?.coverageMismatches || 0)
+        + Number(snapshot?.identityMismatches || 0);
+      if (mismatches > 0 && (mismatches === 1 || (mismatches & (mismatches - 1)) === 0)) {
+        console.warn(
+          'WebGPU retained pick topology drift; WebGL2 remains authoritative:',
+          snapshot?.lastReport,
+        );
+      }
+    })
+    .catch(error => {
+      try {
+        updateBackendPickDiagnostics(app.backendPickDiagnostics());
+      } catch (observerError) {
+        console.warn('Rust backend-pick diagnostics unavailable:', observerError);
+      }
+      warnBackendPickError(error, 'readback');
+    });
 }
 
 function webGpuPresentationSupportsRenderMode(mode, residency = null) {
@@ -7110,39 +7105,28 @@ function pickFaceAtCanvasPixel(x, y) {
 
 function pickSurfaceAtCanvasPixel(x, y) {
   if (!preparePickCamera()) return null;
-  const targetEpoch = rustInteractionDiagnostics.targetEpoch;
-  if (PICK_IMPLEMENTATION !== 'js'
-      && Number.isInteger(targetEpoch)
-      && typeof quiltingWasmBackend.mr_stageBackendPickEvidence === 'function'
-      && typeof quiltingWasmBackend.mr_readBackendPickEvidence === 'function') {
+  if (PICK_IMPLEMENTATION !== 'js') {
     try {
-      const staged = quiltingWasmBackend.mr_stageBackendPickEvidence(
+      const app = ensureRustAppShadow('backend-pick');
+      if (typeof app.stageBackendPickEvidence !== 'function'
+          || typeof app.readBackendPickEvidence !== 'function') {
+        throw new Error('backend pick AppShadow exports are unavailable');
+      }
+      const staged = app.stageBackendPickEvidence(
         pickMvp,
         pickView,
         pickCameraPos,
         x,
         y,
-        targetEpoch,
       );
-      recordBackendPickStage(
-        staged?.staged,
-        staged?.error || (staged?.staged ? '' : 'retained pick was not staged'),
-      );
+      updateBackendPickDiagnostics(app.backendPickDiagnostics());
       if (staged?.staged) {
-        readBackendPickEvidence();
+        readBackendPickEvidence(app);
       }
       return staged?.webgl ?? null;
     } catch (error) {
-      recordBackendPickStage(false, error?.message || String(error));
       recordBackendPickError(error, 'stage');
     }
-  } else if (PICK_IMPLEMENTATION !== 'js') {
-    recordBackendPickStage(
-      false,
-      Number.isInteger(targetEpoch)
-        ? 'backend pick WASM exports are unavailable'
-        : 'interaction target epoch is unavailable',
-    );
   }
   return mr_pickSurface(pickMvp, pickView, pickCameraPos, x, y);
 }
