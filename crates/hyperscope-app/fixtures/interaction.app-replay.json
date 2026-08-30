@@ -1,0 +1,48 @@
+{
+  "version": "hyperscope-app-replay/0.25",
+  "events": [
+    {
+      "type": "interact",
+      "sequence": 0,
+      "at_seconds": 0.1,
+      "action": {
+        "action": "set_hover",
+        "hit": {
+          "assetId": "d0000000-0000-4000-8000-000000000001",
+          "entityId": "e0000000-0000-4000-8000-000000000001",
+          "sourceBound": {
+            "center": [1.0, 2.0, 3.0],
+            "radius": 2.0
+          },
+          "sourcePivot": [1.25, 2.5, 3.75],
+          "outputDistance": 4.5,
+          "surface": {
+            "face": 17,
+            "barycentric": [0.5, 0.25, 0.25]
+          }
+        }
+      }
+    },
+    {
+      "type": "interact",
+      "sequence": 1,
+      "at_seconds": 0.2,
+      "action": {
+        "action": "press_primary"
+      }
+    },
+    {
+      "type": "interact",
+      "sequence": 2,
+      "at_seconds": 0.3,
+      "action": {
+        "action": "release_primary"
+      }
+    },
+    {
+      "type": "frame",
+      "elapsed_seconds": 0.3,
+      "delta_seconds": 0.3
+    }
+  ]
+}
