@@ -651,8 +651,8 @@ for (const navigationSettingsAuthorityStep of [
   "implementationFromRoute(\n  initialNavigationParams, 'navstateimpl',\n)",
   "RUST_NAVIGATION_SETTINGS_IMPLEMENTATION !== 'js'",
   'function browserNavigationSettingsState()',
-  'app.setNavigationSettings(',
-  'function navigationSettingsContentEqual(left, right)',
+  'app.synchronizeNavigationSettings(',
+  'if (!receipt.matchesInput)',
   'function applyRustNavigationSettingsProjection(navigation)',
   'function ensureRustNavigationSettingsView()',
   'rustAppShadow.mountNavigationControls(',
@@ -668,6 +668,16 @@ for (const navigationSettingsAuthorityStep of [
     `browser navigation-settings adapter is missing ${navigationSettingsAuthorityStep}`,
   );
 }
+assert.equal(
+  browserSource.includes('function navigationSettingsContentEqual(left, right)'),
+  false,
+  'browser glue must not own navigation-settings equality',
+);
+assert.equal(
+  browserSource.includes('app.setNavigationSettings('),
+  false,
+  'browser glue must not allocate explicitly sequenced navigation-settings events',
+);
 for (const graphicsBackendStep of [
   "import * as quiltingWasmBackend from './pkg/quilting_wasm.js';",
   "const GRAPHICS_BACKEND_REQUEST = graphicsBackendFromRoute(initialBrowserParams);",

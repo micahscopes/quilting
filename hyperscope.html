@@ -4541,22 +4541,6 @@ function browserNavigationSettingsState() {
   };
 }
 
-const NAVIGATION_SETTINGS_FIELDS = Object.freeze([
-  'transitionSeconds',
-  'smoothingSeconds',
-  'tangentPullFraction',
-  'speedOctaveSteps',
-  'bodyScaleOctaveSteps',
-  'eyeHeightOctaveSteps',
-]);
-
-function navigationSettingsContentEqual(left, right) {
-  return NAVIGATION_SETTINGS_FIELDS.every(field =>
-    Number.isFinite(left?.[field])
-    && Number.isFinite(right?.[field])
-    && Math.abs(left[field] - right[field]) <= 1e-12);
-}
-
 function applyRustNavigationSettingsProjection(navigation) {
   batchSignals(() => {
     focusTransitionCentiseconds.set(navigation.transitionSeconds * 100);
@@ -4568,37 +4552,33 @@ function applyRustNavigationSettingsProjection(navigation) {
   });
 }
 
-function dispatchRustNavigationSettings(app, settings, source) {
-  const receipt = app.setNavigationSettings(
-    ++rustAppShadowSequence,
-    settings.transitionSeconds,
-    settings.smoothingSeconds,
-    settings.tangentPullFraction,
-    settings.speedOctaveSteps,
-    settings.bodyScaleOctaveSteps,
-    settings.eyeHeightOctaveSteps,
-  );
-  rustAppShadowDiagnostics.lastCommit = receipt.commit;
-  rustNavigationSettingsDiagnostics.dispatches += 1;
-  rustNavigationSettingsDiagnostics.lastRust = receipt.navigation;
-  rustNavigationSettingsDiagnostics.lastDispatchSource = source;
-  return receipt.navigation;
-}
-
 function synchronizeRustNavigationSettings() {
   if (RUST_NAVIGATION_SETTINGS_IMPLEMENTATION === 'js' || !wasmOk.peek()) return false;
   let app = null;
   try {
     const browser = browserNavigationSettingsState();
     app = ensureRustAppShadow('navigation-settings');
-    const committed = app.snapshot().navigationSettings;
-    const rust = navigationSettingsContentEqual(browser, committed)
-      ? committed
-      : dispatchRustNavigationSettings(app, browser, 'browser-synchronization');
+    const receipt = app.synchronizeNavigationSettings(
+      browser.transitionSeconds,
+      browser.smoothingSeconds,
+      browser.tangentPullFraction,
+      browser.speedOctaveSteps,
+      browser.bodyScaleOctaveSteps,
+      browser.eyeHeightOctaveSteps,
+    );
+    if (receipt.sequence != null) {
+      observeRustAppShadowSequence(receipt.sequence, 'Rust navigation-settings synchronization');
+    }
+    if (receipt.commit) rustAppShadowDiagnostics.lastCommit = receipt.commit;
+    if (receipt.disposition === 'committed') {
+      rustNavigationSettingsDiagnostics.dispatches += 1;
+      rustNavigationSettingsDiagnostics.lastDispatchSource = 'browser-synchronization';
+    }
+    const rust = receipt.navigation;
     rustNavigationSettingsDiagnostics.comparisons += 1;
     rustNavigationSettingsDiagnostics.lastBrowser = browser;
     rustNavigationSettingsDiagnostics.lastRust = rust;
-    if (!navigationSettingsContentEqual(browser, rust)) {
+    if (!receipt.matchesInput) {
       rustNavigationSettingsDiagnostics.mismatches += 1;
       recordAppShadowMismatch('navigation_settings', { browser, rust });
     }

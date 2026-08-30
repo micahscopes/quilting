@@ -806,6 +806,26 @@ pub struct AppNavigationSettingsSnapshot {
     pub settings: NavigationSettings,
 }
 
+/// Outcome of reconciling one adapter projection with the authoritative
+/// device-independent navigation settings.
+///
+/// An unchanged projection is deliberately not an application event: it does
+/// not allocate an input sequence, advance the revision, or publish FRP read
+/// models. A changed projection still enters through the ordinary reducer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavigationSettingsSynchronizationDisposition {
+    Unchanged,
+    Committed,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NavigationSettingsSynchronization {
+    pub disposition: NavigationSettingsSynchronizationDisposition,
+    pub sequence: Option<u64>,
+    pub commit: Option<AppCommit>,
+    pub snapshot: AppNavigationSettingsSnapshot,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SelectedFocusSnapshot {
     pub identity: AssetEntityId,
@@ -2146,6 +2166,56 @@ impl AppStore {
         Ok((sequence, commit))
     }
 
+    /// Reconcile a complete adapter projection with navigation settings under
+    /// the reducer lock.
+    ///
+    /// This is the idempotent port for browser/Blender/session adapters. The
+    /// comparison and local sequence allocation are Rust-owned and atomic;
+    /// only the reducer mutates application state. Deliberate user controls
+    /// may continue to use [`Self::dispatch_semantic`] directly when every
+    /// accepted gesture should remain an observable application event.
+    pub fn synchronize_navigation_settings(
+        &self,
+        settings: NavigationSettings,
+    ) -> Result<NavigationSettingsSynchronization, ReduceError> {
+        let settings = settings
+            .validate()
+            .map_err(ReduceError::InvalidNavigationSettings)?;
+        let (sequence, commit, snapshot) = {
+            let mut state = self.lock_state();
+            let snapshot = state.navigation_settings_snapshot();
+            if snapshot.settings == settings {
+                return Ok(NavigationSettingsSynchronization {
+                    disposition: NavigationSettingsSynchronizationDisposition::Unchanged,
+                    sequence: None,
+                    commit: None,
+                    snapshot,
+                });
+            }
+
+            let sequence = state
+                .next_direct_input_sequence
+                .ok_or(ReduceError::InputSequenceExhausted)?;
+            let at_seconds = state.frame_elapsed_seconds;
+            let commit = state.reduce(AppEvent::Input(Timed {
+                sequence,
+                at_seconds,
+                value: SemanticAction::SetNavigationSettings(settings),
+            }))?;
+            let snapshot = state.navigation_settings_snapshot();
+            (sequence, commit, snapshot)
+        };
+        if commit.published_ui {
+            self.flush_read_models();
+        }
+        Ok(NavigationSettingsSynchronization {
+            disposition: NavigationSettingsSynchronizationDisposition::Committed,
+            sequence: Some(sequence),
+            commit: Some(commit),
+            snapshot,
+        })
+    }
+
     /// Queue a local semantic navigation action at the current virtual frame
     /// time, allocating its sequence from the same authority used by
     /// presentation and explicitly sequenced replay input.
@@ -2848,6 +2918,86 @@ mod tests {
             Err(ReduceError::FutureNavigationSettingsInput),
         );
         assert_eq!(store.navigation_settings_snapshot(), before);
+    }
+
+    #[test]
+    fn navigation_settings_synchronization_is_atomic_idempotent_and_sequence_owned() {
+        let store = AppStore::default();
+        let initial = store.navigation_settings_snapshot();
+        let unchanged = store
+            .synchronize_navigation_settings(initial.settings)
+            .unwrap();
+        assert_eq!(
+            unchanged.disposition,
+            NavigationSettingsSynchronizationDisposition::Unchanged,
+        );
+        assert_eq!(unchanged.sequence, None);
+        assert_eq!(unchanged.commit, None);
+        assert_eq!(unchanged.snapshot, initial);
+        assert_eq!(store.summary_snapshot().revision, initial.revision);
+
+        let settings = NavigationSettings {
+            transition_seconds: 1.75,
+            surface_walk: hyperscape::SurfaceWalkControls {
+                smoothing_seconds: 0.8,
+                tangent_pull_fraction: 0.35,
+                speed_octave_steps: 12.0,
+                body_scale_octave_steps: -6.0,
+                eye_height_octave_steps: 3.0,
+                ..initial.settings.surface_walk
+            },
+        };
+        let committed = store.synchronize_navigation_settings(settings).unwrap();
+        assert_eq!(
+            committed.disposition,
+            NavigationSettingsSynchronizationDisposition::Committed,
+        );
+        assert_eq!(committed.sequence, Some(0));
+        assert_eq!(committed.snapshot.settings, settings);
+        assert_eq!(
+            committed.commit.as_ref().map(|commit| commit.revision),
+            Some(committed.snapshot.revision),
+        );
+        assert_eq!(store.navigation_settings_snapshot(), committed.snapshot);
+        assert_eq!(store.summary_snapshot().revision, committed.snapshot.revision);
+
+        let repeated = store.synchronize_navigation_settings(settings).unwrap();
+        assert_eq!(
+            repeated.disposition,
+            NavigationSettingsSynchronizationDisposition::Unchanged,
+        );
+        assert_eq!(repeated.sequence, None);
+        assert_eq!(repeated.commit, None);
+        assert_eq!(repeated.snapshot, committed.snapshot);
+
+        let mut next = settings;
+        next.transition_seconds = 2.0;
+        let next = store.synchronize_navigation_settings(next).unwrap();
+        assert_eq!(next.sequence, Some(1));
+        assert_eq!(next.snapshot.revision, committed.snapshot.revision + 1);
+    }
+
+    #[test]
+    fn navigation_settings_synchronization_rejects_without_observable_change() {
+        let store = AppStore::default();
+        let before = store.navigation_settings_snapshot();
+        let invalid = NavigationSettings {
+            transition_seconds: f64::INFINITY,
+            ..before.settings
+        };
+        assert_eq!(
+            store.synchronize_navigation_settings(invalid),
+            Err(ReduceError::InvalidNavigationSettings(
+                "navigation transition duration must be finite and in [0,5]",
+            )),
+        );
+        assert_eq!(store.navigation_settings_snapshot(), before);
+        assert_eq!(store.summary_snapshot().revision, before.revision);
+
+        let mut valid = before.settings;
+        valid.transition_seconds = 1.25;
+        let committed = store.synchronize_navigation_settings(valid).unwrap();
+        assert_eq!(committed.sequence, Some(0));
     }
 
     #[test]

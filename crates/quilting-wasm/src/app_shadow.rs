@@ -25,7 +25,8 @@ use hyperscope_app::{
     AssetLoadScope, AssetMetadata, AssetStatus, AuthoredRevision, CommitDisposition,
     EffectCompletion, FocusPostprocessMode, FocusPostprocessSettings, FrameTick,
     LocalPeerDisposition, LocalPeerIngress, LocalPeerLane, LocalPeerReceipt, NavigationSettings,
-    NavigationSynchronization, PatchLabCompletion, PatchLabControls, PatchLabEffect,
+    NavigationSettingsSynchronizationDisposition, NavigationSynchronization, PatchLabCompletion,
+    PatchLabControls, PatchLabEffect,
     PatchLabFailure, PatchLabField, PatchLabGeometryCompletion, PatchLabGeometryOutcome,
     PatchLabHistogramBin, PatchLabLodCompletion, PatchLabLodOutcome, PatchLabLodSummary,
     PatchLabReadModel, PatchLabSessionIntent, PatchLabShape, PresentationAction,
@@ -1887,6 +1888,50 @@ impl HyperscopeAppShadow {
         })
     }
 
+    /// Idempotently reconcile the browser's complete navigation-settings
+    /// projection. Rust owns validation, equality, local input allocation, and
+    /// the revision fence; JavaScript only supplies platform signal values and
+    /// mirrors the returned committed projection.
+    #[wasm_bindgen(js_name = synchronizeNavigationSettings)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn synchronize_navigation_settings(
+        &self,
+        transition_seconds: f64,
+        smoothing_seconds: f64,
+        tangent_pull_fraction: f64,
+        speed_octave_steps: f64,
+        body_scale_octave_steps: f64,
+        eye_height_octave_steps: f64,
+    ) -> Result<JsValue, JsValue> {
+        let current = self.store.navigation_settings_snapshot().settings;
+        let settings = NavigationSettings {
+            transition_seconds,
+            surface_walk: SurfaceWalkControls {
+                smoothing_seconds,
+                tangent_pull_fraction,
+                speed_octave_steps,
+                body_scale_octave_steps,
+                eye_height_octave_steps,
+                ..current.surface_walk
+            },
+        };
+        let synchronization = self
+            .store
+            .synchronize_navigation_settings(settings)
+            .map_err(js_error)?;
+        let matches_input = synchronization.snapshot.settings == settings;
+        to_js(&ShadowNavigationSettingsSynchronizationReceipt {
+            disposition: match synchronization.disposition {
+                NavigationSettingsSynchronizationDisposition::Unchanged => "unchanged",
+                NavigationSettingsSynchronizationDisposition::Committed => "committed",
+            },
+            sequence: synchronization.sequence.map(|sequence| sequence.to_string()),
+            commit: synchronization.commit.as_ref().map(shadow_commit),
+            matches_input,
+            navigation: synchronization.snapshot.into(),
+        })
+    }
+
     /// Replace the complete educational Patch Lab session through the same
     /// reducer/effect boundary used by native, replay, and future WebGPU
     /// adapters. Rust allocates job IDs and coalesces LOD work; JavaScript may
@@ -3159,6 +3204,16 @@ struct ShadowRenderSettingsReceipt {
 #[serde(rename_all = "camelCase")]
 struct ShadowNavigationSettingsReceipt {
     commit: ShadowCommit,
+    navigation: ShadowNavigationSettings,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowNavigationSettingsSynchronizationReceipt {
+    disposition: &'static str,
+    sequence: Option<String>,
+    commit: Option<ShadowCommit>,
+    matches_input: bool,
     navigation: ShadowNavigationSettings,
 }
 

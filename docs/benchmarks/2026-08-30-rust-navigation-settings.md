@@ -14,6 +14,17 @@ Raw HID axis mappings, sensitivity, window-focus policy, and SpaceMouse profile
 remain browser-adapter concerns. They are intentionally absent from the shared
 application packet.
 
+The browser synchronization port is now idempotent and Rust-owned as well.
+`AppStore::synchronize_navigation_settings` validates and compares the complete
+packet under the reducer lock, allocates a local input sequence only when the
+packet changed, and routes that change through `SetNavigationSettings`. An
+unchanged projection advances neither the application revision nor the FRP
+commit fence. The WASM adapter returns the disposition, optional sequence and
+commit, exact Rust projection, and typed match result; JavaScript no longer
+owns epsilon comparison, the decision to dispatch, or input-sequence
+allocation. The older explicitly sequenced WASM setter remains available as a
+compatibility seam, but the browser no longer calls it.
+
 The URL lane is explicit and rollback-safe:
 
 - `navstateimpl=js` keeps the incumbent browser signals authoritative (default).
@@ -41,6 +52,11 @@ The URL lane is explicit and rollback-safe:
   control dispatch, semantic-unit projection, preservation of non-UI walk
   policy, and atomic rejection.
 - Strict `hyperscope-web --all-features` Clippy: passed.
+- Two focused native synchronization tests pass: changed/unchanged sequencing,
+  idempotent revisions, exact projection, and invalid-input atomicity.
+- `node scripts/smoke-navigation-settings-boundary.mjs`: passed. This
+  zero-build oracle also parses the inline browser module and rejects a return
+  of browser-owned equality, snapshot admission, or sequence allocation.
 
 Live Chromium comparison and authority evidence remain pending. The default is
 therefore still `js`; no release route is silently promoted by this cut.
