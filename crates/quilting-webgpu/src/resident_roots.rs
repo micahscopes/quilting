@@ -1267,6 +1267,7 @@ impl LodClassifierDevice {
         &'resource self,
         encoder: &mut wgpu::CommandEncoder,
         frame: &RenderFrame,
+        scene: &RenderSceneSnapshot,
         model: &LodClassifierModel,
         resident: &DeviceResidentLod<'_>,
         preparation: &'resource ResidentRootPreparationScene,
@@ -1282,6 +1283,7 @@ impl LodClassifierDevice {
         self.encode_resident_roots_with_raw_field(
             encoder,
             frame,
+            scene,
             model,
             resident,
             preparation,
@@ -1302,6 +1304,7 @@ impl LodClassifierDevice {
         &'resource self,
         encoder: &mut wgpu::CommandEncoder,
         frame: &RenderFrame,
+        scene: &RenderSceneSnapshot,
         model: &LodClassifierModel,
         resident: &DeviceResidentLod<'_>,
         preparation: &'resource ResidentRootPreparationScene,
@@ -1315,6 +1318,9 @@ impl LodClassifierDevice {
         num_joints: u32,
         use_qb: bool,
     ) -> Result<ResidentRootFrameEncoding, LodWebGpuError> {
+        frame
+            .execution(scene)
+            .map_err(|error| LodWebGpuError::Payload(format!("render frame contract: {error}")))?;
         let draw_passes = render_draw_passes(frame.style);
         let focus_frame = raw_field_target.is_some();
         if focus_frame && frame.style != RenderStyle::Pbr {
@@ -1518,6 +1524,7 @@ impl LodClassifierDevice {
         &'resource self,
         encoder: &mut wgpu::CommandEncoder,
         frame: &RenderFrame,
+        scene: &RenderSceneSnapshot,
         model: &LodClassifierModel,
         resident: &DeviceResidentLod<'_>,
         preparation: &'resource ResidentRootPreparationScene,
@@ -1552,6 +1559,7 @@ impl LodClassifierDevice {
         let roots = self.encode_resident_roots_with_raw_field(
             encoder,
             frame,
+            scene,
             model,
             resident,
             preparation,
@@ -1602,6 +1610,7 @@ impl LodClassifierDevice {
         num_joints: u32,
         use_qb: bool,
     ) -> Result<FocusPatchFrameEncoding, LodWebGpuError> {
+        let logical_submission = resident_root_frame_submission(frame, render_scene)?;
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1610,6 +1619,7 @@ impl LodClassifierDevice {
         let encoding = self.encode_focus_resident_roots(
             &mut encoder,
             frame,
+            render_scene,
             model,
             resident,
             preparation,
@@ -1625,7 +1635,7 @@ impl LodClassifierDevice {
             use_qb,
         )?;
         self.queue.submit([encoder.finish()]);
-        let scene = resident_root_frame_evidence(frame, render_scene, encoding.roots)?;
+        let scene = resident_root_frame_evidence(logical_submission, encoding.roots);
         Ok(FocusPatchFrameEncoding {
             scene,
             postprocess: encoding.postprocess,
@@ -1652,6 +1662,7 @@ impl LodClassifierDevice {
         num_joints: u32,
         use_qb: bool,
     ) -> Result<PatchFrameEncoding, LodWebGpuError> {
+        let logical_submission = resident_root_frame_submission(frame, render_scene)?;
         if frame.view.viewport != target.size {
             return Err(LodWebGpuError::Payload(format!(
                 "offscreen target {:?} does not match frame viewport {:?}",
@@ -1666,6 +1677,7 @@ impl LodClassifierDevice {
         let encoding = self.encode_resident_roots(
             &mut encoder,
             frame,
+            render_scene,
             model,
             resident,
             preparation,
@@ -1690,7 +1702,7 @@ impl LodClassifierDevice {
             use_qb,
         )?;
         self.queue.submit([encoder.finish()]);
-        resident_root_frame_evidence(frame, render_scene, encoding)
+        Ok(resident_root_frame_evidence(logical_submission, encoding))
     }
 
     /// Present one root-only supported frame through the same direct encoder as
@@ -1713,6 +1725,7 @@ impl LodClassifierDevice {
         num_joints: u32,
         use_qb: bool,
     ) -> Result<SurfacePresentation<PatchFrameEncoding>, LodWebGpuError> {
+        let logical_submission = resident_root_frame_submission(frame, render_scene)?;
         surface.present_with(
             self,
             "quilting resident root presentation frame",
@@ -1727,6 +1740,7 @@ impl LodClassifierDevice {
                 let encoding = self.encode_resident_roots(
                     encoder,
                     frame,
+                    render_scene,
                     model,
                     resident,
                     preparation,
@@ -1739,25 +1753,30 @@ impl LodClassifierDevice {
                     num_joints,
                     use_qb,
                 )?;
-                resident_root_frame_evidence(frame, render_scene, encoding)
+                Ok(resident_root_frame_evidence(logical_submission, encoding))
             },
         )
     }
 }
 
-fn resident_root_frame_evidence(
+fn resident_root_frame_submission(
     frame: &RenderFrame,
     scene: &RenderSceneSnapshot,
-    encoding: ResidentRootFrameEncoding,
-) -> Result<PatchFrameEncoding, LodWebGpuError> {
-    let logical_submission = frame
+) -> Result<RenderSubmissionStats, LodWebGpuError> {
+    frame
         .expected_submission_stats(scene)
-        .map_err(|error| LodWebGpuError::Payload(format!("render frame contract: {error}")))?;
-    Ok(PatchFrameEncoding {
+        .map_err(|error| LodWebGpuError::Payload(format!("render frame contract: {error}")))
+}
+
+fn resident_root_frame_evidence(
+    logical_submission: RenderSubmissionStats,
+    encoding: ResidentRootFrameEncoding,
+) -> PatchFrameEncoding {
+    PatchFrameEncoding {
         logical_submission,
         indirect_draw_calls: encoding.indirect_draw_calls,
         source_instance_count: encoding.source_face_count,
-    })
+    }
 }
 
 impl LodClassifierDevice {

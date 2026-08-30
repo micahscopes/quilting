@@ -2190,13 +2190,18 @@ impl LodClassifierDevice {
             },
             LodPose::default(),
         )?;
-        let frame = RenderFrame::build(
+        let frame_scene = ValidatedRenderScene::new(render_scene.clone())
+            .map_err(|error| LodWebGpuError::Conformance(error.to_string()))?;
+        let frame_options = RenderFrameOptions::default();
+        let frame_plan =
+            RenderCommandPlan::build(&frame_scene, RenderStyle::MatcapWire, frame_options)
+                .map_err(|error| LodWebGpuError::Conformance(error.to_string()))?;
+        let frame = RenderFrame::from_command_plan(
             17,
             RenderPoseIdentity {
                 asset_revision: 3,
                 pose_revision: 5,
             },
-            RenderStyle::MatcapWire,
             RenderView {
                 viewport: [WIDTH, HEIGHT],
                 mvp: identity_matrix(),
@@ -2205,8 +2210,8 @@ impl LodClassifierDevice {
                 selected_node: None,
                 focus: FocusFieldPacket::default(),
             },
-            RenderFrameOptions::default(),
-            &render_scene,
+            frame_options,
+            &frame_plan,
         )
         .map_err(|error| LodWebGpuError::Conformance(error.to_string()))?;
 
@@ -2263,7 +2268,7 @@ impl LodClassifierDevice {
             self.encode_resident_adaptive(
                 &mut encoder,
                 &frame,
-                &render_scene,
+                frame_plan.scene().snapshot(),
                 classification.model,
                 &resident,
                 &preparation,

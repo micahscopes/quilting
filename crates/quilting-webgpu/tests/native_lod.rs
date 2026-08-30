@@ -1143,7 +1143,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         let root_focus_encoding = classifier
             .render_offscreen_focus_resident_roots(
                 &focus_frame,
-                &render_scene,
+                focus_plan.scene().snapshot(),
                 &root_model,
                 &resident,
                 &root_preparation,

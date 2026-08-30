@@ -413,7 +413,7 @@ impl LodClassifierDevice {
         validate_frame: bool,
     ) -> Result<(), LodWebGpuError> {
         if validate_frame {
-            frame.validate(scene).map_err(|error| {
+            frame.execution(scene).map(|_| ()).map_err(|error| {
                 LodWebGpuError::Payload(format!("render frame contract: {error}"))
             })?;
         }
@@ -719,8 +719,8 @@ impl LodClassifierDevice {
         num_joints: u32,
         use_qb: bool,
     ) -> Result<ResidentAdaptiveFrameEncoding, LodWebGpuError> {
-        frame
-            .validate(scene)
+        let logical_submission = frame
+            .expected_submission_stats(scene)
             .map_err(|error| LodWebGpuError::Payload(format!("render frame contract: {error}")))?;
         if frame.style == RenderStyle::Pbr {
             validate_basic_pbr_frame(scene, frame.options)?;
@@ -749,6 +749,7 @@ impl LodClassifierDevice {
         let root_encoding = self.encode_resident_roots(
             encoder,
             frame,
+            scene,
             model,
             resident,
             roots,
@@ -794,9 +795,6 @@ impl LodClassifierDevice {
                 )
             })
             .transpose()?;
-        let logical_submission = frame
-            .expected_submission_stats(scene)
-            .map_err(|error| LodWebGpuError::Payload(format!("render frame contract: {error}")))?;
         Ok(ResidentAdaptiveFrameEncoding {
             logical_submission,
             roots: root_encoding,
@@ -877,8 +875,8 @@ impl LodClassifierDevice {
         num_joints: u32,
         use_qb: bool,
     ) -> Result<FocusResidentAdaptiveFrameEncoding, LodWebGpuError> {
-        frame
-            .validate(scene)
+        let logical_submission = frame
+            .expected_submission_stats(scene)
             .map_err(|error| LodWebGpuError::Payload(format!("render frame contract: {error}")))?;
         validate_focus_pbr_frame(scene, frame.options)?;
         if frame.style != RenderStyle::Pbr {
@@ -921,6 +919,7 @@ impl LodClassifierDevice {
         let roots_encoding = self.encode_resident_roots_with_raw_field(
             encoder,
             frame,
+            scene,
             model,
             resident,
             roots,
@@ -977,9 +976,6 @@ impl LodClassifierDevice {
             output_target.color_view,
             packet,
         )?;
-        let logical_submission = frame
-            .expected_submission_stats(scene)
-            .map_err(|error| LodWebGpuError::Payload(format!("render frame contract: {error}")))?;
         Ok(FocusResidentAdaptiveFrameEncoding {
             scene: ResidentAdaptiveFrameEncoding {
                 logical_submission,
