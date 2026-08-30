@@ -279,11 +279,11 @@ mod tests {
             VISIBILITY_VARYINGS,
         );
         assert!(key.bindings().samplers().iter().any(|binding| {
-            binding.name.as_ref() == "_group_0_binding_5_vs"
+            binding.name.as_ref() == "_group_0_binding_4_vs"
                 && binding.texture_unit == SUPPRESSED_FACE_TEX_UNIT
         }));
         let source = quilting_shaders::compile_patch_visibility_glsl_native().unwrap();
-        assert!(source.contains("_group_0_binding_5_vs"));
+        assert!(source.contains("_group_0_binding_4_vs"));
         assert!(source.contains("texelFetch"));
     }
 
@@ -313,9 +313,9 @@ mod tests {
                 .map(|binding| (binding.name.as_ref(), binding.texture_unit))
                 .collect::<Vec<_>>(),
             vec![
-                ("_group_0_binding_2_vs", SKINNING_TEX_UNIT),
-                ("_group_0_binding_3_vs", MORPH_TEX_UNIT),
-                ("_group_0_binding_4_vs", FACE_DATA_TEX_UNIT),
+                ("_group_0_binding_1_vs", SKINNING_TEX_UNIT),
+                ("_group_0_binding_2_vs", MORPH_TEX_UNIT),
+                ("_group_0_binding_3_vs", FACE_DATA_TEX_UNIT),
             ]
         );
     }

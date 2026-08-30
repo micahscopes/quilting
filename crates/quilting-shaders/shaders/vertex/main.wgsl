@@ -23,7 +23,9 @@ struct Uniforms {
     normal_model: mat4x4<f32>,
 }
 
-@group(0) @binding(0)
+// Portable graphics namespace: the legacy combined view/entity draw packet is
+// updated per batch and therefore occupies the entity/batch group.
+@group(1) @binding(0)
 var<uniform> u: Uniforms;
 
 // Skeletal animation: skin matrices (joint_world * inverse_bind) uploaded per frame.
@@ -42,29 +44,30 @@ struct JointMatrices {
     morph_weights: array<vec4<f32>, 16>,
 }
 
-@group(0) @binding(1)
+// Pose and immutable source data occupy group 0.
+@group(0) @binding(0)
 var<uniform> joints: JointMatrices;
 
 // Per-vertex skinning data texture: width = num_verts, height = 2
 // Row 0: joint indices (as f32), Row 1: joint weights
-@group(0) @binding(2)
+@group(0) @binding(1)
 var skinning_tex: texture_2d<f32>;
 
 // Morph target deltas texture: width = num_verts, height = num_targets
 // Each texel = (dx, dy, dz, 0) position delta for that vertex+target
-@group(0) @binding(3)
+@group(0) @binding(2)
 var morph_tex: texture_2d<f32>;
 
 // Immutable source-face records, packed as thirteen RGBA32F texels per face in
 // the normative 52-float instance layout. Animated LOD updates stream only a
 // topology record containing edge LODs, permutation, and source face ID.
-@group(0) @binding(4)
+@group(0) @binding(3)
 var face_data_tex: texture_2d<f32>;
 
 // Sparse renderer-owned mask for baseline source roots replaced by an
 // adaptive overlay. Overlay batches disable the mask, so an affected face can
 // still publish a root leaf when only its topology or corner density changed.
-@group(0) @binding(5)
+@group(0) @binding(4)
 var suppressed_face_tex: texture_2d<f32>;
 
 // Apply skeletal skinning to a position.

@@ -11,7 +11,8 @@ struct MatcapUniforms {
     _pad2: f32,
 }
 
-@group(0) @binding(1)
+// Portable graphics namespace: material/style state lives in group 2.
+@group(2) @binding(0)
 var<uniform> matcap_u: MatcapUniforms;
 
 struct FragInput {

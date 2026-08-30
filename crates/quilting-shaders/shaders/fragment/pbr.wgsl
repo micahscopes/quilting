@@ -45,67 +45,69 @@ struct PbrUniforms {
     focus_field_params: vec4<f32>,       // x=enabled; yzw reserved
 }
 
-@group(0) @binding(1)
+// Portable graphics namespace: material/style state lives in group 2.
+@group(2) @binding(0)
 var<uniform> pbr: PbrUniforms;
 
-@group(0) @binding(2)
+@group(2) @binding(1)
 var base_color_tex: texture_2d<f32>;
-@group(0) @binding(3)
+@group(2) @binding(2)
 var base_color_sampler: sampler;
 
-@group(0) @binding(4)
+@group(2) @binding(3)
 var metallic_roughness_tex: texture_2d<f32>;
-@group(0) @binding(5)
+@group(2) @binding(4)
 var metallic_roughness_sampler: sampler;
 
-@group(0) @binding(6)
+@group(2) @binding(5)
 var normal_tex: texture_2d<f32>;
-@group(0) @binding(7)
+@group(2) @binding(6)
 var normal_sampler: sampler;
 
-@group(0) @binding(8)
+@group(2) @binding(7)
 var emissive_tex: texture_2d<f32>;
-@group(0) @binding(9)
+@group(2) @binding(8)
 var emissive_sampler: sampler;
 
-@group(0) @binding(10)
+@group(2) @binding(9)
 var occlusion_tex: texture_2d<f32>;
-@group(0) @binding(11)
+@group(2) @binding(10)
 var occlusion_sampler: sampler;
 
 // Sheen E LUT (directional albedo of Charlie distribution)
-@group(0) @binding(16)
+@group(2) @binding(11)
 var sheen_e_lut: texture_2d<f32>;
-@group(0) @binding(17)
+@group(2) @binding(12)
 var sheen_e_sampler: sampler;
 
 // Environment cubemaps for IBL
-@group(0) @binding(12)
+@group(2) @binding(13)
 var env_prefiltered: texture_cube<f32>;
-@group(0) @binding(13)
+@group(2) @binding(14)
 var env_prefiltered_sampler: sampler;
 
-@group(0) @binding(14)
+@group(2) @binding(15)
 var env_irradiance: texture_cube<f32>;
-@group(0) @binding(15)
+@group(2) @binding(16)
 var env_irradiance_sampler: sampler;
 
 // Screen-space scene color for transmission refraction
-@group(0) @binding(18)
+// Portable graphics namespace: pass-local images live in group 3.
+@group(3) @binding(0)
 var scene_color_tex: texture_2d<f32>;
-@group(0) @binding(19)
+@group(3) @binding(1)
 var scene_color_sampler: sampler;
 
 // Gaussian-blurred scene color for rough transmission
-@group(0) @binding(20)
+@group(3) @binding(2)
 var scene_color_blurred: texture_2d<f32>;
-@group(0) @binding(21)
+@group(3) @binding(3)
 var scene_color_blurred_sampler: sampler;
 
 // Per-pixel transmission modulator texture (R channel)
-@group(0) @binding(22)
+@group(3) @binding(4)
 var transmission_tex: texture_2d<f32>;
-@group(0) @binding(23)
+@group(3) @binding(5)
 var transmission_tex_sampler: sampler;
 
 struct FragInput {

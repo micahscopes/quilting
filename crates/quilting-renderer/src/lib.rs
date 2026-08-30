@@ -526,11 +526,11 @@ mod tests {
             "vertex shader should have the JointMatrices UBO block"
         );
         assert!(
-            vertex.contains("_group_0_binding_2_vs"),
+            vertex.contains("_group_0_binding_1_vs"),
             "vertex shader should have the skinning texture sampler"
         );
         assert!(
-            vertex.contains("_group_0_binding_3_vs"),
+            vertex.contains("_group_0_binding_2_vs"),
             "vertex shader should have the morph texture sampler"
         );
     }

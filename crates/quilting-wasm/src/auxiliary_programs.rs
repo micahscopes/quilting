@@ -1,11 +1,12 @@
 //! Pure descriptors for lazily-created fullscreen WebGL auxiliary programs.
 
 use quilting_core::render_pipeline::{
-    GraphicsProgramDescriptor, ShaderModuleDescriptor, ShaderStage, ShaderTarget,
+    BindingKind, GraphicsProgramDescriptor, SamplerBindingKind, ShaderModuleDescriptor,
+    ShaderStage, ShaderTarget, TextureSampleKind, TextureViewDimension,
 };
 use quilting_renderer::shader::{
-    WebGlBindingPlan, WebGlBindingSite, WebGlOpaqueBindingKind, WebGlProgramKey,
-    WebGlSamplerBinding, WebGlUniformBlockBinding,
+    WebGlBindingPlan, WebGlBindingSite, WebGlProgramKey, WebGlSamplerBinding,
+    WebGlUniformBlockBinding,
 };
 use std::sync::Arc;
 
@@ -142,6 +143,7 @@ pub(crate) fn auxiliary_program_descriptor(
             binding_point: POST_PROCESS_UNIFORMS_BINDING,
             source_name: "post_process".into(),
             source: WebGlBindingSite::new(0, 0, ShaderStage::Fragment),
+            minimum_size: 16,
         }],
         vec![
             WebGlSamplerBinding {
@@ -149,14 +151,18 @@ pub(crate) fn auxiliary_program_descriptor(
                 texture_unit: 0,
                 source_name: "source_texture".into(),
                 source: WebGlBindingSite::new(0, 1, ShaderStage::Fragment),
-                source_kind: WebGlOpaqueBindingKind::SampledTexture,
+                source_kind: BindingKind::Texture {
+                    sample_kind: TextureSampleKind::FloatFilterable,
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
             },
             WebGlSamplerBinding {
                 name: "_group_0_binding_2_fs".into(),
                 texture_unit: 0,
                 source_name: "source_sampler".into(),
                 source: WebGlBindingSite::new(0, 2, ShaderStage::Fragment),
-                source_kind: WebGlOpaqueBindingKind::Sampler,
+                source_kind: BindingKind::Sampler(SamplerBindingKind::Filtering),
             },
         ],
     )?;

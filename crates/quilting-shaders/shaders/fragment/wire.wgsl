@@ -11,7 +11,8 @@ struct WireUniforms {
     show_density: i32,
 }
 
-@group(0) @binding(1)
+// Portable graphics namespace: material/style state lives in group 2.
+@group(2) @binding(0)
 var<uniform> wire: WireUniforms;
 
 fn heatmap(t_in: f32) -> vec3<f32> {

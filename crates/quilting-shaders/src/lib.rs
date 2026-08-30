@@ -10,6 +10,16 @@ pub enum EntryPointStage {
     Fragment,
 }
 
+/// Stable graphics resource groups shared by WGSL sources and backend layout
+/// descriptors. Individual pipelines may omit unused groups, but a coordinate
+/// never changes responsibility between WebGL2 and WebGPU.
+pub mod graphics_bind_group {
+    pub const FRAME_POSE: u32 = 0;
+    pub const ENTITY_BATCH: u32 = 1;
+    pub const MATERIAL_STYLE: u32 = 2;
+    pub const PASS_RESOURCE: u32 = 3;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ReflectedBindingKind {
     UniformBuffer,
@@ -1734,7 +1744,7 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             );
         }
         assert!(
-            code.contains("_group_0_binding_4_vs"),
+            code.contains("_group_0_binding_3_vs"),
             "patch preparation must fetch immutable source-face data",
         );
     }
