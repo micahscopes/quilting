@@ -469,8 +469,10 @@ for (const animationClockAuthorityStep of [
 }
 for (const animationClipAuthorityStep of [
   "ANIMATION_CLIP_IMPLEMENTATION === 'rust'",
-  "const receipt = app.dispatchAnimationClip(index);",
-  "effect.type === 'select_animation_clip'",
+  "const receipt = app.requestAnimationClip(index);",
+  'const effect = receipt.selection;',
+  'const cancellations = receipt.cancellations;',
+  'if (!receipt.matchesRequest)',
   'rustAppShadow.completeAnimationClipSelected(',
   'rustAppShadow.completeAnimationClipSelectionFailed(',
   'beginAppAnimationClipSelection(idx)',
@@ -482,7 +484,6 @@ for (const animationClipAuthorityStep of [
   "observeAnimationClipResidency('scene-installed', snapshot);",
   "observeAnimationClipResidency('selection-pending');",
   "observeAnimationClipResidency(error ? 'selection-failed' : 'selection-complete', snapshot);",
-  "effect.type === 'cancel_animation_clip_selection'",
   'clipJob.cancellations.length === 0',
   'animationClipDiagnostics.repairs += 1;',
   'rendererAnimationClipIndex = null;',
@@ -495,6 +496,22 @@ for (const animationClipAuthorityStep of [
   assert.ok(
     browserSource.includes(animationClipAuthorityStep),
     `browser animation-clip authority is missing ${animationClipAuthorityStep}`,
+  );
+}
+const animationClipRequestBoundary = browserSource.slice(
+  browserSource.indexOf('function beginAppAnimationClipSelection(index) {'),
+  browserSource.indexOf('function completeAppAnimationClipSelection(',
+);
+for (const retiredAnimationClipParsing of [
+  'receipt.commit.effects.filter(',
+  "effect.type === 'select_animation_clip'",
+  "effect.type === 'cancel_animation_clip_selection'",
+  'snapshot?.animationClipSelection?.active?.clip?.index',
+]) {
+  assert.equal(
+    animationClipRequestBoundary.includes(retiredAnimationClipParsing),
+    false,
+    `browser clip request must not rediscover ${retiredAnimationClipParsing}`,
   );
 }
 for (const navigationAuthorityStep of [

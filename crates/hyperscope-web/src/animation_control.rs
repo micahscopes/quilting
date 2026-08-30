@@ -7,8 +7,11 @@
 //! control intent.
 
 use hyperscope_app::{
-    AnimationAction, AnimationClipSelectionReadModel, AppAnimationSnapshot, AppEffect, AppStore,
+    AnimationAction, AnimationClipSelectionReadModel, AppAnimationSnapshot, AppStore,
     InstalledPrimarySceneReadModel, ReduceError, SemanticAction,
+};
+pub use hyperscope_app::{
+    AnimationClipJobEffect, AnimationClipRequest as AnimationClipControlCommit,
 };
 
 #[cfg(all(feature = "csr", target_arch = "wasm32"))]
@@ -60,23 +63,6 @@ pub struct AnimationClipControlViewModel {
     pub pending_index: Option<u32>,
     pub disabled: bool,
     pub status_label: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AnimationClipJobEffect {
-    pub job_id: u64,
-    pub scene_request_id: String,
-    pub asset_id: String,
-    pub clip_index: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AnimationClipControlCommit {
-    pub sequence: u64,
-    pub revision: u64,
-    pub requested_index: u32,
-    pub selection: Option<AnimationClipJobEffect>,
-    pub cancellations: Vec<AnimationClipJobEffect>,
 }
 
 /// Commit the control's atomic toggle intent through the application reducer.
@@ -242,51 +228,7 @@ pub fn select_animation_clip(
     store: &AppStore,
     index: u32,
 ) -> Result<AnimationClipControlCommit, ReduceError> {
-    let (sequence, commit) =
-        store.dispatch_semantic(SemanticAction::Animate(AnimationAction::SelectClip(index)))?;
-    let mut selection = None;
-    let mut cancellations = Vec::new();
-    for effect in &commit.effects {
-        let (destination, effect) = match effect {
-            AppEffect::SelectAnimationClip {
-                job_id,
-                scene_request_id,
-                asset_id,
-                clip_index,
-            } => (
-                &mut selection,
-                AnimationClipJobEffect {
-                    job_id: *job_id,
-                    scene_request_id: scene_request_id.to_string(),
-                    asset_id: asset_id.to_string(),
-                    clip_index: *clip_index,
-                },
-            ),
-            AppEffect::CancelAnimationClipSelection {
-                job_id,
-                scene_request_id,
-                asset_id,
-                clip_index,
-            } => {
-                cancellations.push(AnimationClipJobEffect {
-                    job_id: *job_id,
-                    scene_request_id: scene_request_id.to_string(),
-                    asset_id: asset_id.to_string(),
-                    clip_index: *clip_index,
-                });
-                continue;
-            }
-            _ => continue,
-        };
-        *destination = Some(effect);
-    }
-    Ok(AnimationClipControlCommit {
-        sequence,
-        revision: commit.revision,
-        requested_index: index,
-        selection,
-        cancellations,
-    })
+    store.request_animation_clip(index)
 }
 
 #[cfg(test)]
@@ -484,8 +426,8 @@ mod tests {
             selected.selection,
             Some(AnimationClipJobEffect {
                 job_id: 0,
-                scene_request_id: request_id.to_string(),
-                asset_id: asset_id.to_string(),
+                scene_request_id: request_id,
+                asset_id,
                 clip_index: 1,
             }),
         );

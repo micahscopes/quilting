@@ -19,7 +19,8 @@ use hyperscape_protocol::{
 };
 use hyperscope_app::{
     session_node_identity, AnimationAction, AnimationClipDescriptor,
-    AnimationClipSelectionCompletion, AnimationClipSelectionOutcome, AnimationClock,
+    AnimationClipJobEffect, AnimationClipSelectionCompletion, AnimationClipSelectionOutcome,
+    AnimationClock,
     AnimationPoseRequestDisposition, AnimationPoseScheduler, AnimationPoseStamp, AppCommit,
     AppEffect, AppEvent, AppFrameSnapshot, AppStore, AssetLoadCompletion, AssetLoadOutcome,
     AssetLoadScope, AssetMetadata, AssetStatus, AuthoredRevision, CommitDisposition,
@@ -1741,6 +1742,30 @@ impl HyperscopeAppShadow {
         })
     }
 
+    /// Request one renderer clip job through the typed application port.
+    /// The generic dispatch method remains a compatibility/evidence seam;
+    /// ordinary browser code must not rediscover selection and cancellation
+    /// jobs by filtering its generic effect list.
+    #[wasm_bindgen(js_name = requestAnimationClip)]
+    pub fn request_animation_clip(&self, index: u32) -> Result<JsValue, JsValue> {
+        let request = self.store.request_animation_clip(index).map_err(js_error)?;
+        to_js(&ShadowAnimationClipRequest {
+            sequence: request.sequence.to_string(),
+            commit: shadow_commit(&request.commit),
+            requested_index: request.requested_index,
+            selection: request
+                .selection
+                .as_ref()
+                .map(ShadowAnimationClipJobEffect::selection),
+            cancellations: request
+                .cancellations
+                .iter()
+                .map(ShadowAnimationClipJobEffect::cancellation)
+                .collect(),
+            matches_request: request.matches_request,
+        })
+    }
+
     #[wasm_bindgen(js_name = completeAnimationClipSelected)]
     pub fn complete_animation_clip_selected(
         &self,
@@ -3198,6 +3223,47 @@ struct ShadowAnimationClip {
 struct ShadowAnimationClipSelection {
     active: Option<ShadowActiveAnimationClip>,
     pending: Option<ShadowPendingAnimationClip>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowAnimationClipRequest {
+    sequence: String,
+    commit: ShadowCommit,
+    requested_index: u32,
+    selection: Option<ShadowAnimationClipJobEffect>,
+    cancellations: Vec<ShadowAnimationClipJobEffect>,
+    matches_request: bool,
+}
+
+#[derive(Serialize)]
+struct ShadowAnimationClipJobEffect {
+    #[serde(rename = "type")]
+    effect_type: &'static str,
+    job_id: String,
+    scene_request_id: String,
+    asset_id: String,
+    clip_index: u32,
+}
+
+impl ShadowAnimationClipJobEffect {
+    fn selection(effect: &AnimationClipJobEffect) -> Self {
+        Self::new("select_animation_clip", effect)
+    }
+
+    fn cancellation(effect: &AnimationClipJobEffect) -> Self {
+        Self::new("cancel_animation_clip_selection", effect)
+    }
+
+    fn new(effect_type: &'static str, effect: &AnimationClipJobEffect) -> Self {
+        Self {
+            effect_type,
+            job_id: effect.job_id.to_string(),
+            scene_request_id: effect.scene_request_id.to_string(),
+            asset_id: effect.asset_id.to_string(),
+            clip_index: effect.clip_index,
+        }
+    }
 }
 
 #[derive(Serialize)]

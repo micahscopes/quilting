@@ -679,6 +679,29 @@ pub struct AnimationClipSelectionReadModel {
     pub pending: Option<PendingAnimationClipReadModel>,
 }
 
+/// One renderer job allocated by the animation-clip reducer. Adapters execute
+/// this exact identity and must return it unchanged in the completion event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnimationClipJobEffect {
+    pub job_id: u64,
+    pub scene_request_id: RequestId,
+    pub asset_id: AssetId,
+    pub clip_index: u32,
+}
+
+/// Typed result of one local clip request. This is the shared application port
+/// for Leptos, WASM, and future Blender/session adapters; none of them should
+/// rediscover job semantics by filtering a generic [`AppCommit`] effect list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnimationClipRequest {
+    pub sequence: u64,
+    pub commit: AppCommit,
+    pub requested_index: u32,
+    pub selection: Option<AnimationClipJobEffect>,
+    pub cancellations: Vec<AnimationClipJobEffect>,
+    pub matches_request: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiagnosticReadModel {
     pub revision: u64,
@@ -2180,6 +2203,63 @@ impl AppStore {
             self.flush_read_models();
         }
         Ok((sequence, commit))
+    }
+
+    /// Request one installed animation clip and project the reducer's exact
+    /// asynchronous job protocol into a typed receipt.
+    pub fn request_animation_clip(
+        &self,
+        index: u32,
+    ) -> Result<AnimationClipRequest, ReduceError> {
+        let (sequence, commit) =
+            self.dispatch_semantic(SemanticAction::Animate(AnimationAction::SelectClip(index)))?;
+        let mut selection = None;
+        let mut cancellations = Vec::new();
+        for effect in &commit.effects {
+            let job = match effect {
+                AppEffect::SelectAnimationClip {
+                    job_id,
+                    scene_request_id,
+                    asset_id,
+                    clip_index,
+                }
+                | AppEffect::CancelAnimationClipSelection {
+                    job_id,
+                    scene_request_id,
+                    asset_id,
+                    clip_index,
+                } => AnimationClipJobEffect {
+                    job_id: *job_id,
+                    scene_request_id: *scene_request_id,
+                    asset_id: *asset_id,
+                    clip_index: *clip_index,
+                },
+                _ => continue,
+            };
+            match effect {
+                AppEffect::SelectAnimationClip { .. } => {
+                    debug_assert!(selection.is_none());
+                    selection = Some(job);
+                }
+                AppEffect::CancelAnimationClipSelection { .. } => cancellations.push(job),
+                _ => unreachable!(),
+            }
+        }
+        debug_assert!(cancellations.len() <= 1);
+        let state = self.animation_clip_selection_snapshot();
+        let selected_index = state
+            .pending
+            .as_ref()
+            .map(|pending| pending.clip.index)
+            .or_else(|| state.active.as_ref().map(|active| active.clip.index));
+        Ok(AnimationClipRequest {
+            sequence,
+            commit,
+            requested_index: index,
+            selection,
+            cancellations,
+            matches_request: selected_index == Some(index),
+        })
     }
 
     /// Reconcile a complete adapter projection with navigation settings under
@@ -3699,11 +3779,22 @@ mod tests {
         );
         assert_eq!(store.summary_snapshot().revision, installed_revision);
 
-        let (_, first) = store
-            .dispatch_semantic(SemanticAction::Animate(AnimationAction::SelectClip(1)))
-            .unwrap();
+        let first = store.request_animation_clip(1).unwrap();
+        assert_eq!(first.sequence, 2);
+        assert_eq!(first.requested_index, 1);
+        assert!(first.matches_request);
         assert_eq!(
-            first.effects,
+            first.selection,
+            Some(AnimationClipJobEffect {
+                job_id: 0,
+                scene_request_id: request_id,
+                asset_id: horse.id,
+                clip_index: 1,
+            }),
+        );
+        assert!(first.cancellations.is_empty());
+        assert_eq!(
+            first.commit.effects,
             vec![AppEffect::SelectAnimationClip {
                 job_id: 0,
                 scene_request_id: request_id,
@@ -3721,16 +3812,26 @@ mod tests {
             0,
             "pending renderer work must not change the sampled active clip",
         );
-        let (_, duplicate) = store
-            .dispatch_semantic(SemanticAction::Animate(AnimationAction::SelectClip(1)))
-            .unwrap();
-        assert!(duplicate.effects.is_empty());
+        let duplicate = store.request_animation_clip(1).unwrap();
+        assert!(duplicate.commit.effects.is_empty());
+        assert!(duplicate.selection.is_none());
+        assert!(duplicate.cancellations.is_empty());
+        assert!(duplicate.matches_request);
 
-        let (_, back_to_active) = store
-            .dispatch_semantic(SemanticAction::Animate(AnimationAction::SelectClip(0)))
-            .unwrap();
+        let back_to_active = store.request_animation_clip(0).unwrap();
+        assert!(back_to_active.selection.is_none());
         assert_eq!(
-            back_to_active.effects,
+            back_to_active.cancellations,
+            vec![AnimationClipJobEffect {
+                job_id: 0,
+                scene_request_id: request_id,
+                asset_id: horse.id,
+                clip_index: 1,
+            }],
+        );
+        assert!(back_to_active.matches_request);
+        assert_eq!(
+            back_to_active.commit.effects,
             vec![AppEffect::CancelAnimationClipSelection {
                 job_id: 0,
                 scene_request_id: request_id,

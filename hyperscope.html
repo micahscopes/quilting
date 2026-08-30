@@ -5196,13 +5196,6 @@ function ensureRustAnimationClipControlView() {
       host,
       (index, sequence, revision, effect, cancellations) => {
         try {
-          if (effect != null && effect.type !== 'select_animation_clip') {
-            throw new Error('Rust animation clip view emitted an invalid selection effect');
-          }
-          if (!Array.isArray(cancellations)
-              || cancellations.some(item => item?.type !== 'cancel_animation_clip_selection')) {
-            throw new Error('Rust animation clip view emitted invalid cancellation effects');
-          }
           observeRustAppShadowSequence(sequence, 'Rust animation clip control');
           const effects = effect == null ? [...cancellations] : [...cancellations, effect];
           rustAppShadowDiagnostics.lastCommit = {
@@ -9180,44 +9173,27 @@ function beginAppAnimationClipSelection(index) {
   const app = ensureRustAppShadow('animation-clip-selection');
   animationClipDiagnostics.dispatches += 1;
   animationClipDiagnostics.lastRequestedClip = index;
-  const receipt = app.dispatchAnimationClip(index);
+  const receipt = app.requestAnimationClip(index);
   observeRustAppShadowSequence(receipt.sequence, 'Rust animation clip adapter');
   rustAppShadowDiagnostics.lastCommit = receipt.commit;
-  const selections = receipt.commit.effects.filter(
-    effect => effect.type === 'select_animation_clip',
-  );
-  const cancellations = receipt.commit.effects.filter(
-    effect => effect.type === 'cancel_animation_clip_selection',
-  );
-  if (cancellations.length > 1) {
-    throw new Error('Rust animation clip request emitted multiple cancellation effects');
-  }
+  const effect = receipt.selection;
+  const cancellations = receipt.cancellations;
   animationClipDiagnostics.cancellationEffects += cancellations.length;
-  if (selections.length === 0) {
+  if (!receipt.matchesRequest) {
+    recordAppShadowMismatch(
+      'animation_clip_request',
+      `requested clip ${index} did not become Rust active or pending intent`,
+    );
+    throw new Error('Rust animation clip request did not commit its requested intent');
+  }
+  if (!effect) {
     animationClipDiagnostics.noops += 1;
     const snapshot = refreshAppShadowSnapshot();
-    const active = snapshot?.animationClipSelection?.active?.clip?.index;
-    if (active !== index) {
-      throw new Error('Rust animation clip request emitted no effect for a divergent clip');
-    }
     observeAnimationClipResidency('selection-noop', snapshot);
     return { receipt, effect: null, cancellations };
   }
-  if (selections.length !== 1) {
-    throw new Error('Rust animation clip request must emit exactly one selection effect');
-  }
-  const effect = selections[0];
   animationClipDiagnostics.effects += 1;
   animationClipDiagnostics.lastJobId = effect.job_id;
-  if (effect.clip_index !== index) {
-    recordAppShadowMismatch(
-      'animation_clip_effect',
-      `requested clip ${index}, Rust selected ${effect.clip_index}`,
-    );
-    if (ANIMATION_CLIP_IMPLEMENTATION === 'rust') {
-      throw new Error('Rust animation clip effect diverged from browser intent');
-    }
-  }
   observeAnimationClipResidency('selection-pending');
   return { receipt, effect, cancellations };
 }

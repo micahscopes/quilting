@@ -230,7 +230,7 @@ fn emit_clip_commit(callback: &Function, committed: &AnimationClipControlCommit)
     let arguments = Array::new();
     arguments.push(&JsValue::from_f64(f64::from(committed.requested_index)));
     arguments.push(&JsValue::from_str(&committed.sequence.to_string()));
-    arguments.push(&JsValue::from_str(&committed.revision.to_string()));
+    arguments.push(&JsValue::from_str(&committed.commit.revision.to_string()));
     arguments.push(
         &committed
             .selection
@@ -256,9 +256,9 @@ fn clip_effect_to_js(effect_type: &str, effect: &AnimationClipJobEffect) -> JsVa
         ("job_id", JsValue::from_str(&effect.job_id.to_string())),
         (
             "scene_request_id",
-            JsValue::from_str(&effect.scene_request_id),
+            JsValue::from_str(&effect.scene_request_id.to_string()),
         ),
-        ("asset_id", JsValue::from_str(&effect.asset_id)),
+        ("asset_id", JsValue::from_str(&effect.asset_id.to_string())),
         (
             "clip_index",
             JsValue::from_f64(f64::from(effect.clip_index)),
