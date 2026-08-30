@@ -4149,9 +4149,42 @@ pub fn mr_pick_surface(
         let barycentric_array = js_sys::Float32Array::new_with_length(3);
         barycentric_array.copy_from(&barycentric);
         let node = state.face_nodes.get(face as usize).copied().unwrap_or(0);
+        let barycentric_f64 = barycentric.map(f64::from);
+        let conformal = conformal_state_for_node(state, node);
+        let source_position = state
+            .surface_runtime
+            .sample_face_in_parent_chart(
+                &state.cached_instances,
+                face as usize,
+                barycentric_f64,
+                conformal.euclidean_model,
+            )
+            .ok()
+            .map(|sample| sample.output_position);
+        let output_position = state
+            .surface_runtime
+            .output_patch_for_face(
+                &state.cached_instances,
+                face as usize,
+                conformal.mobius,
+                conformal.euclidean_model,
+            )
+            .ok()
+            .map(|patch| patch.eval(barycentric_f64[1], barycentric_f64[2]).to_point())
+            .filter(|point| point.iter().all(|coordinate| coordinate.is_finite()));
         js_sys::Reflect::set(&result, &"face".into(), &JsValue::from_f64(face as f64)).ok();
         js_sys::Reflect::set(&result, &"node".into(), &JsValue::from_f64(node as f64)).ok();
         js_sys::Reflect::set(&result, &"barycentric".into(), &barycentric_array).ok();
+        for (name, position) in [
+            ("source_position", source_position),
+            ("output_position", output_position),
+        ] {
+            if let Some(position) = position {
+                let array = js_sys::Float64Array::new_with_length(3);
+                array.copy_from(&position);
+                js_sys::Reflect::set(&result, &name.into(), &array).ok();
+            }
+        }
         result.into()
     })
 }

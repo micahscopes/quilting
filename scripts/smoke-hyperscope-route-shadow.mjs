@@ -570,6 +570,17 @@ for (const interactionBoundaryStep of [
     `generated WASM interaction boundary is missing ${interactionBoundaryStep}`,
   );
 }
+for (const exactPickStep of [
+  '.sample_face_in_parent_chart(',
+  '.output_patch_for_face(',
+  '("source_position", source_position)',
+  '("output_position", output_position)',
+]) {
+  assert.ok(
+    mainRendererSource.includes(exactPickStep),
+    `renderer interaction pick is missing ${exactPickStep}`,
+  );
+}
 for (const interactionAuthorityStep of [
   'interaction: InteractionController,',
   'SemanticAction::Interact(action) => {',
