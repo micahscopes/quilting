@@ -1,6 +1,10 @@
-use super::{project_render_controls, RenderControlIntent, RenderControlsViewModel};
+use super::{
+    project_render_controls, set_render_controls, RenderControlCommit, RenderControlIntent,
+    RenderControlsViewModel,
+};
+use crate::effect_js::patch_lab_effect_to_js;
 use futures_signals::signal::SignalExt as _;
-use hyperscope_app::{AppStore, SemanticAction};
+use hyperscope_app::AppStore;
 use js_sys::{Array, Function};
 use leptos::mount::mount_to;
 use leptos::prelude::*;
@@ -216,32 +220,22 @@ fn submit_intent(
     // published Leptos signal is a view projection and may legitimately lag a
     // rapid sequence of input events by one microtask.
     let intent = update(project_render_controls(&store.render_snapshot()));
-    let settings = match intent.into_settings() {
-        Ok(settings) => settings,
-        Err(error) => {
-            emit_error(error_callback, error);
-            return;
-        }
-    };
-    let (sequence, _) = match store.dispatch_semantic(SemanticAction::SetRenderSettings(settings)) {
+    let committed = match set_render_controls(store, intent) {
         Ok(committed) => committed,
         Err(error) => {
             emit_error(error_callback, &error.to_string());
             return;
         }
     };
-    emit_committed(
-        callback,
-        sequence,
-        project_render_controls(&store.render_snapshot()).value,
-    );
+    emit_committed(callback, &committed);
 }
 
 fn emit_error(callback: &Function, message: &str) {
     let _ = callback.call1(&JsValue::UNDEFINED, &JsValue::from_str(message));
 }
 
-fn emit_committed(callback: &Function, sequence: u64, intent: RenderControlIntent) {
+fn emit_committed(callback: &Function, committed: &RenderControlCommit) {
+    let intent = committed.value;
     let arguments = Array::new();
     arguments.push(&JsValue::from_str(intent.style));
     arguments.push(&JsValue::from_f64(f64::from(intent.resolution_level)));
@@ -250,6 +244,11 @@ fn emit_committed(callback: &Function, sequence: u64, intent: RenderControlInten
     arguments.push(&JsValue::from_f64(intent.min_pixels_per_subdivision));
     arguments.push(&JsValue::from_f64(f64::from(intent.atlas_exponent)));
     arguments.push(&JsValue::from_f64(f64::from(intent.max_face_edge_ratio)));
-    arguments.push(&JsValue::from(sequence));
+    arguments.push(&JsValue::from(committed.sequence));
+    let effects = Array::new();
+    for effect in &committed.patch_lab_effects {
+        effects.push(&patch_lab_effect_to_js(effect));
+    }
+    arguments.push(&effects);
     let _ = callback.apply(&JsValue::UNDEFINED, &arguments);
 }

@@ -4874,6 +4874,7 @@ function ensureRustRenderSettingsView() {
         atlasExponent,
         maxFaceEdgeRatio,
         sequence,
+        effects,
       ) => {
         try {
           observeRustAppShadowSequence(sequence, 'Rust render control');
@@ -4889,6 +4890,7 @@ function ensureRustRenderSettingsView() {
           rustRenderSettingsDiagnostics.dispatches += 1;
           rustRenderSettingsDiagnostics.lastRust = rust;
           rustRenderSettingsDiagnostics.lastDispatchSource = 'leptos-control';
+          observeRustPatchLabEffects(effects || [], 'leptos-render-control');
           applyRustRenderSettingsProjection(rust);
           rustRenderSettingsDiagnostics.authorityWrites += 1;
         } catch (error) {

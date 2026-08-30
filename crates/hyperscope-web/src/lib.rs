@@ -9,6 +9,9 @@
 #[cfg(any(feature = "patch-lab", feature = "render-controls"))]
 mod controls;
 
+#[cfg(all(feature = "csr", target_arch = "wasm32"))]
+mod effect_js;
+
 #[cfg(feature = "animation-control")]
 pub mod animation_control;
 

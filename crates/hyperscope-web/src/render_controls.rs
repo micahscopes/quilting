@@ -7,7 +7,10 @@
 
 use crate::controls::numeric_control_domain;
 pub use crate::controls::NumericControlViewDomain;
-use hyperscope_app::{AppRenderSnapshot, RenderSettings};
+use hyperscope_app::{
+    AppEffect, AppRenderSnapshot, AppStore, PatchLabEffect, ReduceError, RenderSettings,
+    SemanticAction,
+};
 
 #[cfg(all(feature = "csr", target_arch = "wasm32"))]
 mod csr;
@@ -40,6 +43,57 @@ impl RenderControlIntent {
         )
     }
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderControlCommit {
+    pub sequence: u64,
+    pub revision: u64,
+    pub value: RenderControlIntent,
+    pub patch_lab_effects: Vec<PatchLabEffect>,
+}
+
+pub fn set_render_controls(
+    store: &AppStore,
+    intent: RenderControlIntent,
+) -> Result<RenderControlCommit, RenderControlError> {
+    let settings = intent
+        .into_settings()
+        .map_err(RenderControlError::InvalidSettings)?;
+    let (sequence, commit) = store
+        .dispatch_semantic(SemanticAction::SetRenderSettings(settings))
+        .map_err(RenderControlError::Reduce)?;
+    let patch_lab_effects = commit
+        .effects
+        .into_iter()
+        .filter_map(|effect| match effect {
+            AppEffect::PatchLab(effect) => Some(effect),
+            _ => None,
+        })
+        .collect();
+    Ok(RenderControlCommit {
+        sequence,
+        revision: commit.revision,
+        value: project_render_controls(&store.render_snapshot()).value,
+        patch_lab_effects,
+    })
+}
+
+#[derive(Debug)]
+pub enum RenderControlError {
+    InvalidSettings(&'static str),
+    Reduce(ReduceError),
+}
+
+impl std::fmt::Display for RenderControlError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidSettings(error) => formatter.write_str(error),
+            Self::Reduce(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for RenderControlError {}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RenderControlsViewModel {
@@ -126,7 +180,11 @@ pub fn project_render_controls(snapshot: &AppRenderSnapshot) -> RenderControlsVi
 mod tests {
     use super::*;
     use hyperscape::{PresentationTessellation, RenderStyle};
-    use hyperscope_app::RenderSettings;
+    use hyperscope_app::{
+        AppEvent, EffectCompletion, PatchLabCompletion, PatchLabGeometryCompletion,
+        PatchLabGeometryOutcome, PatchLabLodCompletion, PatchLabLodOutcome, PatchLabLodSummary,
+        PatchLabSessionIntent, RenderSettings,
+    };
 
     #[test]
     fn projection_uses_committed_settings_and_canonical_domains() {
@@ -167,5 +225,70 @@ mod tests {
             .into_settings(),
             Err("unknown backend-neutral render style"),
         );
+    }
+
+    #[test]
+    fn control_dispatch_returns_committed_value_and_adapter_effects() {
+        let store = AppStore::default();
+        let intent = project_render_controls(&store.render_snapshot()).with_atlas(8);
+        let committed = set_render_controls(&store, intent).unwrap();
+        assert_eq!(committed.sequence, 0);
+        assert_eq!(committed.revision, 1);
+        assert_eq!(committed.value.atlas_exponent, 8);
+        assert!(committed.patch_lab_effects.is_empty());
+        assert_eq!(store.render_snapshot().settings.atlas_exponent, 8);
+    }
+
+    #[test]
+    fn atlas_edit_returns_the_cross_domain_patch_lab_job() {
+        let store = AppStore::default();
+        store
+            .dispatch_semantic(SemanticAction::SetPatchLab(PatchLabSessionIntent {
+                active: true,
+                controls: Default::default(),
+            }))
+            .unwrap();
+        store
+            .dispatch(AppEvent::EffectCompleted(EffectCompletion::PatchLab(
+                PatchLabCompletion::Geometry(PatchLabGeometryCompletion {
+                    job_id: 0,
+                    outcome: PatchLabGeometryOutcome::Built {
+                        vertex_count: 3,
+                        face_count: 1,
+                    },
+                }),
+            )))
+            .unwrap();
+        store
+            .dispatch(AppEvent::EffectCompleted(EffectCompletion::PatchLab(
+                PatchLabCompletion::Lod(PatchLabLodCompletion {
+                    job_id: 1,
+                    geometry_job_id: 0,
+                    outcome: PatchLabLodOutcome::Evaluated(PatchLabLodSummary {
+                        requested_first_face: Some([8, 16, 16]),
+                        resident_first_face: Some([8, 16, 16]),
+                        promoted_faces: 0,
+                        promoted_edges: 0,
+                        shared_edges: 0,
+                        shared_edge_mismatches: 0,
+                        max_face_edge_ratio: 2,
+                        rendered_triangles: 256,
+                        histogram: Vec::new(),
+                    }),
+                }),
+            )))
+            .unwrap();
+
+        let intent = project_render_controls(&store.render_snapshot()).with_atlas(8);
+        let committed = set_render_controls(&store, intent).unwrap();
+        assert_eq!(committed.patch_lab_effects.len(), 1);
+        assert!(matches!(
+            committed.patch_lab_effects[0],
+            PatchLabEffect::EvaluateLod {
+                job_id: 2,
+                geometry_job_id: 0,
+                ..
+            }
+        ));
     }
 }
