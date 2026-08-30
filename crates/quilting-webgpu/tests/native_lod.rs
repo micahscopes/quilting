@@ -23,9 +23,10 @@ use quilting_renderer::compute::{
     LodSubjectState, PackedLodClassification, PreparedLodModel, WgslLodDispatchMetrics,
 };
 use quilting_webgpu::{
-    resident_root_render_domains, supports_basic_pbr_frame, supports_patch_presentation_style,
-    supports_resident_root_render_scene, supports_resident_root_render_style, LodClassifierDevice,
-    LodPose, OffscreenPatchRenderTarget, PatchRenderSceneUpdate, PbrTextureTableUpdate,
+    resident_root_render_domains, supports_basic_pbr_frame, supports_focus_pbr_frame,
+    supports_patch_presentation_style, supports_resident_root_render_scene,
+    supports_resident_root_render_style, LodClassifierDevice, LodPose, OffscreenPatchRenderTarget,
+    PatchRenderSceneUpdate, PbrTextureTableUpdate,
 };
 
 #[test]
@@ -239,6 +240,36 @@ fn shared_render_frame_fixture() -> (PreparedLodModel, Vec<f32>, RenderSceneSnap
     )
     .unwrap();
     (prepared, source_instances, scene, frame)
+}
+
+#[test]
+fn basic_and_focus_pbr_capabilities_are_explicitly_disjoint() {
+    let (_, _, scene, _) = shared_render_frame_fixture();
+    let focus_options = RenderFrameOptions {
+        focus_postprocess: Some(quilting_core::render::FocusPostprocessPacket {
+            mode: quilting_core::render::FocusPostprocessMode::Spheroidal,
+            blur_radius_pixels: 11,
+            blur_strength: 1.0,
+            focus_coordinate: 0.5,
+            bandwidth: 0.1,
+            normalize_range: false,
+            stretch_range: [0.5, 0.5],
+            gaussian_passes: 1,
+            kawase_passes: 3,
+            kawase_offset: 1.5,
+        }),
+        ..RenderFrameOptions::default()
+    };
+    assert!(supports_basic_pbr_frame(
+        &scene,
+        RenderFrameOptions::default(),
+    ));
+    assert!(!supports_focus_pbr_frame(
+        &scene,
+        RenderFrameOptions::default(),
+    ));
+    assert!(!supports_basic_pbr_frame(&scene, focus_options));
+    assert!(supports_focus_pbr_frame(&scene, focus_options));
 }
 
 fn metrics(atlas: &LodAtlasLookup, pixel_floor: f32, num_joints: u32) -> WgslLodDispatchMetrics {

@@ -281,6 +281,14 @@ impl FocusPostprocessPipelines {
 }
 
 impl LodClassifierDevice {
+    /// Create the fixed-format composer paired with the browser parity target
+    /// without exposing backend texture enums to the WASM adapter.
+    pub fn create_offscreen_focus_postprocess_pipelines(
+        &self,
+    ) -> Result<FocusPostprocessPipelines, LodWebGpuError> {
+        self.create_focus_postprocess_pipelines(wgpu::TextureFormat::Rgba8Unorm)
+    }
+
     pub fn create_focus_postprocess_pipelines(
         &self,
         output_format: wgpu::TextureFormat,

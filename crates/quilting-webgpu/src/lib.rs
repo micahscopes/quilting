@@ -985,6 +985,14 @@ pub fn supports_basic_pbr_frame(scene: &RenderSceneSnapshot, options: RenderFram
     validate_basic_pbr_frame(scene, options).is_ok()
 }
 
+/// Whether the authored PBR subset can execute through the focus MRT and
+/// retained post-processing schedule. This is intentionally distinct from
+/// [`supports_basic_pbr_frame`]: callers must never admit a focus packet to a
+/// single-target PBR pipeline or silently discard the composition request.
+pub fn supports_focus_pbr_frame(scene: &RenderSceneSnapshot, options: RenderFrameOptions) -> bool {
+    validate_focus_pbr_frame(scene, options).is_ok()
+}
+
 fn validate_basic_pbr_frame(
     scene: &RenderSceneSnapshot,
     options: RenderFrameOptions,
@@ -7509,6 +7517,20 @@ impl PatchRenderScene {
     /// without semantic lowering or placeholder substitution.
     pub fn supports_resident_basic_pbr_frame(&self, options: RenderFrameOptions) -> bool {
         supports_basic_pbr_frame(&self.scene, options)
+            && self.pbr_texture_residency().is_some_and(|residency| {
+                residency
+                    .iter()
+                    .all(|material| material.unresolved_mask() == 0)
+            })
+            && self
+                .pbr_environment_bindings()
+                .is_some_and(PbrEnvironmentBindings::is_resident)
+    }
+
+    /// Whether this coherent scene epoch can execute the focus-aware PBR
+    /// path without lowering authored materials or substituting resources.
+    pub fn supports_resident_focus_pbr_frame(&self, options: RenderFrameOptions) -> bool {
+        supports_focus_pbr_frame(&self.scene, options)
             && self.pbr_texture_residency().is_some_and(|residency| {
                 residency
                     .iter()
