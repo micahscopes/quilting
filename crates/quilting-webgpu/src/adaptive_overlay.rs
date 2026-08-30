@@ -36,6 +36,49 @@ pub struct ResidentAdaptiveFrameEncoding {
     pub overlay: Option<AdaptiveOverlayFrameEncoding>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FocusResidentAdaptiveFrameEncoding {
+    pub scene: ResidentAdaptiveFrameEncoding,
+    pub postprocess: FocusPostprocessEncoding,
+}
+
+#[derive(Clone, Copy)]
+enum AdaptiveRenderPipelines<'a> {
+    Diagnostic(&'a DiagnosticPatchRenderPipelines),
+    Focus(&'a FocusPbrPatchRenderPipeline),
+}
+
+impl<'a> AdaptiveRenderPipelines<'a> {
+    fn is_focus(self) -> bool {
+        matches!(self, Self::Focus(_))
+    }
+
+    fn get_for_pass(
+        self,
+        pass: RenderPass,
+        geometry: RenderGeometry,
+    ) -> Result<&'a PatchRenderPipeline, LodWebGpuError> {
+        match self {
+            Self::Diagnostic(pipelines) => pipelines.get_for_pass(pass, geometry),
+            Self::Focus(pipeline)
+                if pass == RenderPass::PbrOpaque && geometry == RenderGeometry::Triangles =>
+            {
+                Ok(&pipeline.inner)
+            }
+            Self::Focus(_) => Err(LodWebGpuError::Payload(format!(
+                "adaptive focus PBR cannot lower {pass:?}/{geometry:?}",
+            ))),
+        }
+    }
+
+    fn highlight(self) -> Option<&'a PatchRenderPipeline> {
+        match self {
+            Self::Diagnostic(pipelines) => Some(&pipelines.highlight),
+            Self::Focus(_) => None,
+        }
+    }
+}
+
 impl AdaptiveOverlayScene {
     pub fn scene_revision(&self) -> u64 {
         self.scene_revision
@@ -165,6 +208,25 @@ impl LodClassifierDevice {
         }
         self.upload_adaptive_overlay_scene_with_resources(
             pipeline,
+            model,
+            roots,
+            scene,
+            textures,
+            environment,
+        )
+    }
+
+    pub fn upload_focus_adaptive_overlay_scene_with_pbr_resources(
+        &self,
+        pipeline: &FocusPbrPatchRenderPipeline,
+        model: &LodClassifierModel,
+        roots: &ResidentRootPreparationScene,
+        scene: &RenderSceneSnapshot,
+        textures: Option<&PbrTextureTable>,
+        environment: Option<&PbrEnvironmentMap>,
+    ) -> Result<Option<AdaptiveOverlayScene>, LodWebGpuError> {
+        self.upload_adaptive_overlay_scene_with_resources(
+            &pipeline.inner,
             model,
             roots,
             scene,
@@ -347,7 +409,7 @@ impl LodClassifierDevice {
         model: &LodClassifierModel,
         resident: &DeviceResidentLod<'_>,
         overlay: &AdaptiveOverlayScene,
-        pipelines: &DiagnosticPatchRenderPipelines,
+        pipelines: AdaptiveRenderPipelines<'_>,
         validate_frame: bool,
     ) -> Result<(), LodWebGpuError> {
         if validate_frame {
@@ -357,12 +419,19 @@ impl LodClassifierDevice {
         }
         let pbr_supported = frame.style == RenderStyle::Pbr
             && overlay.supports_resident_basic_pbr()
-            && validate_basic_pbr_frame(scene, frame.options).is_ok();
-        if !(supports_patch_presentation_style(frame.style) || pbr_supported)
+            && if pipelines.is_focus() {
+                validate_focus_pbr_frame(scene, frame.options).is_ok()
+            } else {
+                validate_basic_pbr_frame(scene, frame.options).is_ok()
+            };
+        let diagnostic_supported =
+            !pipelines.is_focus() && supports_patch_presentation_style(frame.style);
+        if !(diagnostic_supported || pbr_supported)
             || render_draw_passes(frame.style)
                 .iter()
                 .filter(|draw| draw.pass != RenderPass::PbrTransparent)
                 .any(|draw| pipelines.get_for_pass(draw.pass, draw.geometry).is_err())
+            || (pipelines.is_focus() && frame.options.highlight_face.is_some())
         {
             return Err(LodWebGpuError::Payload(format!(
                 "adaptive overlay renderer does not support {:?}",
@@ -409,8 +478,21 @@ impl LodClassifierDevice {
         use_qb: bool,
     ) -> Result<AdaptiveOverlayFrameEncoding, LodWebGpuError> {
         self.encode_adaptive_overlay_impl(
-            encoder, frame, scene, model, resident, overlay, pipelines, atlas, target, pose,
-            num_joints, use_qb, true, true,
+            encoder,
+            frame,
+            scene,
+            model,
+            resident,
+            overlay,
+            AdaptiveRenderPipelines::Diagnostic(pipelines),
+            atlas,
+            target,
+            None,
+            pose,
+            num_joints,
+            use_qb,
+            true,
+            true,
         )
     }
 
@@ -423,9 +505,10 @@ impl LodClassifierDevice {
         model: &LodClassifierModel,
         resident: &DeviceResidentLod<'_>,
         overlay: &'resource AdaptiveOverlayScene,
-        pipelines: &'resource DiagnosticPatchRenderPipelines,
+        pipelines: AdaptiveRenderPipelines<'resource>,
         atlas: &'resource PackedPatchAtlas,
         target: PatchRenderTarget<'resource>,
+        raw_field_target: Option<&'resource wgpu::TextureView>,
         pose: LodPose<'_>,
         num_joints: u32,
         use_qb: bool,
@@ -495,17 +578,40 @@ impl LodClassifierDevice {
                     }),
                     stencil_ops: None,
                 });
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("quilting adaptive overlay frame"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target.color_view,
+        if pipelines.is_focus() != raw_field_target.is_some() {
+            return Err(LodWebGpuError::Payload(
+                "adaptive focus pipeline and raw-field target must be paired".to_string(),
+            ));
+        }
+        let primary_attachment = Some(wgpu::RenderPassColorAttachment {
+            view: target.color_view,
+            depth_slice: None,
+            resolve_target: target.resolve_target,
+            ops: wgpu::Operations {
+                load: color_load,
+                store: wgpu::StoreOp::Store,
+            },
+        });
+        let raw_attachment = raw_field_target.map(|view| {
+            Some(wgpu::RenderPassColorAttachment {
+                view,
                 depth_slice: None,
-                resolve_target: target.resolve_target,
+                resolve_target: None,
                 ops: wgpu::Operations {
-                    load: color_load,
+                    load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
-            })],
+            })
+        });
+        let color_attachments = [primary_attachment, raw_attachment.flatten()];
+        let color_attachments = if pipelines.is_focus() {
+            &color_attachments[..]
+        } else {
+            &color_attachments[..1]
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("quilting adaptive overlay frame"),
+            color_attachments,
             depth_stencil_attachment,
             timestamp_writes: None,
             occlusion_query_set: None,
@@ -565,15 +671,22 @@ impl LodClassifierDevice {
                 } else {
                     PatchWinding::CounterClockwise
                 };
-                pipelines.highlight.draw_batch(
-                    &mut pass,
-                    &overlay.bindings,
-                    &overlay.visibility,
-                    draw,
-                    batch_index as u32,
-                    0,
-                    winding,
-                )?;
+                pipelines
+                    .highlight()
+                    .ok_or_else(|| {
+                        LodWebGpuError::Payload(
+                            "adaptive focus PBR has no source-face highlight pipeline".to_string(),
+                        )
+                    })?
+                    .draw_batch(
+                        &mut pass,
+                        &overlay.bindings,
+                        &overlay.visibility,
+                        draw,
+                        batch_index as u32,
+                        0,
+                        winding,
+                    )?;
                 indirect_draw_calls = indirect_draw_calls.saturating_add(1);
             }
         }
@@ -663,7 +776,7 @@ impl LodClassifierDevice {
                     model,
                     resident,
                     overlay,
-                    overlay_pipelines,
+                    AdaptiveRenderPipelines::Diagnostic(overlay_pipelines),
                     atlas,
                     PatchRenderTarget {
                         color_view,
@@ -672,6 +785,7 @@ impl LodClassifierDevice {
                         clear_color: None,
                         clear_depth: None,
                     },
+                    None,
                     pose,
                     num_joints,
                     use_qb,
@@ -687,6 +801,199 @@ impl LodClassifierDevice {
             logical_submission,
             roots: root_encoding,
             overlay: overlay_encoding,
+        })
+    }
+
+    /// Encode roots and sparse dyadic replacements into one focus MRT before
+    /// running composition. The overlay loads both root attachments, so a
+    /// suppressed root and its replacement cannot disappear between passes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_focus_resident_adaptive<'resource>(
+        &'resource self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &RenderFrame,
+        scene: &RenderSceneSnapshot,
+        model: &LodClassifierModel,
+        resident: &DeviceResidentLod<'_>,
+        roots: &'resource ResidentRootPreparationScene,
+        root_geometry: &'resource ResidentGeometryBucketScene,
+        root_pipeline: &'resource ResidentRootRenderPipeline,
+        root_bindings: &'resource ResidentRootRenderBindings,
+        overlay_pipeline: &'resource FocusPbrPatchRenderPipeline,
+        overlay: Option<&'resource AdaptiveOverlayScene>,
+        atlas: &'resource PackedPatchAtlas,
+        focus_pipelines: &FocusPostprocessPipelines,
+        focus_target: &'resource FocusPostprocessTarget,
+        output_target: &'resource OffscreenPatchRenderTarget,
+        pose: LodPose<'_>,
+        num_joints: u32,
+        use_qb: bool,
+    ) -> Result<FocusResidentAdaptiveFrameEncoding, LodWebGpuError> {
+        frame
+            .validate(scene)
+            .map_err(|error| LodWebGpuError::Payload(format!("render frame contract: {error}")))?;
+        validate_focus_pbr_frame(scene, frame.options)?;
+        if frame.style != RenderStyle::Pbr {
+            return Err(LodWebGpuError::Payload(format!(
+                "adaptive focus path cannot render {:?}",
+                frame.style,
+            )));
+        }
+        if frame.view.viewport != focus_target.size() || frame.view.viewport != output_target.size {
+            return Err(LodWebGpuError::Payload(format!(
+                "adaptive focus/output targets {:?}/{:?} do not match viewport {:?}",
+                focus_target.size(),
+                output_target.size,
+                frame.view.viewport,
+            )));
+        }
+        if root_pipeline.color_format != focus_target.scene_color_format()
+            || root_pipeline.sample_count != 1
+            || overlay_pipeline.color_format != focus_target.scene_color_format()
+            || overlay_pipeline.raw_field_format != focus_target.raw_field_format()
+        {
+            return Err(LodWebGpuError::Payload(
+                "adaptive focus pipelines do not match the retained single-sample MRT".to_string(),
+            ));
+        }
+        if scene.suppressed_root_faces.is_empty() != overlay.is_none() {
+            return Err(LodWebGpuError::Payload(
+                "adaptive focus overlay presence does not match root suppression".to_string(),
+            ));
+        }
+        let resident_suppression = root_geometry.suppressed_faces.lock().map_err(|_| {
+            LodWebGpuError::Payload("resident root suppression lock was poisoned".to_string())
+        })?;
+        if resident_suppression.as_slice() != scene.suppressed_root_faces {
+            return Err(LodWebGpuError::Payload(
+                "resident root suppression was not published with the focus overlay".to_string(),
+            ));
+        }
+        drop(resident_suppression);
+        let roots_encoding = self.encode_resident_roots_with_raw_field(
+            encoder,
+            frame,
+            model,
+            resident,
+            roots,
+            root_geometry,
+            root_pipeline,
+            root_bindings,
+            atlas,
+            PatchRenderTarget {
+                color_view: focus_target.scene_color_view(),
+                resolve_target: None,
+                depth_stencil_view: Some(&output_target.depth_view),
+                clear_color: Some(wgpu::Color::TRANSPARENT),
+                clear_depth: Some(1.0),
+            },
+            Some(focus_target.raw_field_view()),
+            pose,
+            num_joints,
+            use_qb,
+        )?;
+        let overlay_encoding = overlay
+            .map(|overlay| {
+                self.encode_adaptive_overlay_impl(
+                    encoder,
+                    frame,
+                    scene,
+                    model,
+                    resident,
+                    overlay,
+                    AdaptiveRenderPipelines::Focus(overlay_pipeline),
+                    atlas,
+                    PatchRenderTarget {
+                        color_view: focus_target.scene_color_view(),
+                        resolve_target: None,
+                        depth_stencil_view: Some(&output_target.depth_view),
+                        clear_color: None,
+                        clear_depth: None,
+                    },
+                    Some(focus_target.raw_field_view()),
+                    pose,
+                    num_joints,
+                    use_qb,
+                    false,
+                    false,
+                )
+            })
+            .transpose()?;
+        let packet = frame.options.focus_postprocess.ok_or_else(|| {
+            LodWebGpuError::Payload("adaptive focus frame lost its packet".to_string())
+        })?;
+        let postprocess = self.encode_focus_postprocess(
+            encoder,
+            focus_pipelines,
+            focus_target,
+            &output_target.color_view,
+            packet,
+        )?;
+        let logical_submission = frame
+            .expected_submission_stats(scene)
+            .map_err(|error| LodWebGpuError::Payload(format!("render frame contract: {error}")))?;
+        Ok(FocusResidentAdaptiveFrameEncoding {
+            scene: ResidentAdaptiveFrameEncoding {
+                logical_submission,
+                roots: roots_encoding,
+                overlay: overlay_encoding,
+            },
+            postprocess,
+        })
+    }
+
+    /// Submit a complete resident-root plus sparse-overlay focus frame without
+    /// readback or CPU-authored per-LoD batches.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_offscreen_focus_resident_adaptive(
+        &self,
+        frame: &RenderFrame,
+        scene: &RenderSceneSnapshot,
+        model: &LodClassifierModel,
+        resident: &DeviceResidentLod<'_>,
+        roots: &ResidentRootPreparationScene,
+        root_geometry: &ResidentGeometryBucketScene,
+        root_pipeline: &ResidentRootRenderPipeline,
+        root_bindings: &ResidentRootRenderBindings,
+        overlay_pipeline: &FocusPbrPatchRenderPipeline,
+        overlay: Option<&AdaptiveOverlayScene>,
+        atlas: &PackedPatchAtlas,
+        focus_pipelines: &FocusPostprocessPipelines,
+        focus_target: &FocusPostprocessTarget,
+        output_target: &OffscreenPatchRenderTarget,
+        pose: LodPose<'_>,
+        num_joints: u32,
+        use_qb: bool,
+    ) -> Result<FocusPatchFrameEncoding, LodWebGpuError> {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quilting resident adaptive focus frame"),
+            });
+        let encoding = self.encode_focus_resident_adaptive(
+            &mut encoder,
+            frame,
+            scene,
+            model,
+            resident,
+            roots,
+            root_geometry,
+            root_pipeline,
+            root_bindings,
+            overlay_pipeline,
+            overlay,
+            atlas,
+            focus_pipelines,
+            focus_target,
+            output_target,
+            pose,
+            num_joints,
+            use_qb,
+        )?;
+        self.queue.submit([encoder.finish()]);
+        Ok(FocusPatchFrameEncoding {
+            scene: resident_adaptive_frame_evidence(encoding.scene),
+            postprocess: encoding.postprocess,
         })
     }
 

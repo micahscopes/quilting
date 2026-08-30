@@ -15,7 +15,8 @@ mod presentation;
 mod resident_roots;
 
 pub use adaptive_overlay::{
-    AdaptiveOverlayFrameEncoding, AdaptiveOverlayScene, ResidentAdaptiveFrameEncoding,
+    AdaptiveOverlayFrameEncoding, AdaptiveOverlayScene, FocusResidentAdaptiveFrameEncoding,
+    ResidentAdaptiveFrameEncoding,
 };
 pub use focus_postprocess::{
     FocusPostprocessEncoding, FocusPostprocessPipelines, FocusPostprocessTarget,
@@ -2419,6 +2420,136 @@ impl LodClassifierDevice {
             return Err(LodWebGpuError::Conformance(format!(
                 "resident adaptive PBR produced implausible image evidence: {pbr_signature:?}",
             )));
+        }
+        let focus_root_pipeline = self.create_offscreen_resident_root_render_pipeline()?;
+        let focus_overlay_pipeline = self.create_offscreen_focus_pbr_patch_render_pipeline()?;
+        let focus_root_bindings = self.create_resident_root_render_bindings_with_pbr(
+            &focus_root_pipeline,
+            &preparation,
+            &geometry,
+            &pbr_render_scene,
+            Some(&pbr_textures),
+            Some(&environment),
+        )?;
+        let focus_overlay = self
+            .upload_focus_adaptive_overlay_scene_with_pbr_resources(
+                &focus_overlay_pipeline,
+                &model,
+                &preparation,
+                &pbr_render_scene,
+                Some(&pbr_textures),
+                Some(&environment),
+            )?
+            .ok_or_else(|| {
+                LodWebGpuError::Conformance(
+                    "resident focus conformance lost its adaptive overlay".to_string(),
+                )
+            })?;
+        self.publish_adaptive_overlay_suppression(&geometry, Some(&focus_overlay))?;
+        let focus_pipelines =
+            self.create_focus_postprocess_pipelines(wgpu::TextureFormat::Rgba8Unorm)?;
+        let focus_target =
+            self.create_focus_postprocess_target([WIDTH, HEIGHT], &focus_pipelines)?;
+        let focus_output = self.create_offscreen_patch_render_target([WIDTH, HEIGHT])?;
+        let mut focus_view = pbr_frame.view;
+        focus_view.focus = FocusFieldPacket {
+            sphere: [0.0, 0.0, 0.0, 1.0],
+            enabled: true,
+        };
+        let focus_frame = RenderFrame::build(
+            19,
+            pbr_frame.pose,
+            RenderStyle::Pbr,
+            focus_view,
+            RenderFrameOptions {
+                focus_postprocess: Some(quilting_core::render::FocusPostprocessPacket {
+                    mode: quilting_core::render::FocusPostprocessMode::Spheroidal,
+                    blur_radius_pixels: 11,
+                    blur_strength: 1.0,
+                    focus_coordinate: 0.5,
+                    bandwidth: 0.1,
+                    normalize_range: false,
+                    stretch_range: [0.5, 0.5],
+                    gaussian_passes: 1,
+                    kawase_passes: 3,
+                    kawase_offset: 1.5,
+                }),
+                ..RenderFrameOptions::default()
+            },
+            &pbr_render_scene,
+        )
+        .map_err(|error| LodWebGpuError::Conformance(error.to_string()))?;
+        let focus_error_scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut focus_encoder =
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("resident adaptive focus render conformance"),
+                });
+        let focus_encoding = {
+            let classification = self.encode_lod_classification(&mut model, &mut focus_encoder)?;
+            let resident = self.encode_resident_lod_reconciliation(
+                &classification,
+                FaceLodGrading::TwoToOne,
+                &mut focus_encoder,
+            );
+            self.encode_focus_resident_adaptive(
+                &mut focus_encoder,
+                &focus_frame,
+                &pbr_render_scene,
+                classification.model,
+                &resident,
+                &preparation,
+                &geometry,
+                &focus_root_pipeline,
+                &focus_root_bindings,
+                &focus_overlay_pipeline,
+                Some(&focus_overlay),
+                &packed_atlas,
+                &focus_pipelines,
+                &focus_target,
+                &focus_output,
+                LodPose::default(),
+                0,
+                true,
+            )?
+        };
+        if focus_encoding.scene.roots.source_face_count != 2
+            || focus_encoding.scene.roots.indirect_draw_calls != 2
+            || focus_encoding.scene.overlay
+                != Some(AdaptiveOverlayFrameEncoding {
+                    indirect_draw_calls: 1,
+                    source_patch_count: 1,
+                })
+            || focus_encoding.postprocess.render_passes != 8
+        {
+            return Err(LodWebGpuError::Conformance(format!(
+                "resident adaptive focus encoding mismatch: {focus_encoding:?}",
+            )));
+        }
+        self.queue.submit([focus_encoder.finish()]);
+        if let Some(error) = focus_error_scope.pop().await {
+            return Err(LodWebGpuError::Conformance(format!(
+                "resident adaptive focus failed validation: {error}",
+            )));
+        }
+        let focus_raw = self
+            .stage_focus_raw_field_image(&focus_target)?
+            .read()
+            .await?;
+        if focus_raw.covered_texels() == 0 {
+            return Err(LodWebGpuError::Conformance(
+                "resident adaptive focus raw field has no coverage".to_string(),
+            ));
+        }
+        let focus_image = self
+            .stage_offscreen_patch_render_target_image(&focus_output)?
+            .read()
+            .await?;
+        let focus_signature = render_image_signature(focus_image.view()?, 0);
+        if focus_signature.covered_pixels == 0 {
+            return Err(LodWebGpuError::Conformance(
+                "resident adaptive focus composition has no coverage".to_string(),
+            ));
         }
         if let Some(surface) = presentation {
             let surface_size = surface.size();

@@ -121,8 +121,8 @@ pub struct ResidentRootDrawDomainOutput {
 /// Graphics pipelines that pull source-indexed prepared roots through the
 /// device-generated atlas/parity bucket plan.
 pub struct ResidentRootRenderPipeline {
-    color_format: wgpu::TextureFormat,
-    sample_count: u32,
+    pub(super) color_format: wgpu::TextureFormat,
+    pub(super) sample_count: u32,
     bind_group_layout: wgpu::BindGroupLayout,
     pbr_portable_atlas_bind_group_layout: wgpu::BindGroupLayout,
     pbr_environment_bind_group_layout: wgpu::BindGroupLayout,
@@ -898,7 +898,7 @@ impl LodClassifierDevice {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn encode_resident_roots_with_raw_field<'resource>(
+    pub(super) fn encode_resident_roots_with_raw_field<'resource>(
         &'resource self,
         encoder: &mut wgpu::CommandEncoder,
         frame: &RenderFrame,
