@@ -1055,9 +1055,8 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             .device()
             .push_error_scope(wgpu::ErrorFilter::Validation);
         let focus_encoding = classifier
-            .render_offscreen_focus_pbr_patch_render_plan_with_face_visibility(
+            .render_offscreen_focus_pbr_patch_scene_with_face_visibility(
                 &focus_frame,
-                &focus_plan,
                 focus_pbr_pipeline,
                 focus_pipelines,
                 &focus_scene,
@@ -1695,9 +1694,8 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 .device()
                 .push_error_scope(wgpu::ErrorFilter::Validation);
             let encoding = classifier
-                .render_offscreen_supported_patch_render_plan_with_face_visibility(
+                .render_offscreen_supported_patch_scene_with_face_visibility(
                     &frame,
-                    &plan,
                     &diagnostic_pipelines,
                     &diagnostic_scene,
                     &packed_atlas,
@@ -1714,7 +1712,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             assert_eq!(
                 encoding.logical_submission,
                 frame
-                    .execution_with_command_plan(&plan)
+                    .execution(diagnostic_scene.scene())
                     .unwrap()
                     .submission_stats()
             );

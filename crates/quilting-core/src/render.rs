@@ -1252,6 +1252,7 @@ pub struct RenderFrame {
     pub view: RenderView,
     pub options: RenderFrameOptions,
     pub commands: Arc<[RenderCommand]>,
+    command_plan: Option<RenderCommandPlan>,
 }
 
 /// An immutable scene that has passed the complete semantic contract once.
@@ -1562,6 +1563,7 @@ impl RenderFrame {
             view,
             options,
             commands,
+            command_plan: None,
         })
     }
 
@@ -1590,7 +1592,15 @@ impl RenderFrame {
             view,
             options,
             commands: Arc::clone(&plan.commands),
+            command_plan: Some(plan.clone()),
         })
+    }
+
+    /// The immutable command/scene provenance retained by
+    /// [`Self::from_command_plan`]. Legacy frames deliberately return `None`
+    /// and continue through the independent full-validation oracle.
+    pub fn retained_command_plan(&self) -> Option<&RenderCommandPlan> {
+        self.command_plan.as_ref()
     }
 
     pub fn validate(&self, scene: &RenderSceneSnapshot) -> Result<(), RenderContractError> {
@@ -1648,6 +1658,16 @@ impl RenderFrame {
         &'frame self,
         scene: &'scene RenderSceneSnapshot,
     ) -> Result<RenderExecution<'frame, 'scene>, RenderContractError> {
+        if let Some(plan) = self.command_plan.as_ref() {
+            if !plan.scene().contains_snapshot(scene) {
+                return Err(RenderContractError::ExecutionSceneMismatch);
+            }
+            self.validate_with_command_plan(plan)?;
+            return Ok(RenderExecution {
+                commands: &self.commands,
+                scene,
+            });
+        }
         self.validate(scene)?;
         Ok(RenderExecution {
             commands: &self.commands,
@@ -2408,9 +2428,19 @@ mod tests {
         )
         .unwrap();
         assert!(Arc::ptr_eq(&planned_frame.commands, &plan.commands));
+        assert!(planned_frame
+            .retained_command_plan()
+            .is_some_and(|retained| retained.scene().shares_snapshot_with(plan.scene())));
         assert_eq!(
             planned_frame
                 .execution_with_command_plan(&plan)
+                .unwrap()
+                .submission_stats(),
+            plan.execution().submission_stats(),
+        );
+        assert_eq!(
+            planned_frame
+                .execution(validated.snapshot())
                 .unwrap()
                 .submission_stats(),
             plan.execution().submission_stats(),
@@ -2434,6 +2464,12 @@ mod tests {
         assert_eq!(
             frame.execution_with_command_plan(&plan).unwrap_err(),
             RenderContractError::CommandPlanMismatch,
+        );
+
+        let equivalent_snapshot = scene.clone();
+        assert_eq!(
+            planned_frame.execution(&equivalent_snapshot).unwrap_err(),
+            RenderContractError::ExecutionSceneMismatch,
         );
 
         let mut uniform_only = options;
