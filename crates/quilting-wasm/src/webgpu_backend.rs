@@ -1339,9 +1339,13 @@ pub(crate) fn submit_frame(
             .map(|resident| resident.classification_epoch());
         let resident_root_frame = device_lod_epoch.is_some()
             && backend.resident_roots.as_ref().is_some_and(|roots| {
+                let adaptive_layer_supported = roots
+                    .overlay
+                    .as_ref()
+                    .is_none_or(AdaptiveOverlayScene::supports_resident_untextured_pbr);
                 roots
                     .bindings
-                    .supports_resident_root_frame(style, roots.overlay.is_some())
+                    .supports_resident_root_frame(style, adaptive_layer_supported)
             });
         if device_lod_epoch.is_none() {
             if face_visibility.len() != resident_faces {

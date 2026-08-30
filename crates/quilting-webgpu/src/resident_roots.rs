@@ -197,16 +197,17 @@ impl ResidentRootRenderBindings {
 
     /// Decide whether this coherent binding epoch can execute one frame from
     /// device-resident roots without semantic lowering. Diagnostic styles can
-    /// composite their sparse overlay; PBR remains root-only until adaptive
-    /// material binding has an equivalent portable addressing scheme.
+    /// composite their sparse overlay; PBR additionally requires the caller
+    /// to prove that its absent or retained adaptive layer has equivalent
+    /// factor-only material and environment bindings.
     pub fn supports_resident_root_frame(
         &self,
         style: RenderStyle,
-        has_adaptive_overlay: bool,
+        adaptive_layer_supported: bool,
     ) -> bool {
         supports_resident_root_render_style(style)
             || (style == RenderStyle::Pbr
-                && !has_adaptive_overlay
+                && adaptive_layer_supported
                 && self.supports_resident_untextured_pbr())
     }
 }

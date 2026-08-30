@@ -2086,8 +2086,30 @@ impl LodClassifierDevice {
                 "resident root PBR rejected factor-only material residency".to_string(),
             ));
         }
-        if !pbr_bindings.supports_resident_root_frame(RenderStyle::Pbr, false)
-            || pbr_bindings.supports_resident_root_frame(RenderStyle::Pbr, true)
+        let pbr_overlay_pipeline = overlay_pipelines
+            .get(RenderStyle::Pbr)
+            .expect("diagnostic pipeline family contains PBR");
+        let pbr_overlay = self
+            .upload_adaptive_overlay_scene_with_pbr_resources(
+                pbr_overlay_pipeline,
+                &model,
+                &preparation,
+                &pbr_render_scene,
+                None,
+                Some(&environment),
+            )?
+            .ok_or_else(|| {
+                LodWebGpuError::Conformance(
+                    "resident PBR conformance lost its adaptive overlay".to_string(),
+                )
+            })?;
+        if !pbr_overlay.supports_resident_untextured_pbr() {
+            return Err(LodWebGpuError::Conformance(
+                "adaptive PBR rejected factor-only material residency".to_string(),
+            ));
+        }
+        if !pbr_bindings.supports_resident_root_frame(RenderStyle::Pbr, true)
+            || pbr_bindings.supports_resident_root_frame(RenderStyle::Pbr, false)
         {
             return Err(LodWebGpuError::Conformance(
                 "resident root PBR overlay capability was not conservative".to_string(),
@@ -2109,7 +2131,7 @@ impl LodClassifierDevice {
         let mut pbr_encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("resident root PBR render conformance"),
+                label: Some("resident adaptive PBR render conformance"),
             });
         let pbr_encoding = {
             let classification = self.encode_lod_classification(&mut model, &mut pbr_encoder)?;
@@ -2118,15 +2140,18 @@ impl LodClassifierDevice {
                 FaceLodGrading::TwoToOne,
                 &mut pbr_encoder,
             );
-            self.encode_resident_roots(
+            self.encode_resident_adaptive(
                 &mut pbr_encoder,
                 &pbr_frame,
+                &pbr_render_scene,
                 classification.model,
                 &resident,
                 &preparation,
                 &geometry,
                 &pipeline,
                 &pbr_bindings,
+                &overlay_pipelines,
+                Some(&pbr_overlay),
                 &packed_atlas,
                 PatchRenderTarget {
                     color_view: &target_view,
@@ -2140,9 +2165,16 @@ impl LodClassifierDevice {
                 true,
             )?
         };
-        if pbr_encoding.source_face_count != 2 || pbr_encoding.indirect_draw_calls != 2 {
+        if pbr_encoding.roots.source_face_count != 2
+            || pbr_encoding.roots.indirect_draw_calls != 2
+            || pbr_encoding.overlay
+                != Some(AdaptiveOverlayFrameEncoding {
+                    indirect_draw_calls: 1,
+                    source_patch_count: 1,
+                })
+        {
             return Err(LodWebGpuError::Conformance(format!(
-                "resident root PBR encoding mismatch: {pbr_encoding:?}",
+                "resident adaptive PBR encoding mismatch: {pbr_encoding:?}",
             )));
         }
         pbr_encoder.copy_texture_to_buffer(
@@ -2169,7 +2201,7 @@ impl LodClassifierDevice {
         self.queue.submit([pbr_encoder.finish()]);
         if let Some(error) = pbr_error_scope.pop().await {
             return Err(LodWebGpuError::Conformance(format!(
-                "resident root PBR failed validation: {error}",
+                "resident adaptive PBR failed validation: {error}",
             )));
         }
         let pbr_pixels = self.readback_words(&readback, readback_bytes).await?;
@@ -2186,7 +2218,7 @@ impl LodClassifierDevice {
             || pbr_signature.covered_pixels >= u64::from(WIDTH) * u64::from(HEIGHT)
         {
             return Err(LodWebGpuError::Conformance(format!(
-                "resident root PBR produced implausible image evidence: {pbr_signature:?}",
+                "resident adaptive PBR produced implausible image evidence: {pbr_signature:?}",
             )));
         }
         if let Some(surface) = presentation {
@@ -3540,6 +3572,20 @@ impl LodClassifierDevice {
         visibility: &VisibilityCompactionScene,
         textures: Option<&PbrTextureTable>,
     ) -> Result<PatchRenderBindings, LodWebGpuError> {
+        self.create_patch_render_bindings_with_environment(
+            pipeline, scene, patches, visibility, textures, None,
+        )
+    }
+
+    pub(crate) fn create_patch_render_bindings_with_environment(
+        &self,
+        pipeline: &PatchRenderPipeline,
+        scene: &RenderSceneSnapshot,
+        patches: &PatchPreparationScene,
+        visibility: &VisibilityCompactionScene,
+        textures: Option<&PbrTextureTable>,
+        environment: Option<&PbrEnvironmentMap>,
+    ) -> Result<PatchRenderBindings, LodWebGpuError> {
         if patches.patch_count == 0
             || visibility.source_count == 0
             || visibility.batch_count == 0
@@ -3584,7 +3630,7 @@ impl LodClassifierDevice {
             None
         };
         let pbr_environment = if pipeline.style == RenderStyle::Pbr {
-            Some(self.create_pbr_environment_bindings(pipeline, None)?)
+            Some(self.create_pbr_environment_bindings(pipeline, environment)?)
         } else {
             None
         };

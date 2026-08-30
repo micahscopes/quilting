@@ -19,6 +19,7 @@ pub struct AdaptiveOverlayScene {
     visibility: VisibilityCompactionScene,
     face_visibility: FaceVisibilityExpansionScene,
     bindings: PatchRenderBindings,
+    pbr_scene_supported: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +54,25 @@ impl AdaptiveOverlayScene {
 
     pub fn prepared_records_buffer(&self) -> &wgpu::Buffer {
         &self.patches.prepared_records
+    }
+
+    pub fn supports_resident_untextured_pbr(&self) -> bool {
+        self.pbr_scene_supported
+            && self
+                .bindings
+                .material_textures
+                .as_ref()
+                .is_some_and(|textures| {
+                    textures
+                        .residency()
+                        .iter()
+                        .all(|material| material.referenced_mask() == 0)
+                })
+            && self
+                .bindings
+                .pbr_environment
+                .as_ref()
+                .is_some_and(PbrEnvironmentBindings::is_resident)
     }
 }
 
@@ -103,6 +123,42 @@ impl LodClassifierDevice {
         roots: &ResidentRootPreparationScene,
         scene: &RenderSceneSnapshot,
     ) -> Result<Option<AdaptiveOverlayScene>, LodWebGpuError> {
+        self.upload_adaptive_overlay_scene_with_resources(pipeline, model, roots, scene, None, None)
+    }
+
+    pub fn upload_adaptive_overlay_scene_with_pbr_resources(
+        &self,
+        pipeline: &PatchRenderPipeline,
+        model: &LodClassifierModel,
+        roots: &ResidentRootPreparationScene,
+        scene: &RenderSceneSnapshot,
+        textures: Option<&PbrTextureTable>,
+        environment: Option<&PbrEnvironmentMap>,
+    ) -> Result<Option<AdaptiveOverlayScene>, LodWebGpuError> {
+        if pipeline.style != RenderStyle::Pbr {
+            return Err(LodWebGpuError::Payload(
+                "adaptive PBR resources require the PBR render pipeline".to_string(),
+            ));
+        }
+        self.upload_adaptive_overlay_scene_with_resources(
+            pipeline,
+            model,
+            roots,
+            scene,
+            textures,
+            environment,
+        )
+    }
+
+    fn upload_adaptive_overlay_scene_with_resources(
+        &self,
+        pipeline: &PatchRenderPipeline,
+        model: &LodClassifierModel,
+        roots: &ResidentRootPreparationScene,
+        scene: &RenderSceneSnapshot,
+        textures: Option<&PbrTextureTable>,
+        environment: Option<&PbrEnvironmentMap>,
+    ) -> Result<Option<AdaptiveOverlayScene>, LodWebGpuError> {
         if roots.topology.model_identity != model.identity {
             return Err(LodWebGpuError::Payload(
                 "adaptive overlay roots belong to a different resource epoch".to_string(),
@@ -128,8 +184,14 @@ impl LodClassifierDevice {
             &visibility,
             model.prepared.residency.num_faces,
         )?;
-        let bindings =
-            self.create_patch_render_bindings(pipeline, scene, &patches, &visibility, None)?;
+        let bindings = self.create_patch_render_bindings_with_environment(
+            pipeline,
+            scene,
+            &patches,
+            &visibility,
+            textures,
+            environment,
+        )?;
         let batches = source_batch_indices
             .iter()
             .map(|&index| scene.batches[index as usize].clone())
@@ -144,6 +206,8 @@ impl LodClassifierDevice {
             visibility,
             face_visibility,
             bindings,
+            pbr_scene_supported: pipeline.style == RenderStyle::Pbr
+                && supports_basic_pbr_frame(scene, RenderFrameOptions::default()),
         }))
     }
 
@@ -222,9 +286,13 @@ impl LodClassifierDevice {
                 LodWebGpuError::Payload(format!("render frame contract: {error}"))
             })?;
         }
-        if !supports_patch_presentation_style(frame.style)
+        let pbr_supported = frame.style == RenderStyle::Pbr
+            && overlay.supports_resident_untextured_pbr()
+            && validate_basic_pbr_frame(scene, frame.options).is_ok();
+        if !(supports_patch_presentation_style(frame.style) || pbr_supported)
             || render_draw_passes(frame.style)
                 .iter()
+                .filter(|draw| draw.pass != RenderPass::PbrTransparent)
                 .any(|draw| pipelines.get_for_pass(draw.pass, draw.geometry).is_err())
         {
             return Err(LodWebGpuError::Payload(format!(
@@ -313,6 +381,9 @@ impl LodClassifierDevice {
 
         let draw_passes = render_draw_passes(frame.style);
         for draw_pass in draw_passes {
+            if draw_pass.pass == RenderPass::PbrTransparent {
+                continue;
+            }
             for (batch_index, batch) in overlay.batches.iter().enumerate() {
                 let draw = atlas
                     .draw(batch.id.key.lod, draw_pass.geometry)
@@ -377,6 +448,9 @@ impl LodClassifierDevice {
         });
         let mut indirect_draw_calls = 0u32;
         for draw_pass in draw_passes {
+            if draw_pass.pass == RenderPass::PbrTransparent {
+                continue;
+            }
             let pipeline = pipelines.get_for_pass(draw_pass.pass, draw_pass.geometry)?;
             for (batch_index, batch) in overlay.batches.iter().enumerate() {
                 let draw = atlas
@@ -436,6 +510,9 @@ impl LodClassifierDevice {
         frame
             .validate(scene)
             .map_err(|error| LodWebGpuError::Payload(format!("render frame contract: {error}")))?;
+        if frame.style == RenderStyle::Pbr {
+            validate_basic_pbr_frame(scene, frame.options)?;
+        }
         if scene.suppressed_root_faces.is_empty() != overlay.is_none() {
             return Err(LodWebGpuError::Payload(
                 "adaptive overlay presence does not match root suppression".to_string(),
