@@ -327,6 +327,25 @@ impl HyperscopeAppShadow {
         );
     }
 
+    /// Mount the camera-lens control in the explicit Rust navigation lane.
+    /// The view queues a typed navigation action; the browser callback merely
+    /// advances the shared application clock and applies its Rust projection.
+    #[cfg(feature = "leptos-ui")]
+    #[wasm_bindgen(js_name = mountCameraLensControl)]
+    pub fn mount_camera_lens_control(
+        &self,
+        parent: web_sys::HtmlElement,
+        on_queue: js_sys::Function,
+        on_error: js_sys::Function,
+    ) {
+        hyperscope_web::camera_controls::mount_camera_lens_control(
+            parent,
+            self.store.clone(),
+            on_queue,
+            on_error,
+        );
+    }
+
     /// Mount the opt-in Leptos presentation card over the committed
     /// presentation signal. A platform callback synchronizes incumbent input
     /// state, then the view dispatches through AppStore and exposes only

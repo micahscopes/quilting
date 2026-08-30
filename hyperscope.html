@@ -122,8 +122,11 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
   <div class="section">
     <label>Animation Time</label>
     <div class="sr"><span style="font-size:10px;color:#8b949e;width:50px">Time</span><input type="range" id="time" min="0" max="2" step="any" value="0"><span class="v" id="time-v">0.00</span></div>
-    <label style="margin-top:5px">Vertical field of view</label>
-    <div class="sr"><input type="range" id="camera-fov" min="35" max="110" step="1" value="75"><span class="v" id="camera-fov-v">75°</span></div>
+    <div id="camera-fov-rust" hidden></div>
+    <div id="camera-fov-browser">
+      <label style="margin-top:5px">Vertical field of view</label>
+      <div class="sr"><input type="range" id="camera-fov" min="35" max="110" step="1" value="75"><span class="v" id="camera-fov-v">75°</span></div>
+    </div>
   </div>
 
   <div class="section">
@@ -3948,6 +3951,11 @@ const rustAppShadowDiagnostics = {
   navigationStatusAuthority: 'unmounted',
   navigationStatusMountAttempts: 0,
   navigationStatusMountErrors: 0,
+  cameraLensControlAuthority: 'browser-fallback',
+  cameraLensControlMountAttempts: 0,
+  cameraLensControlMountErrors: 0,
+  cameraLensControlDispatches: 0,
+  cameraLensControlErrors: 0,
   presentationLoads: 0,
   presentationComparisons: 0,
   navigationSynchronizations: 0,
@@ -5044,6 +5052,82 @@ function ensureRustNavigationStatusView() {
   }
 }
 
+function useBrowserCameraLensControl() {
+  const host = $('camera-fov-rust');
+  const fallback = $('camera-fov-browser');
+  if (host) host.hidden = true;
+  if (fallback) fallback.hidden = false;
+  rustAppShadowDiagnostics.cameraLensControlAuthority = 'browser-fallback';
+}
+
+let rustCameraLensControlMounted = false;
+let rustCameraLensControlMountAttempted = false;
+function ensureRustCameraLensControl() {
+  if (RUST_NAVIGATION_IMPLEMENTATION !== 'rust') {
+    useBrowserCameraLensControl();
+    return false;
+  }
+  if (rustCameraLensControlMounted) return true;
+  if (rustCameraLensControlMountAttempted || !rustAppShadow) return false;
+  rustCameraLensControlMountAttempted = true;
+  rustAppShadowDiagnostics.cameraLensControlMountAttempts += 1;
+  const host = $('camera-fov-rust');
+  const fallback = $('camera-fov-browser');
+  if (!host || !fallback || typeof rustAppShadow.mountCameraLensControl !== 'function') {
+    useBrowserCameraLensControl();
+    return false;
+  }
+  try {
+    rustAppShadow.mountCameraLensControl(
+      host,
+      (verticalFovDegrees, sequence, queueRevision) => {
+        try {
+          observeRustAppShadowSequence(sequence, 'Rust camera-lens control');
+          rustAppShadowDiagnostics.lastCommit = {
+            revision: String(queueRevision),
+            disposition: 'applied',
+            publishedUi: false,
+            effects: [],
+          };
+          const navigation = rustAppShadow.tickNavigation(0);
+          const committedDegrees = Number(navigation?.camera?.vertical_fov_radians)
+            * 180 / Math.PI;
+          if (!Number.isFinite(committedDegrees)
+              || Math.abs(committedDegrees - Number(verticalFovDegrees)) > 1e-9) {
+            throw new Error('Rust camera-lens projection did not commit the queued field of view');
+          }
+          cameraFovDegrees.set(committedDegrees);
+          rustAppShadowDiagnostics.cameraLensControlDispatches += 1;
+          refreshAppShadowSnapshot();
+        } catch (error) {
+          rustAppShadowDiagnostics.cameraLensControlErrors += 1;
+          recordAppShadowMismatch(
+            'camera_lens_control_projection',
+            error?.message || String(error),
+          );
+        }
+      },
+      error => {
+        rustAppShadowDiagnostics.cameraLensControlErrors += 1;
+        recordAppShadowMismatch('camera_lens_control_rejection', String(error));
+      },
+    );
+    host.hidden = false;
+    fallback.hidden = true;
+    rustCameraLensControlMounted = true;
+    rustAppShadowDiagnostics.cameraLensControlAuthority = 'hyperscope-web';
+    return true;
+  } catch (error) {
+    rustAppShadowDiagnostics.cameraLensControlMountErrors += 1;
+    recordAppShadowMismatch(
+      'camera_lens_control_mount',
+      error?.message || String(error),
+    );
+    useBrowserCameraLensControl();
+    return false;
+  }
+}
+
 function ensureRustPatchLabView() {
   if (RUST_PATCH_LAB_IMPLEMENTATION === 'js') return false;
   if (rustPatchLabViewMounted) return true;
@@ -5210,6 +5294,7 @@ function refreshAppShadowSnapshot() {
   ensureRustAnimationClipControlView();
   ensureRustNavigationSettingsView();
   ensureRustNavigationStatusView();
+  ensureRustCameraLensControl();
   ensureRustPatchLabView();
   if (!ensureRustAssetCreditsView()) renderAssetCredits(snapshot);
   return snapshot;

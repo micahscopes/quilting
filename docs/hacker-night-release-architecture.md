@@ -154,6 +154,15 @@ The first application boundary is now explicit:
   through `AppStore` per edit. JavaScript applies only the committed packet to
   legacy runtime consumers and URL state; `js`, `shadow`, and mount failure
   retain the incumbent HTML controls as a measured rollback.
+- The vertical field-of-view control is a separate Leptos CSR island in the
+  explicit `navimpl=rust` lane because projection lens state belongs to the
+  application camera, not to the preference packet. It derives its exact
+  35–110 degree integral domain from `ControlSpec`, queues
+  `NavigationAction::SetPerspectiveLens` through `AppStore`, and preserves the
+  committed near/far planes. The browser callback advances that same
+  application controller at zero elapsed time and projects only the integrated
+  Rust FOV into the legacy renderer/URL signal. The HTML control remains the
+  fallback for JavaScript/shadow navigation and mount failure.
 - The normalized SpaceMouse camera gate freezes samples at
   a platform-neutral Rust boundary. Browser code retains only WebHID/report
   acquisition, device shaping/smoothing, button layers, and the

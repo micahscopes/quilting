@@ -11,6 +11,7 @@ description = "Optional browser-host adapters for Hyperscope"
 default = []
 animation-control = ["dep:hyperscope-app"]
 asset-credits = ["dep:hyperscape-protocol", "dep:hyperscope-app"]
+camera-controls = ["dep:hyperscape", "dep:hyperscope-app"]
 navigation-status = ["dep:hyperscope-app"]
 navigation-controls = ["dep:hyperscope-app"]
 presentation-card = ["dep:hyperscope-app"]
@@ -19,6 +20,7 @@ render-controls = ["dep:hyperscope-app"]
 csr = [
     "animation-control",
     "asset-credits",
+    "camera-controls",
     "navigation-controls",
     "navigation-status",
     "presentation-card",
@@ -57,6 +59,7 @@ hhhs-replica = { workspace = true, optional = true }
 hhhs-store = { workspace = true, optional = true }
 hyperscape-hhhs = { version = "0.1.0", path = "../hyperscape-hhhs", optional = true }
 hyperscape-protocol = { version = "0.1.0", path = "../hyperscape-protocol", optional = true }
+hyperscape = { version = "0.1.0", path = "../hyperscape", optional = true }
 hyperscope-app = { version = "0.1.0", path = "../hyperscope-app", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", features = ["raw_value"], optional = true }

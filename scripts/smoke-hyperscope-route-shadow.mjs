@@ -10,6 +10,10 @@ const webGpuBackendSource = readFileSync(
   `${repository}/crates/quilting-wasm/src/webgpu_backend.rs`,
   'utf8',
 );
+const cameraControlsSource = [
+  `${repository}/crates/hyperscope-web/src/camera_controls.rs`,
+  `${repository}/crates/hyperscope-web/src/camera_controls/csr.rs`,
+].map(path => readFileSync(path, 'utf8')).join('\n');
 const {
   default: init,
   canonicalizeHyperscopeRoute,
@@ -754,6 +758,42 @@ for (const directDispatchStep of [
     `Leptos render controls are missing direct Rust dispatch step: ${directDispatchStep}`,
   );
 }
+for (const cameraLensStep of [
+  "numeric_control_domain(\"fov\")",
+  'NavigationAction::SetPerspectiveLens(requested_lens)',
+  'project_camera_lens_control(&store.navigation_snapshot())',
+  'queued.requested_lens.vertical_fov_radians.to_degrees()',
+]) {
+  assert.ok(
+    cameraControlsSource.includes(cameraLensStep),
+    `Rust camera-lens control is missing ${cameraLensStep}`,
+  );
+}
+for (const cameraLensBoundaryStep of [
+  "RUST_NAVIGATION_IMPLEMENTATION !== 'rust'",
+  'rustAppShadow.mountCameraLensControl(',
+  'const navigation = rustAppShadow.tickNavigation(0);',
+  'cameraFovDegrees.set(committedDegrees);',
+  "rustAppShadowDiagnostics.cameraLensControlAuthority = 'hyperscope-web';",
+  'useBrowserCameraLensControl();',
+]) {
+  assert.ok(
+    browserSource.includes(cameraLensBoundaryStep),
+    `browser camera-lens boundary is missing ${cameraLensBoundaryStep}`,
+  );
+}
+const cameraLensMountBoundary = browserSource.slice(
+  browserSource.indexOf('rustAppShadow.mountCameraLensControl('),
+  browserSource.indexOf(
+    'host.hidden = false;',
+    browserSource.indexOf('rustAppShadow.mountCameraLensControl('),
+  ),
+);
+assert.ok(
+  !cameraLensMountBoundary.includes('.setPerspectiveLens(')
+    && cameraLensMountBoundary.includes('rustAppShadow.tickNavigation(0)'),
+  'the camera-lens island must queue in Rust and project only the integrated camera',
+);
 for (const assetAuthorityStep of [
   "implementationFromRoute(\n  initialBrowserParams, 'assetimpl',\n)",
   "RUST_ASSET_IMPLEMENTATION !== 'js'",

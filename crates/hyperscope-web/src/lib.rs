@@ -7,11 +7,15 @@
 #![forbid(unsafe_code)]
 
 #[cfg(any(
+    feature = "camera-controls",
     feature = "navigation-controls",
     feature = "patch-lab",
     feature = "render-controls"
 ))]
 mod controls;
+
+#[cfg(feature = "camera-controls")]
+pub mod camera_controls;
 
 #[cfg(all(feature = "csr", target_arch = "wasm32"))]
 mod effect_js;
