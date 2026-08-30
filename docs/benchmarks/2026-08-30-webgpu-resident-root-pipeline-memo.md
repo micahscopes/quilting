@@ -50,7 +50,6 @@ presentation and focus formats actually share the family.
 
 ## Remaining work
 
-Focus postprocessing now uses the same functional lowering. Prepared/adaptive
-patch pipelines remain migration work and should move only with equivalent
-immutable keys and lifecycle tests. This cut does not claim WebGL2/WebGPU image
-parity.
+Focus postprocessing and prepared/adaptive patch rendering now use the same
+functional lowering. Their independent notes preserve the exact family and
+test boundaries. This cut does not claim WebGL2/WebGPU image parity.

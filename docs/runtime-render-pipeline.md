@@ -251,9 +251,14 @@ the older uncached construction path instead of being folded into an
 incomplete key. Resident-root rendering now uses the same rule for its sixteen
 style/winding variants, including its shared root layout, PBR atlas/environment
 groups, focus MRT, vertex layout, and highlight depth-write policy.
-Prepared/adaptive patch families remain migration work and must not be
-described as functional-descriptor-backed until their actual lowering consumes
-those values too.
+Prepared/adaptive patch rendering now follows that rule as well. Its requested
+style family describes the shared prepared-record layout, ordinary PBR texture
+table and environment groups, vertex pull layout, triangle winding variants,
+single reused wire variant, optional focus MRT, and highlight depth-write
+policy. The exact ordered family is retained per device; a hit returns cloned
+WebGPU handles without revisiting WGSL flattening or pipeline construction.
+Formats outside the portable subset continue through the explicit uncached
+builder rather than receiving a lossy key.
 
 `quilting_renderer::memo::DeviceMemo` is the effect boundary. It maps a pure
 descriptor to a concrete backend resource, inserts only after construction has
