@@ -386,6 +386,25 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         assert_eq!(initial_shader_memo.hits, 0);
         assert_eq!(initial_shader_memo.failed_creations, 0);
         assert_eq!(initial_shader_memo.resident_entries, 3);
+        let initial_root_pipeline_memo = classifier.resident_root_pipeline_memo_diagnostics();
+        assert_eq!(initial_root_pipeline_memo.misses, 1);
+        assert_eq!(initial_root_pipeline_memo.hits, 0);
+        assert_eq!(initial_root_pipeline_memo.failed_creations, 0);
+        assert_eq!(initial_root_pipeline_memo.resident_entries, 1);
+
+        let _reused_root_pipeline = classifier
+            .create_offscreen_resident_root_render_pipeline()
+            .expect("reuse retained resident-root pipeline family");
+        let reused_root_pipeline_memo = classifier.resident_root_pipeline_memo_diagnostics();
+        assert_eq!(reused_root_pipeline_memo.misses, 1);
+        assert_eq!(reused_root_pipeline_memo.hits, 1);
+        assert_eq!(reused_root_pipeline_memo.failed_creations, 0);
+        assert_eq!(reused_root_pipeline_memo.resident_entries, 1);
+        assert_eq!(
+            classifier.render_shader_memo_diagnostics(),
+            initial_shader_memo,
+            "a pipeline-family hit must not revisit shader lowering",
+        );
 
         let texture_a = TextureAssetDescriptor {
             width: 2,

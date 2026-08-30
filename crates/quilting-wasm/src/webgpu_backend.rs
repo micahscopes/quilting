@@ -193,6 +193,11 @@ pub(crate) struct WebGpuBackendDiagnostics {
     render_shader_module_failed_creations: u64,
     render_shader_module_invalidations: u64,
     render_shader_module_entries: usize,
+    resident_root_pipeline_hits: u64,
+    resident_root_pipeline_misses: u64,
+    resident_root_pipeline_failed_creations: u64,
+    resident_root_pipeline_invalidations: u64,
+    resident_root_pipeline_entries: usize,
     initialization_attempts: u64,
     atlas_uploads: u64,
     texture_uploads: u64,
@@ -257,6 +262,11 @@ impl WebGpuBackend {
             .device
             .as_ref()
             .map(LodClassifierDevice::render_shader_memo_diagnostics)
+            .unwrap_or_default();
+        let resident_root_pipeline_memo = self
+            .device
+            .as_ref()
+            .map(LodClassifierDevice::resident_root_pipeline_memo_diagnostics)
             .unwrap_or_default();
         let pbr_texture_residency = self
             .scene
@@ -357,6 +367,11 @@ impl WebGpuBackend {
             render_shader_module_failed_creations: render_shader_memo.failed_creations,
             render_shader_module_invalidations: render_shader_memo.invalidations,
             render_shader_module_entries: render_shader_memo.resident_entries,
+            resident_root_pipeline_hits: resident_root_pipeline_memo.hits,
+            resident_root_pipeline_misses: resident_root_pipeline_memo.misses,
+            resident_root_pipeline_failed_creations: resident_root_pipeline_memo.failed_creations,
+            resident_root_pipeline_invalidations: resident_root_pipeline_memo.invalidations,
+            resident_root_pipeline_entries: resident_root_pipeline_memo.resident_entries,
             initialization_attempts: self.initialization_attempts,
             atlas_uploads: self.atlas_uploads,
             texture_uploads: self.texture_uploads,

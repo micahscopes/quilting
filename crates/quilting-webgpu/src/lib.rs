@@ -772,12 +772,25 @@ pub struct FocusPatchFrameEncoding {
     pub postprocess: FocusPostprocessEncoding,
 }
 
+/// Complete immutable state that selects one resident-root graphics pipeline
+/// family. Shader identity is memoized independently by its functional
+/// descriptor; these are the remaining backend target states that determine
+/// whether the retained family can be reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ResidentRootPipelineKey {
+    color_format: wgpu::TextureFormat,
+    depth_format: Option<wgpu::TextureFormat>,
+    sample_count: u32,
+}
+
 /// Device-local pipelines shared by every uploaded classifier model.
 pub struct LodClassifierDevice {
     device: wgpu::Device,
     queue: wgpu::Queue,
     next_model_identity: Mutex<u64>,
     render_shader_modules: Mutex<DeviceMemo<ShaderModuleDescriptor, wgpu::ShaderModule>>,
+    resident_root_render_pipelines:
+        Mutex<DeviceMemo<ResidentRootPipelineKey, ResidentRootRenderPipeline>>,
     pass1_pipeline: wgpu::ComputePipeline,
     pass2_pipeline: wgpu::ComputePipeline,
     resident_seed_pipeline: wgpu::ComputePipeline,
@@ -1461,6 +1474,7 @@ impl LodClassifierDevice {
             queue,
             next_model_identity: Mutex::new(1),
             render_shader_modules: Mutex::new(DeviceMemo::new(0)),
+            resident_root_render_pipelines: Mutex::new(DeviceMemo::new(0)),
             pass1_pipeline,
             pass2_pipeline,
             resident_seed_pipeline,
@@ -1536,6 +1550,16 @@ impl LodClassifierDevice {
     /// Observable cache state for functional render diagnostics and tests.
     pub fn render_shader_memo_diagnostics(&self) -> DeviceMemoDiagnostics {
         self.render_shader_modules
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .diagnostics()
+    }
+
+    /// Observable retained resident-root pipeline state. The memo is scoped to
+    /// this device, so dropping the device releases every cached WebGPU object
+    /// without a process-global registry or hidden invalidation channel.
+    pub fn resident_root_pipeline_memo_diagnostics(&self) -> DeviceMemoDiagnostics {
+        self.resident_root_render_pipelines
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .diagnostics()

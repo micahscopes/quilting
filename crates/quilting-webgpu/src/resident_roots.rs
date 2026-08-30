@@ -120,6 +120,7 @@ pub struct ResidentRootDrawDomainOutput {
 
 /// Graphics pipelines that pull source-indexed prepared roots through the
 /// device-generated atlas/parity bucket plan.
+#[derive(Clone)]
 pub struct ResidentRootRenderPipeline {
     pub(super) color_format: wgpu::TextureFormat,
     pub(super) sample_count: u32,
@@ -136,6 +137,7 @@ pub struct ResidentRootRenderPipeline {
     highlight: ResidentRootWindingPipelines,
 }
 
+#[derive(Clone)]
 struct ResidentRootWindingPipelines {
     counter_clockwise: wgpu::RenderPipeline,
     clockwise: wgpu::RenderPipeline,
@@ -376,6 +378,28 @@ impl LodClassifierDevice {
                 "resident root render sample count must be nonzero".to_string(),
             ));
         }
+        let key = crate::ResidentRootPipelineKey {
+            color_format,
+            depth_format,
+            sample_count,
+        };
+        let mut pipelines = self.resident_root_render_pipelines.lock().map_err(|_| {
+            LodWebGpuError::Payload(
+                "WebGPU resident-root render pipeline memo was poisoned".to_string(),
+            )
+        })?;
+        let pipeline = pipelines.get_or_try_insert_with(key, |_| {
+            self.build_resident_root_render_pipeline(color_format, depth_format, sample_count)
+        })?;
+        Ok(pipeline.clone())
+    }
+
+    fn build_resident_root_render_pipeline(
+        &self,
+        color_format: wgpu::TextureFormat,
+        depth_format: Option<wgpu::TextureFormat>,
+        sample_count: u32,
+    ) -> Result<ResidentRootRenderPipeline, LodWebGpuError> {
         let module = self.memoized_render_shader_module(
             "quilting resident root render",
             quilting_shaders::sources::RESIDENT_ROOT_RENDER_DEVICE,
