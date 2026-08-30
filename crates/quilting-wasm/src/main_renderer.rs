@@ -576,6 +576,68 @@ struct BackendPickEvidenceCapture {
     started_ms: f64,
 }
 
+#[cfg(feature = "webgpu-backend")]
+#[derive(Clone, Copy)]
+struct BackendPickEvidenceStageMetadata {
+    webgpu_frame_revision: u64,
+    webgl_render_call: u64,
+    staging_ms: f64,
+}
+
+#[cfg(feature = "webgpu-backend")]
+pub(crate) struct BackendPickEvidenceStageReceipt {
+    webgl: Option<ResolvedSurfacePick>,
+    staged: Result<BackendPickEvidenceStageMetadata, String>,
+}
+
+#[cfg(feature = "webgpu-backend")]
+impl BackendPickEvidenceStageReceipt {
+    pub(crate) fn staged(&self) -> bool {
+        self.staged.is_ok()
+    }
+
+    pub(crate) fn error(&self) -> Option<&str> {
+        self.staged.as_ref().err().map(String::as_str)
+    }
+
+    pub(crate) fn into_js(self) -> JsValue {
+        let result = js_sys::Object::new();
+        js_sys::Reflect::set(&result, &"staged".into(), &JsValue::from_bool(self.staged())).ok();
+        js_sys::Reflect::set(
+            &result,
+            &"webgl".into(),
+            &self.webgl.map(surface_pick_to_js).unwrap_or(JsValue::NULL),
+        )
+        .ok();
+        match self.staged {
+            Ok(metadata) => {
+                js_sys::Reflect::set(
+                    &result,
+                    &"webgpuFrameRevision".into(),
+                    &JsValue::from_f64(metadata.webgpu_frame_revision as f64),
+                )
+                .ok();
+                js_sys::Reflect::set(
+                    &result,
+                    &"webglRenderCall".into(),
+                    &JsValue::from_f64(metadata.webgl_render_call as f64),
+                )
+                .ok();
+                js_sys::Reflect::set(
+                    &result,
+                    &"stagingMs".into(),
+                    &JsValue::from_f64(metadata.staging_ms),
+                )
+                .ok();
+            }
+            Err(error) => {
+                js_sys::Reflect::set(&result, &"error".into(), &JsValue::from_str(&error)).ok();
+            }
+        }
+        result.into()
+    }
+}
+
 struct MainState {
     renderer: Renderer,
     /// Authoritative drawable size, updated with the GL viewport by mr_resize.
@@ -4272,18 +4334,14 @@ pub fn mr_pick_surface(
 /// surface synchronously. The staged WebGPU query observes retained frame
 /// state and never becomes interaction authority.
 #[cfg(feature = "webgpu-backend")]
-#[wasm_bindgen(js_name = "mr_stageBackendPickEvidence")]
-pub fn mr_stage_backend_pick_evidence(
+pub(crate) fn stage_backend_pick_evidence(
     mvp: &[f32],
     mv: &[f32],
     camera_pos: &[f32],
     x: i32,
     y: i32,
     target_epoch: u32,
-) -> JsValue {
-    let result = js_sys::Object::new();
-    js_sys::Reflect::set(&result, &"staged".into(), &JsValue::FALSE).ok();
-    js_sys::Reflect::set(&result, &"webgl".into(), &JsValue::NULL).ok();
+) -> BackendPickEvidenceStageReceipt {
     let started_ms = browser_now_ms();
     let face = mr_pick(mvp, mv, camera_pos, x, y);
     let surface = STATE.with(|state| {
@@ -4292,11 +4350,8 @@ pub fn mr_stage_backend_pick_evidence(
             .as_ref()
             .and_then(|state| resolve_surface_pick(state, face))
     });
-    if let Some(surface) = surface {
-        js_sys::Reflect::set(&result, &"webgl".into(), &surface_pick_to_js(surface)).ok();
-    }
 
-    let staged = STATE.with(|slot| -> Result<(u64, u64, f64), String> {
+    let staged = STATE.with(|slot| -> Result<BackendPickEvidenceStageMetadata, String> {
         let mut state = slot.borrow_mut();
         let state = state
             .as_mut()
@@ -4350,57 +4405,48 @@ pub fn mr_stage_backend_pick_evidence(
             staging_ms,
             started_ms,
         });
-        Ok((webgpu_frame_revision, webgl_render_call, staging_ms))
+        Ok(BackendPickEvidenceStageMetadata {
+            webgpu_frame_revision,
+            webgl_render_call,
+            staging_ms,
+        })
     });
 
-    match staged {
-        Ok((frame_revision, render_call, staging_ms)) => {
-            js_sys::Reflect::set(&result, &"staged".into(), &JsValue::TRUE).ok();
-            js_sys::Reflect::set(
-                &result,
-                &"webgpuFrameRevision".into(),
-                &JsValue::from_f64(frame_revision as f64),
-            )
-            .ok();
-            js_sys::Reflect::set(
-                &result,
-                &"webglRenderCall".into(),
-                &JsValue::from_f64(render_call as f64),
-            )
-            .ok();
-            js_sys::Reflect::set(
-                &result,
-                &"stagingMs".into(),
-                &JsValue::from_f64(staging_ms),
-            )
-            .ok();
-        }
-        Err(error) => {
-            js_sys::Reflect::set(&result, &"error".into(), &JsValue::from_str(&error)).ok();
-        }
+    BackendPickEvidenceStageReceipt {
+        webgl: surface,
+        staged,
     }
-    result.into()
+}
+
+#[cfg(feature = "webgpu-backend")]
+#[wasm_bindgen(js_name = "mr_stageBackendPickEvidence")]
+pub fn mr_stage_backend_pick_evidence(
+    mvp: &[f32],
+    mv: &[f32],
+    camera_pos: &[f32],
+    x: i32,
+    y: i32,
+    target_epoch: u32,
+) -> JsValue {
+    stage_backend_pick_evidence(mvp, mv, camera_pos, x, y, target_epoch).into_js()
 }
 
 /// Read the single bounded backend pick comparison staged by
 /// `mr_stageBackendPickEvidence`.
 #[cfg(feature = "webgpu-backend")]
-#[wasm_bindgen(js_name = "mr_readBackendPickEvidence")]
-pub async fn mr_read_backend_pick_evidence() -> Result<JsValue, JsValue> {
-    let capture = STATE.with(|slot| -> Result<BackendPickEvidenceCapture, JsValue> {
+pub(crate) async fn read_backend_pick_evidence() -> Result<RenderPickEvidenceReport, String> {
+    let capture = STATE.with(|slot| -> Result<BackendPickEvidenceCapture, String> {
         let mut state = slot.borrow_mut();
         let state = state
             .as_mut()
-            .ok_or_else(|| JsValue::from_str("renderer is not initialized"))?;
+            .ok_or_else(|| "renderer is not initialized".to_string())?;
         if state.backend_pick_evidence_reading {
-            return Err(JsValue::from_str(
-                "a backend pick comparison readback is already in flight",
-            ));
+            return Err("a backend pick comparison readback is already in flight".to_string());
         }
         let capture = state
             .backend_pick_evidence
             .take()
-            .ok_or_else(|| JsValue::from_str("no backend pick comparison is staged"))?;
+            .ok_or_else(|| "no backend pick comparison is staged".to_string())?;
         state.backend_pick_evidence_reading = true;
         Ok(capture)
     })?;
@@ -4474,7 +4520,15 @@ pub async fn mr_read_backend_pick_evidence() -> Result<JsValue, JsValue> {
             state.backend_pick_evidence_reading = false;
         }
     });
-    let report = report.map_err(|error| JsValue::from_str(&error))?;
+    report
+}
+
+#[cfg(feature = "webgpu-backend")]
+#[wasm_bindgen(js_name = "mr_readBackendPickEvidence")]
+pub async fn mr_read_backend_pick_evidence() -> Result<JsValue, JsValue> {
+    let report = read_backend_pick_evidence()
+        .await
+        .map_err(|error| JsValue::from_str(&error))?;
     serde_wasm_bindgen::to_value(&report).map_err(|error| JsValue::from_str(&error.to_string()))
 }
 

@@ -1370,19 +1370,28 @@ impl HyperscopeAppShadow {
     pub fn record_backend_pick_evidence(&self, report: JsValue) -> Result<JsValue, JsValue> {
         let report = serde_wasm_bindgen::from_value::<RenderPickEvidenceReport>(report)
             .map_err(|error| js_error(format!("backend pick evidence is invalid: {error}")))?;
-        let targets = self
-            .interaction_targets
-            .try_borrow()
-            .map_err(|_| JsValue::from_str("interaction targets are being replaced"))?;
-        let snapshot = {
+        let snapshot = (|| -> Result<_, String> {
+            let targets = self
+                .interaction_targets
+                .try_borrow()
+                .map_err(|_| "interaction targets are being replaced".to_string())?;
             let mut observer = self
                 .backend_pick_evidence
                 .try_borrow_mut()
-                .map_err(|_| JsValue::from_str("backend pick diagnostics are already borrowed"))?;
+                .map_err(|_| "backend pick diagnostics are already borrowed".to_string())?;
             observer
                 .record_report(&targets, report)
-                .map_err(js_error)?;
-            observer.snapshot()
+                .map_err(|error| error.to_string())?;
+            Ok(observer.snapshot())
+        })();
+        let snapshot = match snapshot {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                if let Ok(mut observer) = self.backend_pick_evidence.try_borrow_mut() {
+                    observer.record_error(format!("observe: {error}"));
+                }
+                return Err(js_error(error));
+            }
         };
         to_js(&snapshot)
     }
@@ -1416,6 +1425,68 @@ impl HyperscopeAppShadow {
             .try_borrow()
             .map_err(|_| JsValue::from_str("backend pick diagnostics are already borrowed"))?
             .snapshot();
+        to_js(&snapshot)
+    }
+
+    /// Stage one renderer comparison using the interaction table's current
+    /// epoch directly. The epoch never crosses the browser adapter.
+    #[cfg(feature = "webgpu-backend")]
+    #[wasm_bindgen(js_name = stageBackendPickEvidence)]
+    pub fn stage_backend_pick_evidence(
+        &self,
+        mvp: &[f32],
+        mv: &[f32],
+        camera_pos: &[f32],
+        x: i32,
+        y: i32,
+    ) -> Result<JsValue, JsValue> {
+        let target_epoch = self
+            .interaction_targets
+            .try_borrow()
+            .map_err(|_| JsValue::from_str("interaction targets are being replaced"))?
+            .epoch();
+        let receipt = crate::main_renderer::stage_backend_pick_evidence(
+            mvp,
+            mv,
+            camera_pos,
+            x,
+            y,
+            target_epoch,
+        );
+        if let Ok(mut observer) = self.backend_pick_evidence.try_borrow_mut() {
+            observer.record_stage(receipt.staged(), receipt.error().map(str::to_string));
+        }
+        Ok(receipt.into_js())
+    }
+
+    /// Complete the one staged renderer comparison and record it against the
+    /// current target table without serializing the report through JavaScript.
+    #[cfg(feature = "webgpu-backend")]
+    #[wasm_bindgen(js_name = readBackendPickEvidence)]
+    pub async fn read_backend_pick_evidence(&self) -> Result<JsValue, JsValue> {
+        let report = match crate::main_renderer::read_backend_pick_evidence().await {
+            Ok(report) => report,
+            Err(error) => {
+                if let Ok(mut observer) = self.backend_pick_evidence.try_borrow_mut() {
+                    observer.record_error(format!("readback: {error}"));
+                }
+                return Err(js_error(error));
+            }
+        };
+        let targets = self
+            .interaction_targets
+            .try_borrow()
+            .map_err(|_| JsValue::from_str("interaction targets are being replaced"))?;
+        let snapshot = {
+            let mut observer = self
+                .backend_pick_evidence
+                .try_borrow_mut()
+                .map_err(|_| JsValue::from_str("backend pick diagnostics are already borrowed"))?;
+            observer
+                .record_report(&targets, report)
+                .map_err(js_error)?;
+            observer.snapshot()
+        };
         to_js(&snapshot)
     }
 
