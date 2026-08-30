@@ -275,16 +275,23 @@ or sphere state.
    source pivot, displayed-chart distance, and optional face/barycentric detail.
    `InteractionState` retains only ephemeral hover/active state; its snapshot
    derives selected identity from `FocusNavigation::anchor`. Focus-radius-aware
-   reach, virtual-time ordering, cadence invariance, cross-entity release
-   cancellation, and invalid-hit atomicity are covered natively. The ECS plugin
+   proximity reach is explicit; exact screen/XR ray hits remain selectable at
+   any distance so a tiny detached focus sphere cannot reject visible geometry.
+   Virtual-time ordering, cadence invariance, cross-entity release cancellation,
+   and invalid-hit atomicity are covered natively. The ECS plugin
    routes a successful activation into the established `AnchorFocus` action in
    the same ordered interaction set. `AppState` integrates interaction before
    navigation on the same virtual frame, and `HyperscopeAppShadow` exposes
    validated entity-level or face/barycentric hover plus primary
-   press/release/cancel and a read-only interaction snapshot. Renderer/browser
-   ray and shape queries, visualization policy, and live rollback-gated adoption
-   remain. Selection tint remains presentation; neither it nor a backend-local
-   face index becomes selection authority.
+   press/release/cancel and a read-only interaction snapshot. The retained
+   WebGL2 pick now also evaluates the exact animated QB point in source and
+   displayed charts on demand. `selectionimpl=shadow` routes mouse and
+   view-center picks through hover/press/release, compares the activated stable
+   identity, and falls back to the incumbent direct observer without changing
+   renderer authority. Live shadow evidence, Rust-default promotion, broader
+   hover cadence, shape queries, and visualization policy remain. Selection tint
+   remains presentation; neither it nor a backend-local face index becomes
+   selection authority.
 6. **Persistence and replay — native oracle complete.** Replay version 0.17
    serializes asset-scoped stable entity references, selected source
    bounds/pivots, derived

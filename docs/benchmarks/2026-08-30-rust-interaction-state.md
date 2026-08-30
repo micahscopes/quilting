@@ -10,7 +10,9 @@ Each hit carries one asset-scoped stable entity identity, its source-space
 focus bound and pivot, displayed-chart camera distance, and optional
 face/barycentric detail. Barycentrics are normalized at construction and cannot
 silently name a different object. Interaction reach is the larger of a positive
-minimum and a configurable multiple of the shared focus-sphere radius.
+minimum and a configurable multiple of the shared focus-sphere radius for the
+explicit `SetProximityHover` action. `SetHover` represents an exact ray/query
+result and validates geometry without applying that proximity cap.
 
 A same-entity press/release produces an `InteractionActivation`, which enters
 the existing `NavigationAction::AnchorFocus` queue in the same ordered ECS
@@ -48,14 +50,23 @@ and snapshot methods. The route source smoke fences their delegation through
 `SemanticAction::Interact`; the exact `leptos-ui,webgpu-backend` WASM feature
 set passes `cargo check --target wasm32-unknown-unknown`.
 
+The first page adapter is intentionally shadow-only. The retained WebGL2 pick
+returns its exact face/barycentric coordinate plus on-demand animated QB points
+in the source and displayed conformal charts. Under `selectionimpl=shadow`,
+mouse and view-center picks enter hover/press/release, compare the selected and
+hovered stable identity, and publish
+`globalThis.__hyperscopeInteractionDiagnostics`. Missing generated methods,
+invalid packets, or comparison failures retain the incumbent direct
+`AnchorFocus` observer. The default `selectionimpl=rust` path is unchanged.
+
 The command used one low-priority Cargo job and did not invoke Trunk,
 `wasm-pack`, or `wasm-opt`.
 
 ## Remaining boundary
 
 This is semantic-core evidence, not live browser authority. WebGL2/WebGPU ray
-or shape queries still need thin adapters that resolve packed renderer hits to
-the exact stable identity and enqueue these actions. Visualization such as
-hover/selection tint remains presentation policy. A `js|shadow|rust` browser
-adoption gate and representative live parity evidence should precede any
-incumbent removal.
+or shape queries beyond this first WebGL2 click path still need thin adapters
+that resolve packed renderer hits to exact stable identity. Visualization such
+as hover/selection tint remains presentation policy. Representative live shadow
+parity and a deliberate Rust-default promotion should precede any incumbent
+removal.

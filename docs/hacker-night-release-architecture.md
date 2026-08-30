@@ -634,8 +634,13 @@ WebGL2/WebGPU picking, selection tint, and DOM event shape outside semantic
 authority. The generated `HyperscopeAppShadow` facade now validates and queues
 entity-level or face/barycentric hover plus primary press/release/cancel, and
 projects an interaction snapshot without mutating focus directly. Browser query
-plumbing and live rollback-gated adoption remain separate work; this boundary
-does not yet claim live picking authority.
+plumbing now has a shadow-only first slice: the WebGL2 pick evaluates the exact
+animated QB point in source and displayed charts only on explicit picks, while
+`selectionimpl=shadow` sends hover/press/release and compares the resulting
+stable identity. Exact ray hits bypass proximity range; explicitly named
+proximity hits use focus-radius-aware reach. Any facade/version error falls back
+to the incumbent direct observer. Live evidence and Rust-default promotion
+remain separate work; this boundary does not yet claim live picking authority.
 `selectionimpl=js|shadow|rust` is the rollback boundary: the Rust mode verifies
 the application identity against `AppStore`, joins only the backend-local packed
 node, and applies the selected focus packet directly to the resident renderer
