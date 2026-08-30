@@ -118,6 +118,8 @@ pub const PATCH_RENDER_DEVICE_WIRE_ENTRY_POINT: &str = "render_patch_wire";
 pub const PATCH_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT: &str = "render_patch_highlight";
 pub const PATCH_RENDER_DEVICE_PBR_ENTRY_POINT: &str = "render_patch_pbr";
 pub const PATCH_RENDER_DEVICE_PBR_FOCUS_ENTRY_POINT: &str = "render_patch_pbr_focus";
+pub const PATCH_PICK_DEVICE_VERTEX_ENTRY_POINT: &str = "render_patch_pick_vertex";
+pub const PATCH_PICK_DEVICE_FRAGMENT_ENTRY_POINT: &str = "render_patch_pick";
 pub const RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT: &str = "render_resident_root_vertex";
 pub const RESIDENT_ROOT_RENDER_DEVICE_NORMALS_ENTRY_POINT: &str = "render_resident_root_normals";
 pub const RESIDENT_ROOT_RENDER_DEVICE_LOD_ENTRY_POINT: &str = "render_resident_root_lod";
@@ -162,6 +164,7 @@ pub mod sources {
     pub const PREPARED_VISIBILITY: &str =
         include_str!("../shaders/compute/prepared_visibility.wgsl");
     pub const PATCH_RENDER_DEVICE: &str = include_str!("../shaders/render/patch.wgsl");
+    pub const PATCH_PICK_DEVICE: &str = include_str!("../shaders/render/patch_pick.wgsl");
     pub const FOCUS_POSTPROCESS: &str = include_str!("../shaders/render/focus_postprocess.wgsl");
     pub const RESIDENT_ROOT_RENDER_DEVICE: &str =
         include_str!("../shaders/render/resident_root_patch.wgsl");
@@ -655,6 +658,22 @@ pub fn compile_patch_render_device_wgsl() -> Result<String, Box<dyn std::error::
     emit_wgsl(&compile_patch_render_device_module()?)
 }
 
+/// Compile and validate the one-pixel prepared-patch query pass.
+pub fn compile_patch_pick_device_module() -> Result<naga::Module, Box<dyn std::error::Error>> {
+    let module = compile_shader(sources::PATCH_PICK_DEVICE, HashMap::new())?;
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)?;
+    Ok(module)
+}
+
+/// Standalone WGSL for the one-pixel prepared-patch query pass.
+pub fn compile_patch_pick_device_wgsl() -> Result<String, Box<dyn std::error::Error>> {
+    emit_wgsl(&compile_patch_pick_device_module()?)
+}
+
 /// Compile and validate the backend-local fullscreen focus pass family.
 pub fn compile_focus_postprocess_module() -> Result<naga::Module, Box<dyn std::error::Error>> {
     let module = compile_shader(sources::FOCUS_POSTPROCESS, HashMap::new())?;
@@ -1125,6 +1144,53 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             9,
             "one uniform plus eight storage buffers stay inside WebGPU minimum limits",
         );
+    }
+
+    #[test]
+    fn compile_patch_pick_device_shader() {
+        let module = compile_patch_pick_device_module()
+            .expect("patch pick device shader compiles and validates");
+        let vertex = module
+            .entry_points
+            .iter()
+            .find(|entry| entry.name == PATCH_PICK_DEVICE_VERTEX_ENTRY_POINT)
+            .expect("patch pick vertex entry point");
+        assert_eq!(vertex.stage, naga::ShaderStage::Vertex);
+        let fragment = module
+            .entry_points
+            .iter()
+            .find(|entry| entry.name == PATCH_PICK_DEVICE_FRAGMENT_ENTRY_POINT)
+            .expect("patch pick fragment entry point");
+        assert_eq!(fragment.stage, naga::ShaderStage::Fragment);
+
+        let vertex_bindings = reflect_graphics_entry_bindings(
+            &module,
+            EntryPointStage::Vertex,
+            PATCH_PICK_DEVICE_VERTEX_ENTRY_POINT,
+        )
+        .expect("patch pick vertex bindings");
+        assert_eq!(
+            vertex_bindings
+                .iter()
+                .map(|binding| (binding.group, binding.binding))
+                .collect::<Vec<_>>(),
+            vec![(0, 0), (0, 1), (0, 2), (0, 3), (0, 4), (1, 0)],
+        );
+        assert!(reflect_graphics_entry_bindings(
+            &module,
+            EntryPointStage::Fragment,
+            PATCH_PICK_DEVICE_FRAGMENT_ENTRY_POINT,
+        )
+        .expect("patch pick fragment bindings")
+        .is_empty());
+
+        let flattened =
+            compile_patch_pick_device_wgsl().expect("flatten patch pick device WGSL");
+        assert!(!flattened.contains("#import"));
+        assert!(!flattened.contains("#define_import_path"));
+        let reparsed = naga::front::wgsl::parse_str(&flattened)
+            .expect("reparse flattened patch pick device WGSL");
+        assert_eq!(reparsed.entry_points.len(), 2);
     }
 
     #[test]
