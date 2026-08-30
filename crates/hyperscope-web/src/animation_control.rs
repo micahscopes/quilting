@@ -7,14 +7,14 @@
 //! control intent.
 
 use hyperscope_app::{
-    AnimationAction, AnimationClipSelectionReadModel, AppEffect, AppStore, AppSummary,
+    AnimationAction, AnimationClipSelectionReadModel, AppAnimationSnapshot, AppEffect, AppStore,
     InstalledPrimarySceneReadModel, ReduceError, SemanticAction,
 };
 
 #[cfg(all(feature = "csr", target_arch = "wasm32"))]
 mod csr;
 #[cfg(all(feature = "csr", target_arch = "wasm32"))]
-pub use csr::{mount_animation_clip_control, mount_animation_control};
+pub use csr::{mount_animation_clip_control, mount_animation_control, mount_animation_timeline};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnimationControlViewModel {
@@ -28,6 +28,23 @@ pub struct AnimationControlCommit {
     pub sequence: u64,
     pub revision: u64,
     pub playing: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnimationTimelineViewModel {
+    pub revision: u64,
+    pub sample_time_seconds: f64,
+    pub minimum_seconds: f64,
+    pub maximum_seconds: f64,
+    pub disabled: bool,
+    pub status_label: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AnimationTimelineCommit {
+    pub sequence: u64,
+    pub revision: u64,
+    pub sample_time_seconds: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,8 +92,8 @@ pub fn toggle_animation_playback(store: &AppStore) -> Result<AnimationControlCom
     })
 }
 
-pub fn project_animation_control(summary: &AppSummary) -> AnimationControlViewModel {
-    if summary.animation_playing {
+pub fn project_animation_control(snapshot: &AppAnimationSnapshot) -> AnimationControlViewModel {
+    if snapshot.clock.playing {
         AnimationControlViewModel {
             playing: true,
             action_label: "Pause animation",
@@ -90,6 +107,90 @@ pub fn project_animation_control(summary: &AppSummary) -> AnimationControlViewMo
         }
     }
 }
+
+pub fn project_animation_timeline(snapshot: &AppAnimationSnapshot) -> AnimationTimelineViewModel {
+    let Some(clip) = snapshot.active_clip else {
+        return AnimationTimelineViewModel {
+            revision: snapshot.revision,
+            sample_time_seconds: 0.0,
+            minimum_seconds: 0.0,
+            maximum_seconds: 1.0,
+            disabled: true,
+            status_label: "No active animation".to_owned(),
+        };
+    };
+    AnimationTimelineViewModel {
+        revision: snapshot.revision,
+        sample_time_seconds: clip.sample_time_seconds,
+        minimum_seconds: clip.time_min_seconds,
+        maximum_seconds: clip.time_max_seconds,
+        disabled: snapshot.clock.playing,
+        status_label: if snapshot.clock.playing {
+            "Pause animation to seek".to_owned()
+        } else {
+            format!("Animation time {:.2} seconds", clip.sample_time_seconds)
+        },
+    }
+}
+
+/// Seek in authored clip time. The reducer continues to own its unwrapped,
+/// clip-relative clock; the view cannot seek while playback is advancing,
+/// matching the incumbent browser interaction contract.
+pub fn seek_animation_timeline(
+    store: &AppStore,
+    sample_time_seconds: f64,
+) -> Result<AnimationTimelineCommit, AnimationTimelineError> {
+    let frame = store.frame_snapshot();
+    if frame.animation.playing {
+        return Err(AnimationTimelineError::Playing);
+    }
+    let clip = frame
+        .active_animation_clip
+        .ok_or(AnimationTimelineError::NoActiveClip)?;
+    if !sample_time_seconds.is_finite()
+        || sample_time_seconds < clip.time_min_seconds
+        || sample_time_seconds > clip.time_max_seconds
+    {
+        return Err(AnimationTimelineError::InvalidSampleTime);
+    }
+    let (sequence, commit) = store
+        .dispatch_semantic(SemanticAction::Animate(AnimationAction::Seek(
+            sample_time_seconds - clip.time_min_seconds,
+        )))
+        .map_err(AnimationTimelineError::Reduce)?;
+    let committed = store
+        .frame_snapshot()
+        .active_animation_clip
+        .ok_or(AnimationTimelineError::NoActiveClip)?;
+    Ok(AnimationTimelineCommit {
+        sequence,
+        revision: commit.revision,
+        sample_time_seconds: committed.sample_time_seconds,
+    })
+}
+
+#[derive(Debug)]
+pub enum AnimationTimelineError {
+    NoActiveClip,
+    Playing,
+    InvalidSampleTime,
+    Reduce(ReduceError),
+}
+
+impl std::fmt::Display for AnimationTimelineError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoActiveClip => formatter.write_str("no active animation clip is installed"),
+            Self::Playing => formatter.write_str("pause animation before seeking"),
+            Self::InvalidSampleTime => {
+                formatter.write_str("animation sample time is outside the active clip")
+            }
+            Self::Reduce(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for AnimationTimelineError {}
 
 /// Derive one coherent selector from the installed catalog and the committed
 /// active/pending selection. A pending choice is shown immediately, but the
@@ -258,10 +359,9 @@ mod tests {
 
     #[test]
     fn projection_exposes_playback_state_and_inverse_action() {
-        let mut summary = AppSummary::default();
-        summary.animation_playing = true;
+        let store = AppStore::default();
         assert_eq!(
-            project_animation_control(&summary),
+            project_animation_control(&store.animation_snapshot()),
             AnimationControlViewModel {
                 playing: true,
                 action_label: "Pause animation",
@@ -269,9 +369,9 @@ mod tests {
             }
         );
 
-        summary.animation_playing = false;
+        toggle_animation_playback(&store).unwrap();
         assert_eq!(
-            project_animation_control(&summary),
+            project_animation_control(&store.animation_snapshot()),
             AnimationControlViewModel {
                 playing: false,
                 action_label: "Play animation",
@@ -301,6 +401,40 @@ mod tests {
             },
         );
         assert!(store.summary_snapshot().animation_playing);
+    }
+
+    #[test]
+    fn timeline_projects_authored_clip_time_and_seeks_only_while_paused() {
+        let (store, _, _) = installed_store();
+        let playing = project_animation_timeline(&store.animation_snapshot());
+        assert_eq!(playing.minimum_seconds, 0.0);
+        assert_eq!(playing.maximum_seconds, 1.5);
+        assert!(playing.disabled);
+        assert!(matches!(
+            seek_animation_timeline(&store, 0.75),
+            Err(AnimationTimelineError::Playing),
+        ));
+
+        toggle_animation_playback(&store).unwrap();
+        let paused = project_animation_timeline(&store.animation_snapshot());
+        assert!(!paused.disabled);
+        let committed = seek_animation_timeline(&store, 0.75).unwrap();
+        assert_eq!(committed.sample_time_seconds, 0.75);
+        assert_eq!(store.animation_snapshot().clock.time_seconds, 0.75);
+    }
+
+    #[test]
+    fn timeline_rejects_invalid_samples_without_mutating_the_clock() {
+        let (store, _, _) = installed_store();
+        toggle_animation_playback(&store).unwrap();
+        let before = store.frame_snapshot();
+        for invalid in [-0.1, 1.6, f64::NAN] {
+            assert!(matches!(
+                seek_animation_timeline(&store, invalid),
+                Err(AnimationTimelineError::InvalidSampleTime),
+            ));
+        }
+        assert_eq!(store.frame_snapshot(), before);
     }
 
     #[test]

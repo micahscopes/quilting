@@ -280,6 +280,24 @@ impl HyperscopeAppShadow {
         );
     }
 
+    /// Mount the Rust-authoritative animation timeline over its compact,
+    /// explicitly throttled FRP projection.
+    #[cfg(feature = "leptos-ui")]
+    #[wasm_bindgen(js_name = mountAnimationTimeline)]
+    pub fn mount_animation_timeline(
+        &self,
+        parent: web_sys::HtmlElement,
+        on_commit: js_sys::Function,
+        on_error: js_sys::Function,
+    ) {
+        hyperscope_web::animation_control::mount_animation_timeline(
+            parent,
+            self.store.clone(),
+            on_commit,
+            on_error,
+        );
+    }
+
     /// Mount the explicit Rust-authority installed-animation selector. The
     /// view dispatches through AppStore; the browser receives only the exact
     /// committed selection/cancellation effects needed to update resources.
@@ -700,6 +718,13 @@ impl HyperscopeAppShadow {
     #[wasm_bindgen(js_name = flushReadModels)]
     pub fn flush_read_models(&self) {
         self.store.flush_read_models();
+    }
+
+    /// Publish only the low-rate animation-control projection. This is the
+    /// browser RAF throttle boundary, not a renderer or application tick.
+    #[wasm_bindgen(js_name = flushAnimationReadModel)]
+    pub fn flush_animation_read_model(&self) -> u64 {
+        self.store.flush_animation_read_model()
     }
 
     /// Replace settled camera/focus state before a low-rate authored

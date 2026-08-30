@@ -120,8 +120,11 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
   <div class="sub">Conformal mesh rendering</div>
 
   <div class="section">
-    <label>Animation Time</label>
-    <div class="sr"><span style="font-size:10px;color:#8b949e;width:50px">Time</span><input type="range" id="time" min="0" max="2" step="any" value="0"><span class="v" id="time-v">0.00</span></div>
+    <div id="animation-time-rust" hidden></div>
+    <div id="animation-time-browser">
+      <label>Animation Time</label>
+      <div class="sr"><span style="font-size:10px;color:#8b949e;width:50px">Time</span><input type="range" id="time" min="0" max="2" step="any" value="0"><span class="v" id="time-v">0.00</span></div>
+    </div>
     <div id="camera-fov-rust" hidden></div>
     <div id="camera-fov-browser">
       <label style="margin-top:5px">Vertical field of view</label>
@@ -3920,6 +3923,8 @@ let rustAssetCreditsMountAttempted = false;
 let rustAssetCreditsMounted = false;
 let rustAnimationControlMountAttempted = false;
 let rustAnimationControlMounted = false;
+let rustAnimationTimelineMountAttempted = false;
+let rustAnimationTimelineMounted = false;
 let rustAnimationClipControlMountAttempted = false;
 let rustAnimationClipControlMounted = false;
 let rustNavigationStatusMountAttempted = false;
@@ -3945,6 +3950,11 @@ const rustAppShadowDiagnostics = {
   animationControlAuthority: 'browser-fallback',
   animationControlMountAttempts: 0,
   animationControlMountErrors: 0,
+  animationTimelineAuthority: 'browser-fallback',
+  animationTimelineMountAttempts: 0,
+  animationTimelineMountErrors: 0,
+  animationTimelineDispatches: 0,
+  animationTimelineErrors: 0,
   animationClipControlAuthority: 'browser-fallback',
   animationClipControlMountAttempts: 0,
   animationClipControlMountErrors: 0,
@@ -4960,6 +4970,84 @@ function ensureRustAnimationControlView() {
   }
 }
 
+function useBrowserAnimationTimeline() {
+  const host = $('animation-time-rust');
+  const fallback = $('animation-time-browser');
+  if (host) host.hidden = true;
+  if (fallback) fallback.hidden = false;
+  rustAppShadowDiagnostics.animationTimelineAuthority = 'browser-fallback';
+}
+
+function ensureRustAnimationTimelineView() {
+  if (ANIMATION_CLOCK_IMPLEMENTATION !== 'rust') {
+    useBrowserAnimationTimeline();
+    return false;
+  }
+  if (rustAnimationTimelineMounted) return true;
+  if (rustAnimationTimelineMountAttempted || !rustAppShadow) return false;
+  rustAnimationTimelineMountAttempted = true;
+  rustAppShadowDiagnostics.animationTimelineMountAttempts += 1;
+  const host = $('animation-time-rust');
+  const fallback = $('animation-time-browser');
+  if (!host || !fallback || typeof rustAppShadow.mountAnimationTimeline !== 'function') {
+    useBrowserAnimationTimeline();
+    return false;
+  }
+  try {
+    rustAppShadow.mountAnimationTimeline(
+      host,
+      (sampleTimeSeconds, sequence, revision) => {
+        try {
+          const committedTime = Number(sampleTimeSeconds);
+          if (!Number.isFinite(committedTime) || animating_sig.peek()) {
+            throw new Error('Rust animation timeline returned an invalid paused sample');
+          }
+          observeRustAppShadowSequence(sequence, 'Rust animation timeline');
+          rustAppShadowDiagnostics.lastCommit = {
+            revision: String(revision),
+            disposition: 'applied',
+            publishedUi: true,
+            effects: [],
+          };
+          animTime = committedTime;
+          animationClockDiagnostics.dispatches += 1;
+          animationClockDiagnostics.authorityWrites += 1;
+          animationClockDiagnostics.lastContext = 'timeline-seek';
+          animationClockDiagnostics.state = 'authoritative';
+          rustAppShadowDiagnostics.animationTimelineDispatches += 1;
+          rebaseAnimationPoseContinuity();
+          tickAnimation(animTime, animationPoseClockSeconds);
+          debouncedLodRecompute();
+          syncURL();
+        } catch (error) {
+          rustAppShadowDiagnostics.animationTimelineErrors += 1;
+          recordAppShadowMismatch(
+            'animation_timeline_projection',
+            error?.message || String(error),
+          );
+        }
+      },
+      error => {
+        rustAppShadowDiagnostics.animationTimelineErrors += 1;
+        recordAppShadowMismatch('animation_timeline_rejection', String(error));
+      },
+    );
+    host.hidden = false;
+    fallback.hidden = true;
+    rustAnimationTimelineMounted = true;
+    rustAppShadowDiagnostics.animationTimelineAuthority = 'hyperscope-web';
+    return true;
+  } catch (error) {
+    rustAppShadowDiagnostics.animationTimelineMountErrors += 1;
+    recordAppShadowMismatch(
+      'animation_timeline_mount',
+      error?.message || String(error),
+    );
+    useBrowserAnimationTimeline();
+    return false;
+  }
+}
+
 function ensureRustAnimationClipControlView() {
   if (ANIMATION_CLIP_IMPLEMENTATION !== 'rust') return false;
   if (rustAnimationClipControlMounted) return true;
@@ -5291,6 +5379,7 @@ function refreshAppShadowSnapshot() {
   const snapshot = rustAppShadow.snapshot();
   rustAppShadowDiagnostics.snapshot = snapshot;
   ensureRustAnimationControlView();
+  ensureRustAnimationTimelineView();
   ensureRustAnimationClipControlView();
   ensureRustNavigationSettingsView();
   ensureRustNavigationStatusView();
@@ -10995,8 +11084,14 @@ function frame(ts) {
     }
     if (ts - lastAnimationUiAt >= ANIMATION_UI_INTERVAL_MS) {
       lastAnimationUiAt = ts;
-      $('time').value = animTime;
-      $('time-v').textContent = animTime.toFixed(2);
+      if (ANIMATION_CLOCK_IMPLEMENTATION === 'rust'
+          && rustAnimationTimelineMounted
+          && typeof rustAppShadow?.flushAnimationReadModel === 'function') {
+        rustAppShadow.flushAnimationReadModel();
+      } else {
+        $('time').value = animTime;
+        $('time-v').textContent = animTime.toFixed(2);
+      }
       syncURL();
     }
     tickAnimation(animTime, animationPoseClockSeconds);

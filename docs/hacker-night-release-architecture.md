@@ -555,6 +555,15 @@ The first application boundary is now explicit:
   scrubbing likewise allocate inside the store. JavaScript/shadow modes retain
   their explicit sequence path, so this narrows Rust authority without erasing
   the comparison oracle or prematurely changing the default clock lane.
+  The Rust lane now also exposes a compact `AppAnimationSnapshot` and dedicated
+  throttle flush, separate from the full summary and navigation projections.
+  A Leptos timeline consumes that FRP signal, disables seeking during playback,
+  converts authored clip time to the reducer's unwrapped relative clock, and
+  dispatches `Seek` directly through `AppStore`. The 50-ms browser cadence only
+  publishes this compact read model and adapts committed sample time into the
+  incumbent renderer; it no longer writes the timeline DOM or clones unrelated
+  application read models. The original HTML timeline remains the `js|shadow`
+  and mount-failure rollback.
   Version 0.9 records whether an asset request is independent or replaces the
   primary scene. A 0.8 trace keeps its historical per-asset meaning; it cannot
   smuggle a `primary_scene` request into the older schema.

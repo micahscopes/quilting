@@ -1,7 +1,8 @@
 use super::{
-    project_animation_clip_control, project_animation_control, select_animation_clip,
-    toggle_animation_playback, AnimationClipControlCommit, AnimationClipControlViewModel,
-    AnimationClipJobEffect, AnimationControlViewModel,
+    project_animation_clip_control, project_animation_control, project_animation_timeline,
+    seek_animation_timeline, select_animation_clip, toggle_animation_playback,
+    AnimationClipControlCommit, AnimationClipControlViewModel, AnimationClipJobEffect,
+    AnimationControlViewModel, AnimationTimelineViewModel,
 };
 use futures_signals::signal::SignalExt as _;
 use hyperscope_app::AppStore;
@@ -11,9 +12,9 @@ use leptos::prelude::*;
 use send_wrapper::SendWrapper;
 use wasm_bindgen::JsValue;
 
-/// Mount a permanent Leptos CSR playback control over the AppStore's low-rate
-/// summary signal. The button dispatches directly through the reducer; browser
-/// callbacks receive only committed renderer adaptation or rejection effects.
+/// Mount a permanent Leptos CSR playback control over the AppStore's compact
+/// animation signal. The button dispatches directly through the reducer;
+/// browser callbacks receive only committed adaptation or rejection effects.
 pub fn mount_animation_control(
     parent: web_sys::HtmlElement,
     store: AppStore,
@@ -21,13 +22,35 @@ pub fn mount_animation_control(
     on_error: Function,
 ) {
     mount_to(parent, move || {
-        let (control, set_control) = signal(project_animation_control(&store.summary_snapshot()));
-        let updates = store.summary_signal().for_each(move |summary| {
-            set_control.set(project_animation_control(&summary));
+        let (control, set_control) = signal(project_animation_control(&store.animation_snapshot()));
+        let updates = store.animation_signal().for_each(move |animation| {
+            set_control.set(project_animation_control(&animation));
             async {}
         });
         wasm_bindgen_futures::spawn_local(updates);
         view! { <AnimationControl control store on_commit on_error /> }
+    })
+    .forget();
+}
+
+/// Mount the throttled Rust animation timeline. Playback frames publish only
+/// the compact animation read model; seeking dispatches directly through the
+/// reducer and returns an already committed authored sample time.
+pub fn mount_animation_timeline(
+    parent: web_sys::HtmlElement,
+    store: AppStore,
+    on_commit: Function,
+    on_error: Function,
+) {
+    mount_to(parent, move || {
+        let (timeline, set_timeline) =
+            signal(project_animation_timeline(&store.animation_snapshot()));
+        let updates = store.animation_signal().for_each(move |animation| {
+            set_timeline.set(project_animation_timeline(&animation));
+            async {}
+        });
+        wasm_bindgen_futures::spawn_local(updates);
+        view! { <AnimationTimeline timeline store on_commit on_error /> }
     })
     .forget();
 }
@@ -82,6 +105,56 @@ fn AnimationControl(
                 on:click=move |_| toggle_playback(&store, &on_commit, &on_error)
             ></button>
             <span class="toggle-label">"Auto-animate"</span>
+        </div>
+    }
+}
+
+#[component]
+fn AnimationTimeline(
+    timeline: ReadSignal<AnimationTimelineViewModel>,
+    store: AppStore,
+    on_commit: Function,
+    on_error: Function,
+) -> impl IntoView {
+    let on_commit = SendWrapper::new(on_commit);
+    let on_error = SendWrapper::new(on_error);
+    view! {
+        <div id="animation-timeline-rust-view">
+            <label for="animation-time-rust-input">"Animation Time"</label>
+            <div class="sr">
+                <span style="font-size:10px;color:#8b949e;width:50px">"Time"</span>
+                <input
+                    id="animation-time-rust-input"
+                    type="range"
+                    min=move || timeline.read().minimum_seconds
+                    max=move || timeline.read().maximum_seconds
+                    step="any"
+                    disabled=move || timeline.read().disabled
+                    aria-label=move || timeline.read().status_label.clone()
+                    prop:value=move || timeline.read().sample_time_seconds
+                    on:input=move |event| {
+                        let Ok(value) = event_target_value(&event).parse::<f64>() else {
+                            return;
+                        };
+                        match seek_animation_timeline(&store, value) {
+                            Ok(committed) => {
+                                let arguments = Array::new();
+                                arguments.push(&JsValue::from_f64(committed.sample_time_seconds));
+                                arguments.push(&JsValue::from(committed.sequence));
+                                arguments.push(&JsValue::from(committed.revision));
+                                let _ = on_commit.apply(&JsValue::UNDEFINED, &arguments);
+                            }
+                            Err(error) => {
+                                let _ = on_error.call1(
+                                    &JsValue::UNDEFINED,
+                                    &JsValue::from_str(&error.to_string()),
+                                );
+                            }
+                        }
+                    }
+                />
+                <span class="v">{move || format!("{:.2}", timeline.read().sample_time_seconds)}</span>
+            </div>
         </div>
     }
 }

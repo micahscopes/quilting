@@ -390,6 +390,43 @@ for (const directAnimationStep of [
     `Leptos animation control is missing direct Rust dispatch step: ${directAnimationStep}`,
   );
 }
+const animationTimelineMountBoundary = browserSource.slice(
+  browserSource.indexOf('rustAppShadow.mountAnimationTimeline('),
+  browserSource.indexOf(
+    'host.hidden = false;',
+    browserSource.indexOf('rustAppShadow.mountAnimationTimeline('),
+  ),
+);
+assert.ok(
+  !animationTimelineMountBoundary.includes('dispatchAnimationSeekIntent(')
+    && animationTimelineMountBoundary.includes(
+      "observeRustAppShadowSequence(sequence, 'Rust animation timeline');",
+    )
+    && animationTimelineMountBoundary.includes('animTime = committedTime;')
+    && animationTimelineMountBoundary.includes("'animation_timeline_rejection'"),
+  'the animation timeline callback must apply committed Rust time without redispatching intent',
+);
+for (const timelineStep of [
+  'store.animation_signal()',
+  'seek_animation_timeline(&store, value)',
+  'SemanticAction::Animate(AnimationAction::Seek(',
+  'disabled=move || timeline.read().disabled',
+]) {
+  assert.ok(
+    animationControlSource.includes(timelineStep),
+    `Leptos animation timeline is missing ${timelineStep}`,
+  );
+}
+for (const throttledTimelineStep of [
+  "ANIMATION_CLOCK_IMPLEMENTATION === 'rust'",
+  'rustAnimationTimelineMounted',
+  'rustAppShadow.flushAnimationReadModel();',
+]) {
+  assert.ok(
+    browserSource.includes(throttledTimelineStep),
+    `browser animation timeline throttle is missing ${throttledTimelineStep}`,
+  );
+}
 
 const lodAdapter = browserSource.slice(
   browserSource.indexOf('async function recomputeLods()'),
