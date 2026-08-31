@@ -19,7 +19,7 @@ use quilting_core::render::{
     ResidentRootDrawDomains, VisibilityCompactionPlan,
 };
 use quilting_mesh::HalfEdgeMesh;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 #[cfg(target_arch = "wasm32")]
 fn log_info(msg: &str) {
@@ -693,6 +693,41 @@ pub struct WgslLodModelWords {
     pub skinning: Vec<[u32; 8]>,
     pub morph_deltas: Vec<[u32; 4]>,
     pub adjacency: Vec<[u32; 4]>,
+    pub subject_layout: WgslLodSubjectLayout,
+}
+
+/// Immutable authored-node to dense WGSL subject-row mapping. The row order is
+/// fixed by first face occurrence and shared by model packing and every later
+/// dynamic transform publication.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WgslLodSubjectLayout {
+    rows: BTreeMap<usize, u32>,
+}
+
+impl WgslLodSubjectLayout {
+    pub fn from_prepared(prepared: &PreparedLodModel) -> Result<Self, String> {
+        let mut rows = BTreeMap::new();
+        for &node in &prepared.model.face_nodes {
+            if !rows.contains_key(&node) {
+                let row = u32::try_from(rows.len())
+                    .map_err(|_| "LOD subject table exceeds the WGSL ABI".to_string())?;
+                rows.insert(node, row);
+            }
+        }
+        Ok(Self { rows })
+    }
+
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    fn row(&self, node: usize) -> Option<u32> {
+        self.rows.get(&node).copied()
+    }
 }
 
 /// Immutable and scene-retained words consumed by WebGPU patch preparation.
@@ -1630,29 +1665,17 @@ pub struct WgslLodDispatchMetrics {
     pub num_joints: u32,
 }
 
-fn wgsl_lod_subject_rows(
-    prepared: &PreparedLodModel,
-) -> Result<std::collections::BTreeMap<usize, u32>, String> {
-    let mut rows = std::collections::BTreeMap::new();
-    for &node in &prepared.model.face_nodes {
-        if !rows.contains_key(&node) {
-            let row = u32::try_from(rows.len())
-                .map_err(|_| "LOD subject table exceeds the WGSL ABI".to_string())?;
-            rows.insert(node, row);
-        }
-    }
-    Ok(rows)
-}
-
 /// Pack immutable classifier residency into the exact WGSL record strides.
 pub fn pack_wgsl_lod_model_words(
     prepared: &PreparedLodModel,
 ) -> Result<WgslLodModelWords, String> {
     let model = &prepared.model;
-    let subject_rows = wgsl_lod_subject_rows(prepared)?;
+    let subject_layout = WgslLodSubjectLayout::from_prepared(prepared)?;
     let mut faces = Vec::with_capacity(model.faces.len());
     for (&vertices, &node) in model.faces.iter().zip(&model.face_nodes) {
-        let subject = subject_rows[&node];
+        let subject = subject_layout
+            .row(node)
+            .expect("face nodes constructed the subject layout");
         faces.push([vertices[0], vertices[1], vertices[2], subject]);
     }
 
@@ -1722,6 +1745,7 @@ pub fn pack_wgsl_lod_model_words(
         skinning,
         morph_deltas,
         adjacency,
+        subject_layout,
     })
 }
 
@@ -1745,14 +1769,24 @@ pub fn pack_wgsl_lod_subject_words_into(
     dispatch: &LodDispatchState,
     packed: &mut Vec<[u32; 40]>,
 ) -> Result<(), String> {
-    let subject_rows = wgsl_lod_subject_rows(prepared)?;
+    let layout = WgslLodSubjectLayout::from_prepared(prepared)?;
+    pack_wgsl_lod_subject_words_with_layout(&layout, dispatch, packed)
+}
+
+/// Repack against a model-retained row layout, avoiding per-dispatch map
+/// reconstruction while preserving the exact compatibility packer above.
+pub fn pack_wgsl_lod_subject_words_with_layout(
+    layout: &WgslLodSubjectLayout,
+    dispatch: &LodDispatchState,
+    packed: &mut Vec<[u32; 40]>,
+) -> Result<(), String> {
     packed.clear();
-    packed.resize(subject_rows.len().max(1), [0; 40]);
+    packed.resize(layout.len().max(1), [0; 40]);
     for state in &dispatch.subjects {
-        let row_index = subject_rows
-            .get(&state.node)
+        let row_index = layout
+            .row(state.node)
             .ok_or_else(|| "LOD subject state has no resident face row".to_string())?;
-        let row = &mut packed[*row_index as usize];
+        let row = &mut packed[row_index as usize];
         for (destination, value) in row[..16].iter_mut().zip(state.mobius) {
             *destination = value.to_bits();
         }
@@ -4212,6 +4246,8 @@ mod tests {
         .unwrap();
         let model = pack_wgsl_lod_model_words(&prepared).unwrap();
         assert_eq!(model.faces, vec![[0, 1, 2, 0]]);
+        assert_eq!(model.subject_layout.len(), 1);
+        assert_eq!(model.subject_layout.row(2), Some(0));
         assert_eq!(model.positions[0], [1.0f32.to_bits(), (-2.0f32).to_bits(), 3.0f32.to_bits(), 0]);
         assert_eq!(
             model.skinning[0],
@@ -4273,10 +4309,20 @@ mod tests {
         let scratch_allocation = subject_scratch.as_ptr();
         let mut baseline_only = dispatch.clone();
         baseline_only.subjects.clear();
-        pack_wgsl_lod_subject_words_into(&prepared, &baseline_only, &mut subject_scratch).unwrap();
+        pack_wgsl_lod_subject_words_with_layout(
+            &model.subject_layout,
+            &baseline_only,
+            &mut subject_scratch,
+        )
+        .unwrap();
         assert_eq!(subject_scratch, vec![[0; 40]]);
         assert_eq!(subject_scratch.as_ptr(), scratch_allocation);
-        pack_wgsl_lod_subject_words_into(&prepared, &dispatch, &mut subject_scratch).unwrap();
+        pack_wgsl_lod_subject_words_with_layout(
+            &model.subject_layout,
+            &dispatch,
+            &mut subject_scratch,
+        )
+        .unwrap();
         assert_eq!(subject_scratch, subjects);
         assert_eq!(subject_scratch.as_ptr(), scratch_allocation);
 

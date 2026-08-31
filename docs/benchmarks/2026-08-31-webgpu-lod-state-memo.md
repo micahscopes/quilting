@@ -46,9 +46,8 @@ diagnostics. Every classifier request records two outcomes, one per half.
 
 The 160-byte-row output allocation is now retained and reused. Exact comparison
 still visits every subject, which is required before skipping a full-table
-upload, and the shared packer currently reconstructs the node-to-dense-row map
-with a `BTreeMap` on every request. Retaining that immutable lookup in the
-uploaded model is the next bounded CPU reduction.
+upload. The immutable node-to-dense-row map subsequently moved into uploaded
+model residency; see `2026-08-31-webgpu-lod-subject-layout.md`.
 
 Classification and resident LOD reconciliation subsequently moved into one
 ordered command encoder and submission without readback; see

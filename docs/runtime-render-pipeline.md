@@ -243,6 +243,10 @@ table. Camera-only requests therefore reuse subject residency, identical
 requests write neither half, and subject packing reuses retained scratch
 storage. `lodStateUploads`, `lodStateReuses`, and `lodStateUploadBytes` expose
 the resulting device-lifetime queue traffic independently of pose uploads.
+Its authored-node to dense subject-row layout is also built once with immutable
+model words and retained by the uploaded classifier. Per-request packing no
+longer scans face ownership or allocates a `BTreeMap`; the compatibility packer
+still supports stateless callers outside the retained WebGPU path.
 The browser's classifier and resident reconciliation now form one ordered
 WebGPU command graph and one queue submission. The intermediate packed LOD
 table never crosses back to the CPU; the separately submitted helpers remain

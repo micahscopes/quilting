@@ -82,15 +82,15 @@ use quilting_core::render_pipeline::{
 use quilting_core::screen_partition::ScreenPatchLeafId;
 use quilting_renderer::compute::{
     pack_lod_classification, pack_wgsl_adaptive_overlay_scene_words, pack_wgsl_lod_atlas_words,
-    pack_wgsl_lod_dispatch_words, pack_wgsl_lod_model_words, pack_wgsl_lod_subject_words_into,
-    pack_wgsl_patch_preparation_scene_words, pack_wgsl_resident_root_preparation_scene_words,
-    pack_wgsl_root_eligibility_bits, pack_wgsl_source_visibility_words,
-    pack_wgsl_visibility_compaction_scene_words, prepare_lod_atlas_lookup, prepare_lod_model,
-    reconcile_and_pack_wgsl_lod_pass2, reconcile_and_pack_wgsl_resident_lods,
-    wgsl_resident_geometry_bucket_oracle_words_with_domains,
+    pack_wgsl_lod_dispatch_words, pack_wgsl_lod_model_words,
+    pack_wgsl_lod_subject_words_with_layout, pack_wgsl_patch_preparation_scene_words,
+    pack_wgsl_resident_root_preparation_scene_words, pack_wgsl_root_eligibility_bits,
+    pack_wgsl_source_visibility_words, pack_wgsl_visibility_compaction_scene_words,
+    prepare_lod_atlas_lookup, prepare_lod_model, reconcile_and_pack_wgsl_lod_pass2,
+    reconcile_and_pack_wgsl_resident_lods, wgsl_resident_geometry_bucket_oracle_words_with_domains,
     wgsl_resident_root_topology_oracle_words, LodAtlasLookup, LodDispatchState, LodModelData,
     PreparedLodModel, WgslAdaptiveOverlayPreparationSceneWords, WgslLodDispatchMetrics,
-    WgslPatchPreparationSceneWords, WgslResidentRootPreparationSceneWords,
+    WgslLodSubjectLayout, WgslPatchPreparationSceneWords, WgslResidentRootPreparationSceneWords,
     WgslVisibilityCompactionSceneWords,
 };
 use std::borrow::Cow;
@@ -1021,6 +1021,7 @@ pub struct LodClassifierModel {
     classification_epoch: u64,
     joint_capacity: usize,
     subject_rows: usize,
+    subject_layout: WgslLodSubjectLayout,
     uniform: wgpu::Buffer,
     faces: wgpu::Buffer,
     skinning: wgpu::Buffer,
@@ -7895,12 +7896,7 @@ impl LodClassifierDevice {
         let words = pack_wgsl_lod_model_words(&prepared).map_err(LodWebGpuError::Payload)?;
         let atlas_words = pack_wgsl_lod_atlas_words(atlas);
         let face_count = prepared.residency.num_faces;
-        let subject_rows = words
-            .faces
-            .iter()
-            .map(|face| face[3] as usize)
-            .max()
-            .map_or(1, |row| row + 1);
+        let subject_rows = words.subject_layout.len().max(1);
         let joint_capacity = prepared
             .model
             .joint_indices
@@ -8087,6 +8083,7 @@ impl LodClassifierDevice {
             classification_epoch: 0,
             joint_capacity,
             subject_rows,
+            subject_layout: words.subject_layout,
             uniform,
             faces,
             skinning,
@@ -8122,8 +8119,12 @@ impl LodClassifierDevice {
         let mut lod_state = model.lod_state.lock().map_err(|_| {
             LodWebGpuError::Payload("LOD state staging lock was poisoned".to_string())
         })?;
-        pack_wgsl_lod_subject_words_into(&model.prepared, dispatch, &mut lod_state.subject_scratch)
-            .map_err(LodWebGpuError::Payload)?;
+        pack_wgsl_lod_subject_words_with_layout(
+            &model.subject_layout,
+            dispatch,
+            &mut lod_state.subject_scratch,
+        )
+        .map_err(LodWebGpuError::Payload)?;
         if lod_state.subject_scratch.len() != model.subject_rows {
             return Err(LodWebGpuError::Payload(
                 "subject table changed immutable shape".to_string(),

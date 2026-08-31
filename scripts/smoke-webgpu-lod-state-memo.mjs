@@ -14,7 +14,7 @@ const browser = read('crates/quilting-wasm/src/webgpu_backend.rs');
 for (const required of [
   'pub fn pack_wgsl_lod_subject_words_into',
   'packed.clear();',
-  'packed.resize(subject_rows.len().max(1), [0; 40]);',
+  'packed.resize(layout.len().max(1), [0; 40]);',
 ]) {
   assert.ok(renderer.includes(required), `reusable LOD subject packer is missing ${required}`);
 }
@@ -27,7 +27,7 @@ for (const required of [
   'fn commit_uniform',
   'fn commit_subject_scratch',
   'lod_state: Mutex<RetainedLodDispatchState>',
-  'pack_wgsl_lod_subject_words_into(',
+  'pack_wgsl_lod_subject_words_with_layout(',
   'self.record_lod_state_publication(uniform_publication);',
   'self.record_lod_state_publication(subject_publication);',
   'pub fn lod_state_memo_diagnostics',
