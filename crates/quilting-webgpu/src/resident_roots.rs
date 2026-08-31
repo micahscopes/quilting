@@ -1369,8 +1369,11 @@ impl LodClassifierDevice {
             ));
         }
         self.write_resident_root_render_frames(bindings, frame, &preparation.draw_domains, use_qb)?;
-        if pose_upload.should_publish() {
-            self.write_resident_root_preparation_pose(model, preparation, pose, num_joints)?;
+        if pose_upload.should_publish_dynamic() {
+            self.write_dynamic_pose(model, pose, num_joints)?;
+        }
+        if pose_upload.should_publish_preparation() {
+            self.write_patch_joint_count(&preparation.patches, num_joints);
         }
         self.encode_resident_root_preparation(preparation, resident, encoder)?;
         self.encode_resident_root_visibility(preparation, geometry, bindings, encoder)?;

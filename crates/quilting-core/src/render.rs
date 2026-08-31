@@ -679,6 +679,26 @@ pub struct RenderPoseIdentity {
     pub pose_revision: u64,
 }
 
+impl RenderPoseIdentity {
+    /// Identity for an unanimated asset revision.
+    pub const fn static_asset(asset_revision: u64) -> Self {
+        Self {
+            asset_revision,
+            pose_revision: 0,
+        }
+    }
+
+    /// Losslessly combine an animation continuity epoch and its local pose
+    /// revision. A restarted clip may reuse a local revision, but not the
+    /// resulting backend identity.
+    pub const fn timed(asset_revision: u64, revision: u32, continuity_epoch: u32) -> Self {
+        Self {
+            asset_revision,
+            pose_revision: ((continuity_epoch as u64) << 32) | revision as u64,
+        }
+    }
+}
+
 /// Whether a backend must resolve a batch's source pose again. The global and
 /// batch-local dirty flags carry topology/pose invalidation; ordinary affine
 /// entity motion is compared explicitly because it is part of the prepared
@@ -1992,6 +2012,22 @@ mod tests {
     const IDENTITY_MOBIUS: [f32; 16] = [
         1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
     ];
+
+    #[test]
+    fn timed_pose_identity_includes_continuity_epoch() {
+        assert_eq!(RenderPoseIdentity::static_asset(7).pose_revision, 0);
+        assert_eq!(
+            RenderPoseIdentity::timed(7, 11, 3),
+            RenderPoseIdentity {
+                asset_revision: 7,
+                pose_revision: (3u64 << 32) | 11,
+            },
+        );
+        assert_ne!(
+            RenderPoseIdentity::timed(7, 11, 3),
+            RenderPoseIdentity::timed(7, 11, 4),
+        );
+    }
 
     fn transform() -> RenderEntityTransform {
         RenderEntityTransform {

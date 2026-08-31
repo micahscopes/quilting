@@ -11,8 +11,8 @@ use quilting_core::material::{
     EnvironmentMapAsset, EnvironmentMapDescriptor, TextureAssetDescriptor, TextureWrapMode,
 };
 use quilting_core::render::{
-    RenderFrame, RenderFrameOptions, RenderSceneSnapshot, RenderStyle, RenderSubmissionStats,
-    RenderView, ResidentRootDrawDomains, ValidatedRenderScene,
+    RenderFrame, RenderFrameOptions, RenderPoseIdentity, RenderSceneSnapshot, RenderStyle,
+    RenderSubmissionStats, RenderView, ResidentRootDrawDomains, ValidatedRenderScene,
 };
 use quilting_renderer::compute::{
     prepare_lod_dispatch_state, LodAtlasLookup, PreparedLodModel, WgslLodDispatchMetrics,
@@ -58,9 +58,10 @@ struct WebGpuBackend {
     last_frame_input: Option<LiveFrameInput>,
     last_face_visibility_bits: Vec<u32>,
     next_face_visibility_bits: Vec<u32>,
-    last_joint_matrices: Vec<f32>,
-    last_morph_weights: Vec<f32>,
     next_morph_weights: Vec<f32>,
+    device_pose_identity: Option<RenderPoseIdentity>,
+    patch_pose_uniforms_ready: bool,
+    resident_pose_uniforms_ready: bool,
     initialization_attempts: u64,
     atlas_uploads: u64,
     texture_uploads: u64,
@@ -77,8 +78,12 @@ struct WebGpuBackend {
     visibility_uploads: u64,
     visibility_upload_bytes: u64,
     fallback_pose_uploads: u64,
+    fallback_pose_initializations: u64,
     fallback_pose_reuses: u64,
+    classifier_pose_uploads: u64,
+    classifier_pose_reuses: u64,
     resident_pose_uploads: u64,
+    resident_pose_initializations: u64,
     resident_pose_reuses: u64,
     device_lod_dispatches: u64,
     device_lod_frames: u64,
@@ -151,6 +156,20 @@ struct LiveFrameInput {
     style: RenderStyle,
     view: RenderView,
     options: RenderFrameOptions,
+}
+
+fn render_pose_upload_policy(
+    resident: Option<RenderPoseIdentity>,
+    requested: RenderPoseIdentity,
+    preparation_ready: bool,
+) -> PoseUploadPolicy {
+    if resident != Some(requested) {
+        PoseUploadPolicy::Publish
+    } else if !preparation_ready {
+        PoseUploadPolicy::PublishPreparation
+    } else {
+        PoseUploadPolicy::Reuse
+    }
 }
 
 /// Whether the incumbent renderer still has to submit the visible patch pass
@@ -237,9 +256,17 @@ pub(crate) struct WebGpuBackendDiagnostics {
     visibility_uploads: u64,
     visibility_upload_bytes: u64,
     fallback_pose_uploads: u64,
+    fallback_pose_initializations: u64,
     fallback_pose_reuses: u64,
+    classifier_pose_uploads: u64,
+    classifier_pose_reuses: u64,
+    device_pose_asset_revision: Option<u64>,
+    device_pose_revision: Option<u64>,
+    patch_pose_uniforms_ready: bool,
     resident_pose_uploads: u64,
+    resident_pose_initializations: u64,
     resident_pose_reuses: u64,
+    resident_pose_uniforms_ready: bool,
     device_lod_dispatches: u64,
     device_lod_frames: u64,
     resident_root_pipeline_ready: bool,
@@ -444,9 +471,21 @@ impl WebGpuBackend {
             visibility_uploads: self.visibility_uploads,
             visibility_upload_bytes: self.visibility_upload_bytes,
             fallback_pose_uploads: self.fallback_pose_uploads,
+            fallback_pose_initializations: self.fallback_pose_initializations,
             fallback_pose_reuses: self.fallback_pose_reuses,
+            classifier_pose_uploads: self.classifier_pose_uploads,
+            classifier_pose_reuses: self.classifier_pose_reuses,
+            device_pose_asset_revision: self
+                .device_pose_identity
+                .map(|identity| identity.asset_revision),
+            device_pose_revision: self
+                .device_pose_identity
+                .map(|identity| identity.pose_revision),
+            patch_pose_uniforms_ready: self.patch_pose_uniforms_ready,
             resident_pose_uploads: self.resident_pose_uploads,
+            resident_pose_initializations: self.resident_pose_initializations,
             resident_pose_reuses: self.resident_pose_reuses,
+            resident_pose_uniforms_ready: self.resident_pose_uniforms_ready,
             device_lod_dispatches: self.device_lod_dispatches,
             device_lod_frames: self.device_lod_frames,
             resident_root_pipeline_ready: self.resident_root_pipeline.is_some(),
@@ -552,6 +591,10 @@ impl WebGpuBackend {
         candidate: ResidentRootSceneCandidate,
         failure: Option<String>,
     ) {
+        // Reuse may retain root topology while replacing the overlay/focus
+        // preparation buffers. Initialize the complete family on its next
+        // successful frame rather than guessing which local uniform survived.
+        self.resident_pose_uniforms_ready = false;
         match candidate {
             ResidentRootSceneCandidate::Reuse(candidate) if failure.is_none() => {
                 let ResidentRootReuseCandidate {
@@ -728,9 +771,10 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
                     backend.last_frame_used_resident_roots = false;
                     backend.last_face_visibility_bits.clear();
                     backend.next_face_visibility_bits.clear();
-                    backend.last_joint_matrices.clear();
-                    backend.last_morph_weights.clear();
                     backend.next_morph_weights.clear();
+                    backend.device_pose_identity = None;
+                    backend.patch_pose_uniforms_ready = false;
+                    backend.resident_pose_uniforms_ready = false;
                     if resident_root_error.is_some() {
                         backend.resident_root_fallbacks =
                             backend.resident_root_fallbacks.saturating_add(1);
@@ -858,9 +902,10 @@ pub(crate) async fn initialize_presentation(
         backend.last_frame_used_resident_roots = false;
         backend.last_face_visibility_bits.clear();
         backend.next_face_visibility_bits.clear();
-        backend.last_joint_matrices.clear();
-        backend.last_morph_weights.clear();
         backend.next_morph_weights.clear();
+        backend.device_pose_identity = None;
+        backend.patch_pose_uniforms_ready = false;
+        backend.resident_pose_uniforms_ready = false;
         if resident_root_error.is_some() {
             backend.resident_root_fallbacks = backend.resident_root_fallbacks.saturating_add(1);
         }
@@ -1151,6 +1196,9 @@ pub(crate) fn replace_atlas(
                 backend.last_face_visibility_bits.clear();
                 backend.next_face_visibility_bits.clear();
                 backend.next_morph_weights.clear();
+                backend.device_pose_identity = None;
+                backend.patch_pose_uniforms_ready = false;
+                backend.resident_pose_uniforms_ready = false;
                 backend.atlas_uploads = backend.atlas_uploads.saturating_add(1);
                 if backend.model.is_some() {
                     backend.model_uploads = backend.model_uploads.saturating_add(1);
@@ -1196,6 +1244,9 @@ pub(crate) fn replace_model(
                 backend.last_face_visibility_bits.clear();
                 backend.next_face_visibility_bits.clear();
                 backend.next_morph_weights.clear();
+                backend.device_pose_identity = None;
+                backend.patch_pose_uniforms_ready = false;
+                backend.resident_pose_uniforms_ready = false;
                 backend.model_uploads = backend.model_uploads.saturating_add(1);
                 backend.last_error = None;
                 Ok(true)
@@ -1210,6 +1261,7 @@ pub(crate) fn replace_model(
 /// later presentation frame; no staging copy or map is created here.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn dispatch_lod(
+    pose_identity: RenderPoseIdentity,
     legacy_mobius: [f32; 16],
     packed_subjects: &[f32],
     density: f32,
@@ -1249,6 +1301,14 @@ pub(crate) fn dispatch_lod(
             viewport,
             num_joints,
         };
+        let pose_upload = if backend.device_pose_identity == Some(pose_identity) {
+            PoseUploadPolicy::Reuse
+        } else {
+            PoseUploadPolicy::Publish
+        };
+        if pose_upload == PoseUploadPolicy::Publish {
+            backend.device_pose_identity = None;
+        }
         backend.last_device_lod_epoch = None;
         backend.last_frame_input = None;
         let epoch_result = (|| {
@@ -1269,6 +1329,7 @@ pub(crate) fn dispatch_lod(
                         joint_matrices,
                         morph_weights,
                     },
+                    pose_upload,
                 )
                 .map_err(|error| error.to_string())?;
             Ok::<_, String>(
@@ -1285,6 +1346,12 @@ pub(crate) fn dispatch_lod(
             }
         };
         backend.device_lod_dispatches = backend.device_lod_dispatches.saturating_add(1);
+        if pose_upload == PoseUploadPolicy::Publish {
+            backend.classifier_pose_uploads = backend.classifier_pose_uploads.saturating_add(1);
+        } else {
+            backend.classifier_pose_reuses = backend.classifier_pose_reuses.saturating_add(1);
+        }
+        backend.device_pose_identity = Some(pose_identity);
         backend.last_device_lod_epoch = Some(epoch);
         backend.last_frame_input = None;
         backend.last_error = None;
@@ -1711,6 +1778,7 @@ pub(crate) fn replace_scene(
                 backend.scene_updates = backend.scene_updates.saturating_add(1);
                 backend.last_frame_input = None;
                 backend.next_morph_weights.clear();
+                backend.patch_pose_uniforms_ready = false;
                 backend.publish_resident_scene(resident_root_candidate, resident_root_failure);
                 backend.last_error = None;
                 return Ok(true);
@@ -1765,6 +1833,7 @@ pub(crate) fn replace_scene(
                 backend.last_face_visibility_bits.clear();
                 backend.next_face_visibility_bits.clear();
                 backend.next_morph_weights.clear();
+                backend.patch_pose_uniforms_ready = false;
                 backend.publish_resident_scene(resident_root_candidate, resident_root_failure);
                 backend.last_error = None;
                 Ok(true)
@@ -1911,8 +1980,6 @@ pub(crate) fn submit_frame(
                 "WebGPU morph weight payload exceeds resident targets",
             ));
         }
-        effective_morph_weights.extend_from_slice(morph_weights);
-        effective_morph_weights.resize(resident_morph_targets, 0.0);
 
         if !joint_matrices.len().is_multiple_of(16) {
             return Err(backend.reject_frame(
@@ -1939,14 +2006,17 @@ pub(crate) fn submit_frame(
             view,
             options,
         };
-        let pose_upload_required = backend.last_frame_input.is_none()
-            || backend.last_joint_matrices != joint_matrices
-            || backend.last_morph_weights != effective_morph_weights;
-        let pose_upload = if pose_upload_required {
-            PoseUploadPolicy::Publish
+        let preparation_pose_ready = if resident_root_frame {
+            backend.resident_pose_uniforms_ready
         } else {
-            PoseUploadPolicy::Reuse
+            backend.patch_pose_uniforms_ready
         };
+        let pose_upload = render_pose_upload_policy(
+            backend.device_pose_identity,
+            frame.pose,
+            preparation_pose_ready,
+        );
+        let pose_upload_required = pose_upload != PoseUploadPolicy::Reuse;
         let unchanged = backend.last_frame_input == Some(frame_input)
             && (device_lod_epoch.is_some()
                 || backend.last_face_visibility_bits == face_visibility_bits)
@@ -1962,6 +2032,10 @@ pub(crate) fn submit_frame(
                     LiveFrameDisposition::IncumbentRequired
                 },
             );
+        }
+        if pose_upload.should_publish_dynamic() {
+            effective_morph_weights.extend_from_slice(morph_weights);
+            effective_morph_weights.resize(resident_morph_targets, 0.0);
         }
         let visibility_upload_required = device_lod_epoch.is_none()
             && backend.last_face_visibility_bits != face_visibility_bits;
@@ -2046,6 +2120,16 @@ pub(crate) fn submit_frame(
             }
             backend.last_focus_error = None;
         }
+        if pose_upload.should_publish_dynamic() {
+            backend.device_pose_identity = None;
+        }
+        if pose_upload.should_publish_preparation() {
+            if resident_root_frame {
+                backend.resident_pose_uniforms_ready = false;
+            } else {
+                backend.patch_pose_uniforms_ready = false;
+            }
+        }
         let prepared_frame = (|| {
             let device = backend
                 .device
@@ -2069,6 +2153,7 @@ pub(crate) fn submit_frame(
                             morph_weights: &effective_morph_weights,
                         },
                         num_joints,
+                        pose_upload,
                     )
                     .map_err(|error| error.to_string())?;
             }
@@ -2080,10 +2165,22 @@ pub(crate) fn submit_frame(
             Ok::<_, String>(frame)
         })();
         if prepared_frame.is_ok() && !resident_root_frame {
-            if pose_upload_required {
-                backend.fallback_pose_uploads = backend.fallback_pose_uploads.saturating_add(1);
-            } else {
-                backend.fallback_pose_reuses = backend.fallback_pose_reuses.saturating_add(1);
+            match pose_upload {
+                PoseUploadPolicy::Publish => {
+                    backend.device_pose_identity = Some(frame.pose);
+                    backend.patch_pose_uniforms_ready = true;
+                    backend.fallback_pose_uploads =
+                        backend.fallback_pose_uploads.saturating_add(1);
+                }
+                PoseUploadPolicy::PublishPreparation => {
+                    backend.patch_pose_uniforms_ready = true;
+                    backend.fallback_pose_initializations =
+                        backend.fallback_pose_initializations.saturating_add(1);
+                }
+                PoseUploadPolicy::Reuse => {
+                    backend.fallback_pose_reuses =
+                        backend.fallback_pose_reuses.saturating_add(1);
+                }
             }
         }
         let result =
@@ -2383,25 +2480,28 @@ pub(crate) fn submit_frame(
                     );
                 }
                 backend.next_face_visibility_bits = face_visibility_bits;
-                backend.last_joint_matrices.clear();
-                backend
-                    .last_joint_matrices
-                    .extend_from_slice(joint_matrices);
-                std::mem::swap(
-                    &mut backend.last_morph_weights,
-                    &mut effective_morph_weights,
-                );
                 backend.next_morph_weights = effective_morph_weights;
                 backend.last_frame_input = Some(frame_input);
+                backend.device_pose_identity = Some(frame.pose);
                 if resident_root_frame {
                     backend.resident_root_frames = backend.resident_root_frames.saturating_add(1);
-                    if pose_upload_required {
-                        backend.resident_pose_uploads =
-                            backend.resident_pose_uploads.saturating_add(1);
-                    } else {
-                        backend.resident_pose_reuses =
-                            backend.resident_pose_reuses.saturating_add(1);
+                    backend.resident_pose_uniforms_ready = true;
+                    match pose_upload {
+                        PoseUploadPolicy::Publish => {
+                            backend.resident_pose_uploads =
+                                backend.resident_pose_uploads.saturating_add(1);
+                        }
+                        PoseUploadPolicy::PublishPreparation => {
+                            backend.resident_pose_initializations =
+                                backend.resident_pose_initializations.saturating_add(1);
+                        }
+                        PoseUploadPolicy::Reuse => {
+                            backend.resident_pose_reuses =
+                                backend.resident_pose_reuses.saturating_add(1);
+                        }
                     }
+                } else {
+                    backend.patch_pose_uniforms_ready = true;
                 }
                 if focus_frame {
                     backend.focus_frames = backend.focus_frames.saturating_add(1);
@@ -2697,6 +2797,23 @@ fn render_style_name(style: RenderStyle) -> &'static str {
 mod tests {
     use super::*;
     use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[test]
+    fn render_pose_policy_distinguishes_device_pose_from_local_uniforms() {
+        let pose = RenderPoseIdentity::timed(5, 7, 11);
+        assert_eq!(
+            render_pose_upload_policy(None, pose, false),
+            PoseUploadPolicy::Publish,
+        );
+        assert_eq!(
+            render_pose_upload_policy(Some(pose), pose, false),
+            PoseUploadPolicy::PublishPreparation,
+        );
+        assert_eq!(
+            render_pose_upload_policy(Some(pose), pose, true),
+            PoseUploadPolicy::Reuse,
+        );
+    }
 
     #[test]
     fn pick_readback_serialization_keeps_epoch_and_source_chart_semantics() {

@@ -205,13 +205,20 @@ The main renderer creates this shared scene/plan/frame chain only when render
 parity is enabled or WebGPU will actually attempt the current diagnostic style
 (plus explicit one-shot PBR evidence). Merely having a ready headless adapter
 therefore adds no extraction, plan, or frame work to ordinary incumbent PBR.
-Camera/view-only WebGPU frames now reuse the device's retained joint/morph
-payload and patch joint-count uniform. A scene or model invalidation still
-forces the next upload even when its numeric pose is unchanged. The resident
-root and optional adaptive overlay share a typed `PoseUploadPolicy`, so their
-preparation pose state is either published atomically or reused together.
-`fallbackPoseUploads`, `fallbackPoseReuses`, `residentPoseUploads`, and
-`residentPoseReuses` expose both bounded memo paths.
+`RenderPoseIdentity` now combines the structural asset revision with the exact
+animation continuity epoch and local pose revision; camera motion no longer
+pretends to be a pose change. Device LOD classification and rendering consume
+that same identity and the same renderer-owned pose payload. Classification
+therefore reuses pose buffers on camera-only LOD updates, and rendering reuses
+the pose that classification just published instead of uploading it twice.
+The three-state `PoseUploadPolicy` distinguishes a full dynamic publication,
+initialization of newly retained preparation uniforms, and complete reuse; the
+resident root and optional adaptive overlay advance as one family. The backend
+no longer retains comparison copies of the joint and morph vectors.
+`classifierPoseUploads/Reuses`, `fallbackPoseUploads/Initializations/Reuses`,
+and `residentPoseUploads/Initializations/Reuses` expose the bounded paths. A
+model replacement still forces a full upload, while a scene/preparation change
+forces only its local uniform initialization when the device pose is current.
 `resolvedExecutionFrames`, `resolvedExecutionFallbacks`, and
 `lastExecutionError` make that gate observable through the existing render
 shadow diagnostics. Shadow scene validation and WebGL PBR lowering now happen

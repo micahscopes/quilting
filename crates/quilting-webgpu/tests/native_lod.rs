@@ -831,6 +831,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                     &visibility_dispatch,
                     metrics(&atlas, 1.0, 0),
                     LodPose::default(),
+                    PoseUploadPolicy::Publish,
                 )
                 .unwrap();
             let resident_lod = classifier
@@ -858,6 +859,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                     &visibility_dispatch,
                     metrics(&atlas, 1.0, 0),
                     LodPose::default(),
+                    PoseUploadPolicy::Publish,
                 )
                 .unwrap();
             let foreign_resident = classifier.reconcile_resident_lod_on_device(
@@ -881,7 +883,13 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 .contains("different WebGPU model"));
         }
         assert!(classifier
-            .write_patch_render_pose_state(&foreign_model, &retained_scene, LodPose::default(), 0,)
+            .write_patch_render_pose_state(
+                &foreign_model,
+                &retained_scene,
+                LodPose::default(),
+                0,
+                PoseUploadPolicy::Publish,
+            )
             .unwrap_err()
             .to_string()
             .contains("different WebGPU model"));
@@ -1135,6 +1143,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                     &identity_dispatch(),
                     root_metrics,
                     LodPose::default(),
+                    PoseUploadPolicy::Publish,
                 )
                 .unwrap();
             classifier.reconcile_resident_lod_on_device(&classification, FaceLodGrading::TwoToOne);
@@ -1528,7 +1537,13 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         ));
 
         classifier
-            .write_patch_render_pose_state(&model, &retained_scene, LodPose::default(), 0)
+            .write_patch_render_pose_state(
+                &model,
+                &retained_scene,
+                LodPose::default(),
+                0,
+                PoseUploadPolicy::Publish,
+            )
             .unwrap();
 
         let visible_dispatch = identity_dispatch();
@@ -1539,6 +1554,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                     &visible_dispatch,
                     metrics(&atlas, 1.0, 0),
                     LodPose::default(),
+                    PoseUploadPolicy::Publish,
                 )
                 .unwrap();
             let resident = classifier
@@ -1571,6 +1587,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                     &hidden_dispatch,
                     metrics(&atlas, 1.0, 0),
                     LodPose::default(),
+                    PoseUploadPolicy::Publish,
                 )
                 .unwrap();
             let resident = classifier
@@ -1664,7 +1681,13 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             RenderFrameOptions::default(),
         ));
         classifier
-            .write_patch_render_pose_state(&model, &diagnostic_scene, LodPose::default(), 0)
+            .write_patch_render_pose_state(
+                &model,
+                &diagnostic_scene,
+                LodPose::default(),
+                0,
+                PoseUploadPolicy::Publish,
+            )
             .unwrap();
         classifier
             .write_patch_render_face_visibility_bits(&diagnostic_scene, &[0b11])
@@ -1843,6 +1866,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 &textured_diagnostic_scene,
                 LodPose::default(),
                 0,
+                PoseUploadPolicy::Publish,
             )
             .unwrap();
         classifier

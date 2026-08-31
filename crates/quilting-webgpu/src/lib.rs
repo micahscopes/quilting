@@ -298,13 +298,22 @@ pub struct LodPose<'a> {
 /// model and preparation epoch that received the previous successful publish.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PoseUploadPolicy {
+    /// Publish shared dynamic pose buffers and preparation-local uniforms.
     Publish,
+    /// Reuse the shared dynamic pose while initializing local preparation
+    /// uniforms for a newly retained scene family.
+    PublishPreparation,
+    /// Reuse both shared and preparation-local pose state.
     Reuse,
 }
 
 impl PoseUploadPolicy {
-    const fn should_publish(self) -> bool {
+    pub const fn should_publish_dynamic(self) -> bool {
         matches!(self, Self::Publish)
+    }
+
+    pub const fn should_publish_preparation(self) -> bool {
+        !matches!(self, Self::Reuse)
     }
 }
 
@@ -554,6 +563,16 @@ fn patch_pbr_material_slot(
 mod patch_pbr_material_tests {
     use super::*;
     use quilting_core::material::{PbrAlphaMode, PbrTextureReferences};
+
+    #[test]
+    fn pose_upload_policy_separates_dynamic_and_preparation_publication() {
+        assert!(PoseUploadPolicy::Publish.should_publish_dynamic());
+        assert!(PoseUploadPolicy::Publish.should_publish_preparation());
+        assert!(!PoseUploadPolicy::PublishPreparation.should_publish_dynamic());
+        assert!(PoseUploadPolicy::PublishPreparation.should_publish_preparation());
+        assert!(!PoseUploadPolicy::Reuse.should_publish_dynamic());
+        assert!(!PoseUploadPolicy::Reuse.should_publish_preparation());
+    }
 
     #[test]
     fn patch_frame_keeps_source_face_selection_separate_from_node_and_material() {
@@ -2209,6 +2228,7 @@ impl LodClassifierDevice {
                 num_joints: 0,
             },
             LodPose::default(),
+            PoseUploadPolicy::Publish,
         )?;
         let frame_scene = ValidatedRenderScene::new(render_scene.clone())
             .map_err(|error| LodWebGpuError::Conformance(error.to_string()))?;
@@ -2831,6 +2851,7 @@ impl LodClassifierDevice {
                     num_joints: 0,
                 },
                 LodPose::default(),
+                PoseUploadPolicy::Publish,
             )?;
             let presentation_frame = RenderFrame::build(
                 18,
@@ -3112,6 +3133,7 @@ impl LodClassifierDevice {
                     joint_matrices: &[],
                     morph_weights: &[0.0],
                 },
+                PoseUploadPolicy::Publish,
             )?;
             let resident =
                 self.reconcile_resident_lod_on_device(&classification, FaceLodGrading::TwoToOne);
@@ -3268,6 +3290,7 @@ impl LodClassifierDevice {
                     joint_matrices: &joint_matrices,
                     morph_weights: &[],
                 },
+                PoseUploadPolicy::Publish,
             )?;
             if output.face_count() != 1 || output.epoch() != 1 {
                 return Err(LodWebGpuError::Conformance(format!(
@@ -3311,6 +3334,7 @@ impl LodClassifierDevice {
                 joint_matrices: &joint_matrices,
                 morph_weights: &[],
             },
+            PoseUploadPolicy::Publish,
         )?;
         if next_output.epoch() != 2 {
             return Err(LodWebGpuError::Conformance(format!(
@@ -4922,7 +4946,13 @@ impl LodClassifierDevice {
         num_joints: u32,
         source_visibility: &[u8],
     ) -> Result<(), LodWebGpuError> {
-        self.write_patch_render_pose_state(model, scene, pose, num_joints)?;
+        self.write_patch_render_pose_state(
+            model,
+            scene,
+            pose,
+            num_joints,
+            PoseUploadPolicy::Publish,
+        )?;
         self.write_source_visibility(&scene.visibility, source_visibility)
     }
 
@@ -4932,13 +4962,20 @@ impl LodClassifierDevice {
         scene: &PatchRenderScene,
         pose: LodPose<'_>,
         num_joints: u32,
+        pose_upload: PoseUploadPolicy,
     ) -> Result<(), LodWebGpuError> {
         if model.identity != scene.model_identity {
             return Err(LodWebGpuError::Payload(
                 "patch render scene belongs to a different WebGPU model".to_string(),
             ));
         }
-        self.write_patch_pose(model, &scene.patches, pose, num_joints)
+        if pose_upload.should_publish_dynamic() {
+            self.write_dynamic_pose(model, pose, num_joints)?;
+        }
+        if pose_upload.should_publish_preparation() {
+            self.write_patch_joint_count(&scene.patches, num_joints);
+        }
+        Ok(())
     }
 
     /// Upload a compact face-indexed visibility bitset. Expansion into current
@@ -7658,17 +7695,20 @@ impl LodClassifierDevice {
         })
     }
 
-    /// Upload the current pose, dispatch metrics, and authored subject state.
-    /// This changes no immutable model shape and performs no command encoding
-    /// or readback.
+    /// Publish or reuse the current pose, then upload dispatch metrics and
+    /// authored subject state. This changes no immutable model shape and
+    /// performs no command encoding or readback.
     pub fn write_lod_classification_state(
         &self,
         model: &LodClassifierModel,
         dispatch: &LodDispatchState,
         metrics: WgslLodDispatchMetrics,
         pose: LodPose<'_>,
+        pose_upload: PoseUploadPolicy,
     ) -> Result<(), LodWebGpuError> {
-        self.write_dynamic_pose(model, pose, metrics.num_joints)?;
+        if pose_upload.should_publish_dynamic() {
+            self.write_dynamic_pose(model, pose, metrics.num_joints)?;
+        }
         let subject_words = pack_wgsl_lod_subject_words(&model.prepared, dispatch)
             .map_err(LodWebGpuError::Payload)?;
         if subject_words.len() != model.subject_rows {
@@ -7839,8 +7879,9 @@ impl LodClassifierDevice {
         dispatch: &LodDispatchState,
         metrics: WgslLodDispatchMetrics,
         pose: LodPose<'_>,
+        pose_upload: PoseUploadPolicy,
     ) -> Result<DeviceLodClassification<'model>, LodWebGpuError> {
-        self.write_lod_classification_state(model, dispatch, metrics, pose)?;
+        self.write_lod_classification_state(model, dispatch, metrics, pose, pose_upload)?;
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -7923,7 +7964,13 @@ impl LodClassifierDevice {
         metrics: WgslLodDispatchMetrics,
         pose: LodPose<'_>,
     ) -> Result<Vec<u32>, LodWebGpuError> {
-        let output = self.classify_on_device(model, dispatch, metrics, pose)?;
+        let output = self.classify_on_device(
+            model,
+            dispatch,
+            metrics,
+            pose,
+            PoseUploadPolicy::Publish,
+        )?;
         self.read_lod_classification_for_diagnostics(&output).await
     }
 

@@ -2797,6 +2797,19 @@ fn current_render_frame_options(renderer: &MainState) -> RenderFrameOptions {
     }
 }
 
+fn current_render_pose_identity(renderer: &MainState) -> RenderPoseIdentity {
+    renderer.surface_runtime.pose_stamp().map_or_else(
+        || RenderPoseIdentity::static_asset(renderer.render_command_builds),
+        |(revision, continuity_epoch)| {
+            RenderPoseIdentity::timed(
+                renderer.render_command_builds,
+                revision,
+                continuity_epoch,
+            )
+        },
+    )
+}
+
 fn current_render_frame(
     renderer: &MainState,
     camera: &Camera,
@@ -2806,10 +2819,7 @@ fn current_render_frame(
     };
     RenderFrame::from_command_plan(
         renderer.render_calls,
-        RenderPoseIdentity {
-            asset_revision: renderer.render_command_builds,
-            pose_revision: renderer.render_calls,
-        },
+        current_render_pose_identity(renderer),
         current_render_view(renderer, camera),
         current_render_frame_options(renderer),
         plan,
@@ -7742,22 +7752,23 @@ pub fn mr_dispatch_webgpu_lod(
             .as_ref()
             .ok_or_else(|| JsValue::from_str("renderer LOD atlas is not resident"))?
             .max_lod;
-        let pose = if animated {
-            Some(
-                state
-                    .surface_runtime
-                    .lod_pose_source(
-                        clip_time_seconds,
-                        sample_time_seconds,
-                        revision,
-                        continuity_epoch,
-                    )
-                    .map_err(|error| JsValue::from_str(&error))?,
-            )
-        } else {
-            None
-        };
+        if animated {
+            state
+                .surface_runtime
+                .lod_pose_source(
+                    clip_time_seconds,
+                    sample_time_seconds,
+                    revision,
+                    continuity_epoch,
+                )
+                .map_err(|error| JsValue::from_str(&error))?;
+        }
+        let (joint_matrices, morph_weights) = state
+            .surface_runtime
+            .current_pose_payload()
+            .map_err(|error| JsValue::from_str(&error))?;
         crate::webgpu_backend::dispatch_lod(
+            current_render_pose_identity(state),
             legacy_mobius,
             subject_states,
             density,
@@ -7765,8 +7776,8 @@ pub fn mr_dispatch_webgpu_lod(
             max_lod,
             view_projection,
             [vp_width, vp_height],
-            pose.map_or(&[][..], |pose| pose.joint_matrices),
-            pose.map_or(&[][..], |pose| pose.morph_weights),
+            joint_matrices,
+            morph_weights,
             state.lod_grading,
         )
         .map_err(|error| JsValue::from_str(&error))

@@ -492,7 +492,7 @@ impl LodClassifierDevice {
             pose,
             num_joints,
             use_qb,
-            pose_upload.should_publish(),
+            pose_upload,
             true,
             true,
         )
@@ -514,7 +514,7 @@ impl LodClassifierDevice {
         pose: LodPose<'_>,
         num_joints: u32,
         use_qb: bool,
-        publish_pose_state: bool,
+        pose_upload: PoseUploadPolicy,
         write_dynamic_pose: bool,
         validate_frame: bool,
     ) -> Result<AdaptiveOverlayFrameEncoding, LodWebGpuError> {
@@ -527,12 +527,11 @@ impl LodClassifierDevice {
             pipelines,
             validate_frame,
         )?;
-        if publish_pose_state {
-            if write_dynamic_pose {
-                self.write_adaptive_overlay_pose_state(model, overlay, pose, num_joints)?;
-            } else {
-                self.write_patch_joint_count(&overlay.patches, num_joints);
-            }
+        if write_dynamic_pose && pose_upload.should_publish_dynamic() {
+            self.write_dynamic_pose(model, pose, num_joints)?;
+        }
+        if pose_upload.should_publish_preparation() {
+            self.write_patch_joint_count(&overlay.patches, num_joints);
         }
         self.write_adaptive_overlay_frames(frame, overlay, use_qb)?;
 
@@ -797,7 +796,7 @@ impl LodClassifierDevice {
                     pose,
                     num_joints,
                     use_qb,
-                    pose_upload.should_publish(),
+                    pose_upload,
                     false,
                     false,
                 )
@@ -973,7 +972,7 @@ impl LodClassifierDevice {
                     pose,
                     num_joints,
                     use_qb,
-                    pose_upload.should_publish(),
+                    pose_upload,
                     false,
                     false,
                 )
