@@ -28,10 +28,11 @@ use hyperscope_app::{
     EffectCompletion, FocusPostprocessMode, FocusPostprocessSettings, FrameTick,
     LocalPeerDisposition, LocalPeerIngress, LocalPeerLane, LocalPeerReceipt, NavigationSettings,
     NavigationSettingsSynchronizationDisposition, NavigationSynchronization, PatchLabCompletion,
-    PatchLabControls, PatchLabEffect,
+    PatchLabCompletionDispatch, PatchLabControls, PatchLabEffect, PatchLabEffects,
     PatchLabFailure, PatchLabField, PatchLabGeometryCompletion, PatchLabGeometryOutcome,
     PatchLabHistogramBin, PatchLabLodCompletion, PatchLabLodOutcome, PatchLabLodSummary,
-    PatchLabReadModel, PatchLabSessionIntent, PatchLabShape, PresentationAction,
+    PatchLabReadModel, PatchLabSessionDispatch, PatchLabSessionIntent, PatchLabShape,
+    PresentationAction,
     PresentationAnimationResidencyBinding, PrimarySceneInstallCompletion,
     PrimarySceneInstallMetadata, PrimarySceneInstallOutcome, RenderSettings,
     RenderSettingsSynchronizationDisposition, SemanticAction, Timed,
@@ -859,6 +860,22 @@ impl HyperscopeAppShadow {
         let effects = std::mem::take(&mut *self.pending_adapter_effects.borrow_mut());
         let effects = effects.iter().map(shadow_effect).collect::<Vec<_>>();
         to_js(&effects)
+    }
+
+    /// Drain the frame lane as a typed Patch Lab job list. The generic drain
+    /// remains a rollback seam; ordinary frame adaptation rejects and restores
+    /// the queue if a future reducer adds a different high-rate effect kind.
+    #[wasm_bindgen(js_name = drainPatchLabEffects)]
+    pub fn drain_patch_lab_effects(&self) -> Result<JsValue, JsValue> {
+        let effects = std::mem::take(&mut *self.pending_adapter_effects.borrow_mut());
+        let patch_lab_effects = PatchLabEffects::from_effects(&effects);
+        if patch_lab_effects.len() != effects.len() {
+            self.pending_adapter_effects.borrow_mut().extend(effects);
+            return Err(JsValue::from_str(
+                "quiet frame queue contains a non-Patch-Lab adapter effect",
+            ));
+        }
+        to_js(&shadow_patch_lab_effects(&patch_lab_effects))
     }
 
     #[wasm_bindgen(js_name = pendingAdapterEffectCount)]
@@ -2024,6 +2041,11 @@ impl HyperscopeAppShadow {
             .synchronize_render_settings(settings)
             .map_err(js_error)?;
         let matches_input = synchronization.snapshot.settings == settings;
+        let patch_lab_effects = synchronization
+            .commit
+            .as_ref()
+            .map(PatchLabEffects::from_commit)
+            .unwrap_or_default();
         to_js(&ShadowRenderSettingsSynchronizationReceipt {
             disposition: match synchronization.disposition {
                 RenderSettingsSynchronizationDisposition::Unchanged => "unchanged",
@@ -2031,6 +2053,7 @@ impl HyperscopeAppShadow {
             },
             sequence: synchronization.sequence.map(|sequence| sequence.to_string()),
             commit: synchronization.commit.as_ref().map(shadow_commit),
+            patch_lab_effects: shadow_patch_lab_effects(&patch_lab_effects),
             matches_input,
             render: synchronization.snapshot.into(),
         })
@@ -2140,6 +2163,19 @@ impl HyperscopeAppShadow {
         })
     }
 
+    /// Commit a Patch Lab edit through AppStore's sequence authority and
+    /// return its backend-neutral renderer jobs as a typed list.
+    #[wasm_bindgen(js_name = requestPatchLab)]
+    pub fn request_patch_lab(&self, input: JsValue) -> Result<JsValue, JsValue> {
+        let input: ShadowPatchLabIntentInput =
+            serde_wasm_bindgen::from_value(input).map_err(js_error)?;
+        let dispatch = self
+            .store
+            .set_patch_lab_session(input.into_intent()?)
+            .map_err(js_error)?;
+        patch_lab_session_to_js(dispatch)
+    }
+
     /// Complete one Rust-issued Patch Lab geometry job. The decoded geometry
     /// remains adapter-owned until renderer installation; this completion
     /// records only the backend-neutral evidence needed to schedule LOD work.
@@ -2150,13 +2186,34 @@ impl HyperscopeAppShadow {
         vertex_count: u32,
         face_count: u32,
     ) -> Result<JsValue, JsValue> {
-        self.complete_patch_lab(PatchLabCompletion::Geometry(PatchLabGeometryCompletion {
-            job_id: parse_patch_lab_job_id(job_id)?,
-            outcome: PatchLabGeometryOutcome::Built {
-                vertex_count,
-                face_count,
+        let dispatch = self.complete_patch_lab_dispatch(PatchLabCompletion::Geometry(
+            PatchLabGeometryCompletion {
+                job_id: parse_patch_lab_job_id(job_id)?,
+                outcome: PatchLabGeometryOutcome::Built {
+                    vertex_count,
+                    face_count,
+                },
             },
-        }))
+        ))?;
+        commit_to_js(&dispatch.commit)
+    }
+
+    #[wasm_bindgen(js_name = finishPatchLabGeometry)]
+    pub fn finish_patch_lab_geometry(
+        &self,
+        job_id: &str,
+        vertex_count: u32,
+        face_count: u32,
+    ) -> Result<JsValue, JsValue> {
+        patch_lab_completion_to_js(self.complete_patch_lab_dispatch(
+            PatchLabCompletion::Geometry(PatchLabGeometryCompletion {
+                job_id: parse_patch_lab_job_id(job_id)?,
+                outcome: PatchLabGeometryOutcome::Built {
+                    vertex_count,
+                    face_count,
+                },
+            }),
+        )?)
     }
 
     #[wasm_bindgen(js_name = failPatchLabGeometry)]
@@ -2167,14 +2224,37 @@ impl HyperscopeAppShadow {
         message: &str,
         retryable: bool,
     ) -> Result<JsValue, JsValue> {
-        self.complete_patch_lab(PatchLabCompletion::Geometry(PatchLabGeometryCompletion {
-            job_id: parse_patch_lab_job_id(job_id)?,
-            outcome: PatchLabGeometryOutcome::Failed(PatchLabFailure {
-                code: code.to_owned(),
-                message: message.to_owned(),
-                retryable,
+        let dispatch = self.complete_patch_lab_dispatch(PatchLabCompletion::Geometry(
+            PatchLabGeometryCompletion {
+                job_id: parse_patch_lab_job_id(job_id)?,
+                outcome: PatchLabGeometryOutcome::Failed(PatchLabFailure {
+                    code: code.to_owned(),
+                    message: message.to_owned(),
+                    retryable,
+                }),
+            },
+        ))?;
+        commit_to_js(&dispatch.commit)
+    }
+
+    #[wasm_bindgen(js_name = finishPatchLabGeometryFailed)]
+    pub fn finish_patch_lab_geometry_failed(
+        &self,
+        job_id: &str,
+        code: &str,
+        message: &str,
+        retryable: bool,
+    ) -> Result<JsValue, JsValue> {
+        patch_lab_completion_to_js(self.complete_patch_lab_dispatch(
+            PatchLabCompletion::Geometry(PatchLabGeometryCompletion {
+                job_id: parse_patch_lab_job_id(job_id)?,
+                outcome: PatchLabGeometryOutcome::Failed(PatchLabFailure {
+                    code: code.to_owned(),
+                    message: message.to_owned(),
+                    retryable,
+                }),
             }),
-        }))
+        )?)
     }
 
     /// Complete one Rust-issued LOD evaluation with a compact semantic
@@ -2189,11 +2269,32 @@ impl HyperscopeAppShadow {
     ) -> Result<JsValue, JsValue> {
         let summary: ShadowPatchLabLodSummaryInput =
             serde_wasm_bindgen::from_value(summary).map_err(js_error)?;
-        self.complete_patch_lab(PatchLabCompletion::Lod(PatchLabLodCompletion {
-            job_id: parse_patch_lab_job_id(job_id)?,
-            geometry_job_id: parse_patch_lab_job_id(geometry_job_id)?,
-            outcome: PatchLabLodOutcome::Evaluated(summary.try_into_summary()?),
-        }))
+        let dispatch = self.complete_patch_lab_dispatch(PatchLabCompletion::Lod(
+            PatchLabLodCompletion {
+                job_id: parse_patch_lab_job_id(job_id)?,
+                geometry_job_id: parse_patch_lab_job_id(geometry_job_id)?,
+                outcome: PatchLabLodOutcome::Evaluated(summary.try_into_summary()?),
+            },
+        ))?;
+        commit_to_js(&dispatch.commit)
+    }
+
+    #[wasm_bindgen(js_name = finishPatchLabLod)]
+    pub fn finish_patch_lab_lod(
+        &self,
+        job_id: &str,
+        geometry_job_id: &str,
+        summary: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let summary: ShadowPatchLabLodSummaryInput =
+            serde_wasm_bindgen::from_value(summary).map_err(js_error)?;
+        patch_lab_completion_to_js(self.complete_patch_lab_dispatch(PatchLabCompletion::Lod(
+            PatchLabLodCompletion {
+                job_id: parse_patch_lab_job_id(job_id)?,
+                geometry_job_id: parse_patch_lab_job_id(geometry_job_id)?,
+                outcome: PatchLabLodOutcome::Evaluated(summary.try_into_summary()?),
+            },
+        ))?)
     }
 
     #[wasm_bindgen(js_name = failPatchLabLod)]
@@ -2205,15 +2306,40 @@ impl HyperscopeAppShadow {
         message: &str,
         retryable: bool,
     ) -> Result<JsValue, JsValue> {
-        self.complete_patch_lab(PatchLabCompletion::Lod(PatchLabLodCompletion {
-            job_id: parse_patch_lab_job_id(job_id)?,
-            geometry_job_id: parse_patch_lab_job_id(geometry_job_id)?,
-            outcome: PatchLabLodOutcome::Failed(PatchLabFailure {
-                code: code.to_owned(),
-                message: message.to_owned(),
-                retryable,
-            }),
-        }))
+        let dispatch = self.complete_patch_lab_dispatch(PatchLabCompletion::Lod(
+            PatchLabLodCompletion {
+                job_id: parse_patch_lab_job_id(job_id)?,
+                geometry_job_id: parse_patch_lab_job_id(geometry_job_id)?,
+                outcome: PatchLabLodOutcome::Failed(PatchLabFailure {
+                    code: code.to_owned(),
+                    message: message.to_owned(),
+                    retryable,
+                }),
+            },
+        ))?;
+        commit_to_js(&dispatch.commit)
+    }
+
+    #[wasm_bindgen(js_name = finishPatchLabLodFailed)]
+    pub fn finish_patch_lab_lod_failed(
+        &self,
+        job_id: &str,
+        geometry_job_id: &str,
+        code: &str,
+        message: &str,
+        retryable: bool,
+    ) -> Result<JsValue, JsValue> {
+        patch_lab_completion_to_js(self.complete_patch_lab_dispatch(PatchLabCompletion::Lod(
+            PatchLabLodCompletion {
+                job_id: parse_patch_lab_job_id(job_id)?,
+                geometry_job_id: parse_patch_lab_job_id(geometry_job_id)?,
+                outcome: PatchLabLodOutcome::Failed(PatchLabFailure {
+                    code: code.to_owned(),
+                    message: message.to_owned(),
+                    retryable,
+                }),
+            },
+        ))?)
     }
 
     /// Read the committed Patch Lab projection without exposing reducer
@@ -2898,14 +3024,11 @@ impl HyperscopeAppShadow {
         commit_to_js(&commit)
     }
 
-    fn complete_patch_lab(&self, completion: PatchLabCompletion) -> Result<JsValue, JsValue> {
-        let commit = self
-            .store
-            .dispatch(AppEvent::EffectCompleted(EffectCompletion::PatchLab(
-                completion,
-            )))
-            .map_err(js_error)?;
-        commit_to_js(&commit)
+    fn complete_patch_lab_dispatch(
+        &self,
+        completion: PatchLabCompletion,
+    ) -> Result<PatchLabCompletionDispatch, JsValue> {
+        self.store.complete_patch_lab(completion).map_err(js_error)
     }
 }
 
@@ -3227,6 +3350,48 @@ enum ShadowPatchLabEffect {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ShadowPatchLabSessionDispatch {
+    sequence: String,
+    commit: ShadowCommit,
+    patch_lab: ShadowPatchLabReadModel,
+    effects: Vec<ShadowPatchLabEffect>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowPatchLabCompletionDispatch {
+    commit: ShadowCommit,
+    patch_lab: ShadowPatchLabReadModel,
+    effects: Vec<ShadowPatchLabEffect>,
+}
+
+fn shadow_patch_lab_effects(effects: &PatchLabEffects) -> Vec<ShadowPatchLabEffect> {
+    effects
+        .as_slice()
+        .iter()
+        .map(shadow_patch_lab_effect)
+        .collect()
+}
+
+fn patch_lab_session_to_js(dispatch: PatchLabSessionDispatch) -> Result<JsValue, JsValue> {
+    to_js(&ShadowPatchLabSessionDispatch {
+        sequence: dispatch.sequence.to_string(),
+        commit: shadow_commit(&dispatch.commit),
+        patch_lab: dispatch.state.into(),
+        effects: shadow_patch_lab_effects(&dispatch.effects),
+    })
+}
+
+fn patch_lab_completion_to_js(dispatch: PatchLabCompletionDispatch) -> Result<JsValue, JsValue> {
+    to_js(&ShadowPatchLabCompletionDispatch {
+        commit: shadow_commit(&dispatch.commit),
+        patch_lab: dispatch.state.into(),
+        effects: shadow_patch_lab_effects(&dispatch.effects),
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ShadowSnapshot {
     revision: String,
     animation_playing: bool,
@@ -3503,6 +3668,7 @@ struct ShadowRenderSettingsSynchronizationReceipt {
     disposition: &'static str,
     sequence: Option<String>,
     commit: Option<ShadowCommit>,
+    patch_lab_effects: Vec<ShadowPatchLabEffect>,
     matches_input: bool,
     render: ShadowRenderSettings,
 }

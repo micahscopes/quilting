@@ -4254,22 +4254,14 @@ function browserPatchLabIntent(active = patchLab.active) {
   };
 }
 
-function unwrapRustPatchLabEffect(effect) {
-  return effect?.type === 'patch_lab' ? effect.effect : effect;
-}
-
 function observeRustPatchLabEffects(effects, context) {
   if (RUST_PATCH_LAB_IMPLEMENTATION === 'js') return;
   if (!Array.isArray(effects)) throw new Error(`${context} returned non-array effects`);
   const observed = [];
-  const patchTypes = new Set([
-    'build_geometry', 'cancel_geometry', 'discard_geometry',
-    'evaluate_lod', 'cancel_lod',
-  ]);
-  for (const rawEffect of effects) {
-    const effect = unwrapRustPatchLabEffect(rawEffect);
-    if (!effect || typeof effect.type !== 'string') continue;
-    if (rawEffect?.type !== 'patch_lab' && !patchTypes.has(effect.type)) continue;
+  for (const effect of effects) {
+    if (!effect || typeof effect.type !== 'string') {
+      throw new Error(`${context} returned an invalid Patch Lab job`);
+    }
     observed.push(effect);
     switch (effect.type) {
       case 'build_geometry':
@@ -4349,10 +4341,10 @@ function synchronizeRustPatchLabFromBrowser(context, active = patchLab.active) {
   try {
     const app = ensureRustAppShadow('patch-lab');
     const browser = browserPatchLabIntent(active);
-    const receipt = app.dispatchPatchLab(browser);
+    const receipt = app.requestPatchLab(browser);
     observeRustAppShadowSequence(receipt.sequence, 'Rust Patch Lab synchronization');
     rustAppShadowDiagnostics.lastCommit = receipt.commit;
-    observeRustPatchLabEffects(receipt.commit?.effects || [], context);
+    observeRustPatchLabEffects(receipt.effects, context);
     rustPatchLabDiagnostics.synchronizations += 1;
     rustPatchLabDiagnostics.commits += 1;
     const rust = rustPatchLabControlProjection(app.snapshot());
@@ -4421,17 +4413,18 @@ function completeRustPatchLabGeometryFromBrowser(result, context) {
   const jobId = rustPatchLabDiagnostics.pendingGeometryJob;
   if (jobId == null) return;
   try {
-    const commit = rustAppShadow.completePatchLabGeometry(
+    const receipt = rustAppShadow.finishPatchLabGeometry(
       jobId,
       Number(result?.num_vertices || 0),
       Number(result?.num_faces || 0),
     );
+    const commit = receipt.commit;
     rustPatchLabDiagnostics.pendingGeometryJob = null;
     rustPatchLabDiagnostics.installedGeometryJob = jobId;
     rustPatchLabDiagnostics.geometryCompletions += 1;
     rustAppShadowDiagnostics.lastCommit = commit;
     if (commit.disposition === 'ignored_stale') rustPatchLabDiagnostics.staleCompletions += 1;
-    observeRustPatchLabEffects(commit.effects || [], context);
+    observeRustPatchLabEffects(receipt.effects, context);
   } catch (error) {
     rustPatchLabDiagnostics.errors += 1;
     rustPatchLabDiagnostics.lastError = error?.message || String(error);
@@ -4446,13 +4439,14 @@ function completeRustPatchLabLodFromBrowser(result, context) {
   if (jobId == null || geometryJobId == null) return;
   try {
     const summary = patchLabLodSummary(result);
-    const commit = rustAppShadow.completePatchLabLod(jobId, geometryJobId, summary);
+    const receipt = rustAppShadow.finishPatchLabLod(jobId, geometryJobId, summary);
+    const commit = receipt.commit;
     rustPatchLabDiagnostics.pendingLodJob = null;
     rustPatchLabDiagnostics.pendingLodGeometryJob = null;
     rustPatchLabDiagnostics.lodCompletions += 1;
     rustAppShadowDiagnostics.lastCommit = commit;
     if (commit.disposition === 'ignored_stale') rustPatchLabDiagnostics.staleCompletions += 1;
-    observeRustPatchLabEffects(commit.effects || [], context);
+    observeRustPatchLabEffects(receipt.effects, context);
     const latest = rustAppShadow.patchLabSnapshot()?.latestLod;
     rustPatchLabDiagnostics.comparisons += 1;
     if (!latest
@@ -4473,15 +4467,16 @@ function failRustPatchLabGeometryFromBrowser(error, context) {
   const jobId = rustPatchLabDiagnostics.pendingGeometryJob;
   if (jobId == null) return;
   try {
-    const commit = rustAppShadow.failPatchLabGeometry(
+    const receipt = rustAppShadow.finishPatchLabGeometryFailed(
       jobId,
       'browser_geometry_job_failed',
       error?.message || String(error),
       true,
     );
+    const commit = receipt.commit;
     rustPatchLabDiagnostics.pendingGeometryJob = null;
     rustAppShadowDiagnostics.lastCommit = commit;
-    observeRustPatchLabEffects(commit.effects || [], context);
+    observeRustPatchLabEffects(receipt.effects, context);
   } catch (completionError) {
     rustPatchLabDiagnostics.errors += 1;
     rustPatchLabDiagnostics.lastError = completionError?.message || String(completionError);
@@ -4494,17 +4489,18 @@ function failRustPatchLabLodFromBrowser(error, context) {
   const geometryJobId = rustPatchLabDiagnostics.pendingLodGeometryJob;
   if (jobId == null || geometryJobId == null) return;
   try {
-    const commit = rustAppShadow.failPatchLabLod(
+    const receipt = rustAppShadow.finishPatchLabLodFailed(
       jobId,
       geometryJobId,
       'browser_lod_job_failed',
       error?.message || String(error),
       true,
     );
+    const commit = receipt.commit;
     rustPatchLabDiagnostics.pendingLodJob = null;
     rustPatchLabDiagnostics.pendingLodGeometryJob = null;
     rustAppShadowDiagnostics.lastCommit = commit;
-    observeRustPatchLabEffects(commit.effects || [], context);
+    observeRustPatchLabEffects(receipt.effects, context);
   } catch (completionError) {
     rustPatchLabDiagnostics.errors += 1;
     rustPatchLabDiagnostics.lastError = completionError?.message || String(completionError);
@@ -4767,7 +4763,7 @@ function synchronizeRustRenderSettingsPacket(app, settings, source) {
   }
   if (receipt.commit) {
     rustAppShadowDiagnostics.lastCommit = receipt.commit;
-    observeRustPatchLabEffects(receipt.commit.effects || [], `${source}-render-settings`);
+    observeRustPatchLabEffects(receipt.patchLabEffects, `${source}-render-settings`);
   }
   if (receipt.disposition === 'committed') rustRenderSettingsDiagnostics.dispatches += 1;
   rustRenderSettingsDiagnostics.lastRust = receipt.render;
@@ -5774,7 +5770,7 @@ function applyRustAppFocusToRenderer(navigation, selection = selectedObject) {
 function drainRustFrameAdapterEffects(emittedCount, context) {
   if (!rustAppShadow || Number(emittedCount) <= 0) return;
   try {
-    observeRustPatchLabEffects(rustAppShadow.drainAdapterEffects(), context);
+    observeRustPatchLabEffects(rustAppShadow.drainPatchLabEffects(), context);
   } catch (error) {
     rustAppShadowDiagnostics.frameErrors += 1;
     recordAppShadowMismatch(

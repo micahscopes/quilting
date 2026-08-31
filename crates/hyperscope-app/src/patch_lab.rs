@@ -170,9 +170,12 @@ pub struct PatchLabEffects(Vec<PatchLabEffect>);
 
 impl PatchLabEffects {
     pub fn from_commit(commit: &AppCommit) -> Self {
+        Self::from_effects(&commit.effects)
+    }
+
+    pub fn from_effects(effects: &[AppEffect]) -> Self {
         Self(
-            commit
-                .effects
+            effects
                 .iter()
                 .filter_map(|effect| match effect {
                     AppEffect::PatchLab(effect) => Some(effect.clone()),
@@ -186,9 +189,34 @@ impl PatchLabEffects {
         &self.0
     }
 
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub fn into_vec(self) -> Vec<PatchLabEffect> {
         self.0
     }
+}
+
+/// Typed result of one Patch Lab session edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchLabSessionDispatch {
+    pub sequence: u64,
+    pub commit: AppCommit,
+    pub state: PatchLabReadModel,
+    pub effects: PatchLabEffects,
+}
+
+/// Typed result of one Patch Lab geometry or LOD completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchLabCompletionDispatch {
+    pub commit: AppCommit,
+    pub state: PatchLabReadModel,
+    pub effects: PatchLabEffects,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

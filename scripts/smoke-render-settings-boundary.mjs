@@ -61,11 +61,13 @@ const packet = browser.slice(packetStart, packetEnd);
 for (const required of [
   'app.synchronizeRenderSettings(settings)',
   'if (receipt.sequence != null)',
-  'observeRustPatchLabEffects(receipt.commit.effects || []',
+  'observeRustPatchLabEffects(receipt.patchLabEffects,',
   "receipt.disposition === 'committed'",
 ]) {
   assert.ok(packet.includes(required), `thin render-settings packet adapter is missing ${required}`);
 }
+assert.equal(packet.includes('receipt.commit.effects'), false,
+  'render-settings adaptation must consume typed Patch Lab jobs');
 
 const synchronizationStart = browser.indexOf('function synchronizeRustRenderSettings() {');
 const synchronizationEnd = browser.indexOf('  } catch (error) {', synchronizationStart);

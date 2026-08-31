@@ -2457,6 +2457,39 @@ impl AppStore {
         })
     }
 
+    /// Commit one complete Patch Lab control packet and expose only the
+    /// renderer jobs nested in the resulting application commit.
+    pub fn set_patch_lab_session(
+        &self,
+        intent: PatchLabSessionIntent,
+    ) -> Result<PatchLabSessionDispatch, ReduceError> {
+        let (sequence, commit) = self.dispatch_semantic(SemanticAction::SetPatchLab(intent))?;
+        let effects = PatchLabEffects::from_commit(&commit);
+        Ok(PatchLabSessionDispatch {
+            sequence,
+            commit,
+            state: self.patch_lab_snapshot(),
+            effects,
+        })
+    }
+
+    /// Admit one Patch Lab platform completion and return the exact follow-up
+    /// renderer jobs selected by the reducer's generation/coalescing policy.
+    pub fn complete_patch_lab(
+        &self,
+        completion: PatchLabCompletion,
+    ) -> Result<PatchLabCompletionDispatch, ReduceError> {
+        let commit = self.dispatch(AppEvent::EffectCompleted(EffectCompletion::PatchLab(
+            completion,
+        )))?;
+        let effects = PatchLabEffects::from_commit(&commit);
+        Ok(PatchLabCompletionDispatch {
+            commit,
+            state: self.patch_lab_snapshot(),
+            effects,
+        })
+    }
+
     /// Commit one presentation action and retain the exact renderer clip jobs
     /// generated transactionally with its cue/clock/navigation transition.
     pub fn dispatch_presentation(
