@@ -679,6 +679,19 @@ const graphicsBackendDiagnostics = {
 };
 globalThis.__hyperscopeGraphicsBackend = graphicsBackendDiagnostics;
 
+const webGpuLodAuthorityDiagnostics = {
+  requested: GRAPHICS_BACKEND_REQUEST === 'webgpu',
+  active: false,
+  state: GRAPHICS_BACKEND_REQUEST === 'webgpu' ? 'awaiting-presentation' : 'disabled',
+  activations: 0,
+  dispatches: 0,
+  fullSceneDispatches: 0,
+  fallbackTransitions: 0,
+  lastTransitionReason: null,
+  incumbentResetPending: false,
+};
+globalThis.__hyperscopeWebGpuLodAuthority = webGpuLodAuthorityDiagnostics;
+
 const backendPickDiagnostics = {
   enabled: PICK_IMPLEMENTATION !== 'js',
   requested: PICK_IMPLEMENTATION,
@@ -768,7 +781,11 @@ function synchronizeGraphicsBackendPresentation() {
     && !failed;
   presentationCanvas.classList.toggle('webgpu-presenting', presenting);
   webglCanvas.classList.toggle('webgpu-input-layer', presenting);
+  const previousEffective = graphicsBackendDiagnostics.effective;
   graphicsBackendDiagnostics.effective = presenting ? 'webgpu' : 'webgl2';
+  if (previousEffective === 'webgpu' && !presenting) {
+    retireWebGpuLodAuthority('WebGPU presentation retired');
+  }
   if (GRAPHICS_BACKEND_REQUEST === 'webgpu') {
     if (failed) {
       graphicsBackendDiagnostics.state = 'fallback';
@@ -984,6 +1001,11 @@ function updateSameContextLodDiagnostics(snapshot) {
     Object.assign(sameContextLodDiagnostics, snapshot);
   }
   sameContextLodDiagnostics.requestedImplementation = LOD_IMPLEMENTATION;
+  if (webGpuLodAuthorityDiagnostics.active) {
+    sameContextLodDiagnostics.effectiveAuthority = 'webgpu-device';
+    sameContextLodDiagnostics.state = 'device-authority';
+    return sameContextLodDiagnostics;
+  }
   const rendererAuthorityReady = LOD_IMPLEMENTATION === 'rust'
     && !sameContextLodAuthorityFailed
     && sameContextLodDiagnostics.ready === true
@@ -1060,6 +1082,10 @@ function scheduleSameContextLodPoll() {
       }
       if (LOD_IMPLEMENTATION === 'rust'
           && Number(snapshot.authoritative_publications) > previousPublications) {
+        webGpuLodAuthorityDiagnostics.incumbentResetPending = false;
+        if (!webGpuLodAuthorityDiagnostics.active) {
+          webGpuLodAuthorityDiagnostics.state = 'incumbent';
+        }
         const batchGroupMs = consumeBatchMeasure(
           'batch-group', 'batch-group-start', 'batch-group-end',
         );
@@ -10826,7 +10852,55 @@ function uploadProceduralEnvMaps() {
 // --- Animation + LOD ---
 let lodInFlight = false;
 let lodDebounceTimer = null;
+let lodDirty = false; // set true when camera moves while LOD is in flight
+let lodFullSceneDirty = true;
+let lodDeltaResetPending = false;
 let skinTexW = 0;
+
+function webGpuLodAuthorityEligible() {
+  const residency = graphicsBackendDiagnostics.residency;
+  return GRAPHICS_BACKEND_REQUEST === 'webgpu'
+    && graphicsBackendDiagnostics.effective === 'webgpu'
+    && graphicsBackendDiagnostics.state === 'presenting'
+    && residency?.state === 'ready'
+    && residency?.presentationReady === true
+    && residency?.presentationStyle === graphicsBackendDiagnostics.renderMode
+    && (residency?.presentationFrames || 0) > 0
+    && (residency?.frameFailures || 0) === 0
+    && (residency?.presentationLosses || 0) === 0;
+}
+
+function activateWebGpuLodAuthority() {
+  if (!webGpuLodAuthorityDiagnostics.active) {
+    webGpuLodAuthorityDiagnostics.active = true;
+    webGpuLodAuthorityDiagnostics.activations += 1;
+    webGpuLodAuthorityDiagnostics.lastTransitionReason =
+      'presenting WebGPU accepted a complete device LOD epoch';
+  }
+  webGpuLodAuthorityDiagnostics.state = 'device-resident';
+  // The incumbent delta encoder becomes dormant while WebGPU owns LOD. Its
+  // first rollback publication must therefore restart from a full snapshot.
+  lodDeltaResetPending = true;
+  webGpuLodAuthorityDiagnostics.incumbentResetPending = true;
+  sameContextLodDiagnostics.effectiveAuthority = 'webgpu-device';
+  sameContextLodDiagnostics.state = 'device-authority';
+}
+
+function retireWebGpuLodAuthority(reason) {
+  if (!webGpuLodAuthorityDiagnostics.active) return false;
+  webGpuLodAuthorityDiagnostics.active = false;
+  webGpuLodAuthorityDiagnostics.state = 'incumbent-recovery';
+  webGpuLodAuthorityDiagnostics.fallbackTransitions += 1;
+  webGpuLodAuthorityDiagnostics.lastTransitionReason = reason;
+  webGpuLodAuthorityDiagnostics.incumbentResetPending = true;
+  lodDeltaResetPending = true;
+  lodFullSceneDirty = true;
+  lodDirty = true;
+  if (!lodInFlight && meshInfo && !remeshedMode && !patchLab.active) {
+    debouncedLodRecompute();
+  }
+  return true;
+}
 
 function animationPoseStampFromPacket() {
   const [t, sampleTime, revision, continuityEpoch] = animationPosePacket;
@@ -11103,10 +11177,6 @@ async function evaluateAnimationPose(request) {
   }
 }
 
-let lodDirty = false; // set true when camera moves while LOD is in flight
-let lodFullSceneDirty = true;
-let lodDeltaResetPending = false;
-
 function acceptLodDeltaSequence(response, fullSnapshot) {
   const epoch = Number(response.delta_epoch);
   const baseRevision = Number(response.delta_base_revision);
@@ -11253,6 +11323,58 @@ async function recomputeLods() {
     const tp = getTessParams();
 
     let resetDelta = lodDeltaResetPending;
+    const deviceAuthorityEligible = webGpuLodAuthorityEligible();
+    if (webGpuLodAuthorityDiagnostics.active && !deviceAuthorityEligible) {
+      if (retireWebGpuLodAuthority('WebGPU presentation is no longer authoritative')) {
+        resetDelta = true;
+      }
+    }
+    if (WEBGPU_SHADOW_ENABLED) {
+      try {
+        // Once the visible WebGPU surface is proven, keep the complete scene
+        // coherent on that device. A primary-only dispatch would deliberately
+        // invalidate the device epoch and force the incumbent readback path.
+        const deviceFullScene = deviceAuthorityEligible;
+        webGpuLodAuthorityDiagnostics.dispatches += 1;
+        if (deviceFullScene) webGpuLodAuthorityDiagnostics.fullSceneDispatches += 1;
+        const deviceLodDispatched = quiltingWasmBackend.mr_dispatchWebGpuLod(
+          lodPoseAnimated,
+          lodPose?.t ?? 0,
+          lodPose?.sampleTime ?? 0,
+          lodPose?.revision ?? 0,
+          lodPose?.continuityEpoch ?? 0,
+          lodMobius,
+          deviceFullScene
+            ? authoredLodStates
+            : (primaryOnly ? presentationComposition.primaryLodStates : authoredLodStates),
+          deviceFullScene ? 0 : (primaryOnly ? currentPrimaryFaceCount : 0),
+          tp.density,
+          tp.minPx,
+          vp,
+          w,
+          h,
+        );
+        graphicsBackendDiagnostics.deviceLodState = deviceLodDispatched
+          ? 'resident' : (primaryOnly ? 'partial-fallback' : 'awaiting-residency');
+        graphicsBackendDiagnostics.deviceLodError = null;
+        if (deviceLodDispatched && deviceAuthorityEligible) {
+          activateWebGpuLodAuthority();
+          lodTelemetry.submitted += 1;
+          if (lodPose) lodTelemetry.poseSubmittedRevision = lodPose.revision;
+          lodInFlight = false;
+          lodTelemetry.inFlight = false;
+          return;
+        }
+        if (!deviceLodDispatched && webGpuLodAuthorityDiagnostics.active
+            && retireWebGpuLodAuthority('WebGPU rejected the complete device LOD dispatch')) {
+          resetDelta = true;
+        }
+      } catch (error) {
+        graphicsBackendDiagnostics.deviceLodState = 'fallback';
+        graphicsBackendDiagnostics.deviceLodError = error?.message || String(error);
+        if (retireWebGpuLodAuthority('WebGPU device LOD dispatch failed')) resetDelta = true;
+      }
+    }
     const sameContextReady = refreshSameContextLodReadiness()
       && currentFaceNodes.length > 0
       && Number(sameContextLodDiagnostics.residency?.num_faces) === currentFaceNodes.length;
@@ -11279,31 +11401,6 @@ async function recomputeLods() {
         if (sameContextDispatched) scheduleSameContextLodPoll();
       } catch (error) {
         if (!absorbSameContextLodLifecycleGap(error)) recordSameContextLodError(error);
-      }
-    }
-    if (WEBGPU_SHADOW_ENABLED) {
-      try {
-        const deviceLodDispatched = quiltingWasmBackend.mr_dispatchWebGpuLod(
-          lodPoseAnimated,
-          lodPose?.t ?? 0,
-          lodPose?.sampleTime ?? 0,
-          lodPose?.revision ?? 0,
-          lodPose?.continuityEpoch ?? 0,
-          lodMobius,
-          primaryOnly ? presentationComposition.primaryLodStates : authoredLodStates,
-          primaryOnly ? currentPrimaryFaceCount : 0,
-          tp.density,
-          tp.minPx,
-          vp,
-          w,
-          h,
-        );
-        graphicsBackendDiagnostics.deviceLodState = deviceLodDispatched
-          ? 'resident' : (primaryOnly ? 'partial-fallback' : 'awaiting-residency');
-        graphicsBackendDiagnostics.deviceLodError = null;
-      } catch (error) {
-        graphicsBackendDiagnostics.deviceLodState = 'fallback';
-        graphicsBackendDiagnostics.deviceLodError = error?.message || String(error);
       }
     }
     if (LOD_IMPLEMENTATION === 'rust'
@@ -11371,6 +11468,10 @@ async function recomputeLods() {
     if (resp.lods && !remeshedMode) {
       if (!acceptLodPoseStamp(resp, lodPose)) throw new RetiredLodPublication();
       acceptLodDeltaSequence(resp, !!wt.full_snapshot);
+      if (wt.full_snapshot && !webGpuLodAuthorityDiagnostics.active) {
+        webGpuLodAuthorityDiagnostics.incumbentResetPending = false;
+        webGpuLodAuthorityDiagnostics.state = 'incumbent';
+      }
       const faceLods = new Float32Array(resp.lods.buffer || resp.lods);
       const classifiedFaces = Number(resp.classified_faces)
         || Math.floor(faceLods.length / 6);
