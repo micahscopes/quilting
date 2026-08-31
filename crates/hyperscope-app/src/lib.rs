@@ -867,6 +867,15 @@ pub struct PresentationDispatch {
     pub cancellations: Vec<AnimationClipJobEffect>,
 }
 
+/// Typed result of changing the process-local binding between an authored
+/// presentation asset and the primary scene currently resident in a renderer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresentationAnimationResidencyDispatch {
+    pub commit: AppCommit,
+    pub selection: Option<AnimationClipJobEffect>,
+    pub cancellations: Vec<AnimationClipJobEffect>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiagnosticReadModel {
     pub revision: u64,
@@ -2541,6 +2550,33 @@ impl AppStore {
         let effects = AnimationClipEffects::from_commit(&commit);
         Ok(PresentationDispatch {
             sequence,
+            commit,
+            selection: effects.selection,
+            cancellations: effects.cancellations,
+        })
+    }
+
+    /// Admit renderer-local presentation animation residency and expose every
+    /// clip job selected transactionally with that evidence. The binding is
+    /// process-local platform state, never authored or durable state.
+    pub fn set_presentation_animation_residency(
+        &self,
+        binding: Option<PresentationAnimationResidencyBinding>,
+    ) -> Result<PresentationAnimationResidencyDispatch, ReduceError> {
+        let commit = self.dispatch(AppEvent::PresentationAnimationResidencyChanged(binding))?;
+        if commit.effects.iter().any(|effect| {
+            !matches!(
+                effect,
+                AppEffect::SelectAnimationClip { .. }
+                    | AppEffect::CancelAnimationClipSelection { .. }
+            )
+        }) {
+            return Err(ReduceError::EffectContract(
+                "presentation animation residency emitted a non-animation renderer job",
+            ));
+        }
+        let effects = AnimationClipEffects::from_commit(&commit);
+        Ok(PresentationAnimationResidencyDispatch {
             commit,
             selection: effects.selection,
             cancellations: effects.cancellations,
@@ -4462,12 +4498,20 @@ mod tests {
             resident_asset_id: resident.id,
         };
         let bound = store
-            .dispatch(AppEvent::PresentationAnimationResidencyChanged(Some(
-                binding,
-            )))
+            .set_presentation_animation_residency(Some(binding))
             .unwrap();
         assert_eq!(
-            bound.effects,
+            bound.selection,
+            Some(AnimationClipJobEffect {
+                job_id: 0,
+                scene_request_id: scene_request,
+                asset_id: resident.id,
+                clip_index: 1,
+            }),
+        );
+        assert!(bound.cancellations.is_empty());
+        assert_eq!(
+            bound.commit.effects,
             vec![AppEffect::SelectAnimationClip {
                 job_id: 0,
                 scene_request_id: scene_request,

@@ -3411,11 +3411,12 @@ async function bindPrimaryPresentationAnimationResidency(presentationAssetId) {
   if (!installed?.requestId || !installed?.assetId) {
     throw new Error('presentation animation binding requires an installed primary scene');
   }
-  const commit = rustAppShadow.bindPresentationAnimationResidency(
+  const receipt = rustAppShadow.setPresentationAnimationResidency(
     presentationAssetId,
     installed.requestId,
     installed.assetId,
   );
+  const commit = receipt.commit;
   rustAppShadowDiagnostics.lastCommit = commit;
   const after = refreshAppShadowSnapshot();
   const residency = after?.presentation?.animationResidency;
@@ -3426,7 +3427,7 @@ async function bindPrimaryPresentationAnimationResidency(presentationAssetId) {
   }
   rustPresentationDiagnostics.animationResidency = residency;
   return applyCommittedPresentationAnimationEffects(
-    commit,
+    { effect: receipt.selection, cancellations: receipt.cancellations },
     after?.presentation?.active,
     'presentation-residency',
   );

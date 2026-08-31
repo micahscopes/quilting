@@ -32,8 +32,8 @@ use hyperscope_app::{
     PatchLabFailure, PatchLabField, PatchLabGeometryCompletion, PatchLabGeometryOutcome,
     PatchLabHistogramBin, PatchLabLodCompletion, PatchLabLodOutcome, PatchLabLodSummary,
     PatchLabReadModel, PatchLabSessionDispatch, PatchLabSessionIntent, PatchLabShape,
-    PresentationAction,
-    PresentationAnimationResidencyBinding, PrimarySceneInstallCompletion,
+    PresentationAction, PresentationAnimationResidencyBinding,
+    PresentationAnimationResidencyDispatch, PrimarySceneInstallCompletion,
     PrimarySceneInstallCompletionDispatch, PrimarySceneInstallMetadata,
     PrimarySceneInstallOutcome, RenderSettings,
     RenderSettingsSynchronizationDisposition, SemanticAction, Timed,
@@ -1762,6 +1762,26 @@ impl HyperscopeAppShadow {
         commit_to_js(&commit)
     }
 
+    /// Admit the renderer-local binding through the typed application port
+    /// and return any clip selection/cancellation jobs chosen with it.
+    #[wasm_bindgen(js_name = setPresentationAnimationResidency)]
+    pub fn set_presentation_animation_residency(
+        &self,
+        presentation_asset_id: &str,
+        scene_request_id: &str,
+        resident_asset_id: &str,
+    ) -> Result<JsValue, JsValue> {
+        presentation_animation_residency_to_js(
+            self.store
+                .set_presentation_animation_residency(Some(PresentationAnimationResidencyBinding {
+                    presentation_asset_id: asset_id_from_str(presentation_asset_id)?,
+                    scene_request_id: request_id_from_str(scene_request_id)?,
+                    resident_asset_id: asset_id_from_str(resident_asset_id)?,
+                }))
+                .map_err(js_error)?,
+        )
+    }
+
     #[wasm_bindgen(js_name = clearPresentationAnimationResidency)]
     pub fn clear_presentation_animation_residency(&self) -> Result<JsValue, JsValue> {
         let commit = self
@@ -1769,6 +1789,15 @@ impl HyperscopeAppShadow {
             .dispatch(AppEvent::PresentationAnimationResidencyChanged(None))
             .map_err(js_error)?;
         commit_to_js(&commit)
+    }
+
+    #[wasm_bindgen(js_name = unsetPresentationAnimationResidency)]
+    pub fn unset_presentation_animation_residency(&self) -> Result<JsValue, JsValue> {
+        presentation_animation_residency_to_js(
+            self.store
+                .set_presentation_animation_residency(None)
+                .map_err(js_error)?,
+        )
     }
 
     /// Mirror low-rate cue intent. This shadow compares resolved desired state;
@@ -3674,6 +3703,31 @@ struct ShadowPresentationDispatch {
     commit: ShadowCommit,
     selection: Option<ShadowAnimationClipJobEffect>,
     cancellations: Vec<ShadowAnimationClipJobEffect>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowPresentationAnimationResidencyDispatch {
+    commit: ShadowCommit,
+    selection: Option<ShadowAnimationClipJobEffect>,
+    cancellations: Vec<ShadowAnimationClipJobEffect>,
+}
+
+fn presentation_animation_residency_to_js(
+    dispatch: PresentationAnimationResidencyDispatch,
+) -> Result<JsValue, JsValue> {
+    to_js(&ShadowPresentationAnimationResidencyDispatch {
+        commit: shadow_commit(&dispatch.commit),
+        selection: dispatch
+            .selection
+            .as_ref()
+            .map(ShadowAnimationClipJobEffect::selection),
+        cancellations: dispatch
+            .cancellations
+            .iter()
+            .map(ShadowAnimationClipJobEffect::cancellation)
+            .collect(),
+    })
 }
 
 #[derive(Serialize)]

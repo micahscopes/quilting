@@ -16,7 +16,9 @@ for (const required of [
   'pub struct AnimationClipEffects',
   'pub fn from_commit(commit: &AppCommit) -> Self',
   'pub struct PresentationDispatch',
+  'pub struct PresentationAnimationResidencyDispatch',
   'pub fn dispatch_presentation(',
+  'pub fn set_presentation_animation_residency(',
   'SemanticAction::Present(action)',
   'let effects = AnimationClipEffects::from_commit(&commit);',
   'selection: effects.selection',
@@ -50,8 +52,11 @@ for (const required of [
 for (const required of [
   '#[wasm_bindgen(js_name = dispatchPresentation)]',
   '#[wasm_bindgen(js_name = requestPresentation)]',
+  '#[wasm_bindgen(js_name = setPresentationAnimationResidency)]',
+  '#[wasm_bindgen(js_name = unsetPresentationAnimationResidency)]',
   '.dispatch_presentation(presentation_action_from_wire(action, cue_id)?)',
   'ShadowPresentationDispatch',
+  'ShadowPresentationAnimationResidencyDispatch',
   'ShadowAnimationClipJobEffect::selection',
   'ShadowAnimationClipJobEffect::cancellation',
 ]) {
@@ -105,6 +110,25 @@ for (const retired of [
 }
 assert.equal(browser.includes('function committedPresentationClipJob('), false,
   'browser presentation semantics must not retain committedPresentationClipJob');
+
+const residencyStart = browser.indexOf('async function bindPrimaryPresentationAnimationResidency(');
+const residencyEnd = browser.indexOf('function presentationLayerMatrix(', residencyStart);
+const residency = browser.slice(residencyStart, residencyEnd);
+for (const required of [
+  'rustAppShadow.setPresentationAnimationResidency(',
+  'const commit = receipt.commit;',
+  '{ effect: receipt.selection, cancellations: receipt.cancellations }',
+]) {
+  assert.ok(residency.includes(required),
+    `typed presentation residency adapter is missing ${required}`);
+}
+for (const retired of [
+  'rustAppShadow.bindPresentationAnimationResidency(',
+  'applyCommittedPresentationAnimationEffects(\n    commit,',
+]) {
+  assert.equal(residency.includes(retired), false,
+    `ordinary presentation residency must not retain ${retired}`);
+}
 
 const moduleSource = browser.match(/<script type="module">([\s\S]*?)<\/script>/)?.[1];
 assert.ok(moduleSource, 'could not extract the Hyperscope inline module');

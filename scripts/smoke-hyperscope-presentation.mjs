@@ -718,7 +718,7 @@ assert.ok(
   'all cue paths must share one committed renderer/navigation adapter',
 );
 for (const residencyStep of [
-  'rustAppShadow.bindPresentationAnimationResidency(',
+  'rustAppShadow.setPresentationAnimationResidency(',
   'await bindPrimaryPresentationAnimationResidency(primaryAsset.id);',
   'const job = observePresentationClipJob(clipJob, context);',
   'committedClipJob: job,',
