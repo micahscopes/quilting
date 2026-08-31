@@ -1153,7 +1153,7 @@ pub struct PatchRenderScene {
 /// the caller can construct an atomic replacement without cloning it.
 pub enum PatchRenderSceneUpdate {
     Updated,
-    ShapeChanged(RenderSceneSnapshot),
+    ShapeChanged(ValidatedRenderScene),
 }
 
 /// Compact per-face CPU/shadow visibility and its retained expansion bindings.
@@ -4661,6 +4661,27 @@ impl LodClassifierDevice {
         let scene = ValidatedRenderScene::new(scene).map_err(|error| {
             LodWebGpuError::Payload(format!("retained WebGPU render scene: {error}"))
         })?;
+        self.upload_validated_patch_render_scene(
+            pipeline,
+            model,
+            scene,
+            source_instances,
+            textures,
+        )
+    }
+
+    /// Upload one scene that has already crossed the backend-neutral semantic
+    /// validation boundary. The retained WebGPU aggregate shares the exact
+    /// scene allocation with extraction, command planning, and parity
+    /// observers instead of cloning and revalidating its member tables.
+    pub fn upload_validated_patch_render_scene(
+        &self,
+        pipeline: &PatchRenderPipeline,
+        model: &LodClassifierModel,
+        scene: ValidatedRenderScene,
+        source_instances: &[f32],
+        textures: Option<&PbrTextureTable>,
+    ) -> Result<PatchRenderScene, LodWebGpuError> {
         let snapshot = scene.snapshot();
         let patch_words =
             pack_wgsl_patch_preparation_scene_words(&model.prepared, snapshot, source_instances)
@@ -4731,12 +4752,40 @@ impl LodClassifierDevice {
         textures: Option<&PbrTextureTable>,
     ) -> Result<PatchRenderSceneUpdate, LodWebGpuError> {
         scene.revision = revision;
+        let scene = ValidatedRenderScene::new(scene).map_err(|error| {
+            LodWebGpuError::Payload(format!("retained WebGPU render scene update: {error}"))
+        })?;
+        self.update_validated_patch_render_scene_in_place(
+            pipeline,
+            model,
+            retained,
+            scene,
+            source_instances,
+            textures,
+        )
+    }
+
+    /// Publish an already validated scene into retained allocations when its
+    /// device shape is unchanged. Shape changes return the same validated
+    /// allocation so the caller can atomically upload a replacement without
+    /// cloning or revalidating the snapshot.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_validated_patch_render_scene_in_place(
+        &self,
+        pipeline: &PatchRenderPipeline,
+        model: &LodClassifierModel,
+        retained: &mut PatchRenderScene,
+        scene: ValidatedRenderScene,
+        source_instances: &[f32],
+        textures: Option<&PbrTextureTable>,
+    ) -> Result<PatchRenderSceneUpdate, LodWebGpuError> {
+        let snapshot = scene.snapshot();
         let patch_words =
-            pack_wgsl_patch_preparation_scene_words(&model.prepared, &scene, source_instances)
+            pack_wgsl_patch_preparation_scene_words(&model.prepared, snapshot, source_instances)
                 .map_err(LodWebGpuError::Payload)?;
         let visibility_words =
-            pack_wgsl_visibility_compaction_scene_words(&scene).map_err(LodWebGpuError::Payload)?;
-        let material_words = patch_pbr_material_table_words(&scene.materials)?;
+            pack_wgsl_visibility_compaction_scene_words(snapshot).map_err(LodWebGpuError::Payload)?;
+        let material_words = patch_pbr_material_table_words(&snapshot.materials)?;
         let same_shape = model.identity == retained.model_identity
             && patch_words.uniform[0] == retained.patches.patch_count
             && patch_words.topology.len() == retained.patches.patch_count as usize
@@ -4746,7 +4795,7 @@ impl LodClassifierDevice {
             && visibility_words.batches.len() == retained.visibility.batch_count as usize
             && visibility_words.source_eligibility.len()
                 == retained.visibility.source_count as usize
-            && scene.materials.len().max(1) == retained.bindings.material_count as usize;
+            && snapshot.materials.len().max(1) == retained.bindings.material_count as usize;
         if !same_shape {
             return Ok(PatchRenderSceneUpdate::ShapeChanged(scene));
         }
@@ -4757,9 +4806,6 @@ impl LodClassifierDevice {
                 "in-place WebGPU scene update changed immutable model words".to_string(),
             ));
         }
-        let scene = ValidatedRenderScene::new(scene).map_err(|error| {
-            LodWebGpuError::Payload(format!("retained WebGPU render scene update: {error}"))
-        })?;
         let material_textures = if pipeline.uses_pbr_bindings() {
             Some(self.create_pbr_material_texture_bindings(
                 pipeline,

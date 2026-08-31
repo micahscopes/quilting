@@ -700,10 +700,13 @@ struct MainState {
     /// Opt-in comparison between backend-neutral frame commands and actual
     /// indexed WebGL patch submissions.
     render_shadow: RenderShadowObserver,
-    render_shadow_scene_dirty: bool,
-    /// Immutable scene epoch validated only when the opt-in render authority
-    /// gate observes a changed retained batch set.
+    render_scene_dirty: bool,
+    /// One immutable extraction epoch shared by command planning, optional
+    /// WebGL parity observation, and WebGPU resource publication.
     validated_render_scene: Option<ValidatedRenderScene>,
+    render_scene_extractions: u64,
+    render_scene_extraction_failures: u64,
+    render_scene_error: Option<String>,
     /// Memoized command-affecting identity for the validated scene. Camera,
     /// pose, and uniform-only changes do not rebuild this value.
     render_command_plan: Option<RenderCommandPlan>,
@@ -2201,8 +2204,11 @@ pub fn mr_init(canvas_id: &str) -> bool {
             #[cfg(feature = "webgpu-backend")]
             backend_pick_evidence_reading: false,
             render_shadow: RenderShadowObserver::default(),
-            render_shadow_scene_dirty: true,
+            render_scene_dirty: true,
             validated_render_scene: None,
+            render_scene_extractions: 0,
+            render_scene_extraction_failures: 0,
+            render_scene_error: None,
             render_command_plan: None,
             webgl_pbr_command_plan: None,
             render_command_plan_builds: 0,
@@ -2717,7 +2723,7 @@ fn sync_render_batches(renderer: &mut MainState) {
     }
     renderer.render_batches = render_batches;
     renderer.render_commands_dirty = false;
-    renderer.render_shadow_scene_dirty = true;
+    renderer.render_scene_dirty = true;
     renderer.render_command_builds += 1;
 }
 
@@ -2806,10 +2812,22 @@ fn submit_webgpu_frame(
     }
     let source_revision = renderer.render_command_builds;
     if crate::webgpu_backend::needs_scene(source_revision) {
-        let scene = match extract_render_scene(renderer) {
-            Ok(scene) => scene,
-            Err(error) => {
-                crate::webgpu_backend::record_frame_prerequisite_failure(error);
+        let scene = match renderer.validated_render_scene.as_ref() {
+            Some(scene) if scene.snapshot().revision == source_revision => scene.clone(),
+            Some(scene) => {
+                crate::webgpu_backend::record_frame_prerequisite_failure(format!(
+                    "shared render scene revision {} does not match source revision {source_revision}",
+                    scene.snapshot().revision,
+                ));
+                return LiveFrameDisposition::IncumbentRequired;
+            }
+            None => {
+                crate::webgpu_backend::record_frame_prerequisite_failure(
+                    renderer
+                        .render_scene_error
+                        .as_deref()
+                        .unwrap_or("shared validated render scene is unavailable"),
+                );
                 return LiveFrameDisposition::IncumbentRequired;
             }
         };
@@ -3209,27 +3227,43 @@ pub async fn mr_compare_backend_frame_evidence() -> Result<JsValue, JsValue> {
     .map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
-fn refresh_render_shadow_scene(renderer: &mut MainState) {
-    if !renderer.render_shadow.is_enabled() || !renderer.render_shadow_scene_dirty {
-        return;
+fn refresh_validated_render_scene(
+    renderer: &mut MainState,
+    backend_scene_required: bool,
+) -> Result<(), String> {
+    if !renderer.render_shadow.is_enabled() && !backend_scene_required {
+        return Ok(());
+    }
+    if !renderer.render_scene_dirty && renderer.validated_render_scene.is_some() {
+        return Ok(());
     }
     let extracted = extract_render_scene(renderer).and_then(|mut scene| {
         scene.revision = renderer.render_command_builds;
         ValidatedRenderScene::new(scene).map_err(|error| error.to_string())
     });
-    renderer.render_shadow_scene_dirty = false;
+    renderer.render_scene_dirty = false;
     match extracted {
         Ok(scene) => {
-            renderer.render_shadow.replace_scene(scene.clone());
+            renderer.render_scene_extractions =
+                renderer.render_scene_extractions.saturating_add(1);
+            renderer.render_scene_error = None;
+            if renderer.render_shadow.is_enabled() {
+                renderer.render_shadow.replace_scene(scene.clone());
+            }
             renderer.validated_render_scene = Some(scene);
             renderer.render_command_plan = None;
             renderer.webgl_pbr_command_plan = None;
+            Ok(())
         }
         Err(error) => {
+            renderer.render_scene_extraction_failures =
+                renderer.render_scene_extraction_failures.saturating_add(1);
+            renderer.render_scene_error = Some(error.clone());
             renderer.validated_render_scene = None;
             renderer.render_command_plan = None;
             renderer.webgl_pbr_command_plan = None;
-            renderer.render_shadow.record_extraction_error(error);
+            renderer.render_shadow.record_extraction_error(&error);
+            Err(error)
         }
     }
 }
@@ -5515,9 +5549,9 @@ pub fn mr_set_render_shadow_enabled(enabled: bool) -> JsValue {
         let changed = state.render_shadow.is_enabled() != enabled;
         state.render_shadow.set_enabled(enabled);
         if enabled && changed {
-            state.render_shadow_scene_dirty = true;
+            state.render_scene_dirty = true;
             sync_render_batches(state);
-            refresh_render_shadow_scene(state);
+            let _ = refresh_validated_render_scene(state, false);
             refresh_render_command_plan(state);
         } else if !enabled && changed {
             state.validated_render_scene = None;
@@ -6092,7 +6126,7 @@ pub fn mr_set_instance_data(instances: &[f32], num_faces: u32) {
             st.pending_face_nodes = None;
             st.patch_prepare_dirty = true;
             st.render_shadow.asset_changed();
-            st.render_shadow_scene_dirty = true;
+            st.render_scene_dirty = true;
             st.presentation_nodes.clear();
             st.authored_node_models.clear();
             st.surface_runtime.reset_geometry();
@@ -6311,6 +6345,11 @@ pub fn mr_debug_resident_lod_edges() -> JsValue {
             ),
             ("lastGpuBatchFailures", batch_stats.last_gpu_failures),
             ("renderCommandBuilds", state.render_command_builds),
+            ("renderSceneExtractions", state.render_scene_extractions),
+            (
+                "renderSceneExtractionFailures",
+                state.render_scene_extraction_failures,
+            ),
             ("renderCommandPlanBuilds", state.render_command_plan_builds),
             ("renderCalls", state.render_calls),
             ("webglPatchFrames", state.webgl_patch_frames),
@@ -8275,7 +8314,7 @@ pub fn mr_set_materials(data: &[f32], num_materials: u32) {
             }
             info!("Set {} PBR materials", st.materials.len());
             st.render_commands_dirty = true;
-            st.render_shadow_scene_dirty = true;
+            st.render_scene_dirty = true;
         }
     });
 }
@@ -8306,7 +8345,7 @@ pub fn mr_append_materials(data: &[f32], num_materials: u32) -> u32 {
             base,
         );
         state.render_commands_dirty = true;
-        state.render_shadow_scene_dirty = true;
+        state.render_scene_dirty = true;
         base
     })
 }
@@ -9968,17 +10007,24 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
 
         sync_render_batches(state);
         #[cfg(feature = "webgpu-backend")]
+        let backend_scene_required = crate::webgpu_backend::needs_scene(
+            state.render_command_builds,
+        ) || state.backend_evidence_requested;
+        #[cfg(not(feature = "webgpu-backend"))]
+        let backend_scene_required = false;
+        let _scene_refresh = refresh_validated_render_scene(state, backend_scene_required);
+        #[cfg(feature = "webgpu-backend")]
         if state.backend_evidence_requested && state.render_style == RenderStyle::Pbr {
             let options = RenderFrameOptions {
                 focus_postprocess: state.focus_postprocess,
                 highlight_face: u32::try_from(state.highlight_face).ok(),
                 matcap_style: state.matcap_style,
             };
-            let supported = extract_render_scene(state).is_ok_and(|scene| {
+            let supported = state.validated_render_scene.as_ref().is_some_and(|scene| {
                 if options.focus_postprocess.is_some() {
-                    quilting_webgpu::supports_focus_pbr_frame(&scene, options)
+                    quilting_webgpu::supports_focus_pbr_frame(scene.snapshot(), options)
                 } else {
-                    quilting_webgpu::supports_basic_pbr_frame(&scene, options)
+                    quilting_webgpu::supports_basic_pbr_frame(scene.snapshot(), options)
                 }
             });
             if !supported {
@@ -9989,7 +10035,6 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 );
             }
         }
-        refresh_render_shadow_scene(state);
         refresh_render_command_plan(state);
         let prepared_render_revision = prepare_render_shadow_observation(state, &camera);
 

@@ -161,9 +161,14 @@ can therefore remain high-rate data. Both paths reject a stale/distinct scene
 or a noncanonical command sequence before device work, then resolve every batch
 command to the immutable batch metadata and exact index count it addresses.
 
-WebGPU's retained `PatchRenderScene` now owns the validated scene epoch rather
-than a second unproven snapshot. Prepared-patch, focus-PBR, resident-root, and
-adaptive-overlay entry points all call the ordinary `RenderFrame::execution`
+The main renderer now creates one `ValidatedRenderScene` allocation per
+structural extraction epoch. The WebGL command plan, optional parity observer,
+and WebGPU `PatchRenderScene` retain clones of that exact `Arc`-backed scene;
+WebGPU no longer rewrites a backend-local revision, clones member tables, or
+revalidates a second snapshot. `renderSceneExtractions` and
+`renderSceneExtractionFailures` make that low-rate boundary measurable.
+Prepared-patch, focus-PBR, resident-root, and adaptive-overlay entry points all
+call the ordinary `RenderFrame::execution`
 seam before device work, so a plan-built frame automatically uses retained
 admission while a directly built frame remains the rollback and parity oracle.
 Atlas admission, ordered draw traversal, highlight admission, and workload

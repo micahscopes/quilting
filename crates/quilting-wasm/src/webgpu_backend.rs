@@ -13,6 +13,7 @@ use quilting_core::material::{
 use quilting_core::render::{
     RenderCommandPlan, RenderFrame, RenderFrameOptions, RenderPoseIdentity, RenderSceneSnapshot,
     RenderStyle, RenderSubmissionStats, RenderView, ResidentRootDrawDomains,
+    ValidatedRenderScene,
 };
 use quilting_renderer::compute::{
     prepare_lod_dispatch_state, LodAtlasLookup, PreparedLodModel, WgslLodDispatchMetrics,
@@ -1588,7 +1589,7 @@ fn build_adaptive_overlay(
 /// remains usable if packing or allocation fails.
 pub(crate) fn replace_scene(
     source_revision: u64,
-    scene: RenderSceneSnapshot,
+    scene: ValidatedRenderScene,
     source_instances: &[f32],
 ) -> Result<bool, String> {
     BACKEND.with(|slot| {
@@ -1597,13 +1598,13 @@ pub(crate) fn replace_scene(
             return Ok(false);
         }
         let next_revision = backend.scene_uploads.saturating_add(1);
-        let mut scene = scene;
-        scene.revision = next_revision;
         let resident_root_domains = backend
             .model_source
             .as_ref()
             .ok_or_else(|| "WebGPU resident roots require immutable model residency".to_string())
-            .and_then(|source| resident_root_render_domains(&scene, source.residency.num_faces));
+            .and_then(|source| {
+                resident_root_render_domains(scene.snapshot(), source.residency.num_faces)
+            });
         let resident_root_candidate = match (
             backend.device.as_ref(),
             backend.model.as_ref(),
@@ -1640,7 +1641,7 @@ pub(crate) fn replace_scene(
                         root_pipeline,
                         &retained.preparation,
                         &retained.geometry,
-                        &scene,
+                        scene.snapshot(),
                         backend.textures.as_ref(),
                         backend.environment.as_ref(),
                     )
@@ -1650,7 +1651,7 @@ pub(crate) fn replace_scene(
                     model,
                     pipelines,
                     &retained.preparation,
-                    &scene,
+                    scene.snapshot(),
                     backend.textures.as_ref(),
                     backend.environment.as_ref(),
                 )?;
@@ -1660,7 +1661,7 @@ pub(crate) fn replace_scene(
                     backend.focus.as_ref(),
                     &retained.preparation,
                     &retained.geometry,
-                    &scene,
+                    scene.snapshot(),
                     backend.textures.as_ref(),
                     backend.environment.as_ref(),
                 ) {
@@ -1691,7 +1692,7 @@ pub(crate) fn replace_scene(
                 overlay_pipelines,
                 backend.focus.as_ref(),
                 domains,
-                &scene,
+                scene.snapshot(),
                 source_instances,
                 backend.textures.as_ref(),
                 backend.environment.as_ref(),
@@ -1723,13 +1724,12 @@ pub(crate) fn replace_scene(
                 .and_then(|pipelines| pipelines.get(RenderStyle::Pbr));
             match (device.as_ref(), pipeline, model.as_ref(), retained.as_mut()) {
                 (Some(device), Some(pipeline), Some(model), Some(retained)) => device
-                    .update_patch_render_scene_in_place(
+                    .update_validated_patch_render_scene_in_place(
                         pipeline,
                         model,
                         retained,
                         scene,
                         source_instances,
-                        next_revision,
                         textures.as_ref(),
                     )
                     .map_err(|error| error.to_string()),
@@ -1769,12 +1769,11 @@ pub(crate) fn replace_scene(
                 .as_ref()
                 .ok_or_else(|| "WebGPU render scene requires model residency".to_string())?;
             let mut candidate = device
-                .upload_patch_render_scene(
+                .upload_validated_patch_render_scene(
                     pipeline,
                     model,
                     scene,
                     source_instances,
-                    next_revision,
                     backend.textures.as_ref(),
                 )
                 .map_err(|error| error.to_string())?;

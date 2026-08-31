@@ -12,7 +12,7 @@ use quilting_core::quaternion::{Mobius, Quat};
 use quilting_core::render::{
     FocusFieldPacket, MatcapStyle, PbrDrawClass, RenderBatchSnapshot, RenderEntityTransform,
     RenderFrame, RenderFrameOptions, RenderGeometry, RenderPoseIdentity, RenderSceneSnapshot,
-    RenderStyle, RenderView,
+    RenderStyle, RenderView, ValidatedRenderScene,
 };
 use quilting_core::render_evidence::{render_image_signature, RenderImageSignature};
 use quilting_core::screen_partition::ScreenPatchLeafId;
@@ -785,16 +785,19 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         let mut model = classifier.upload_model(prepared, &atlas).unwrap();
         let mut foreign_model = classifier.upload_model(foreign_prepared, &atlas).unwrap();
         let pipeline = classifier.create_offscreen_patch_render_pipeline().unwrap();
+        let validated_scene = ValidatedRenderScene::new(render_scene.clone()).unwrap();
         let mut retained_scene = classifier
-            .upload_patch_render_scene(
+            .upload_validated_patch_render_scene(
                 &pipeline,
                 &model,
-                render_scene.clone(),
+                validated_scene.clone(),
                 &source_instances,
-                render_scene.revision,
                 None,
             )
             .unwrap();
+        assert!(retained_scene
+            .validated_scene()
+            .shares_snapshot_with(&validated_scene));
         assert_eq!(retained_scene.patch_count(), 2);
         assert_eq!(retained_scene.batch_count(), 2);
         let mut reordered_scene = render_scene.clone();
@@ -927,7 +930,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             PatchRenderSceneUpdate::ShapeChanged(scene) => scene,
             PatchRenderSceneUpdate::Updated => panic!("batch-count change updated in place"),
         };
-        assert_eq!(returned_scene, resized_scene);
+        assert_eq!(returned_scene.snapshot(), &resized_scene);
         assert_eq!(retained_scene.scene(), &reordered_scene);
 
         assert!(matches!(
