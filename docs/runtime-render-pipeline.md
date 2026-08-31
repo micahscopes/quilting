@@ -237,6 +237,12 @@ browser constructs the overlay against its root binding epoch, so a composite
 camera/focus/selection update publishes 176 bytes total rather than once per
 family. This ownership is intentionally not device-global: ordinary scenes,
 replacement root epochs, and focus/non-focus aggregates remain isolated.
+The device LOD classifier applies the same exact-publication rule separately to
+its 272-byte dispatch uniform and retained 160-byte-per-subject transform
+table. Camera-only requests therefore reuse subject residency, identical
+requests write neither half, and subject packing reuses retained scratch
+storage. `lodStateUploads`, `lodStateReuses`, and `lodStateUploadBytes` expose
+the resulting device-lifetime queue traffic independently of pose uploads.
 `resolvedExecutionFrames`, `resolvedExecutionFallbacks`, and
 `lastExecutionError` make that gate observable through the existing render
 shadow diagnostics. Shadow scene validation and WebGL PBR lowering now happen

@@ -82,7 +82,7 @@ use quilting_core::render_pipeline::{
 use quilting_core::screen_partition::ScreenPatchLeafId;
 use quilting_renderer::compute::{
     pack_lod_classification, pack_wgsl_adaptive_overlay_scene_words, pack_wgsl_lod_atlas_words,
-    pack_wgsl_lod_dispatch_words, pack_wgsl_lod_model_words, pack_wgsl_lod_subject_words,
+    pack_wgsl_lod_dispatch_words, pack_wgsl_lod_model_words, pack_wgsl_lod_subject_words_into,
     pack_wgsl_patch_preparation_scene_words, pack_wgsl_resident_root_preparation_scene_words,
     pack_wgsl_root_eligibility_bits, pack_wgsl_source_visibility_words,
     pack_wgsl_visibility_compaction_scene_words, prepare_lod_atlas_lookup, prepare_lod_model,
@@ -658,6 +658,42 @@ mod patch_pbr_material_tests {
     }
 
     #[test]
+    fn retained_lod_state_memos_global_and_subject_words_independently() {
+        let mut state = RetainedLodDispatchState::new(2);
+        assert_eq!(
+            state.commit_uniform([0; 68]),
+            FrameTablePublication::Upload {
+                bytes: DISPATCH_UNIFORM_BYTES,
+            },
+        );
+        assert_eq!(
+            state.commit_subject_scratch(),
+            FrameTablePublication::Upload {
+                bytes: 2 * SUBJECT_RECORD_BYTES,
+            },
+        );
+        assert_eq!(state.commit_uniform([0; 68]), FrameTablePublication::Reuse);
+        assert_eq!(state.commit_subject_scratch(), FrameTablePublication::Reuse);
+
+        let mut changed_uniform = [0; 68];
+        changed_uniform[40] = 1.0f32.to_bits();
+        state.subject_scratch[1][36] = 2.0f32.to_bits();
+        assert_eq!(
+            state.commit_uniform(changed_uniform),
+            FrameTablePublication::Upload {
+                bytes: DISPATCH_UNIFORM_BYTES,
+            },
+        );
+        assert_eq!(
+            state.commit_subject_scratch(),
+            FrameTablePublication::Upload {
+                bytes: 2 * SUBJECT_RECORD_BYTES,
+            },
+        );
+        assert_eq!(state.subject_words[1][36], 2.0f32.to_bits());
+    }
+
+    #[test]
     fn patch_frame_keeps_source_face_selection_separate_from_node_and_material() {
         let mut mobius = identity_mobius();
         mobius[5] = 0.625;
@@ -922,6 +958,16 @@ pub struct FrameTableMemoDiagnostics {
     pub upload_bytes: u64,
 }
 
+/// Exact queue traffic for classifier-global dispatch words and retained
+/// per-subject transform rows. Each classification records one outcome for
+/// each half, independently of dynamic pose publication.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LodStateMemoDiagnostics {
+    pub uploads: u64,
+    pub reuses: u64,
+    pub upload_bytes: u64,
+}
+
 /// Device-local pipelines shared by every uploaded classifier model.
 pub struct LodClassifierDevice {
     device: wgpu::Device,
@@ -962,6 +1008,9 @@ pub struct LodClassifierDevice {
     frame_table_uploads: AtomicU64,
     frame_table_reuses: AtomicU64,
     frame_table_upload_bytes: AtomicU64,
+    lod_state_uploads: AtomicU64,
+    lod_state_reuses: AtomicU64,
+    lod_state_upload_bytes: AtomicU64,
 }
 
 /// Retained device buffers for one immutable prepared model and atlas lookup.
@@ -979,11 +1028,56 @@ pub struct LodClassifierModel {
     morph_deltas: wgpu::Buffer,
     morph_weights: wgpu::Buffer,
     subject_states: wgpu::Buffer,
+    lod_state: Mutex<RetainedLodDispatchState>,
     packed_records: wgpu::Buffer,
     pass1_bind_group: wgpu::BindGroup,
     pass2_bind_group: wgpu::BindGroup,
     resident: ResidentLodReconciliationBuffers,
     resident_epoch: Cell<Option<(u64, FaceLodGrading)>>,
+}
+
+struct RetainedLodDispatchState {
+    uniform_words: [u32; 68],
+    subject_words: Vec<[u32; 40]>,
+    subject_scratch: Vec<[u32; 40]>,
+    uniform_published: bool,
+    subjects_published: bool,
+}
+
+impl RetainedLodDispatchState {
+    fn new(subject_rows: usize) -> Self {
+        Self {
+            uniform_words: [0; 68],
+            subject_words: vec![[0; 40]; subject_rows],
+            subject_scratch: vec![[0; 40]; subject_rows],
+            uniform_published: false,
+            subjects_published: false,
+        }
+    }
+
+    fn commit_uniform(&mut self, words: [u32; 68]) -> FrameTablePublication {
+        if self.uniform_published && self.uniform_words == words {
+            FrameTablePublication::Reuse
+        } else {
+            self.uniform_words = words;
+            self.uniform_published = true;
+            FrameTablePublication::Upload {
+                bytes: DISPATCH_UNIFORM_BYTES,
+            }
+        }
+    }
+
+    fn commit_subject_scratch(&mut self) -> FrameTablePublication {
+        if self.subjects_published && self.subject_words == self.subject_scratch {
+            FrameTablePublication::Reuse
+        } else {
+            std::mem::swap(&mut self.subject_words, &mut self.subject_scratch);
+            self.subjects_published = true;
+            FrameTablePublication::Upload {
+                bytes: self.subject_words.len() as u64 * SUBJECT_RECORD_BYTES,
+            }
+        }
+    }
 }
 
 struct ResidentLodReconciliationBuffers {
@@ -1709,6 +1803,9 @@ impl LodClassifierDevice {
             frame_table_uploads: AtomicU64::new(0),
             frame_table_reuses: AtomicU64::new(0),
             frame_table_upload_bytes: AtomicU64::new(0),
+            lod_state_uploads: AtomicU64::new(0),
+            lod_state_reuses: AtomicU64::new(0),
+            lod_state_upload_bytes: AtomicU64::new(0),
         })
     }
 
@@ -1745,6 +1842,29 @@ impl LodClassifierDevice {
             uploads: self.frame_table_uploads.load(Ordering::Relaxed),
             reuses: self.frame_table_reuses.load(Ordering::Relaxed),
             upload_bytes: self.frame_table_upload_bytes.load(Ordering::Relaxed),
+        }
+    }
+
+    fn record_lod_state_publication(&self, publication: FrameTablePublication) {
+        match publication {
+            FrameTablePublication::Upload { bytes } => {
+                self.lod_state_uploads.fetch_add(1, Ordering::Relaxed);
+                self.lod_state_upload_bytes
+                    .fetch_add(bytes, Ordering::Relaxed);
+            }
+            FrameTablePublication::Reuse => {
+                self.lod_state_reuses.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Device-lifetime classifier-state traffic. Dynamic pose arrays are
+    /// reported separately by the browser's pose-identity diagnostics.
+    pub fn lod_state_memo_diagnostics(&self) -> LodStateMemoDiagnostics {
+        LodStateMemoDiagnostics {
+            uploads: self.lod_state_uploads.load(Ordering::Relaxed),
+            reuses: self.lod_state_reuses.load(Ordering::Relaxed),
+            upload_bytes: self.lod_state_upload_bytes.load(Ordering::Relaxed),
         }
     }
 
@@ -7974,6 +8094,7 @@ impl LodClassifierDevice {
             morph_deltas,
             morph_weights,
             subject_states,
+            lod_state: Mutex::new(RetainedLodDispatchState::new(subject_rows)),
             packed_records,
             pass1_bind_group,
             pass2_bind_group,
@@ -7996,22 +8117,36 @@ impl LodClassifierDevice {
         if pose_upload.should_publish_dynamic() {
             self.write_dynamic_pose(model, pose, metrics.num_joints)?;
         }
-        let subject_words = pack_wgsl_lod_subject_words(&model.prepared, dispatch)
+        let uniform_words = pack_wgsl_lod_dispatch_words(&model.prepared, dispatch, metrics)
             .map_err(LodWebGpuError::Payload)?;
-        if subject_words.len() != model.subject_rows {
+        let mut lod_state = model.lod_state.lock().map_err(|_| {
+            LodWebGpuError::Payload("LOD state staging lock was poisoned".to_string())
+        })?;
+        pack_wgsl_lod_subject_words_into(&model.prepared, dispatch, &mut lod_state.subject_scratch)
+            .map_err(LodWebGpuError::Payload)?;
+        if lod_state.subject_scratch.len() != model.subject_rows {
             return Err(LodWebGpuError::Payload(
                 "subject table changed immutable shape".to_string(),
             ));
         }
-        let uniform_words = pack_wgsl_lod_dispatch_words(&model.prepared, dispatch, metrics)
-            .map_err(LodWebGpuError::Payload)?;
-        self.queue
-            .write_buffer(&model.uniform, 0, bytemuck::cast_slice(&uniform_words));
-        self.queue.write_buffer(
-            &model.subject_states,
-            0,
-            bytemuck::cast_slice(&subject_words),
-        );
+        let uniform_publication = lod_state.commit_uniform(uniform_words);
+        let subject_publication = lod_state.commit_subject_scratch();
+        if matches!(uniform_publication, FrameTablePublication::Upload { .. }) {
+            self.queue.write_buffer(
+                &model.uniform,
+                0,
+                bytemuck::cast_slice(&lod_state.uniform_words),
+            );
+        }
+        if matches!(subject_publication, FrameTablePublication::Upload { .. }) {
+            self.queue.write_buffer(
+                &model.subject_states,
+                0,
+                bytemuck::cast_slice(&lod_state.subject_words),
+            );
+        }
+        self.record_lod_state_publication(uniform_publication);
+        self.record_lod_state_publication(subject_publication);
         Ok(())
     }
 

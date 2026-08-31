@@ -1732,8 +1732,22 @@ pub fn pack_wgsl_lod_subject_words(
     prepared: &PreparedLodModel,
     dispatch: &LodDispatchState,
 ) -> Result<Vec<[u32; 40]>, String> {
+    let mut packed = Vec::new();
+    pack_wgsl_lod_subject_words_into(prepared, dispatch, &mut packed)?;
+    Ok(packed)
+}
+
+/// Repack dynamic subject transforms into caller-retained storage. Reusing the
+/// vector lets a real-time backend compare exact words without allocating a
+/// fresh 160-byte row table on every classifier dispatch.
+pub fn pack_wgsl_lod_subject_words_into(
+    prepared: &PreparedLodModel,
+    dispatch: &LodDispatchState,
+    packed: &mut Vec<[u32; 40]>,
+) -> Result<(), String> {
     let subject_rows = wgsl_lod_subject_rows(prepared)?;
-    let mut packed = vec![[0; 40]; subject_rows.len().max(1)];
+    packed.clear();
+    packed.resize(subject_rows.len().max(1), [0; 40]);
     for state in &dispatch.subjects {
         let row_index = subject_rows
             .get(&state.node)
@@ -1753,7 +1767,7 @@ pub fn pack_wgsl_lod_subject_words(
         row[38] = state.has_pole.to_bits();
         row[39] = 1.0f32.to_bits();
     }
-    Ok(packed)
+    Ok(())
 }
 
 /// Pack the exact 272-byte `LodDispatchUniforms` block declared in WGSL.
@@ -4255,6 +4269,16 @@ mod tests {
             ],
         );
         assert_eq!(std::mem::size_of_val(&subjects[0]), 160);
+        let mut subject_scratch = subjects.clone();
+        let scratch_allocation = subject_scratch.as_ptr();
+        let mut baseline_only = dispatch.clone();
+        baseline_only.subjects.clear();
+        pack_wgsl_lod_subject_words_into(&prepared, &baseline_only, &mut subject_scratch).unwrap();
+        assert_eq!(subject_scratch, vec![[0; 40]]);
+        assert_eq!(subject_scratch.as_ptr(), scratch_allocation);
+        pack_wgsl_lod_subject_words_into(&prepared, &dispatch, &mut subject_scratch).unwrap();
+        assert_eq!(subject_scratch, subjects);
+        assert_eq!(subject_scratch.as_ptr(), scratch_allocation);
 
         let view_projection = std::array::from_fn(|index| 20.0 + index as f32);
         let uniform = pack_wgsl_lod_dispatch_words(
