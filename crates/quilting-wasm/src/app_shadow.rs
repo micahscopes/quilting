@@ -923,6 +923,21 @@ impl HyperscopeAppShadow {
         to_js(&ShadowLocalPresenceSample::from(presence))
     }
 
+    /// Resolve stable primary/secondary presentation identity before the
+    /// browser allocates decoded buffers or renderer-local packed offsets.
+    #[wasm_bindgen(js_name = presentationCompositionPlan)]
+    pub fn presentation_composition_plan(&self) -> Result<JsValue, JsValue> {
+        let plan = self
+            .store
+            .presentation_composition_plan()
+            .map_err(js_error)?;
+        to_js(&ShadowPresentationCompositionPlan {
+            revision: plan.revision.to_string(),
+            primary: plan.primary,
+            secondary: plan.secondary,
+        })
+    }
+
     /// Serialize and atomically clear effects retained by quiet frame
     /// dispatches. A second drain is empty; job IDs and cancellation order are
     /// preserved exactly as committed by the reducer.
@@ -4288,6 +4303,14 @@ struct ShadowPresentation {
     assets: Vec<PresentationAsset>,
     active: Option<PresentationSnapshot>,
     animation_residency: Option<ShadowPresentationAnimationResidency>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowPresentationCompositionPlan {
+    revision: String,
+    primary: PresentationAsset,
+    secondary: Vec<PresentationAsset>,
 }
 
 impl From<hyperscope_app::PresentationReadModel> for ShadowPresentation {

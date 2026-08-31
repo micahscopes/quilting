@@ -12898,8 +12898,12 @@ async function uploadPresentationCompositionToLodWorker(
 
 async function initializePresentationComposition() {
   if (!RUST_PRESENTATION_ENABLED || !rustPresentationManifest || !currentInstances) return false;
-  const primaryAsset = rustPresentationManifest.assets.find(asset =>
-    presentationAssetMatchesFilename(asset, currentGlb));
+  const rustPlan = presentationAppAuthority()
+    ? rustAppShadow.presentationCompositionPlan()
+    : null;
+  const primaryAsset = rustPlan?.primary
+    ?? rustPresentationManifest.assets.find(asset =>
+      presentationAssetMatchesFilename(asset, currentGlb));
   if (!primaryAsset) {
     throw new Error(`loaded model ${currentGlb} is not a presentation asset`);
   }
@@ -12910,7 +12914,8 @@ async function initializePresentationComposition() {
     source: 'primary-runtime',
   });
   await bindPrimaryPresentationAnimationResidency(primaryAsset.id);
-  const secondaryAssets = rustPresentationManifest.assets.filter(asset => asset.id !== primaryAsset.id);
+  const secondaryAssets = rustPlan?.secondary
+    ?? rustPresentationManifest.assets.filter(asset => asset.id !== primaryAsset.id);
   const fetched = await Promise.all(secondaryAssets.map(async asset => {
     try {
       const result = await fetchPresentationGlb(asset);

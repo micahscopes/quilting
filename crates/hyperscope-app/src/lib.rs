@@ -49,6 +49,12 @@ use uuid::Uuid;
 const MAX_DIAGNOSTICS: usize = 256;
 const SESSION_NODE_ENTITY_PREFIX: u128 = 0xeeeeeeee_0000_4000_8000_000000000000;
 
+fn presentation_uri_leaf(uri: &str) -> Option<&str> {
+    uri.split(['?', '#'])
+        .next()
+        .and_then(|path| path.rsplit('/').find(|segment| !segment.is_empty()))
+}
+
 /// Build an application-local identity for one glTF node in a session-scoped
 /// asset load.
 ///
@@ -1109,6 +1115,52 @@ pub struct PresentationReadModel {
     pub active: Option<PresentationSnapshot>,
     pub animation_residency: Option<PresentationAnimationResidencyBinding>,
 }
+
+/// Semantic asset order for one renderer composition. Stable presentation
+/// identity is resolved in Rust; platform adapters retain only decoded buffers,
+/// packed offsets, GPU handles, and asynchronous residency witnesses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresentationCompositionPlan {
+    pub revision: u64,
+    pub primary: PresentationAsset,
+    pub secondary: Vec<PresentationAsset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PresentationCompositionPlanError {
+    NoPresentation,
+    NoInstalledPrimaryScene,
+    MissingPrimaryAsset { resident_uri: String },
+    AmbiguousPrimaryAsset {
+        resident_uri: String,
+        candidates: Vec<Uuid>,
+    },
+}
+
+impl fmt::Display for PresentationCompositionPlanError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoPresentation => formatter.write_str("no presentation is loaded"),
+            Self::NoInstalledPrimaryScene => {
+                formatter.write_str("no primary scene is installed")
+            }
+            Self::MissingPrimaryAsset { resident_uri } => write!(
+                formatter,
+                "installed primary scene '{resident_uri}' is not a presentation asset",
+            ),
+            Self::AmbiguousPrimaryAsset {
+                resident_uri,
+                candidates,
+            } => write!(
+                formatter,
+                "installed primary scene '{resident_uri}' ambiguously matches {} presentation assets",
+                candidates.len(),
+            ),
+        }
+    }
+}
+
+impl Error for PresentationCompositionPlanError {}
 
 /// Coherent low-rate animation state for renderer adapters.
 /// This deliberately excludes cue composition, navigation, assets, and
@@ -2268,6 +2320,76 @@ impl AppState {
         })
     }
 
+    fn presentation_composition_plan(
+        &self,
+    ) -> Result<PresentationCompositionPlan, PresentationCompositionPlanError> {
+        let presentation = self
+            .presentation
+            .as_ref()
+            .ok_or(PresentationCompositionPlanError::NoPresentation)?
+            .presentation();
+        let installed = self
+            .installed_primary_scene
+            .as_ref()
+            .ok_or(PresentationCompositionPlanError::NoInstalledPrimaryScene)?;
+        let resident_id = installed.asset.descriptor.id;
+        let resident_uri = installed.asset.descriptor.uri.as_str();
+
+        let bound_id = self
+            .presentation_animation_residency
+            .map(|binding| binding.presentation_asset_id.as_uuid());
+        let exact_id = presentation
+            .assets
+            .iter()
+            .any(|asset| asset.id == resident_id.as_uuid())
+            .then_some(resident_id.as_uuid());
+        let primary_id = if let Some(id) = bound_id.or(exact_id) {
+            id
+        } else {
+            let resident_leaf = presentation_uri_leaf(resident_uri);
+            let candidates = presentation
+                .assets
+                .iter()
+                .filter(|asset| presentation_uri_leaf(&asset.uri) == resident_leaf)
+                .map(|asset| asset.id)
+                .collect::<Vec<_>>();
+            match candidates.as_slice() {
+                [candidate] => *candidate,
+                [] => {
+                    return Err(PresentationCompositionPlanError::MissingPrimaryAsset {
+                        resident_uri: resident_uri.to_owned(),
+                    })
+                }
+                _ => {
+                    return Err(PresentationCompositionPlanError::AmbiguousPrimaryAsset {
+                        resident_uri: resident_uri.to_owned(),
+                        candidates,
+                    })
+                }
+            }
+        };
+
+        let primary = presentation
+            .assets
+            .iter()
+            .find(|asset| asset.id == primary_id)
+            .cloned()
+            .ok_or_else(|| PresentationCompositionPlanError::MissingPrimaryAsset {
+                resident_uri: resident_uri.to_owned(),
+            })?;
+        let secondary = presentation
+            .assets
+            .iter()
+            .filter(|asset| asset.id != primary_id)
+            .cloned()
+            .collect();
+        Ok(PresentationCompositionPlan {
+            revision: self.revision,
+            primary,
+            secondary,
+        })
+    }
+
     fn animation_runtime_read_model(&self) -> AnimationRuntimeReadModel {
         AnimationRuntimeReadModel {
             revision: self.revision,
@@ -3097,6 +3219,12 @@ impl AppStore {
 
     pub fn presentation_snapshot(&self) -> Option<PresentationReadModel> {
         self.presentation.get_cloned()
+    }
+
+    pub fn presentation_composition_plan(
+        &self,
+    ) -> Result<PresentationCompositionPlan, PresentationCompositionPlanError> {
+        self.lock_state().presentation_composition_plan()
     }
 
     pub fn animation_runtime_snapshot(&self) -> AnimationRuntimeReadModel {
@@ -6043,6 +6171,114 @@ mod tests {
         );
 
         assert!(store.local_presence_snapshot(0).is_err());
+    }
+
+    #[test]
+    fn presentation_composition_plan_resolves_primary_identity_in_rust() {
+        let store = AppStore::default();
+        store
+            .dispatch(AppEvent::PresentationLoaded(presentation_fixture()))
+            .unwrap();
+        assert_eq!(
+            store.presentation_composition_plan(),
+            Err(PresentationCompositionPlanError::NoInstalledPrimaryScene),
+        );
+
+        let resident = asset(0x9000, "horse.glb");
+        let resident_request = request(0x9001);
+        store
+            .request_asset_load(
+                resident_request,
+                resident.clone(),
+                AssetLoadScope::PrimaryScene,
+            )
+            .unwrap();
+        store
+            .complete_asset_load(AssetLoadCompletion {
+                request_id: resident_request,
+                asset_id: resident.id,
+                outcome: AssetLoadOutcome::Loaded {
+                    byte_length: 64,
+                    content_digest: None,
+                    metadata: AssetMetadata::default(),
+                },
+            })
+            .unwrap();
+        store
+            .complete_primary_scene_install(PrimarySceneInstallCompletion {
+                request_id: resident_request,
+                asset_id: resident.id,
+                outcome: PrimarySceneInstallOutcome::Installed(install_metadata()),
+            })
+            .unwrap();
+
+        let plan = store.presentation_composition_plan().unwrap();
+        assert_eq!(plan.primary.name, "Animated horse");
+        assert_eq!(plan.primary.uri, "/horse.glb");
+        assert_eq!(plan.secondary.len(), 4);
+        assert!(plan
+            .secondary
+            .iter()
+            .all(|asset| asset.id != plan.primary.id));
+        assert_eq!(plan.revision, store.frame_snapshot().revision);
+
+        let primary_id = AssetId::new(plan.primary.id).unwrap();
+        store
+            .bind_presentation_animation_to_installed_scene(primary_id)
+            .unwrap();
+        assert_eq!(
+            store.presentation_composition_plan().unwrap().primary.id,
+            primary_id.as_uuid(),
+        );
+    }
+
+    #[test]
+    fn presentation_composition_plan_rejects_ambiguous_uri_identity() {
+        let store = AppStore::default();
+        let mut presentation = presentation_fixture();
+        let mut duplicate = presentation.assets[0].clone();
+        duplicate.id = Uuid::from_u128(0xa0000000_0000_4000_8000_000000000099);
+        duplicate.uri = "/duplicates/horse.glb".to_owned();
+        presentation.assets.push(duplicate);
+        store
+            .dispatch(AppEvent::PresentationLoaded(presentation))
+            .unwrap();
+
+        let resident = asset(0x9100, "horse.glb");
+        let resident_request = request(0x9101);
+        store
+            .request_asset_load(
+                resident_request,
+                resident.clone(),
+                AssetLoadScope::PrimaryScene,
+            )
+            .unwrap();
+        store
+            .complete_asset_load(AssetLoadCompletion {
+                request_id: resident_request,
+                asset_id: resident.id,
+                outcome: AssetLoadOutcome::Loaded {
+                    byte_length: 64,
+                    content_digest: None,
+                    metadata: AssetMetadata::default(),
+                },
+            })
+            .unwrap();
+        store
+            .complete_primary_scene_install(PrimarySceneInstallCompletion {
+                request_id: resident_request,
+                asset_id: resident.id,
+                outcome: PrimarySceneInstallOutcome::Installed(install_metadata()),
+            })
+            .unwrap();
+
+        assert!(matches!(
+            store.presentation_composition_plan(),
+            Err(PresentationCompositionPlanError::AmbiguousPrimaryAsset {
+                candidates,
+                ..
+            }) if candidates.len() == 2
+        ));
     }
 
     #[test]
