@@ -938,6 +938,10 @@ pub struct AppFrameSnapshot {
     pub revision: u64,
     pub elapsed_seconds: f64,
     pub animation: AnimationClock,
+    /// Monotonic real-time clock for pose-derived velocity and continuity
+    /// evidence. It advances while animation transport is playing, but is
+    /// deliberately independent of clip speed and loop wrapping.
+    pub animation_pose_sample_time_seconds: f64,
     pub active_animation_clip: Option<AnimationClipFrameSnapshot>,
     pub navigation_preset: NavigationPreset,
     pub pending_navigation_actions: usize,
@@ -1208,6 +1212,7 @@ struct PresenceRecord {
 pub struct AppState {
     revision: u64,
     frame_elapsed_seconds: f64,
+    animation_pose_sample_time_seconds: f64,
     /// Next locally allocated sequence for semantic inputs that commit at the
     /// current application time. Navigation retains its own queue sequence
     /// because presentation activation and navigation synchronization also
@@ -1242,6 +1247,7 @@ impl Default for AppState {
         Self {
             revision: 0,
             frame_elapsed_seconds: 0.0,
+            animation_pose_sample_time_seconds: 0.0,
             next_direct_input_sequence: Some(0),
             navigation: NavigationController::default(),
             interaction: InteractionController::default(),
@@ -1296,6 +1302,7 @@ impl AppState {
             revision: self.revision,
             elapsed_seconds: self.frame_elapsed_seconds,
             animation: self.animation,
+            animation_pose_sample_time_seconds: self.animation_pose_sample_time_seconds,
             active_animation_clip: self
                 .active_animation_clip
                 .as_ref()
@@ -1598,6 +1605,16 @@ impl AppState {
                     return Err(ReduceError::InvalidTime);
                 }
                 let next_animation = self.animation.advanced(frame.delta_seconds)?;
+                let next_animation_pose_sample_time_seconds =
+                    self.animation_pose_sample_time_seconds
+                        + if self.animation.playing {
+                            frame.delta_seconds
+                        } else {
+                            0.0
+                        };
+                if !next_animation_pose_sample_time_seconds.is_finite() {
+                    return Err(ReduceError::InvalidTime);
+                }
                 let activations = self
                     .interaction
                     .advance_to(frame.elapsed_seconds, &self.navigation.focus)
@@ -1620,6 +1637,8 @@ impl AppState {
                     presentation.reconcile_navigation(&mut self.navigation);
                 }
                 self.animation = next_animation;
+                self.animation_pose_sample_time_seconds =
+                    next_animation_pose_sample_time_seconds;
                 self.frame_elapsed_seconds = frame.elapsed_seconds;
                 self.patch_lab.advance(
                     frame.elapsed_seconds,
@@ -2922,6 +2941,12 @@ impl AppStore {
         self.lock_state().frame_snapshot()
     }
 
+    /// Read the allocation-free pose evaluation clock without cloning the
+    /// navigation and focus fields carried by a complete frame snapshot.
+    pub fn animation_pose_sample_time_seconds(&self) -> f64 {
+        self.lock_state().animation_pose_sample_time_seconds
+    }
+
     pub fn animation_snapshot(&self) -> AppAnimationSnapshot {
         self.animation.get()
     }
@@ -3761,7 +3786,7 @@ mod tests {
 
     #[test]
     fn animation_clock_is_atomic_and_frame_partition_invariant() {
-        fn clock_after(deltas: &[f64]) -> AnimationClock {
+        fn frame_after(deltas: &[f64]) -> AppFrameSnapshot {
             let store = AppStore::default();
             store
                 .dispatch(AppEvent::Input(Timed {
@@ -3786,11 +3811,18 @@ mod tests {
                     }))
                     .unwrap();
             }
-            store.frame_snapshot().animation
+            store.frame_snapshot()
         }
 
-        assert_eq!(clock_after(&[1.0]), clock_after(&[0.25, 0.25, 0.5]));
-        assert_eq!(clock_after(&[1.0]).time_seconds, 1.5);
+        let whole = frame_after(&[1.0]);
+        let partitioned = frame_after(&[0.25, 0.25, 0.5]);
+        assert_eq!(whole.animation, partitioned.animation);
+        assert_eq!(whole.animation.time_seconds, 1.5);
+        assert_eq!(whole.animation_pose_sample_time_seconds, 1.0);
+        assert_eq!(
+            whole.animation_pose_sample_time_seconds,
+            partitioned.animation_pose_sample_time_seconds,
+        );
         assert_eq!(
             AnimationClock {
                 time_seconds: -0.25,
@@ -3810,6 +3842,47 @@ mod tests {
         }));
         assert_eq!(rejected, Err(ReduceError::InvalidAnimationClock));
         assert_eq!(store.frame_snapshot().animation, before);
+    }
+
+    #[test]
+    fn animation_pose_sample_clock_tracks_playing_real_time_not_clip_speed() {
+        let store = AppStore::default();
+        store
+            .dispatch(AppEvent::Input(Timed {
+                sequence: 1,
+                at_seconds: 0.0,
+                value: SemanticAction::Animate(AnimationAction::SetSpeed(-4.0)),
+            }))
+            .unwrap();
+        store
+            .dispatch(AppEvent::Frame(FrameTick {
+                elapsed_seconds: 0.25,
+                delta_seconds: 0.25,
+            }))
+            .unwrap();
+        let playing = store.frame_snapshot();
+        assert_eq!(playing.animation.time_seconds, -1.0);
+        assert_eq!(playing.animation_pose_sample_time_seconds, 0.25);
+
+        store
+            .dispatch(AppEvent::Input(Timed {
+                sequence: 2,
+                at_seconds: 0.25,
+                value: SemanticAction::Animate(AnimationAction::SetPlaying(false)),
+            }))
+            .unwrap();
+        store
+            .dispatch(AppEvent::Frame(FrameTick {
+                elapsed_seconds: 1.25,
+                delta_seconds: 1.0,
+            }))
+            .unwrap();
+        assert_eq!(
+            store
+                .frame_snapshot()
+                .animation_pose_sample_time_seconds,
+            0.25,
+        );
     }
 
     fn dispatch_presentation(

@@ -10833,9 +10833,11 @@ function recordAnimationPoseMismatch(context, browserValue, rustValue) {
   });
 }
 
-function requestRustAnimationPose(t, sampleTime) {
+function requestRustAnimationPose(t, sampleTime = null) {
   const app = ensureRustAppShadow('animation-pose');
-  const disposition = app.writeAnimationPoseRequest(t, sampleTime, animationPosePacket);
+  const disposition = ANIMATION_CLOCK_IMPLEMENTATION === 'rust'
+    ? app.writeAnimationPoseRequestFromFrame(t, animationPosePacket)
+    : app.writeAnimationPoseRequest(t, sampleTime, animationPosePacket);
   if (disposition !== 1 && disposition !== 2) {
     throw new Error(`Rust animation pose scheduler returned disposition ${disposition}`);
   }
@@ -10931,7 +10933,7 @@ function tickAnimation(t, sampleTime = animationPoseClockSeconds) {
   let request;
   if (ANIMATION_CLOCK_IMPLEMENTATION === 'rust') {
     try {
-      const scheduled = requestRustAnimationPose(Number(t), Number(sampleTime));
+      const scheduled = requestRustAnimationPose(Number(t));
       request = scheduled.request;
       animationPoseRevision = request.revision;
       animationPoseContinuityEpoch = request.continuityEpoch;
@@ -11702,7 +11704,9 @@ function frame(ts) {
   if (animating && !patchLab.active && !animationPoseBlocked && gpuSkinned && meshInfo) {
     const duration = Number(meshInfo.duration) || 0;
     const timeMin = Number(meshInfo.time_min) || 0;
-    animationPoseClockSeconds += deltaSeconds;
+    if (ANIMATION_CLOCK_IMPLEMENTATION !== 'rust') {
+      animationPoseClockSeconds += deltaSeconds;
+    }
     if (rustAnimationClockReady) {
       if (rustAnimationWrapped) rebaseAnimationPoseContinuity();
     } else if (duration > 0) {

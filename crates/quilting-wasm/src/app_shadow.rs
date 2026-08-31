@@ -222,6 +222,19 @@ impl HyperscopeAppShadow {
         })
     }
 
+    /// Allocate an animation-pose stamp from the application frame clock.
+    /// Rust-authority adapters supply only renderer clip time; the explicitly
+    /// sampled method above remains the JS/shadow parity oracle.
+    #[wasm_bindgen(js_name = writeAnimationPoseRequestFromFrame)]
+    pub fn write_animation_pose_request_from_frame(
+        &self,
+        clip_time_seconds: f64,
+        output: &mut [f64],
+    ) -> Result<u8, JsValue> {
+        let sample_time_seconds = self.store.animation_pose_sample_time_seconds();
+        self.write_animation_pose_request(clip_time_seconds, sample_time_seconds, output)
+    }
+
     /// Settle the exact physical animation worker job. Returns 0 for a stale
     /// completion, 1 for a matched completion with no follow-up, and 2 after
     /// writing the newest coalesced request that should dispatch next.

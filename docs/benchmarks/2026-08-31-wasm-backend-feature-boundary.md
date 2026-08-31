@@ -16,6 +16,11 @@ feature-enabled WebGPU mirror later rejects the maps.
 ## Evidence
 
 `scripts/smoke-wasm-feature-boundaries.mjs` freezes the module and mirror-call
-guards. The broader wasm32 adapter check discovered this issue and will be
-rerun without WebGPU after system load returns below the build threshold; the
-feature-enabled check remains a separate gate.
+guards. The broader WebGL2-only wasm32 adapter check now passes:
+
+```text
+cargo check --target wasm32-unknown-unknown -p quilting-wasm --features leptos-ui
+Finished `dev` profile ... in 16.05s
+```
+
+The feature-enabled WebGPU check remains a separate gate.
