@@ -8,8 +8,9 @@
 use crate::controls::numeric_control_domain;
 pub use crate::controls::NumericControlViewDomain;
 use hyperscope_app::{
-    AppRenderSnapshot, AppStore, FocusPostprocessMode, FocusPostprocessSettings, PatchLabEffect,
-    PatchLabEffects, ReduceError, RenderSettings, SemanticAction,
+    AppRenderSnapshot, AppStore, FocusDiagnosticView, FocusPostprocessMode,
+    FocusPostprocessSettings, PatchLabEffect, PatchLabEffects, ReduceError, RenderSettings,
+    SemanticAction,
 };
 
 #[cfg(all(feature = "csr", target_arch = "wasm32"))]
@@ -171,6 +172,16 @@ impl RenderControlsViewModel {
         })
     }
 
+    pub fn with_focus_diagnostic_view(
+        self,
+        diagnostic_view: FocusDiagnosticView,
+    ) -> RenderControlIntent {
+        self.with_focus_postprocess(FocusPostprocessSettings {
+            diagnostic_view,
+            ..self.value.focus_postprocess
+        })
+    }
+
     pub fn with_focus_radius(self, blur_radius_pixels: u16) -> RenderControlIntent {
         self.with_focus_postprocess(FocusPostprocessSettings {
             blur_radius_pixels,
@@ -314,6 +325,12 @@ mod tests {
                 .focus_postprocess
                 .mode,
             FocusPostprocessMode::Spheroidal,
+        );
+        assert_eq!(
+            view.with_focus_diagnostic_view(FocusDiagnosticView::Weight)
+                .focus_postprocess
+                .diagnostic_view,
+            FocusDiagnosticView::Weight,
         );
         assert_eq!(
             view.with_focus_strength(1.75)

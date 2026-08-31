@@ -25,7 +25,8 @@ use hyperscope_app::{
     AppEffect, AppEvent, AppFrameSnapshot, AppStore, AssetFetchJob, AssetJobIdentity,
     AssetLoadCompletion, AssetLoadCompletionDispatch, AssetLoadOutcome, AssetLoadRequest,
     AssetLoadScope, AssetMetadata, AssetReadModel, AssetStatus, AuthoredRevision, CommitDisposition,
-    FocusPostprocessMode, FocusPostprocessSettings, FrameTick, GraphicsPresentationDecision,
+    FocusDiagnosticView, FocusPostprocessMode, FocusPostprocessSettings, FrameTick,
+    GraphicsPresentationDecision,
     InstalledPrimarySceneReadModel,
     LocalPeerDisposition, LocalPeerIngress, LocalPeerLane,
     LocalPeerReceipt, NavigationSettings,
@@ -2483,6 +2484,7 @@ impl HyperscopeAppShadow {
             focus_postprocess: ShadowFocusPostprocessInput {
                 enabled: focus_enabled,
                 mode: focus_mode,
+                diagnostic_view: FocusDiagnosticView::Composite.wire_index(),
                 blur_radius_pixels,
                 blur_strength,
                 focus_coordinate,
@@ -4352,6 +4354,10 @@ impl ShadowRenderSettingsInput {
                 enabled: self.focus_postprocess.enabled,
                 mode: FocusPostprocessMode::from_wire_index(self.focus_postprocess.mode)
                     .ok_or("unknown focus postprocess mode")?,
+                diagnostic_view: FocusDiagnosticView::from_wire_index(
+                    self.focus_postprocess.diagnostic_view,
+                )
+                .ok_or("unknown focus diagnostic view")?,
                 blur_radius_pixels: self.focus_postprocess.blur_radius_pixels,
                 blur_strength: self.focus_postprocess.blur_strength,
                 focus_coordinate: self.focus_postprocess.focus_coordinate,
@@ -4370,6 +4376,7 @@ impl ShadowRenderSettingsInput {
 struct ShadowFocusPostprocessInput {
     enabled: bool,
     mode: u8,
+    diagnostic_view: u8,
     blur_radius_pixels: u16,
     blur_strength: f64,
     focus_coordinate: f64,
@@ -4443,6 +4450,7 @@ struct ShadowRenderSettings {
 pub(crate) struct FocusPostprocessShadow {
     enabled: bool,
     mode: u8,
+    diagnostic_view: u8,
     blur_radius_pixels: u16,
     blur_strength: f64,
     focus_coordinate: f64,
@@ -4458,6 +4466,7 @@ impl From<FocusPostprocessSettings> for FocusPostprocessShadow {
         Self {
             enabled: settings.enabled,
             mode: settings.mode.wire_index(),
+            diagnostic_view: settings.diagnostic_view.wire_index(),
             blur_radius_pixels: settings.blur_radius_pixels,
             blur_strength: settings.blur_strength,
             focus_coordinate: settings.focus_coordinate,

@@ -127,6 +127,14 @@ pub struct FocusPostprocessSettings {
     /// spheroidal enablement comes from Hyperscape's focus navigation state.
     pub enabled: bool,
     pub mode: FocusPostprocessMode,
+    /// Optional inspection output from the focus compositor. This is distinct
+    /// from the underlying scene render style: diagnostic views still render
+    /// PBR before replacing the final composite with an intermediate field.
+    #[cfg_attr(
+        feature = "replay",
+        serde(default, skip_serializing_if = "FocusDiagnosticView::is_composite")
+    )]
+    pub diagnostic_view: FocusDiagnosticView,
     pub blur_radius_pixels: u16,
     pub blur_strength: f64,
     pub focus_coordinate: f64,
@@ -142,6 +150,7 @@ impl Default for FocusPostprocessSettings {
         Self {
             enabled: false,
             mode: FocusPostprocessMode::ConformalStretch,
+            diagnostic_view: FocusDiagnosticView::Composite,
             blur_radius_pixels: 11,
             blur_strength: 3.0,
             focus_coordinate: 0.62,
@@ -150,6 +159,47 @@ impl Default for FocusPostprocessSettings {
             gaussian_passes: 1,
             kawase_passes: 3,
             kawase_offset: 1.5,
+        }
+    }
+}
+
+/// Backend-neutral focus-compositor inspection requested by application UI.
+///
+/// `DistanceField` is the semantic result historically labelled "JFA" in the
+/// browser. Naming the value after its meaning keeps the application contract
+/// independent of the algorithm used by a renderer to produce it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "replay", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "replay", serde(rename_all = "snake_case"))]
+pub enum FocusDiagnosticView {
+    #[default]
+    Composite,
+    Weight,
+    DistanceField,
+    Firmness,
+}
+
+impl FocusDiagnosticView {
+    pub const fn is_composite(&self) -> bool {
+        matches!(self, Self::Composite)
+    }
+
+    pub const fn wire_index(self) -> u8 {
+        match self {
+            Self::Composite => 0,
+            Self::Weight => 1,
+            Self::DistanceField => 2,
+            Self::Firmness => 3,
+        }
+    }
+
+    pub const fn from_wire_index(index: u8) -> Option<Self> {
+        match index {
+            0 => Some(Self::Composite),
+            1 => Some(Self::Weight),
+            2 => Some(Self::DistanceField),
+            3 => Some(Self::Firmness),
+            _ => None,
         }
     }
 }

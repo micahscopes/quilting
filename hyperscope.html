@@ -176,9 +176,6 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
         <button data-v="both">Both</button>
         <button data-v="normals">Normals</button>
         <button data-v="stretch">Stretch</button>
-        <button data-v="fz-weight">Weight</button>
-        <button data-v="fz-jfa">JFA</button>
-        <button data-v="fz-firmness">Firmness</button>
       </div>
     </div>
   </div>
@@ -368,6 +365,13 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
       <button data-v="2">Hybrid</button>
       <button data-v="3">Selection</button>
     </div>
+    <label>Focus diagnostic</label>
+    <div class="btns" id="fuzzy-debug-btns">
+      <button data-v="0" class="a">Composite</button>
+      <button data-v="1">Weight</button>
+      <button data-v="2">Distance</button>
+      <button data-v="3">Firmness</button>
+    </div>
     <label>Blur radius</label>
     <div class="sr"><input type="range" id="fuzzy-radius" min="4" max="128" value="48"><span class="v" id="fuzzy-radius-v">48</span></div>
     <label>Blur strength</label>
@@ -517,7 +521,7 @@ const BOOTSTRAP_POLICY_DEFAULTS = Object.freeze({
   assetimpl: 'rust',
   animclockimpl: 'js',
   animclipimpl: 'js',
-  renderstateimpl: 'js',
+  renderstateimpl: 'rust',
   patchlabimpl: 'js',
   appshadow: '0',
   routeimpl: 'rust',
@@ -556,6 +560,19 @@ function normalizeLegacyNavigationShadow(params) {
   return normalized;
 }
 
+function normalizeLegacyFocusDiagnostic(params) {
+  const normalized = new URLSearchParams(params);
+  const diagnostic = ({
+    'fz-weight': '1',
+    'fz-jfa': '2',
+    'fz-firmness': '3',
+  })[normalized.get('mode')];
+  if (!diagnostic) return normalized;
+  normalized.set('mode', 'pbr');
+  if (!normalized.has('fdebug')) normalized.set('fdebug', diagnostic);
+  return normalized;
+}
+
 function implementationFromRoute(params, key) {
   const defaultImplementation = BOOTSTRAP_POLICY_DEFAULTS[key];
   if (!['js', 'shadow', 'rust'].includes(defaultImplementation)) {
@@ -583,7 +600,8 @@ function bootstrapToggleFromRoute(params, key) {
 }
 
 const initialBrowserParams = new URLSearchParams(location.search);
-const initialNavigationParams = normalizeLegacyNavigationShadow(initialBrowserParams);
+const initialFocusDiagnosticParams = normalizeLegacyFocusDiagnostic(initialBrowserParams);
+const initialNavigationParams = normalizeLegacyNavigationShadow(initialFocusDiagnosticParams);
 const initialRouteParams = normalizeLegacyRouteShadow(initialNavigationParams);
 const $ = id => document.getElementById(id);
 const RUST_NAVIGATION_IMPLEMENTATION = implementationFromRoute(
@@ -1063,6 +1081,13 @@ function synchronizeGraphicsBackendPresentation() {
       browserRetired,
     )) {
       requireIncumbentLodRecovery();
+    }
+    if (presenting) {
+      // A paused scene may have completed its first device LOD dispatch before
+      // the first presentable frame existed. Crossing the actual presentation
+      // boundary is the missing readiness event; request one fresh complete
+      // epoch instead of waiting for animation or camera input to do it.
+      debouncedLodRecompute();
     }
   }
   if (GRAPHICS_BACKEND_REQUEST === 'webgpu') {
@@ -2100,6 +2125,7 @@ function syncURL() {
       );
       set('fuzzy', fz.enabled.peek() ? '1' : '0', PARAM_DEFAULTS.fuzzy);
       ss('fmode', fz.mode, PARAM_DEFAULTS.fmode);
+      ss('fdebug', fz.debug, PARAM_DEFAULTS.fdebug);
       ss('fradius', fz.radius, PARAM_DEFAULTS.fradius);
       ss('fstr', fz.strength, PARAM_DEFAULTS.fstr);
       ss('ffocus', fz.focus, PARAM_DEFAULTS.ffocus);
@@ -5032,6 +5058,7 @@ function browserRenderSettingsState() {
     focusPostprocess: {
       enabled: Boolean(fz.enabled.peek()),
       mode: Number(fz.mode.peek()),
+      diagnosticView: Number(fz.debug.peek()),
       blurRadiusPixels: Number(fz.radius.peek()),
       blurStrength: Number(fz.strength.peek()) / 10,
       focusCoordinate: Number(fz.focus.peek()) / 100,
@@ -5059,6 +5086,7 @@ function applyRustRenderSettingsProjection(render) {
     if (!focus) throw new Error('Rust render settings omitted focus postprocess policy');
     fz.enabled.set(focus.enabled);
     fz.mode.set(String(focus.mode));
+    fz.debug.set(String(focus.diagnosticView));
     fz.radius.set(focus.blurRadiusPixels);
     fz.strength.set(focus.blurStrength * 10);
     fz.focus.set(focus.focusCoordinate * 100);
@@ -5769,6 +5797,7 @@ function acceptRustRenderSettingsViewCommit(
   maxFaceEdgeRatio,
   focusEnabled,
   focusMode,
+  focusDiagnosticView,
   blurRadiusPixels,
   blurStrength,
   focusCoordinate,
@@ -5793,6 +5822,7 @@ function acceptRustRenderSettingsViewCommit(
       focusPostprocess: {
         enabled: focusEnabled,
         mode: focusMode,
+        diagnosticView: focusDiagnosticView,
         blurRadiusPixels,
         blurStrength,
         focusCoordinate,
@@ -8921,29 +8951,38 @@ canvas.addEventListener('touchmove', e => {
 // --- Button group helper ---
 // --- Render mode (signal) ---
 const renderMode = signal('pbr', 'mode');
-bindBtnGroup('render-btns', renderMode);
-effect(() => {
-  const v = renderMode.get();
+let activeFocusDiagnosticView = 0;
+function focusDiagnosticRenderMode(view) {
+  return ({ 1: 'fz-weight', 2: 'fz-jfa', 3: 'fz-firmness' })[view] || null;
+}
+
+function applyBrowserRenderMode(style) {
+  const focusDiagnosticMode = focusDiagnosticRenderMode(activeFocusDiagnosticView);
+  const requestedMode = focusDiagnosticMode || style;
   // A supported style change can be staged atomically against the currently
-  // visible WebGPU frame. Keep that exact old frame visible until the next RAF
-  // submits the requested style; synchronizing here would retire style-agnostic
-  // device LOD authority before the renderer had a chance to replace it.
+  // visible WebGPU frame. Focus diagnostics are explicitly unsupported by the
+  // current WebGPU composer and therefore retire presentation immediately.
   const stageWebGpuStyleTransition = GRAPHICS_BACKEND_REQUEST === 'webgpu'
     && graphicsBackendDiagnostics.effective === 'webgpu'
     && webGpuPresentationSupportsRenderMode(
-      v,
+      requestedMode,
       graphicsBackendDiagnostics.residency,
     );
-  graphicsBackendDiagnostics.renderMode = v;
+  graphicsBackendDiagnostics.renderMode = requestedMode;
   graphicsBackendDiagnostics.presentationArmed = false;
   graphicsBackendDiagnostics.lastRefreshAt = -Infinity;
   if (!stageWebGpuStyleTransition) synchronizeGraphicsBackendPresentation();
-  if (!wasmOk.get()) return;
-  // Fuzzy debug views: render PBR underneath, then debug blit replaces output
-  const fzDebug = { 'fz-weight': 1, 'fz-jfa': 2, 'fz-firmness': 3 }[v];
-  mr_setRenderMode(fzDebug ? 'pbr' : v);
-  mr_setFuzzyDebug(fzDebug || 0);
+  if (!wasmOk.peek()) return;
+  mr_setRenderMode(focusDiagnosticMode ? 'pbr' : style);
+  mr_setFuzzyDebug(activeFocusDiagnosticView);
   syncURL();
+}
+
+bindBtnGroup('render-btns', renderMode);
+effect(() => {
+  const v = renderMode.get();
+  wasmOk.get();
+  applyBrowserRenderMode(v);
 });
 
 // --- Möbius transform (signals) ---
@@ -9894,6 +9933,7 @@ $('time').addEventListener('input', () => {
 const fz = {
   enabled:   signal(false, 'fuzzy'),
   mode:      signal('0', 'fmode'),
+  debug:     signal('0', 'fdebug'),
   radius:    signal(11, 'fradius'),
   strength:  signal(30, 'fstr'),
   focus:     signal(62, 'ffocus'),
@@ -9905,6 +9945,7 @@ const fz = {
 };
 bindToggle('fuzzy-toggle', fz.enabled);
 bindBtnGroup('fuzzy-mode-btns', fz.mode);
+bindBtnGroup('fuzzy-debug-btns', fz.debug);
 effect(() => {
   const m = fz.mode.get();
   const focusLabel = $('fuzzy-focus-label');
@@ -9934,6 +9975,11 @@ bindSlider('fuzzy-kawase-off', fz.kawaseOff, v => (v / 10).toFixed(2));
 
 function applyFuzzyRendererState() {
   const mode = parseInt(fz.mode.peek());
+  const diagnosticView = Number(fz.debug.peek());
+  if (diagnosticView !== activeFocusDiagnosticView) {
+    activeFocusDiagnosticView = diagnosticView;
+    applyBrowserRenderMode(renderMode.peek());
+  }
   const focusField = mode === 3 ? rendererFocusFieldState() : null;
   if (rustOwnsSpheroidalFocus(mode) && rustFocusFieldSignalApplyDepth > 0) return false;
   if (rustOwnsSpheroidalFocus(mode) && !rustCommittedFocusField) return false;
@@ -9983,6 +10029,7 @@ effect(() => {
 // Single effect: any fuzzy signal change → push to WASM + sync URL
 effect(() => {
   fz.mode.get();
+  fz.debug.get();
   fz.focus.get();
   fz.bandwidth.get();
   fz.enabled.get();
@@ -10632,6 +10679,9 @@ applyParams = function(
   const admittedFocus = validatedRenderSettings?.focusPostprocess;
   fz.enabled.set(admittedFocus?.enabled ?? params.fuzzy === '1');
   fz.mode.set(admittedFocus ? String(admittedFocus.mode) : params.fmode || '0');
+  fz.debug.set(admittedFocus
+    ? String(admittedFocus.diagnosticView)
+    : params.fdebug || '0');
   fz.radius.set(admittedFocus?.blurRadiusPixels
     ?? admittedInteger(params.fradius, 11, 4, 128));
   fz.strength.set(admittedFocus
@@ -11163,6 +11213,7 @@ function activateWebGpuLodAuthority() {
   }
   webGpuLodAuthorityDiagnostics.state = 'device-resident';
   webGpuLodAuthorityDiagnostics.incumbentResetPending = true;
+  webGpuLodAuthorityEffectivelyActive();
   return browserWebGpuLodAuthorityFlags();
 }
 
@@ -11173,6 +11224,7 @@ function retireWebGpuLodAuthority(reason) {
   webGpuLodAuthorityDiagnostics.fallbackTransitions += 1;
   webGpuLodAuthorityDiagnostics.lastTransitionReason = reason;
   webGpuLodAuthorityDiagnostics.incumbentResetPending = true;
+  webGpuLodAuthorityEffectivelyActive();
   return true;
 }
 
@@ -12708,7 +12760,7 @@ function frame(ts) {
   mr_render(mvp, view, frameCameraPos);
   if (GRAPHICS_BACKEND_REQUEST === 'webgpu') {
     graphicsBackendDiagnostics.presentationArmed = webGpuPresentationSupportsRenderMode(
-      renderMode.peek(),
+      graphicsBackendDiagnostics.renderMode,
       graphicsBackendDiagnostics.residency,
     );
     const refreshDue = ts - graphicsBackendDiagnostics.lastRefreshAt >= 250;

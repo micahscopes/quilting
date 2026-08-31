@@ -4,7 +4,7 @@ use super::{
 };
 use crate::effect_js::patch_lab_effect_to_js;
 use futures_signals::signal::SignalExt as _;
-use hyperscope_app::{AppStore, FocusPostprocessMode};
+use hyperscope_app::{AppStore, FocusDiagnosticView, FocusPostprocessMode};
 use js_sys::{Array, Function};
 use leptos::mount::mount_to;
 use leptos::prelude::*;
@@ -26,6 +26,13 @@ const FOCUS_MODES: &[(FocusPostprocessMode, &str)] = &[
     (FocusPostprocessMode::ConformalStretch, "Conformal"),
     (FocusPostprocessMode::Hybrid, "Hybrid"),
     (FocusPostprocessMode::Spheroidal, "Selection"),
+];
+
+const FOCUS_DIAGNOSTIC_VIEWS: &[(FocusDiagnosticView, &str)] = &[
+    (FocusDiagnosticView::Composite, "Composite"),
+    (FocusDiagnosticView::Weight, "Weight"),
+    (FocusDiagnosticView::DistanceField, "Distance"),
+    (FocusDiagnosticView::Firmness, "Firmness"),
 ];
 
 /// Mount the explicit Rust-authority render controls over the committed
@@ -267,6 +274,30 @@ fn FocusPostprocessControls(
             }
         })
         .collect_view();
+    let diagnostic_buttons = FOCUS_DIAGNOSTIC_VIEWS
+        .iter()
+        .map(|&(diagnostic_view, label)| {
+            let store = store.clone();
+            let on_commit = on_commit.clone();
+            let on_error = on_error.clone();
+            view! {
+                <button
+                    type="button"
+                    class:a=move || {
+                        controls.read().value.focus_postprocess.diagnostic_view
+                            == diagnostic_view
+                    }
+                    aria-pressed=move || {
+                        (controls.read().value.focus_postprocess.diagnostic_view
+                            == diagnostic_view).to_string()
+                    }
+                    on:click=move |_| submit_intent(&store, &on_commit, &on_error, |current| {
+                        current.with_focus_diagnostic_view(diagnostic_view)
+                    })
+                >{label}</button>
+            }
+        })
+        .collect_view();
 
     view! {
         <div id="focus-postprocess-controls-rust-view">
@@ -288,6 +319,9 @@ fn FocusPostprocessControls(
                 <span class="toggle-label">"Enable blur"</span>
             </div>
             <div class="btns">{mode_buttons}</div>
+
+            <label>"Focus diagnostic"</label>
+            <div class="btns">{diagnostic_buttons}</div>
 
             <label>"Blur radius"</label>
             <div class="sr">
@@ -522,6 +556,9 @@ fn emit_committed(callback: &Function, committed: &RenderControlCommit) {
     let focus = intent.focus_postprocess;
     arguments.push(&JsValue::from_bool(focus.enabled));
     arguments.push(&JsValue::from_f64(f64::from(focus.mode.wire_index())));
+    arguments.push(&JsValue::from_f64(f64::from(
+        focus.diagnostic_view.wire_index(),
+    )));
     arguments.push(&JsValue::from_f64(f64::from(focus.blur_radius_pixels)));
     arguments.push(&JsValue::from_f64(focus.blur_strength));
     arguments.push(&JsValue::from_f64(focus.focus_coordinate));

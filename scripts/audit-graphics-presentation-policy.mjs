@@ -4,10 +4,12 @@ import assert from 'node:assert/strict';
 
 const cdpEndpoint = process.env.HYPERSCOPE_CDP_ENDPOINT || 'http://127.0.0.1:9222';
 const pagePort = process.env.HYPERSCOPE_PORT || '8888';
+const targetId = process.env.HYPERSCOPE_TARGET_ID || null;
 
 const targets = await (await fetch(`${cdpEndpoint}/json/list`)).json();
 const page = targets.find(target =>
-  target.type === 'page' && target.url.includes(`:${pagePort}/`),
+  target.type === 'page' && target.url.includes(`:${pagePort}/`)
+    && (!targetId || target.id === targetId),
 );
 assert.ok(page, `no Hyperscope page found on port ${pagePort}`);
 
@@ -25,6 +27,9 @@ function auditGraphicsPresentationPolicy() {
   }
   const buttonFor = mode => document.querySelector(
     `#render-btns button[data-v="${mode}"]`,
+  );
+  const focusDiagnosticButtonFor = value => document.querySelector(
+    `#fuzzy-debug-btns button[data-v="${value}"]`,
   );
   const snapshot = async () => {
     await graphics.refresh();
@@ -60,8 +65,9 @@ function auditGraphicsPresentationPolicy() {
     );
     const originalMode = before.mode;
     const originalButton = buttonFor(originalMode);
-    const unsupportedButton = buttonFor('fz-weight');
-    if (!originalButton || !unsupportedButton) {
+    const unsupportedButton = focusDiagnosticButtonFor('1');
+    const compositeButton = focusDiagnosticButtonFor('0');
+    if (!originalButton || !unsupportedButton || !compositeButton) {
       throw new Error(`cannot audit policy from render mode ${originalMode}`);
     }
 
@@ -76,6 +82,7 @@ function auditGraphicsPresentationPolicy() {
           && current.rust?.phase === 'unsupported-mode',
       );
     } finally {
+      compositeButton.click();
       originalButton.click();
     }
     const recovered = await waitFor(

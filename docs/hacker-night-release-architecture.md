@@ -499,13 +499,14 @@ The first application boundary is now explicit:
   and grading policy. The generated application facade admits the same
   complete value, rejects unknown backend-neutral styles and invalid ranges
   atomically, and exposes its revision-fenced projection; browser control
-  signals remain the default incumbent behind
+  signals remain a measured rollback behind
   `renderstateimpl=js|shadow|rust`. The explicit shadow lane coalesces one
   browser signal batch into one complete reducer comparison, while the
-  explicit Rust lane reapplies the committed projection and rolls invalid
-  intent back to the preceding Rust value. Neither measured lane is canonical
-  until live browser parity evidence is recorded.
-  The explicit Rust lane now mounts a Leptos control island directly over the
+  Rust lane reapplies the committed projection and rolls invalid intent back
+  to the preceding Rust value. Live browser parity evidence recorded on
+  2026-08-31 promoted Rust to the canonical route default; JavaScript and
+  shadow remain explicit, linkable rollback/measurement lanes.
+  The Rust lane mounts a Leptos control island directly over the
   reducer's `render_signal`. Each edit reads the current reducer snapshot,
   allocates a direct semantic-input sequence under the same application lock,
   and commits one complete replacement value without returning action intent
@@ -514,8 +515,15 @@ The first application boundary is now explicit:
   allocated sequence also advances the compatibility counter so a later
   rollback-path input cannot reuse it. A separate read-only error callback
   retains browser diagnostics if Rust rejects an edit. The incumbent HTML
-  controls remain visible for the default JavaScript lane and automatically
+  controls remain available for the explicit JavaScript lane and automatically
   reappear if the Rust view cannot mount.
+  Replay 0.26 separates semantic render style from focus-compositor inspection:
+  Composite, Weight, Distance Field, and Firmness are a typed diagnostic value,
+  while the underlying scene remains PBR. Legacy `mode=fz-*` links normalize to
+  `mode=pbr&fdebug=*`; replay 0.25 rejects non-composite diagnostics rather than
+  assigning the new meaning retroactively. Unsupported focus diagnostics cause
+  an explicit WebGPU-to-WebGL presentation fallback, and returning to Composite
+  requests a fresh device LOD epoch even when animation is paused.
   Shadow/Rust startup no longer seeds the reducer by reading those projected
   browser signals back. The admitted typed route value is committed directly
   to `AppStore` before WASM readiness publishes control effects; controls then

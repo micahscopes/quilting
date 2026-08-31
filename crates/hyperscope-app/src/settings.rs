@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use crate::{FocusPostprocessMode, FocusPostprocessSettings, RenderSettings};
+use crate::{
+    FocusDiagnosticView, FocusPostprocessMode, FocusPostprocessSettings, RenderSettings,
+};
 use hyperscape::SurfaceWalkControls;
 use hyperscape_protocol::{AssetEntityId, AssetId, EntityId};
 
@@ -217,6 +219,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("animclipimpl", "js", Implementation),
     spec!("fuzzy", "0", Toggle),
     choice_spec!("fmode", "1", ["0", "1", "2", "3"]),
+    choice_spec!("fdebug", "0", ["0", "1", "2", "3"]),
     numeric_spec!("fradius", "11", Number, 4.0, 128.0, true, 1.0),
     numeric_spec!("fstr", "30", Number, 1.0, 30.0, false, 0.1),
     numeric_spec!("ffocus", "62", Number, 0.0, 100.0, false, 0.1),
@@ -309,7 +312,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     spec!("assetimpl", "rust", Implementation),
     spec!("sceneimpl", "rust", Implementation),
     spec!("routeimpl", "rust", Implementation),
-    spec!("renderstateimpl", "js", Implementation),
+    spec!("renderstateimpl", "rust", Implementation),
     spec!("lodimpl", "js", Implementation),
     spec!("rendershadow", "0", Toggle),
     spec!("adaptiveshadow", "0", Toggle),
@@ -661,6 +664,11 @@ impl HyperscopeRoute {
             .and_then(|value| value.parse::<u8>().ok())
             .and_then(FocusPostprocessMode::from_wire_index)
             .ok_or("route focus postprocess mode is invalid")?;
+        let focus_diagnostic_view = self
+            .value("fdebug")
+            .and_then(|value| value.parse::<u8>().ok())
+            .and_then(FocusDiagnosticView::from_wire_index)
+            .ok_or("route focus diagnostic view is invalid")?;
         let blur_radius_pixels = self
             .value("fradius")
             .and_then(|value| value.parse::<u16>().ok())
@@ -712,6 +720,7 @@ impl HyperscopeRoute {
             settings.with_focus_postprocess(FocusPostprocessSettings {
                 enabled: focus_enabled,
                 mode: focus_mode,
+                diagnostic_view: focus_diagnostic_view,
                 blur_radius_pixels,
                 blur_strength,
                 focus_coordinate,
@@ -1188,6 +1197,7 @@ mod tests {
             ("lodratio", "4"),
             ("fuzzy", "1"),
             ("fmode", "2"),
+            ("fdebug", "2"),
             ("fradius", "24"),
             ("fstr", "17.5"),
             ("ffocus", "31.25"),
@@ -1212,6 +1222,7 @@ mod tests {
                 focus_postprocess: FocusPostprocessSettings {
                     enabled: true,
                     mode: FocusPostprocessMode::Hybrid,
+                    diagnostic_view: FocusDiagnosticView::DistanceField,
                     blur_radius_pixels: 24,
                     blur_strength: 1.75,
                     focus_coordinate: 0.3125,
@@ -1338,11 +1349,11 @@ mod tests {
     }
 
     #[test]
-    fn render_settings_cutover_starts_as_an_explicit_measurement_lane() {
-        let default_route = HyperscopeRoute::from_pairs([("renderstateimpl", "js")]);
+    fn render_settings_cutover_uses_rust_by_default_with_measured_rollbacks() {
+        let default_route = HyperscopeRoute::from_pairs([("renderstateimpl", "rust")]);
         assert!(default_route.canonical_pairs().is_empty());
 
-        for implementation in ["shadow", "rust"] {
+        for implementation in ["js", "shadow"] {
             let route = HyperscopeRoute::from_pairs([("renderstateimpl", implementation)]);
             assert_eq!(
                 route.canonical_pairs(),

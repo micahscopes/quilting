@@ -13,7 +13,8 @@ const browser = read('hyperscope.html');
 const settings = read('crates/hyperscope-app/src/settings.rs');
 
 for (const required of [
-  'spec!("renderstateimpl", "js", Implementation)',
+  'spec!("renderstateimpl", "rust", Implementation)',
+  'pub enum FocusDiagnosticView',
   'pub enum RenderSettingsSynchronizationDisposition',
   'pub fn synchronize_render_settings(',
   'if snapshot.settings == settings',
@@ -96,6 +97,21 @@ for (const retired of [
   'app.setRenderSettings(',
 ]) {
   assert.equal(browser.includes(retired), false, `browser glue must not retain ${retired}`);
+}
+
+for (const required of [
+  "renderstateimpl: 'rust'",
+  "const diagnostic = ({",
+  "normalized.set('mode', 'pbr')",
+  "normalized.set('fdebug', diagnostic)",
+  'diagnosticView: Number(fz.debug.peek())',
+  'fz.debug.set(String(focus.diagnosticView))',
+  'function focusDiagnosticRenderMode(view)',
+  'graphicsBackendDiagnostics.renderMode = requestedMode',
+  'if (presenting) {',
+  'debouncedLodRecompute();',
+]) {
+  assert.ok(browser.includes(required), `browser render-settings boundary is missing ${required}`);
 }
 
 const moduleSource = browser.match(/<script type="module">([\s\S]*?)<\/script>/)?.[1];

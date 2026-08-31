@@ -122,9 +122,11 @@ assert.equal(specs.find(spec => spec.key === 'sceneimpl').defaultValue, 'rust');
 assert.equal(specs.find(spec => spec.key === 'routeimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'routeimpl').defaultValue, 'rust');
 assert.equal(specs.find(spec => spec.key === 'renderstateimpl').kind, 'implementation');
-assert.equal(specs.find(spec => spec.key === 'renderstateimpl').defaultValue, 'js');
+assert.equal(specs.find(spec => spec.key === 'renderstateimpl').defaultValue, 'rust');
 assert.equal(specs.find(spec => spec.key === 'cue').kind, 'optional_uuid');
 assert.equal(specs.find(spec => spec.key === 'cue').defaultValue, '');
+assert.equal(specs.find(spec => spec.key === 'fdebug').kind, 'choice');
+assert.equal(specs.find(spec => spec.key === 'fdebug').defaultValue, '0');
 
 for (const mode of ['pbr', 'matcap', 'wire', 'normals', 'both', 'lod', 'stretch']) {
   assert.equal(canonicalizeHyperscopeRoute([['mode', mode]]).diagnostics.length, 0);
@@ -153,6 +155,7 @@ assert.deepEqual(typedRenderRoute.renderSettings, {
   focusPostprocess: {
     enabled: false,
     mode: 1,
+    diagnosticView: 0,
     blurRadiusPixels: 11,
     blurStrength: 3,
     focusCoordinate: 0.62,
@@ -1258,11 +1261,11 @@ assert.deepEqual(
   'canonical routes must retain an explicit scene-extraction rollback',
 );
 assert.deepEqual(
-  canonicalizeHyperscopeRoute([['renderstateimpl', 'js']]).pairs,
+  canonicalizeHyperscopeRoute([['renderstateimpl', 'rust']]).pairs,
   [],
-  'canonical routes must omit the JavaScript render-settings default',
+  'canonical routes must omit the Rust render-settings default',
 );
-for (const implementation of ['shadow', 'rust']) {
+for (const implementation of ['js', 'shadow']) {
   assert.deepEqual(
     canonicalizeHyperscopeRoute([['renderstateimpl', implementation]]).pairs,
     [['renderstateimpl', implementation]],

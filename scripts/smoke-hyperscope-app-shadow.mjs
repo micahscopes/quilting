@@ -244,6 +244,7 @@ assert.deepEqual(app.snapshot().renderSettings, {
   focusPostprocess: {
     enabled: false,
     mode: 1,
+    diagnosticView: 0,
     blurRadiusPixels: 11,
     blurStrength: 3,
     focusCoordinate: 0.62,
@@ -1720,6 +1721,7 @@ assert.deepEqual(
     focusPostprocess: {
       enabled: false,
       mode: 1,
+      diagnosticView: 0,
       blurRadiusPixels: 11,
       blurStrength: 3,
       focusCoordinate: 0.62,

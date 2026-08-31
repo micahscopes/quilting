@@ -4,9 +4,11 @@ import assert from 'node:assert/strict';
 
 const cdpEndpoint = process.env.HYPERSCOPE_CDP_ENDPOINT || 'http://127.0.0.1:9222';
 const pagePort = process.env.HYPERSCOPE_PORT || '8888';
+const targetId = process.env.HYPERSCOPE_TARGET_ID || null;
 const targets = await (await fetch(`${cdpEndpoint}/json/list`)).json();
 const page = targets.find(target =>
-  target.type === 'page' && target.url.includes(`:${pagePort}/`),
+  target.type === 'page' && target.url.includes(`:${pagePort}/`)
+    && (!targetId || target.id === targetId),
 );
 assert.ok(page, `no Hyperscope page found on port ${pagePort}`);
 
