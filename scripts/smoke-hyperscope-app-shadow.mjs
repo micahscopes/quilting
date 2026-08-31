@@ -229,6 +229,7 @@ assert.equal(
 );
 
 const app = new HyperscopeAppShadow();
+const defaultFocusPostprocess = [false, 1, 11, 3, 0.62, 0.1, false, 1, 3, 1.5];
 assert.equal(typeof app.mountAnimationClipControl, 'function');
 assert.equal(app.snapshot().animationPlaying, true);
 assert.deepEqual(app.snapshot().renderSettings, {
@@ -240,9 +241,22 @@ assert.deepEqual(app.snapshot().renderSettings, {
   minPixelsPerSubdivision: 16,
   atlasExponent: 7,
   maxFaceEdgeRatio: 2,
+  focusPostprocess: {
+    enabled: false,
+    mode: 1,
+    blurRadiusPixels: 11,
+    blurStrength: 3,
+    focusCoordinate: 0.62,
+    bandwidth: 0.1,
+    normalizeRange: false,
+    gaussianPasses: 1,
+    kawasePasses: 3,
+    kawaseOffset: 1.5,
+  },
 });
 const renderSettingsReceipt = app.setRenderSettings(
   80, 'stretch', 6, 12, false, 64, 9, 4,
+  ...defaultFocusPostprocess,
 );
 assert.equal(renderSettingsReceipt.commit.disposition, 'applied');
 assert.deepEqual(renderSettingsReceipt.render, app.snapshot().renderSettings);
@@ -268,11 +282,17 @@ assert.deepEqual(
 );
 const beforeRejectedRenderSettings = app.snapshot();
 assert.throws(
-  () => app.setRenderSettings(81, 'browser_magic', 0, 100, true, 16, 7, 2),
+  () => app.setRenderSettings(
+    81, 'browser_magic', 0, 100, true, 16, 7, 2,
+    ...defaultFocusPostprocess,
+  ),
   /unknown backend-neutral render style/,
 );
 assert.throws(
-  () => app.setRenderSettings(82, 'pbr', 0, 100, true, 16, 10, 2),
+  () => app.setRenderSettings(
+    82, 'pbr', 0, 100, true, 16, 10, 2,
+    ...defaultFocusPostprocess,
+  ),
   /resident atlas exponent must be in \[3,9\]/,
 );
 assert.deepEqual(app.snapshot(), beforeRejectedRenderSettings);
@@ -1697,6 +1717,18 @@ assert.deepEqual(
     minPixelsPerSubdivision: incumbentStart.tessellation.min_pixels_per_subdivision,
     atlasExponent: 9,
     maxFaceEdgeRatio: 4,
+    focusPostprocess: {
+      enabled: false,
+      mode: 1,
+      blurRadiusPixels: 11,
+      blurStrength: 3,
+      focusCoordinate: 0.62,
+      bandwidth: 0.1,
+      normalizeRange: false,
+      gaussianPasses: 1,
+      kawasePasses: 3,
+      kawaseOffset: 1.5,
+    },
   },
   'cue activation must replace only authored render policy in the AppStore',
 );
