@@ -7,7 +7,7 @@
 
 pub use quilting_core::educational::{PatchLabField, PatchLabShape};
 
-use crate::{AppEffect, ReduceError, RenderSettings};
+use crate::{AppCommit, AppEffect, ReduceError, RenderSettings};
 
 pub const PATCH_LAB_PHASE_TURN_MICRORADIANS: u32 = 6_283_185;
 pub const PATCH_LAB_ANIMATION_RATE_MICRORADIANS_PER_SECOND: f64 = 1_350_000.0;
@@ -160,6 +160,35 @@ pub enum PatchLabEffect {
         job_id: u64,
         geometry_job_id: u64,
     },
+}
+
+/// Patch Lab renderer jobs projected from one trusted application commit.
+/// View and platform adapters share this interpretation instead of matching
+/// the generic top-level effect enum independently.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PatchLabEffects(Vec<PatchLabEffect>);
+
+impl PatchLabEffects {
+    pub fn from_commit(commit: &AppCommit) -> Self {
+        Self(
+            commit
+                .effects
+                .iter()
+                .filter_map(|effect| match effect {
+                    AppEffect::PatchLab(effect) => Some(effect.clone()),
+                    _ => None,
+                })
+                .collect(),
+        )
+    }
+
+    pub fn as_slice(&self) -> &[PatchLabEffect] {
+        &self.0
+    }
+
+    pub fn into_vec(self) -> Vec<PatchLabEffect> {
+        self.0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

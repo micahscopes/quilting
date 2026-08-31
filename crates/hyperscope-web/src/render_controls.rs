@@ -8,8 +8,8 @@
 use crate::controls::numeric_control_domain;
 pub use crate::controls::NumericControlViewDomain;
 use hyperscope_app::{
-    AppEffect, AppRenderSnapshot, AppStore, FocusPostprocessMode, FocusPostprocessSettings,
-    PatchLabEffect, ReduceError, RenderSettings, SemanticAction,
+    AppRenderSnapshot, AppStore, FocusPostprocessMode, FocusPostprocessSettings, PatchLabEffect,
+    PatchLabEffects, ReduceError, RenderSettings, SemanticAction,
 };
 
 #[cfg(all(feature = "csr", target_arch = "wasm32"))]
@@ -64,14 +64,7 @@ pub fn set_render_controls(
     let (sequence, commit) = store
         .dispatch_semantic(SemanticAction::SetRenderSettings(settings))
         .map_err(RenderControlError::Reduce)?;
-    let patch_lab_effects = commit
-        .effects
-        .into_iter()
-        .filter_map(|effect| match effect {
-            AppEffect::PatchLab(effect) => Some(effect),
-            _ => None,
-        })
-        .collect();
+    let patch_lab_effects = PatchLabEffects::from_commit(&commit).into_vec();
     Ok(RenderControlCommit {
         sequence,
         revision: commit.revision,

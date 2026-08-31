@@ -8,7 +8,7 @@
 use crate::controls::numeric_control_domain;
 pub use crate::controls::NumericControlViewDomain;
 use hyperscope_app::{
-    AppEffect, AppRenderSnapshot, AppStore, PatchLabControls, PatchLabEffect, PatchLabField,
+    AppRenderSnapshot, AppStore, PatchLabControls, PatchLabEffect, PatchLabEffects, PatchLabField,
     PatchLabReadModel, PatchLabSessionIntent, PatchLabShape, ReduceError, SemanticAction,
     PATCH_LAB_PHASE_TURN_MICRORADIANS,
 };
@@ -48,14 +48,7 @@ pub fn set_patch_lab_session(
     intent: PatchLabSessionIntent,
 ) -> Result<PatchLabControlCommit, ReduceError> {
     let (sequence, commit) = store.dispatch_semantic(SemanticAction::SetPatchLab(intent))?;
-    let effects = commit
-        .effects
-        .into_iter()
-        .filter_map(|effect| match effect {
-            AppEffect::PatchLab(effect) => Some(effect),
-            _ => None,
-        })
-        .collect();
+    let effects = PatchLabEffects::from_commit(&commit).into_vec();
     Ok(PatchLabControlCommit {
         sequence,
         revision: commit.revision,
