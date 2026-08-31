@@ -44,6 +44,8 @@ for (const retired of ['commit.effects', 'AppEffect::SelectAnimationClip', 'for 
 }
 for (const required of [
   'committed.commit.revision.to_string()',
+  '.map(|active| f64::from(active.clip.index))',
+  '.map(|pending| f64::from(pending.clip.index))',
   'effect.scene_request_id.to_string()',
   'effect.asset_id.to_string()',
 ]) {
@@ -93,6 +95,20 @@ for (const retired of [
   assert.equal(request.includes(retired), false,
     `browser clip adapter must not retain ${retired}`);
 }
+
+const controlStart = browser.indexOf('function ensureRustAnimationClipControlView() {');
+const controlEnd = browser.indexOf('function ensureRustNavigationStatusView()', controlStart);
+const control = browser.slice(controlStart, controlEnd);
+for (const required of [
+  '(index, sequence, revision, activeIndex, pendingIndex, effect, cancellations)',
+  'active: Number.isSafeInteger(active) && active >= 0',
+  'pending: Number.isSafeInteger(pending) && pending >= 0',
+  'observeAnimationClipResidency(',
+]) {
+  assert.ok(control.includes(required), `Leptos clip callback is missing ${required}`);
+}
+assert.equal(control.includes('refreshAppShadowSnapshot()'), false,
+  'Leptos clip callbacks must not serialize the complete application state');
 
 const completionStart = browser.indexOf('function completeAppAnimationClipSelection(');
 const completionEnd = browser.indexOf('async function selectAnimationIndex(', completionStart);

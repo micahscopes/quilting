@@ -233,6 +233,22 @@ fn emit_clip_commit(callback: &Function, committed: &AnimationClipControlCommit)
     arguments.push(&JsValue::from_f64(f64::from(committed.requested_index)));
     arguments.push(&JsValue::from_str(&committed.sequence.to_string()));
     arguments.push(&JsValue::from_str(&committed.commit.revision.to_string()));
+    arguments.push(&JsValue::from_f64(
+        committed
+            .state
+            .active
+            .as_ref()
+            .map(|active| f64::from(active.clip.index))
+            .unwrap_or(-1.0),
+    ));
+    arguments.push(&JsValue::from_f64(
+        committed
+            .state
+            .pending
+            .as_ref()
+            .map(|pending| f64::from(pending.clip.index))
+            .unwrap_or(-1.0),
+    ));
     arguments.push(
         &committed
             .selection

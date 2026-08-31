@@ -5221,7 +5221,7 @@ function ensureRustAnimationClipControlView() {
   try {
     rustAppShadow.mountAnimationClipControl(
       host,
-      (index, sequence, revision, effect, cancellations) => {
+      (index, sequence, revision, activeIndex, pendingIndex, effect, cancellations) => {
         try {
           observeRustAppShadowSequence(sequence, 'Rust animation clip control');
           const effects = effect == null ? [...cancellations] : [...cancellations, effect];
@@ -5237,7 +5237,18 @@ function ensureRustAnimationClipControlView() {
           animationClipDiagnostics.cancellationEffects += cancellations.length;
           animationClipDiagnostics.lastRequestedClip = Number(index);
           animationClipDiagnostics.lastJobId = effect?.job_id ?? null;
-          const snapshot = refreshAppShadowSnapshot();
+          const active = Number(activeIndex);
+          const pending = Number(pendingIndex);
+          const snapshot = {
+            animationClipSelection: {
+              active: Number.isSafeInteger(active) && active >= 0
+                ? { clip: { index: active } }
+                : null,
+              pending: Number.isSafeInteger(pending) && pending >= 0
+                ? { clip: { index: pending } }
+                : null,
+            },
+          };
           observeAnimationClipResidency(
             effect == null ? 'control-noop' : 'control-pending',
             snapshot,
