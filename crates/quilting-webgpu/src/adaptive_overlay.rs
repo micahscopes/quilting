@@ -1018,7 +1018,7 @@ impl LodClassifierDevice {
                 color_view: focus_target.scene_color_view(),
                 resolve_target: None,
                 depth_stencil_view: Some(output_target.depth_stencil_view),
-                clear_color: Some(wgpu::Color::TRANSPARENT),
+                clear_color: Some(crate::focus_postprocess::FOCUS_SCENE_CLEAR),
                 clear_depth: Some(1.0),
             },
             Some(focus_target.raw_field_view()),

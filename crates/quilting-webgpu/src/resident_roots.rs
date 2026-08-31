@@ -1470,7 +1470,9 @@ impl LodClassifierDevice {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    load: wgpu::LoadOp::Clear(
+                        crate::focus_postprocess::FOCUS_RAW_FIELD_CLEAR,
+                    ),
                     store: wgpu::StoreOp::Store,
                 },
             })
@@ -1640,7 +1642,7 @@ impl LodClassifierDevice {
                 color_view: focus_target.scene_color_view(),
                 resolve_target: None,
                 depth_stencil_view: Some(&output_target.depth_view),
-                clear_color: Some(wgpu::Color::TRANSPARENT),
+                clear_color: Some(crate::focus_postprocess::FOCUS_SCENE_CLEAR),
                 clear_depth: Some(1.0),
             },
             Some(focus_target.raw_field_view()),

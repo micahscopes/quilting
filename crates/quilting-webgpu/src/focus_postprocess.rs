@@ -16,6 +16,24 @@ use std::collections::BTreeMap;
 use std::num::NonZeroU64;
 use std::sync::Mutex;
 
+/// Incumbent PBR scene clear retained through the focus render graph.
+pub(crate) const FOCUS_SCENE_CLEAR: wgpu::Color = wgpu::Color {
+    r: 0.2,
+    g: 0.2,
+    b: 0.3,
+    a: 1.0,
+};
+
+/// Empty-scene focus payload matching the WebGL2 MRT contract. R/G remain a
+/// neutral stretch sample while B places uncovered pixels outside the
+/// spheroidal focus field.
+pub(crate) const FOCUS_RAW_FIELD_CLEAR: wgpu::Color = wgpu::Color {
+    r: 0.5,
+    g: 0.5,
+    b: 1.0,
+    a: 1.0,
+};
+
 const FOCUS_PASS_UNIFORM_BYTES: u64 = 64;
 const FOCUS_PASS_CAPACITY: usize = 64;
 

@@ -34,7 +34,7 @@ fn focus_fullscreen_vertex(@builtin(vertex_index) vertex_index: u32) -> FocusFul
     let position = positions[vertex_index];
     return FocusFullscreenOutput(
         vec4<f32>(position, 0.0, 1.0),
-        position * 0.5 + vec2<f32>(0.5),
+        position * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5),
     );
 }
 

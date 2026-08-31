@@ -1433,6 +1433,13 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             .expect("focus uniform type");
         assert_eq!(layouter[uniform].size, 64);
 
+        // WebGPU render-target textures have a top-left texture origin while
+        // clip-space Y remains positive upward. Every focus subpass must use
+        // this conversion; otherwise each fullscreen pass flips its input and
+        // final orientation depends on the configured pass-count parity.
+        assert!(sources::FOCUS_POSTPROCESS
+            .contains("position * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5)"));
+
         let emitted = compile_focus_postprocess_wgsl().expect("focus WGSL emits");
         for name in [
             FOCUS_POSTPROCESS_VERTEX_ENTRY_POINT,
