@@ -6038,17 +6038,33 @@ function mirrorAppPresentation(direction, cueId, expected) {
 
 function beginAppAssetShadow(uri, source, explicitAssetId = null, scope = 'asset') {
   if (!rustAppShadow) return null;
-  const requestId = appShadowUuid('e', ++rustAppShadowRequestOrdinal);
-  const assetId = appShadowAssetId(uri, explicitAssetId);
   const requestedUri = String(uri);
   try {
-    const receipt = rustAppShadow.requestAssetLoad(
-      requestId,
-      assetId,
-      requestedUri,
-      /\.gltf$/i.test(requestedUri) ? 'model/gltf+json' : 'model/gltf-binary',
-      scope,
-    );
+    const mediaType = /\.gltf$/i.test(requestedUri)
+      ? 'model/gltf+json' : 'model/gltf-binary';
+    let receipt;
+    let requestId;
+    let assetId;
+    if (RUST_ASSET_IMPLEMENTATION === 'rust') {
+      receipt = rustAppShadow.requestSessionAssetLoad(
+        explicitAssetId ? String(explicitAssetId) : '',
+        requestedUri,
+        mediaType,
+        scope,
+      );
+      requestId = receipt.fetch.requestId;
+      assetId = receipt.fetch.assetId;
+    } else {
+      requestId = appShadowUuid('e', ++rustAppShadowRequestOrdinal);
+      assetId = appShadowAssetId(uri, explicitAssetId);
+      receipt = rustAppShadow.requestAssetLoad(
+        requestId,
+        assetId,
+        requestedUri,
+        mediaType,
+        scope,
+      );
+    }
     observeRustAppShadowSequence(receipt.sequence, 'Rust asset request');
     const commit = receipt.commit;
     rustAppShadowDiagnostics.requestedCancellations +=

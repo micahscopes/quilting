@@ -47,6 +47,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use uuid::Uuid;
 
 const MAX_DIAGNOSTICS: usize = 256;
+const SESSION_REQUEST_ID_PREFIX: u128 = 0xe0000000_0000_4000_8000_000000000000;
+const SESSION_ASSET_ID_PREFIX: u128 = 0xf0000000_0000_4000_8000_000000000000;
+const SESSION_ID_ORDINAL_MAX: u64 = 0x0000_ffff_ffff_ffff;
 const SESSION_NODE_ENTITY_PREFIX: u128 = 0xeeeeeeee_0000_4000_8000_000000000000;
 
 fn presentation_uri_leaf(uri: &str) -> Option<&str> {
@@ -1271,6 +1274,9 @@ pub struct AppState {
     /// because presentation activation and navigation synchronization also
     /// participate in that ordering domain.
     next_direct_input_sequence: Option<u64>,
+    next_session_request_ordinal: Option<u64>,
+    next_session_asset_ordinal: Option<u64>,
+    session_assets_by_uri: BTreeMap<String, AssetId>,
     navigation: NavigationController,
     interaction: InteractionController,
     presentation: Option<PresentationRuntime>,
@@ -1302,6 +1308,9 @@ impl Default for AppState {
             frame_elapsed_seconds: 0.0,
             animation_pose_sample_time_seconds: 0.0,
             next_direct_input_sequence: Some(0),
+            next_session_request_ordinal: Some(1),
+            next_session_asset_ordinal: Some(1),
+            session_assets_by_uri: BTreeMap::new(),
             navigation: NavigationController::default(),
             interaction: InteractionController::default(),
             presentation: None,
@@ -1331,6 +1340,48 @@ impl Default for AppState {
 impl AppState {
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    fn allocate_session_asset_request(
+        &mut self,
+        uri: String,
+        media_type: Option<String>,
+        explicit_asset_id: Option<AssetId>,
+    ) -> Result<(RequestId, AssetDescriptor), ReduceError> {
+        let asset_id = if let Some(asset_id) = explicit_asset_id {
+            asset_id
+        } else if let Some(asset_id) = self.session_assets_by_uri.get(&uri) {
+            *asset_id
+        } else {
+            let ordinal = self
+                .next_session_asset_ordinal
+                .ok_or(ReduceError::SessionAssetIdentityExhausted)?;
+            let asset_id = AssetId::from_u128(SESSION_ASSET_ID_PREFIX | u128::from(ordinal))
+                .map_err(|error| ReduceError::Wire(error.to_string()))?;
+            self.next_session_asset_ordinal = ordinal
+                .checked_add(1)
+                .filter(|next| *next <= SESSION_ID_ORDINAL_MAX);
+            self.session_assets_by_uri.insert(uri.clone(), asset_id);
+            asset_id
+        };
+        let ordinal = self
+            .next_session_request_ordinal
+            .ok_or(ReduceError::SessionRequestIdentityExhausted)?;
+        let request_id = RequestId::from_u128(SESSION_REQUEST_ID_PREFIX | u128::from(ordinal))
+            .map_err(|error| ReduceError::Wire(error.to_string()))?;
+        self.next_session_request_ordinal = ordinal
+            .checked_add(1)
+            .filter(|next| *next <= SESSION_ID_ORDINAL_MAX);
+        let asset = AssetDescriptor {
+            id: asset_id,
+            uri,
+            media_type,
+            content_digest: None,
+        };
+        asset
+            .validate()
+            .map_err(|error| ReduceError::Wire(error.to_string()))?;
+        Ok((request_id, asset))
     }
 
     pub fn frame_snapshot(&self) -> AppFrameSnapshot {
@@ -2708,6 +2759,69 @@ impl AppStore {
         })
     }
 
+    /// Allocate process-local request and optional asset identity together
+    /// with the semantic input sequence, then return the reducer's exact
+    /// platform jobs. Stable authored or presentation asset IDs remain
+    /// caller-supplied through `explicit_asset_id`; absent IDs are memoized by
+    /// exact URI only for this AppStore session.
+    pub fn request_session_asset_load(
+        &self,
+        uri: String,
+        media_type: Option<String>,
+        scope: AssetLoadScope,
+        explicit_asset_id: Option<AssetId>,
+    ) -> Result<AssetLoadRequest, ReduceError> {
+        let request = {
+            let mut state = self.lock_state();
+            let mut staged = state.clone();
+            let (request_id, asset) = staged.allocate_session_asset_request(
+                uri,
+                media_type,
+                explicit_asset_id,
+            )?;
+            let sequence = staged
+                .next_direct_input_sequence
+                .ok_or(ReduceError::InputSequenceExhausted)?;
+            let at_seconds = staged.frame_elapsed_seconds;
+            let commit = staged.reduce(AppEvent::Input(Timed {
+                sequence,
+                at_seconds,
+                value: SemanticAction::RequestAsset {
+                    request_id,
+                    asset: asset.clone(),
+                    scope,
+                },
+            }))?;
+            let mut jobs = AssetEffectJobs::from_commit(&commit)?;
+            let fetch = jobs.fetch.take().ok_or(ReduceError::EffectContract(
+                "an accepted asset request emitted no fetch job",
+            ))?;
+            if fetch.request_id != request_id || fetch.asset != asset {
+                return Err(ReduceError::EffectContract(
+                    "an asset request fetch job diverged from its allocated intent",
+                ));
+            }
+            if jobs.install.is_some() {
+                return Err(ReduceError::EffectContract(
+                    "an asset request unexpectedly emitted an install job",
+                ));
+            }
+            let request = AssetLoadRequest {
+                sequence,
+                commit,
+                fetch,
+                load_cancellations: jobs.load_cancellations,
+                install_cancellations: jobs.install_cancellations,
+            };
+            *state = staged;
+            request
+        };
+        if request.commit.published_ui {
+            self.flush_read_models();
+        }
+        Ok(request)
+    }
+
     /// Complete one platform acquisition and expose any resulting primary
     /// install authorization without leaking generic reducer effects to the
     /// adapter.
@@ -3359,6 +3473,8 @@ pub enum ReduceError {
     InvalidRenderSettings(&'static str),
     EffectContract(&'static str),
     InputSequenceExhausted,
+    SessionRequestIdentityExhausted,
+    SessionAssetIdentityExhausted,
     AnimationClipJobExhausted,
     PatchLabJobExhausted,
     FutureEffectInput,
@@ -3401,6 +3517,12 @@ impl fmt::Display for ReduceError {
             }
             Self::InputSequenceExhausted => {
                 formatter.write_str("local semantic input sequence is exhausted")
+            }
+            Self::SessionRequestIdentityExhausted => {
+                formatter.write_str("session asset-request identity sequence is exhausted")
+            }
+            Self::SessionAssetIdentityExhausted => {
+                formatter.write_str("session asset identity sequence is exhausted")
             }
             Self::AnimationClipJobExhausted => {
                 formatter.write_str("animation clip selection job sequence is exhausted")
@@ -4244,6 +4366,109 @@ mod tests {
                 asset_id: chess.id,
             }],
         );
+    }
+
+    #[test]
+    fn session_asset_requests_allocate_and_memoize_correlation_identity() {
+        let store = AppStore::default();
+        let first = store
+            .request_session_asset_load(
+                "horse.glb".to_owned(),
+                Some("model/gltf-binary".to_owned()),
+                AssetLoadScope::Asset,
+                None,
+            )
+            .unwrap();
+        assert_eq!(first.sequence, 0);
+        assert_eq!(
+            first.fetch.request_id,
+            RequestId::from_u128(SESSION_REQUEST_ID_PREFIX | 1).unwrap(),
+        );
+        assert_eq!(
+            first.fetch.asset.id,
+            AssetId::from_u128(SESSION_ASSET_ID_PREFIX | 1).unwrap(),
+        );
+
+        let repeated = store
+            .request_session_asset_load(
+                "horse.glb".to_owned(),
+                Some("model/gltf-binary".to_owned()),
+                AssetLoadScope::Asset,
+                None,
+            )
+            .unwrap();
+        assert_eq!(repeated.sequence, 1);
+        assert_eq!(
+            repeated.fetch.request_id,
+            RequestId::from_u128(SESSION_REQUEST_ID_PREFIX | 2).unwrap(),
+        );
+        assert_eq!(repeated.fetch.asset.id, first.fetch.asset.id);
+
+        let authored = asset(99, "authored.glb");
+        let explicit = store
+            .request_session_asset_load(
+                authored.uri.clone(),
+                None,
+                AssetLoadScope::PrimaryScene,
+                Some(authored.id),
+            )
+            .unwrap();
+        assert_eq!(explicit.sequence, 2);
+        assert_eq!(explicit.fetch.asset.id, authored.id);
+
+        let different = store
+            .request_session_asset_load(
+                "chess.glb".to_owned(),
+                None,
+                AssetLoadScope::Asset,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            different.fetch.asset.id,
+            AssetId::from_u128(SESSION_ASSET_ID_PREFIX | 2).unwrap(),
+        );
+    }
+
+    #[test]
+    fn exhausted_session_identity_allocation_is_transactional() {
+        let mut state = AppState {
+            next_session_request_ordinal: None,
+            ..AppState::default()
+        };
+        let expected = state.clone();
+        let store = AppStore::new(state.clone());
+        assert_eq!(
+            store.request_session_asset_load(
+                "horse.glb".to_owned(),
+                None,
+                AssetLoadScope::Asset,
+                None,
+            ),
+            Err(ReduceError::SessionRequestIdentityExhausted),
+        );
+        state = store.lock_state().clone();
+        assert_eq!(state.revision, expected.revision);
+        assert_eq!(state.session_assets_by_uri, expected.session_assets_by_uri);
+        assert_eq!(
+            state.next_session_asset_ordinal,
+            expected.next_session_asset_ordinal,
+        );
+
+        let store = AppStore::new(AppState {
+            next_session_asset_ordinal: None,
+            ..AppState::default()
+        });
+        assert_eq!(
+            store.request_session_asset_load(
+                "horse.glb".to_owned(),
+                None,
+                AssetLoadScope::Asset,
+                None,
+            ),
+            Err(ReduceError::SessionAssetIdentityExhausted),
+        );
+        assert_eq!(store.lock_state().revision, 0);
     }
 
     #[test]

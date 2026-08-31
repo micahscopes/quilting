@@ -19,6 +19,10 @@ for (const required of [
   'pub struct AssetEffectJobs',
   'pub struct AssetLoadRequest',
   'pub fn request_asset_load(',
+  'pub fn request_session_asset_load(',
+  'fn allocate_session_asset_request(',
+  'const SESSION_REQUEST_ID_PREFIX:',
+  'const SESSION_ASSET_ID_PREFIX:',
   'self.dispatch_semantic(SemanticAction::RequestAsset',
   'let mut jobs = AssetEffectJobs::from_commit(&commit)?;',
   'load_cancellations: jobs.load_cancellations',
@@ -32,7 +36,9 @@ for (const required of [
   '#[wasm_bindgen(js_name = requestAsset)]',
   '#[wasm_bindgen(js_name = requestPrimaryAsset)]',
   '#[wasm_bindgen(js_name = requestAssetLoad)]',
+  '#[wasm_bindgen(js_name = requestSessionAssetLoad)]',
   '.request_asset_load(',
+  '.request_session_asset_load(',
   'ShadowAssetLoadRequest',
   'ShadowAssetFetchJob::from(request.fetch)',
   'ShadowAssetJobIdentity::from',
@@ -46,6 +52,7 @@ assert.ok(requestStart >= 0 && requestEnd > requestStart,
   'could not locate browser asset-request adapter');
 const request = browser.slice(requestStart, requestEnd);
 for (const required of [
+  'rustAppShadow.requestSessionAssetLoad(',
   'rustAppShadow.requestAssetLoad(',
   "observeRustAppShadowSequence(receipt.sequence, 'Rust asset request')",
   'fetch: receipt.fetch,',
@@ -53,6 +60,25 @@ for (const required of [
   'installCancellations: receipt.installCancellations,',
 ]) {
   assert.ok(request.includes(required), `thin asset-request adapter is missing ${required}`);
+}
+const rustAuthorityStart = request.indexOf(
+  "if (RUST_ASSET_IMPLEMENTATION === 'rust')",
+);
+const rollbackStart = request.indexOf('} else {', rustAuthorityStart);
+assert.ok(rustAuthorityStart >= 0 && rollbackStart > rustAuthorityStart,
+  'asset-request adapter must preserve an explicit Rust/fallback split');
+const rustAuthority = request.slice(rustAuthorityStart, rollbackStart);
+for (const required of [
+  'rustAppShadow.requestSessionAssetLoad(',
+  'requestId = receipt.fetch.requestId;',
+  'assetId = receipt.fetch.assetId;',
+]) {
+  assert.ok(rustAuthority.includes(required),
+    `Rust asset identity authority is missing ${required}`);
+}
+for (const retired of ['appShadowUuid(', 'appShadowAssetId(']) {
+  assert.equal(rustAuthority.includes(retired), false,
+    `Rust asset identity authority must not call ${retired}`);
 }
 for (const retired of [
   'rustAppShadow.requestAsset.bind(',

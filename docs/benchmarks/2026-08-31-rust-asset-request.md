@@ -13,6 +13,12 @@ array to discover cancellations. `BrowserAssetEffectHost` receives typed jobs
 and limits itself to platform responsibilities: abort controllers, acquisition
 fences, and serialized decode/install work.
 
+The default Rust lane also allocates process-local request IDs and memoized
+URI-to-asset IDs inside `AppState`, transactionally with the request commit.
+Presentation/authored asset IDs remain explicit inputs. JavaScript retains its
+former UUID allocation only behind the `assetimpl=js|shadow` rollback lanes;
+the Rust lane reads both identities back from the typed fetch job.
+
 ## Rollback and next boundary
 
 The explicitly sequenced `requestAsset` and `requestPrimaryAsset` methods
@@ -33,6 +39,8 @@ claim the entire loading pipeline has crossed the typed boundary.
   AppStore/WASM/browser path, rejects generic request-effect filtering, and
   parses both browser modules without compiling WASM.
 
-Focused Rust, wasm32, and live-browser checks remain required when system
-headroom permits. No Trunk, binding-generation, or Binaryen step is part of
-this source cut.
+The four focused session-identity native tests passed, as did the incremental
+`wasm32-unknown-unknown` `quilting-wasm` check with `leptos-ui`. The targeted
+source oracle passed and parsed the browser module. Live-browser validation
+still requires a later binding refresh; no Trunk, binding-generation, or
+Binaryen step was part of this source cut.

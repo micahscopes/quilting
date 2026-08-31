@@ -23,8 +23,8 @@ use hyperscope_app::{
     AnimationClipSelectionOutcome, AnimationClipSelectionReadModel, AnimationClock,
     AnimationPoseRequestDisposition, AnimationPoseScheduler, AnimationPoseStamp, AppCommit,
     AppEffect, AppEvent, AppFrameSnapshot, AppStore, AssetFetchJob, AssetJobIdentity,
-    AssetLoadCompletion, AssetLoadCompletionDispatch, AssetLoadOutcome, AssetLoadScope,
-    AssetMetadata, AssetReadModel, AssetStatus, AuthoredRevision, CommitDisposition,
+    AssetLoadCompletion, AssetLoadCompletionDispatch, AssetLoadOutcome, AssetLoadRequest,
+    AssetLoadScope, AssetMetadata, AssetReadModel, AssetStatus, AuthoredRevision, CommitDisposition,
     FocusPostprocessMode, FocusPostprocessSettings, FrameTick, InstalledPrimarySceneReadModel,
     LocalPeerDisposition, LocalPeerIngress, LocalPeerLane,
     LocalPeerReceipt, NavigationSettings,
@@ -563,21 +563,43 @@ impl HyperscopeAppShadow {
                 scope,
             )
             .map_err(js_error)?;
-        to_js(&ShadowAssetLoadRequest {
-            sequence: request.sequence.to_string(),
-            commit: shadow_commit(&request.commit),
-            fetch: ShadowAssetFetchJob::from(request.fetch),
-            load_cancellations: request
-                .load_cancellations
-                .into_iter()
-                .map(ShadowAssetJobIdentity::from)
-                .collect(),
-            install_cancellations: request
-                .install_cancellations
-                .into_iter()
-                .map(ShadowAssetJobIdentity::from)
-                .collect(),
-        })
+        asset_load_request_to_js(request)
+    }
+
+    /// Allocate browser-session correlation identities in Rust. An explicit
+    /// asset ID preserves authored/presentation identity; an empty value asks
+    /// the AppStore to memoize a process-local ID by exact URI.
+    #[wasm_bindgen(js_name = requestSessionAssetLoad)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn request_session_asset_load(
+        &self,
+        explicit_asset_id: &str,
+        uri: &str,
+        media_type: &str,
+        scope: &str,
+    ) -> Result<JsValue, JsValue> {
+        let scope = match scope {
+            "asset" => AssetLoadScope::Asset,
+            "primary_scene" => AssetLoadScope::PrimaryScene,
+            _ => {
+                return Err(JsValue::from_str(
+                    "asset scope must be asset or primary_scene",
+                ))
+            }
+        };
+        let explicit_asset_id = (!explicit_asset_id.is_empty())
+            .then(|| asset_id_from_str(explicit_asset_id))
+            .transpose()?;
+        let request = self
+            .store
+            .request_session_asset_load(
+                uri.to_owned(),
+                (!media_type.is_empty()).then(|| media_type.to_owned()),
+                scope,
+                explicit_asset_id,
+            )
+            .map_err(js_error)?;
+        asset_load_request_to_js(request)
     }
 
     #[wasm_bindgen(js_name = cancelAsset)]
@@ -3347,6 +3369,24 @@ struct ShadowAssetLoadCompletion {
     commit: ShadowCommit,
     install: Option<ShadowAssetJobIdentity>,
     asset: Option<ShadowAsset>,
+}
+
+fn asset_load_request_to_js(request: AssetLoadRequest) -> Result<JsValue, JsValue> {
+    to_js(&ShadowAssetLoadRequest {
+        sequence: request.sequence.to_string(),
+        commit: shadow_commit(&request.commit),
+        fetch: ShadowAssetFetchJob::from(request.fetch),
+        load_cancellations: request
+            .load_cancellations
+            .into_iter()
+            .map(ShadowAssetJobIdentity::from)
+            .collect(),
+        install_cancellations: request
+            .install_cancellations
+            .into_iter()
+            .map(ShadowAssetJobIdentity::from)
+            .collect(),
+    })
 }
 
 fn asset_load_completion_to_js(dispatch: AssetLoadCompletionDispatch) -> Result<JsValue, JsValue> {
