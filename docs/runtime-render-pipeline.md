@@ -167,6 +167,10 @@ and WebGPU `PatchRenderScene` retain clones of that exact `Arc`-backed scene;
 WebGPU no longer rewrites a backend-local revision, clones member tables, or
 revalidates a second snapshot. `renderSceneExtractions` and
 `renderSceneExtractionFailures` make that low-rate boundary measurable.
+The one-shot backend image-evidence request first synchronizes pending retained
+batches and preflights PBR support against this same current scene allocation;
+it no longer constructs a request-local snapshot that could disagree with the
+epoch published on the following frame.
 Prepared-patch, focus-PBR, resident-root, and adaptive-overlay entry points all
 call the ordinary `RenderFrame::execution`
 seam before device work, so a plan-built frame automatically uses retained

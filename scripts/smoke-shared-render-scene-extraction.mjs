@@ -63,6 +63,23 @@ assert.ok(submit.includes('renderer.validated_render_scene.as_ref()'),
 assert.equal(submit.includes('extract_render_scene(renderer)'), false,
   'WebGPU submission must not independently extract a second scene');
 
+const evidenceStart = renderer.indexOf('pub fn mr_request_backend_frame_evidence()');
+const evidenceEnd = renderer.indexOf(
+  '\n#[cfg(feature = "webgpu-backend")]\n#[wasm_bindgen(js_name = "mr_compareBackendFrameEvidence")]',
+  evidenceStart,
+);
+const evidence = renderer.slice(evidenceStart, evidenceEnd);
+assert.ok(evidenceStart >= 0 && evidenceEnd > evidenceStart,
+  'could not locate backend frame evidence request');
+assert.ok(evidence.includes('sync_render_batches(state);'),
+  'backend evidence must synchronize pending batch semantics');
+assert.ok(evidence.includes('refresh_validated_render_scene(state, true)'),
+  'backend evidence must refresh the shared validated scene epoch');
+assert.ok(evidence.includes('scene.snapshot().revision == state.render_command_builds'),
+  'backend evidence must preflight the current structural revision');
+assert.equal(evidence.includes('extract_render_scene(state)'), false,
+  'backend evidence must not independently extract a private scene');
+
 for (const required of [
   'ValidatedRenderScene::new(render_scene.clone())',
   '.upload_validated_patch_render_scene(',

@@ -3133,16 +3133,31 @@ pub fn mr_request_backend_frame_evidence() -> Result<bool, JsValue> {
                     "PBR backend evidence requires a headless WebGPU device with resident environment maps",
                 ));
             }
-            let scene = extract_render_scene(state).map_err(|error| JsValue::from_str(&error))?;
+            // Evidence must preflight the exact structural epoch that the next
+            // WebGPU frame will publish. Synchronize pending batch semantics
+            // and cross the shared validation boundary once instead of
+            // constructing a private request-time snapshot.
+            sync_render_batches(state);
+            refresh_validated_render_scene(state, true)
+                .map_err(|error| JsValue::from_str(&error))?;
+            let scene = state
+                .validated_render_scene
+                .as_ref()
+                .filter(|scene| scene.snapshot().revision == state.render_command_builds)
+                .ok_or_else(|| {
+                    JsValue::from_str(
+                        "PBR backend evidence requires the current validated render scene",
+                    )
+                })?;
             let options = RenderFrameOptions {
                 focus_postprocess: state.focus_postprocess,
                 highlight_face: u32::try_from(state.highlight_face).ok(),
                 matcap_style: state.matcap_style,
             };
             let supported = if options.focus_postprocess.is_some() {
-                quilting_webgpu::supports_focus_pbr_frame(&scene, options)
+                quilting_webgpu::supports_focus_pbr_frame(scene.snapshot(), options)
             } else {
-                quilting_webgpu::supports_basic_pbr_frame(&scene, options)
+                quilting_webgpu::supports_basic_pbr_frame(scene.snapshot(), options)
             };
             if !supported {
                 return Err(JsValue::from_str(
