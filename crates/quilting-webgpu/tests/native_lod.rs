@@ -26,7 +26,7 @@ use quilting_webgpu::{
     resident_root_render_domains, supports_basic_pbr_frame, supports_focus_pbr_frame,
     supports_patch_presentation_style, supports_resident_root_render_scene,
     supports_resident_root_render_style, LodClassifierDevice, LodPose, OffscreenPatchRenderTarget,
-    PatchRenderSceneUpdate, PbrTextureTableUpdate,
+    PatchRenderSceneUpdate, PbrTextureTableUpdate, PoseUploadPolicy,
 };
 
 #[test]
@@ -1159,6 +1159,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 &target,
                 LodPose::default(),
                 0,
+                PoseUploadPolicy::Publish,
                 true,
             )
             .unwrap();
@@ -1228,6 +1229,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 &target,
                 LodPose::default(),
                 0,
+                PoseUploadPolicy::Publish,
                 true,
             )
             .unwrap();
@@ -1271,6 +1273,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 &target,
                 LodPose::default(),
                 0,
+                PoseUploadPolicy::Publish,
                 true,
             )
             .unwrap();
@@ -1326,6 +1329,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                     &target,
                     LodPose::default(),
                     0,
+                    PoseUploadPolicy::Publish,
                     true,
                 )
                 .unwrap();
@@ -1382,6 +1386,7 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 &target,
                 LodPose::default(),
                 0,
+                PoseUploadPolicy::Publish,
                 true,
             )
             .unwrap();

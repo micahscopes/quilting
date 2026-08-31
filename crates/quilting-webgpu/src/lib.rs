@@ -293,6 +293,21 @@ pub struct LodPose<'a> {
     pub morph_weights: &'a [f32],
 }
 
+/// Whether a retained preparation family must publish its dynamic pose inputs
+/// before encoding. `Reuse` is valid only while the caller retains the exact
+/// model and preparation epoch that received the previous successful publish.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PoseUploadPolicy {
+    Publish,
+    Reuse,
+}
+
+impl PoseUploadPolicy {
+    const fn should_publish(self) -> bool {
+        matches!(self, Self::Publish)
+    }
+}
+
 /// Bounded evidence returned after the shared device conformance matrix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LodDeviceConformance {
@@ -2292,6 +2307,7 @@ impl LodClassifierDevice {
                 },
                 LodPose::default(),
                 0,
+                PoseUploadPolicy::Publish,
                 true,
             )?
         };
@@ -2596,6 +2612,7 @@ impl LodClassifierDevice {
                 },
                 LodPose::default(),
                 0,
+                PoseUploadPolicy::Publish,
                 true,
             )?
         };
@@ -2745,6 +2762,7 @@ impl LodClassifierDevice {
                 &focus_output,
                 LodPose::default(),
                 0,
+                PoseUploadPolicy::Publish,
                 true,
             )?
         };
@@ -2870,6 +2888,7 @@ impl LodClassifierDevice {
                         },
                         LodPose::default(),
                         0,
+                        PoseUploadPolicy::Publish,
                         true,
                     )
                 },
@@ -2936,6 +2955,7 @@ impl LodClassifierDevice {
                 &surface_focus_target,
                 LodPose::default(),
                 0,
+                PoseUploadPolicy::Publish,
                 true,
             )?;
             let SurfacePresentation::Presented(surface_focus_encoding) = surface_focus_presented

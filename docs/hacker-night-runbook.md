@@ -47,7 +47,8 @@ Only a final artifact whose download size is being measured should opt into
 Binaryen explicitly:
 
 ```sh
-HYPERSCOPE_WASM_OPT=1 HYPERSCOPE_BUILD_JOBS=2 trunk build --release
+HYPERSCOPE_ARTIFACT_BUILD=1 HYPERSCOPE_WASM_OPT=1 \
+  HYPERSCOPE_BUILD_JOBS=2 trunk build --release
 ```
 
 With Blender installed, also run

@@ -22,10 +22,10 @@ use quilting_webgpu::{
     FocusPbrRenderResources, LodClassifierDevice, LodClassifierModel, LodPose,
     OffscreenPatchRenderTarget, PackedPatchAtlas, PatchFrameEncoding, PatchPickPipeline,
     PatchPickRequest, PatchPickTarget, PatchPresentationSurface, PatchRenderScene,
-    PatchRenderSceneUpdate, PbrEnvironmentMap, PbrTextureTable, ResidentGeometryBucketScene,
-    ResidentRootPickPipeline, ResidentRootPreparationScene, ResidentRootRenderBindings,
-    ResidentRootRenderPipeline, StagedOffscreenImageReadback, StagedPatchPickReadback,
-    SurfacePresentation, WebGpuAdapterSummary,
+    PatchRenderSceneUpdate, PbrEnvironmentMap, PbrTextureTable, PoseUploadPolicy,
+    ResidentGeometryBucketScene, ResidentRootPickPipeline, ResidentRootPreparationScene,
+    ResidentRootRenderBindings, ResidentRootRenderPipeline, StagedOffscreenImageReadback,
+    StagedPatchPickReadback, SurfacePresentation, WebGpuAdapterSummary,
 };
 use serde::Serialize;
 use std::cell::RefCell;
@@ -78,6 +78,8 @@ struct WebGpuBackend {
     visibility_upload_bytes: u64,
     fallback_pose_uploads: u64,
     fallback_pose_reuses: u64,
+    resident_pose_uploads: u64,
+    resident_pose_reuses: u64,
     device_lod_dispatches: u64,
     device_lod_frames: u64,
     resident_root_scene_uploads: u64,
@@ -236,6 +238,8 @@ pub(crate) struct WebGpuBackendDiagnostics {
     visibility_upload_bytes: u64,
     fallback_pose_uploads: u64,
     fallback_pose_reuses: u64,
+    resident_pose_uploads: u64,
+    resident_pose_reuses: u64,
     device_lod_dispatches: u64,
     device_lod_frames: u64,
     resident_root_pipeline_ready: bool,
@@ -441,6 +445,8 @@ impl WebGpuBackend {
             visibility_upload_bytes: self.visibility_upload_bytes,
             fallback_pose_uploads: self.fallback_pose_uploads,
             fallback_pose_reuses: self.fallback_pose_reuses,
+            resident_pose_uploads: self.resident_pose_uploads,
+            resident_pose_reuses: self.resident_pose_reuses,
             device_lod_dispatches: self.device_lod_dispatches,
             device_lod_frames: self.device_lod_frames,
             resident_root_pipeline_ready: self.resident_root_pipeline.is_some(),
@@ -1936,6 +1942,11 @@ pub(crate) fn submit_frame(
         let pose_upload_required = backend.last_frame_input.is_none()
             || backend.last_joint_matrices != joint_matrices
             || backend.last_morph_weights != effective_morph_weights;
+        let pose_upload = if pose_upload_required {
+            PoseUploadPolicy::Publish
+        } else {
+            PoseUploadPolicy::Reuse
+        };
         let unchanged = backend.last_frame_input == Some(frame_input)
             && (device_lod_epoch.is_some()
                 || backend.last_face_visibility_bits == face_visibility_bits)
@@ -2146,6 +2157,7 @@ pub(crate) fn submit_frame(
                                 focus_target,
                                 pose,
                                 num_joints,
+                                pose_upload,
                                 true,
                             ) {
                                 Ok(SurfacePresentation::Presented(encoding)) => {
@@ -2180,6 +2192,7 @@ pub(crate) fn submit_frame(
                                 atlas,
                                 pose,
                                 num_joints,
+                                pose_upload,
                                 true,
                             )
                         }
@@ -2279,6 +2292,7 @@ pub(crate) fn submit_frame(
                                     target,
                                     pose,
                                     num_joints,
+                                    pose_upload,
                                     true,
                                 )
                                 .map(|encoding| encoding.scene)
@@ -2305,6 +2319,7 @@ pub(crate) fn submit_frame(
                                 target,
                                 pose,
                                 num_joints,
+                                pose_upload,
                                 true,
                             )
                         }
@@ -2380,6 +2395,13 @@ pub(crate) fn submit_frame(
                 backend.last_frame_input = Some(frame_input);
                 if resident_root_frame {
                     backend.resident_root_frames = backend.resident_root_frames.saturating_add(1);
+                    if pose_upload_required {
+                        backend.resident_pose_uploads =
+                            backend.resident_pose_uploads.saturating_add(1);
+                    } else {
+                        backend.resident_pose_reuses =
+                            backend.resident_pose_reuses.saturating_add(1);
+                    }
                 }
                 if focus_frame {
                     backend.focus_frames = backend.focus_frames.saturating_add(1);

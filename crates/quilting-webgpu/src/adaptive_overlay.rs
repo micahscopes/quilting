@@ -475,6 +475,7 @@ impl LodClassifierDevice {
         target: PatchRenderTarget<'resource>,
         pose: LodPose<'_>,
         num_joints: u32,
+        pose_upload: PoseUploadPolicy,
         use_qb: bool,
     ) -> Result<AdaptiveOverlayFrameEncoding, LodWebGpuError> {
         self.encode_adaptive_overlay_impl(
@@ -491,6 +492,7 @@ impl LodClassifierDevice {
             pose,
             num_joints,
             use_qb,
+            pose_upload.should_publish(),
             true,
             true,
         )
@@ -512,6 +514,7 @@ impl LodClassifierDevice {
         pose: LodPose<'_>,
         num_joints: u32,
         use_qb: bool,
+        publish_pose_state: bool,
         write_dynamic_pose: bool,
         validate_frame: bool,
     ) -> Result<AdaptiveOverlayFrameEncoding, LodWebGpuError> {
@@ -524,10 +527,12 @@ impl LodClassifierDevice {
             pipelines,
             validate_frame,
         )?;
-        if write_dynamic_pose {
-            self.write_adaptive_overlay_pose_state(model, overlay, pose, num_joints)?;
-        } else {
-            self.write_patch_joint_count(&overlay.patches, num_joints);
+        if publish_pose_state {
+            if write_dynamic_pose {
+                self.write_adaptive_overlay_pose_state(model, overlay, pose, num_joints)?;
+            } else {
+                self.write_patch_joint_count(&overlay.patches, num_joints);
+            }
         }
         self.write_adaptive_overlay_frames(frame, overlay, use_qb)?;
 
@@ -717,6 +722,7 @@ impl LodClassifierDevice {
         target: PatchRenderTarget<'resource>,
         pose: LodPose<'_>,
         num_joints: u32,
+        pose_upload: PoseUploadPolicy,
         use_qb: bool,
     ) -> Result<ResidentAdaptiveFrameEncoding, LodWebGpuError> {
         let logical_submission = frame
@@ -766,6 +772,7 @@ impl LodClassifierDevice {
             },
             pose,
             num_joints,
+            pose_upload,
             use_qb,
         )?;
         let overlay_encoding = overlay
@@ -790,6 +797,7 @@ impl LodClassifierDevice {
                     pose,
                     num_joints,
                     use_qb,
+                    pose_upload.should_publish(),
                     false,
                     false,
                 )
@@ -825,6 +833,7 @@ impl LodClassifierDevice {
         output_target: &'resource OffscreenPatchRenderTarget,
         pose: LodPose<'_>,
         num_joints: u32,
+        pose_upload: PoseUploadPolicy,
         use_qb: bool,
     ) -> Result<FocusResidentAdaptiveFrameEncoding, LodWebGpuError> {
         self.encode_focus_resident_adaptive_to_target(
@@ -849,6 +858,7 @@ impl LodClassifierDevice {
             },
             pose,
             num_joints,
+            pose_upload,
             use_qb,
         )
     }
@@ -873,6 +883,7 @@ impl LodClassifierDevice {
         output_target: FocusFrameTarget<'resource>,
         pose: LodPose<'_>,
         num_joints: u32,
+        pose_upload: PoseUploadPolicy,
         use_qb: bool,
     ) -> Result<FocusResidentAdaptiveFrameEncoding, LodWebGpuError> {
         let logical_submission = frame
@@ -937,6 +948,7 @@ impl LodClassifierDevice {
             Some(focus_target.raw_field_view()),
             pose,
             num_joints,
+            pose_upload,
             use_qb,
         )?;
         let overlay_encoding = overlay
@@ -961,6 +973,7 @@ impl LodClassifierDevice {
                     pose,
                     num_joints,
                     use_qb,
+                    pose_upload.should_publish(),
                     false,
                     false,
                 )
@@ -1007,6 +1020,7 @@ impl LodClassifierDevice {
         output_target: &OffscreenPatchRenderTarget,
         pose: LodPose<'_>,
         num_joints: u32,
+        pose_upload: PoseUploadPolicy,
         use_qb: bool,
     ) -> Result<FocusPatchFrameEncoding, LodWebGpuError> {
         let mut encoder = self
@@ -1032,6 +1046,7 @@ impl LodClassifierDevice {
             output_target,
             pose,
             num_joints,
+            pose_upload,
             use_qb,
         )?;
         self.queue.submit([encoder.finish()]);
@@ -1064,6 +1079,7 @@ impl LodClassifierDevice {
         focus_target: &FocusPostprocessTarget,
         pose: LodPose<'_>,
         num_joints: u32,
+        pose_upload: PoseUploadPolicy,
         use_qb: bool,
     ) -> Result<SurfacePresentation<FocusPatchFrameEncoding>, LodWebGpuError> {
         let surface_size = surface.size();
@@ -1105,6 +1121,7 @@ impl LodClassifierDevice {
                     },
                     pose,
                     num_joints,
+                    pose_upload,
                     use_qb,
                 )
                 .map(|encoding| FocusPatchFrameEncoding {
@@ -1134,6 +1151,7 @@ impl LodClassifierDevice {
         target: &OffscreenPatchRenderTarget,
         pose: LodPose<'_>,
         num_joints: u32,
+        pose_upload: PoseUploadPolicy,
         use_qb: bool,
     ) -> Result<PatchFrameEncoding, LodWebGpuError> {
         if frame.view.viewport != target.size {
@@ -1174,6 +1192,7 @@ impl LodClassifierDevice {
             },
             pose,
             num_joints,
+            pose_upload,
             use_qb,
         )?;
         self.queue.submit([encoder.finish()]);
@@ -1199,6 +1218,7 @@ impl LodClassifierDevice {
         atlas: &PackedPatchAtlas,
         pose: LodPose<'_>,
         num_joints: u32,
+        pose_upload: PoseUploadPolicy,
         use_qb: bool,
     ) -> Result<SurfacePresentation<PatchFrameEncoding>, LodWebGpuError> {
         surface.present_with(
@@ -1228,6 +1248,7 @@ impl LodClassifierDevice {
                     target,
                     pose,
                     num_joints,
+                    pose_upload,
                     use_qb,
                 )
                 .map(resident_adaptive_frame_evidence)

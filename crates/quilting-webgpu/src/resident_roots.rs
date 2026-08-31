@@ -1278,6 +1278,7 @@ impl LodClassifierDevice {
         target: PatchRenderTarget<'resource>,
         pose: LodPose<'_>,
         num_joints: u32,
+        pose_upload: PoseUploadPolicy,
         use_qb: bool,
     ) -> Result<ResidentRootFrameEncoding, LodWebGpuError> {
         self.encode_resident_roots_with_raw_field(
@@ -1295,6 +1296,7 @@ impl LodClassifierDevice {
             None,
             pose,
             num_joints,
+            pose_upload,
             use_qb,
         )
     }
@@ -1316,6 +1318,7 @@ impl LodClassifierDevice {
         raw_field_target: Option<&'resource wgpu::TextureView>,
         pose: LodPose<'_>,
         num_joints: u32,
+        pose_upload: PoseUploadPolicy,
         use_qb: bool,
     ) -> Result<ResidentRootFrameEncoding, LodWebGpuError> {
         frame
@@ -1366,7 +1369,9 @@ impl LodClassifierDevice {
             ));
         }
         self.write_resident_root_render_frames(bindings, frame, &preparation.draw_domains, use_qb)?;
-        self.write_resident_root_preparation_pose(model, preparation, pose, num_joints)?;
+        if pose_upload.should_publish() {
+            self.write_resident_root_preparation_pose(model, preparation, pose, num_joints)?;
+        }
         self.encode_resident_root_preparation(preparation, resident, encoder)?;
         self.encode_resident_root_visibility(preparation, geometry, bindings, encoder)?;
         self.encode_resident_geometry_buckets(geometry, resident, encoder)?;
@@ -1537,6 +1542,7 @@ impl LodClassifierDevice {
         output_target: &'resource OffscreenPatchRenderTarget,
         pose: LodPose<'_>,
         num_joints: u32,
+        pose_upload: PoseUploadPolicy,
         use_qb: bool,
     ) -> Result<FocusResidentRootFrameEncoding, LodWebGpuError> {
         if frame.view.viewport != focus_target.size() || frame.view.viewport != output_target.size {
@@ -1577,6 +1583,7 @@ impl LodClassifierDevice {
             Some(focus_target.raw_field_view()),
             pose,
             num_joints,
+            pose_upload,
             use_qb,
         )?;
         let postprocess = self.encode_focus_postprocess(
@@ -1608,6 +1615,7 @@ impl LodClassifierDevice {
         output_target: &OffscreenPatchRenderTarget,
         pose: LodPose<'_>,
         num_joints: u32,
+        pose_upload: PoseUploadPolicy,
         use_qb: bool,
     ) -> Result<FocusPatchFrameEncoding, LodWebGpuError> {
         let logical_submission = resident_root_frame_submission(frame, render_scene)?;
@@ -1632,6 +1640,7 @@ impl LodClassifierDevice {
             output_target,
             pose,
             num_joints,
+            pose_upload,
             use_qb,
         )?;
         self.queue.submit([encoder.finish()]);
@@ -1660,6 +1669,7 @@ impl LodClassifierDevice {
         target: &OffscreenPatchRenderTarget,
         pose: LodPose<'_>,
         num_joints: u32,
+        pose_upload: PoseUploadPolicy,
         use_qb: bool,
     ) -> Result<PatchFrameEncoding, LodWebGpuError> {
         let logical_submission = resident_root_frame_submission(frame, render_scene)?;
@@ -1699,6 +1709,7 @@ impl LodClassifierDevice {
             },
             pose,
             num_joints,
+            pose_upload,
             use_qb,
         )?;
         self.queue.submit([encoder.finish()]);
@@ -1723,6 +1734,7 @@ impl LodClassifierDevice {
         atlas: &PackedPatchAtlas,
         pose: LodPose<'_>,
         num_joints: u32,
+        pose_upload: PoseUploadPolicy,
         use_qb: bool,
     ) -> Result<SurfacePresentation<PatchFrameEncoding>, LodWebGpuError> {
         let logical_submission = resident_root_frame_submission(frame, render_scene)?;
@@ -1751,6 +1763,7 @@ impl LodClassifierDevice {
                     target,
                     pose,
                     num_joints,
+                    pose_upload,
                     use_qb,
                 )?;
                 Ok(resident_root_frame_evidence(logical_submission, encoding))
