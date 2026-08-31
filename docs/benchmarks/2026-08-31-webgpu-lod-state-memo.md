@@ -50,10 +50,9 @@ upload, and the shared packer currently reconstructs the node-to-dense-row map
 with a `BTreeMap` on every request. Retaining that immutable lookup in the
 uploaded model is the next bounded CPU reduction.
 
-Classification and resident LOD reconciliation also still use two command
-encoders and two queue submissions in the browser path. They have a direct
-same-encoder dependency and are the next higher-value submission consolidation;
-neither requires readback.
+Classification and resident LOD reconciliation subsequently moved into one
+ordered command encoder and submission without readback; see
+`2026-08-31-webgpu-lod-single-submit.md`.
 
 ## Verification
 

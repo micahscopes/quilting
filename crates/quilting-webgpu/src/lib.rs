@@ -8194,12 +8194,12 @@ impl LodClassifierDevice {
     /// after one classifier output. Ten bounded Jacobi passes reach the least
     /// fixed point over the classifier's four-bit exponent lattice; the final
     /// pass re-canonicalizes topology and performs the resident atlas lookup.
-    pub fn encode_resident_lod_reconciliation<'classification>(
+    pub fn encode_resident_lod_reconciliation<'model>(
         &self,
-        classification: &'classification DeviceLodClassification<'_>,
+        classification: &DeviceLodClassification<'model>,
         grading: FaceLodGrading,
         encoder: &mut wgpu::CommandEncoder,
-    ) -> DeviceResidentLod<'classification> {
+    ) -> DeviceResidentLod<'model> {
         let model = classification.model;
         let groups = classification.face_count.div_ceil(LOD_WORKGROUP_SIZE);
         if groups != 0 {
@@ -8277,11 +8277,11 @@ impl LodClassifierDevice {
     /// Submit resident reconciliation without staging or readback. Callers
     /// building a larger render graph should prefer
     /// [`Self::encode_resident_lod_reconciliation`].
-    pub fn reconcile_resident_lod_on_device<'classification>(
+    pub fn reconcile_resident_lod_on_device<'model>(
         &self,
-        classification: &'classification DeviceLodClassification<'_>,
+        classification: &DeviceLodClassification<'model>,
         grading: FaceLodGrading,
-    ) -> DeviceResidentLod<'classification> {
+    ) -> DeviceResidentLod<'model> {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -8312,6 +8312,32 @@ impl LodClassifierDevice {
         let output = self.encode_lod_classification(model, &mut encoder)?;
         self.queue.submit([encoder.finish()]);
         Ok(output)
+    }
+
+    /// Publish classifier inputs, classify, and reconcile one resident LOD
+    /// epoch in a single ordered GPU submission. The lower-level encode and
+    /// submit helpers remain available for diagnostics and custom graphs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn classify_and_reconcile_on_device<'model>(
+        &self,
+        model: &'model mut LodClassifierModel,
+        dispatch: &LodDispatchState,
+        metrics: WgslLodDispatchMetrics,
+        pose: LodPose<'_>,
+        pose_upload: PoseUploadPolicy,
+        grading: FaceLodGrading,
+    ) -> Result<DeviceResidentLod<'model>, LodWebGpuError> {
+        self.write_lod_classification_state(model, dispatch, metrics, pose, pose_upload)?;
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quilting classified resident LOD graph"),
+            });
+        let classification = self.encode_lod_classification(model, &mut encoder)?;
+        let resident =
+            self.encode_resident_lod_reconciliation(&classification, grading, &mut encoder);
+        self.queue.submit([encoder.finish()]);
+        Ok(resident)
     }
 
     /// Copy a device-resident result into temporary staging for conformance or

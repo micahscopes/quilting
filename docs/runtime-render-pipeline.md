@@ -243,6 +243,10 @@ table. Camera-only requests therefore reuse subject residency, identical
 requests write neither half, and subject packing reuses retained scratch
 storage. `lodStateUploads`, `lodStateReuses`, and `lodStateUploadBytes` expose
 the resulting device-lifetime queue traffic independently of pose uploads.
+The browser's classifier and resident reconciliation now form one ordered
+WebGPU command graph and one queue submission. The intermediate packed LOD
+table never crosses back to the CPU; the separately submitted helpers remain
+only as diagnostic/custom-graph primitives and a rollback seam.
 `resolvedExecutionFrames`, `resolvedExecutionFallbacks`, and
 `lastExecutionError` make that gate observable through the existing render
 shadow diagnostics. Shadow scene validation and WebGL PBR lowering now happen

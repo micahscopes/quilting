@@ -1342,8 +1342,8 @@ pub(crate) fn dispatch_lod(
                 .as_mut()
                 .ok_or_else(|| "ready WebGPU backend has no model".to_string())?;
             device.invalidate_resident_lod(model);
-            let classification = device
-                .classify_on_device(
+            let resident = device
+                .classify_and_reconcile_on_device(
                     model,
                     &dispatch,
                     metrics,
@@ -1352,13 +1352,10 @@ pub(crate) fn dispatch_lod(
                         morph_weights,
                     },
                     pose_upload,
+                    grading,
                 )
                 .map_err(|error| error.to_string())?;
-            Ok::<_, String>(
-                device
-                    .reconcile_resident_lod_on_device(&classification, grading)
-                    .classification_epoch(),
-            )
+            Ok::<_, String>(resident.classification_epoch())
         })();
         let epoch = match epoch_result {
             Ok(epoch) => epoch,
