@@ -21,6 +21,8 @@ for (const required of [
   'pub fn set_presentation_animation_residency(',
   'SemanticAction::Present(action)',
   'let effects = AnimationClipEffects::from_commit(&commit);',
+  'active: self',
+  '.and_then(|presentation| presentation.active)',
   'selection: effects.selection',
   'cancellations: effects.cancellations',
 ]) {
@@ -43,6 +45,7 @@ for (const retired of ['commit.effects', 'AppEffect::', 'for effect in']) {
 }
 for (const required of [
   'committed.commit.revision',
+  'serde_wasm_bindgen::to_value(&committed.active)',
   'effect.scene_request_id.to_string()',
   'effect.asset_id.to_string()',
 ]) {
@@ -56,6 +59,7 @@ for (const required of [
   '#[wasm_bindgen(js_name = unsetPresentationAnimationResidency)]',
   '.dispatch_presentation(presentation_action_from_wire(action, cue_id)?)',
   'ShadowPresentationDispatch',
+  'active: dispatch.active',
   'ShadowPresentationAnimationResidencyDispatch',
   'ShadowAnimationClipJobEffect::selection',
   'ShadowAnimationClipJobEffect::cancellation',
@@ -70,6 +74,7 @@ assert.ok(dispatchStart >= 0 && dispatchEnd > dispatchStart,
 const dispatch = browser.slice(dispatchStart, dispatchEnd);
 for (const required of [
   'rustAppShadow.requestPresentation(direction, cueId || \'\')',
+  'active = cacheAppActivePresentation(receipt.active, commit);',
   'clipJob = { effect: receipt.selection, cancellations: receipt.cancellations };',
   'rustAppShadow.present(',
 ]) {
@@ -79,10 +84,19 @@ for (const retired of [
   'rustAppShadow.dispatchPresentation(direction, cueId',
   'receipt.commit.effects',
   'effect.type ===',
+  'const active = refreshAppShadowSnapshot()?.presentation?.active;',
 ]) {
   assert.equal(dispatch.includes(retired), false,
     `ordinary presentation dispatch must not retain ${retired}`);
 }
+
+const cardStart = browser.indexOf('function consumeRustPresentationCardCommit(');
+const cardEnd = browser.indexOf('function activateRustPresentation(', cardStart);
+const card = browser.slice(cardStart, cardEnd);
+assert.ok(card.includes('cacheAppActivePresentation(active, commit)'),
+  'presentation card commits must consume their typed active cue');
+assert.equal(card.includes('refreshAppShadowSnapshot()'), false,
+  'presentation card commits must not serialize the complete application state');
 
 const effectsStart = browser.indexOf('function observePresentationClipJob(job, context) {');
 const effectsEnd = browser.indexOf(

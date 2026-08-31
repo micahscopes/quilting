@@ -1847,6 +1847,7 @@ impl HyperscopeAppShadow {
         to_js(&ShadowPresentationDispatch {
             sequence: dispatch.sequence.to_string(),
             commit: shadow_commit(&dispatch.commit),
+            active: dispatch.active,
             selection: dispatch
                 .selection
                 .as_ref()
@@ -3769,6 +3770,7 @@ fn primary_scene_install_completion_to_js(
 struct ShadowPresentationDispatch {
     sequence: String,
     commit: ShadowCommit,
+    active: Option<PresentationSnapshot>,
     selection: Option<ShadowAnimationClipJobEffect>,
     cancellations: Vec<ShadowAnimationClipJobEffect>,
 }

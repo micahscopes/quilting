@@ -871,10 +871,11 @@ pub struct PrimarySceneInstallCompletionDispatch {
 
 /// Typed presentation action result, including any renderer clip jobs emitted
 /// transactionally with the cue change.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PresentationDispatch {
     pub sequence: u64,
     pub commit: AppCommit,
+    pub active: Option<PresentationSnapshot>,
     pub selection: Option<AnimationClipJobEffect>,
     pub cancellations: Vec<AnimationClipJobEffect>,
 }
@@ -2592,6 +2593,9 @@ impl AppStore {
         Ok(PresentationDispatch {
             sequence,
             commit,
+            active: self
+                .presentation_snapshot()
+                .and_then(|presentation| presentation.active),
             selection: effects.selection,
             cancellations: effects.cancellations,
         })

@@ -136,6 +136,17 @@ fn activate(
     arguments.push(&JsValue::from_str(action_name));
     arguments.push(&JsValue::from(committed.sequence));
     arguments.push(&JsValue::from(committed.commit.revision));
+    let active = match serde_wasm_bindgen::to_value(&committed.active) {
+        Ok(active) => active,
+        Err(error) => {
+            emit_error(
+                error_callback,
+                &format!("active presentation cue serialization failed: {error}"),
+            );
+            return;
+        }
+    };
+    arguments.push(&active);
     arguments.push(
         &committed
             .selection

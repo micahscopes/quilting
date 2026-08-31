@@ -1884,6 +1884,7 @@ dependencies = [
  "leptos",
  "send_wrapper",
  "serde",
+ "serde-wasm-bindgen",
  "serde_json",
  "thiserror 2.0.18",
  "tiny_http",

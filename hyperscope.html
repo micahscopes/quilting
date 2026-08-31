@@ -3187,12 +3187,13 @@ function ensureRustPresentationView() {
     rustAppShadow.mountPresentationCard(
       host,
       () => prepareRustPresentationAction(),
-      (direction, sequence, revision, effect, cancellations) => {
+      (direction, sequence, revision, active, effect, cancellations) => {
         try {
           consumeRustPresentationCardCommit(
             direction,
             sequence,
             revision,
+            active,
             effect,
             cancellations,
           );
@@ -3805,10 +3806,23 @@ function applyRustPresentationCommit(snapshot, navigation, clipJob = null) {
   return snapshot;
 }
 
+function cacheAppActivePresentation(active, commit) {
+  const current = rustAppShadowDiagnostics.snapshot;
+  if (current?.presentation) {
+    rustAppShadowDiagnostics.snapshot = {
+      ...current,
+      revision: commit?.revision ?? current.revision,
+      presentation: { ...current.presentation, active },
+    };
+  }
+  return active;
+}
+
 function consumeRustPresentationCardCommit(
   direction,
   sequence,
   revision,
+  active,
   effect,
   cancellations,
 ) {
@@ -3824,7 +3838,7 @@ function consumeRustPresentationCardCommit(
     effects,
   };
   rustAppShadowDiagnostics.lastCommit = commit;
-  const snapshot = refreshAppShadowSnapshot()?.presentation?.active;
+  const snapshot = cacheAppActivePresentation(active, commit);
   if (!snapshot) throw new Error(`presentation action ${direction} produced no active cue`);
   rustAppPresentationPoseReady = true;
   rustPresentationDiagnostics.viewDispatches += 1;
@@ -5948,11 +5962,13 @@ function compareAppPresentationPose(expected, actual) {
 function dispatchAppPresentation(direction, cueId) {
   if (!rustAppShadow) throw new Error('Rust application boundary is unavailable');
   let commit;
+  let active;
   let clipJob = null;
   if (presentationAppAuthority()) {
     const receipt = rustAppShadow.requestPresentation(direction, cueId || '');
     observeRustAppShadowSequence(receipt.sequence, 'Rust presentation adapter');
     commit = receipt.commit;
+    active = cacheAppActivePresentation(receipt.active, commit);
     clipJob = { effect: receipt.selection, cancellations: receipt.cancellations };
   } else {
     commit = rustAppShadow.present(
@@ -5960,9 +5976,9 @@ function dispatchAppPresentation(direction, cueId) {
       direction,
       cueId || '',
     );
+    active = refreshAppShadowSnapshot()?.presentation?.active;
   }
   rustAppShadowDiagnostics.lastCommit = commit;
-  const active = refreshAppShadowSnapshot()?.presentation?.active;
   return { commit, active, clipJob };
 }
 

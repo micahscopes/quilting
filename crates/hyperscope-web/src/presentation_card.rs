@@ -304,6 +304,7 @@ mod tests {
             activate_presentation_card(&store, PresentationCardAction::Advance).unwrap();
         assert_eq!(advanced.sequence, 2);
         assert_eq!(advanced.commit.revision, 7);
+        assert_eq!(advanced.active.as_ref().unwrap().cue_index, 1);
         assert_eq!(
             advanced.selection,
             Some(PresentationAnimationClipEffect {
