@@ -624,6 +624,9 @@ const RUST_RENDER_SETTINGS_IMPLEMENTATION = implementationFromRoute(
 const RUST_PATCH_LAB_IMPLEMENTATION = implementationFromRoute(
   initialBrowserParams, 'patchlabimpl',
 );
+const LOD_IMPLEMENTATION = implementationFromRoute(
+  initialBrowserParams, 'lodimpl',
+);
 const EXPLICIT_RUST_APP_SHADOW_ENABLED =
   bootstrapToggleFromRoute(initialBrowserParams, 'appshadow');
 const RUST_APP_SHADOW_ENABLED =
@@ -635,6 +638,7 @@ const RUST_APP_SHADOW_ENABLED =
   || ANIMATION_CLIP_IMPLEMENTATION !== 'js'
   || RUST_RENDER_SETTINGS_IMPLEMENTATION !== 'js'
   || RUST_PATCH_LAB_IMPLEMENTATION !== 'js'
+  || LOD_IMPLEMENTATION !== 'js'
   || PICK_IMPLEMENTATION !== 'js'
   || RUST_SELECTION_IMPLEMENTATION !== 'js'
   || RUST_SCENE_IMPLEMENTATION !== 'js'
@@ -648,9 +652,6 @@ const RUST_RENDER_SHADOW_ENABLED =
 const GRAPHICS_BACKEND_REQUEST = graphicsBackendFromRoute(initialBrowserParams);
 const WEBGPU_SHADOW_ENABLED = GRAPHICS_BACKEND_REQUEST !== 'webgl2'
   || PICK_IMPLEMENTATION !== 'js';
-const LOD_IMPLEMENTATION = implementationFromRoute(
-  initialBrowserParams, 'lodimpl',
-);
 const RUST_ADAPTIVE_ROOT_SHADOW_ENABLED =
   bootstrapToggleFromRoute(initialBrowserParams, 'adaptiveshadow');
 const INCREMENTAL_ROOT_GROUP_SHADOW_ENABLED =
@@ -681,6 +682,9 @@ globalThis.__hyperscopeGraphicsBackend = graphicsBackendDiagnostics;
 
 const webGpuLodAuthorityDiagnostics = {
   requested: GRAPHICS_BACKEND_REQUEST === 'webgpu',
+  implementation: LOD_IMPLEMENTATION,
+  effectiveAuthority: LOD_IMPLEMENTATION === 'rust' ? 'awaiting-rust' : 'js-oracle',
+  effectiveActive: false,
   active: false,
   state: GRAPHICS_BACKEND_REQUEST === 'webgpu' ? 'awaiting-presentation' : 'disabled',
   activations: 0,
@@ -689,8 +693,135 @@ const webGpuLodAuthorityDiagnostics = {
   fallbackTransitions: 0,
   lastTransitionReason: null,
   incumbentResetPending: false,
+  rust: null,
+  comparisons: 0,
+  mismatchCount: 0,
+  mismatches: [],
+  errorCount: 0,
+  errors: [],
+  refresh() {
+    return refreshRustWebGpuLodAuthorityDiagnostics();
+  },
 };
 globalThis.__hyperscopeWebGpuLodAuthority = webGpuLodAuthorityDiagnostics;
+
+const WEBGPU_LOD_COMPLETE_SCENE = 1 << 0;
+const WEBGPU_LOD_DEVICE_AUTHORITY = 1 << 1;
+const WEBGPU_LOD_INCUMBENT_REQUIRED = 1 << 2;
+const WEBGPU_LOD_INCUMBENT_RESET_PENDING = 1 << 3;
+const WEBGPU_LOD_STALE_COMPLETION = 1 << 4;
+const WEBGPU_LOD_INCUMBENT_RECOVERED = 1 << 5;
+const WEBGPU_LOD_PARITY_MASK = WEBGPU_LOD_COMPLETE_SCENE
+  | WEBGPU_LOD_DEVICE_AUTHORITY
+  | WEBGPU_LOD_INCUMBENT_REQUIRED
+  | WEBGPU_LOD_INCUMBENT_RESET_PENDING
+  | WEBGPU_LOD_INCUMBENT_RECOVERED;
+let rustWebGpuLodAuthorityFlags = 0;
+let rustWebGpuLodAuthorityOperational = false;
+
+function browserWebGpuLodAuthorityFlags(extraFlags = 0) {
+  let flags = extraFlags;
+  if (webGpuLodAuthorityDiagnostics.active) flags |= WEBGPU_LOD_DEVICE_AUTHORITY;
+  if (webGpuLodAuthorityDiagnostics.incumbentResetPending) {
+    flags |= WEBGPU_LOD_INCUMBENT_RESET_PENDING;
+  }
+  return flags;
+}
+
+function webGpuLodAuthorityEffectivelyActive() {
+  const active = LOD_IMPLEMENTATION === 'rust' && rustWebGpuLodAuthorityOperational
+    ? (rustWebGpuLodAuthorityFlags & WEBGPU_LOD_DEVICE_AUTHORITY) !== 0
+    : webGpuLodAuthorityDiagnostics.active;
+  webGpuLodAuthorityDiagnostics.effectiveActive = active;
+  webGpuLodAuthorityDiagnostics.effectiveAuthority =
+    LOD_IMPLEMENTATION === 'rust' && rustWebGpuLodAuthorityOperational
+      ? 'rust'
+      : LOD_IMPLEMENTATION === 'rust' ? 'js-oracle-fallback' : 'js-oracle';
+  return active;
+}
+
+function incumbentLodResetEffectivelyPending() {
+  return LOD_IMPLEMENTATION === 'rust' && rustWebGpuLodAuthorityOperational
+    ? (rustWebGpuLodAuthorityFlags & WEBGPU_LOD_INCUMBENT_RESET_PENDING) !== 0
+    : webGpuLodAuthorityDiagnostics.incumbentResetPending;
+}
+
+function refreshRustWebGpuLodAuthorityDiagnostics() {
+  if (!rustAppShadow || LOD_IMPLEMENTATION === 'js') {
+    return webGpuLodAuthorityDiagnostics.rust;
+  }
+  try {
+    webGpuLodAuthorityDiagnostics.rust =
+      rustAppShadow.webGpuLodAuthorityDiagnostics();
+  } catch (error) {
+    recordRustWebGpuLodAuthorityError(error, 'diagnostics');
+  }
+  return webGpuLodAuthorityDiagnostics.rust;
+}
+
+function recordRustWebGpuLodAuthorityError(error, context) {
+  const message = `${context}: ${error?.message || String(error)}`;
+  webGpuLodAuthorityDiagnostics.errorCount += 1;
+  webGpuLodAuthorityDiagnostics.errors.push(message);
+  if (webGpuLodAuthorityDiagnostics.errors.length > 16) {
+    webGpuLodAuthorityDiagnostics.errors.splice(
+      0,
+      webGpuLodAuthorityDiagnostics.errors.length - 16,
+    );
+  }
+  rustWebGpuLodAuthorityOperational = false;
+  webGpuLodAuthorityEffectivelyActive();
+  const count = webGpuLodAuthorityDiagnostics.errorCount;
+  if (count === 1 || (count & (count - 1)) === 0) {
+    console.warn('Rust WebGPU LOD authority unavailable; using JS oracle:', error);
+  }
+}
+
+function recordWebGpuLodAuthorityParity(context, browserFlags, rustFlags) {
+  if (rustFlags === null) return;
+  webGpuLodAuthorityDiagnostics.comparisons += 1;
+  const browserDecision = browserFlags & WEBGPU_LOD_PARITY_MASK;
+  const rustDecision = rustFlags & WEBGPU_LOD_PARITY_MASK;
+  if (browserDecision !== rustDecision) {
+    webGpuLodAuthorityDiagnostics.mismatchCount += 1;
+    webGpuLodAuthorityDiagnostics.mismatches.push({
+      context,
+      browserFlags: browserDecision,
+      rustFlags: rustDecision,
+    });
+    if (webGpuLodAuthorityDiagnostics.mismatches.length > 16) {
+      webGpuLodAuthorityDiagnostics.mismatches.splice(
+        0,
+        webGpuLodAuthorityDiagnostics.mismatches.length - 16,
+      );
+    }
+  }
+}
+
+function callRustWebGpuLodAuthority(method, context, ...args) {
+  if (LOD_IMPLEMENTATION === 'js' || !rustAppShadow) return null;
+  try {
+    const previousState = rustWebGpuLodAuthorityFlags
+      & (WEBGPU_LOD_DEVICE_AUTHORITY | WEBGPU_LOD_INCUMBENT_RESET_PENDING);
+    const flags = rustAppShadow[method](...args);
+    rustWebGpuLodAuthorityFlags = flags;
+    rustWebGpuLodAuthorityOperational = true;
+    webGpuLodAuthorityEffectivelyActive();
+    const nextState = flags
+      & (WEBGPU_LOD_DEVICE_AUTHORITY | WEBGPU_LOD_INCUMBENT_RESET_PENDING);
+    if (previousState !== nextState) refreshRustWebGpuLodAuthorityDiagnostics();
+    return flags;
+  } catch (error) {
+    recordRustWebGpuLodAuthorityError(error, context);
+    return null;
+  }
+}
+
+function chooseWebGpuLodAuthorityFlag(rustFlags, flag, browserValue) {
+  return LOD_IMPLEMENTATION === 'rust' && rustFlags !== null
+    ? (rustFlags & flag) !== 0
+    : browserValue;
+}
 
 const backendPickDiagnostics = {
   enabled: PICK_IMPLEMENTATION !== 'js',
@@ -783,8 +914,26 @@ function synchronizeGraphicsBackendPresentation() {
   webglCanvas.classList.toggle('webgpu-input-layer', presenting);
   const previousEffective = graphicsBackendDiagnostics.effective;
   graphicsBackendDiagnostics.effective = presenting ? 'webgpu' : 'webgl2';
-  if (previousEffective === 'webgpu' && !presenting) {
-    retireWebGpuLodAuthority('WebGPU presentation retired');
+  if (previousEffective !== graphicsBackendDiagnostics.effective) {
+    const browserRetired = previousEffective === 'webgpu' && !presenting
+      ? retireWebGpuLodAuthority('WebGPU presentation retired')
+      : false;
+    const browserFlags = browserWebGpuLodAuthorityFlags(
+      browserRetired ? WEBGPU_LOD_INCUMBENT_REQUIRED : 0,
+    );
+    const rustFlags = callRustWebGpuLodAuthority(
+      'observeWebGpuLodPresentation',
+      'presentation-transition',
+      presenting,
+    );
+    recordWebGpuLodAuthorityParity('presentation-transition', browserFlags, rustFlags);
+    if (chooseWebGpuLodAuthorityFlag(
+      rustFlags,
+      WEBGPU_LOD_INCUMBENT_REQUIRED,
+      browserRetired,
+    )) {
+      requireIncumbentLodRecovery();
+    }
   }
   if (GRAPHICS_BACKEND_REQUEST === 'webgpu') {
     if (failed) {
@@ -1001,7 +1150,7 @@ function updateSameContextLodDiagnostics(snapshot) {
     Object.assign(sameContextLodDiagnostics, snapshot);
   }
   sameContextLodDiagnostics.requestedImplementation = LOD_IMPLEMENTATION;
-  if (webGpuLodAuthorityDiagnostics.active) {
+  if (webGpuLodAuthorityEffectivelyActive()) {
     sameContextLodDiagnostics.effectiveAuthority = 'webgpu-device';
     sameContextLodDiagnostics.state = 'device-authority';
     return sameContextLodDiagnostics;
@@ -1082,10 +1231,7 @@ function scheduleSameContextLodPoll() {
       }
       if (LOD_IMPLEMENTATION === 'rust'
           && Number(snapshot.authoritative_publications) > previousPublications) {
-        webGpuLodAuthorityDiagnostics.incumbentResetPending = false;
-        if (!webGpuLodAuthorityDiagnostics.active) {
-          webGpuLodAuthorityDiagnostics.state = 'incumbent';
-        }
+        completeIncumbentLodRecovery(true, 'same-context-publication');
         const batchGroupMs = consumeBatchMeasure(
           'batch-group', 'batch-group-start', 'batch-group-end',
         );
@@ -10878,12 +11024,8 @@ function activateWebGpuLodAuthority() {
       'presenting WebGPU accepted a complete device LOD epoch';
   }
   webGpuLodAuthorityDiagnostics.state = 'device-resident';
-  // The incumbent delta encoder becomes dormant while WebGPU owns LOD. Its
-  // first rollback publication must therefore restart from a full snapshot.
-  lodDeltaResetPending = true;
   webGpuLodAuthorityDiagnostics.incumbentResetPending = true;
-  sameContextLodDiagnostics.effectiveAuthority = 'webgpu-device';
-  sameContextLodDiagnostics.state = 'device-authority';
+  return browserWebGpuLodAuthorityFlags();
 }
 
 function retireWebGpuLodAuthority(reason) {
@@ -10893,13 +11035,53 @@ function retireWebGpuLodAuthority(reason) {
   webGpuLodAuthorityDiagnostics.fallbackTransitions += 1;
   webGpuLodAuthorityDiagnostics.lastTransitionReason = reason;
   webGpuLodAuthorityDiagnostics.incumbentResetPending = true;
+  return true;
+}
+
+function applyWebGpuDeviceLodAuthority() {
+  // The incumbent delta encoder becomes dormant while WebGPU owns LOD. Its
+  // first rollback publication must therefore restart from a full snapshot.
+  lodDeltaResetPending = true;
+  sameContextLodDiagnostics.effectiveAuthority = 'webgpu-device';
+  sameContextLodDiagnostics.state = 'device-authority';
+}
+
+function requireIncumbentLodRecovery() {
   lodDeltaResetPending = true;
   lodFullSceneDirty = true;
   lodDirty = true;
   if (!lodInFlight && meshInfo && !remeshedMode && !patchLab.active) {
     debouncedLodRecompute();
   }
-  return true;
+}
+
+function completeIncumbentLodRecovery(fullSnapshot, context) {
+  let browserExtraFlags = 0;
+  if (!webGpuLodAuthorityDiagnostics.active
+      && webGpuLodAuthorityDiagnostics.incumbentResetPending) {
+    if (fullSnapshot) {
+      webGpuLodAuthorityDiagnostics.incumbentResetPending = false;
+      webGpuLodAuthorityDiagnostics.state = 'incumbent';
+      browserExtraFlags |= WEBGPU_LOD_INCUMBENT_RECOVERED;
+    } else {
+      browserExtraFlags |= WEBGPU_LOD_INCUMBENT_REQUIRED;
+    }
+  }
+  const browserFlags = browserWebGpuLodAuthorityFlags(browserExtraFlags);
+  const rustFlags = callRustWebGpuLodAuthority(
+    'completeIncumbentLodRecovery',
+    context,
+    fullSnapshot,
+  );
+  recordWebGpuLodAuthorityParity(context, browserFlags, rustFlags);
+  if (chooseWebGpuLodAuthorityFlag(
+    rustFlags,
+    WEBGPU_LOD_INCUMBENT_RESET_PENDING,
+    webGpuLodAuthorityDiagnostics.incumbentResetPending,
+  )) {
+    lodDeltaResetPending = true;
+  }
+  webGpuLodAuthorityEffectivelyActive();
 }
 
 function animationPoseStampFromPacket() {
@@ -11324,19 +11506,49 @@ async function recomputeLods() {
 
     let resetDelta = lodDeltaResetPending;
     const deviceAuthorityEligible = webGpuLodAuthorityEligible();
+    let browserRetiredBeforeDispatch = false;
     if (webGpuLodAuthorityDiagnostics.active && !deviceAuthorityEligible) {
-      if (retireWebGpuLodAuthority('WebGPU presentation is no longer authoritative')) {
-        resetDelta = true;
-      }
+      browserRetiredBeforeDispatch = retireWebGpuLodAuthority(
+        'WebGPU presentation is no longer authoritative',
+      );
     }
     if (WEBGPU_SHADOW_ENABLED) {
+      let rustBeginFlags = null;
       try {
         // Once the visible WebGPU surface is proven, keep the complete scene
         // coherent on that device. A primary-only dispatch would deliberately
         // invalidate the device epoch and force the incumbent readback path.
-        const deviceFullScene = deviceAuthorityEligible;
+        const browserBeginFlags = browserWebGpuLodAuthorityFlags(
+          (deviceAuthorityEligible ? WEBGPU_LOD_COMPLETE_SCENE : 0)
+          | (browserRetiredBeforeDispatch ? WEBGPU_LOD_INCUMBENT_REQUIRED : 0),
+        );
+        rustBeginFlags = callRustWebGpuLodAuthority(
+          'beginWebGpuLodDispatch',
+          'device-dispatch-begin',
+          deviceAuthorityEligible,
+        );
+        recordWebGpuLodAuthorityParity(
+          'device-dispatch-begin',
+          browserBeginFlags,
+          rustBeginFlags,
+        );
+        if (chooseWebGpuLodAuthorityFlag(
+          rustBeginFlags,
+          WEBGPU_LOD_INCUMBENT_REQUIRED,
+          browserRetiredBeforeDispatch,
+        )) {
+          requireIncumbentLodRecovery();
+          resetDelta = true;
+        }
+        const deviceFullScene = chooseWebGpuLodAuthorityFlag(
+          rustBeginFlags,
+          WEBGPU_LOD_COMPLETE_SCENE,
+          deviceAuthorityEligible,
+        );
         webGpuLodAuthorityDiagnostics.dispatches += 1;
-        if (deviceFullScene) webGpuLodAuthorityDiagnostics.fullSceneDispatches += 1;
+        if (deviceAuthorityEligible) {
+          webGpuLodAuthorityDiagnostics.fullSceneDispatches += 1;
+        }
         const deviceLodDispatched = quiltingWasmBackend.mr_dispatchWebGpuLod(
           lodPoseAnimated,
           lodPose?.t ?? 0,
@@ -11357,22 +11569,71 @@ async function recomputeLods() {
         graphicsBackendDiagnostics.deviceLodState = deviceLodDispatched
           ? 'resident' : (primaryOnly ? 'partial-fallback' : 'awaiting-residency');
         graphicsBackendDiagnostics.deviceLodError = null;
+        let browserCompletionExtra = 0;
         if (deviceLodDispatched && deviceAuthorityEligible) {
           activateWebGpuLodAuthority();
+        } else if (!deviceLodDispatched
+            && retireWebGpuLodAuthority('WebGPU rejected the complete device LOD dispatch')) {
+          browserCompletionExtra |= WEBGPU_LOD_INCUMBENT_REQUIRED;
+        }
+        const browserCompletionFlags = browserWebGpuLodAuthorityFlags(
+          browserCompletionExtra,
+        );
+        const rustCompletionFlags = rustBeginFlags === null ? null
+          : callRustWebGpuLodAuthority(
+            'completeWebGpuLodDispatch',
+            'device-dispatch-complete',
+            deviceLodDispatched,
+          );
+        recordWebGpuLodAuthorityParity(
+          'device-dispatch-complete',
+          browserCompletionFlags,
+          rustCompletionFlags,
+        );
+        if (chooseWebGpuLodAuthorityFlag(
+          rustCompletionFlags,
+          WEBGPU_LOD_INCUMBENT_REQUIRED,
+          browserCompletionExtra !== 0,
+        )) {
+          requireIncumbentLodRecovery();
+          resetDelta = true;
+        }
+        if (chooseWebGpuLodAuthorityFlag(
+          rustCompletionFlags,
+          WEBGPU_LOD_DEVICE_AUTHORITY,
+          deviceLodDispatched && deviceAuthorityEligible,
+        )) {
+          applyWebGpuDeviceLodAuthority();
           lodTelemetry.submitted += 1;
           if (lodPose) lodTelemetry.poseSubmittedRevision = lodPose.revision;
           lodInFlight = false;
           lodTelemetry.inFlight = false;
           return;
         }
-        if (!deviceLodDispatched && webGpuLodAuthorityDiagnostics.active
-            && retireWebGpuLodAuthority('WebGPU rejected the complete device LOD dispatch')) {
-          resetDelta = true;
-        }
       } catch (error) {
         graphicsBackendDiagnostics.deviceLodState = 'fallback';
         graphicsBackendDiagnostics.deviceLodError = error?.message || String(error);
-        if (retireWebGpuLodAuthority('WebGPU device LOD dispatch failed')) resetDelta = true;
+        const browserRetired = retireWebGpuLodAuthority(
+          'WebGPU device LOD dispatch failed',
+        );
+        const browserFlags = browserWebGpuLodAuthorityFlags(
+          browserRetired ? WEBGPU_LOD_INCUMBENT_REQUIRED : 0,
+        );
+        const rustFlags = rustBeginFlags === null ? null
+          : callRustWebGpuLodAuthority(
+            'completeWebGpuLodDispatch',
+            'device-dispatch-error',
+            false,
+          );
+        recordWebGpuLodAuthorityParity('device-dispatch-error', browserFlags, rustFlags);
+        if (chooseWebGpuLodAuthorityFlag(
+          rustFlags,
+          WEBGPU_LOD_INCUMBENT_REQUIRED,
+          browserRetired,
+        )) {
+          requireIncumbentLodRecovery();
+          resetDelta = true;
+        }
       }
     }
     const sameContextReady = refreshSameContextLodReadiness()
@@ -11468,9 +11729,12 @@ async function recomputeLods() {
     if (resp.lods && !remeshedMode) {
       if (!acceptLodPoseStamp(resp, lodPose)) throw new RetiredLodPublication();
       acceptLodDeltaSequence(resp, !!wt.full_snapshot);
-      if (wt.full_snapshot && !webGpuLodAuthorityDiagnostics.active) {
-        webGpuLodAuthorityDiagnostics.incumbentResetPending = false;
-        webGpuLodAuthorityDiagnostics.state = 'incumbent';
+      if (!webGpuLodAuthorityEffectivelyActive()
+          && incumbentLodResetEffectivelyPending()) {
+        completeIncumbentLodRecovery(
+          !!wt.full_snapshot,
+          'worker-publication',
+        );
       }
       const faceLods = new Float32Array(resp.lods.buffer || resp.lods);
       const classifiedFaces = Number(resp.classified_faces)
