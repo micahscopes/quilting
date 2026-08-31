@@ -23,8 +23,8 @@ use hyperscope_app::{
     AnimationClock,
     AnimationPoseRequestDisposition, AnimationPoseScheduler, AnimationPoseStamp, AppCommit,
     AppEffect, AppEvent, AppFrameSnapshot, AppStore, AssetFetchJob, AssetJobIdentity,
-    AssetLoadCompletion, AssetLoadOutcome, AssetLoadScope, AssetMetadata, AssetStatus,
-    AuthoredRevision, CommitDisposition,
+    AssetLoadCompletion, AssetLoadCompletionDispatch, AssetLoadOutcome, AssetLoadScope,
+    AssetMetadata, AssetStatus, AuthoredRevision, CommitDisposition,
     EffectCompletion, FocusPostprocessMode, FocusPostprocessSettings, FrameTick,
     LocalPeerDisposition, LocalPeerIngress, LocalPeerLane, LocalPeerReceipt, NavigationSettings,
     NavigationSettingsSynchronizationDisposition, NavigationSynchronization, PatchLabCompletion,
@@ -589,7 +589,7 @@ impl HyperscopeAppShadow {
         asset_id: &str,
         byte_length: u32,
     ) -> Result<JsValue, JsValue> {
-        self.complete_asset(
+        let dispatch = self.complete_asset(
             request_id,
             asset_id,
             AssetLoadOutcome::Loaded {
@@ -597,7 +597,8 @@ impl HyperscopeAppShadow {
                 content_digest: None,
                 metadata: AssetMetadata::default(),
             },
-        )
+        )?;
+        commit_to_js(&dispatch.commit)
     }
 
     #[wasm_bindgen(js_name = completeAssetLoadedWithMetadata)]
@@ -610,7 +611,7 @@ impl HyperscopeAppShadow {
     ) -> Result<JsValue, JsValue> {
         let metadata = serde_wasm_bindgen::from_value::<AssetMetadata>(metadata)
             .map_err(|error| js_error(format!("asset metadata is invalid: {error}")))?;
-        self.complete_asset(
+        let dispatch = self.complete_asset(
             request_id,
             asset_id,
             AssetLoadOutcome::Loaded {
@@ -618,7 +619,8 @@ impl HyperscopeAppShadow {
                 content_digest: None,
                 metadata,
             },
-        )
+        )?;
+        commit_to_js(&dispatch.commit)
     }
 
     #[wasm_bindgen(js_name = completeAssetFailed)]
@@ -630,7 +632,7 @@ impl HyperscopeAppShadow {
         message: &str,
         retryable: bool,
     ) -> Result<JsValue, JsValue> {
-        self.complete_asset(
+        let dispatch = self.complete_asset(
             request_id,
             asset_id,
             AssetLoadOutcome::Failed {
@@ -638,7 +640,69 @@ impl HyperscopeAppShadow {
                 message: message.to_owned(),
                 retryable,
             },
-        )
+        )?;
+        commit_to_js(&dispatch.commit)
+    }
+
+    /// Complete one successful acquisition and return the typed primary
+    /// install job, if the reducer admitted this as the current primary load.
+    #[wasm_bindgen(js_name = finishAssetLoaded)]
+    pub fn finish_asset_loaded(
+        &self,
+        request_id: &str,
+        asset_id: &str,
+        byte_length: u32,
+    ) -> Result<JsValue, JsValue> {
+        asset_load_completion_to_js(self.complete_asset(
+            request_id,
+            asset_id,
+            AssetLoadOutcome::Loaded {
+                byte_length: byte_length as usize,
+                content_digest: None,
+                metadata: AssetMetadata::default(),
+            },
+        )?)
+    }
+
+    #[wasm_bindgen(js_name = finishAssetLoadedWithMetadata)]
+    pub fn finish_asset_loaded_with_metadata(
+        &self,
+        request_id: &str,
+        asset_id: &str,
+        byte_length: u32,
+        metadata: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let metadata = serde_wasm_bindgen::from_value::<AssetMetadata>(metadata)
+            .map_err(|error| js_error(format!("asset metadata is invalid: {error}")))?;
+        asset_load_completion_to_js(self.complete_asset(
+            request_id,
+            asset_id,
+            AssetLoadOutcome::Loaded {
+                byte_length: byte_length as usize,
+                content_digest: None,
+                metadata,
+            },
+        )?)
+    }
+
+    #[wasm_bindgen(js_name = finishAssetFailed)]
+    pub fn finish_asset_failed(
+        &self,
+        request_id: &str,
+        asset_id: &str,
+        code: &str,
+        message: &str,
+        retryable: bool,
+    ) -> Result<JsValue, JsValue> {
+        asset_load_completion_to_js(self.complete_asset(
+            request_id,
+            asset_id,
+            AssetLoadOutcome::Failed {
+                code: code.to_owned(),
+                message: message.to_owned(),
+                retryable,
+            },
+        )?)
     }
 
     /// Complete the distinct renderer-install job emitted after a primary
@@ -2779,18 +2843,14 @@ impl HyperscopeAppShadow {
         request_id: &str,
         asset_id: &str,
         outcome: AssetLoadOutcome,
-    ) -> Result<JsValue, JsValue> {
-        let commit = self
-            .store
-            .dispatch(AppEvent::EffectCompleted(EffectCompletion::AssetLoad(
-                AssetLoadCompletion {
-                    request_id: request_id_from_str(request_id)?,
-                    asset_id: asset_id_from_str(asset_id)?,
-                    outcome,
-                },
-            )))
-            .map_err(js_error)?;
-        commit_to_js(&commit)
+    ) -> Result<AssetLoadCompletionDispatch, JsValue> {
+        self.store
+            .complete_asset_load(AssetLoadCompletion {
+                request_id: request_id_from_str(request_id)?,
+                asset_id: asset_id_from_str(asset_id)?,
+                outcome,
+            })
+            .map_err(js_error)
     }
 
     fn complete_primary_scene_install(
@@ -3008,6 +3068,20 @@ struct ShadowAssetLoadRequest {
     fetch: ShadowAssetFetchJob,
     load_cancellations: Vec<ShadowAssetJobIdentity>,
     install_cancellations: Vec<ShadowAssetJobIdentity>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowAssetLoadCompletion {
+    commit: ShadowCommit,
+    install: Option<ShadowAssetJobIdentity>,
+}
+
+fn asset_load_completion_to_js(dispatch: AssetLoadCompletionDispatch) -> Result<JsValue, JsValue> {
+    to_js(&ShadowAssetLoadCompletion {
+        commit: shadow_commit(&dispatch.commit),
+        install: dispatch.install.map(ShadowAssetJobIdentity::from),
+    })
 }
 
 #[derive(Serialize)]

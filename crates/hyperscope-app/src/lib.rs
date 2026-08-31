@@ -745,6 +745,15 @@ pub struct AssetLoadRequest {
     pub install_cancellations: Vec<AssetJobIdentity>,
 }
 
+/// Typed result of completing one platform asset acquisition. A successfully
+/// decoded active primary asset carries the exact subsequent install job;
+/// secondary, failed, and stale completions do not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetLoadCompletionDispatch {
+    pub commit: AppCommit,
+    pub install: Option<AssetJobIdentity>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActiveAnimationClipReadModel {
     pub scene_request_id: RequestId,
@@ -2414,6 +2423,40 @@ impl AppStore {
         })
     }
 
+    /// Complete one platform acquisition and expose any resulting primary
+    /// install authorization without leaking generic reducer effects to the
+    /// adapter.
+    pub fn complete_asset_load(
+        &self,
+        completion: AssetLoadCompletion,
+    ) -> Result<AssetLoadCompletionDispatch, ReduceError> {
+        let expected = AssetJobIdentity {
+            request_id: completion.request_id,
+            asset_id: completion.asset_id,
+        };
+        let commit = self.dispatch(AppEvent::EffectCompleted(EffectCompletion::AssetLoad(
+            completion,
+        )))?;
+        let mut jobs = AssetEffectJobs::from_commit(&commit)?;
+        if jobs.fetch.is_some()
+            || !jobs.load_cancellations.is_empty()
+            || !jobs.install_cancellations.is_empty()
+        {
+            return Err(ReduceError::EffectContract(
+                "an asset completion emitted request-stage asset jobs",
+            ));
+        }
+        if jobs.install.is_some_and(|install| install != expected) {
+            return Err(ReduceError::EffectContract(
+                "an asset completion install job diverged from its completed request",
+            ));
+        }
+        Ok(AssetLoadCompletionDispatch {
+            commit,
+            install: jobs.install.take(),
+        })
+    }
+
     /// Commit one presentation action and retain the exact renderer clip jobs
     /// generated transactionally with its cue/clock/navigation transition.
     pub fn dispatch_presentation(
@@ -3655,19 +3698,24 @@ mod tests {
         );
         assert!(replacement.install_cancellations.is_empty());
 
-        store
-            .dispatch(AppEvent::EffectCompleted(EffectCompletion::AssetLoad(
-                AssetLoadCompletion {
-                    request_id: chess_request,
-                    asset_id: chess.id,
-                    outcome: AssetLoadOutcome::Loaded {
-                        byte_length: 100,
-                        content_digest: None,
-                        metadata: AssetMetadata::default(),
-                    },
+        let decoded = store
+            .complete_asset_load(AssetLoadCompletion {
+                request_id: chess_request,
+                asset_id: chess.id,
+                outcome: AssetLoadOutcome::Loaded {
+                    byte_length: 100,
+                    content_digest: None,
+                    metadata: AssetMetadata::default(),
                 },
-            )))
+            })
             .unwrap();
+        assert_eq!(
+            decoded.install,
+            Some(AssetJobIdentity {
+                request_id: chess_request,
+                asset_id: chess.id,
+            }),
+        );
         let after_decode = store
             .request_asset_load(bathroom_request, bathroom, AssetLoadScope::PrimaryScene)
             .unwrap();

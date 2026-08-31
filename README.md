@@ -118,6 +118,7 @@ node scripts/smoke-render-settings-boundary.mjs
 node scripts/smoke-animation-clip-boundary.mjs
 node scripts/smoke-presentation-dispatch-boundary.mjs
 node scripts/smoke-asset-request-boundary.mjs
+node scripts/smoke-asset-completion-boundary.mjs
 ```
 
 Opt into Binaryen only when producing the final size-optimized artifact:

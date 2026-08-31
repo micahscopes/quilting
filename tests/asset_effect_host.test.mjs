@@ -13,16 +13,13 @@ const cancellationJob = (requestId, assetId) => ({
   assetId,
 });
 
-const installEffect = (requestId, assetId) => ({
-  type: 'install_primary_scene',
-  request_id: requestId,
-  asset_id: assetId,
+const installJob = (requestId, assetId) => ({
+  requestId,
+  assetId,
 });
 
 function authorizeInstall(host, token) {
-  return host.beginInstall(token, {
-    effects: [installEffect(token.requestId, token.assetId)],
-  });
+  return host.beginInstall(token, installJob(token.requestId, token.assetId));
 }
 
 function begin(host, {
@@ -107,7 +104,7 @@ test('shadow mode observes cancellation without changing incumbent behavior', ()
   assert.equal(host.mayInstall(second), true);
 });
 
-test('rust mode validates a full commit before superseding the current job', () => {
+test('rust mode validates a typed request before superseding the current job', () => {
   const host = new BrowserAssetEffectHost('rust');
   const first = begin(host, {
     requestId: 'request-1', assetId: 'horse', uri: 'horse.glb', scope: 'primary_scene',
@@ -134,8 +131,8 @@ test('rust mode requires the decoded completion to authorize primary installatio
   host.recordCompletion(token, 'applied');
   assert.equal(host.mayInstall(token), false);
   assert.throws(
-    () => host.beginInstall(token, { effects: [] }),
-    /exactly one matching install effect/,
+    () => host.beginInstall(token, null),
+    /primary install must be a job object/,
   );
   assert.equal(host.mayInstall(token), false);
   authorizeInstall(host, token);
@@ -165,7 +162,7 @@ test('rust mode rejects a replacement that omits the active install cancellation
   assert.equal(host.primary, first);
 });
 
-test('Rust cancellation effects abort independent same-asset jobs', () => {
+test('Rust cancellation jobs abort independent same-asset jobs', () => {
   const host = new BrowserAssetEffectHost('rust');
   const first = begin(host, {
     requestId: 'request-1', assetId: 'horse', uri: 'horse.glb',

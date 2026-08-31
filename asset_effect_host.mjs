@@ -8,27 +8,6 @@ function requiredString(value, label) {
   return value;
 }
 
-function installCommitEffects(commit) {
-  if (!commit || !Array.isArray(commit.effects)) {
-    throw new TypeError('Rust asset completion commit must contain an effects array');
-  }
-  return commit.effects;
-}
-
-function validateInstallEffect(effect) {
-  if (!effect || typeof effect !== 'object') {
-    throw new TypeError('Rust primary install effect must be an object');
-  }
-  if (effect.type === 'install_primary_scene') {
-    return Object.freeze({
-      type: effect.type,
-      requestId: requiredString(effect.request_id, 'install request ID'),
-      assetId: requiredString(effect.asset_id, 'install asset ID'),
-    });
-  }
-  throw new TypeError(`unsupported Rust primary install effect ${JSON.stringify(effect.type)}`);
-}
-
 function validateFetchJob(job) {
   if (!job || typeof job !== 'object') {
     throw new TypeError('Rust asset request must contain a typed fetch job');
@@ -40,20 +19,24 @@ function validateFetchJob(job) {
   });
 }
 
+function validateJobIdentity(job, label) {
+  if (!job || typeof job !== 'object') {
+    throw new TypeError(`${label} must be a job object`);
+  }
+  return Object.freeze({
+    requestId: requiredString(job.requestId, `${label} request ID`),
+    assetId: requiredString(job.assetId, `${label} asset ID`),
+  });
+}
+
 function validateJobList(jobs, label, stage) {
   if (!Array.isArray(jobs)) {
     throw new TypeError(`${label} must be an array`);
   }
-  return jobs.map(job => {
-    if (!job || typeof job !== 'object') {
-      throw new TypeError(`${label} must contain job objects`);
-    }
-    return Object.freeze({
-      stage,
-      requestId: requiredString(job.requestId, `${label} request ID`),
-      assetId: requiredString(job.assetId, `${label} asset ID`),
-    });
-  });
+  return jobs.map(job => Object.freeze({
+    stage,
+    ...validateJobIdentity(job, label),
+  }));
 }
 
 /**
@@ -178,22 +161,23 @@ export class BrowserAssetEffectHost {
     return { token, mismatches };
   }
 
-  beginInstall(token, commit) {
+  beginInstall(token, install) {
     if (!token || this.jobs.get(token.requestId) !== token) {
       if (this.implementation === 'rust') {
         throw new Error('primary scene install has no matching active asset job');
       }
       return { mismatches: ['primary scene install has no matching active asset job'] };
     }
-    const observedEffects = this.implementation === 'js'
-      ? []
-      : installCommitEffects(commit).map(validateInstallEffect);
-    const installs = observedEffects.filter(effect => effect.type === 'install_primary_scene');
-    const matchingInstall = installs.find(effect => effect.requestId === token.requestId);
+    const observedInstall = this.implementation === 'js'
+      ? null
+      : validateJobIdentity(install, 'primary install');
+    const matchingInstall = observedInstall?.requestId === token.requestId
+      ? observedInstall
+      : null;
     const mismatches = [];
     if (this.implementation !== 'js') {
-      if (installs.length !== 1 || !matchingInstall) {
-        mismatches.push('completion commit must contain exactly one matching install effect');
+      if (!matchingInstall) {
+        mismatches.push('completion receipt must contain one matching install job');
       } else if (matchingInstall.assetId !== token.assetId) {
         mismatches.push('install asset ID diverged');
       }

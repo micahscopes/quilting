@@ -6047,20 +6047,21 @@ function completeAppAssetShadow(token, bufferOrByteLength, metadata = null) {
     return 'invalid';
   }
   try {
-    const commit = metadata && typeof metadata === 'object'
-      ? rustAppShadow.completeAssetLoadedWithMetadata(
+    const receipt = metadata && typeof metadata === 'object'
+      ? rustAppShadow.finishAssetLoadedWithMetadata(
         token.requestId,
         token.assetId,
         byteLength,
         metadata,
       )
-      : rustAppShadow.completeAssetLoaded(token.requestId, token.assetId, byteLength);
+      : rustAppShadow.finishAssetLoaded(token.requestId, token.assetId, byteLength);
+    const commit = receipt.commit;
     rustAppShadowDiagnostics.loaded += 1;
     rustAppShadowDiagnostics.lastCommit = commit;
     if (commit.disposition === 'ignored_stale') rustAppShadowDiagnostics.staleCompletions += 1;
     browserAssetEffectHost.recordCompletion(token, commit.disposition);
     if (token.scope === 'primary_scene' && commit.disposition === 'applied') {
-      const hosted = browserAssetEffectHost.beginInstall(token, commit);
+      const hosted = browserAssetEffectHost.beginInstall(token, receipt.install);
       for (const mismatch of hosted.mismatches) {
         recordAppShadowMismatch('install_effect', `${token.uri}: ${mismatch}`);
       }
@@ -6178,13 +6179,14 @@ function failAppAssetShadow(token, code, error, retryable = false) {
   token.completed = true;
   const message = error?.message || String(error);
   try {
-    const commit = rustAppShadow.completeAssetFailed(
+    const receipt = rustAppShadow.finishAssetFailed(
       token.requestId,
       token.assetId,
       code,
       message,
       retryable,
     );
+    const commit = receipt.commit;
     rustAppShadowDiagnostics.failed += 1;
     rustAppShadowDiagnostics.lastCommit = commit;
     if (commit.disposition === 'ignored_stale') rustAppShadowDiagnostics.staleCompletions += 1;
