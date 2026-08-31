@@ -10,6 +10,7 @@
 #[cfg(feature = "replay")]
 mod replay;
 mod animation_pose;
+mod lod_authority;
 mod peer;
 mod patch_lab;
 mod presentation_animation;
@@ -18,6 +19,7 @@ mod settings;
 #[cfg(feature = "replay")]
 pub use replay::*;
 pub use animation_pose::*;
+pub use lod_authority::*;
 pub use peer::*;
 pub use patch_lab::*;
 pub use presentation_animation::*;
