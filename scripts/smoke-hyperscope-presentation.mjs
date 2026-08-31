@@ -657,11 +657,11 @@ assert.ok(
   'the Rust-authority Leptos card must dispatch directly while rollback lanes retain HTML controls',
 );
 for (const directPresentationStep of [
-  '.dispatch_semantic(SemanticAction::Present(action.semantic()))',
+  'store.dispatch_presentation(action.semantic())',
   'prepare_callback.call1(',
   'activate_presentation_card(store, action)',
   'arguments.push(&JsValue::from(committed.sequence));',
-  'arguments.push(&JsValue::from(committed.revision));',
+  'arguments.push(&JsValue::from(committed.commit.revision));',
   'presentation_clip_effect_to_js("select_animation_clip", effect)',
 ]) {
   assert.ok(
@@ -692,7 +692,7 @@ const activationAdapter = browserSource.slice(
 );
 assert.ok(
   activationAdapter.indexOf('mirrorAppPresentation(direction, cueId, snapshot)')
-    < activationAdapter.indexOf('return applyRustPresentationCommit(snapshot, navigation, commit);'),
+    < activationAdapter.indexOf('return applyRustPresentationCommit(snapshot, navigation, clipJob);'),
   'AppStore cue authority must commit before active-scene extraction during rendering',
 );
 const directPresentationAdapter = browserSource.slice(
@@ -701,7 +701,8 @@ const directPresentationAdapter = browserSource.slice(
 );
 assert.ok(
   directPresentationAdapter.includes('if (presentationAppAuthority())')
-    && directPresentationAdapter.includes('rustAppShadow.dispatchPresentation(direction, cueId || \'\')')
+    && directPresentationAdapter.includes('rustAppShadow.requestPresentation(direction, cueId || \'\')')
+    && directPresentationAdapter.includes('clipJob = { effect: receipt.selection, cancellations: receipt.cancellations };')
     && directPresentationAdapter.includes("observeRustAppShadowSequence(receipt.sequence, 'Rust presentation adapter')")
     && directPresentationAdapter.includes('rustAppShadow.present('),
   'Rust presentation adapters must allocate inside AppStore while shadow replay stays explicitly sequenced',
@@ -719,7 +720,7 @@ assert.ok(
 for (const residencyStep of [
   'rustAppShadow.bindPresentationAnimationResidency(',
   'await bindPrimaryPresentationAnimationResidency(primaryAsset.id);',
-  "effect.type === 'select_animation_clip'",
+  'const job = observePresentationClipJob(clipJob, context);',
   'committedClipJob: job,',
   'writeRustAnimationSample(rustAppShadow, null);',
 ]) {

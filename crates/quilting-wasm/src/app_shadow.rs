@@ -1640,6 +1640,29 @@ impl HyperscopeAppShadow {
         })
     }
 
+    /// Commit one cue action and expose its animation renderer jobs as typed
+    /// fields. The generic dispatch method remains the replay/rollback seam.
+    #[wasm_bindgen(js_name = requestPresentation)]
+    pub fn request_presentation(&self, action: &str, cue_id: &str) -> Result<JsValue, JsValue> {
+        let dispatch = self
+            .store
+            .dispatch_presentation(presentation_action_from_wire(action, cue_id)?)
+            .map_err(js_error)?;
+        to_js(&ShadowPresentationDispatch {
+            sequence: dispatch.sequence.to_string(),
+            commit: shadow_commit(&dispatch.commit),
+            selection: dispatch
+                .selection
+                .as_ref()
+                .map(ShadowAnimationClipJobEffect::selection),
+            cancellations: dispatch
+                .cancellations
+                .iter()
+                .map(ShadowAnimationClipJobEffect::cancellation)
+                .collect(),
+        })
+    }
+
     /// Commit explicit playback intent from a browser control or restored URL.
     #[wasm_bindgen(js_name = setAnimationPlaying)]
     pub fn set_animation_playing(
@@ -3234,6 +3257,15 @@ struct ShadowAnimationClipRequest {
     selection: Option<ShadowAnimationClipJobEffect>,
     cancellations: Vec<ShadowAnimationClipJobEffect>,
     matches_request: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowPresentationDispatch {
+    sequence: String,
+    commit: ShadowCommit,
+    selection: Option<ShadowAnimationClipJobEffect>,
+    cancellations: Vec<ShadowAnimationClipJobEffect>,
 }
 
 #[derive(Serialize)]

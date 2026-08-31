@@ -689,6 +689,55 @@ pub struct AnimationClipJobEffect {
     pub clip_index: u32,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AnimationClipEffects {
+    pub selection: Option<AnimationClipJobEffect>,
+    pub cancellations: Vec<AnimationClipJobEffect>,
+}
+
+impl AnimationClipEffects {
+    /// Project the animation renderer jobs from one trusted reducer commit.
+    /// This is the only generic-effect interpretation used by application and
+    /// view adapters.
+    pub fn from_commit(commit: &AppCommit) -> Self {
+        let mut projected = Self::default();
+        for effect in &commit.effects {
+            let job = match effect {
+                AppEffect::SelectAnimationClip {
+                    job_id,
+                    scene_request_id,
+                    asset_id,
+                    clip_index,
+                }
+                | AppEffect::CancelAnimationClipSelection {
+                    job_id,
+                    scene_request_id,
+                    asset_id,
+                    clip_index,
+                } => AnimationClipJobEffect {
+                    job_id: *job_id,
+                    scene_request_id: *scene_request_id,
+                    asset_id: *asset_id,
+                    clip_index: *clip_index,
+                },
+                _ => continue,
+            };
+            match effect {
+                AppEffect::SelectAnimationClip { .. } => {
+                    debug_assert!(projected.selection.is_none());
+                    projected.selection = Some(job);
+                }
+                AppEffect::CancelAnimationClipSelection { .. } => {
+                    projected.cancellations.push(job);
+                }
+                _ => unreachable!(),
+            }
+        }
+        debug_assert!(projected.cancellations.len() <= 1);
+        projected
+    }
+}
+
 /// Typed result of one local clip request. This is the shared application port
 /// for Leptos, WASM, and future Blender/session adapters; none of them should
 /// rediscover job semantics by filtering a generic [`AppCommit`] effect list.
@@ -700,6 +749,16 @@ pub struct AnimationClipRequest {
     pub selection: Option<AnimationClipJobEffect>,
     pub cancellations: Vec<AnimationClipJobEffect>,
     pub matches_request: bool,
+}
+
+/// Typed presentation action result, including any renderer clip jobs emitted
+/// transactionally with the cue change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresentationDispatch {
+    pub sequence: u64,
+    pub commit: AppCommit,
+    pub selection: Option<AnimationClipJobEffect>,
+    pub cancellations: Vec<AnimationClipJobEffect>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2213,39 +2272,7 @@ impl AppStore {
     ) -> Result<AnimationClipRequest, ReduceError> {
         let (sequence, commit) =
             self.dispatch_semantic(SemanticAction::Animate(AnimationAction::SelectClip(index)))?;
-        let mut selection = None;
-        let mut cancellations = Vec::new();
-        for effect in &commit.effects {
-            let job = match effect {
-                AppEffect::SelectAnimationClip {
-                    job_id,
-                    scene_request_id,
-                    asset_id,
-                    clip_index,
-                }
-                | AppEffect::CancelAnimationClipSelection {
-                    job_id,
-                    scene_request_id,
-                    asset_id,
-                    clip_index,
-                } => AnimationClipJobEffect {
-                    job_id: *job_id,
-                    scene_request_id: *scene_request_id,
-                    asset_id: *asset_id,
-                    clip_index: *clip_index,
-                },
-                _ => continue,
-            };
-            match effect {
-                AppEffect::SelectAnimationClip { .. } => {
-                    debug_assert!(selection.is_none());
-                    selection = Some(job);
-                }
-                AppEffect::CancelAnimationClipSelection { .. } => cancellations.push(job),
-                _ => unreachable!(),
-            }
-        }
-        debug_assert!(cancellations.len() <= 1);
+        let effects = AnimationClipEffects::from_commit(&commit);
         let state = self.animation_clip_selection_snapshot();
         let selected_index = state
             .pending
@@ -2256,9 +2283,25 @@ impl AppStore {
             sequence,
             commit,
             requested_index: index,
-            selection,
-            cancellations,
+            selection: effects.selection,
+            cancellations: effects.cancellations,
             matches_request: selected_index == Some(index),
+        })
+    }
+
+    /// Commit one presentation action and retain the exact renderer clip jobs
+    /// generated transactionally with its cue/clock/navigation transition.
+    pub fn dispatch_presentation(
+        &self,
+        action: PresentationAction,
+    ) -> Result<PresentationDispatch, ReduceError> {
+        let (sequence, commit) = self.dispatch_semantic(SemanticAction::Present(action))?;
+        let effects = AnimationClipEffects::from_commit(&commit);
+        Ok(PresentationDispatch {
+            sequence,
+            commit,
+            selection: effects.selection,
+            cancellations: effects.cancellations,
         })
     }
 

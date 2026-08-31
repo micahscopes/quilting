@@ -135,7 +135,7 @@ fn activate(
     let arguments = Array::new();
     arguments.push(&JsValue::from_str(action_name));
     arguments.push(&JsValue::from(committed.sequence));
-    arguments.push(&JsValue::from(committed.revision));
+    arguments.push(&JsValue::from(committed.commit.revision));
     arguments.push(
         &committed
             .selection
@@ -164,9 +164,9 @@ fn presentation_clip_effect_to_js(
         ("job_id", JsValue::from_str(&effect.job_id.to_string())),
         (
             "scene_request_id",
-            JsValue::from_str(&effect.scene_request_id),
+            JsValue::from_str(&effect.scene_request_id.to_string()),
         ),
-        ("asset_id", JsValue::from_str(&effect.asset_id)),
+        ("asset_id", JsValue::from_str(&effect.asset_id.to_string())),
         (
             "clip_index",
             JsValue::from_f64(f64::from(effect.clip_index)),

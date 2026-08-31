@@ -4,8 +4,10 @@
 //! a platform effect. This module only derives stable display state from the
 //! committed low-rate [`hyperscope_app::PresentationReadModel`].
 
-use hyperscope_app::{
-    AppEffect, AppStore, PresentationAction, PresentationReadModel, ReduceError, SemanticAction,
+use hyperscope_app::{AppStore, PresentationAction, PresentationReadModel, ReduceError};
+pub use hyperscope_app::{
+    AnimationClipJobEffect as PresentationAnimationClipEffect,
+    PresentationDispatch as PresentationCardCommit,
 };
 
 #[cfg(all(feature = "csr", target_arch = "wasm32"))]
@@ -48,69 +50,13 @@ impl PresentationCardAction {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PresentationCardCommit {
-    pub sequence: u64,
-    pub revision: u64,
-    pub selection: Option<PresentationAnimationClipEffect>,
-    pub cancellations: Vec<PresentationAnimationClipEffect>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PresentationAnimationClipEffect {
-    pub job_id: u64,
-    pub scene_request_id: String,
-    pub asset_id: String,
-    pub clip_index: u32,
-}
-
 /// Commit one card navigation action through the application reducer after a
 /// platform adapter has synchronized its incumbent camera/focus state.
 pub fn activate_presentation_card(
     store: &AppStore,
     action: PresentationCardAction,
 ) -> Result<PresentationCardCommit, ReduceError> {
-    let (sequence, commit) = store.dispatch_semantic(SemanticAction::Present(action.semantic()))?;
-    let mut selection = None;
-    let mut cancellations = Vec::new();
-    for effect in commit.effects {
-        let effect = match effect {
-            AppEffect::SelectAnimationClip {
-                job_id,
-                scene_request_id,
-                asset_id,
-                clip_index,
-            } => {
-                let effect = PresentationAnimationClipEffect {
-                    job_id,
-                    scene_request_id: scene_request_id.to_string(),
-                    asset_id: asset_id.to_string(),
-                    clip_index,
-                };
-                selection = Some(effect);
-                continue;
-            }
-            AppEffect::CancelAnimationClipSelection {
-                job_id,
-                scene_request_id,
-                asset_id,
-                clip_index,
-            } => PresentationAnimationClipEffect {
-                job_id,
-                scene_request_id: scene_request_id.to_string(),
-                asset_id: asset_id.to_string(),
-                clip_index,
-            },
-            _ => continue,
-        };
-        cancellations.push(effect);
-    }
-    Ok(PresentationCardCommit {
-        sequence,
-        revision: commit.revision,
-        selection,
-        cancellations,
-    })
+    store.dispatch_presentation(action.semantic())
 }
 
 impl PresentationCardViewModel {
@@ -159,6 +105,7 @@ mod tests {
         AnimationClipDescriptor, AssetLoadCompletion, AssetLoadOutcome, AssetLoadScope,
         AssetMetadata, EffectCompletion, PresentationAnimationResidencyBinding,
         PrimarySceneInstallCompletion, PrimarySceneInstallMetadata, PrimarySceneInstallOutcome,
+        SemanticAction,
     };
 
     fn id(value: u128) -> uuid::Uuid {
@@ -240,15 +187,12 @@ mod tests {
             .dispatch_semantic(SemanticAction::Present(PresentationAction::Start))
             .unwrap();
 
-        assert_eq!(
-            activate_presentation_card(&store, PresentationCardAction::Advance).unwrap(),
-            PresentationCardCommit {
-                sequence: 1,
-                revision: 3,
-                selection: None,
-                cancellations: Vec::new(),
-            },
-        );
+        let advanced =
+            activate_presentation_card(&store, PresentationCardAction::Advance).unwrap();
+        assert_eq!(advanced.sequence, 1);
+        assert_eq!(advanced.commit.revision, 3);
+        assert_eq!(advanced.selection, None);
+        assert!(advanced.cancellations.is_empty());
         assert_eq!(
             store
                 .presentation_snapshot()
@@ -258,15 +202,12 @@ mod tests {
                 .cue_index,
             1,
         );
-        assert_eq!(
-            activate_presentation_card(&store, PresentationCardAction::Reverse).unwrap(),
-            PresentationCardCommit {
-                sequence: 2,
-                revision: 4,
-                selection: None,
-                cancellations: Vec::new(),
-            },
-        );
+        let reversed =
+            activate_presentation_card(&store, PresentationCardAction::Reverse).unwrap();
+        assert_eq!(reversed.sequence, 2);
+        assert_eq!(reversed.commit.revision, 4);
+        assert_eq!(reversed.selection, None);
+        assert!(reversed.cancellations.is_empty());
         assert_eq!(
             store
                 .presentation_snapshot()
@@ -359,19 +300,19 @@ mod tests {
             .unwrap();
         assert!(binding.effects.is_empty());
 
+        let advanced =
+            activate_presentation_card(&store, PresentationCardAction::Advance).unwrap();
+        assert_eq!(advanced.sequence, 2);
+        assert_eq!(advanced.commit.revision, 7);
         assert_eq!(
-            activate_presentation_card(&store, PresentationCardAction::Advance).unwrap(),
-            PresentationCardCommit {
-                sequence: 2,
-                revision: 7,
-                selection: Some(PresentationAnimationClipEffect {
-                    job_id: 0,
-                    scene_request_id: request_id.to_string(),
-                    asset_id: resident_asset_id.to_string(),
-                    clip_index: 1,
-                }),
-                cancellations: Vec::new(),
-            },
+            advanced.selection,
+            Some(PresentationAnimationClipEffect {
+                job_id: 0,
+                scene_request_id: request_id,
+                asset_id: resident_asset_id,
+                clip_index: 1,
+            }),
         );
+        assert!(advanced.cancellations.is_empty());
     }
 }
