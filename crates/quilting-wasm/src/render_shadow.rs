@@ -4,8 +4,8 @@
 //! bounded diagnostic snapshot when it explicitly calls the exported query.
 
 use quilting_core::render::{
-    RenderCommandPlan, RenderContractError, RenderFrameOptions, RenderParityDiagnostics,
-    RenderParityObserver, RenderStyle, RenderSubmissionStats, RenderView, ValidatedRenderScene,
+    RenderContractError, RenderFrame, RenderParityDiagnostics, RenderParityObserver,
+    RenderSubmissionStats, ValidatedRenderScene,
 };
 use serde::Serialize;
 use wasm_bindgen::JsValue;
@@ -92,28 +92,28 @@ impl RenderShadowObserver {
 
     pub(crate) fn prepare_observation(
         &mut self,
-        plan: &RenderCommandPlan,
-        style: RenderStyle,
-        view: RenderView,
-        options: RenderFrameOptions,
+        frame: &RenderFrame,
     ) -> Option<u64> {
         if !self.is_enabled() {
             return None;
         }
-        let revision = self.frame_revision.saturating_add(1);
-        let result = self
-            .parity
-            .validated_scene()
-            .ok_or(RenderContractError::ObserverSceneUnavailable)
-            .and_then(|scene| plan.validate_for(scene, style, options))
-            .and_then(|()| view.validate())
-            .and_then(|()| {
-                options
-                    .focus_postprocess
-                    .map_or(Ok(()), |focus| focus.validate().map(|_| ()))
+        let result = frame
+            .retained_command_plan()
+            .ok_or(RenderContractError::CommandPlanMismatch)
+            .and_then(|plan| frame.execution_with_command_plan(plan))
+            .and_then(|execution| {
+                let scene = self
+                    .parity
+                    .validated_scene()
+                    .ok_or(RenderContractError::ObserverSceneUnavailable)?;
+                if scene.contains_snapshot(execution.scene()) {
+                    Ok(())
+                } else {
+                    Err(RenderContractError::ExecutionSceneMismatch)
+                }
             });
         match result {
-            Ok(()) => Some(revision),
+            Ok(()) => Some(frame.revision),
             Err(error) => {
                 self.record_observation_error(error);
                 None
@@ -123,19 +123,23 @@ impl RenderShadowObserver {
 
     pub(crate) fn observe_prepared(
         &mut self,
-        frame_revision: u64,
-        plan: &RenderCommandPlan,
+        frame: &RenderFrame,
         actual: RenderSubmissionStats,
     ) {
         if !self.is_enabled() {
             return;
         }
-        match self
-            .parity
-            .observe_execution(frame_revision, plan.execution(), actual)
-        {
+        let result = frame
+            .retained_command_plan()
+            .ok_or(RenderContractError::CommandPlanMismatch)
+            .and_then(|plan| frame.execution_with_command_plan(plan))
+            .and_then(|execution| {
+                self.parity
+                    .observe_execution(frame.revision, execution, actual)
+            });
+        match result {
             Ok(_) => {
-                self.frame_revision = frame_revision;
+                self.frame_revision = frame.revision;
                 self.last_error = None;
             }
             Err(error) => self.record_observation_error(error),

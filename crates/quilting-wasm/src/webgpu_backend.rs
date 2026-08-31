@@ -11,9 +11,8 @@ use quilting_core::material::{
     EnvironmentMapAsset, EnvironmentMapDescriptor, TextureAssetDescriptor, TextureWrapMode,
 };
 use quilting_core::render::{
-    RenderCommandPlan, RenderFrame, RenderFrameOptions, RenderPoseIdentity, RenderSceneSnapshot,
-    RenderStyle, RenderSubmissionStats, RenderView, ResidentRootDrawDomains,
-    ValidatedRenderScene,
+    RenderFrame, RenderFrameOptions, RenderSceneSnapshot, RenderStyle, RenderSubmissionStats,
+    RenderView, ResidentRootDrawDomains, ValidatedRenderScene,
 };
 use quilting_renderer::compute::{
     prepare_lod_dispatch_state, LodAtlasLookup, PreparedLodModel, WgslLodDispatchMetrics,
@@ -271,38 +270,6 @@ pub(crate) struct WebGpuBackendDiagnostics {
 }
 
 impl WebGpuBackend {
-    /// Build a high-rate frame from the main renderer's shared low-rate plan.
-    /// The backend first proves that the plan addresses its exact retained
-    /// scene allocation, then borrows its command identity without retaining a
-    /// parallel plan cache.
-    fn build_render_frame(
-        &self,
-        frame_revision: u64,
-        scene_source_revision: u64,
-        style: RenderStyle,
-        view: RenderView,
-        options: RenderFrameOptions,
-        plan: &RenderCommandPlan,
-    ) -> Result<RenderFrame, String> {
-        let scene = self
-            .scene
-            .as_ref()
-            .ok_or_else(|| "WebGPU render frame requires scene residency".to_string())?;
-        plan.validate_for(scene.validated_scene(), style, options)
-            .map_err(|error| error.to_string())?;
-        RenderFrame::from_command_plan(
-            frame_revision,
-            RenderPoseIdentity {
-                asset_revision: scene_source_revision,
-                pose_revision: frame_revision,
-            },
-            view,
-            options,
-            plan,
-        )
-        .map_err(|error| error.to_string())
-    }
-
     fn incumbent_required(&mut self) -> LiveFrameDisposition {
         // A retained surface is only evidence for its exact last frame. If the
         // current request cannot be represented, clear that witness so the
@@ -1326,13 +1293,16 @@ pub(crate) fn invalidate_lod() {
     });
 }
 
-pub(crate) fn needs_scene(source_revision: u64) -> bool {
+pub(crate) fn needs_scene(source_revision: u64, scene: &ValidatedRenderScene) -> bool {
     BACKEND.with(|slot| {
         let backend = slot.borrow();
         backend.state == "ready"
             && backend.model.is_some()
             && backend.atlas.is_some()
-            && (backend.scene.is_none() || backend.scene_source_revision != Some(source_revision))
+            && (backend.scene_source_revision != Some(source_revision)
+                || backend.scene.as_ref().is_none_or(|retained| {
+                    !retained.validated_scene().shares_snapshot_with(scene)
+                }))
     })
 }
 
@@ -1801,16 +1771,16 @@ pub(crate) fn replace_scene(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn submit_frame(
     source_render_call: u64,
-    plan: &RenderCommandPlan,
-    style: RenderStyle,
-    view: RenderView,
-    options: RenderFrameOptions,
+    frame: &RenderFrame,
     face_visibility: &[bool],
     joint_matrices: &[f32],
     morph_weights: &[f32],
 ) -> Result<LiveFrameDisposition, String> {
     BACKEND.with(|slot| {
         let mut backend = slot.borrow_mut();
+        let style = frame.style;
+        let view = frame.view;
+        let options = frame.options;
         if backend.state != "ready" {
             return Ok(backend.incumbent_required());
         }
@@ -1840,12 +1810,29 @@ pub(crate) fn submit_frame(
             return Ok(backend.incumbent_required());
         }
         backend.frame_attempts = backend.frame_attempts.saturating_add(1);
-        let frame_revision = backend.frame_attempts;
+        let frame_revision = frame.revision;
 
         let mut face_visibility_bits = std::mem::take(&mut backend.next_face_visibility_bits);
         face_visibility_bits.clear();
         let mut effective_morph_weights = std::mem::take(&mut backend.next_morph_weights);
         effective_morph_weights.clear();
+        let frame_validation = backend
+            .scene
+            .as_ref()
+            .ok_or_else(|| "WebGPU render frame requires scene residency".to_string())
+            .and_then(|scene| {
+                frame
+                    .execution(scene.scene())
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            });
+        if let Err(error) = frame_validation {
+            return Err(backend.reject_frame(
+                face_visibility_bits,
+                effective_morph_weights,
+                error,
+            ));
+        }
         let (resident_faces, resident_morph_targets) = match backend.model_source.as_ref() {
             Some(model) => (model.residency.num_faces, model.model.num_morph_targets),
             None => {
@@ -1959,23 +1946,6 @@ pub(crate) fn submit_frame(
         }
         let visibility_upload_required = device_lod_epoch.is_none()
             && backend.last_face_visibility_bits != face_visibility_bits;
-        let frame = match backend.build_render_frame(
-            frame_revision,
-            scene_source_revision,
-            style,
-            view,
-            options,
-            plan,
-        ) {
-            Ok(frame) => frame,
-            Err(error) => {
-                return Err(backend.reject_frame(
-                    face_visibility_bits,
-                    effective_morph_weights,
-                    error,
-                ));
-            }
-        };
 
         if backend.presentation.is_some() {
             let resize = {
@@ -2146,7 +2116,7 @@ pub(crate) fn submit_frame(
                             })?;
                             match device.present_focus_resident_adaptive(
                                 presentation,
-                                &frame,
+                                frame,
                                 scene.scene(),
                                 model,
                                 &resident,
@@ -2182,7 +2152,7 @@ pub(crate) fn submit_frame(
                                 })?;
                             device.present_resident_adaptive(
                                 presentation,
-                                &frame,
+                                frame,
                                 scene.scene(),
                                 model,
                                 &resident,
@@ -2204,7 +2174,7 @@ pub(crate) fn submit_frame(
                     {
                         device.present_supported_patch_scene_with_resident_lod_visibility(
                             presentation,
-                            &frame,
+                            frame,
                             pipelines,
                             scene,
                             &resident,
@@ -2214,7 +2184,7 @@ pub(crate) fn submit_frame(
                     } else {
                         device.present_supported_patch_scene_with_face_visibility(
                             presentation,
-                            &frame,
+                            frame,
                             pipelines,
                             scene,
                             atlas,
@@ -2278,7 +2248,7 @@ pub(crate) fn submit_frame(
                             })?;
                             device
                                 .render_offscreen_focus_resident_adaptive(
-                                    &frame,
+                                    frame,
                                     scene.scene(),
                                     model,
                                     &resident,
@@ -2306,7 +2276,7 @@ pub(crate) fn submit_frame(
                                         .to_string()
                                 })?;
                             device.render_offscreen_resident_adaptive(
-                                &frame,
+                                frame,
                                 scene.scene(),
                                 model,
                                 &resident,
@@ -2326,7 +2296,7 @@ pub(crate) fn submit_frame(
                     } else if let Some(resident) = resident {
                         device
                             .render_offscreen_supported_patch_scene_with_resident_lod_visibility_and_webgl_clear(
-                                &frame,
+                                frame,
                                 pipelines,
                                 scene,
                                 &resident,
@@ -2339,15 +2309,15 @@ pub(crate) fn submit_frame(
                             "ready WebGPU backend has no normals pipeline".to_string()
                         })?;
                         device.render_offscreen_normals_patch_scene_with_webgl_clear(
-                            &frame, pipeline, scene, atlas, target, true,
+                            frame, pipeline, scene, atlas, target, true,
                         )
                     } else if style == RenderStyle::Pbr {
                         device.render_offscreen_supported_patch_scene_with_webgl_clear(
-                            &frame, pipelines, scene, atlas, target, true,
+                            frame, pipelines, scene, atlas, target, true,
                         )
                     } else {
                         device.render_offscreen_supported_patch_scene_with_face_visibility(
-                            &frame, pipelines, scene, atlas, target, true,
+                            frame, pipelines, scene, atlas, target, true,
                         )
                     };
                     encoding.map(Some).map_err(|error| error.to_string())

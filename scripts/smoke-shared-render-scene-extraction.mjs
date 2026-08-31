@@ -10,6 +10,7 @@ const webGpu = read('crates/quilting-webgpu/src/lib.rs');
 const native = read('crates/quilting-webgpu/tests/native_lod.rs');
 const bridge = read('crates/quilting-wasm/src/webgpu_backend.rs');
 const renderer = read('crates/quilting-wasm/src/main_renderer.rs');
+const renderShadow = read('crates/quilting-wasm/src/render_shadow.rs');
 
 for (const required of [
   'pub struct ValidatedRenderScene {',
@@ -47,6 +48,8 @@ for (const required of [
   'render_command_plan: Option<RenderCommandPlan>',
   'fn refresh_validated_render_scene(',
   'fn refresh_render_command_plan(renderer: &mut MainState, backend_plan_required: bool)',
+  'fn current_render_frame(',
+  'RenderFrame::from_command_plan(',
   'backend_scene_required: bool',
   'renderer.render_shadow.replace_scene(scene.clone())',
   'renderer.validated_render_scene = Some(scene)',
@@ -66,17 +69,42 @@ assert.ok(submit.includes('renderer.validated_render_scene.as_ref()'),
   'WebGPU submission must consume the main renderer scene epoch');
 assert.equal(submit.includes('extract_render_scene(renderer)'), false,
   'WebGPU submission must not independently extract a second scene');
-assert.ok(submit.includes('renderer.render_command_plan.as_ref()'),
-  'WebGPU submission must consume the main renderer command plan');
+assert.ok(submit.includes('frame: Option<&RenderFrame>'),
+  'WebGPU submission must consume the main renderer frame');
 
-assert.ok(bridge.includes('plan: &RenderCommandPlan'),
-  'WebGPU submission must borrow the shared command plan');
-assert.ok(bridge.includes('plan.validate_for(scene.validated_scene(), style, options)'),
-  'WebGPU must validate the shared plan against exact retained scene identity');
+assert.ok(bridge.includes('frame: &RenderFrame'),
+  'WebGPU submission must borrow the shared render frame');
+assert.ok(bridge.includes('validated_scene().shares_snapshot_with(scene)'),
+  'WebGPU scene residency must require exact shared allocation identity');
+assert.ok(bridge.includes('.execution(scene.scene())'),
+  'WebGPU must validate the shared frame against exact retained scene identity');
 assert.equal(bridge.includes('command_plan: Option<RenderCommandPlan>'), false,
   'WebGPU must not retain a parallel command-plan cache');
 assert.equal(bridge.includes('RenderCommandPlan::build('), false,
   'WebGPU must not independently rebuild the shared command plan');
+assert.equal(bridge.includes('RenderFrame::from_command_plan('), false,
+  'WebGPU must not independently construct the shared render frame');
+const liveSubmitStart = bridge.indexOf('pub(crate) fn submit_frame(');
+const liveSubmitEnd = bridge.indexOf(
+  '\n/// Stage a one-pixel query against the latest completed prepared-patch frame.',
+  liveSubmitStart,
+);
+const liveSubmit = bridge.slice(liveSubmitStart, liveSubmitEnd);
+assert.ok(liveSubmitStart >= 0 && liveSubmitEnd > liveSubmitStart,
+  'could not locate WebGPU live frame submission');
+assert.ok(liveSubmit.indexOf('.execution(scene.scene())') >= 0,
+  'WebGPU live submission must validate exact frame/scene provenance');
+assert.ok(liveSubmit.indexOf('.execution(scene.scene())') < liveSubmit.indexOf('let unchanged ='),
+  'WebGPU must validate frame provenance before retaining an unchanged surface');
+
+for (const required of [
+  'frame: &RenderFrame',
+  'frame.execution_with_command_plan(plan)',
+  '.observe_execution(frame.revision, execution, actual)',
+]) {
+  assert.ok(renderShadow.includes(required),
+    `WebGL parity observer is missing shared-frame step ${required}`);
+}
 
 const evidenceStart = renderer.indexOf('pub fn mr_request_backend_frame_evidence()');
 const evidenceEnd = renderer.indexOf(

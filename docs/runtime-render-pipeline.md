@@ -190,12 +190,17 @@ shared validated scene. It rebuilds that plan only when the scene allocation,
 render style, or command-presence key changes; camera matrices, animation pose,
 focus-field values, and uniform-only options construct frames with
 `RenderFrame::from_command_plan`. WebGL parity and WebGPU consume this same plan
-allocation. The WebGPU adapter validates it against the exact scene allocation
-retained by `PatchRenderScene`; it no longer owns a parallel plan cache or
-rebuild counter. `renderCommandPlanBuilds` exposes the sole cache boundary in
+allocation and the main renderer constructs one high-rate `RenderFrame` for the
+current view. The parity observer and WebGPU consume that exact frame. WebGPU
+validates it against the scene allocation retained by `PatchRenderScene`; it no
+longer owns a parallel plan cache, rebuild counter, or frame constructor.
+Scene residency compares both the structural revision and exact shared `Arc`
+identity, so dropping and re-extracting a main-renderer cache cannot leave an
+equal-numbered but distinct WebGPU epoch silently resident.
+`renderCommandPlanBuilds` exposes the sole low-rate cache boundary in
 main-renderer diagnostics. The route/shadow smoke oracle rejects any return of
-`RenderFrame::build` or `RenderCommandPlan::build` to the ordinary browser
-WebGPU path.
+`RenderFrame::build`, `RenderCommandPlan::build`, or
+`RenderFrame::from_command_plan` to the ordinary browser WebGPU path.
 `resolvedExecutionFrames`, `resolvedExecutionFallbacks`, and
 `lastExecutionError` make that gate observable through the existing render
 shadow diagnostics. Shadow scene validation and WebGL PBR lowering now happen

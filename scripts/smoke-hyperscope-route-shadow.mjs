@@ -750,8 +750,9 @@ for (const stalePresentationGuard of [
 for (const sharedFramePlanStep of [
   'fn refresh_render_command_plan(renderer: &mut MainState, backend_plan_required: bool)',
   'crate::webgpu_backend::frame_contract_required()',
-  'renderer.render_command_plan.as_ref()',
   'RenderCommandPlan::build(scene, style, options)',
+  'fn current_render_frame(',
+  'RenderFrame::from_command_plan(',
 ]) {
   assert.ok(
     mainRendererSource.includes(sharedFramePlanStep),
@@ -759,9 +760,9 @@ for (const sharedFramePlanStep of [
   );
 }
 for (const borrowedFramePlanStep of [
-  'plan: &RenderCommandPlan',
-  'plan.validate_for(scene.validated_scene(), style, options)',
-  'RenderFrame::from_command_plan(',
+  'frame: &RenderFrame',
+  '.execution(scene.scene())',
+  'validated_scene().shares_snapshot_with(scene)',
 ]) {
   assert.ok(
     webGpuBackendSource.includes(borrowedFramePlanStep),
@@ -777,6 +778,11 @@ assert.equal(
   webGpuBackendSource.includes('RenderCommandPlan::build('),
   false,
   'WebGPU must not rebuild the main renderer command plan',
+);
+assert.equal(
+  webGpuBackendSource.includes('RenderFrame::from_command_plan('),
+  false,
+  'WebGPU must not reconstruct the main renderer frame',
 );
 assert.equal(
   webGpuBackendSource.includes('RenderFrame::build('),

@@ -41,8 +41,9 @@ use quilting_core::material::{
 use quilting_core::render::{
     patch_preparation_needed, patch_visibility_needed, FocusFieldPacket, FocusPostprocessMode,
     FocusPostprocessPacket, MatcapStyle, PbrDrawClass, RenderBatchSnapshot,
-    RenderCommandPlan, RenderEntityTransform, RenderFrameOptions, RenderPass, RenderSceneSnapshot,
-    RenderStyle, RenderSubmissionStats, RenderView, ValidatedRenderScene,
+    RenderCommandPlan, RenderEntityTransform, RenderFrame, RenderFrameOptions, RenderPass,
+    RenderPoseIdentity, RenderSceneSnapshot, RenderStyle, RenderSubmissionStats, RenderView,
+    ValidatedRenderScene,
 };
 #[cfg(feature = "webgpu-backend")]
 use quilting_core::render::RenderSubmissionMismatch;
@@ -2796,10 +2797,31 @@ fn current_render_frame_options(renderer: &MainState) -> RenderFrameOptions {
     }
 }
 
+fn current_render_frame(
+    renderer: &MainState,
+    camera: &Camera,
+) -> Result<Option<RenderFrame>, String> {
+    let Some(plan) = renderer.render_command_plan.as_ref() else {
+        return Ok(None);
+    };
+    RenderFrame::from_command_plan(
+        renderer.render_calls,
+        RenderPoseIdentity {
+            asset_revision: renderer.render_command_builds,
+            pose_revision: renderer.render_calls,
+        },
+        current_render_view(renderer, camera),
+        current_render_frame_options(renderer),
+        plan,
+    )
+    .map(Some)
+    .map_err(|error| error.to_string())
+}
+
 #[cfg(feature = "webgpu-backend")]
 fn submit_webgpu_frame(
     renderer: &MainState,
-    camera: &Camera,
+    frame: Option<&RenderFrame>,
 ) -> crate::webgpu_backend::LiveFrameDisposition {
     use crate::webgpu_backend::LiveFrameDisposition;
 
@@ -2814,40 +2836,40 @@ fn submit_webgpu_frame(
         return LiveFrameDisposition::IncumbentRequired;
     }
     let source_revision = renderer.render_command_builds;
-    if crate::webgpu_backend::needs_scene(source_revision) {
-        let scene = match renderer.validated_render_scene.as_ref() {
-            Some(scene) if scene.snapshot().revision == source_revision => scene.clone(),
-            Some(scene) => {
-                crate::webgpu_backend::record_frame_prerequisite_failure(format!(
-                    "shared render scene revision {} does not match source revision {source_revision}",
-                    scene.snapshot().revision,
-                ));
-                return LiveFrameDisposition::IncumbentRequired;
-            }
-            None => {
-                crate::webgpu_backend::record_frame_prerequisite_failure(
-                    renderer
-                        .render_scene_error
-                        .as_deref()
-                        .unwrap_or("shared validated render scene is unavailable"),
-                );
-                return LiveFrameDisposition::IncumbentRequired;
-            }
-        };
+    let scene = match renderer.validated_render_scene.as_ref() {
+        Some(scene) if scene.snapshot().revision == source_revision => scene,
+        Some(scene) => {
+            crate::webgpu_backend::record_frame_prerequisite_failure(format!(
+                "shared render scene revision {} does not match source revision {source_revision}",
+                scene.snapshot().revision,
+            ));
+            return LiveFrameDisposition::IncumbentRequired;
+        }
+        None => {
+            crate::webgpu_backend::record_frame_prerequisite_failure(
+                renderer
+                    .render_scene_error
+                    .as_deref()
+                    .unwrap_or("shared validated render scene is unavailable"),
+            );
+            return LiveFrameDisposition::IncumbentRequired;
+        }
+    };
+    if crate::webgpu_backend::needs_scene(source_revision, scene) {
         if let Err(error) = crate::webgpu_backend::replace_scene(
             source_revision,
-            scene,
+            scene.clone(),
             &renderer.cached_instances,
         ) {
             crate::webgpu_backend::record_frame_prerequisite_failure(error);
             return LiveFrameDisposition::IncumbentRequired;
         }
     }
-    let plan = match renderer.render_command_plan.as_ref() {
-        Some(plan) => plan,
+    let frame = match frame {
+        Some(frame) => frame,
         None => {
             crate::webgpu_backend::record_frame_prerequisite_failure(
-                "shared render command plan is unavailable",
+                "shared render frame is unavailable",
             );
             return LiveFrameDisposition::IncumbentRequired;
         }
@@ -2861,10 +2883,7 @@ fn submit_webgpu_frame(
     };
     crate::webgpu_backend::submit_frame(
         renderer.render_calls,
-        plan,
-        renderer.render_style,
-        current_render_view(renderer, camera),
-        current_render_frame_options(renderer),
+        frame,
         &renderer.classified_face_visibility,
         joint_matrices,
         morph_weights,
@@ -3341,27 +3360,23 @@ fn refresh_render_command_plan(renderer: &mut MainState, backend_plan_required: 
     }
 }
 
-fn prepare_render_shadow_observation(renderer: &mut MainState, camera: &Camera) -> Option<u64> {
-    let style = renderer.render_style;
-    let view = current_render_view(renderer, camera);
-    let options = current_render_frame_options(renderer);
-    let plan = renderer.render_command_plan.as_ref()?;
-    renderer
-        .render_shadow
-        .prepare_observation(plan, style, view, options)
+fn prepare_render_shadow_observation(
+    renderer: &mut MainState,
+    frame: Option<&RenderFrame>,
+) -> Option<u64> {
+    renderer.render_shadow.prepare_observation(frame?)
 }
 
 fn observe_render_submission(
     renderer: &mut MainState,
     prepared_revision: Option<u64>,
+    frame: Option<&RenderFrame>,
     actual: RenderSubmissionStats,
 ) {
-    if let (Some(frame_revision), Some(plan)) =
-        (prepared_revision, renderer.render_command_plan.as_ref())
-    {
-        renderer
-            .render_shadow
-            .observe_prepared(frame_revision, plan, actual);
+    if let (Some(prepared_revision), Some(frame)) = (prepared_revision, frame) {
+        if prepared_revision == frame.revision {
+            renderer.render_shadow.observe_prepared(frame, actual);
+        }
     }
 }
 
@@ -10066,7 +10081,19 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
             }
         }
         refresh_render_command_plan(state, backend_plan_required);
-        let prepared_render_revision = prepare_render_shadow_observation(state, &camera);
+        let render_frame = match current_render_frame(state, &camera) {
+            Ok(frame) => frame,
+            Err(error) => {
+                state.render_shadow.record_extraction_error(&error);
+                #[cfg(feature = "webgpu-backend")]
+                if backend_plan_required {
+                    crate::webgpu_backend::record_frame_prerequisite_failure(error);
+                }
+                None
+            }
+        };
+        let prepared_render_revision =
+            prepare_render_shadow_observation(state, render_frame.as_ref());
 
         // The explicitly selected WebGPU backend submits before any WebGL
         // frame work. A valid presentation frame needs none of the
@@ -10074,14 +10101,19 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         // refreshes both for its exact pick camera, while a later fallback or
         // mode switch observes the deliberately retained dirty stamps below.
         #[cfg(feature = "webgpu-backend")]
-        match submit_webgpu_frame(state, &camera) {
+        match submit_webgpu_frame(state, render_frame.as_ref()) {
             crate::webgpu_backend::LiveFrameDisposition::PresentationSubmitted(
                 submission_stats,
             ) => {
                 state.webgpu_presentation_patch_frames = state
                     .webgpu_presentation_patch_frames
                     .saturating_add(1);
-                observe_render_submission(state, prepared_render_revision, submission_stats);
+                observe_render_submission(
+                    state,
+                    prepared_render_revision,
+                    render_frame.as_ref(),
+                    submission_stats,
+                );
                 state.last_render_submission = submission_stats;
                 state.render_submission_totals.merge(submission_stats);
                 state
@@ -10805,7 +10837,12 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 if use_resolved_pbr_plan {
                     state.render_shadow.record_execution_success();
                 }
-                observe_render_submission(state, prepared_render_revision, submission_stats);
+                observe_render_submission(
+                    state,
+                    prepared_render_revision,
+                    render_frame.as_ref(),
+                    submission_stats,
+                );
                 state.renderer.end_frame();
                 state
                     .render_timing
@@ -10829,9 +10866,22 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
         }
 
         let resolved_submission = if prepared_render_revision.is_some() {
-            state.render_command_plan.as_ref().and_then(|plan| {
+            render_frame.as_ref().and_then(|frame| {
+                let Some(plan) = frame.retained_command_plan() else {
+                    state
+                        .render_shadow
+                        .record_execution_fallback("shared render frame lost its command plan");
+                    return None;
+                };
+                let execution = match frame.execution_with_command_plan(plan) {
+                    Ok(execution) => execution,
+                    Err(error) => {
+                        state.render_shadow.record_execution_fallback(error);
+                        return None;
+                    }
+                };
                 match state.renderer.render_diagnostic_execution(
-                    plan.execution(),
+                    execution,
                     &camera,
                     render_batches,
                 ) {
@@ -10877,7 +10927,12 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 }
             }
         }
-        observe_render_submission(state, prepared_render_revision, submission_stats);
+        observe_render_submission(
+            state,
+            prepared_render_revision,
+            render_frame.as_ref(),
+            submission_stats,
+        );
 
         // Highlight pass: overlay picked QB patch with cyan
         if state.highlight_face >= 0 && state.highlight_prog.is_some() {
