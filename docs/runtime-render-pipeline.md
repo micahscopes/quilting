@@ -219,6 +219,16 @@ no longer retains comparison copies of the joint and morph vectors.
 and `residentPoseUploads/Initializations/Reuses` expose the bounded paths. A
 model replacement still forces a full upload, while a scene/preparation change
 forces only its local uniform initialization when the device pose is current.
+Retained fallback, resident-root, and adaptive-overlay frame tables likewise
+compare their exact packed 64-word rows before queue publication. An
+animation-only frame therefore reuses camera/conformal tables rather than
+resending 256 bytes per batch or domain; a packing failure invalidates the
+witness before returning. Fallback packing writes directly into retained
+staging storage instead of allocating an intermediate frame vector.
+`frameTableUploads`, `frameTableReuses`, and `frameTableUploadBytes` report the
+device-lifetime traffic, including work preceding a surface skip. Camera or
+focus changes still republish the tables; splitting frame-global view words
+from domain-local transform/material words remains the next bounded reduction.
 `resolvedExecutionFrames`, `resolvedExecutionFallbacks`, and
 `lastExecutionError` make that gate observable through the existing render
 shadow diagnostics. Shadow scene validation and WebGL PBR lowering now happen

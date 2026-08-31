@@ -255,6 +255,9 @@ pub(crate) struct WebGpuBackendDiagnostics {
     frame_failures: u64,
     visibility_uploads: u64,
     visibility_upload_bytes: u64,
+    frame_table_uploads: u64,
+    frame_table_reuses: u64,
+    frame_table_upload_bytes: u64,
     fallback_pose_uploads: u64,
     fallback_pose_initializations: u64,
     fallback_pose_reuses: u64,
@@ -339,6 +342,11 @@ impl WebGpuBackend {
             .device
             .as_ref()
             .map(LodClassifierDevice::resident_root_pipeline_memo_diagnostics)
+            .unwrap_or_default();
+        let frame_table_memo = self
+            .device
+            .as_ref()
+            .map(LodClassifierDevice::frame_table_memo_diagnostics)
             .unwrap_or_default();
         let pbr_texture_residency = self
             .scene
@@ -470,6 +478,9 @@ impl WebGpuBackend {
             frame_failures: self.frame_failures,
             visibility_uploads: self.visibility_uploads,
             visibility_upload_bytes: self.visibility_upload_bytes,
+            frame_table_uploads: frame_table_memo.uploads,
+            frame_table_reuses: frame_table_memo.reuses,
+            frame_table_upload_bytes: frame_table_memo.upload_bytes,
             fallback_pose_uploads: self.fallback_pose_uploads,
             fallback_pose_initializations: self.fallback_pose_initializations,
             fallback_pose_reuses: self.fallback_pose_reuses,

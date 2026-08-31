@@ -361,22 +361,29 @@ impl LodClassifierDevice {
         overlay: &AdaptiveOverlayScene,
         use_qb: bool,
     ) -> Result<(), LodWebGpuError> {
-        let mut words = overlay.bindings.frame_words.lock().map_err(|_| {
+        let mut table = overlay.bindings.frame_table.lock().map_err(|_| {
             LodWebGpuError::Payload("adaptive overlay frame lock was poisoned".to_string())
         })?;
-        for (destination, batch) in words
-            .chunks_exact_mut(PATCH_RENDER_FRAME_WORDS)
-            .zip(&overlay.batches)
-        {
-            destination.copy_from_slice(
-                &PatchRenderFrame::from_render_frame(frame, batch, use_qb).to_words()?,
+        let mut changed = table.begin_update();
+        for (row, batch) in overlay.batches.iter().enumerate() {
+            let words = match PatchRenderFrame::from_render_frame(frame, batch, use_qb).to_words() {
+                Ok(words) => words,
+                Err(error) => {
+                    table.invalidate();
+                    return Err(error);
+                }
+            };
+            changed |= table.replace_row(row, &words);
+        }
+        let publication = table.commit(changed);
+        if matches!(publication, FrameTablePublication::Upload { .. }) {
+            self.queue.write_buffer(
+                &overlay.bindings.frames,
+                0,
+                bytemuck::cast_slice(table.words.as_slice()),
             );
         }
-        self.queue.write_buffer(
-            &overlay.bindings.frames,
-            0,
-            bytemuck::cast_slice(words.as_slice()),
-        );
+        self.record_frame_table_publication(publication);
         Ok(())
     }
 

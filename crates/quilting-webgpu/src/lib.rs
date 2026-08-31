@@ -96,6 +96,7 @@ use quilting_renderer::compute::{
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use wgpu::util::DeviceExt;
 
@@ -575,6 +576,45 @@ mod patch_pbr_material_tests {
     }
 
     #[test]
+    fn retained_frame_table_publishes_once_and_reuses_exact_words() {
+        let mut table = RetainedFrameTable::new(PATCH_RENDER_FRAME_WORDS, PATCH_RENDER_FRAME_BYTES);
+        let mut row = [0u32; PATCH_RENDER_FRAME_WORDS];
+
+        let mut changed = table.begin_update();
+        changed |= table.replace_row(0, &row);
+        assert_eq!(
+            table.commit(changed),
+            FrameTablePublication::Upload {
+                bytes: PATCH_RENDER_FRAME_BYTES,
+            },
+        );
+
+        let mut changed = table.begin_update();
+        changed |= table.replace_row(0, &row);
+        assert_eq!(table.commit(changed), FrameTablePublication::Reuse);
+
+        row[17] = 9;
+        let mut changed = table.begin_update();
+        changed |= table.replace_row(0, &row);
+        assert_eq!(
+            table.commit(changed),
+            FrameTablePublication::Upload {
+                bytes: PATCH_RENDER_FRAME_BYTES,
+            },
+        );
+
+        table.invalidate();
+        let mut changed = table.begin_update();
+        changed |= table.replace_row(0, &row);
+        assert_eq!(
+            table.commit(changed),
+            FrameTablePublication::Upload {
+                bytes: PATCH_RENDER_FRAME_BYTES,
+            },
+        );
+    }
+
+    #[test]
     fn patch_frame_keeps_source_face_selection_separate_from_node_and_material() {
         let mut mobius = identity_mobius();
         mobius[5] = 0.625;
@@ -822,6 +862,16 @@ pub struct FocusPatchFrameEncoding {
     pub postprocess: FocusPostprocessEncoding,
 }
 
+/// Exact queue traffic caused by retained per-batch/domain frame tables.
+/// Counts live on the device so presentation skips and fallback paths remain
+/// observable without threading diagnostic state through render semantics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FrameTableMemoDiagnostics {
+    pub uploads: u64,
+    pub reuses: u64,
+    pub upload_bytes: u64,
+}
+
 /// Device-local pipelines shared by every uploaded classifier model.
 pub struct LodClassifierDevice {
     device: wgpu::Device,
@@ -859,6 +909,9 @@ pub struct LodClassifierDevice {
     visibility_count_pipeline: wgpu::ComputePipeline,
     visibility_scan_pipeline: wgpu::ComputePipeline,
     visibility_scatter_pipeline: wgpu::ComputePipeline,
+    frame_table_uploads: AtomicU64,
+    frame_table_reuses: AtomicU64,
+    frame_table_upload_bytes: AtomicU64,
 }
 
 /// Retained device buffers for one immutable prepared model and atlas lookup.
@@ -1157,6 +1210,59 @@ fn validate_pbr_material_subset(scene: &RenderSceneSnapshot) -> Result<(), LodWe
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FrameTablePublication {
+    Upload { bytes: u64 },
+    Reuse,
+}
+
+struct RetainedFrameTable {
+    words: Vec<u32>,
+    byte_len: u64,
+    published: bool,
+}
+
+impl RetainedFrameTable {
+    fn new(word_count: usize, byte_len: u64) -> Self {
+        debug_assert_eq!(word_count.saturating_mul(4) as u64, byte_len);
+        Self {
+            words: vec![0; word_count],
+            byte_len,
+            published: false,
+        }
+    }
+
+    fn begin_update(&self) -> bool {
+        !self.published
+    }
+
+    fn replace_row(&mut self, row: usize, next: &[u32; PATCH_RENDER_FRAME_WORDS]) -> bool {
+        let start = row * PATCH_RENDER_FRAME_WORDS;
+        let destination = &mut self.words[start..start + PATCH_RENDER_FRAME_WORDS];
+        if destination == next {
+            false
+        } else {
+            destination.copy_from_slice(next);
+            true
+        }
+    }
+
+    fn invalidate(&mut self) {
+        self.published = false;
+    }
+
+    fn commit(&mut self, changed: bool) -> FrameTablePublication {
+        self.published = true;
+        if changed {
+            FrameTablePublication::Upload {
+                bytes: self.byte_len,
+            }
+        } else {
+            FrameTablePublication::Reuse
+        }
+    }
+}
+
 /// Scene/frame bindings shared by every atlas bucket and indirect batch draw.
 pub struct PatchRenderBindings {
     frame_count: u32,
@@ -1165,7 +1271,7 @@ pub struct PatchRenderBindings {
     materials: wgpu::Buffer,
     material_textures: Option<PbrMaterialTextureBindings>,
     pbr_environment: Option<PbrEnvironmentBindings>,
-    frame_words: Mutex<Vec<u32>>,
+    frame_table: Mutex<RetainedFrameTable>,
     bind_group: wgpu::BindGroup,
 }
 
@@ -1540,6 +1646,9 @@ impl LodClassifierDevice {
             visibility_count_pipeline,
             visibility_scan_pipeline,
             visibility_scatter_pipeline,
+            frame_table_uploads: AtomicU64::new(0),
+            frame_table_reuses: AtomicU64::new(0),
+            frame_table_upload_bytes: AtomicU64::new(0),
         })
     }
 
@@ -1554,6 +1663,29 @@ impl LodClassifierDevice {
     /// the caller's subsequent command submission on this same queue.
     pub fn queue(&self) -> &wgpu::Queue {
         &self.queue
+    }
+
+    fn record_frame_table_publication(&self, publication: FrameTablePublication) {
+        match publication {
+            FrameTablePublication::Upload { bytes } => {
+                self.frame_table_uploads.fetch_add(1, Ordering::Relaxed);
+                self.frame_table_upload_bytes
+                    .fetch_add(bytes, Ordering::Relaxed);
+            }
+            FrameTablePublication::Reuse => {
+                self.frame_table_reuses.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Device-lifetime frame-table traffic. A reuse means the exact retained
+    /// words remained valid and no `Queue::write_buffer` call was issued.
+    pub fn frame_table_memo_diagnostics(&self) -> FrameTableMemoDiagnostics {
+        FrameTableMemoDiagnostics {
+            uploads: self.frame_table_uploads.load(Ordering::Relaxed),
+            reuses: self.frame_table_reuses.load(Ordering::Relaxed),
+            upload_bytes: self.frame_table_upload_bytes.load(Ordering::Relaxed),
+        }
     }
 
     /// Lower one immutable composable WGSL descriptor once per device. The
@@ -4625,7 +4757,7 @@ impl LodClassifierDevice {
             materials,
             material_textures,
             pbr_environment,
-            frame_words: Mutex::new(vec![0; frame_word_count]),
+            frame_table: Mutex::new(RetainedFrameTable::new(frame_word_count, frame_bytes)),
             bind_group,
         })
     }
@@ -6044,6 +6176,14 @@ impl LodClassifierDevice {
         bindings: &PatchRenderBindings,
         frames: &[PatchRenderFrame],
     ) -> Result<(), LodWebGpuError> {
+        self.write_patch_render_frame_results(bindings, frames.iter().copied().map(Ok))
+    }
+
+    fn write_patch_render_frame_results(
+        &self,
+        bindings: &PatchRenderBindings,
+        frames: impl ExactSizeIterator<Item = Result<PatchRenderFrame, LodWebGpuError>>,
+    ) -> Result<(), LodWebGpuError> {
         if frames.len() != bindings.frame_count as usize {
             return Err(LodWebGpuError::Payload(format!(
                 "patch render frame table has {} records; expected {}",
@@ -6051,18 +6191,33 @@ impl LodClassifierDevice {
                 bindings.frame_count,
             )));
         }
-        let mut words = bindings.frame_words.lock().map_err(|_| {
+        let mut table = bindings.frame_table.lock().map_err(|_| {
             LodWebGpuError::Payload("patch render frame staging lock was poisoned".to_string())
         })?;
-        for (destination, frame) in words.chunks_exact_mut(PATCH_RENDER_FRAME_WORDS).zip(frames) {
-            destination.copy_from_slice(&frame.to_words()?);
+        let mut changed = table.begin_update();
+        for (row, frame) in frames.enumerate() {
+            let words = match frame.and_then(PatchRenderFrame::to_words) {
+                Ok(words) => words,
+                Err(error) => {
+                    table.invalidate();
+                    return Err(error);
+                }
+            };
+            changed |= table.replace_row(row, &words);
         }
         debug_assert_eq!(
-            std::mem::size_of_val(words.as_slice()) as u64,
+            std::mem::size_of_val(table.words.as_slice()) as u64,
             u64::from(bindings.frame_count) * PATCH_RENDER_FRAME_BYTES,
         );
-        self.queue
-            .write_buffer(&bindings.frames, 0, bytemuck::cast_slice(&words));
+        let publication = table.commit(changed);
+        if matches!(publication, FrameTablePublication::Upload { .. }) {
+            self.queue.write_buffer(
+                &bindings.frames,
+                0,
+                bytemuck::cast_slice(table.words.as_slice()),
+            );
+        }
+        self.record_frame_table_publication(publication);
         Ok(())
     }
 
@@ -6225,10 +6380,9 @@ impl LodClassifierDevice {
             }
         }
 
-        let render_frames = scene
-            .batches
-            .iter()
-            .map(|batch| {
+        self.write_patch_render_frame_results(
+            bindings,
+            scene.batches.iter().map(|batch| {
                 let material_slot =
                     patch_pbr_material_slot(&scene.materials, batch.id.key.material_index)?;
                 Ok(PatchRenderFrame::from_render_frame_with_material_slot(
@@ -6237,9 +6391,8 @@ impl LodClassifierDevice {
                     use_qb,
                     material_slot,
                 ))
-            })
-            .collect::<Result<Vec<_>, LodWebGpuError>>()?;
-        self.write_patch_render_frames(bindings, &render_frames)?;
+            }),
+        )?;
 
         self.encode_patch_preparation(patches, encoder);
         encode_visibility(encoder, patches, visibility)?;

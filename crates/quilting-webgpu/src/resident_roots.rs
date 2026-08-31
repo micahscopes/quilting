@@ -487,7 +487,7 @@ pub struct ResidentRootRenderBindings {
     portable_material_textures: Option<pbr_resources::PbrPortableAtlasBindings>,
     pbr_environment: Option<PbrEnvironmentBindings>,
     pbr_scene_supported: bool,
-    frame_words: Mutex<Vec<u32>>,
+    frame_table: Mutex<RetainedFrameTable>,
     _bucket_index_uniform: wgpu::Buffer,
     visibility_bind_group: wgpu::BindGroup,
     pub(super) bind_group: wgpu::BindGroup,
@@ -1224,7 +1224,7 @@ impl LodClassifierDevice {
             portable_material_textures,
             pbr_environment,
             pbr_scene_supported,
-            frame_words: Mutex::new(vec![0; frame_word_count]),
+            frame_table: Mutex::new(RetainedFrameTable::new(frame_word_count, frame_bytes)),
             _bucket_index_uniform: bucket_index_uniform,
             visibility_bind_group,
             bind_group,
@@ -1246,19 +1246,31 @@ impl LodClassifierDevice {
                 "resident root render frames belong to a different domain table".to_string(),
             ));
         }
-        let mut words = bindings.frame_words.lock().map_err(|_| {
+        let mut table = bindings.frame_table.lock().map_err(|_| {
             LodWebGpuError::Payload("resident root frame staging lock was poisoned".to_string())
         })?;
-        for (destination, domain) in words
-            .chunks_exact_mut(PATCH_RENDER_FRAME_WORDS)
-            .zip(&domains.domains)
-        {
-            destination.copy_from_slice(
-                &PatchRenderFrame::from_transform(frame, domain.transform, use_qb).to_words()?,
+        let mut changed = table.begin_update();
+        for (row, domain) in domains.domains.iter().enumerate() {
+            let words = match PatchRenderFrame::from_transform(frame, domain.transform, use_qb)
+                .to_words()
+            {
+                Ok(words) => words,
+                Err(error) => {
+                    table.invalidate();
+                    return Err(error);
+                }
+            };
+            changed |= table.replace_row(row, &words);
+        }
+        let publication = table.commit(changed);
+        if matches!(publication, FrameTablePublication::Upload { .. }) {
+            self.queue.write_buffer(
+                &bindings.frames,
+                0,
+                bytemuck::cast_slice(table.words.as_slice()),
             );
         }
-        self.queue
-            .write_buffer(&bindings.frames, 0, bytemuck::cast_slice(&words));
+        self.record_frame_table_publication(publication);
         Ok(())
     }
 
