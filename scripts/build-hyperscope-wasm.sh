@@ -21,6 +21,10 @@ case "${HYPERSCOPE_WASM_PROFILE:-release}" in
         exit 2
         ;;
 esac
+if [[ "${HYPERSCOPE_WASM_OPT:-0}" == "1" && "${HYPERSCOPE_ARTIFACT_BUILD:-0}" != "1" ]]; then
+    echo "error: wasm-opt requires HYPERSCOPE_ARTIFACT_BUILD=1; ordinary Trunk builds keep Binaryen disabled" >&2
+    exit 2
+fi
 if [[ "${HYPERSCOPE_WASM_OPT:-0}" != "1" ]]; then
     wasm_pack_mode+=(--no-opt)
 fi

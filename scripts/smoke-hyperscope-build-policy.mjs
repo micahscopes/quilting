@@ -18,6 +18,7 @@ const fakeWasmPack = join(temporary, 'wasm-pack');
 const cleanEnvironment = Object.fromEntries(
   Object.entries(process.env).filter(([key]) => ![
     'CARGO_BUILD_JOBS',
+    'HYPERSCOPE_ARTIFACT_BUILD',
     'HYPERSCOPE_BUILD_JOBS',
     'HYPERSCOPE_WASM_OPT',
     'HYPERSCOPE_WASM_PROFILE',
@@ -73,6 +74,7 @@ try {
   assert.equal(fast.jobs, '1');
 
   const artifact = run('artifact', {
+    HYPERSCOPE_ARTIFACT_BUILD: '1',
     HYPERSCOPE_WASM_OPT: '1',
     HYPERSCOPE_BUILD_JOBS: '3',
   });
@@ -80,6 +82,12 @@ try {
   assert.ok(artifact.args.includes('--release'));
   assert.equal(artifact.args.includes('--no-opt'), false);
   assert.equal(artifact.jobs, '3');
+
+  const accidentalOptimizer = run('accidental-optimizer', {
+    HYPERSCOPE_WASM_OPT: '1',
+  });
+  assert.equal(accidentalOptimizer.status, 2);
+  assert.match(accidentalOptimizer.stderr, /requires HYPERSCOPE_ARTIFACT_BUILD=1/);
 
   const invalid = run('invalid', { HYPERSCOPE_WASM_PROFILE: 'fast-ish' });
   assert.equal(invalid.status, 2);

@@ -126,8 +126,13 @@ node scripts/smoke-patch-lab-job-boundary.mjs
 Opt into Binaryen only when producing the final size-optimized artifact:
 
 ```sh
-HYPERSCOPE_WASM_OPT=1 HYPERSCOPE_BUILD_JOBS=2 trunk build --release
+HYPERSCOPE_ARTIFACT_BUILD=1 HYPERSCOPE_WASM_OPT=1 \
+  HYPERSCOPE_BUILD_JOBS=2 trunk build --release
 ```
+
+The two explicit artifact flags are intentional: a stale optimizer setting now
+fails immediately instead of launching Binaryen from an interactive Trunk
+session.
 
 The checked-in six-cue presentation is available at
 `http://127.0.0.1:8093/?presentation=1&glb=horse.glb`. For a reproducible
