@@ -2810,6 +2810,9 @@ fn submit_webgpu_frame(
     {
         return LiveFrameDisposition::IncumbentRequired;
     }
+    if !crate::webgpu_backend::frame_contract_required() {
+        return LiveFrameDisposition::IncumbentRequired;
+    }
     let source_revision = renderer.render_command_builds;
     if crate::webgpu_backend::needs_scene(source_revision) {
         let scene = match renderer.validated_render_scene.as_ref() {
@@ -2840,6 +2843,15 @@ fn submit_webgpu_frame(
             return LiveFrameDisposition::IncumbentRequired;
         }
     }
+    let plan = match renderer.render_command_plan.as_ref() {
+        Some(plan) => plan,
+        None => {
+            crate::webgpu_backend::record_frame_prerequisite_failure(
+                "shared render command plan is unavailable",
+            );
+            return LiveFrameDisposition::IncumbentRequired;
+        }
+    };
     let (joint_matrices, morph_weights) = match renderer.surface_runtime.current_pose_payload() {
         Ok(pose) => pose,
         Err(error) => {
@@ -2849,6 +2861,7 @@ fn submit_webgpu_frame(
     };
     crate::webgpu_backend::submit_frame(
         renderer.render_calls,
+        plan,
         renderer.render_style,
         current_render_view(renderer, camera),
         current_render_frame_options(renderer),
@@ -3283,8 +3296,8 @@ fn refresh_validated_render_scene(
     }
 }
 
-fn refresh_render_command_plan(renderer: &mut MainState) {
-    if !renderer.render_shadow.is_enabled() {
+fn refresh_render_command_plan(renderer: &mut MainState, backend_plan_required: bool) {
+    if !renderer.render_shadow.is_enabled() && !backend_plan_required {
         return;
     }
     let style = renderer.render_style;
@@ -3301,7 +3314,7 @@ fn refresh_render_command_plan(renderer: &mut MainState) {
     }
     match RenderCommandPlan::build(scene, style, options) {
         Ok(plan) => {
-            let pbr_plan = if style == RenderStyle::Pbr {
+            let pbr_plan = if renderer.render_shadow.is_enabled() && style == RenderStyle::Pbr {
                 match WebGlPbrCommandPlan::build(
                     plan.execution(),
                     renderer.render_batches.as_slice(),
@@ -5567,7 +5580,7 @@ pub fn mr_set_render_shadow_enabled(enabled: bool) -> JsValue {
             state.render_scene_dirty = true;
             sync_render_batches(state);
             let _ = refresh_validated_render_scene(state, false);
-            refresh_render_command_plan(state);
+            refresh_render_command_plan(state, false);
         } else if !enabled && changed {
             state.validated_render_scene = None;
             state.render_command_plan = None;
@@ -10022,9 +10035,11 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
 
         sync_render_batches(state);
         #[cfg(feature = "webgpu-backend")]
-        let backend_scene_required = crate::webgpu_backend::needs_scene(
-            state.render_command_builds,
-        ) || state.backend_evidence_requested;
+        let backend_plan_required = crate::webgpu_backend::frame_contract_required();
+        #[cfg(feature = "webgpu-backend")]
+        let backend_scene_required = backend_plan_required || state.backend_evidence_requested;
+        #[cfg(not(feature = "webgpu-backend"))]
+        let backend_plan_required = false;
         #[cfg(not(feature = "webgpu-backend"))]
         let backend_scene_required = false;
         let _scene_refresh = refresh_validated_render_scene(state, backend_scene_required);
@@ -10050,7 +10065,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                 );
             }
         }
-        refresh_render_command_plan(state);
+        refresh_render_command_plan(state, backend_plan_required);
         let prepared_render_revision = prepare_render_shadow_observation(state, &camera);
 
         // The explicitly selected WebGPU backend submits before any WebGL

@@ -44,12 +44,16 @@ assert.equal(replaceScene.includes('ValidatedRenderScene::new('), false,
 for (const required of [
   'render_scene_dirty: bool',
   'validated_render_scene: Option<ValidatedRenderScene>',
+  'render_command_plan: Option<RenderCommandPlan>',
   'fn refresh_validated_render_scene(',
+  'fn refresh_render_command_plan(renderer: &mut MainState, backend_plan_required: bool)',
   'backend_scene_required: bool',
   'renderer.render_shadow.replace_scene(scene.clone())',
   'renderer.validated_render_scene = Some(scene)',
   'crate::webgpu_backend::needs_scene(',
+  'crate::webgpu_backend::frame_contract_required()',
   'scene.clone(),',
+  'plan,',
   '("renderSceneExtractions", state.render_scene_extractions)',
 ]) {
   assert.ok(renderer.includes(required), `shared renderer extraction is missing ${required}`);
@@ -62,6 +66,17 @@ assert.ok(submit.includes('renderer.validated_render_scene.as_ref()'),
   'WebGPU submission must consume the main renderer scene epoch');
 assert.equal(submit.includes('extract_render_scene(renderer)'), false,
   'WebGPU submission must not independently extract a second scene');
+assert.ok(submit.includes('renderer.render_command_plan.as_ref()'),
+  'WebGPU submission must consume the main renderer command plan');
+
+assert.ok(bridge.includes('plan: &RenderCommandPlan'),
+  'WebGPU submission must borrow the shared command plan');
+assert.ok(bridge.includes('plan.validate_for(scene.validated_scene(), style, options)'),
+  'WebGPU must validate the shared plan against exact retained scene identity');
+assert.equal(bridge.includes('command_plan: Option<RenderCommandPlan>'), false,
+  'WebGPU must not retain a parallel command-plan cache');
+assert.equal(bridge.includes('RenderCommandPlan::build('), false,
+  'WebGPU must not independently rebuild the shared command plan');
 
 const evidenceStart = renderer.indexOf('pub fn mr_request_backend_frame_evidence()');
 const evidenceEnd = renderer.indexOf(

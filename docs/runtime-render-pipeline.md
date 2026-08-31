@@ -185,15 +185,17 @@ non-PBR WebGL2 styles preflight every retained batch against that resolved scene
 and execute its draw commands directly; a mismatch falls back before the first
 diagnostic draw.
 
-The browser WebGPU adapter retains exactly one active `RenderCommandPlan` beside
-its device-resident `PatchRenderScene`. It rebuilds that plan only when the
-validated scene allocation, render style, or command-presence key changes;
-camera matrices, animation pose, focus-field values, and uniform-only options
-construct frames with `RenderFrame::from_command_plan`. Scene replacement and
-successful in-place scene publication both retire the old plan atomically.
-`commandPlanReady` and `commandPlanBuilds` expose this cache boundary in backend
-diagnostics. The route/shadow smoke oracle rejects any return of
-`RenderFrame::build` to the ordinary browser WebGPU frame path.
+The main renderer retains exactly one active `RenderCommandPlan` beside its
+shared validated scene. It rebuilds that plan only when the scene allocation,
+render style, or command-presence key changes; camera matrices, animation pose,
+focus-field values, and uniform-only options construct frames with
+`RenderFrame::from_command_plan`. WebGL parity and WebGPU consume this same plan
+allocation. The WebGPU adapter validates it against the exact scene allocation
+retained by `PatchRenderScene`; it no longer owns a parallel plan cache or
+rebuild counter. `renderCommandPlanBuilds` exposes the sole cache boundary in
+main-renderer diagnostics. The route/shadow smoke oracle rejects any return of
+`RenderFrame::build` or `RenderCommandPlan::build` to the ordinary browser
+WebGPU path.
 `resolvedExecutionFrames`, `resolvedExecutionFallbacks`, and
 `lastExecutionError` make that gate observable through the existing render
 shadow diagnostics. Shadow scene validation and WebGL PBR lowering now happen

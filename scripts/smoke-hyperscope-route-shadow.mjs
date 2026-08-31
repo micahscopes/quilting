@@ -747,18 +747,37 @@ for (const stalePresentationGuard of [
     `WebGPU stale-presentation guard is missing ${stalePresentationGuard}`,
   );
 }
-for (const retainedFramePlanStep of [
-  'command_plan: Option<RenderCommandPlan>',
-  'fn build_render_frame(',
-  '!plan.matches(scene.validated_scene(), style, options)',
-  'RenderFrame::from_command_plan(',
-  'command_plan_builds',
+for (const sharedFramePlanStep of [
+  'fn refresh_render_command_plan(renderer: &mut MainState, backend_plan_required: bool)',
+  'crate::webgpu_backend::frame_contract_required()',
+  'renderer.render_command_plan.as_ref()',
+  'RenderCommandPlan::build(scene, style, options)',
 ]) {
   assert.ok(
-    webGpuBackendSource.includes(retainedFramePlanStep),
-    `WebGPU retained frame-plan path is missing ${retainedFramePlanStep}`,
+    mainRendererSource.includes(sharedFramePlanStep),
+    `main renderer shared frame-plan path is missing ${sharedFramePlanStep}`,
   );
 }
+for (const borrowedFramePlanStep of [
+  'plan: &RenderCommandPlan',
+  'plan.validate_for(scene.validated_scene(), style, options)',
+  'RenderFrame::from_command_plan(',
+]) {
+  assert.ok(
+    webGpuBackendSource.includes(borrowedFramePlanStep),
+    `WebGPU borrowed frame-plan path is missing ${borrowedFramePlanStep}`,
+  );
+}
+assert.equal(
+  webGpuBackendSource.includes('command_plan: Option<RenderCommandPlan>'),
+  false,
+  'WebGPU must not retain a duplicate browser command-plan cache',
+);
+assert.equal(
+  webGpuBackendSource.includes('RenderCommandPlan::build('),
+  false,
+  'WebGPU must not rebuild the main renderer command plan',
+);
 assert.equal(
   webGpuBackendSource.includes('RenderFrame::build('),
   false,
