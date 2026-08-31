@@ -38,6 +38,8 @@ use hyperscope_app::{
     PrimarySceneInstallCompletionDispatch, PrimarySceneInstallMetadata,
     PrimarySceneInstallOutcome, RenderSettings,
     RenderSettingsSynchronizationDisposition, SemanticAction, Timed,
+    WebGpuLodAuthority, WebGpuLodAuthorityDisposition, WebGpuLodAuthorityPhase,
+    WebGpuLodAuthorityReason, WebGpuLodAuthoritySnapshot,
 };
 use quilting_core::render_evidence::RenderPickEvidenceReport;
 use serde::{Deserialize, Serialize};
@@ -45,6 +47,108 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 use wasm_bindgen::prelude::*;
+
+const WEBGPU_LOD_COMPLETE_SCENE: u8 = 1 << 0;
+const WEBGPU_LOD_DEVICE_AUTHORITY: u8 = 1 << 1;
+const WEBGPU_LOD_INCUMBENT_REQUIRED: u8 = 1 << 2;
+const WEBGPU_LOD_INCUMBENT_RESET_PENDING: u8 = 1 << 3;
+const WEBGPU_LOD_STALE_COMPLETION: u8 = 1 << 4;
+const WEBGPU_LOD_INCUMBENT_RECOVERED: u8 = 1 << 5;
+
+fn webgpu_lod_authority_flags(
+    snapshot: WebGpuLodAuthoritySnapshot,
+    disposition: WebGpuLodAuthorityDisposition,
+    complete_scene: bool,
+) -> u8 {
+    let mut flags = 0;
+    if complete_scene {
+        flags |= WEBGPU_LOD_COMPLETE_SCENE;
+    }
+    if snapshot.suppress_incumbent() {
+        flags |= WEBGPU_LOD_DEVICE_AUTHORITY;
+    }
+    if disposition == WebGpuLodAuthorityDisposition::IncumbentRequired {
+        flags |= WEBGPU_LOD_INCUMBENT_REQUIRED;
+    }
+    if snapshot.incumbent_reset_pending {
+        flags |= WEBGPU_LOD_INCUMBENT_RESET_PENDING;
+    }
+    if disposition == WebGpuLodAuthorityDisposition::IgnoredStale {
+        flags |= WEBGPU_LOD_STALE_COMPLETION;
+    }
+    if disposition == WebGpuLodAuthorityDisposition::IncumbentRecovered {
+        flags |= WEBGPU_LOD_INCUMBENT_RECOVERED;
+    }
+    flags
+}
+
+fn webgpu_lod_phase_name(phase: WebGpuLodAuthorityPhase) -> &'static str {
+    match phase {
+        WebGpuLodAuthorityPhase::AwaitingPresentation => "awaiting-presentation",
+        WebGpuLodAuthorityPhase::AwaitingDeviceEpoch => "awaiting-device-epoch",
+        WebGpuLodAuthorityPhase::DeviceResident => "device-resident",
+        WebGpuLodAuthorityPhase::IncumbentRecovery => "incumbent-recovery",
+        WebGpuLodAuthorityPhase::Incumbent => "incumbent",
+    }
+}
+
+fn webgpu_lod_reason_name(reason: WebGpuLodAuthorityReason) -> &'static str {
+    match reason {
+        WebGpuLodAuthorityReason::PresentationObserved => "presentation-observed",
+        WebGpuLodAuthorityReason::DeviceEpochAccepted => "device-epoch-accepted",
+        WebGpuLodAuthorityReason::PresentationRetired => "presentation-retired",
+        WebGpuLodAuthorityReason::DeviceDispatchRejected => "device-dispatch-rejected",
+        WebGpuLodAuthorityReason::IncumbentRecovered => "incumbent-recovered",
+        WebGpuLodAuthorityReason::SparseIncumbentRejected => "sparse-incumbent-rejected",
+        WebGpuLodAuthorityReason::StaleDeviceCompletion => "stale-device-completion",
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowWebGpuLodAuthority {
+    revision: String,
+    phase: &'static str,
+    presentation_authoritative: bool,
+    active: bool,
+    incumbent_reset_pending: bool,
+    pending_dispatch_token: Option<String>,
+    pending_dispatch_complete_scene: bool,
+    activations: String,
+    dispatches: String,
+    full_scene_dispatches: String,
+    fallback_transitions: String,
+    incumbent_recoveries: String,
+    stale_device_completions: String,
+    sparse_incumbent_rejections: String,
+    last_reason: Option<&'static str>,
+}
+
+impl From<WebGpuLodAuthoritySnapshot> for ShadowWebGpuLodAuthority {
+    fn from(snapshot: WebGpuLodAuthoritySnapshot) -> Self {
+        Self {
+            revision: snapshot.revision.to_string(),
+            phase: webgpu_lod_phase_name(snapshot.phase),
+            presentation_authoritative: snapshot.presentation_authoritative,
+            active: snapshot.active,
+            incumbent_reset_pending: snapshot.incumbent_reset_pending,
+            pending_dispatch_token: snapshot
+                .pending_dispatch
+                .map(|dispatch| dispatch.token.to_string()),
+            pending_dispatch_complete_scene: snapshot
+                .pending_dispatch
+                .is_some_and(|dispatch| dispatch.complete_scene),
+            activations: snapshot.activations.to_string(),
+            dispatches: snapshot.dispatches.to_string(),
+            full_scene_dispatches: snapshot.full_scene_dispatches.to_string(),
+            fallback_transitions: snapshot.fallback_transitions.to_string(),
+            incumbent_recoveries: snapshot.incumbent_recoveries.to_string(),
+            stale_device_completions: snapshot.stale_device_completions.to_string(),
+            sparse_incumbent_rejections: snapshot.sparse_incumbent_rejections.to_string(),
+            last_reason: snapshot.last_reason.map(webgpu_lod_reason_name),
+        }
+    }
+}
 
 /// Pure generated-WASM oracle for the normalized SpaceMouse camera boundary.
 /// This does not queue an action, advance virtual time, or mutate app state.
@@ -169,6 +273,9 @@ pub fn encode_local_presence_envelope(
 #[wasm_bindgen]
 pub struct HyperscopeAppShadow {
     store: AppStore,
+    /// Process-local renderer authority. It owns no GPU handles or durable
+    /// state; adapters report only presentation/dispatch/recovery evidence.
+    webgpu_lod_authority: RefCell<WebGpuLodAuthority>,
     peer_ingress: RefCell<LocalPeerIngress>,
     animation_pose_scheduler: RefCell<AnimationPoseScheduler>,
     /// Renderer residency joins transient packed-node handles to stable
@@ -191,12 +298,101 @@ impl HyperscopeAppShadow {
     pub fn new() -> Self {
         Self {
             store: AppStore::default(),
+            webgpu_lod_authority: RefCell::new(WebGpuLodAuthority::default()),
             peer_ingress: RefCell::new(LocalPeerIngress::default()),
             animation_pose_scheduler: RefCell::new(AnimationPoseScheduler::default()),
             interaction_targets: RefCell::new(InteractionTargetTable::default()),
             backend_pick_evidence: RefCell::new(InteractionPickEvidenceObserver::default()),
             pending_adapter_effects: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Observe whether WebGPU is the actual visible presenter. The compact
+    /// result is a bit packet decoded by the browser adapter; no JS object is
+    /// allocated on this transition path.
+    #[wasm_bindgen(js_name = observeWebGpuLodPresentation)]
+    pub fn observe_webgpu_lod_presentation(&self, authoritative: bool) -> Result<u8, JsValue> {
+        let transition = self
+            .webgpu_lod_authority
+            .borrow_mut()
+            .observe_presentation(authoritative)
+            .map_err(js_error)?;
+        Ok(webgpu_lod_authority_flags(
+            transition.snapshot,
+            transition.disposition,
+            false,
+        ))
+    }
+
+    /// Start one synchronous device dispatch decision. Bit zero says the
+    /// adapter must classify the complete composed scene; the remaining bits
+    /// describe the current authority and rollback obligations.
+    #[wasm_bindgen(js_name = beginWebGpuLodDispatch)]
+    pub fn begin_webgpu_lod_dispatch(
+        &self,
+        presentation_authoritative: bool,
+    ) -> Result<u8, JsValue> {
+        let mut authority = self.webgpu_lod_authority.borrow_mut();
+        let observed = authority
+            .observe_presentation(presentation_authoritative)
+            .map_err(js_error)?;
+        let begun = authority.begin_dispatch().map_err(js_error)?;
+        let complete_scene = begun
+            .dispatch
+            .is_some_and(|dispatch| dispatch.complete_scene);
+        let mut flags =
+            webgpu_lod_authority_flags(begun.snapshot, begun.disposition, complete_scene);
+        if observed.disposition == WebGpuLodAuthorityDisposition::IncumbentRequired {
+            flags |= WEBGPU_LOD_INCUMBENT_REQUIRED;
+        }
+        Ok(flags)
+    }
+
+    /// Settle the one synchronous device dispatch begun above. A presentation
+    /// change between calls makes the completion stale inside the Rust reducer
+    /// instead of allowing an old device epoch to seize authority.
+    #[wasm_bindgen(js_name = completeWebGpuLodDispatch)]
+    pub fn complete_webgpu_lod_dispatch(&self, accepted: bool) -> Result<u8, JsValue> {
+        let mut authority = self.webgpu_lod_authority.borrow_mut();
+        let token = authority
+            .snapshot()
+            .pending_dispatch
+            .ok_or_else(|| JsValue::from_str("no WebGPU LOD dispatch is pending"))?
+            .token;
+        let transition = authority
+            .complete_dispatch(token, accepted)
+            .map_err(js_error)?;
+        Ok(webgpu_lod_authority_flags(
+            transition.snapshot,
+            transition.disposition,
+            false,
+        ))
+    }
+
+    /// Admit an incumbent recovery only when it is a complete coherent
+    /// snapshot. Sparse/delta publications cannot clear a device-authority
+    /// rollback obligation.
+    #[wasm_bindgen(js_name = completeIncumbentLodRecovery)]
+    pub fn complete_incumbent_lod_recovery(&self, full_snapshot: bool) -> Result<u8, JsValue> {
+        let transition = self
+            .webgpu_lod_authority
+            .borrow_mut()
+            .complete_incumbent_recovery(full_snapshot)
+            .map_err(js_error)?;
+        Ok(webgpu_lod_authority_flags(
+            transition.snapshot,
+            transition.disposition,
+            false,
+        ))
+    }
+
+    /// Low-rate exact diagnostics for parity checks and the inspector. The
+    /// high-rate decision methods above remain allocation-free scalar calls.
+    #[wasm_bindgen(js_name = webGpuLodAuthorityDiagnostics)]
+    pub fn webgpu_lod_authority_diagnostics(&self) -> Result<JsValue, JsValue> {
+        to_js(&ShadowWebGpuLodAuthority::from(
+            self.webgpu_lod_authority.borrow().snapshot(),
+        ))
     }
 
     /// Allocate one exact animation-pose stamp. Returns 1 when the adapter
