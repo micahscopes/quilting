@@ -201,6 +201,10 @@ equal-numbered but distinct WebGPU epoch silently resident.
 main-renderer diagnostics. The route/shadow smoke oracle rejects any return of
 `RenderFrame::build`, `RenderCommandPlan::build`, or
 `RenderFrame::from_command_plan` to the ordinary browser WebGPU path.
+The main renderer creates this shared scene/plan/frame chain only when render
+parity is enabled or WebGPU will actually attempt the current diagnostic style
+(plus explicit one-shot PBR evidence). Merely having a ready headless adapter
+therefore adds no extraction, plan, or frame work to ordinary incumbent PBR.
 `resolvedExecutionFrames`, `resolvedExecutionFallbacks`, and
 `lastExecutionError` make that gate observable through the existing render
 shadow diagnostics. Shadow scene validation and WebGL PBR lowering now happen

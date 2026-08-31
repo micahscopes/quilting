@@ -2819,20 +2819,21 @@ fn current_render_frame(
 }
 
 #[cfg(feature = "webgpu-backend")]
+fn webgpu_frame_requested(renderer: &MainState) -> bool {
+    crate::webgpu_backend::frame_contract_required()
+        && (quilting_webgpu::supports_patch_presentation_style(renderer.render_style)
+            || (renderer.render_style == RenderStyle::Pbr
+                && renderer.backend_evidence_requested))
+}
+
+#[cfg(feature = "webgpu-backend")]
 fn submit_webgpu_frame(
     renderer: &MainState,
     frame: Option<&RenderFrame>,
 ) -> crate::webgpu_backend::LiveFrameDisposition {
     use crate::webgpu_backend::LiveFrameDisposition;
 
-    let requested_pbr_evidence =
-        renderer.render_style == RenderStyle::Pbr && renderer.backend_evidence_requested;
-    if !quilting_webgpu::supports_patch_presentation_style(renderer.render_style)
-        && !requested_pbr_evidence
-    {
-        return LiveFrameDisposition::IncumbentRequired;
-    }
-    if !crate::webgpu_backend::frame_contract_required() {
+    if !webgpu_frame_requested(renderer) {
         return LiveFrameDisposition::IncumbentRequired;
     }
     let source_revision = renderer.render_command_builds;
@@ -10050,9 +10051,9 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
 
         sync_render_batches(state);
         #[cfg(feature = "webgpu-backend")]
-        let backend_plan_required = crate::webgpu_backend::frame_contract_required();
+        let backend_plan_required = webgpu_frame_requested(state);
         #[cfg(feature = "webgpu-backend")]
-        let backend_scene_required = backend_plan_required || state.backend_evidence_requested;
+        let backend_scene_required = backend_plan_required;
         #[cfg(not(feature = "webgpu-backend"))]
         let backend_plan_required = false;
         #[cfg(not(feature = "webgpu-backend"))]

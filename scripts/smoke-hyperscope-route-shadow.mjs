@@ -749,7 +749,8 @@ for (const stalePresentationGuard of [
 }
 for (const sharedFramePlanStep of [
   'fn refresh_render_command_plan(renderer: &mut MainState, backend_plan_required: bool)',
-  'crate::webgpu_backend::frame_contract_required()',
+  'fn webgpu_frame_requested(renderer: &MainState) -> bool',
+  'quilting_webgpu::supports_patch_presentation_style(renderer.render_style)',
   'RenderCommandPlan::build(scene, style, options)',
   'fn current_render_frame(',
   'RenderFrame::from_command_plan(',
