@@ -9,6 +9,7 @@ const read = path => readFileSync(join(repository, path), 'utf8');
 const browser = read('hyperscope.html');
 const appShadow = read('crates/quilting-wasm/src/app_shadow.rs');
 const renderer = read('crates/quilting-wasm/src/main_renderer.rs');
+const webgpuBackend = read('crates/quilting-wasm/src/webgpu_backend.rs');
 const renderEvidence = read('crates/quilting-core/src/render_evidence.rs');
 const interaction = read('crates/hyperscape/src/interaction.rs');
 const settings = read('crates/hyperscope-app/src/settings.rs');
@@ -60,8 +61,23 @@ for (const required of [
   'pub(crate) async fn read_backend_pick_evidence()',
   'stage_backend_pick_evidence(mvp, mv, camera_pos, x, y, target_epoch).into_js()',
   'let report = read_backend_pick_evidence()',
+  'let prior_highlight = STATE.with(',
+  'state.highlight_face = prior_highlight;',
 ]) {
   assert.ok(renderer.includes(required), `renderer pick boundary is missing ${required}`);
+}
+
+for (const required of [
+  'last_completed_frame_input: Option<LiveFrameInput>',
+  'pick_frame_ready: self.last_completed_frame_input.is_some()',
+  'backend.last_completed_frame_input = Some(frame_input);',
+  'backend.last_source_render_call = source_render_call;',
+  '.last_completed_frame_input',
+]) {
+  assert.ok(
+    webgpuBackend.includes(required),
+    `WebGPU completed-frame pick residency is missing ${required}`,
+  );
 }
 
 for (const required of [

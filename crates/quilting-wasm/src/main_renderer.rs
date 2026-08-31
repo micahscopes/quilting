@@ -4483,7 +4483,22 @@ pub(crate) fn stage_backend_pick_evidence(
     target_epoch: u32,
 ) -> BackendPickEvidenceStageReceipt {
     let started_ms = browser_now_ms();
+    // The incumbent picker historically highlights every queried face. Pick
+    // evidence is observational and must not turn that debugging side effect
+    // into application state (or make an otherwise supported WebGPU focus
+    // frame fall back because source-face highlight composition is absent).
+    let prior_highlight = STATE.with(|state| {
+        state
+            .borrow()
+            .as_ref()
+            .map_or(-1, |state| state.highlight_face)
+    });
     let face = mr_pick(mvp, mv, camera_pos, x, y);
+    STATE.with(|state| {
+        if let Some(state) = state.borrow_mut().as_mut() {
+            state.highlight_face = prior_highlight;
+        }
+    });
     let surface = STATE.with(|state| {
         let state = state.borrow();
         state

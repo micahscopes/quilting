@@ -58,7 +58,14 @@ struct WebGpuBackend {
     /// One explicit parity frame must use the offscreen target even when the
     /// same device owns a live presentation surface.
     frame_evidence_requested: bool,
+    /// Cache key for deciding whether the next requested frame can retain the
+    /// current presentation. Device LOD dispatch invalidates this without
+    /// invalidating the resources of the last frame that actually completed.
     last_frame_input: Option<LiveFrameInput>,
+    /// Exact input represented by the retained preparation/visibility/root
+    /// buffers. Picking consumes this completed-frame witness even while a
+    /// newer device LOD epoch is waiting for its presentation frame.
+    last_completed_frame_input: Option<LiveFrameInput>,
     /// A matching `last_frame_input` can retain visible pixels only when that
     /// exact frame was submitted to the presentation surface.
     last_frame_presented: bool,
@@ -330,6 +337,7 @@ pub(crate) struct WebGpuBackendDiagnostics {
     pick_pipeline_ready: bool,
     resident_root_pick_pipeline_ready: bool,
     pick_target_ready: bool,
+    pick_frame_ready: bool,
     pick_requests: u64,
     pick_submissions: u64,
     pick_failures: u64,
@@ -355,6 +363,7 @@ impl WebGpuBackend {
         // browser exposes WebGL2 instead of a stale WebGPU image.
         if self.presentation.is_some() {
             self.last_frame_input = None;
+            self.last_completed_frame_input = None;
         }
         LiveFrameDisposition::IncumbentRequired
     }
@@ -592,6 +601,7 @@ impl WebGpuBackend {
             pick_pipeline_ready: self.pick_pipeline.is_some(),
             resident_root_pick_pipeline_ready: self.resident_root_pick_pipeline.is_some(),
             pick_target_ready: self.pick_target.is_some(),
+            pick_frame_ready: self.last_completed_frame_input.is_some(),
             pick_requests: self.pick_requests,
             pick_submissions: self.pick_submissions,
             pick_failures: self.pick_failures,
@@ -628,6 +638,7 @@ impl WebGpuBackend {
         self.next_face_visibility_bits = face_visibility_bits;
         self.next_morph_weights = morph_weights;
         self.frame_failures = self.frame_failures.saturating_add(1);
+        self.last_completed_frame_input = None;
         self.last_frame_failure = Some(error.clone());
         self.last_error = Some(error.clone());
         error
@@ -839,6 +850,7 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
                     backend.presentation = None;
                     backend.frame_evidence_requested = false;
                     backend.last_frame_input = None;
+                    backend.last_completed_frame_input = None;
                     backend.last_frame_presented = false;
                     backend.last_presentation_style = None;
                     backend.frame_evidence = None;
@@ -974,6 +986,7 @@ pub(crate) async fn initialize_presentation(
         backend.presentation = Some(presentation);
         backend.frame_evidence_requested = false;
         backend.last_frame_input = None;
+        backend.last_completed_frame_input = None;
         backend.last_frame_presented = false;
         backend.last_presentation_style = None;
         backend.frame_evidence = None;
@@ -1272,6 +1285,7 @@ pub(crate) fn replace_atlas(
                 backend.scene_source_revision = None;
                 backend.frame_evidence = None;
                 backend.last_frame_input = None;
+                backend.last_completed_frame_input = None;
                 backend.last_device_lod_epoch = None;
                 backend.last_face_visibility_bits.clear();
                 backend.next_face_visibility_bits.clear();
@@ -1321,6 +1335,7 @@ pub(crate) fn replace_model(
                 backend.scene_source_revision = None;
                 backend.frame_evidence = None;
                 backend.last_frame_input = None;
+                backend.last_completed_frame_input = None;
                 backend.last_device_lod_epoch = None;
                 backend.last_face_visibility_bits.clear();
                 backend.next_face_visibility_bits.clear();
@@ -1882,6 +1897,7 @@ pub(crate) fn replace_scene(
                 backend.scene_updates = backend.scene_updates.saturating_add(1);
                 backend.frame_evidence = None;
                 backend.last_frame_input = None;
+                backend.last_completed_frame_input = None;
                 backend.next_morph_weights.clear();
                 backend.patch_pose_uniforms_ready = false;
                 backend.publish_resident_scene(resident_root_candidate, resident_root_failure);
@@ -1936,6 +1952,7 @@ pub(crate) fn replace_scene(
                 backend.scene_rebuilds = backend.scene_rebuilds.saturating_add(1);
                 backend.frame_evidence = None;
                 backend.last_frame_input = None;
+                backend.last_completed_frame_input = None;
                 backend.last_face_visibility_bits.clear();
                 backend.next_face_visibility_bits.clear();
                 backend.next_morph_weights.clear();
@@ -2137,16 +2154,19 @@ pub(crate) fn submit_frame(
             backend.next_face_visibility_bits = face_visibility_bits;
             backend.next_morph_weights = effective_morph_weights;
             backend.frames_skipped_unchanged = backend.frames_skipped_unchanged.saturating_add(1);
-            return Ok(
-                if presentation_frame
-                    && backend.last_frame_presented
-                    && backend.last_frame_revision != 0
-                {
-                    LiveFrameDisposition::PresentationRetained
-                } else {
-                    LiveFrameDisposition::IncumbentRequired
-                },
-            );
+            if presentation_frame
+                && backend.last_frame_presented
+                && backend.last_frame_revision != 0
+            {
+                // No GPU work is necessary, but the retained presentation and
+                // pick resources are also an exact rendering of this newer
+                // equivalent source call. Advance that coherence witness so a
+                // pick between frames is not rejected solely because the
+                // browser kept asking us to present identical state.
+                backend.last_source_render_call = source_render_call;
+                return Ok(LiveFrameDisposition::PresentationRetained);
+            }
+            return Ok(LiveFrameDisposition::IncumbentRequired);
         }
         if pose_upload.should_publish_dynamic() {
             effective_morph_weights.extend_from_slice(morph_weights);
@@ -2598,6 +2618,7 @@ pub(crate) fn submit_frame(
                 backend.next_face_visibility_bits = face_visibility_bits;
                 backend.next_morph_weights = effective_morph_weights;
                 backend.last_frame_input = Some(frame_input);
+                backend.last_completed_frame_input = Some(frame_input);
                 backend.last_frame_presented = presentation_frame;
                 if presentation_frame {
                     backend.last_presentation_style = Some(style);
@@ -2749,7 +2770,7 @@ pub(crate) fn stage_pick(pixel: [u32; 2], target_epoch: u32) -> Result<StagedWeb
         backend.pick_requests = backend.pick_requests.saturating_add(1);
         if backend.state != "ready"
             || backend.last_frame_revision == 0
-            || backend.last_frame_input.is_none()
+            || backend.last_completed_frame_input.is_none()
         {
             return Err(backend.reject_pick("WebGPU picking requires one completed coherent frame"));
         }
@@ -2759,7 +2780,7 @@ pub(crate) fn stage_pick(pixel: [u32; 2], target_epoch: u32) -> Result<StagedWeb
         };
         let resident_frame = backend.last_frame_used_resident_roots;
         let focus_frame = backend
-            .last_frame_input
+            .last_completed_frame_input
             .is_some_and(|frame| frame.options.focus_postprocess.is_some());
         let result = (|| {
             let WebGpuBackend {
