@@ -17,6 +17,8 @@ for (const required of [
   'EffectCompletion::AssetLoad(completion)',
   'let mut jobs = AssetEffectJobs::from_commit(&commit)?;',
   'install: jobs.install.take()',
+  '.find(|asset| asset.descriptor.id == expected.asset_id)',
+  'decoded.asset,',
 ]) {
   assert.ok(app.includes(required), `application asset-completion port is missing ${required}`);
 }
@@ -31,6 +33,7 @@ for (const required of [
   '.complete_asset_load(AssetLoadCompletion {',
   'struct ShadowAssetLoadCompletion',
   'install: dispatch.install.map(ShadowAssetJobIdentity::from)',
+  'asset: dispatch.asset.map(ShadowAsset::from)',
 ]) {
   assert.ok(adapter.includes(required), `WASM asset-completion port is missing ${required}`);
 }
@@ -44,6 +47,7 @@ for (const required of [
   'rustAppShadow.finishAssetLoadedWithMetadata(',
   'rustAppShadow.finishAssetLoaded(',
   'const commit = receipt.commit;',
+  'cacheAppAssetReadModel(receipt.asset, commit)',
   'browserAssetEffectHost.beginInstall(token, receipt.install)',
 ]) {
   assert.ok(completion.includes(required), `thin asset-completion adapter is missing ${required}`);
@@ -53,6 +57,7 @@ for (const retired of [
   'rustAppShadow.completeAssetLoaded(',
   'browserAssetEffectHost.beginInstall(token, commit)',
   'commit.effects',
+  'refreshAppShadowSnapshot()',
 ]) {
   assert.equal(completion.includes(retired), false,
     `ordinary asset completion must not retain ${retired}`);
@@ -65,8 +70,12 @@ assert.ok(failureStart >= 0 && failureEnd > failureStart,
 const failure = browser.slice(failureStart, failureEnd);
 assert.ok(failure.includes('rustAppShadow.finishAssetFailed('),
   'asset failures must use the typed completion receipt');
+assert.ok(failure.includes('cacheAppAssetReadModel(receipt.asset, commit)'),
+  'asset failures must consume the compact asset state');
 assert.equal(failure.includes('rustAppShadow.completeAssetFailed('), false,
   'ordinary asset failures must not use the generic completion seam');
+assert.equal(failure.includes('refreshAppShadowSnapshot()'), false,
+  'asset failures must not serialize the complete application state');
 
 const installStart = host.indexOf('  beginInstall(');
 const installEnd = host.indexOf('\n  recordCompletion(', installStart);

@@ -6031,6 +6031,23 @@ function beginAppAssetShadow(uri, source, explicitAssetId = null, scope = 'asset
   }
 }
 
+function cacheAppAssetReadModel(asset, commit) {
+  if (!asset) return null;
+  const current = rustAppShadowDiagnostics.snapshot;
+  const assets = Array.isArray(current?.assets) ? current.assets.slice() : [];
+  const index = assets.findIndex(candidate => candidate.id === asset.id);
+  if (index >= 0) assets[index] = asset;
+  else assets.push(asset);
+  const snapshot = {
+    ...(current || {}),
+    revision: commit?.revision ?? current?.revision,
+    assets,
+  };
+  rustAppShadowDiagnostics.snapshot = snapshot;
+  if (!ensureRustAssetCreditsView()) renderAssetCredits(snapshot);
+  return asset;
+}
+
 function completeAppAssetShadow(token, bufferOrByteLength, metadata = null) {
   if (!token || token.completed || !rustAppShadow) return 'unobserved';
   token.completed = true;
@@ -6057,14 +6074,13 @@ function completeAppAssetShadow(token, bufferOrByteLength, metadata = null) {
     rustAppShadowDiagnostics.lastCommit = commit;
     if (commit.disposition === 'ignored_stale') rustAppShadowDiagnostics.staleCompletions += 1;
     browserAssetEffectHost.recordCompletion(token, commit.disposition);
+    const asset = cacheAppAssetReadModel(receipt.asset, commit);
     if (token.scope === 'primary_scene' && commit.disposition === 'applied') {
       const hosted = browserAssetEffectHost.beginInstall(token, receipt.install);
       for (const mismatch of hosted.mismatches) {
         recordAppShadowMismatch('install_effect', `${token.uri}: ${mismatch}`);
       }
     }
-    const snapshot = refreshAppShadowSnapshot();
-    const asset = snapshot?.assets.find(candidate => candidate.id === token.assetId);
     if (commit.disposition === 'applied'
         && (asset?.status?.state !== 'ready' || asset.status.byte_length !== byteLength)) {
       recordAppShadowMismatch('loaded_projection', `Rust ready projection diverged for ${token.uri}`);
@@ -6231,7 +6247,7 @@ function failAppAssetShadow(token, code, error, retryable = false) {
     rustAppShadowDiagnostics.lastCommit = commit;
     if (commit.disposition === 'ignored_stale') rustAppShadowDiagnostics.staleCompletions += 1;
     browserAssetEffectHost.recordCompletion(token, commit.disposition);
-    refreshAppShadowSnapshot();
+    cacheAppAssetReadModel(receipt.asset, commit);
     return commit.disposition;
   } catch (shadowError) {
     recordAppShadowMismatch(

@@ -24,7 +24,7 @@ use hyperscope_app::{
     AnimationPoseRequestDisposition, AnimationPoseScheduler, AnimationPoseStamp, AppCommit,
     AppEffect, AppEvent, AppFrameSnapshot, AppStore, AssetFetchJob, AssetJobIdentity,
     AssetLoadCompletion, AssetLoadCompletionDispatch, AssetLoadOutcome, AssetLoadScope,
-    AssetMetadata, AssetStatus, AuthoredRevision, CommitDisposition,
+    AssetMetadata, AssetReadModel, AssetStatus, AuthoredRevision, CommitDisposition,
     EffectCompletion, FocusPostprocessMode, FocusPostprocessSettings, FrameTick,
     InstalledPrimarySceneReadModel, LocalPeerDisposition, LocalPeerIngress, LocalPeerLane,
     LocalPeerReceipt, NavigationSettings,
@@ -2783,11 +2783,7 @@ impl HyperscopeAppShadow {
             .store
             .asset_snapshot()
             .into_iter()
-            .map(|asset| ShadowAsset {
-                id: asset.descriptor.id.to_string(),
-                uri: asset.descriptor.uri,
-                status: ShadowAssetStatus::from(asset.status),
-            })
+            .map(ShadowAsset::from)
             .collect();
         let diagnostics = self
             .store
@@ -3271,12 +3267,14 @@ struct ShadowAssetLoadRequest {
 struct ShadowAssetLoadCompletion {
     commit: ShadowCommit,
     install: Option<ShadowAssetJobIdentity>,
+    asset: Option<ShadowAsset>,
 }
 
 fn asset_load_completion_to_js(dispatch: AssetLoadCompletionDispatch) -> Result<JsValue, JsValue> {
     to_js(&ShadowAssetLoadCompletion {
         commit: shadow_commit(&dispatch.commit),
         install: dispatch.install.map(ShadowAssetJobIdentity::from),
+        asset: dispatch.asset.map(ShadowAsset::from),
     })
 }
 
@@ -4338,6 +4336,16 @@ struct ShadowAsset {
     id: String,
     uri: String,
     status: ShadowAssetStatus,
+}
+
+impl From<AssetReadModel> for ShadowAsset {
+    fn from(asset: AssetReadModel) -> Self {
+        Self {
+            id: asset.descriptor.id.to_string(),
+            uri: asset.descriptor.uri,
+            status: asset.status.into(),
+        }
+    }
 }
 
 #[derive(Serialize)]

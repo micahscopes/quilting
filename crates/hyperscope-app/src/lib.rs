@@ -752,6 +752,7 @@ pub struct AssetLoadRequest {
 pub struct AssetLoadCompletionDispatch {
     pub commit: AppCommit,
     pub install: Option<AssetJobIdentity>,
+    pub asset: Option<AssetReadModel>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2505,6 +2506,12 @@ impl AppStore {
         Ok(AssetLoadCompletionDispatch {
             commit,
             install: jobs.install.take(),
+            asset: self
+                .assets
+                .lock_ref()
+                .iter()
+                .find(|asset| asset.descriptor.id == expected.asset_id)
+                .cloned(),
         })
     }
 
@@ -3858,6 +3865,17 @@ mod tests {
             Some(AssetJobIdentity {
                 request_id: chess_request,
                 asset_id: chess.id,
+            }),
+        );
+        assert_eq!(
+            decoded.asset,
+            Some(AssetReadModel {
+                descriptor: chess.clone(),
+                status: AssetStatus::Ready {
+                    byte_length: 100,
+                    content_digest: None,
+                    metadata: AssetMetadata::default(),
+                },
             }),
         );
         let after_decode = store
