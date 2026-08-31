@@ -2545,13 +2545,13 @@ impl HyperscopeAppShadow {
         Ok(())
     }
 
-    /// Return only the coherent low-rate state needed by presentation
-    /// animation adaptation. High-rate sampling remains allocation-free through
+    /// Return only the coherent low-rate state needed by animation adapters.
+    /// High-rate sampling remains allocation-free through
     /// `writeInstalledAnimationSample`.
-    #[wasm_bindgen(js_name = presentationAnimationState)]
-    pub fn presentation_animation_state(&self) -> Result<JsValue, JsValue> {
-        let state = self.store.presentation_animation_snapshot();
-        to_js(&ShadowPresentationAnimationState {
+    #[wasm_bindgen(js_name = animationRuntimeState)]
+    pub fn animation_runtime_state(&self) -> Result<JsValue, JsValue> {
+        let state = self.store.animation_runtime_snapshot();
+        to_js(&ShadowAnimationRuntimeState {
             revision: state.revision.to_string(),
             residency: state.residency.map(Into::into),
             clip_state: state.clip_state.into(),
@@ -3803,7 +3803,7 @@ struct ShadowPresentationAnimationResidencyDispatch {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ShadowPresentationAnimationState {
+struct ShadowAnimationRuntimeState {
     revision: String,
     residency: Option<ShadowPresentationAnimationResidency>,
     clip_state: ShadowAnimationClipSelection,

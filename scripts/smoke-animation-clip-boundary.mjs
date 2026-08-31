@@ -131,6 +131,14 @@ for (const retired of [
     `ordinary clip completion must not retain ${retired}`);
 }
 
+const rangeStart = browser.indexOf('function animationClipRangeForClock(app) {');
+const rangeEnd = browser.indexOf('function writeRustAnimationSample(', rangeStart);
+const range = browser.slice(rangeStart, rangeEnd);
+assert.ok(range.includes('app?.animationRuntimeState()?.clipState?.active?.clip'),
+  'clock range lookup must use the compact Rust animation runtime state');
+assert.equal(range.includes('.snapshot()'), false,
+  'clock range lookup must not serialize the complete application state');
+
 const moduleSource = browser.match(/<script type="module">([\s\S]*?)<\/script>/)?.[1];
 assert.ok(moduleSource, 'could not extract the Hyperscope inline module');
 const syntax = spawnSync(process.execPath, ['--input-type=module', '--check'], {

@@ -1,15 +1,15 @@
-# Rust presentation-animation read model — 2026-08-31
+# Rust animation-runtime read model — 2026-08-31
 
 ## Outcome
 
-Hyperscope now exposes one atomic, low-rate Rust read model containing only the
-state required by presentation animation adaptation: application revision,
-renderer-local presentation residency, active/pending clip state, and the
-playback clock.
+Hyperscope now exposes one atomic, low-rate Rust animation-runtime read model:
+application revision, renderer-local presentation residency, active/pending
+clip state, and the playback clock.
 
 The renderer adapter continues to use the allocation-free installed-animation
-sample packet for each applied pose. It reads the compact model only at cue and
-clip boundaries for validation and diagnostics. These paths no longer
+sample packet for each applied pose. It reads the compact model at cue, clip,
+clock synchronization, URL restoration, and paused-seek boundaries. These
+paths no longer
 serialize cue composition, assets, authored scene state, navigation, Patch Lab,
 jobs, or diagnostics through the complete application snapshot.
 

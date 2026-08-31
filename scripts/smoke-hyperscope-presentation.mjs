@@ -728,7 +728,7 @@ for (const residencyStep of [
   'const job = observePresentationClipJob(clipJob, context);',
   'committedClipJob: job,',
   'writeRustAnimationSample(rustAppShadow, null);',
-  'rustAppShadow.presentationAnimationState()',
+  'rustAppShadow.animationRuntimeState()',
 ]) {
   assert.ok(
     browserSource.includes(residencyStep),

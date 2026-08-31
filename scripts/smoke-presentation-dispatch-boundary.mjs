@@ -20,7 +20,7 @@ for (const required of [
   'pub fn dispatch_presentation(',
   'pub fn set_presentation_animation_residency(',
   'pub fn bind_presentation_animation_to_installed_scene(',
-  'pub fn presentation_animation_snapshot(&self) -> PresentationAnimationReadModel',
+  'pub fn animation_runtime_snapshot(&self) -> AnimationRuntimeReadModel',
   'SemanticAction::Present(action)',
   'let effects = AnimationClipEffects::from_commit(&commit);',
   'active: self',
@@ -60,7 +60,7 @@ for (const required of [
   '#[wasm_bindgen(js_name = requestPresentation)]',
   '#[wasm_bindgen(js_name = setPresentationAnimationResidency)]',
   '#[wasm_bindgen(js_name = bindInstalledPresentationAnimationResidency)]',
-  '#[wasm_bindgen(js_name = presentationAnimationState)]',
+  '#[wasm_bindgen(js_name = animationRuntimeState)]',
   '#[wasm_bindgen(js_name = unsetPresentationAnimationResidency)]',
   '.dispatch_presentation(presentation_action_from_wire(action, cue_id)?)',
   'ShadowPresentationDispatch',
@@ -116,7 +116,7 @@ for (const required of [
   'const effect = job?.effect || null;',
   'const cancellations = job?.cancellations || [];',
   'committedClipJob: job,',
-  'rustAppShadow.presentationAnimationState()',
+  'rustAppShadow.animationRuntimeState()',
   'current?.clipState?.active?.clip?.name',
 ]) {
   assert.ok(effects.includes(required), `typed presentation clip observer is missing ${required}`);

@@ -3263,7 +3263,7 @@ function primaryPresentationAnimation(snapshot) {
 async function applyPresentationAnimationState(snapshot = rustPresentationSnapshot) {
   const generation = ++presentationAnimationGeneration;
   if (ANIMATION_CLIP_IMPLEMENTATION === 'rust' && presentationAppAuthority()) {
-    const state = rustAppShadow.presentationAnimationState();
+    const state = rustAppShadow.animationRuntimeState();
     if (!state.residency) return false;
     return applyRustPresentationAnimationTransport('presentation-state', state);
   }
@@ -3306,7 +3306,7 @@ async function applyPresentationAnimationState(snapshot = rustPresentationSnapsh
     $('time').value = animTime;
     $('time-v').textContent = animTime.toFixed(2);
     rebaseAnimationPoseContinuity();
-    const applicationPlayback = rustAppShadow?.presentationAnimationState()?.playing;
+    const applicationPlayback = rustAppShadow?.animationRuntimeState()?.playing;
     const playing = typeof applicationPlayback === 'boolean'
       ? applicationPlayback
       : Boolean(animation.playing);
@@ -3359,7 +3359,7 @@ function applyRustPresentationAnimationTransport(context, state = null) {
     rebaseAnimationPoseContinuity();
     tickAnimation(animTime, animationPoseClockSeconds);
     debouncedLodRecompute();
-    const current = state || rustAppShadow.presentationAnimationState();
+    const current = state || rustAppShadow.animationRuntimeState();
     rustPresentationDiagnostics.activeAnimation = {
       clipIndex,
       clip: current?.clipState?.active?.clip?.name ?? null,
@@ -3388,7 +3388,7 @@ async function applyCommittedPresentationAnimationEffects(
     return applyPresentationAnimationState(snapshot);
   }
   const job = observePresentationClipJob(clipJob, context);
-  const state = rustAppShadow.presentationAnimationState();
+  const state = rustAppShadow.animationRuntimeState();
   if (!state?.residency) return false;
   const requestedIndex = job.effect?.clip_index
     ?? state?.clipState?.active?.clip?.index;
@@ -6451,7 +6451,7 @@ function currentAnimationClipRange() {
 
 function animationClipRangeForClock(app) {
   if (ANIMATION_CLIP_IMPLEMENTATION === 'js') return currentAnimationClipRange();
-  const clip = app?.snapshot()?.animationClipSelection?.active?.clip;
+  const clip = app?.animationRuntimeState()?.clipState?.active?.clip;
   const timeMin = Number(clip?.timeMinSeconds);
   const timeMax = Number(clip?.timeMaxSeconds);
   const duration = timeMax - timeMin;

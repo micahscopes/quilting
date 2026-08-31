@@ -1105,12 +1105,12 @@ pub struct PresentationReadModel {
     pub animation_residency: Option<PresentationAnimationResidencyBinding>,
 }
 
-/// Coherent low-rate presentation-animation state for renderer adapters.
+/// Coherent low-rate animation state for renderer adapters.
 /// This deliberately excludes cue composition, navigation, assets, and
-/// diagnostics; adapters can sample it after an asynchronous clip boundary
+/// diagnostics; adapters can sample it at asynchronous clip/clock boundaries
 /// without serializing the complete application.
 #[derive(Debug, Clone, PartialEq)]
-pub struct PresentationAnimationReadModel {
+pub struct AnimationRuntimeReadModel {
     pub revision: u64,
     pub residency: Option<PresentationAnimationResidencyBinding>,
     pub clip_state: AnimationClipSelectionReadModel,
@@ -2248,8 +2248,8 @@ impl AppState {
         })
     }
 
-    fn presentation_animation_read_model(&self) -> PresentationAnimationReadModel {
-        PresentationAnimationReadModel {
+    fn animation_runtime_read_model(&self) -> AnimationRuntimeReadModel {
+        AnimationRuntimeReadModel {
             revision: self.revision,
             residency: self.presentation_animation_residency,
             clip_state: self.animation_clip_selection_read_model(),
@@ -3000,8 +3000,8 @@ impl AppStore {
         self.presentation.get_cloned()
     }
 
-    pub fn presentation_animation_snapshot(&self) -> PresentationAnimationReadModel {
-        self.lock_state().presentation_animation_read_model()
+    pub fn animation_runtime_snapshot(&self) -> AnimationRuntimeReadModel {
+        self.lock_state().animation_runtime_read_model()
     }
 
     /// Resolve the active cue against resident renderer nodes without
@@ -4673,7 +4673,7 @@ mod tests {
             Some(binding),
         );
         assert_eq!(store.summary_snapshot().pending_animation_clip, Some(1));
-        let animation_state = store.presentation_animation_snapshot();
+        let animation_state = store.animation_runtime_snapshot();
         assert_eq!(animation_state.revision, bound.commit.revision);
         assert_eq!(animation_state.residency, Some(binding));
         assert_eq!(
