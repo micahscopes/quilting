@@ -5605,10 +5605,9 @@ function advanceRustApplicationClockToSelectionEvent(nowMs) {
   const partialSeconds = Math.max(0, (nowMs - previousFrameTs) / 1000);
   if (partialSeconds === 0) return;
   try {
-    const nextElapsedSeconds = rustAppFrameElapsedSeconds + partialSeconds;
-    const emittedEffects = rustAppShadow.advanceFrameQuiet(nextElapsedSeconds, partialSeconds);
+    const emittedEffects = rustAppShadow.advanceFrameDeltaQuiet(partialSeconds);
     drainRustFrameAdapterEffects(emittedEffects, 'selection-event-frame');
-    rustAppFrameElapsedSeconds = nextElapsedSeconds;
+    rustAppFrameElapsedSeconds += partialSeconds;
     rustAppShadowDiagnostics.eventFrameCalls += 1;
     rustAppShadowDiagnostics.eventFrameSeconds += partialSeconds;
   } catch (error) {
@@ -5854,11 +5853,10 @@ function advanceRustApplicationFrame(nowMs, frameDeltaSeconds, rawFrameDeltaSeco
   const consumesSelectionEventFrame = awaitingSelectionEventFrame
     && nowMs >= selectionEventAtMs;
   try {
-    const nextElapsedSeconds = rustAppFrameElapsedSeconds + deltaSeconds;
-    const emittedEffects = rustAppShadow.advanceFrameQuiet(nextElapsedSeconds, deltaSeconds);
+    const emittedEffects = rustAppShadow.advanceFrameDeltaQuiet(deltaSeconds);
     drainRustFrameAdapterEffects(emittedEffects, 'animation-frame');
     if (consumesSelectionEventFrame) rustAppSelectionEventAtMs = null;
-    rustAppFrameElapsedSeconds = nextElapsedSeconds;
+    rustAppFrameElapsedSeconds += deltaSeconds;
     rustAppShadowDiagnostics.frameCalls += 1;
     rustAppShadowDiagnostics.lastFrameDeltaSeconds = deltaSeconds;
     rustAppShadowDiagnostics.maximumFrameDeltaSeconds = Math.max(

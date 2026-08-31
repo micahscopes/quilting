@@ -2399,6 +2399,25 @@ impl AppStore {
         Ok(commit)
     }
 
+    /// Advance the high-rate application epoch from one platform delta.
+    /// Reading the incumbent epoch and reducing the frame are one atomic store
+    /// operation, so worker-capable adapters cannot race an absolute-time
+    /// round trip.
+    pub fn dispatch_frame_delta(&self, delta_seconds: f64) -> Result<AppCommit, ReduceError> {
+        let commit = {
+            let mut state = self.lock_state();
+            let elapsed_seconds = state.frame_elapsed_seconds + delta_seconds;
+            state.reduce(AppEvent::Frame(FrameTick {
+                elapsed_seconds,
+                delta_seconds,
+            }))?
+        };
+        if commit.published_ui {
+            self.flush_read_models();
+        }
+        Ok(commit)
+    }
+
     /// Dispatch one locally authored semantic action at the current virtual
     /// application time and allocate its sequence under the reducer lock.
     ///
@@ -5901,6 +5920,24 @@ mod tests {
         assert_eq!(store.navigation_snapshot().elapsed_seconds, 0.2);
         assert_eq!(store.summary_snapshot().active_peers, 0);
         assert!(store.presence_snapshot().is_empty());
+    }
+
+    #[test]
+    fn frame_delta_dispatch_derives_the_epoch_atomically() {
+        let store = AppStore::default();
+        store.dispatch_frame_delta(0.125).unwrap();
+        store.dispatch_frame_delta(0.375).unwrap();
+        let frame = store.frame_snapshot();
+        assert_eq!(frame.elapsed_seconds, 0.5);
+        assert_eq!(frame.animation.time_seconds, 0.5);
+        assert_eq!(frame.animation_pose_sample_time_seconds, 0.5);
+
+        let before = store.frame_snapshot();
+        assert_eq!(
+            store.dispatch_frame_delta(-0.01),
+            Err(ReduceError::InvalidTime),
+        );
+        assert_eq!(store.frame_snapshot(), before);
     }
 
     #[test]

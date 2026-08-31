@@ -888,14 +888,20 @@ impl HyperscopeAppShadow {
                 delta_seconds,
             }))
             .map_err(js_error)?;
-        let effect_count = u32::try_from(commit.effects.len())
-            .map_err(|_| JsValue::from_str("frame emitted too many adapter effects"))?;
-        if effect_count != 0 {
-            self.pending_adapter_effects
-                .borrow_mut()
-                .extend(commit.effects);
-        }
-        Ok(effect_count)
+        self.retain_quiet_frame_effects(commit)
+    }
+
+    /// Advance from a platform delta while Rust retains the monotonic elapsed
+    /// epoch. The absolute-time port above remains available for replay and
+    /// js|shadow comparison, but the Rust-authority RAF lane cannot round-trip
+    /// or accidentally rewind application time.
+    #[wasm_bindgen(js_name = advanceFrameDeltaQuiet)]
+    pub fn advance_frame_delta_quiet(&self, delta_seconds: f64) -> Result<u32, JsValue> {
+        let commit = self
+            .store
+            .dispatch_frame_delta(delta_seconds)
+            .map_err(js_error)?;
+        self.retain_quiet_frame_effects(commit)
     }
 
     /// Serialize and atomically clear effects retained by quiet frame
@@ -1375,8 +1381,7 @@ impl HyperscopeAppShadow {
 
     #[wasm_bindgen(js_name = tickNavigation)]
     pub fn tick_navigation(&self, delta_seconds: f64) -> Result<JsValue, JsValue> {
-        let current = self.store.frame_snapshot();
-        self.advance_frame_quiet(current.elapsed_seconds + delta_seconds, delta_seconds)?;
+        self.advance_frame_delta_quiet(delta_seconds)?;
         navigation_to_js(
             self.store.frame_snapshot(),
             self.store.navigation_diagnostics_snapshot(),
@@ -2903,6 +2908,17 @@ impl Default for HyperscopeAppShadow {
 }
 
 impl HyperscopeAppShadow {
+    fn retain_quiet_frame_effects(&self, commit: AppCommit) -> Result<u32, JsValue> {
+        let effect_count = u32::try_from(commit.effects.len())
+            .map_err(|_| JsValue::from_str("frame emitted too many adapter effects"))?;
+        if effect_count != 0 {
+            self.pending_adapter_effects
+                .borrow_mut()
+                .extend(commit.effects);
+        }
+        Ok(effect_count)
+    }
+
     fn step_camera_action(
         &self,
         action: NavigationAction,
@@ -2915,10 +2931,9 @@ impl HyperscopeAppShadow {
                 "{input_name} camera output must contain exactly 17 numbers"
             )));
         }
-        let elapsed_seconds = self.store.frame_snapshot().elapsed_seconds;
         let diagnostic_count = self.store.navigation_diagnostic_count();
         self.dispatch_navigation(action)?;
-        self.advance_frame_quiet(elapsed_seconds, 0.0)?;
+        self.advance_frame_delta_quiet(0.0)?;
         if self.store.navigation_diagnostic_count() != diagnostic_count {
             return Err(JsValue::from_str(
                 &self
