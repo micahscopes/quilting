@@ -92,6 +92,10 @@ impl AdaptiveOverlayScene {
         self.patches.patch_count
     }
 
+    pub fn shares_global_frame_with(&self, roots: &ResidentRootRenderBindings) -> bool {
+        Arc::ptr_eq(&self.bindings.global_frame, &roots.global_frame)
+    }
+
     pub fn source_batch_indices(&self) -> &[u32] {
         &self.source_batch_indices
     }
@@ -189,7 +193,9 @@ impl LodClassifierDevice {
         roots: &ResidentRootPreparationScene,
         scene: &RenderSceneSnapshot,
     ) -> Result<Option<AdaptiveOverlayScene>, LodWebGpuError> {
-        self.upload_adaptive_overlay_scene_with_resources(pipeline, model, roots, scene, None, None)
+        self.upload_adaptive_overlay_scene_with_resources(
+            pipeline, model, roots, scene, None, None, None,
+        )
     }
 
     pub fn upload_adaptive_overlay_scene_with_pbr_resources(
@@ -213,6 +219,37 @@ impl LodClassifierDevice {
             scene,
             textures,
             environment,
+            None,
+        )
+    }
+
+    /// Retain an adaptive PBR layer against the exact root binding epoch that
+    /// will composite it. Both families then bind one aggregate-global frame
+    /// row while retaining independent local-domain tables.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upload_adaptive_overlay_scene_with_pbr_resources_for_roots(
+        &self,
+        pipeline: &PatchRenderPipeline,
+        model: &LodClassifierModel,
+        roots: &ResidentRootPreparationScene,
+        root_bindings: &ResidentRootRenderBindings,
+        scene: &RenderSceneSnapshot,
+        textures: Option<&PbrTextureTable>,
+        environment: Option<&PbrEnvironmentMap>,
+    ) -> Result<Option<AdaptiveOverlayScene>, LodWebGpuError> {
+        if pipeline.style() != Some(RenderStyle::Pbr) {
+            return Err(LodWebGpuError::Payload(
+                "adaptive PBR resources require the PBR render pipeline".to_string(),
+            ));
+        }
+        self.upload_adaptive_overlay_scene_with_resources(
+            pipeline,
+            model,
+            roots,
+            scene,
+            textures,
+            environment,
+            Some(root_bindings),
         )
     }
 
@@ -232,6 +269,29 @@ impl LodClassifierDevice {
             scene,
             textures,
             environment,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn upload_focus_adaptive_overlay_scene_with_pbr_resources_for_roots(
+        &self,
+        pipeline: &FocusPbrPatchRenderPipeline,
+        model: &LodClassifierModel,
+        roots: &ResidentRootPreparationScene,
+        root_bindings: &ResidentRootRenderBindings,
+        scene: &RenderSceneSnapshot,
+        textures: Option<&PbrTextureTable>,
+        environment: Option<&PbrEnvironmentMap>,
+    ) -> Result<Option<AdaptiveOverlayScene>, LodWebGpuError> {
+        self.upload_adaptive_overlay_scene_with_resources(
+            &pipeline.inner,
+            model,
+            roots,
+            scene,
+            textures,
+            environment,
+            Some(root_bindings),
         )
     }
 
@@ -243,12 +303,26 @@ impl LodClassifierDevice {
         scene: &RenderSceneSnapshot,
         textures: Option<&PbrTextureTable>,
         environment: Option<&PbrEnvironmentMap>,
+        root_bindings: Option<&ResidentRootRenderBindings>,
     ) -> Result<Option<AdaptiveOverlayScene>, LodWebGpuError> {
         if roots.topology.model_identity != model.identity {
             return Err(LodWebGpuError::Payload(
                 "adaptive overlay roots belong to a different resource epoch".to_string(),
             ));
         }
+        let shared_global_frame = root_bindings
+            .map(|bindings| {
+                if bindings.model_identity != model.identity
+                    || bindings.domain_identity != roots.draw_domains.domain_identity
+                {
+                    return Err(LodWebGpuError::Payload(
+                        "adaptive overlay global frame belongs to a different root epoch"
+                            .to_string(),
+                    ));
+                }
+                Ok(Arc::clone(&bindings.global_frame))
+            })
+            .transpose()?;
         let words = pack_wgsl_adaptive_overlay_scene_words(&model.prepared, scene)
             .map_err(LodWebGpuError::Payload)?;
         let source_batch_indices = words.source_batch_indices;
@@ -270,6 +344,7 @@ impl LodClassifierDevice {
             &visibility,
             textures,
             environment,
+            shared_global_frame,
         )?;
         let batches = source_batch_indices
             .iter()
@@ -299,7 +374,7 @@ impl LodClassifierDevice {
                 layout: &prepared_visibility_layout,
                 entries: &[
                     bind(0, &patches.uniform),
-                    bind(1, &bindings.global_frame),
+                    bind(1, &bindings.global_frame.buffer),
                     bind(2, &bindings.domains),
                     bind(3, &patches.prepared_records),
                     bind(4, &patch_domain_rows),

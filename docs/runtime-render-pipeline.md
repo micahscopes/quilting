@@ -231,6 +231,12 @@ instead of allocating an intermediate frame vector. The same pair drives
 rendering, visibility, focus-field output, and both picking paths.
 `frameTableUploads`, `frameTableReuses`, and `frameTableUploadBytes` report the
 device-lifetime traffic, including work preceding a surface skip.
+Resident roots and their exact sparse adaptive overlay additionally share one
+reference-counted global-frame residency within each retained aggregate. The
+browser constructs the overlay against its root binding epoch, so a composite
+camera/focus/selection update publishes 176 bytes total rather than once per
+family. This ownership is intentionally not device-global: ordinary scenes,
+replacement root epochs, and focus/non-focus aggregates remain isolated.
 `resolvedExecutionFrames`, `resolvedExecutionFallbacks`, and
 `lastExecutionError` make that gate observable through the existing render
 shadow diagnostics. Shadow scene validation and WebGL PBR lowering now happen

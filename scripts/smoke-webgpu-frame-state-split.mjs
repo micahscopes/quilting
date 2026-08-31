@@ -25,7 +25,7 @@ for (const required of [
   'const PATCH_RENDER_DOMAIN_BYTES: u64 = 80;',
   'pub struct PatchRenderGlobal',
   'pub struct PatchRenderDomain',
-  'global_frame: wgpu::Buffer',
+  'global_frame: Arc<PatchRenderGlobalResidency>',
   'domains: wgpu::Buffer',
   'PatchRenderGlobal::from_render_frame(frame, use_qb)',
   'PatchRenderDomain::from_transform(',
@@ -37,7 +37,7 @@ assert.ok(!webgpu.includes('const PATCH_RENDER_FRAME_BYTES'),
 assert.ok(prepared.includes('PATCH_RENDER_GLOBAL_BYTES')
   && prepared.includes('PATCH_RENDER_DOMAIN_BYTES'),
   'prepared functional layouts must name both split records');
-assert.ok(roots.includes('global_frame: wgpu::Buffer')
+assert.ok(roots.includes('global_frame: Arc<PatchRenderGlobalResidency>')
   && roots.includes('render_domains: wgpu::Buffer'),
   'resident roots must retain the split buffers');
 assert.ok(overlay.includes('adaptive patch domain rows')

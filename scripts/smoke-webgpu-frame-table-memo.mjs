@@ -25,7 +25,8 @@ for (const required of [
   'frame_table_upload_bytes: AtomicU64',
   'pub fn frame_table_memo_diagnostics',
   'self.write_patch_render_frame_parts(',
-  'global_frame_table: Mutex<RetainedFrameTable>',
+  'struct PatchRenderGlobalResidency',
+  'table: Mutex<RetainedFrameTable>',
   'domain_table: Mutex<RetainedFrameTable>',
 ]) {
   assert.ok(webgpu.includes(required), `frame-table memo is missing ${required}`);
@@ -41,15 +42,17 @@ assert.ok(!frameEncoder.includes('collect::<Result<Vec<_>, LodWebGpuError>>()?')
 assert.ok(frameEncoder.includes('self.write_patch_render_frame_parts('),
   'fallback batches must pack directly into retained staging words');
 
-assert.ok(roots.includes('let mut global_changed = global_table.begin_update();'),
-  'resident roots must memoize their global frame');
+assert.ok(webgpu.includes('let mut global_changed = global_table.begin_update();')
+  && webgpu.includes('self.record_frame_table_publication(global_publication);'),
+  'shared global residency must compare and expose exact publications');
+assert.ok(roots.includes('self.write_patch_render_global('),
+  'resident roots must use shared global-frame memoization');
 assert.ok(roots.includes('let mut domains_changed = domain_table.begin_update();'),
   'resident roots must memoize their local domains');
 assert.ok(roots.includes('domain_table.invalidate();'),
   'resident roots must invalidate partial local staging after failure');
-assert.ok(roots.includes('self.record_frame_table_publication(global_publication);')
-  && roots.includes('self.record_frame_table_publication(domain_publication);'),
-  'resident roots must expose both publications');
+assert.ok(roots.includes('self.record_frame_table_publication(domain_publication);'),
+  'resident roots must expose local-domain publications');
 assert.ok(overlay.includes('self.write_patch_render_frame_parts('),
   'adaptive overlays must use the shared retained split-frame memo');
 

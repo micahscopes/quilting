@@ -1472,6 +1472,7 @@ fn build_resident_root_backend(
         model,
         overlay_pipelines,
         &preparation,
+        &bindings,
         scene,
         textures,
         environment,
@@ -1543,6 +1544,7 @@ fn rebuild_resident_root_pbr_scene(
         model,
         pipelines,
         &roots.preparation,
+        &bindings,
         scene.scene(),
         textures,
         environment,
@@ -1593,15 +1595,22 @@ fn build_resident_root_focus_backend(
         )
         .map_err(|error| error.to_string())?;
     let overlay = device
-        .upload_focus_adaptive_overlay_scene_with_pbr_resources(
+        .upload_focus_adaptive_overlay_scene_with_pbr_resources_for_roots(
             focus_backend.overlay_pipeline(),
             model,
             preparation,
+            &bindings,
             scene,
             textures,
             environment,
         )
         .map_err(|error| error.to_string())?;
+    if overlay
+        .as_ref()
+        .is_some_and(|overlay| !overlay.shares_global_frame_with(&bindings))
+    {
+        return Err("resident focus overlay lost aggregate-global frame residency".to_string());
+    }
     Ok(Some(ResidentRootFocusBackend { bindings, overlay }))
 }
 
@@ -1610,6 +1619,7 @@ fn build_adaptive_overlay(
     model: &LodClassifierModel,
     pipelines: &DiagnosticPatchRenderPipelines,
     preparation: &ResidentRootPreparationScene,
+    root_bindings: &ResidentRootRenderBindings,
     scene: &RenderSceneSnapshot,
     textures: Option<&PbrTextureTable>,
     environment: Option<&PbrEnvironmentMap>,
@@ -1617,16 +1627,24 @@ fn build_adaptive_overlay(
     let layout_pipeline = pipelines
         .get(RenderStyle::Pbr)
         .ok_or_else(|| "WebGPU diagnostic pipeline family lost PBR".to_string())?;
-    device
-        .upload_adaptive_overlay_scene_with_pbr_resources(
+    let overlay = device
+        .upload_adaptive_overlay_scene_with_pbr_resources_for_roots(
             layout_pipeline,
             model,
             preparation,
+            root_bindings,
             scene,
             textures,
             environment,
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    if overlay
+        .as_ref()
+        .is_some_and(|overlay| !overlay.shares_global_frame_with(root_bindings))
+    {
+        return Err("resident overlay lost aggregate-global frame residency".to_string());
+    }
+    Ok(overlay)
 }
 
 /// Publish one device-side render scene derived from shared backend-neutral
@@ -1697,6 +1715,7 @@ pub(crate) fn replace_scene(
                     model,
                     pipelines,
                     &retained.preparation,
+                    &bindings,
                     scene.snapshot(),
                     backend.textures.as_ref(),
                     backend.environment.as_ref(),

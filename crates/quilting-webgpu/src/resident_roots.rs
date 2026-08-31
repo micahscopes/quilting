@@ -501,13 +501,12 @@ pub struct ResidentRootRenderBindings {
     domain_count: u32,
     pub(super) bucket_count: u32,
     pub(super) bucket_index_uniform_stride: u32,
-    global_frame: wgpu::Buffer,
+    pub(super) global_frame: Arc<PatchRenderGlobalResidency>,
     render_domains: wgpu::Buffer,
     _materials: wgpu::Buffer,
     portable_material_textures: Option<pbr_resources::PbrPortableAtlasBindings>,
     pbr_environment: Option<PbrEnvironmentBindings>,
     pbr_scene_supported: bool,
-    global_frame_table: Mutex<RetainedFrameTable>,
     render_domain_table: Mutex<RetainedFrameTable>,
     _bucket_index_uniform: wgpu::Buffer,
     visibility_bind_group: wgpu::BindGroup,
@@ -1149,12 +1148,7 @@ impl LodClassifierDevice {
                     "resident root render-domain staging table exceeds address space".to_string(),
                 )
             })?;
-        let global_frame = gpu_buffer(
-            &self.device,
-            "resident root global frame",
-            PATCH_RENDER_GLOBAL_BYTES,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        );
+        let global_frame = self.create_patch_render_global_residency("resident root global frame");
         let render_domains = gpu_buffer(
             &self.device,
             "resident root render-domain table",
@@ -1220,7 +1214,7 @@ impl LodClassifierDevice {
             layout: &visibility_layout,
             entries: &[
                 bind(0, &geometry.uniform),
-                bind(1, &global_frame),
+                bind(1, &global_frame.buffer),
                 bind(2, &render_domains),
                 bind(3, &preparation.patches.prepared_records),
                 bind(4, &geometry.root_eligibility),
@@ -1233,7 +1227,7 @@ impl LodClassifierDevice {
             label: Some("quilting resident root render bindings"),
             layout: &pipeline.bind_group_layout,
             entries: &[
-                bind(0, &global_frame),
+                bind(0, &global_frame.buffer),
                 bind(1, &render_domains),
                 bind(2, &preparation.patches.prepared_records),
                 bind(3, &geometry.compacted_faces),
@@ -1263,11 +1257,6 @@ impl LodClassifierDevice {
             portable_material_textures,
             pbr_environment,
             pbr_scene_supported,
-            global_frame_table: Mutex::new(RetainedFrameTable::new(
-                PATCH_RENDER_GLOBAL_WORDS,
-                PATCH_RENDER_GLOBAL_WORDS,
-                PATCH_RENDER_GLOBAL_BYTES,
-            )),
             render_domain_table: Mutex::new(RetainedFrameTable::new(
                 render_domain_word_count,
                 PATCH_RENDER_DOMAIN_WORDS,
@@ -1294,23 +1283,10 @@ impl LodClassifierDevice {
                 "resident root render frames belong to a different domain table".to_string(),
             ));
         }
-        let global_words = PatchRenderGlobal::from_render_frame(frame, use_qb).to_words()?;
-        let mut global_table = bindings.global_frame_table.lock().map_err(|_| {
-            LodWebGpuError::Payload(
-                "resident root global-frame staging lock was poisoned".to_string(),
-            )
-        })?;
-        let mut global_changed = global_table.begin_update();
-        global_changed |= global_table.replace_row(0, &global_words);
-        let global_publication = global_table.commit(global_changed);
-        if matches!(global_publication, FrameTablePublication::Upload { .. }) {
-            self.queue.write_buffer(
-                &bindings.global_frame,
-                0,
-                bytemuck::cast_slice(global_table.words.as_slice()),
-            );
-        }
-        self.record_frame_table_publication(global_publication);
+        self.write_patch_render_global(
+            &bindings.global_frame,
+            PatchRenderGlobal::from_render_frame(frame, use_qb),
+        )?;
 
         let mut domain_table = bindings.render_domain_table.lock().map_err(|_| {
             LodWebGpuError::Payload(

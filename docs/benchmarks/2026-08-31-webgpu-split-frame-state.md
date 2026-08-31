@@ -52,6 +52,9 @@ Let `N` be the number of retained batches/domains.
 
 For one domain the first/both-change cases are equal. Every additional domain
 saves 176 bytes per global update, and camera motion becomes constant-size.
+Resident roots and their matching sparse overlay subsequently share that
+single global row within one retained aggregate; see
+`2026-08-31-webgpu-aggregate-global-frame.md`.
 
 ## Verification
 

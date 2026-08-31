@@ -1317,16 +1317,20 @@ impl RetainedFrameTable {
     }
 }
 
+pub(crate) struct PatchRenderGlobalResidency {
+    buffer: wgpu::Buffer,
+    table: Mutex<RetainedFrameTable>,
+}
+
 /// Scene/frame bindings shared by every atlas bucket and indirect batch draw.
 pub struct PatchRenderBindings {
     domain_count: u32,
     material_count: u32,
-    global_frame: wgpu::Buffer,
+    global_frame: Arc<PatchRenderGlobalResidency>,
     domains: wgpu::Buffer,
     materials: wgpu::Buffer,
     material_textures: Option<PbrMaterialTextureBindings>,
     pbr_environment: Option<PbrEnvironmentBindings>,
-    global_frame_table: Mutex<RetainedFrameTable>,
     domain_table: Mutex<RetainedFrameTable>,
     bind_group: wgpu::BindGroup,
 }
@@ -4733,8 +4737,27 @@ impl LodClassifierDevice {
         textures: Option<&PbrTextureTable>,
     ) -> Result<PatchRenderBindings, LodWebGpuError> {
         self.create_patch_render_bindings_with_environment(
-            pipeline, scene, patches, visibility, textures, None,
+            pipeline, scene, patches, visibility, textures, None, None,
         )
+    }
+
+    fn create_patch_render_global_residency(
+        &self,
+        label: &'static str,
+    ) -> Arc<PatchRenderGlobalResidency> {
+        Arc::new(PatchRenderGlobalResidency {
+            buffer: gpu_buffer(
+                &self.device,
+                label,
+                PATCH_RENDER_GLOBAL_BYTES,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            ),
+            table: Mutex::new(RetainedFrameTable::new(
+                PATCH_RENDER_GLOBAL_WORDS,
+                PATCH_RENDER_GLOBAL_WORDS,
+                PATCH_RENDER_GLOBAL_BYTES,
+            )),
+        })
     }
 
     pub(crate) fn create_patch_render_bindings_with_environment(
@@ -4745,6 +4768,7 @@ impl LodClassifierDevice {
         visibility: &VisibilityCompactionScene,
         textures: Option<&PbrTextureTable>,
         environment: Option<&PbrEnvironmentMap>,
+        shared_global_frame: Option<Arc<PatchRenderGlobalResidency>>,
     ) -> Result<PatchRenderBindings, LodWebGpuError> {
         if patches.patch_count == 0
             || visibility.source_count == 0
@@ -4769,12 +4793,9 @@ impl LodClassifierDevice {
                     "patch render domain staging table exceeds address space".to_string(),
                 )
             })?;
-        let global_frame = gpu_buffer(
-            &self.device,
-            "patch render global frame",
-            PATCH_RENDER_GLOBAL_BYTES,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        );
+        let global_frame = shared_global_frame.unwrap_or_else(|| {
+            self.create_patch_render_global_residency("patch render global frame")
+        });
         let domains = gpu_buffer(
             &self.device,
             "patch render domain table",
@@ -4804,7 +4825,7 @@ impl LodClassifierDevice {
             label: Some("quilting prepared QB render bindings"),
             layout: &pipeline.bind_group_layout,
             entries: &[
-                bind(0, &global_frame),
+                bind(0, &global_frame.buffer),
                 bind(1, &domains),
                 bind(2, &patches.prepared_records),
                 bind(3, &visibility.compacted_source_instances),
@@ -4828,11 +4849,6 @@ impl LodClassifierDevice {
             materials,
             material_textures,
             pbr_environment,
-            global_frame_table: Mutex::new(RetainedFrameTable::new(
-                PATCH_RENDER_GLOBAL_WORDS,
-                PATCH_RENDER_GLOBAL_WORDS,
-                PATCH_RENDER_GLOBAL_BYTES,
-            )),
             domain_table: Mutex::new(RetainedFrameTable::new(
                 domain_word_count,
                 PATCH_RENDER_DOMAIN_WORDS,
@@ -6272,6 +6288,29 @@ impl LodClassifierDevice {
         )
     }
 
+    fn write_patch_render_global(
+        &self,
+        residency: &PatchRenderGlobalResidency,
+        global: PatchRenderGlobal,
+    ) -> Result<(), LodWebGpuError> {
+        let global_words = global.to_words()?;
+        let mut global_table = residency.table.lock().map_err(|_| {
+            LodWebGpuError::Payload("patch global-frame staging lock was poisoned".to_string())
+        })?;
+        let mut global_changed = global_table.begin_update();
+        global_changed |= global_table.replace_row(0, &global_words);
+        let global_publication = global_table.commit(global_changed);
+        if matches!(global_publication, FrameTablePublication::Upload { .. }) {
+            self.queue.write_buffer(
+                &residency.buffer,
+                0,
+                bytemuck::cast_slice(global_table.words.as_slice()),
+            );
+        }
+        self.record_frame_table_publication(global_publication);
+        Ok(())
+    }
+
     fn write_patch_render_frame_parts(
         &self,
         bindings: &PatchRenderBindings,
@@ -6285,21 +6324,7 @@ impl LodClassifierDevice {
                 bindings.domain_count,
             )));
         }
-        let global_words = global.to_words()?;
-        let mut global_table = bindings.global_frame_table.lock().map_err(|_| {
-            LodWebGpuError::Payload("patch global-frame staging lock was poisoned".to_string())
-        })?;
-        let mut global_changed = global_table.begin_update();
-        global_changed |= global_table.replace_row(0, &global_words);
-        let global_publication = global_table.commit(global_changed);
-        if matches!(global_publication, FrameTablePublication::Upload { .. }) {
-            self.queue.write_buffer(
-                &bindings.global_frame,
-                0,
-                bytemuck::cast_slice(global_table.words.as_slice()),
-            );
-        }
-        self.record_frame_table_publication(global_publication);
+        self.write_patch_render_global(&bindings.global_frame, global)?;
 
         let mut domain_table = bindings.domain_table.lock().map_err(|_| {
             LodWebGpuError::Payload("patch render-domain staging lock was poisoned".to_string())
