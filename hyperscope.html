@@ -519,7 +519,7 @@ const BOOTSTRAP_POLICY_DEFAULTS = Object.freeze({
   selectionimpl: 'rust',
   sceneimpl: 'rust',
   assetimpl: 'rust',
-  animclockimpl: 'js',
+  animclockimpl: 'rust',
   animclipimpl: 'rust',
   renderstateimpl: 'rust',
   patchlabimpl: 'js',
@@ -11290,11 +11290,11 @@ function animationPoseStampFromPacket() {
 }
 
 function animationPoseStampsEqual(left, right) {
-  return Boolean(left && right
-    && left.t === right.t
+  if (left == null || right == null) return left === right;
+  return left.t === right.t
     && left.sampleTime === right.sampleTime
     && left.revision === right.revision
-    && left.continuityEpoch === right.continuityEpoch);
+    && left.continuityEpoch === right.continuityEpoch;
 }
 
 function recordAnimationPoseMismatch(context, browserValue, rustValue) {

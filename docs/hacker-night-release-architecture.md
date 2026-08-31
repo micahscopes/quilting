@@ -549,15 +549,17 @@ The first application boundary is now explicit:
   so a high-rate browser parity lane need not allocate or serialize a frame
   object. Browser clip wrapping remains the incumbent until that lane is
   measured and cut over. `animclockimpl=js|shadow|rust` is that independent
-  rollback boundary; the default remains `js`. The Leptos playback toggle now
-  allocates and commits `TogglePlaying` through `AppStore` directly. Its
+  rollback boundary; the measured default is now `rust`. The Leptos playback
+  toggle allocates and commits `TogglePlaying` through `AppStore` directly. Its
   browser callbacks observe only the committed playing value, sequence, and
   revision—or a rejection—so renderer adaptation and diagnostics remain thin
   effects without regaining action authority. Live ordinary-horse evidence
   recorded 416 shadow comparisons with zero mismatches and `9.45e-14` maximum
   error, then 432 Rust authority writes with no fallback or errors, including
-  pause and seek. Reverse playback, presentation cue switching, and background
-  cadence remain explicit cutover gates.
+  pause and seek. The cutover gate subsequently passed reverse wrapping on a
+  75.8-second clip, a real hidden-tab interval, clamped foreground resumption,
+  pause/seek/resume, and presentation-driven play/pause transitions. Explicit
+  `animclockimpl=js|shadow` routes remain available for rollback and parity.
   Spacebar, startup, and retained HTML playback intent now also allocate their
   semantic sequence inside `AppStore`; JavaScript consumes only the committed
   playback receipt. Explicitly sequenced WASM methods remain as replay/shadow

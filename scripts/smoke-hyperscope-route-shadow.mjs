@@ -96,7 +96,7 @@ assert.equal(specs.find(spec => spec.key === 'walkimpl').kind, 'implementation')
 assert.equal(specs.find(spec => spec.key === 'navimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'navimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'animclockimpl').kind, 'implementation');
-assert.equal(specs.find(spec => spec.key === 'animclockimpl').defaultValue, 'js');
+assert.equal(specs.find(spec => spec.key === 'animclockimpl').defaultValue, 'rust');
 assert.equal(specs.find(spec => spec.key === 'animclipimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'animclipimpl').defaultValue, 'rust');
 assert.equal(specs.find(spec => spec.key === 'animtime').kind, 'number');
@@ -451,6 +451,33 @@ for (const animationClockDefaultStep of [
     `browser animation-clock default is missing ${animationClockDefaultStep}`,
   );
 }
+const animationPoseStampsEqualSource = browserSource.match(
+  /(function animationPoseStampsEqual\(left, right\) \{[\s\S]*?\n\})\n\nfunction recordAnimationPoseMismatch/,
+)?.[1];
+assert.ok(
+  animationPoseStampsEqualSource,
+  'could not locate animation-pose stamp comparator',
+);
+const animationPoseStampsEqual = runInNewContext(
+  `${animationPoseStampsEqualSource}; animationPoseStampsEqual`,
+);
+const animationPoseStamp = Object.freeze({
+  t: 1,
+  sampleTime: 2,
+  revision: 3,
+  continuityEpoch: 4,
+});
+assert.equal(animationPoseStampsEqual(null, null), true);
+assert.equal(animationPoseStampsEqual(null, animationPoseStamp), false);
+assert.equal(animationPoseStampsEqual(animationPoseStamp, null), false);
+assert.equal(animationPoseStampsEqual(animationPoseStamp, { ...animationPoseStamp }), true);
+assert.equal(
+  animationPoseStampsEqual(
+    animationPoseStamp,
+    { ...animationPoseStamp, revision: animationPoseStamp.revision + 1 },
+  ),
+  false,
+);
 for (const animationClockAuthorityStep of [
   "!pendingRouteAnimationClock\n        && (!RUST_PRESENTATION_ENABLED",
   "compareRustAnimationSample('frame')",

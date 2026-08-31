@@ -7,6 +7,9 @@
 This cut does not change `animclockimpl`; the high-rate animation clock remains
 JavaScript-owned until its separate background-cadence and long-clip gates pass.
 
+Those independent gates passed later the same day and are recorded in
+`2026-08-31-rust-animation-clock-cutover.md`; the current clock default is Rust.
+
 Rust owns the installed catalog, active and pending clip identity, job
 allocation, cancellation, stale-result rejection, and the Leptos selector.
 JavaScript remains the platform effect host for worker evaluation and GPU

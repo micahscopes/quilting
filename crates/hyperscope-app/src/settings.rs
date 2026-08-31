@@ -215,7 +215,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     numeric_spec!("anim", "-1", Number, -1.0, i32::MAX as f64, true, 1.0),
     numeric_spec!("animtime", "0", Number, -1e9, 1e9, false, 0.001),
     numeric_spec!("animspeed", "1", Number, -1e6, 1e6, false, 0.01),
-    spec!("animclockimpl", "js", Implementation),
+    spec!("animclockimpl", "rust", Implementation),
     spec!("animclipimpl", "rust", Implementation),
     spec!("fuzzy", "0", Toggle),
     choice_spec!("fmode", "1", ["0", "1", "2", "3"]),
@@ -1373,6 +1373,21 @@ mod tests {
             assert_eq!(
                 route.canonical_pairs(),
                 vec![("animclipimpl", implementation)],
+            );
+            assert!(route.diagnostics().is_empty());
+        }
+    }
+
+    #[test]
+    fn animation_clock_cutover_uses_rust_by_default_with_measured_rollbacks() {
+        let default_route = HyperscopeRoute::from_pairs([("animclockimpl", "rust")]);
+        assert!(default_route.canonical_pairs().is_empty());
+
+        for implementation in ["js", "shadow"] {
+            let route = HyperscopeRoute::from_pairs([("animclockimpl", implementation)]);
+            assert_eq!(
+                route.canonical_pairs(),
+                vec![("animclockimpl", implementation)],
             );
             assert!(route.diagnostics().is_empty());
         }
