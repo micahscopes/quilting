@@ -912,6 +912,17 @@ impl HyperscopeAppShadow {
         self.store.frame_elapsed_seconds()
     }
 
+    /// Project one protocol-valid local viewport sample. Transport identity,
+    /// sequencing, retry, and delivery remain platform responsibilities.
+    #[wasm_bindgen(js_name = localPresenceSample)]
+    pub fn local_presence_sample(&self, ttl_millis: u32) -> Result<JsValue, JsValue> {
+        let presence = self
+            .store
+            .local_presence_snapshot(ttl_millis)
+            .map_err(js_error)?;
+        to_js(&ShadowLocalPresenceSample::from(presence))
+    }
+
     /// Serialize and atomically clear effects retained by quiet frame
     /// dispatches. A second drain is empty; job IDs and cancellation order are
     /// preserved exactly as committed by the reducer.
@@ -3383,6 +3394,48 @@ struct ShadowLocalPeerReceipt {
 struct ShadowPeerPresenceSnapshot {
     elapsed_seconds: f64,
     peers: Vec<ShadowPeerPresence>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowLocalPresenceSample {
+    eye: [f64; 3],
+    forward: [f64; 3],
+    up: [f64; 3],
+    selection: Vec<String>,
+    include_focus: bool,
+    focus_center: [f64; 3],
+    focus_radius: f64,
+    inversion_enabled: bool,
+    active_cue: String,
+    animation_seconds: f64,
+}
+
+impl From<EphemeralPresence> for ShadowLocalPresenceSample {
+    fn from(presence: EphemeralPresence) -> Self {
+        let camera = presence
+            .camera
+            .expect("local application presence always carries a camera");
+        let focus = presence.focus;
+        Self {
+            eye: camera.eye,
+            forward: camera.forward,
+            up: camera.up,
+            selection: presence
+                .selection
+                .into_iter()
+                .map(|entity| entity.to_string())
+                .collect(),
+            include_focus: focus.is_some(),
+            focus_center: focus.map_or([0.0; 3], |focus| focus.center),
+            focus_radius: focus.map_or(1.0, |focus| focus.radius),
+            inversion_enabled: focus.is_some_and(|focus| focus.inversion_enabled),
+            active_cue: presence
+                .active_cue
+                .map_or_else(String::new, |cue| cue.to_string()),
+            animation_seconds: presence.animation_seconds.unwrap_or(-1.0),
+        }
+    }
 }
 
 #[derive(Serialize)]

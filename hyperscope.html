@@ -13258,6 +13258,14 @@ function applyLocalPeerReceipt(receipt) {
 }
 
 function localPeerPresenceSample() {
+  const rustAuthoritative = RUST_NAVIGATION_IMPLEMENTATION === 'rust'
+    && RUST_SELECTION_IMPLEMENTATION === 'rust'
+    && ANIMATION_CLOCK_IMPLEMENTATION === 'rust'
+    && ANIMATION_CLIP_IMPLEMENTATION === 'rust'
+    && (!RUST_PRESENTATION_ENABLED || RUST_PRESENTATION_IMPLEMENTATION === 'rust');
+  if (rustAuthoritative && rustAppShadow) {
+    return rustAppShadow.localPresenceSample(LOCAL_PEER_PRESENCE_TTL_MS);
+  }
   const navigation = manualNavigationState();
   const selectedEntity = selectedObject?.identity?.entityId;
   const selection = selectedEntity ? [selectedEntity] : [];

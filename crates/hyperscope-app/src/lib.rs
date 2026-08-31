@@ -34,8 +34,9 @@ use hyperscape::{
     ScheduledNavigationAction, SphereReflectionState,
 };
 use hyperscape_protocol::{
-    AssetDescriptor, AssetEntityId, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId,
-    EphemeralPresence, PeerId, PresenceEnvelope, RequestId, WireTransform,
+    AssetDescriptor, AssetEntityId, AssetId, AuthoredCommand, AuthoredEnvelope, CameraPresence,
+    EntityId, EphemeralPresence, FocusPresence, MessageId, PeerId, PresenceEnvelope, RequestId,
+    WireError, WireTransform,
 };
 pub use quilting_core::render::FocusPostprocessMode;
 pub use quilting_gltf::GltfAssetMetadata as AssetMetadata;
@@ -2276,6 +2277,54 @@ impl AppState {
         }
     }
 
+    fn local_presence_snapshot(
+        &self,
+        ttl_millis: u32,
+    ) -> Result<EphemeralPresence, WireError> {
+        let camera = self.navigation.camera;
+        let basis = camera.basis();
+        let selection = self
+            .navigation
+            .focus
+            .anchor
+            .map(|anchor| vec![anchor.identity.entity])
+            .unwrap_or_default();
+        let focus = &self.navigation.focus;
+        let include_focus = focus.focus_enabled || focus.inversion_enabled || !selection.is_empty();
+        let active_cue = self
+            .active_presentation
+            .as_ref()
+            .map(|snapshot| MessageId::new(snapshot.cue_id))
+            .transpose()?;
+        let animation_seconds = self
+            .active_animation_clip
+            .as_ref()
+            .map(|active| {
+                AnimationClipFrameSnapshot::from_active(active, self.animation)
+                    .sample_time_seconds
+            })
+            .unwrap_or(self.animation.time_seconds)
+            .max(0.0);
+        let presence = EphemeralPresence {
+            ttl_millis,
+            camera: Some(CameraPresence {
+                eye: camera.eye,
+                forward: basis.forward,
+                up: basis.up,
+            }),
+            selection,
+            focus: include_focus.then_some(FocusPresence {
+                center: focus.sphere.center,
+                radius: focus.sphere.radius,
+                inversion_enabled: focus.inversion_enabled,
+            }),
+            active_cue,
+            animation_seconds: Some(animation_seconds),
+        };
+        presence.validate()?;
+        Ok(presence)
+    }
+
     fn asset_read_models(&self) -> Vec<AssetReadModel> {
         self.assets
             .values()
@@ -3052,6 +3101,16 @@ impl AppStore {
 
     pub fn animation_runtime_snapshot(&self) -> AnimationRuntimeReadModel {
         self.lock_state().animation_runtime_read_model()
+    }
+
+    /// Build one protocol-valid, non-durable local viewport sample from the
+    /// committed application state. The platform supplies TTL and transport;
+    /// it does not reconstruct camera, focus, selection, cue, or clip time.
+    pub fn local_presence_snapshot(
+        &self,
+        ttl_millis: u32,
+    ) -> Result<EphemeralPresence, WireError> {
+        self.lock_state().local_presence_snapshot(ttl_millis)
     }
 
     /// Resolve the active cue against resident renderer nodes without
@@ -5945,6 +6004,45 @@ mod tests {
             Err(ReduceError::InvalidTime),
         );
         assert_eq!(store.frame_snapshot(), before);
+    }
+
+    #[test]
+    fn local_presence_projects_committed_viewport_state() {
+        let store = AppStore::default();
+        let initial = store.local_presence_snapshot(1_500).unwrap();
+        assert_eq!(initial.ttl_millis, 1_500);
+        assert_eq!(initial.camera.unwrap().eye, [0.0, 0.0, 3.0]);
+        assert_eq!(initial.camera.unwrap().forward, [0.0, 0.0, -1.0]);
+        assert!(initial.selection.is_empty());
+        assert_eq!(initial.focus, None);
+        assert_eq!(initial.active_cue, None);
+        assert_eq!(initial.animation_seconds, Some(0.0));
+
+        let selected = selection_identity();
+        apply_navigation_now(&store, selected_focus_action([0.25, 0.0, 0.0]));
+        let selected_presence = store.local_presence_snapshot(1_500).unwrap();
+        assert_eq!(selected_presence.selection, vec![selected.entity]);
+        assert!(selected_presence.focus.is_some());
+
+        store
+            .dispatch_navigation(NavigationAction::SetInversionEnabled(true))
+            .unwrap();
+        store.dispatch_frame_delta(0.0).unwrap();
+        let reflected = store.local_presence_snapshot(1_500).unwrap();
+        assert!(reflected.focus.unwrap().inversion_enabled);
+
+        let presentation = presentation_fixture();
+        let cue = MessageId::new(presentation.cues[0].id).unwrap();
+        store
+            .dispatch(AppEvent::PresentationLoaded(presentation))
+            .unwrap();
+        dispatch_presentation(&store, 0, 0.0, PresentationAction::Start).unwrap();
+        assert_eq!(
+            store.local_presence_snapshot(1_500).unwrap().active_cue,
+            Some(cue),
+        );
+
+        assert!(store.local_presence_snapshot(0).is_err());
     }
 
     #[test]
