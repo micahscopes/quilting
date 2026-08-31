@@ -4032,7 +4032,6 @@ let rustAppShadowSelectionQueued = false;
 let rustAppSelectionTransitionActive = false;
 let rustAppSelectedCameraTransitionKind = null;
 let rustAppSelectionEventAtMs = null;
-let rustAppFrameElapsedSeconds = 0;
 let rustAssetCreditsMountAttempted = false;
 let rustAssetCreditsMounted = false;
 let rustAnimationControlMountAttempted = false;
@@ -5607,7 +5606,6 @@ function advanceRustApplicationClockToSelectionEvent(nowMs) {
   try {
     const emittedEffects = rustAppShadow.advanceFrameDeltaQuiet(partialSeconds);
     drainRustFrameAdapterEffects(emittedEffects, 'selection-event-frame');
-    rustAppFrameElapsedSeconds += partialSeconds;
     rustAppShadowDiagnostics.eventFrameCalls += 1;
     rustAppShadowDiagnostics.eventFrameSeconds += partialSeconds;
   } catch (error) {
@@ -5856,7 +5854,6 @@ function advanceRustApplicationFrame(nowMs, frameDeltaSeconds, rawFrameDeltaSeco
     const emittedEffects = rustAppShadow.advanceFrameDeltaQuiet(deltaSeconds);
     drainRustFrameAdapterEffects(emittedEffects, 'animation-frame');
     if (consumesSelectionEventFrame) rustAppSelectionEventAtMs = null;
-    rustAppFrameElapsedSeconds += deltaSeconds;
     rustAppShadowDiagnostics.frameCalls += 1;
     rustAppShadowDiagnostics.lastFrameDeltaSeconds = deltaSeconds;
     rustAppShadowDiagnostics.maximumFrameDeltaSeconds = Math.max(
@@ -13374,7 +13371,7 @@ function connectLocalPeer() {
     app,
     // Presence expiry and AppEvent::Frame must share one monotonic epoch.
     // performance.now() can predate a lazily-created AppStore by many seconds.
-    nowSeconds: () => rustAppFrameElapsedSeconds,
+    nowSeconds: () => app.frameElapsedSeconds(),
     onReceipt: applyLocalPeerReceipt,
     onStatus: updateLocalPeerStatus,
   });

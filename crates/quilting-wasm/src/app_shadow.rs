@@ -904,6 +904,14 @@ impl HyperscopeAppShadow {
         self.retain_quiet_frame_effects(commit)
     }
 
+    /// Sample the committed monotonic application epoch for low-rate platform
+    /// effects. Ordinary RAF adaptation uses `advanceFrameDeltaQuiet` and does
+    /// not read or mirror this value.
+    #[wasm_bindgen(js_name = frameElapsedSeconds)]
+    pub fn frame_elapsed_seconds(&self) -> f64 {
+        self.store.frame_elapsed_seconds()
+    }
+
     /// Serialize and atomically clear effects retained by quiet frame
     /// dispatches. A second drain is empty; job IDs and cancellation order are
     /// preserved exactly as committed by the reducer.

@@ -12,9 +12,9 @@ The Rust-authority frame port now accepts only the platform delta. `AppStore`
 derives absolute application time and reduces the frame within one lock scope,
 so a future worker-capable adapter cannot race between reading and advancing
 the epoch. The explicit elapsed-plus-delta port remains for deterministic
-replay and `js|shadow` evidence. A local browser mirror remains only as a
-timestamp source for ephemeral presence; it cannot drive or rewind application
-state.
+replay and `js|shadow` evidence. Ephemeral presence samples the committed epoch
+through a low-rate allocation-free getter; JavaScript retains no elapsed-time
+mirror.
 
 ## Evidence
 
@@ -27,7 +27,7 @@ WebGL2-only wasm32 adapter check passes:
 
 ```text
 cargo check --target wasm32-unknown-unknown -p quilting-wasm --features leptos-ui
-Finished `dev` profile ... in 8.46s
+Finished `dev` profile ... in 7.09s
 ```
 
 Trunk, wasm-pack, binding generation, and wasm-opt were not run.

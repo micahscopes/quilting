@@ -15,6 +15,10 @@ assert.ok(
   'the app store needs an atomic delta-only frame port',
 );
 assert.ok(
+  app.includes('pub fn frame_elapsed_seconds(&self) -> f64'),
+  'low-rate platform effects need an allocation-free committed epoch read',
+);
+assert.ok(
   bridge.includes('#[wasm_bindgen(js_name = advanceFrameDeltaQuiet)]'),
   'the WASM adapter must expose a delta-only Rust frame port',
 );
@@ -25,6 +29,10 @@ assert.ok(
 assert.ok(
   bridge.includes('self.advance_frame_delta_quiet(0.0)?;'),
   'synchronous camera integration must not reconstruct absolute frame time',
+);
+assert.ok(
+  bridge.includes('#[wasm_bindgen(js_name = frameElapsedSeconds)]'),
+  'the presence adapter needs a low-rate committed epoch port',
 );
 
 const frameStart = browser.indexOf('function advanceRustApplicationFrame(');
@@ -42,6 +50,11 @@ assert.ok(selectionLane.includes('rustAppShadow.advanceFrameDeltaQuiet(partialSe
   'selection event-time splitting must use the delta-only port');
 assert.equal(selectionLane.includes('rustAppShadow.advanceFrameQuiet('), false,
   'selection event-time splitting must not round-trip browser elapsed time');
+
+assert.equal(browser.includes('rustAppFrameElapsedSeconds'), false,
+  'the browser must not retain a duplicate application epoch');
+assert.ok(browser.includes('nowSeconds: () => app.frameElapsedSeconds()'),
+  'ephemeral presence must sample the committed Rust epoch on demand');
 
 const moduleSource = browser.match(/<script type="module">([\s\S]*?)<\/script>/)?.[1];
 assert.ok(moduleSource, 'could not extract the Hyperscope inline module');

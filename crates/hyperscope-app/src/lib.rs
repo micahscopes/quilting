@@ -2960,6 +2960,12 @@ impl AppStore {
         self.lock_state().frame_snapshot()
     }
 
+    /// Read the committed application epoch for low-rate platform adapters
+    /// such as ephemeral presence without cloning a full frame snapshot.
+    pub fn frame_elapsed_seconds(&self) -> f64 {
+        self.lock_state().frame_elapsed_seconds
+    }
+
     /// Read the allocation-free pose evaluation clock without cloning the
     /// navigation and focus fields carried by a complete frame snapshot.
     pub fn animation_pose_sample_time_seconds(&self) -> f64 {
@@ -5929,6 +5935,7 @@ mod tests {
         store.dispatch_frame_delta(0.375).unwrap();
         let frame = store.frame_snapshot();
         assert_eq!(frame.elapsed_seconds, 0.5);
+        assert_eq!(store.frame_elapsed_seconds(), 0.5);
         assert_eq!(frame.animation.time_seconds, 0.5);
         assert_eq!(frame.animation_pose_sample_time_seconds, 0.5);
 
