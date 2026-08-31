@@ -259,6 +259,8 @@ pub(crate) struct WebGpuBackendDiagnostics {
     presentation_ready: bool,
     presentation_viewport: [u32; 2],
     presentation_color_format: Option<String>,
+    presentation_alpha_mode: Option<String>,
+    render_clear_color: [f32; 4],
     presentation_style: Option<&'static str>,
     presentation_frame_admitted: bool,
     presentation_frames: u64,
@@ -495,6 +497,10 @@ impl WebGpuBackend {
             presentation_color_format: presentation
                 .as_ref()
                 .map(|presentation| presentation.color_format.clone()),
+            presentation_alpha_mode: presentation
+                .as_ref()
+                .map(|presentation| presentation.alpha_mode.clone()),
+            render_clear_color: quilting_core::render::DEFAULT_RENDER_CLEAR_COLOR,
             presentation_style: self
                 .presentation
                 .as_ref()

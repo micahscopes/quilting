@@ -17,12 +17,12 @@ const renderer = readFileSync(
 
 for (const required of [
   'frame_evidence_requested: bool',
-  'last_frame_presented: bool',
+  'presentation_frame_admitted: bool',
   'last_presentation_style: Option<RenderStyle>',
   'frame_evidence: Option<FrameEvidenceMetadata>',
   'fn frame_destination(',
   'backend.presentation.is_some(),\n            frame_evidence_requested,',
-  'backend.last_frame_presented = presentation_frame',
+  'backend.presentation_frame_admitted = true',
   'backend.last_presentation_style = Some(style)',
   'backend.frame_evidence = Some(FrameEvidenceMetadata',
   'pub(crate) fn request_frame_evidence()',

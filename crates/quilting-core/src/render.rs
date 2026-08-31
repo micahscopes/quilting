@@ -617,6 +617,13 @@ pub struct FocusPostprocessPacket {
     pub kawase_offset: f32,
 }
 
+/// Canonical opaque frame clear shared by every Quilting render backend.
+///
+/// Background authorship can later promote this value into scene/frame state;
+/// until then, keeping the incumbent color here prevents WebGL2, WebGPU, focus
+/// composition, and parity targets from silently inventing different policy.
+pub const DEFAULT_RENDER_CLEAR_COLOR: [f32; 4] = [0.2, 0.2, 0.3, 1.0];
+
 impl FocusPostprocessPacket {
     pub fn validate(self) -> Result<Self, RenderContractError> {
         let valid_stretch_range = finite(self.stretch_range)

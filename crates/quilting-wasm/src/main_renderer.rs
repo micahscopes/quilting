@@ -43,7 +43,7 @@ use quilting_core::render::{
     FocusPostprocessPacket, MatcapStyle, PbrDrawClass, RenderBatchSnapshot,
     RenderCommandPlan, RenderEntityTransform, RenderFrame, RenderFrameOptions, RenderPass,
     RenderPoseIdentity, RenderSceneSnapshot, RenderStyle, RenderSubmissionStats, RenderView,
-    ValidatedRenderScene,
+    ValidatedRenderScene, DEFAULT_RENDER_CLEAR_COLOR,
 };
 #[cfg(feature = "webgpu-backend")]
 use quilting_core::render::RenderSubmissionMismatch;
@@ -551,6 +551,7 @@ struct BackendFrameEvidenceReport {
     workload_mismatch: RenderSubmissionMismatch,
     webgpu_indirect_draw_calls: u32,
     webgpu_source_instances: u32,
+    clear_color: [f32; 4],
     focus_postprocess: Option<FocusPostprocessPacket>,
     image: RenderImageComparison,
 }
@@ -3010,7 +3011,8 @@ fn capture_webgl_frame_evidence(
             // Preserve the incumbent RGB clear while leaving background alpha
             // available as an explicit fragment-coverage mask for parity
             // evidence.
-            gl.clear_color(0.2, 0.2, 0.3, 0.0);
+            let [red, green, blue, _] = DEFAULT_RENDER_CLEAR_COLOR;
+            gl.clear_color(red, green, blue, 0.0);
             gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
             gl.enable(glow::DEPTH_TEST);
             gl.enable(glow::BLEND);
@@ -3331,6 +3333,7 @@ pub async fn mr_compare_backend_frame_evidence() -> Result<JsValue, JsValue> {
         workload_mismatch,
         webgpu_indirect_draw_calls: staged.indirect_draw_calls,
         webgpu_source_instances: staged.source_instances,
+        clear_color: DEFAULT_RENDER_CLEAR_COLOR,
         focus_postprocess: webgl.focus_postprocess,
         image,
     })
@@ -10456,7 +10459,8 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                         gl.bind_framebuffer(glow::FRAMEBUFFER, state.pbr_fbo);
                         // Clear color attachment only
                         gl.draw_buffers(&[glow::COLOR_ATTACHMENT0, glow::NONE]);
-                        gl.clear_color(0.2, 0.2, 0.3, 1.0);
+                        let [red, green, blue, alpha] = DEFAULT_RENDER_CLEAR_COLOR;
+                        gl.clear_color(red, green, blue, alpha);
                         gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
                         // Clear weight attachment: R/G remain neutral for conformal/DoF.
                         // B=1 places the empty scene outside the spherical focus field.

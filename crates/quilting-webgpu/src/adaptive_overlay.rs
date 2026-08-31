@@ -1258,12 +1258,7 @@ impl LodClassifierDevice {
                 color_view: &target.color_view,
                 resolve_target: None,
                 depth_stencil_view: Some(&target.depth_view),
-                clear_color: Some(wgpu::Color {
-                    r: 0.2,
-                    g: 0.2,
-                    b: 0.3,
-                    a: 0.0,
-                }),
+                clear_color: Some(DEFAULT_EVIDENCE_CLEAR),
                 clear_depth: Some(1.0),
             },
             pose,
@@ -1301,12 +1296,7 @@ impl LodClassifierDevice {
             self,
             "quilting resident adaptive presentation frame",
             |encoder, mut target| {
-                target.clear_color = Some(wgpu::Color {
-                    r: 0.2,
-                    g: 0.2,
-                    b: 0.3,
-                    a: 1.0,
-                });
+                target.clear_color = Some(DEFAULT_FRAME_CLEAR);
                 target.clear_depth = Some(1.0);
                 self.encode_resident_adaptive(
                     encoder,

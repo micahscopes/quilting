@@ -73,7 +73,7 @@ impl PatchPresentationSurface {
                     "WebGPU presentation surface has no supported present mode".to_string(),
                 )
             })?;
-        let alpha_mode = capabilities.alpha_modes.first().copied().ok_or_else(|| {
+        let alpha_mode = preferred_alpha_mode(&capabilities.alpha_modes).ok_or_else(|| {
             LodWebGpuError::Payload(
                 "WebGPU presentation surface has no supported alpha mode".to_string(),
             )
@@ -338,6 +338,13 @@ fn preferred_present_mode(modes: &[wgpu::PresentMode]) -> Option<wgpu::PresentMo
         .or_else(|| modes.first().copied())
 }
 
+fn preferred_alpha_mode(modes: &[wgpu::CompositeAlphaMode]) -> Option<wgpu::CompositeAlphaMode> {
+    modes
+        .contains(&wgpu::CompositeAlphaMode::Opaque)
+        .then_some(wgpu::CompositeAlphaMode::Opaque)
+        .or_else(|| modes.first().copied())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,7 +367,19 @@ mod tests {
             preferred_present_mode(&[wgpu::PresentMode::Immediate, wgpu::PresentMode::Fifo,]),
             Some(wgpu::PresentMode::Fifo),
         );
+        assert_eq!(
+            preferred_alpha_mode(&[
+                wgpu::CompositeAlphaMode::PreMultiplied,
+                wgpu::CompositeAlphaMode::Opaque,
+            ]),
+            Some(wgpu::CompositeAlphaMode::Opaque),
+        );
+        assert_eq!(
+            preferred_alpha_mode(&[wgpu::CompositeAlphaMode::PostMultiplied]),
+            Some(wgpu::CompositeAlphaMode::PostMultiplied),
+        );
         assert_eq!(preferred_color_format(&[]), None);
         assert_eq!(preferred_present_mode(&[]), None);
+        assert_eq!(preferred_alpha_mode(&[]), None);
     }
 }

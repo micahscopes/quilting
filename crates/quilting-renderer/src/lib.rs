@@ -15,6 +15,7 @@ pub mod prepare;
 pub mod texture;
 
 use glow::HasContext;
+use quilting_core::render::DEFAULT_RENDER_CLEAR_COLOR;
 
 use buffer::{
     VertexUniformBuf, WireUniformBuf, PbrUniformBuf, MatcapUniformBuf, JointMatricesBuf,
@@ -143,8 +144,9 @@ impl Renderer {
 
     /// Clear the framebuffer and set up GL state for a new frame.
     pub fn begin_frame(&self) {
+        let [red, green, blue, alpha] = DEFAULT_RENDER_CLEAR_COLOR;
         unsafe {
-            self.gl.clear_color(0.2, 0.2, 0.3, 1.0);
+            self.gl.clear_color(red, green, blue, alpha);
             self.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
             self.gl.enable(glow::DEPTH_TEST);
             self.gl.enable(glow::BLEND);

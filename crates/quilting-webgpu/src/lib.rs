@@ -69,7 +69,7 @@ use quilting_core::render::{
     RenderCommandPlan, RenderEntityTransform, RenderFrame, RenderFrameOptions, RenderGeometry,
     RenderPass, RenderPoseIdentity, RenderSceneSnapshot, RenderStyle, RenderSubmissionStats,
     RenderView, ResolvedRenderCommand, ResidentRootDrawDomain, ResidentRootDrawDomains,
-    ValidatedRenderScene,
+    ValidatedRenderScene, DEFAULT_RENDER_CLEAR_COLOR,
 };
 use quilting_core::render_evidence::{
     render_image_signature, RenderImageChannelOrder, RenderImageOrigin, RenderImageSignature,
@@ -118,6 +118,20 @@ const MAX_RESIDENT_GEOMETRY_BUCKETS: u32 = 510;
 const DRAW_BATCH_INDEX_BYTES: u64 = 16;
 const PATCH_PREPARE_UNIFORM_BYTES: u64 = 16;
 const PATCH_TOPOLOGY_RECORD_BYTES: u64 = 48;
+
+const DEFAULT_FRAME_CLEAR: wgpu::Color = wgpu::Color {
+    r: DEFAULT_RENDER_CLEAR_COLOR[0] as f64,
+    g: DEFAULT_RENDER_CLEAR_COLOR[1] as f64,
+    b: DEFAULT_RENDER_CLEAR_COLOR[2] as f64,
+    a: DEFAULT_RENDER_CLEAR_COLOR[3] as f64,
+};
+
+/// The image-evidence target keeps the canonical RGB but reserves alpha as a
+/// fragment-coverage mask. Visible targets always use `DEFAULT_FRAME_CLEAR`.
+const DEFAULT_EVIDENCE_CLEAR: wgpu::Color = wgpu::Color {
+    a: 0.0,
+    ..DEFAULT_FRAME_CLEAR
+};
 const PREPARED_PATCH_RECORD_WORDS: usize = 52;
 const PREPARED_PATCH_RECORD_BYTES: u64 = 208;
 const PATCH_SUBJECT_RECORD_BYTES: u64 = 128;
@@ -5897,12 +5911,7 @@ impl LodClassifierDevice {
             target,
             use_qb,
             true,
-            wgpu::Color {
-                r: 0.2,
-                g: 0.2,
-                b: 0.3,
-                a: 0.0,
-            },
+            DEFAULT_EVIDENCE_CLEAR,
         )
     }
 
@@ -5922,12 +5931,7 @@ impl LodClassifierDevice {
             self,
             "quilting live presentation frame",
             |encoder, mut target| {
-                target.clear_color = Some(wgpu::Color {
-                    r: 0.2,
-                    g: 0.2,
-                    b: 0.3,
-                    a: 1.0,
-                });
+                target.clear_color = Some(DEFAULT_FRAME_CLEAR);
                 target.clear_depth = Some(1.0);
                 self.encode_diagnostic_patch_render_scene(
                     encoder,
@@ -5961,12 +5965,7 @@ impl LodClassifierDevice {
             self,
             "quilting live presentation frame",
             |encoder, mut target| {
-                target.clear_color = Some(wgpu::Color {
-                    r: 0.2,
-                    g: 0.2,
-                    b: 0.3,
-                    a: 1.0,
-                });
+                target.clear_color = Some(DEFAULT_FRAME_CLEAR);
                 target.clear_depth = Some(1.0);
                 self.encode_supported_patch_render_scene(
                     encoder,
@@ -6004,12 +6003,7 @@ impl LodClassifierDevice {
             self,
             "quilting device-resident LOD presentation frame",
             |encoder, mut target| {
-                target.clear_color = Some(wgpu::Color {
-                    r: 0.2,
-                    g: 0.2,
-                    b: 0.3,
-                    a: 1.0,
-                });
+                target.clear_color = Some(DEFAULT_FRAME_CLEAR);
                 target.clear_depth = Some(1.0);
                 self.encode_supported_patch_render_scene(
                     encoder,
@@ -6226,12 +6220,7 @@ impl LodClassifierDevice {
             atlas,
             target,
             use_qb,
-            wgpu::Color {
-                r: 0.2,
-                g: 0.2,
-                b: 0.3,
-                a: 0.0,
-            },
+            DEFAULT_EVIDENCE_CLEAR,
         )
     }
 
@@ -6327,12 +6316,7 @@ impl LodClassifierDevice {
             atlas,
             target,
             use_qb,
-            wgpu::Color {
-                r: 0.2,
-                g: 0.2,
-                b: 0.3,
-                a: 0.0,
-            },
+            DEFAULT_EVIDENCE_CLEAR,
         )
     }
 
