@@ -8534,6 +8534,7 @@ pub fn mr_upload_env_maps(
                 info!("Uploaded env maps: prefiltered {}x{} ({} mips), irradiance {}x{}",
                     pf_size, pf_size, st.env_maps.mip_count as u32, ir_size, ir_size);
             }
+            #[cfg(feature = "webgpu-backend")]
             match crate::webgpu_backend::replace_environment_maps(
                 prefiltered,
                 pf_size,
