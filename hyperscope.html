@@ -3407,29 +3407,31 @@ async function applyCommittedPresentationAnimationEffects(
 
 async function bindPrimaryPresentationAnimationResidency(presentationAssetId) {
   if (ANIMATION_CLIP_IMPLEMENTATION !== 'rust' || !presentationAppAuthority()) return false;
-  const before = refreshAppShadowSnapshot();
-  const installed = before?.installedPrimaryScene?.asset;
-  if (!installed?.requestId || !installed?.assetId) {
-    throw new Error('presentation animation binding requires an installed primary scene');
-  }
-  const receipt = rustAppShadow.setPresentationAnimationResidency(
-    presentationAssetId,
-    installed.requestId,
-    installed.assetId,
-  );
+  const receipt = rustAppShadow.bindInstalledPresentationAnimationResidency(presentationAssetId);
   const commit = receipt.commit;
   rustAppShadowDiagnostics.lastCommit = commit;
-  const after = refreshAppShadowSnapshot();
-  const residency = after?.presentation?.animationResidency;
+  const residency = receipt.residency;
   if (residency?.presentationAssetId !== presentationAssetId
-      || residency?.sceneRequestId !== installed.requestId
-      || residency?.residentAssetId !== installed.assetId) {
+      || !residency?.sceneRequestId
+      || !residency?.residentAssetId) {
     throw new Error('Rust presentation animation residency projection diverged');
+  }
+  const current = rustAppShadowDiagnostics.snapshot;
+  if (current?.presentation) {
+    rustAppShadowDiagnostics.snapshot = {
+      ...current,
+      revision: commit.revision,
+      presentation: {
+        ...current.presentation,
+        active: receipt.active,
+        animationResidency: residency,
+      },
+    };
   }
   rustPresentationDiagnostics.animationResidency = residency;
   return applyCommittedPresentationAnimationEffects(
     { effect: receipt.selection, cancellations: receipt.cancellations },
-    after?.presentation?.active,
+    receipt.active,
     'presentation-residency',
   );
 }

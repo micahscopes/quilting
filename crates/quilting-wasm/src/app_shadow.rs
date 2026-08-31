@@ -1783,6 +1783,22 @@ impl HyperscopeAppShadow {
         )
     }
 
+    /// Bind presentation animation to the AppStore-owned installed scene
+    /// without exposing its process-local identity to the browser.
+    #[wasm_bindgen(js_name = bindInstalledPresentationAnimationResidency)]
+    pub fn bind_installed_presentation_animation_residency(
+        &self,
+        presentation_asset_id: &str,
+    ) -> Result<JsValue, JsValue> {
+        presentation_animation_residency_to_js(
+            self.store
+                .bind_presentation_animation_to_installed_scene(asset_id_from_str(
+                    presentation_asset_id,
+                )?)
+                .map_err(js_error)?,
+        )
+    }
+
     #[wasm_bindgen(js_name = clearPresentationAnimationResidency)]
     pub fn clear_presentation_animation_residency(&self) -> Result<JsValue, JsValue> {
         let commit = self
@@ -2796,23 +2812,7 @@ impl HyperscopeAppShadow {
                 message: diagnostic.message,
             })
             .collect();
-        let presentation =
-            self.store
-                .presentation_snapshot()
-                .map(|presentation| ShadowPresentation {
-                    id: presentation.presentation_id.to_string(),
-                    title: presentation.title,
-                    cue_count: presentation.cue_count,
-                    assets: presentation.assets,
-                    active: presentation.active,
-                    animation_residency: presentation.animation_residency.map(|binding| {
-                        ShadowPresentationAnimationResidency {
-                            presentation_asset_id: binding.presentation_asset_id.to_string(),
-                            scene_request_id: binding.scene_request_id.to_string(),
-                            resident_asset_id: binding.resident_asset_id.to_string(),
-                        }
-                    }),
-                });
+        let presentation = self.store.presentation_snapshot().map(ShadowPresentation::from);
         to_js(&ShadowSnapshot {
             revision: summary.revision.to_string(),
             animation_playing: summary.animation_playing,
@@ -3779,6 +3779,8 @@ struct ShadowPresentationDispatch {
 #[serde(rename_all = "camelCase")]
 struct ShadowPresentationAnimationResidencyDispatch {
     commit: ShadowCommit,
+    residency: Option<ShadowPresentationAnimationResidency>,
+    active: Option<PresentationSnapshot>,
     selection: Option<ShadowAnimationClipJobEffect>,
     cancellations: Vec<ShadowAnimationClipJobEffect>,
 }
@@ -3788,6 +3790,8 @@ fn presentation_animation_residency_to_js(
 ) -> Result<JsValue, JsValue> {
     to_js(&ShadowPresentationAnimationResidencyDispatch {
         commit: shadow_commit(&dispatch.commit),
+        residency: dispatch.residency.map(Into::into),
+        active: dispatch.active,
         selection: dispatch
             .selection
             .as_ref()
@@ -4170,12 +4174,35 @@ struct ShadowPresentation {
     animation_residency: Option<ShadowPresentationAnimationResidency>,
 }
 
+impl From<hyperscope_app::PresentationReadModel> for ShadowPresentation {
+    fn from(presentation: hyperscope_app::PresentationReadModel) -> Self {
+        Self {
+            id: presentation.presentation_id.to_string(),
+            title: presentation.title,
+            cue_count: presentation.cue_count,
+            assets: presentation.assets,
+            active: presentation.active,
+            animation_residency: presentation.animation_residency.map(Into::into),
+        }
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ShadowPresentationAnimationResidency {
     presentation_asset_id: String,
     scene_request_id: String,
     resident_asset_id: String,
+}
+
+impl From<PresentationAnimationResidencyBinding> for ShadowPresentationAnimationResidency {
+    fn from(binding: PresentationAnimationResidencyBinding) -> Self {
+        Self {
+            presentation_asset_id: binding.presentation_asset_id.to_string(),
+            scene_request_id: binding.scene_request_id.to_string(),
+            resident_asset_id: binding.resident_asset_id.to_string(),
+        }
+    }
 }
 
 #[derive(Serialize)]

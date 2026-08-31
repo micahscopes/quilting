@@ -882,9 +882,11 @@ pub struct PresentationDispatch {
 
 /// Typed result of changing the process-local binding between an authored
 /// presentation asset and the primary scene currently resident in a renderer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PresentationAnimationResidencyDispatch {
     pub commit: AppCommit,
+    pub residency: Option<PresentationAnimationResidencyBinding>,
+    pub active: Option<PresentationSnapshot>,
     pub selection: Option<AnimationClipJobEffect>,
     pub cancellations: Vec<AnimationClipJobEffect>,
 }
@@ -2609,6 +2611,39 @@ impl AppStore {
         binding: Option<PresentationAnimationResidencyBinding>,
     ) -> Result<PresentationAnimationResidencyDispatch, ReduceError> {
         let commit = self.dispatch(AppEvent::PresentationAnimationResidencyChanged(binding))?;
+        self.presentation_animation_residency_dispatch(commit)
+    }
+
+    /// Bind an authored presentation asset to the exact primary scene that is
+    /// resident at this reducer boundary. The browser never round-trips
+    /// process-local request or asset identities through JavaScript.
+    pub fn bind_presentation_animation_to_installed_scene(
+        &self,
+        presentation_asset_id: AssetId,
+    ) -> Result<PresentationAnimationResidencyDispatch, ReduceError> {
+        let commit = {
+            let mut state = self.lock_state();
+            let resident = state
+                .installed_primary_scene
+                .as_ref()
+                .ok_or(ReduceError::NoInstalledPrimaryScene)?;
+            let binding = PresentationAnimationResidencyBinding {
+                presentation_asset_id,
+                scene_request_id: resident.asset.request_id,
+                resident_asset_id: resident.asset.descriptor.id,
+            };
+            state.reduce(AppEvent::PresentationAnimationResidencyChanged(Some(binding)))?
+        };
+        if commit.published_ui {
+            self.flush_read_models();
+        }
+        self.presentation_animation_residency_dispatch(commit)
+    }
+
+    fn presentation_animation_residency_dispatch(
+        &self,
+        commit: AppCommit,
+    ) -> Result<PresentationAnimationResidencyDispatch, ReduceError> {
         if commit.effects.iter().any(|effect| {
             !matches!(
                 effect,
@@ -2621,8 +2656,13 @@ impl AppStore {
             ));
         }
         let effects = AnimationClipEffects::from_commit(&commit);
+        let presentation = self.presentation_snapshot();
         Ok(PresentationAnimationResidencyDispatch {
             commit,
+            residency: presentation
+                .as_ref()
+                .and_then(|presentation| presentation.animation_residency),
+            active: presentation.and_then(|presentation| presentation.active),
             selection: effects.selection,
             cancellations: effects.cancellations,
         })
@@ -4577,8 +4617,10 @@ mod tests {
             resident_asset_id: resident.id,
         };
         let bound = store
-            .set_presentation_animation_residency(Some(binding))
+            .bind_presentation_animation_to_installed_scene(presentation_asset_id)
             .unwrap();
+        assert_eq!(bound.residency, Some(binding));
+        assert_eq!(bound.active.as_ref().unwrap().cue_index, 0);
         assert_eq!(
             bound.selection,
             Some(AnimationClipJobEffect {

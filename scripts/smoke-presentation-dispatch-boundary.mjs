@@ -19,12 +19,14 @@ for (const required of [
   'pub struct PresentationAnimationResidencyDispatch',
   'pub fn dispatch_presentation(',
   'pub fn set_presentation_animation_residency(',
+  'pub fn bind_presentation_animation_to_installed_scene(',
   'SemanticAction::Present(action)',
   'let effects = AnimationClipEffects::from_commit(&commit);',
   'active: self',
   '.and_then(|presentation| presentation.active)',
   'selection: effects.selection',
   'cancellations: effects.cancellations',
+  'residency: presentation',
 ]) {
   assert.ok(app.includes(required), `application presentation port is missing ${required}`);
 }
@@ -56,11 +58,13 @@ for (const required of [
   '#[wasm_bindgen(js_name = dispatchPresentation)]',
   '#[wasm_bindgen(js_name = requestPresentation)]',
   '#[wasm_bindgen(js_name = setPresentationAnimationResidency)]',
+  '#[wasm_bindgen(js_name = bindInstalledPresentationAnimationResidency)]',
   '#[wasm_bindgen(js_name = unsetPresentationAnimationResidency)]',
   '.dispatch_presentation(presentation_action_from_wire(action, cue_id)?)',
   'ShadowPresentationDispatch',
   'active: dispatch.active',
   'ShadowPresentationAnimationResidencyDispatch',
+  'residency: dispatch.residency.map(Into::into)',
   'ShadowAnimationClipJobEffect::selection',
   'ShadowAnimationClipJobEffect::cancellation',
 ]) {
@@ -129,8 +133,10 @@ const residencyStart = browser.indexOf('async function bindPrimaryPresentationAn
 const residencyEnd = browser.indexOf('function presentationLayerMatrix(', residencyStart);
 const residency = browser.slice(residencyStart, residencyEnd);
 for (const required of [
-  'rustAppShadow.setPresentationAnimationResidency(',
+  'rustAppShadow.bindInstalledPresentationAnimationResidency(presentationAssetId)',
   'const commit = receipt.commit;',
+  'const residency = receipt.residency;',
+  'receipt.active,',
   '{ effect: receipt.selection, cancellations: receipt.cancellations }',
 ]) {
   assert.ok(residency.includes(required),
@@ -138,6 +144,8 @@ for (const required of [
 }
 for (const retired of [
   'rustAppShadow.bindPresentationAnimationResidency(',
+  'rustAppShadow.setPresentationAnimationResidency(',
+  'refreshAppShadowSnapshot()',
   'applyCommittedPresentationAnimationEffects(\n    commit,',
 ]) {
   assert.equal(residency.includes(retired), false,
