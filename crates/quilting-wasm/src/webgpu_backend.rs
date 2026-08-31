@@ -55,7 +55,15 @@ struct WebGpuBackend {
     scene_source_revision: Option<u64>,
     target: Option<OffscreenPatchRenderTarget>,
     presentation: Option<PatchPresentationSurface>,
+    /// One explicit parity frame must use the offscreen target even when the
+    /// same device owns a live presentation surface.
+    frame_evidence_requested: bool,
     last_frame_input: Option<LiveFrameInput>,
+    /// A matching `last_frame_input` can retain visible pixels only when that
+    /// exact frame was submitted to the presentation surface.
+    last_frame_presented: bool,
+    last_presentation_style: Option<RenderStyle>,
+    frame_evidence: Option<FrameEvidenceMetadata>,
     last_face_visibility_bits: Vec<u32>,
     next_face_visibility_bits: Vec<u32>,
     next_morph_weights: Vec<f32>,
@@ -140,6 +148,17 @@ struct ResidentRootReuseCandidate {
     focus_failure: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+struct FrameEvidenceMetadata {
+    frame_revision: u64,
+    source_render_call: u64,
+    viewport: [u32; 2],
+    logical_submission: RenderSubmissionStats,
+    indirect_draw_calls: u32,
+    source_instances: u32,
+    focus_postprocess: Option<quilting_core::render::FocusPostprocessPacket>,
+}
+
 enum ResidentRootSceneCandidate {
     Unavailable,
     Reuse(Box<ResidentRootReuseCandidate>),
@@ -147,6 +166,20 @@ enum ResidentRootSceneCandidate {
         backend: Box<ResidentRootBackend>,
         focus_failure: Option<String>,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FrameDestination {
+    Offscreen,
+    Presentation,
+}
+
+fn frame_destination(presentation_ready: bool, frame_evidence_requested: bool) -> FrameDestination {
+    if presentation_ready && !frame_evidence_requested {
+        FrameDestination::Presentation
+    } else {
+        FrameDestination::Offscreen
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -448,10 +481,10 @@ impl WebGpuBackend {
             presentation_color_format: presentation
                 .as_ref()
                 .map(|presentation| presentation.color_format.clone()),
-            presentation_style: self.presentation.as_ref().and_then(|_| {
-                self.last_frame_input
-                    .map(|frame| render_style_name(frame.style))
-            }),
+            presentation_style: self
+                .presentation
+                .as_ref()
+                .and(self.last_presentation_style.map(render_style_name)),
             presentation_frames: presentation
                 .as_ref()
                 .map_or(0, |presentation| presentation.frames_presented),
@@ -804,7 +837,11 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
                     backend.scene_source_revision = None;
                     backend.target = None;
                     backend.presentation = None;
+                    backend.frame_evidence_requested = false;
                     backend.last_frame_input = None;
+                    backend.last_frame_presented = false;
+                    backend.last_presentation_style = None;
+                    backend.frame_evidence = None;
                     backend.last_device_lod_epoch = None;
                     backend.last_frame_used_resident_roots = false;
                     backend.last_face_visibility_bits.clear();
@@ -935,7 +972,11 @@ pub(crate) async fn initialize_presentation(
         backend.scene_source_revision = None;
         backend.target = None;
         backend.presentation = Some(presentation);
+        backend.frame_evidence_requested = false;
         backend.last_frame_input = None;
+        backend.last_frame_presented = false;
+        backend.last_presentation_style = None;
+        backend.frame_evidence = None;
         backend.last_device_lod_epoch = None;
         backend.last_frame_used_resident_roots = false;
         backend.last_face_visibility_bits.clear();
@@ -1229,6 +1270,7 @@ pub(crate) fn replace_atlas(
                 backend.last_resident_root_error = None;
                 backend.scene = None;
                 backend.scene_source_revision = None;
+                backend.frame_evidence = None;
                 backend.last_frame_input = None;
                 backend.last_device_lod_epoch = None;
                 backend.last_face_visibility_bits.clear();
@@ -1277,6 +1319,7 @@ pub(crate) fn replace_model(
                 backend.last_resident_root_error = None;
                 backend.scene = None;
                 backend.scene_source_revision = None;
+                backend.frame_evidence = None;
                 backend.last_frame_input = None;
                 backend.last_device_lod_epoch = None;
                 backend.last_face_visibility_bits.clear();
@@ -1437,19 +1480,19 @@ pub(crate) fn live_presentation_requested() -> bool {
     BACKEND.with(|slot| slot.borrow().presentation.is_some())
 }
 
-pub(crate) fn shadow_evidence_ready() -> bool {
+pub(crate) fn frame_evidence_ready() -> bool {
     BACKEND.with(|slot| {
         let backend = slot.borrow();
-        backend.state == "ready" && backend.presentation.is_none()
+        backend.state == "ready" && backend.device.is_some()
     })
 }
 
 pub(crate) fn pbr_evidence_ready() -> bool {
-    shadow_evidence_ready() && BACKEND.with(|slot| slot.borrow().environment.is_some())
+    frame_evidence_ready() && BACKEND.with(|slot| slot.borrow().environment.is_some())
 }
 
 pub(crate) fn focus_evidence_prerequisites_ready() -> bool {
-    shadow_evidence_ready()
+    frame_evidence_ready()
         && BACKEND.with(|slot| {
             let backend = slot.borrow();
             backend.focus.is_some() && backend.environment.is_some()
@@ -1837,6 +1880,7 @@ pub(crate) fn replace_scene(
                 backend.scene_source_revision = Some(source_revision);
                 backend.scene_uploads = next_revision;
                 backend.scene_updates = backend.scene_updates.saturating_add(1);
+                backend.frame_evidence = None;
                 backend.last_frame_input = None;
                 backend.next_morph_weights.clear();
                 backend.patch_pose_uniforms_ready = false;
@@ -1890,6 +1934,7 @@ pub(crate) fn replace_scene(
                 backend.scene_source_revision = Some(source_revision);
                 backend.scene_uploads = next_revision;
                 backend.scene_rebuilds = backend.scene_rebuilds.saturating_add(1);
+                backend.frame_evidence = None;
                 backend.last_frame_input = None;
                 backend.last_face_visibility_bits.clear();
                 backend.next_face_visibility_bits.clear();
@@ -1926,6 +1971,12 @@ pub(crate) fn submit_frame(
         if backend.state != "ready" {
             return Ok(backend.incumbent_required());
         }
+        let frame_evidence_requested = std::mem::take(&mut backend.frame_evidence_requested);
+        let destination = frame_destination(
+            backend.presentation.is_some(),
+            frame_evidence_requested,
+        );
+        let presentation_frame = destination == FrameDestination::Presentation;
         // Atlas/model/scene residency arrives asynchronously during ordinary
         // application startup. Frames before the first coherent scene are
         // inert lifecycle gaps, not failed render attempts.
@@ -2087,7 +2138,10 @@ pub(crate) fn submit_frame(
             backend.next_morph_weights = effective_morph_weights;
             backend.frames_skipped_unchanged = backend.frames_skipped_unchanged.saturating_add(1);
             return Ok(
-                if backend.presentation.is_some() && backend.last_frame_revision != 0 {
+                if presentation_frame
+                    && backend.last_frame_presented
+                    && backend.last_frame_revision != 0
+                {
                     LiveFrameDisposition::PresentationRetained
                 } else {
                     LiveFrameDisposition::IncumbentRequired
@@ -2101,7 +2155,7 @@ pub(crate) fn submit_frame(
         let visibility_upload_required = device_lod_epoch.is_none()
             && backend.last_face_visibility_bits != face_visibility_bits;
 
-        if backend.presentation.is_some() {
+        if presentation_frame {
             let resize = {
                 let WebGpuBackend {
                     device,
@@ -2149,6 +2203,7 @@ pub(crate) fn submit_frame(
                 }
             };
             backend.target = Some(target);
+            backend.frame_evidence = None;
             backend.target_rebuilds = backend.target_rebuilds.saturating_add(1);
         }
         if focus_frame {
@@ -2246,7 +2301,7 @@ pub(crate) fn submit_frame(
         }
         let result =
             prepared_frame.and_then(|frame| {
-                if backend.presentation.is_some() {
+                if presentation_frame {
                     let WebGpuBackend {
                         device,
                         model,
@@ -2543,6 +2598,20 @@ pub(crate) fn submit_frame(
                 backend.next_face_visibility_bits = face_visibility_bits;
                 backend.next_morph_weights = effective_morph_weights;
                 backend.last_frame_input = Some(frame_input);
+                backend.last_frame_presented = presentation_frame;
+                if presentation_frame {
+                    backend.last_presentation_style = Some(style);
+                } else {
+                    backend.frame_evidence = Some(FrameEvidenceMetadata {
+                        frame_revision,
+                        source_render_call,
+                        viewport: view.viewport,
+                        logical_submission,
+                        indirect_draw_calls,
+                        source_instances: source_instance_count,
+                        focus_postprocess: options.focus_postprocess,
+                    });
+                }
                 backend.device_pose_identity = Some(frame.pose);
                 if resident_root_frame {
                     backend.resident_root_frames = backend.resident_root_frames.saturating_add(1);
@@ -2569,7 +2638,7 @@ pub(crate) fn submit_frame(
                     backend.last_focus_error = None;
                 }
                 backend.last_error = None;
-                Ok(if backend.presentation.is_some() {
+                Ok(if presentation_frame {
                     LiveFrameDisposition::PresentationSubmitted(logical_submission)
                 } else {
                     LiveFrameDisposition::ShadowSubmitted(logical_submission)
@@ -2582,7 +2651,8 @@ pub(crate) fn submit_frame(
                 backend.next_face_visibility_bits = face_visibility_bits;
                 backend.next_morph_weights = effective_morph_weights;
                 Ok(
-                    if backend.presentation.is_some()
+                    if presentation_frame
+                        && backend.last_frame_presented
                         && backend.last_frame_revision != 0
                         && retained_style_matches
                     {
@@ -2782,22 +2852,23 @@ pub(crate) fn stage_frame_evidence() -> Result<StagedWebGpuFrameEvidence, String
             .target
             .as_ref()
             .ok_or_else(|| "WebGPU image evidence requires an offscreen target".to_string())?;
-        if target.size() != backend.last_viewport {
+        let evidence = backend.frame_evidence.ok_or_else(|| {
+            "WebGPU image evidence requires one completed offscreen frame".to_string()
+        })?;
+        if target.size() != evidence.viewport {
             return Err("WebGPU image evidence target does not match the last frame".to_string());
         }
         let image = device
             .stage_offscreen_patch_render_target_image(target)
             .map_err(|error| error.to_string())?;
         Ok(StagedWebGpuFrameEvidence {
-            frame_revision: backend.last_frame_revision,
-            source_render_call: backend.last_source_render_call,
-            viewport: backend.last_viewport,
-            logical_submission: backend.last_logical_submission,
-            indirect_draw_calls: backend.last_indirect_draw_calls,
-            source_instances: backend.last_source_instances,
-            focus_postprocess: backend
-                .last_frame_input
-                .and_then(|frame| frame.options.focus_postprocess),
+            frame_revision: evidence.frame_revision,
+            source_render_call: evidence.source_render_call,
+            viewport: evidence.viewport,
+            logical_submission: evidence.logical_submission,
+            indirect_draw_calls: evidence.indirect_draw_calls,
+            source_instances: evidence.source_instances,
+            focus_postprocess: evidence.focus_postprocess,
             image,
         })
     })
@@ -2810,6 +2881,20 @@ pub(crate) fn force_next_frame() {
     BACKEND.with(|slot| {
         let mut backend = slot.borrow_mut();
         if backend.state == "ready" {
+            backend.last_frame_input = None;
+        }
+    });
+}
+
+/// Route exactly the next coherent backend frame through the retained
+/// offscreen target. A live surface keeps displaying its last admitted frame
+/// while WebGL renders the matching oracle into its own evidence target.
+pub(crate) fn request_frame_evidence() {
+    BACKEND.with(|slot| {
+        let mut backend = slot.borrow_mut();
+        if backend.state == "ready" {
+            backend.frame_evidence_requested = true;
+            backend.frame_evidence = None;
             backend.last_frame_input = None;
         }
     });
@@ -2858,6 +2943,16 @@ fn render_style_name(style: RenderStyle) -> &'static str {
 mod tests {
     use super::*;
     use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[test]
+    fn explicit_evidence_routes_a_live_device_offscreen() {
+        assert_eq!(
+            frame_destination(true, false),
+            FrameDestination::Presentation,
+        );
+        assert_eq!(frame_destination(true, true), FrameDestination::Offscreen,);
+        assert_eq!(frame_destination(false, true), FrameDestination::Offscreen,);
+    }
 
     #[test]
     fn render_pose_policy_distinguishes_device_pose_from_local_uniforms() {

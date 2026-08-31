@@ -3120,11 +3120,11 @@ fn capture_current_webgl_pbr_frame_evidence(
     // parity target uses transparent alpha as its coverage mask. Canonicalize
     // only exact incumbent-clear pixels; ordinary opaque PBR fragments retain
     // their authored alpha.
-    for pixel in rgba8_bottom_left.chunks_exact_mut(4) {
-        if pixel[0] == 51 && pixel[1] == 51 && (pixel[2] == 76 || pixel[2] == 77) {
-            pixel[3] = 0;
-        }
-    }
+    canonicalize_incumbent_clear_alpha(
+        &mut rgba8_bottom_left,
+        [width as u32, height as u32],
+        usize::try_from(width).unwrap_or(0).saturating_mul(4),
+    )?;
     Ok(WebGlFrameEvidenceCapture {
         render_call,
         viewport: [width as u32, height as u32],
@@ -3132,6 +3132,39 @@ fn capture_current_webgl_pbr_frame_evidence(
         focus_postprocess,
         rgba8_bottom_left,
     })
+}
+
+#[cfg(feature = "webgpu-backend")]
+fn canonicalize_incumbent_clear_alpha(
+    rgba8: &mut [u8],
+    size: [u32; 2],
+    bytes_per_row: usize,
+) -> Result<(), String> {
+    let row_bytes = usize::try_from(size[0])
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+        .ok_or_else(|| "backend evidence row size overflowed".to_string())?;
+    if bytes_per_row < row_bytes {
+        return Err("backend evidence row pitch is smaller than its viewport".to_string());
+    }
+    let required = usize::try_from(size[1])
+        .ok()
+        .and_then(|height| height.checked_sub(1))
+        .and_then(|last_row| last_row.checked_mul(bytes_per_row))
+        .and_then(|prefix| prefix.checked_add(row_bytes))
+        .ok_or_else(|| "backend evidence byte length overflowed".to_string())?;
+    if rgba8.len() < required {
+        return Err("backend evidence image is shorter than its viewport".to_string());
+    }
+    for y in 0..size[1] as usize {
+        let row_start = y * bytes_per_row;
+        for pixel in rgba8[row_start..row_start + row_bytes].chunks_exact_mut(4) {
+            if pixel[0] == 51 && pixel[1] == 51 && (pixel[2] == 76 || pixel[2] == 77) {
+                pixel[3] = 0;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "webgpu-backend")]
@@ -3156,9 +3189,9 @@ pub fn mr_request_backend_frame_evidence() -> Result<bool, JsValue> {
                 "backend image evidence requires a WebGPU-supported diagnostic or basic PBR mode",
             ));
         }
-        if !crate::webgpu_backend::shadow_evidence_ready() {
+        if !crate::webgpu_backend::frame_evidence_ready() {
             return Err(JsValue::from_str(
-                "backend image evidence requires a ready headless WebGPU device",
+                "backend image evidence requires a ready WebGPU device",
             ));
         }
         if !backend_frame_evidence_supports_composition(state.focus_postprocess) {
@@ -3186,7 +3219,7 @@ pub fn mr_request_backend_frame_evidence() -> Result<bool, JsValue> {
         if state.render_style == RenderStyle::Pbr {
             if !crate::webgpu_backend::pbr_evidence_ready() {
                 return Err(JsValue::from_str(
-                    "PBR backend evidence requires a headless WebGPU device with resident environment maps",
+                    "PBR backend evidence requires a WebGPU device with resident environment maps",
                 ));
             }
             // Evidence must preflight the exact structural epoch that the next
@@ -3224,7 +3257,7 @@ pub fn mr_request_backend_frame_evidence() -> Result<bool, JsValue> {
         state.backend_evidence_requested = true;
         state.backend_evidence_capture = None;
         state.backend_evidence_error = None;
-        crate::webgpu_backend::force_next_frame();
+        crate::webgpu_backend::request_frame_evidence();
         Ok(true)
     })
 }
@@ -3259,11 +3292,17 @@ pub async fn mr_compare_backend_frame_evidence() -> Result<JsValue, JsValue> {
             "backend evidence focus packets do not match",
         ));
     }
-    let webgpu = staged
+    let mut webgpu = staged
         .image
         .read()
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    canonicalize_incumbent_clear_alpha(
+        &mut webgpu.bytes,
+        webgpu.size,
+        webgpu.bytes_per_row,
+    )
+    .map_err(|error| JsValue::from_str(&error))?;
     let webgl_row_bytes = usize::try_from(webgl.viewport[0])
         .ok()
         .and_then(|width| width.checked_mul(4))
@@ -11059,6 +11098,21 @@ fn render_highlight_to(
 mod tests {
     use super::*;
     use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[cfg(feature = "webgpu-backend")]
+    #[wasm_bindgen_test]
+    fn evidence_clear_alpha_canonicalization_respects_padded_rows() {
+        let mut rgba8 = vec![0xff; 32];
+        rgba8[0..8].copy_from_slice(&[51, 51, 77, 255, 1, 2, 3, 255]);
+        rgba8[16..24].copy_from_slice(&[51, 51, 76, 255, 4, 5, 6, 255]);
+        canonicalize_incumbent_clear_alpha(&mut rgba8, [2, 2], 16).unwrap();
+        assert_eq!(rgba8[3], 0);
+        assert_eq!(rgba8[7], 255);
+        assert_eq!(rgba8[19], 0);
+        assert_eq!(rgba8[23], 255);
+        assert_eq!(&rgba8[8..16], &[0xff; 8]);
+        assert_eq!(&rgba8[24..32], &[0xff; 8]);
+    }
 
     #[cfg(feature = "webgpu-backend")]
     #[wasm_bindgen_test]
