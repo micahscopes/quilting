@@ -17,7 +17,9 @@ for (const required of [
   'spec!("animclipimpl", "js", Implementation)',
   'pub struct AnimationClipJobEffect',
   'pub struct AnimationClipRequest',
+  'pub struct AnimationClipCompletionDispatch',
   'pub fn request_animation_clip(',
+  'pub fn complete_animation_clip_selection(',
   'SemanticAction::Animate(AnimationAction::SelectClip(index))',
   'matches_request: selected_index == Some(index)',
 ]) {
@@ -50,10 +52,16 @@ for (const required of [
 for (const required of [
   '#[wasm_bindgen(js_name = dispatchAnimationClip)]',
   '#[wasm_bindgen(js_name = requestAnimationClip)]',
+  '#[wasm_bindgen(js_name = completeAnimationClipSelected)]',
+  '#[wasm_bindgen(js_name = completeAnimationClipSelectionFailed)]',
+  '#[wasm_bindgen(js_name = finishAnimationClipSelected)]',
+  '#[wasm_bindgen(js_name = finishAnimationClipSelectionFailed)]',
   'let request = self.store.request_animation_clip(index)',
   'ShadowAnimationClipJobEffect::selection',
   'ShadowAnimationClipJobEffect::cancellation',
   'matches_request: request.matches_request',
+  'struct ShadowAnimationClipCompletionDispatch',
+  'selection: dispatch.state.into()',
 ]) {
   assert.ok(adapter.includes(required), `WASM clip-request port is missing ${required}`);
 }
@@ -80,6 +88,27 @@ for (const retired of [
 ]) {
   assert.equal(request.includes(retired), false,
     `browser clip adapter must not retain ${retired}`);
+}
+
+const completionStart = browser.indexOf('function completeAppAnimationClipSelection(');
+const completionEnd = browser.indexOf('async function selectAnimationIndex(', completionStart);
+const completion = browser.slice(completionStart, completionEnd);
+for (const required of [
+  'rustAppShadow.finishAnimationClipSelected(',
+  'rustAppShadow.finishAnimationClipSelectionFailed(',
+  'const commit = receipt.commit;',
+  '{ animationClipSelection: receipt.selection }',
+]) {
+  assert.ok(completion.includes(required),
+    `typed browser clip-completion adapter is missing ${required}`);
+}
+for (const retired of [
+  'rustAppShadow.completeAnimationClipSelected(',
+  'rustAppShadow.completeAnimationClipSelectionFailed(',
+  'refreshAppShadowSnapshot()',
+]) {
+  assert.equal(completion.includes(retired), false,
+    `ordinary clip completion must not retain ${retired}`);
 }
 
 const moduleSource = browser.match(/<script type="module">([\s\S]*?)<\/script>/)?.[1];

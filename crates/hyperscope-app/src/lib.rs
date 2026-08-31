@@ -847,6 +847,14 @@ pub struct AnimationClipRequest {
     pub matches_request: bool,
 }
 
+/// Typed result of one renderer clip-selection completion. Clip completion is
+/// terminal for that job and must never create another platform job.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnimationClipCompletionDispatch {
+    pub commit: AppCommit,
+    pub state: AnimationClipSelectionReadModel,
+}
+
 /// Typed result of completing one renderer-side primary scene install. Scene
 /// replacement may invalidate a clip-selection job from the formerly resident
 /// scene; adapters must observe these exact cancellation identities before
@@ -2401,6 +2409,26 @@ impl AppStore {
             selection: effects.selection,
             cancellations: effects.cancellations,
             matches_request: selected_index == Some(index),
+        })
+    }
+
+    /// Admit one renderer completion and return the compact clip residency
+    /// read model needed by platform diagnostics and subsequent frame samples.
+    pub fn complete_animation_clip_selection(
+        &self,
+        completion: AnimationClipSelectionCompletion,
+    ) -> Result<AnimationClipCompletionDispatch, ReduceError> {
+        let commit = self.dispatch(AppEvent::EffectCompleted(
+            EffectCompletion::AnimationClipSelection(completion),
+        ))?;
+        if !commit.effects.is_empty() {
+            return Err(ReduceError::EffectContract(
+                "an animation clip completion emitted a follow-up platform job",
+            ));
+        }
+        Ok(AnimationClipCompletionDispatch {
+            commit,
+            state: self.animation_clip_selection_snapshot(),
         })
     }
 
@@ -4248,17 +4276,16 @@ mod tests {
             }]
         );
         let stale = store
-            .dispatch(AppEvent::EffectCompleted(
-                EffectCompletion::AnimationClipSelection(AnimationClipSelectionCompletion {
-                    job_id: 0,
-                    scene_request_id: request_id,
-                    asset_id: horse.id,
-                    clip_index: 1,
-                    outcome: AnimationClipSelectionOutcome::Selected,
-                }),
-            ))
+            .complete_animation_clip_selection(AnimationClipSelectionCompletion {
+                job_id: 0,
+                scene_request_id: request_id,
+                asset_id: horse.id,
+                clip_index: 1,
+                outcome: AnimationClipSelectionOutcome::Selected,
+            })
             .unwrap();
-        assert_eq!(stale.disposition, CommitDisposition::IgnoredStale);
+        assert_eq!(stale.commit.disposition, CommitDisposition::IgnoredStale);
+        assert_eq!(stale.state.pending.unwrap().job_id, 1);
         assert_eq!(store.summary_snapshot().pending_animation_clip_job, Some(1));
 
         store
@@ -4299,18 +4326,16 @@ mod tests {
                 clip_index: 1,
             }]
         );
-        store
-            .dispatch(AppEvent::EffectCompleted(
-                EffectCompletion::AnimationClipSelection(AnimationClipSelectionCompletion {
-                    job_id: 2,
-                    scene_request_id: request_id,
-                    asset_id: horse.id,
-                    clip_index: 1,
-                    outcome: AnimationClipSelectionOutcome::Selected,
-                }),
-            ))
+        let completed = store
+            .complete_animation_clip_selection(AnimationClipSelectionCompletion {
+                job_id: 2,
+                scene_request_id: request_id,
+                asset_id: horse.id,
+                clip_index: 1,
+                outcome: AnimationClipSelectionOutcome::Selected,
+            })
             .unwrap();
-        let selection = store.animation_clip_selection_snapshot();
+        let selection = completed.state;
         assert_eq!(selection.active.unwrap().clip.index, 1);
         assert_eq!(selection.pending, None);
         assert_eq!(

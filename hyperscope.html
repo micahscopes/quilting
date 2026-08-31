@@ -9233,8 +9233,8 @@ function completeAppAnimationClipSelection(job, error = null) {
     animationClipDiagnostics.lastError = error?.message || String(error);
   }
   try {
-    const commit = error
-      ? rustAppShadow.completeAnimationClipSelectionFailed(
+    const receipt = error
+      ? rustAppShadow.finishAnimationClipSelectionFailed(
         effect.job_id,
         effect.scene_request_id,
         effect.asset_id,
@@ -9243,20 +9243,23 @@ function completeAppAnimationClipSelection(job, error = null) {
         error?.message || String(error),
         true,
       )
-      : rustAppShadow.completeAnimationClipSelected(
+      : rustAppShadow.finishAnimationClipSelected(
         effect.job_id,
         effect.scene_request_id,
         effect.asset_id,
         effect.clip_index,
       );
+    const commit = receipt.commit;
     rustAppShadowDiagnostics.lastCommit = commit;
     animationClipDiagnostics.completions += 1;
     if (commit.disposition === 'ignored_stale') {
       rustAppShadowDiagnostics.staleCompletions += 1;
       animationClipDiagnostics.staleCompletions += 1;
     }
-    const snapshot = refreshAppShadowSnapshot();
-    observeAnimationClipResidency(error ? 'selection-failed' : 'selection-complete', snapshot);
+    observeAnimationClipResidency(
+      error ? 'selection-failed' : 'selection-complete',
+      { animationClipSelection: receipt.selection },
+    );
     return commit.disposition;
   } catch (completionError) {
     animationClipDiagnostics.errors += 1;

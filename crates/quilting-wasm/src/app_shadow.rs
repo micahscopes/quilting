@@ -18,9 +18,9 @@ use hyperscape_protocol::{
     RequestId, CURRENT_PROTOCOL_VERSION,
 };
 use hyperscope_app::{
-    session_node_identity, AnimationAction, AnimationClipDescriptor,
-    AnimationClipJobEffect, AnimationClipSelectionCompletion, AnimationClipSelectionOutcome,
-    AnimationClock,
+    session_node_identity, AnimationAction, AnimationClipCompletionDispatch,
+    AnimationClipDescriptor, AnimationClipJobEffect, AnimationClipSelectionCompletion,
+    AnimationClipSelectionOutcome, AnimationClipSelectionReadModel, AnimationClock,
     AnimationPoseRequestDisposition, AnimationPoseScheduler, AnimationPoseStamp, AppCommit,
     AppEffect, AppEvent, AppFrameSnapshot, AppStore, AssetFetchJob, AssetJobIdentity,
     AssetLoadCompletion, AssetLoadCompletionDispatch, AssetLoadOutcome, AssetLoadScope,
@@ -1992,13 +1992,31 @@ impl HyperscopeAppShadow {
         asset_id: &str,
         clip_index: u32,
     ) -> Result<JsValue, JsValue> {
-        self.complete_animation_clip_selection(
+        let dispatch = self.complete_animation_clip_selection_dispatch(
             job_id,
             scene_request_id,
             asset_id,
             clip_index,
             AnimationClipSelectionOutcome::Selected,
-        )
+        )?;
+        commit_to_js(&dispatch.commit)
+    }
+
+    #[wasm_bindgen(js_name = finishAnimationClipSelected)]
+    pub fn finish_animation_clip_selected(
+        &self,
+        job_id: &str,
+        scene_request_id: &str,
+        asset_id: &str,
+        clip_index: u32,
+    ) -> Result<JsValue, JsValue> {
+        animation_clip_completion_to_js(self.complete_animation_clip_selection_dispatch(
+            job_id,
+            scene_request_id,
+            asset_id,
+            clip_index,
+            AnimationClipSelectionOutcome::Selected,
+        )?)
     }
 
     #[wasm_bindgen(js_name = completeAnimationClipSelectionFailed)]
@@ -2013,7 +2031,7 @@ impl HyperscopeAppShadow {
         message: &str,
         retryable: bool,
     ) -> Result<JsValue, JsValue> {
-        self.complete_animation_clip_selection(
+        let dispatch = self.complete_animation_clip_selection_dispatch(
             job_id,
             scene_request_id,
             asset_id,
@@ -2023,7 +2041,33 @@ impl HyperscopeAppShadow {
                 message: message.to_owned(),
                 retryable,
             },
-        )
+        )?;
+        commit_to_js(&dispatch.commit)
+    }
+
+    #[wasm_bindgen(js_name = finishAnimationClipSelectionFailed)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn finish_animation_clip_selection_failed(
+        &self,
+        job_id: &str,
+        scene_request_id: &str,
+        asset_id: &str,
+        clip_index: u32,
+        code: &str,
+        message: &str,
+        retryable: bool,
+    ) -> Result<JsValue, JsValue> {
+        animation_clip_completion_to_js(self.complete_animation_clip_selection_dispatch(
+            job_id,
+            scene_request_id,
+            asset_id,
+            clip_index,
+            AnimationClipSelectionOutcome::Failed {
+                code: code.to_owned(),
+                message: message.to_owned(),
+                retryable,
+            },
+        )?)
     }
 
     /// Replace the complete semantic render policy as one application event.
@@ -2752,32 +2796,8 @@ impl HyperscopeAppShadow {
                     .collect(),
             }
         });
-        let animation_clip_selection = self.store.animation_clip_selection_snapshot();
-        let animation_clip_selection = ShadowAnimationClipSelection {
-            active: animation_clip_selection.active.map(|active| ShadowActiveAnimationClip {
-                scene_request_id: active.scene_request_id.to_string(),
-                asset_id: active.asset_id.to_string(),
-                clip: ShadowAnimationClip {
-                    index: active.clip.index,
-                    name: active.clip.name,
-                    time_min_seconds: active.clip.time_min_seconds,
-                    time_max_seconds: active.clip.time_max_seconds,
-                },
-            }),
-            pending: animation_clip_selection.pending.map(|pending| {
-                ShadowPendingAnimationClip {
-                    job_id: pending.job_id.to_string(),
-                    scene_request_id: pending.scene_request_id.to_string(),
-                    asset_id: pending.asset_id.to_string(),
-                    clip: ShadowAnimationClip {
-                        index: pending.clip.index,
-                        name: pending.clip.name,
-                        time_min_seconds: pending.clip.time_min_seconds,
-                        time_max_seconds: pending.clip.time_max_seconds,
-                    },
-                }
-            }),
-        };
+        let animation_clip_selection: ShadowAnimationClipSelection =
+            self.store.animation_clip_selection_snapshot().into();
         let authored = self.store.authored_scene_snapshot();
         let assets = self
             .store
@@ -3055,30 +3075,26 @@ impl HyperscopeAppShadow {
             .map_err(js_error)
     }
 
-    fn complete_animation_clip_selection(
+    fn complete_animation_clip_selection_dispatch(
         &self,
         job_id: &str,
         scene_request_id: &str,
         asset_id: &str,
         clip_index: u32,
         outcome: AnimationClipSelectionOutcome,
-    ) -> Result<JsValue, JsValue> {
+    ) -> Result<AnimationClipCompletionDispatch, JsValue> {
         let job_id = job_id
             .parse::<u64>()
             .map_err(|error| js_error(format!("animation clip job ID is invalid: {error}")))?;
-        let commit = self
-            .store
-            .dispatch(AppEvent::EffectCompleted(
-                EffectCompletion::AnimationClipSelection(AnimationClipSelectionCompletion {
-                    job_id,
-                    scene_request_id: request_id_from_str(scene_request_id)?,
-                    asset_id: asset_id_from_str(asset_id)?,
-                    clip_index,
-                    outcome,
-                }),
-            ))
-            .map_err(js_error)?;
-        commit_to_js(&commit)
+        self.store
+            .complete_animation_clip_selection(AnimationClipSelectionCompletion {
+                job_id,
+                scene_request_id: request_id_from_str(scene_request_id)?,
+                asset_id: asset_id_from_str(asset_id)?,
+                clip_index,
+                outcome,
+            })
+            .map_err(js_error)
     }
 
     fn complete_patch_lab_dispatch(
@@ -3665,6 +3681,34 @@ struct ShadowAnimationClipSelection {
     pending: Option<ShadowPendingAnimationClip>,
 }
 
+impl From<AnimationClipSelectionReadModel> for ShadowAnimationClipSelection {
+    fn from(selection: AnimationClipSelectionReadModel) -> Self {
+        Self {
+            active: selection.active.map(|active| ShadowActiveAnimationClip {
+                scene_request_id: active.scene_request_id.to_string(),
+                asset_id: active.asset_id.to_string(),
+                clip: ShadowAnimationClip {
+                    index: active.clip.index,
+                    name: active.clip.name,
+                    time_min_seconds: active.clip.time_min_seconds,
+                    time_max_seconds: active.clip.time_max_seconds,
+                },
+            }),
+            pending: selection.pending.map(|pending| ShadowPendingAnimationClip {
+                job_id: pending.job_id.to_string(),
+                scene_request_id: pending.scene_request_id.to_string(),
+                asset_id: pending.asset_id.to_string(),
+                clip: ShadowAnimationClip {
+                    index: pending.clip.index,
+                    name: pending.clip.name,
+                    time_min_seconds: pending.clip.time_min_seconds,
+                    time_max_seconds: pending.clip.time_max_seconds,
+                },
+            }),
+        }
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ShadowAnimationClipRequest {
@@ -3674,6 +3718,22 @@ struct ShadowAnimationClipRequest {
     selection: Option<ShadowAnimationClipJobEffect>,
     cancellations: Vec<ShadowAnimationClipJobEffect>,
     matches_request: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowAnimationClipCompletionDispatch {
+    commit: ShadowCommit,
+    selection: ShadowAnimationClipSelection,
+}
+
+fn animation_clip_completion_to_js(
+    dispatch: AnimationClipCompletionDispatch,
+) -> Result<JsValue, JsValue> {
+    to_js(&ShadowAnimationClipCompletionDispatch {
+        commit: shadow_commit(&dispatch.commit),
+        selection: dispatch.state.into(),
+    })
 }
 
 #[derive(Serialize)]
