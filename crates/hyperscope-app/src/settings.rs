@@ -249,7 +249,7 @@ pub const HYPERSCOPE_CONTROL_SPECS: &[ControlSpec] = &[
     numeric_spec!("walkspeed", "0", Number, -400.0, 400.0, false, 1.0),
     numeric_spec!("walkscale", "0", Number, -800.0, 800.0, false, 1.0),
     numeric_spec!("walkheight", "0", Number, -400.0, 400.0, false, 1.0),
-    spec!("navstateimpl", "js", Implementation),
+    spec!("navstateimpl", "rust", Implementation),
     spec!("walkimpl", "js", Implementation),
     spec!("navimpl", "js", Implementation),
     spec!("selectionimpl", "rust", Implementation),
@@ -1344,6 +1344,21 @@ mod tests {
         for implementation in ["shadow", "rust"] {
             let route = HyperscopeRoute::from_pairs([("navimpl", implementation)]);
             assert_eq!(route.canonical_pairs(), vec![("navimpl", implementation)]);
+            assert!(route.diagnostics().is_empty());
+        }
+    }
+
+    #[test]
+    fn navigation_settings_cutover_uses_rust_by_default_with_measured_rollbacks() {
+        let default_route = HyperscopeRoute::from_pairs([("navstateimpl", "rust")]);
+        assert!(default_route.canonical_pairs().is_empty());
+
+        for implementation in ["js", "shadow"] {
+            let route = HyperscopeRoute::from_pairs([("navstateimpl", implementation)]);
+            assert_eq!(
+                route.canonical_pairs(),
+                vec![("navstateimpl", implementation)],
+            );
             assert!(route.diagnostics().is_empty());
         }
     }

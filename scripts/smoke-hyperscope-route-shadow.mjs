@@ -91,7 +91,7 @@ assert.equal(specs.find(spec => spec.key === 'rendershadow').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'adaptiveshadow').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'rootgroupshadow').kind, 'toggle');
 assert.equal(specs.find(spec => spec.key === 'navstateimpl').kind, 'implementation');
-assert.equal(specs.find(spec => spec.key === 'navstateimpl').defaultValue, 'js');
+assert.equal(specs.find(spec => spec.key === 'navstateimpl').defaultValue, 'rust');
 assert.equal(specs.find(spec => spec.key === 'walkimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'navimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'navimpl').defaultValue, 'js');
@@ -353,7 +353,7 @@ for (const implementation of ['js', 'shadow', 'rust']) {
   );
   assert.deepEqual(
     canonicalizeHyperscopeRoute([['navstateimpl', implementation]]).pairs,
-    implementation === 'js' ? [] : [['navstateimpl', implementation]],
+    implementation === 'rust' ? [] : [['navstateimpl', implementation]],
   );
 }
 assert.equal(
@@ -362,7 +362,7 @@ assert.equal(
 );
 assert.equal(
   implementationFromRoute(new URLSearchParams(), 'navstateimpl'),
-  'js',
+  'rust',
 );
 assert.equal(
   implementationFromRoute(new URLSearchParams(), 'routeimpl'),
@@ -371,6 +371,10 @@ assert.equal(
 assert.equal(
   implementationFromRoute(new URLSearchParams('navimpl=invalid'), 'navimpl'),
   'js',
+);
+assert.equal(
+  implementationFromRoute(new URLSearchParams('navstateimpl=invalid'), 'navstateimpl'),
+  'rust',
 );
 assert.throws(
   () => implementationFromRoute(new URLSearchParams(), 'missingimpl'),
@@ -919,7 +923,7 @@ assert.throws(
 );
 assert.throws(
   () => installRouteDefaults(specs.map(spec => (
-    spec.key === 'navstateimpl' ? { ...spec, defaultValue: 'rust' } : spec
+    spec.key === 'navstateimpl' ? { ...spec, defaultValue: 'js' } : spec
   ))),
   /drifted from bootstrap/,
 );

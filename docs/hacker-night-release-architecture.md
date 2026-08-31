@@ -149,11 +149,12 @@ The first application boundary is now explicit:
   second view model. Selection and presentation publish their settled endpoint
   explicitly, while active frame integration remains allocation-light.
 - The focus-transition and surface-walk preference panel is likewise a Leptos
-  CSR island in the explicit `navstateimpl=rust` lane. It consumes the separate
+  CSR island in the canonical `navstateimpl=rust` lane. It consumes the separate
   committed navigation-settings signal and dispatches one complete replacement
   through `AppStore` per edit. JavaScript applies only the committed packet to
-  legacy runtime consumers and URL state; `js`, `shadow`, and mount failure
-  retain the incumbent HTML controls as a measured rollback.
+  legacy runtime consumers and URL state. Live six-control Rust/shadow/JS
+  evidence on 2026-08-31 promoted Rust to the route default; `js`, `shadow`,
+  and mount failure retain the incumbent HTML controls as measured rollbacks.
 - The vertical field-of-view control is a separate Leptos CSR island in the
   explicit `navimpl=rust` lane because projection lens state belongs to the
   application camera, not to the preference packet. It derives its exact

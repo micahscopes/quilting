@@ -12,7 +12,7 @@ const browser = read('hyperscope.html');
 const settings = read('crates/hyperscope-app/src/settings.rs');
 
 for (const required of [
-  'spec!("navstateimpl", "js", Implementation)',
+  'spec!("navstateimpl", "rust", Implementation)',
   'pub enum NavigationSettingsSynchronizationDisposition',
   'pub fn synchronize_navigation_settings(',
   'if snapshot.settings == settings',
