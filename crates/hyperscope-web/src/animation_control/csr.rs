@@ -213,6 +213,8 @@ fn toggle_playback(store: &AppStore, callback: &Function, error_callback: &Funct
     arguments.push(&JsValue::from_bool(committed.playing));
     arguments.push(&JsValue::from(committed.sequence));
     arguments.push(&JsValue::from(committed.revision));
+    arguments.push(&JsValue::from_f64(committed.time_seconds));
+    arguments.push(&JsValue::from_f64(committed.speed));
     let _ = callback.apply(&JsValue::UNDEFINED, &arguments);
 }
 

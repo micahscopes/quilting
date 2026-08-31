@@ -4876,6 +4876,19 @@ function observeRustAppShadowSequence(sequence, context) {
   rustAppShadowSequence = Math.max(rustAppShadowSequence, sequenceNumber);
 }
 
+function cacheAppAnimationPlayback(playing, timeSeconds, speed, commit) {
+  const current = rustAppShadowDiagnostics.snapshot;
+  if (current) {
+    rustAppShadowDiagnostics.snapshot = {
+      ...current,
+      revision: commit?.revision ?? current.revision,
+      animationPlaying: Boolean(playing),
+      animationTimeSeconds: Number(timeSeconds),
+      animationSpeed: Number(speed),
+    };
+  }
+}
+
 function setAnimationPlaybackIntent(playing) {
   const requested = Boolean(playing);
   if (!wasmOk.peek()) {
@@ -4892,7 +4905,12 @@ function setAnimationPlaybackIntent(playing) {
       animationClockDiagnostics.dispatches += 1;
     }
     animating_sig.set(Boolean(receipt.playing));
-    refreshAppShadowSnapshot();
+    cacheAppAnimationPlayback(
+      receipt.playing,
+      receipt.timeSeconds,
+      receipt.speed,
+      receipt.commit,
+    );
     return Boolean(receipt.playing);
   } catch (error) {
     rustAppShadowDiagnostics.animationPlaybackErrors += 1;
@@ -4916,7 +4934,12 @@ function toggleAnimationPlaybackIntent() {
       animationClockDiagnostics.dispatches += 1;
     }
     animating_sig.set(Boolean(receipt.playing));
-    refreshAppShadowSnapshot();
+    cacheAppAnimationPlayback(
+      receipt.playing,
+      receipt.timeSeconds,
+      receipt.speed,
+      receipt.commit,
+    );
     return Boolean(receipt.playing);
   } catch (error) {
     rustAppShadowDiagnostics.animationPlaybackErrors += 1;
@@ -5062,7 +5085,7 @@ function ensureRustAnimationControlView() {
   try {
     rustAppShadow.mountAnimationControl(
       host,
-      (playing, sequence, revision) => {
+      (playing, sequence, revision, timeSeconds, speed) => {
         try {
           observeRustAppShadowSequence(sequence, 'Rust animation control');
           rustAppShadowDiagnostics.lastCommit = {
@@ -5076,7 +5099,9 @@ function ensureRustAnimationControlView() {
             animationClockDiagnostics.dispatches += 1;
           }
           animating_sig.set(Boolean(playing));
-          refreshAppShadowSnapshot();
+          cacheAppAnimationPlayback(playing, timeSeconds, speed, {
+            revision: String(revision),
+          });
         } catch (error) {
           rustAppShadowDiagnostics.animationPlaybackErrors += 1;
           recordAppShadowMismatch(

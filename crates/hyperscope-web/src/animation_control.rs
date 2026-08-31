@@ -26,11 +26,13 @@ pub struct AnimationControlViewModel {
     pub state_label: &'static str,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AnimationControlCommit {
     pub sequence: u64,
     pub revision: u64,
     pub playing: bool,
+    pub time_seconds: f64,
+    pub speed: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -71,10 +73,13 @@ pub struct AnimationClipControlViewModel {
 pub fn toggle_animation_playback(store: &AppStore) -> Result<AnimationControlCommit, ReduceError> {
     let (sequence, commit) =
         store.dispatch_semantic(SemanticAction::Animate(AnimationAction::TogglePlaying))?;
+    let clock = store.animation_snapshot().clock;
     Ok(AnimationControlCommit {
         sequence,
         revision: commit.revision,
-        playing: store.frame_snapshot().animation.playing,
+        playing: clock.playing,
+        time_seconds: clock.time_seconds,
+        speed: clock.speed,
     })
 }
 
@@ -332,6 +337,8 @@ mod tests {
                 sequence: 0,
                 revision: 1,
                 playing: false,
+                time_seconds: 0.0,
+                speed: 1.0,
             },
         );
         assert_eq!(
@@ -340,6 +347,8 @@ mod tests {
                 sequence: 1,
                 revision: 2,
                 playing: true,
+                time_seconds: 0.0,
+                speed: 1.0,
             },
         );
         assert!(store.summary_snapshot().animation_playing);

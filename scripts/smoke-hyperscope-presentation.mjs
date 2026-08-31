@@ -358,6 +358,7 @@ for (const directPlaybackStep of [
 for (const forbiddenPlaybackStep of [
   'app.setAnimationPlaying(++rustAppShadowSequence',
   'app.toggleAnimationPlaying(++rustAppShadowSequence',
+  'refreshAppShadowSnapshot()',
 ]) {
   assert.equal(
     animationPlaybackAdapter.includes(forbiddenPlaybackStep),
@@ -374,16 +375,20 @@ const animationControlMountBoundary = browserSource.slice(
 );
 assert.ok(
   !animationControlMountBoundary.includes('toggleAnimationPlaybackIntent()')
+    && !animationControlMountBoundary.includes('refreshAppShadowSnapshot()')
     && animationControlMountBoundary.includes("observeRustAppShadowSequence(sequence, 'Rust animation control');")
     && animationControlMountBoundary.includes('animating_sig.set(Boolean(playing));')
+    && animationControlMountBoundary.includes('cacheAppAnimationPlayback(playing, timeSeconds, speed')
     && animationControlMountBoundary.includes("'animation_control_rejection'"),
   'the Leptos animation callback must adapt committed Rust state without dispatching browser intent',
 );
 for (const directAnimationStep of [
   '.dispatch_semantic(SemanticAction::Animate(AnimationAction::TogglePlaying))',
-  'store.frame_snapshot().animation.playing',
+  'store.animation_snapshot().clock',
   'arguments.push(&JsValue::from(committed.sequence));',
   'arguments.push(&JsValue::from(committed.revision));',
+  'arguments.push(&JsValue::from_f64(committed.time_seconds));',
+  'arguments.push(&JsValue::from_f64(committed.speed));',
 ]) {
   assert.ok(
     animationControlSource.includes(directAnimationStep),
@@ -718,11 +723,12 @@ assert.ok(
   'all cue paths must share one committed renderer/navigation adapter',
 );
 for (const residencyStep of [
-  'rustAppShadow.setPresentationAnimationResidency(',
+  'rustAppShadow.bindInstalledPresentationAnimationResidency(presentationAssetId)',
   'await bindPrimaryPresentationAnimationResidency(primaryAsset.id);',
   'const job = observePresentationClipJob(clipJob, context);',
   'committedClipJob: job,',
   'writeRustAnimationSample(rustAppShadow, null);',
+  'rustAppShadow.presentationAnimationState()',
 ]) {
   assert.ok(
     browserSource.includes(residencyStep),
