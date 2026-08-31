@@ -14,7 +14,7 @@ const browser = read('hyperscope.html');
 const settings = read('crates/hyperscope-app/src/settings.rs');
 
 for (const required of [
-  'spec!("animclipimpl", "js", Implementation)',
+  'spec!("animclipimpl", "rust", Implementation)',
   'pub struct AnimationClipJobEffect',
   'pub struct AnimationClipRequest',
   'pub struct AnimationClipCompletionDispatch',
@@ -48,6 +48,7 @@ for (const required of [
   '.map(|pending| f64::from(pending.clip.index))',
   'effect.scene_request_id.to_string()',
   'effect.asset_id.to_string()',
+  'key=|option| (option.index, option.label.clone())',
 ]) {
   assert.ok(csr.includes(required), `CSR clip projection is missing ${required}`);
 }
@@ -80,6 +81,7 @@ for (const required of [
   'const effect = receipt.selection;',
   'const cancellations = receipt.cancellations;',
   'const residencySnapshot = { animationClipSelection: receipt.state };',
+  'String(cancellation.job_id) === String(animationClipDiagnostics.lastJobId)',
   'if (!receipt.matchesRequest)',
 ]) {
   assert.ok(request.includes(required), `thin browser clip adapter is missing ${required}`);

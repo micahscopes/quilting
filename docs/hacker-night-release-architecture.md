@@ -449,8 +449,10 @@ The first application boundary is now explicit:
   matching completion changes the active clip. Duplicate intent is inert,
   returning to the incumbent cancels pending work, replacements cancel old
   clip jobs, and stale or failed completions preserve the active clip. The
-  browser retains `animclipimpl=js|shadow|rust`; JavaScript remains the default
-  until live clip-switch parity is measured. A 0.20 replay retains its
+  browser retains `animclipimpl=js|shadow|rust`; live multi-clip replacement,
+  switch-back, cancellation/repair, stale-completion, and URL evidence promoted
+  Rust to the canonical default on 2026-08-31. JavaScript and shadow remain
+  explicit rollback/measurement routes. A 0.20 replay retains its
   historical installed catalog without gaining application-owned active-clip
   state or asynchronous clip jobs.
   The browser records a separate scalar renderer-residency witness only after
@@ -463,12 +465,12 @@ The first application boundary is now explicit:
   switch is in flight consumes Rust's cancellation effect and performs an
   ordered incumbent reinstall, so the already-dispatched worker request cannot
   make a canceled clip resident later.
-  Under explicit `animclipimpl=rust`, a Leptos selector projects the installed
+  Under the default Rust lane, a Leptos selector projects the installed
   catalog and active/pending clip through the application summary revision
   fence. It dispatches directly through `AppStore`; the platform callback
   receives the exact committed selection and cancellation effects rather than
   returning user intent to JavaScript. The incumbent HTML selector remains the
-  default and the shadow oracle remains available until live parity is green.
+  explicit JavaScript/shadow rollback, and the shadow oracle remains available.
   `AppFrameSnapshot` also carries an allocation-free active-clip sample with
   exact scene/request/asset identity, clip index, authored range, and wrapped
   time. The four-`f64` WASM packet omits repeated IDs but derives entirely from

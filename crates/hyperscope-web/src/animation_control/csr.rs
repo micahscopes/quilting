@@ -189,7 +189,11 @@ fn AnimationClipControl(
             >
                 <For
                     each=move || control.read().options.clone()
-                    key=|option| option.index
+                    // Clip indices are renderer-local and are commonly reused
+                    // when the primary scene changes. Include the projected
+                    // label so Leptos cannot retain an option from the prior
+                    // installed catalog under the same numeric key.
+                    key=|option| (option.index, option.label.clone())
                     children=move |option| view! {
                         <option value=option.index.to_string()>{option.label}</option>
                     }

@@ -98,7 +98,7 @@ assert.equal(specs.find(spec => spec.key === 'navimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'animclockimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'animclockimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'animclipimpl').kind, 'implementation');
-assert.equal(specs.find(spec => spec.key === 'animclipimpl').defaultValue, 'js');
+assert.equal(specs.find(spec => spec.key === 'animclipimpl').defaultValue, 'rust');
 assert.equal(specs.find(spec => spec.key === 'animtime').kind, 'number');
 assert.equal(specs.find(spec => spec.key === 'animtime').defaultValue, '0');
 assert.equal(specs.find(spec => spec.key === 'animspeed').kind, 'number');
@@ -1274,6 +1274,18 @@ for (const implementation of ['js', 'shadow']) {
     canonicalizeHyperscopeRoute([['renderstateimpl', implementation]]).pairs,
     [['renderstateimpl', implementation]],
     `canonical routes must retain explicit ${implementation} render settings`,
+  );
+}
+assert.deepEqual(
+  canonicalizeHyperscopeRoute([['animclipimpl', 'rust']]).pairs,
+  [],
+  'canonical routes must omit the Rust animation-clip default',
+);
+for (const implementation of ['js', 'shadow']) {
+  assert.deepEqual(
+    canonicalizeHyperscopeRoute([['animclipimpl', implementation]]).pairs,
+    [['animclipimpl', implementation]],
+    `canonical routes must retain explicit ${implementation} animation-clip authority`,
   );
 }
 assert.deepEqual(

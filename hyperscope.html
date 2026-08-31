@@ -520,7 +520,7 @@ const BOOTSTRAP_POLICY_DEFAULTS = Object.freeze({
   sceneimpl: 'rust',
   assetimpl: 'rust',
   animclockimpl: 'js',
-  animclipimpl: 'js',
+  animclipimpl: 'rust',
   renderstateimpl: 'rust',
   patchlabimpl: 'js',
   appshadow: '0',
@@ -9657,6 +9657,10 @@ function beginAppAnimationClipSelection(index) {
   const cancellations = receipt.cancellations;
   const residencySnapshot = { animationClipSelection: receipt.state };
   animationClipDiagnostics.cancellationEffects += cancellations.length;
+  if (!effect && cancellations.some(cancellation =>
+    String(cancellation.job_id) === String(animationClipDiagnostics.lastJobId))) {
+    animationClipDiagnostics.lastJobId = null;
+  }
   if (!receipt.matchesRequest) {
     recordAppShadowMismatch(
       'animation_clip_request',
