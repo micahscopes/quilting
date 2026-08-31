@@ -404,6 +404,24 @@ pub struct RenderImageMismatchExample {
     pub actual: [u8; 4],
 }
 
+/// Fixed maximum-channel thresholds used to distinguish pervasive low-bit
+/// shader rounding from material color, alpha, and silhouette divergence.
+pub const RENDER_IMAGE_DELTA_THRESHOLDS: [u8; 7] = [0, 1, 2, 4, 8, 16, 32];
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderImageDeltaProfile {
+    /// Each count is the number of pixels whose maximum channel delta is
+    /// strictly greater than the corresponding threshold.
+    pub thresholds: [u8; RENDER_IMAGE_DELTA_THRESHOLDS.len()],
+    pub rgba_pixels_over: [u64; RENDER_IMAGE_DELTA_THRESHOLDS.len()],
+    pub rgb_pixels_over: [u64; RENDER_IMAGE_DELTA_THRESHOLDS.len()],
+    pub alpha_pixels_over: [u64; RENDER_IMAGE_DELTA_THRESHOLDS.len()],
+    /// RGB error only where both images classify the pixel as covered. This
+    /// separates material/shading drift from clear and silhouette behavior.
+    pub jointly_covered_rgb_pixels_over: [u64; RENDER_IMAGE_DELTA_THRESHOLDS.len()],
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenderImageComparison {
@@ -417,6 +435,7 @@ pub struct RenderImageComparison {
     pub absolute_channel_error: [u64; 4],
     pub maximum_channel_delta: [u8; 4],
     pub mean_absolute_error_millionths: u32,
+    pub delta_profile: RenderImageDeltaProfile,
     pub examples: Vec<RenderImageMismatchExample>,
 }
 
@@ -504,14 +523,19 @@ pub fn compare_render_images(
     let mut coverage_mismatches = 0u64;
     let mut absolute_channel_error = [0u64; 4];
     let mut maximum_channel_delta = [0u8; 4];
+    let mut rgba_pixels_over = [0u64; RENDER_IMAGE_DELTA_THRESHOLDS.len()];
+    let mut rgb_pixels_over = [0u64; RENDER_IMAGE_DELTA_THRESHOLDS.len()];
+    let mut alpha_pixels_over = [0u64; RENDER_IMAGE_DELTA_THRESHOLDS.len()];
+    let mut jointly_covered_rgb_pixels_over =
+        [0u64; RENDER_IMAGE_DELTA_THRESHOLDS.len()];
     let mut examples = Vec::with_capacity(RENDER_IMAGE_MISMATCH_EXAMPLE_LIMIT);
     for y in 0..height as usize {
         for x in 0..width as usize {
             let expected_pixel = expected.canonical_pixel(x, y);
             let actual_pixel = actual.canonical_pixel(x, y);
-            if (expected_pixel[3] > coverage_alpha_threshold)
-                != (actual_pixel[3] > coverage_alpha_threshold)
-            {
+            let expected_covered = expected_pixel[3] > coverage_alpha_threshold;
+            let actual_covered = actual_pixel[3] > coverage_alpha_threshold;
+            if expected_covered != actual_covered {
                 coverage_mismatches = coverage_mismatches.saturating_add(1);
             }
             if expected_pixel != actual_pixel {
@@ -525,11 +549,27 @@ pub fn compare_render_images(
                     });
                 }
             }
-            for channel in 0..4 {
-                let delta = expected_pixel[channel].abs_diff(actual_pixel[channel]);
+            let deltas: [u8; 4] = std::array::from_fn(|channel| {
+                expected_pixel[channel].abs_diff(actual_pixel[channel])
+            });
+            for (channel, delta) in deltas.into_iter().enumerate() {
                 absolute_channel_error[channel] =
                     absolute_channel_error[channel].saturating_add(u64::from(delta));
                 maximum_channel_delta[channel] = maximum_channel_delta[channel].max(delta);
+            }
+            let maximum_rgb_delta = deltas[..3].iter().copied().max().unwrap_or(0);
+            let maximum_rgba_delta = maximum_rgb_delta.max(deltas[3]);
+            for (index, threshold) in RENDER_IMAGE_DELTA_THRESHOLDS.into_iter().enumerate() {
+                rgba_pixels_over[index] = rgba_pixels_over[index]
+                    .saturating_add(u64::from(maximum_rgba_delta > threshold));
+                rgb_pixels_over[index] = rgb_pixels_over[index]
+                    .saturating_add(u64::from(maximum_rgb_delta > threshold));
+                alpha_pixels_over[index] = alpha_pixels_over[index]
+                    .saturating_add(u64::from(deltas[3] > threshold));
+                jointly_covered_rgb_pixels_over[index] = jointly_covered_rgb_pixels_over[index]
+                    .saturating_add(u64::from(
+                        expected_covered && actual_covered && maximum_rgb_delta > threshold,
+                    ));
             }
         }
     }
@@ -548,6 +588,13 @@ pub fn compare_render_images(
         absolute_channel_error,
         maximum_channel_delta,
         mean_absolute_error_millionths: ratio_millionths(absolute_error, error_denominator),
+        delta_profile: RenderImageDeltaProfile {
+            thresholds: RENDER_IMAGE_DELTA_THRESHOLDS,
+            rgba_pixels_over,
+            rgb_pixels_over,
+            alpha_pixels_over,
+            jointly_covered_rgb_pixels_over,
+        },
         examples,
     })
 }
@@ -760,6 +807,11 @@ mod tests {
         assert_eq!(comparison.coverage_mismatches, 5);
         assert_eq!(comparison.coverage_mismatch_millionths, 500_000);
         assert_eq!(comparison.maximum_channel_delta, [10, 0, 0, 255]);
+        assert_eq!(comparison.delta_profile.thresholds, [0, 1, 2, 4, 8, 16, 32]);
+        assert_eq!(comparison.delta_profile.rgba_pixels_over, [10, 10, 9, 8, 6, 5, 5]);
+        assert_eq!(comparison.delta_profile.rgb_pixels_over, [10, 9, 8, 6, 2, 0, 0]);
+        assert_eq!(comparison.delta_profile.alpha_pixels_over, [5; 7]);
+        assert_eq!(comparison.delta_profile.jointly_covered_rgb_pixels_over, [0; 7]);
         assert_eq!(
             comparison.examples.len(),
             RENDER_IMAGE_MISMATCH_EXAMPLE_LIMIT
