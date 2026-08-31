@@ -16,6 +16,8 @@ for (const required of [
   'EffectCompletion::PrimarySceneInstall(completion)',
   'let jobs = AnimationClipEffects::from_commit(&commit);',
   'clip_cancellations: jobs.cancellations',
+  'installed_scene: self.installed_primary_scene_snapshot()',
+  'clip_state: self.animation_clip_selection_snapshot()',
   'fn typed_scene_install_completion_exposes_obsolete_clip_cancellation()',
 ]) {
   assert.ok(app.includes(required), `typed primary-install port is missing ${required}`);
@@ -30,6 +32,8 @@ for (const required of [
   'struct ShadowPrimarySceneInstallCompletionDispatch',
   'clip_cancellations: dispatch',
   '.map(ShadowAnimationClipJobEffect::cancellation)',
+  'installed_scene: dispatch.installed_scene.map(Into::into)',
+  'clip_state: dispatch.clip_state.into()',
 ]) {
   assert.ok(adapter.includes(required), `WASM primary-install port is missing ${required}`);
 }
@@ -41,12 +45,16 @@ for (const required of [
   'rustAppShadow.finishPrimarySceneInstalled(',
   'const commit = receipt.commit;',
   'receipt.clipCancellations',
+  'installedPrimaryScene: receipt.installedScene',
+  'animationClipSelection: receipt.clipState',
   'observePrimarySceneInstallClipCancellations(',
 ]) {
   assert.ok(success.includes(required), `primary-install success adapter is missing ${required}`);
 }
 assert.equal(success.includes('rustAppShadow.completePrimarySceneInstalled('), false,
   'ordinary primary-install success must not use the generic completion seam');
+assert.equal(success.includes('refreshAppShadowSnapshot()'), false,
+  'primary-install success must consume its compact typed state');
 
 const failureStart = browser.indexOf('function failAppPrimarySceneInstall(');
 const failureEnd = browser.indexOf('function failAppAssetShadow(', failureStart);
@@ -55,11 +63,15 @@ for (const required of [
   'rustAppShadow.finishPrimarySceneInstallFailed(',
   'const commit = receipt.commit;',
   'receipt.clipCancellations',
+  'installedPrimaryScene: receipt.installedScene',
+  'animationClipSelection: receipt.clipState',
 ]) {
   assert.ok(failure.includes(required), `primary-install failure adapter is missing ${required}`);
 }
 assert.equal(failure.includes('rustAppShadow.completePrimarySceneInstallFailed('), false,
   'ordinary primary-install failure must not use the generic completion seam');
+assert.equal(failure.includes('refreshAppShadowSnapshot()'), false,
+  'primary-install failure must consume its compact typed state');
 
 const observerStart = browser.indexOf('function observePrimarySceneInstallClipCancellations(');
 const observerEnd = browser.indexOf('function completeAppPrimarySceneInstall(', observerStart);

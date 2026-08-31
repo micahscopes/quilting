@@ -26,7 +26,8 @@ use hyperscope_app::{
     AssetLoadCompletion, AssetLoadCompletionDispatch, AssetLoadOutcome, AssetLoadScope,
     AssetMetadata, AssetStatus, AuthoredRevision, CommitDisposition,
     EffectCompletion, FocusPostprocessMode, FocusPostprocessSettings, FrameTick,
-    LocalPeerDisposition, LocalPeerIngress, LocalPeerLane, LocalPeerReceipt, NavigationSettings,
+    InstalledPrimarySceneReadModel, LocalPeerDisposition, LocalPeerIngress, LocalPeerLane,
+    LocalPeerReceipt, NavigationSettings,
     NavigationSettingsSynchronizationDisposition, NavigationSynchronization, PatchLabCompletion,
     PatchLabCompletionDispatch, PatchLabControls, PatchLabEffect, PatchLabEffects,
     PatchLabFailure, PatchLabField, PatchLabGeometryCompletion, PatchLabGeometryOutcome,
@@ -2771,32 +2772,10 @@ impl HyperscopeAppShadow {
                 metadata: asset.metadata,
             }
         });
-        let installed_primary_scene = self.store.installed_primary_scene_snapshot().map(|scene| {
-            ShadowInstalledPrimaryScene {
-                asset: ShadowReadyPrimaryAsset {
-                    request_id: scene.asset.request_id.to_string(),
-                    asset_id: scene.asset.descriptor.id.to_string(),
-                    uri: scene.asset.descriptor.uri,
-                    media_type: scene.asset.descriptor.media_type,
-                    byte_length: scene.asset.byte_length,
-                    content_digest: scene.asset.content_digest,
-                    metadata: scene.asset.metadata,
-                },
-                num_vertices: scene.install.num_vertices,
-                num_faces: scene.install.num_faces,
-                animation_clips: scene
-                    .install
-                    .animation_clips
-                    .into_iter()
-                    .map(|clip| ShadowAnimationClip {
-                        index: clip.index,
-                        name: clip.name,
-                        time_min_seconds: clip.time_min_seconds,
-                        time_max_seconds: clip.time_max_seconds,
-                    })
-                    .collect(),
-            }
-        });
+        let installed_primary_scene = self
+            .store
+            .installed_primary_scene_snapshot()
+            .map(ShadowInstalledPrimaryScene::from);
         let animation_clip_selection: ShadowAnimationClipSelection =
             self.store.animation_clip_selection_snapshot().into();
         let authored = self.store.authored_scene_snapshot();
@@ -3666,6 +3645,30 @@ struct ShadowInstalledPrimaryScene {
     animation_clips: Vec<ShadowAnimationClip>,
 }
 
+impl From<InstalledPrimarySceneReadModel> for ShadowInstalledPrimaryScene {
+    fn from(scene: InstalledPrimarySceneReadModel) -> Self {
+        Self {
+            asset: ShadowReadyPrimaryAsset {
+                request_id: scene.asset.request_id.to_string(),
+                asset_id: scene.asset.descriptor.id.to_string(),
+                uri: scene.asset.descriptor.uri,
+                media_type: scene.asset.descriptor.media_type,
+                byte_length: scene.asset.byte_length,
+                content_digest: scene.asset.content_digest,
+                metadata: scene.asset.metadata,
+            },
+            num_vertices: scene.install.num_vertices,
+            num_faces: scene.install.num_faces,
+            animation_clips: scene
+                .install
+                .animation_clips
+                .into_iter()
+                .map(ShadowAnimationClip::from)
+                .collect(),
+        }
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ShadowAnimationClip {
@@ -3673,6 +3676,17 @@ struct ShadowAnimationClip {
     name: String,
     time_min_seconds: f64,
     time_max_seconds: f64,
+}
+
+impl From<AnimationClipDescriptor> for ShadowAnimationClip {
+    fn from(clip: AnimationClipDescriptor) -> Self {
+        Self {
+            index: clip.index,
+            name: clip.name,
+            time_min_seconds: clip.time_min_seconds,
+            time_max_seconds: clip.time_max_seconds,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -3688,23 +3702,13 @@ impl From<AnimationClipSelectionReadModel> for ShadowAnimationClipSelection {
             active: selection.active.map(|active| ShadowActiveAnimationClip {
                 scene_request_id: active.scene_request_id.to_string(),
                 asset_id: active.asset_id.to_string(),
-                clip: ShadowAnimationClip {
-                    index: active.clip.index,
-                    name: active.clip.name,
-                    time_min_seconds: active.clip.time_min_seconds,
-                    time_max_seconds: active.clip.time_max_seconds,
-                },
+                clip: active.clip.into(),
             }),
             pending: selection.pending.map(|pending| ShadowPendingAnimationClip {
                 job_id: pending.job_id.to_string(),
                 scene_request_id: pending.scene_request_id.to_string(),
                 asset_id: pending.asset_id.to_string(),
-                clip: ShadowAnimationClip {
-                    index: pending.clip.index,
-                    name: pending.clip.name,
-                    time_min_seconds: pending.clip.time_min_seconds,
-                    time_max_seconds: pending.clip.time_max_seconds,
-                },
+                clip: pending.clip.into(),
             }),
         }
     }
@@ -3743,6 +3747,8 @@ fn animation_clip_completion_to_js(
 struct ShadowPrimarySceneInstallCompletionDispatch {
     commit: ShadowCommit,
     clip_cancellations: Vec<ShadowAnimationClipJobEffect>,
+    installed_scene: Option<ShadowInstalledPrimaryScene>,
+    clip_state: ShadowAnimationClipSelection,
 }
 
 fn primary_scene_install_completion_to_js(
@@ -3755,6 +3761,8 @@ fn primary_scene_install_completion_to_js(
             .iter()
             .map(ShadowAnimationClipJobEffect::cancellation)
             .collect(),
+        installed_scene: dispatch.installed_scene.map(Into::into),
+        clip_state: dispatch.clip_state.into(),
     })
 }
 

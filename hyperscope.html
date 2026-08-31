@@ -6154,7 +6154,10 @@ function completeAppPrimarySceneInstall(token, info) {
     rustAppShadowDiagnostics.lastCommit = commit;
     if (commit.disposition === 'ignored_stale') rustAppShadowDiagnostics.staleCompletions += 1;
     browserAssetEffectHost.recordInstallCompletion(token, commit.disposition);
-    const snapshot = refreshAppShadowSnapshot();
+    const snapshot = {
+      installedPrimaryScene: receipt.installedScene,
+      animationClipSelection: receipt.clipState,
+    };
     if (commit.disposition === 'applied'
         && snapshot?.installedPrimaryScene?.asset?.assetId !== token.assetId) {
       recordAppShadowMismatch(
@@ -6196,7 +6199,10 @@ function failAppPrimarySceneInstall(token, code, error, retryable = false) {
     rustAppShadowDiagnostics.lastCommit = commit;
     if (commit.disposition === 'ignored_stale') rustAppShadowDiagnostics.staleCompletions += 1;
     browserAssetEffectHost.recordInstallCompletion(token, commit.disposition);
-    const snapshot = refreshAppShadowSnapshot();
+    const snapshot = {
+      installedPrimaryScene: receipt.installedScene,
+      animationClipSelection: receipt.clipState,
+    };
     observeAnimationClipResidency('scene-install-failed', snapshot);
     return commit.disposition;
   } catch (shadowError) {

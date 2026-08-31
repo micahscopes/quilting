@@ -860,10 +860,12 @@ pub struct AnimationClipCompletionDispatch {
 /// replacement may invalidate a clip-selection job from the formerly resident
 /// scene; adapters must observe these exact cancellation identities before
 /// starting any route- or presentation-selected clip for the new scene.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PrimarySceneInstallCompletionDispatch {
     pub commit: AppCommit,
     pub clip_cancellations: Vec<AnimationClipJobEffect>,
+    pub installed_scene: Option<InstalledPrimarySceneReadModel>,
+    pub clip_state: AnimationClipSelectionReadModel,
 }
 
 /// Typed presentation action result, including any renderer clip jobs emitted
@@ -2534,6 +2536,8 @@ impl AppStore {
         Ok(PrimarySceneInstallCompletionDispatch {
             commit,
             clip_cancellations: jobs.cancellations,
+            installed_scene: self.installed_primary_scene_snapshot(),
+            clip_state: self.animation_clip_selection_snapshot(),
         })
     }
 
@@ -4454,6 +4458,27 @@ mod tests {
         );
         assert_eq!(store.summary_snapshot().pending_animation_clip_job, None);
         assert_eq!(store.summary_snapshot().active_animation_clip, Some(0));
+        assert_eq!(
+            installed
+                .installed_scene
+                .as_ref()
+                .unwrap()
+                .asset
+                .descriptor
+                .id,
+            chess.id,
+        );
+        assert_eq!(
+            installed
+                .clip_state
+                .active
+                .as_ref()
+                .unwrap()
+                .clip
+                .index,
+            0,
+        );
+        assert_eq!(installed.clip_state.pending, None);
         assert_eq!(
             store.summary_snapshot().installed_primary_scene_asset,
             Some(chess.id),
