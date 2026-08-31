@@ -10450,8 +10450,21 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                     }
                 }
 
-                // PBR: two-pass rendering — opaque first, then transparent
-                unsafe { gl.use_program(Some(state.renderer.programs().pbr)); }
+                // PBR: two-pass rendering — opaque first, then transparent.
+                // Opaque materials can still emit fractional alpha for the
+                // conformal horizon fade. Accumulate that alpha with standard
+                // source-over factors, matching the WebGPU PBR pipeline,
+                // rather than applying the color factors to alpha as well.
+                unsafe {
+                    gl.use_program(Some(state.renderer.programs().pbr));
+                    gl.enable(glow::BLEND);
+                    gl.blend_func_separate(
+                        glow::SRC_ALPHA,
+                        glow::ONE_MINUS_SRC_ALPHA,
+                        glow::ONE,
+                        glow::ONE_MINUS_SRC_ALPHA,
+                    );
+                }
                 let default_mat = PbrMaterial::default();
                 let texture_defaults = [white, black, black, black, white];
                 let mut submission_stats = RenderSubmissionStats::default();
