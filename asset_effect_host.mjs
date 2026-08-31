@@ -8,31 +8,16 @@ function requiredString(value, label) {
   return value;
 }
 
-function commitEffects(commit) {
+function installCommitEffects(commit) {
   if (!commit || !Array.isArray(commit.effects)) {
-    throw new TypeError('Rust asset request commit must contain an effects array');
+    throw new TypeError('Rust asset completion commit must contain an effects array');
   }
   return commit.effects;
 }
 
-function validateEffect(effect) {
+function validateInstallEffect(effect) {
   if (!effect || typeof effect !== 'object') {
-    throw new TypeError('Rust asset effect must be an object');
-  }
-  if (effect.type === 'fetch_asset') {
-    return Object.freeze({
-      type: effect.type,
-      requestId: requiredString(effect.request_id, 'fetch request ID'),
-      assetId: requiredString(effect.asset_id, 'fetch asset ID'),
-      uri: requiredString(effect.uri, 'fetch URI'),
-    });
-  }
-  if (effect.type === 'cancel_asset_load') {
-    return Object.freeze({
-      type: effect.type,
-      requestId: requiredString(effect.request_id, 'cancellation request ID'),
-      assetId: requiredString(effect.asset_id, 'cancellation asset ID'),
-    });
+    throw new TypeError('Rust primary install effect must be an object');
   }
   if (effect.type === 'install_primary_scene') {
     return Object.freeze({
@@ -41,18 +26,38 @@ function validateEffect(effect) {
       assetId: requiredString(effect.asset_id, 'install asset ID'),
     });
   }
-  if (effect.type === 'cancel_primary_scene_install') {
-    return Object.freeze({
-      type: effect.type,
-      requestId: requiredString(effect.request_id, 'install cancellation request ID'),
-      assetId: requiredString(effect.asset_id, 'install cancellation asset ID'),
-    });
+  throw new TypeError(`unsupported Rust primary install effect ${JSON.stringify(effect.type)}`);
+}
+
+function validateFetchJob(job) {
+  if (!job || typeof job !== 'object') {
+    throw new TypeError('Rust asset request must contain a typed fetch job');
   }
-  throw new TypeError(`unsupported Rust asset effect ${JSON.stringify(effect.type)}`);
+  return Object.freeze({
+    requestId: requiredString(job.requestId, 'fetch request ID'),
+    assetId: requiredString(job.assetId, 'fetch asset ID'),
+    uri: requiredString(job.uri, 'fetch URI'),
+  });
+}
+
+function validateJobList(jobs, label, stage) {
+  if (!Array.isArray(jobs)) {
+    throw new TypeError(`${label} must be an array`);
+  }
+  return jobs.map(job => {
+    if (!job || typeof job !== 'object') {
+      throw new TypeError(`${label} must contain job objects`);
+    }
+    return Object.freeze({
+      stage,
+      requestId: requiredString(job.requestId, `${label} request ID`),
+      assetId: requiredString(job.assetId, `${label} asset ID`),
+    });
+  });
 }
 
 /**
- * Thin browser host for Rust AppEffects.
+ * Thin browser host for typed Rust asset jobs.
  *
  * Rust chooses request/cancellation semantics. This host owns only platform
  * resources: AbortControllers, logical-URI acquisition, and the fence that
@@ -76,7 +81,9 @@ export class BrowserAssetEffectHost {
     uri,
     source,
     scope = 'asset',
-    commit = null,
+    fetch = null,
+    loadCancellations = [],
+    installCancellations = [],
   }) {
     requestId = requiredString(requestId, 'request ID');
     assetId = requiredString(assetId, 'asset ID');
@@ -86,44 +93,44 @@ export class BrowserAssetEffectHost {
       throw new TypeError(`unsupported asset scope ${JSON.stringify(scope)}`);
     }
 
-    const observedEffects = this.implementation === 'js'
-      ? []
-      : commitEffects(commit).map(validateEffect);
-    const fetches = observedEffects.filter(effect => effect.type === 'fetch_asset');
-    const matchingFetch = fetches.find(effect => effect.requestId === requestId);
+    const observedFetch = this.implementation === 'js' ? null : validateFetchJob(fetch);
+    const cancellations = this.implementation === 'js' ? [] : [
+      ...validateJobList(loadCancellations, 'load cancellations', 'load'),
+      ...validateJobList(installCancellations, 'install cancellations', 'install'),
+    ];
+    const matchingFetch = observedFetch?.requestId === requestId ? observedFetch : null;
     const mismatches = [];
     if (this.implementation !== 'js') {
-      if (fetches.length !== 1 || !matchingFetch) {
-        mismatches.push('request commit must contain exactly one matching fetch effect');
+      if (!matchingFetch) {
+        mismatches.push('request receipt must contain one matching fetch job');
       } else {
         if (matchingFetch.assetId !== assetId) mismatches.push('fetch asset ID diverged');
         if (matchingFetch.uri !== uri) mismatches.push('fetch URI diverged');
       }
     }
-    const cancellations = observedEffects.filter(effect =>
-      effect.type === 'cancel_asset_load'
-      || effect.type === 'cancel_primary_scene_install');
-    for (const effect of cancellations) {
-      const cancelled = this.jobs.get(effect.requestId);
-      if (!cancelled || cancelled.assetId !== effect.assetId) {
-        mismatches.push(`cancellation did not match active request ${effect.requestId}`);
+    for (const cancellation of cancellations) {
+      const cancelled = this.jobs.get(cancellation.requestId);
+      if (!cancelled || cancelled.assetId !== cancellation.assetId) {
+        mismatches.push(`cancellation did not match active request ${cancellation.requestId}`);
       }
     }
     const previousPrimary = scope === 'primary_scene' ? this.primary : null;
     if (this.implementation !== 'js' && previousPrimary) {
       let expectedCancellation = null;
       if (previousPrimary.disposition === null) {
-        expectedCancellation = 'cancel_asset_load';
+        expectedCancellation = 'load';
       } else if (previousPrimary.disposition === 'applied'
           && previousPrimary.installRequested
           && previousPrimary.installDisposition === null) {
-        expectedCancellation = 'cancel_primary_scene_install';
+        expectedCancellation = 'install';
       }
-      if (expectedCancellation && !cancellations.some(effect =>
-        effect.type === expectedCancellation
-        && effect.requestId === previousPrimary.requestId
-        && effect.assetId === previousPrimary.assetId)) {
-        mismatches.push(`request commit omitted ${expectedCancellation} for the active primary job`);
+      if (expectedCancellation && !cancellations.some(cancellation =>
+        cancellation.stage === expectedCancellation
+        && cancellation.requestId === previousPrimary.requestId
+        && cancellation.assetId === previousPrimary.assetId)) {
+        mismatches.push(
+          `request receipt omitted ${expectedCancellation} cancellation for the active primary job`,
+        );
       }
     }
     if (this.implementation === 'rust' && mismatches.length > 0) {
@@ -157,9 +164,9 @@ export class BrowserAssetEffectHost {
       this.primary = token;
     }
 
-    for (const effect of cancellations) {
-      const cancelled = this.jobs.get(effect.requestId);
-      if (!cancelled || cancelled.assetId !== effect.assetId) {
+    for (const cancellation of cancellations) {
+      const cancelled = this.jobs.get(cancellation.requestId);
+      if (!cancelled || cancelled.assetId !== cancellation.assetId) {
         continue;
       }
       cancelled.superseded = true;
@@ -180,7 +187,7 @@ export class BrowserAssetEffectHost {
     }
     const observedEffects = this.implementation === 'js'
       ? []
-      : commitEffects(commit).map(validateEffect);
+      : installCommitEffects(commit).map(validateInstallEffect);
     const installs = observedEffects.filter(effect => effect.type === 'install_primary_scene');
     const matchingInstall = installs.find(effect => effect.requestId === token.requestId);
     const mismatches = [];

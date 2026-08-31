@@ -2,27 +2,19 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { BrowserAssetEffectHost } from '../asset_effect_host.mjs';
 
-const fetchEffect = (requestId, assetId, uri) => ({
-  type: 'fetch_asset',
-  request_id: requestId,
-  asset_id: assetId,
+const fetchJob = (requestId, assetId, uri) => ({
+  requestId,
+  assetId,
   uri,
 });
 
-const cancelEffect = (requestId, assetId) => ({
-  type: 'cancel_asset_load',
-  request_id: requestId,
-  asset_id: assetId,
+const cancellationJob = (requestId, assetId) => ({
+  requestId,
+  assetId,
 });
 
 const installEffect = (requestId, assetId) => ({
   type: 'install_primary_scene',
-  request_id: requestId,
-  asset_id: assetId,
-});
-
-const cancelInstallEffect = (requestId, assetId) => ({
-  type: 'cancel_primary_scene_install',
   request_id: requestId,
   asset_id: assetId,
 });
@@ -38,7 +30,9 @@ function begin(host, {
   assetId,
   uri,
   scope = 'asset',
-  effects = [fetchEffect(requestId, assetId, uri)],
+  fetch = fetchJob(requestId, assetId, uri),
+  loadCancellations = [],
+  installCancellations = [],
 }) {
   return host.begin({
     requestId,
@@ -46,7 +40,9 @@ function begin(host, {
     uri,
     source: 'test',
     scope,
-    commit: { effects },
+    fetch,
+    loadCancellations,
+    installCancellations,
   });
 }
 
@@ -78,10 +74,8 @@ test('rust mode aborts and fences a superseded primary scene', () => {
     assetId: 'chess',
     uri: 'chess.glb',
     scope: 'primary_scene',
-    effects: [
-      cancelInstallEffect('request-1', 'horse'),
-      fetchEffect('request-2', 'chess', 'chess.glb'),
-    ],
+    fetch: fetchJob('request-2', 'chess', 'chess.glb'),
+    installCancellations: [cancellationJob('request-1', 'horse')],
   }).token;
   assert.equal(first.signal.aborted, true);
   assert.equal(host.mayProcess(first), false);
@@ -103,10 +97,8 @@ test('shadow mode observes cancellation without changing incumbent behavior', ()
     assetId: 'chess',
     uri: 'chess.glb',
     scope: 'primary_scene',
-    effects: [
-      cancelEffect('request-1', 'horse'),
-      fetchEffect('request-2', 'chess', 'chess.glb'),
-    ],
+    fetch: fetchJob('request-2', 'chess', 'chess.glb'),
+    loadCancellations: [cancellationJob('request-1', 'horse')],
   }).token;
   host.recordCompletion(first, 'ignored_stale');
   host.recordCompletion(second, 'applied');
@@ -126,9 +118,9 @@ test('rust mode validates a full commit before superseding the current job', () 
       assetId: 'chess',
       uri: 'chess.glb',
       scope: 'primary_scene',
-      effects: [fetchEffect('wrong-request', 'chess', 'chess.glb')],
+      fetch: fetchJob('wrong-request', 'chess', 'chess.glb'),
     }),
-    /exactly one matching fetch effect/,
+    /one matching fetch job/,
   );
   assert.equal(first.signal.aborted, false);
   assert.equal(host.primary, first);
@@ -165,9 +157,9 @@ test('rust mode rejects a replacement that omits the active install cancellation
       assetId: 'chess',
       uri: 'chess.glb',
       scope: 'primary_scene',
-      effects: [fetchEffect('request-2', 'chess', 'chess.glb')],
+      fetch: fetchJob('request-2', 'chess', 'chess.glb'),
     }),
-    /omitted cancel_primary_scene_install/,
+    /omitted install cancellation/,
   );
   assert.equal(first.signal.aborted, false);
   assert.equal(host.primary, first);
@@ -182,10 +174,8 @@ test('Rust cancellation effects abort independent same-asset jobs', () => {
     requestId: 'request-2',
     assetId: 'horse',
     uri: 'horse.glb',
-    effects: [
-      cancelEffect('request-1', 'horse'),
-      fetchEffect('request-2', 'horse', 'horse.glb'),
-    ],
+    fetch: fetchJob('request-2', 'horse', 'horse.glb'),
+    loadCancellations: [cancellationJob('request-1', 'horse')],
   });
   assert.equal(first.signal.aborted, true);
 });
@@ -228,10 +218,8 @@ test('rust mode serializes primary installations and skips a queued stale job', 
     assetId: 'chess',
     uri: 'chess.glb',
     scope: 'primary_scene',
-    effects: [
-      cancelInstallEffect('request-1', 'horse'),
-      fetchEffect('request-2', 'chess', 'chess.glb'),
-    ],
+    fetch: fetchJob('request-2', 'chess', 'chess.glb'),
+    installCancellations: [cancellationJob('request-1', 'horse')],
   }).token;
   host.recordCompletion(second, 'applied');
   authorizeInstall(host, second);
@@ -273,10 +261,8 @@ test('rust mode serializes decode work before completion and skips stale jobs', 
     assetId: 'chess',
     uri: 'chess.glb',
     scope: 'primary_scene',
-    effects: [
-      cancelEffect('request-1', 'horse'),
-      fetchEffect('request-2', 'chess', 'chess.glb'),
-    ],
+    fetch: fetchJob('request-2', 'chess', 'chess.glb'),
+    loadCancellations: [cancellationJob('request-1', 'horse')],
   }).token;
   const secondProcess = host.runProcess(second, async () => {
     order.push('second');

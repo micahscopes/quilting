@@ -22,8 +22,9 @@ use hyperscope_app::{
     AnimationClipJobEffect, AnimationClipSelectionCompletion, AnimationClipSelectionOutcome,
     AnimationClock,
     AnimationPoseRequestDisposition, AnimationPoseScheduler, AnimationPoseStamp, AppCommit,
-    AppEffect, AppEvent, AppFrameSnapshot, AppStore, AssetLoadCompletion, AssetLoadOutcome,
-    AssetLoadScope, AssetMetadata, AssetStatus, AuthoredRevision, CommitDisposition,
+    AppEffect, AppEvent, AppFrameSnapshot, AppStore, AssetFetchJob, AssetJobIdentity,
+    AssetLoadCompletion, AssetLoadOutcome, AssetLoadScope, AssetMetadata, AssetStatus,
+    AuthoredRevision, CommitDisposition,
     EffectCompletion, FocusPostprocessMode, FocusPostprocessSettings, FrameTick,
     LocalPeerDisposition, LocalPeerIngress, LocalPeerLane, LocalPeerReceipt, NavigationSettings,
     NavigationSettingsSynchronizationDisposition, NavigationSynchronization, PatchLabCompletion,
@@ -509,6 +510,58 @@ impl HyperscopeAppShadow {
             media_type,
             AssetLoadScope::PrimaryScene,
         )
+    }
+
+    /// Request one platform acquisition through AppStore's local sequence and
+    /// typed asset-job authority. Explicitly sequenced request methods remain
+    /// available for replay and rollback adapters.
+    #[wasm_bindgen(js_name = requestAssetLoad)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn request_asset_load(
+        &self,
+        request_id: &str,
+        asset_id: &str,
+        uri: &str,
+        media_type: &str,
+        scope: &str,
+    ) -> Result<JsValue, JsValue> {
+        let scope = match scope {
+            "asset" => AssetLoadScope::Asset,
+            "primary_scene" => AssetLoadScope::PrimaryScene,
+            _ => {
+                return Err(JsValue::from_str(
+                    "asset scope must be asset or primary_scene",
+                ))
+            }
+        };
+        let request = self
+            .store
+            .request_asset_load(
+                request_id_from_str(request_id)?,
+                AssetDescriptor {
+                    id: asset_id_from_str(asset_id)?,
+                    uri: uri.to_owned(),
+                    media_type: (!media_type.is_empty()).then(|| media_type.to_owned()),
+                    content_digest: None,
+                },
+                scope,
+            )
+            .map_err(js_error)?;
+        to_js(&ShadowAssetLoadRequest {
+            sequence: request.sequence.to_string(),
+            commit: shadow_commit(&request.commit),
+            fetch: ShadowAssetFetchJob::from(request.fetch),
+            load_cancellations: request
+                .load_cancellations
+                .into_iter()
+                .map(ShadowAssetJobIdentity::from)
+                .collect(),
+            install_cancellations: request
+                .install_cancellations
+                .into_iter()
+                .map(ShadowAssetJobIdentity::from)
+                .collect(),
+        })
     }
 
     #[wasm_bindgen(js_name = cancelAsset)]
@@ -2945,6 +2998,54 @@ struct ShadowCommit {
 struct ShadowDirectSemanticReceipt {
     sequence: String,
     commit: ShadowCommit,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowAssetLoadRequest {
+    sequence: String,
+    commit: ShadowCommit,
+    fetch: ShadowAssetFetchJob,
+    load_cancellations: Vec<ShadowAssetJobIdentity>,
+    install_cancellations: Vec<ShadowAssetJobIdentity>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowAssetFetchJob {
+    request_id: String,
+    asset_id: String,
+    uri: String,
+    media_type: Option<String>,
+    content_digest: Option<[u8; 32]>,
+}
+
+impl From<AssetFetchJob> for ShadowAssetFetchJob {
+    fn from(job: AssetFetchJob) -> Self {
+        Self {
+            request_id: job.request_id.to_string(),
+            asset_id: job.asset.id.to_string(),
+            uri: job.asset.uri,
+            media_type: job.asset.media_type,
+            content_digest: job.asset.content_digest,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowAssetJobIdentity {
+    request_id: String,
+    asset_id: String,
+}
+
+impl From<AssetJobIdentity> for ShadowAssetJobIdentity {
+    fn from(job: AssetJobIdentity) -> Self {
+        Self {
+            request_id: job.request_id.to_string(),
+            asset_id: job.asset_id.to_string(),
+        }
+    }
 }
 
 #[derive(Serialize)]

@@ -5996,19 +5996,17 @@ function beginAppAssetShadow(uri, source, explicitAssetId = null, scope = 'asset
   const assetId = appShadowAssetId(uri, explicitAssetId);
   const requestedUri = String(uri);
   try {
-    const request = scope === 'primary_scene'
-      ? rustAppShadow.requestPrimaryAsset.bind(rustAppShadow)
-      : rustAppShadow.requestAsset.bind(rustAppShadow);
-    const commit = request(
-      ++rustAppShadowSequence,
-      0,
+    const receipt = rustAppShadow.requestAssetLoad(
       requestId,
       assetId,
       requestedUri,
       /\.gltf$/i.test(requestedUri) ? 'model/gltf+json' : 'model/gltf-binary',
+      scope,
     );
-    const cancellations = commit.effects.filter(effect => effect.type === 'cancel_asset_load');
-    rustAppShadowDiagnostics.requestedCancellations += cancellations.length;
+    observeRustAppShadowSequence(receipt.sequence, 'Rust asset request');
+    const commit = receipt.commit;
+    rustAppShadowDiagnostics.requestedCancellations +=
+      receipt.loadCancellations.length + receipt.installCancellations.length;
     rustAppShadowDiagnostics.requests += 1;
     rustAppShadowDiagnostics.lastCommit = commit;
     const hosted = browserAssetEffectHost.begin({
@@ -6017,7 +6015,9 @@ function beginAppAssetShadow(uri, source, explicitAssetId = null, scope = 'asset
       uri: requestedUri,
       source,
       scope,
-      commit,
+      fetch: receipt.fetch,
+      loadCancellations: receipt.loadCancellations,
+      installCancellations: receipt.installCancellations,
     });
     for (const mismatch of hosted.mismatches) {
       recordAppShadowMismatch('request_effect', `${requestedUri}: ${mismatch}`);

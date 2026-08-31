@@ -501,7 +501,7 @@ for (const animationClipAuthorityStep of [
 const animationClipRequestBoundary = browserSource.slice(
   browserSource.indexOf('function beginAppAnimationClipSelection(index) {'),
   browserSource.indexOf('function completeAppAnimationClipSelection(',
-);
+));
 for (const retiredAnimationClipParsing of [
   'receipt.commit.effects.filter(',
   "effect.type === 'select_animation_clip'",
@@ -1035,7 +1035,11 @@ for (const assetAuthorityStep of [
   'EXPLICIT_RUST_APP_SHADOW_ENABLED',
   "import { BrowserAssetEffectHost } from './asset_effect_host.mjs",
   'const browserAssetEffectHost = new BrowserAssetEffectHost(RUST_ASSET_IMPLEMENTATION);',
-  'rustAppShadow.requestPrimaryAsset.bind(rustAppShadow)',
+  'rustAppShadow.requestAssetLoad(',
+  "observeRustAppShadowSequence(receipt.sequence, 'Rust asset request')",
+  'fetch: receipt.fetch,',
+  'loadCancellations: receipt.loadCancellations,',
+  'installCancellations: receipt.installCancellations,',
   'browserAssetEffectHost.begin({',
   'browserAssetEffectHost.beginInstall(token, commit)',
   'browserAssetEffectHost.runProcess(assetToken, async () => {',
@@ -1056,6 +1060,25 @@ for (const assetAuthorityStep of [
   assert.ok(
     browserSource.includes(assetAuthorityStep),
     `browser asset authority adapter is missing ${assetAuthorityStep}`,
+  );
+}
+const assetRequestBoundary = browserSource.slice(
+  browserSource.indexOf('function beginAppAssetShadow('),
+  browserSource.indexOf(
+    'function completeAppAssetShadow(',
+    browserSource.indexOf('function beginAppAssetShadow('),
+  ),
+);
+for (const retiredAssetRequestStep of [
+  'rustAppShadow.requestPrimaryAsset.bind(',
+  'rustAppShadow.requestAsset.bind(',
+  '++rustAppShadowSequence',
+  'commit.effects.filter(',
+]) {
+  assert.equal(
+    assetRequestBoundary.includes(retiredAssetRequestStep),
+    false,
+    `ordinary asset requests must not retain ${retiredAssetRequestStep}`,
   );
 }
 const dropAdapter = browserSource.slice(

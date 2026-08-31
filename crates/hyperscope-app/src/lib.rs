@@ -658,6 +658,93 @@ pub struct InstalledPrimarySceneReadModel {
     pub install: PrimarySceneInstallMetadata,
 }
 
+/// One platform acquisition selected by the asset reducer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetFetchJob {
+    pub request_id: RequestId,
+    pub asset: AssetDescriptor,
+}
+
+/// Exact identity of a platform asset-load or primary-install job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AssetJobIdentity {
+    pub request_id: RequestId,
+    pub asset_id: AssetId,
+}
+
+/// Typed asset jobs projected from one trusted reducer commit. Generic effect
+/// interpretation stops here; platform adapters receive these categories
+/// directly rather than rediscovering them from [`AppCommit::effects`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AssetEffectJobs {
+    pub fetch: Option<AssetFetchJob>,
+    pub load_cancellations: Vec<AssetJobIdentity>,
+    pub install: Option<AssetJobIdentity>,
+    pub install_cancellations: Vec<AssetJobIdentity>,
+}
+
+impl AssetEffectJobs {
+    fn from_commit(commit: &AppCommit) -> Result<Self, ReduceError> {
+        let mut projected = Self::default();
+        for effect in &commit.effects {
+            match effect {
+                AppEffect::FetchAsset { request_id, asset } => {
+                    if projected.fetch.is_some() {
+                        return Err(ReduceError::EffectContract(
+                            "an application commit emitted multiple asset fetch jobs",
+                        ));
+                    }
+                    projected.fetch = Some(AssetFetchJob {
+                        request_id: *request_id,
+                        asset: asset.clone(),
+                    });
+                }
+                AppEffect::CancelAssetLoad {
+                    request_id,
+                    asset_id,
+                } => projected.load_cancellations.push(AssetJobIdentity {
+                    request_id: *request_id,
+                    asset_id: *asset_id,
+                }),
+                AppEffect::InstallPrimaryScene {
+                    request_id,
+                    asset_id,
+                } => {
+                    if projected.install.is_some() {
+                        return Err(ReduceError::EffectContract(
+                            "an application commit emitted multiple primary install jobs",
+                        ));
+                    }
+                    projected.install = Some(AssetJobIdentity {
+                        request_id: *request_id,
+                        asset_id: *asset_id,
+                    });
+                }
+                AppEffect::CancelPrimarySceneInstall {
+                    request_id,
+                    asset_id,
+                } => projected.install_cancellations.push(AssetJobIdentity {
+                    request_id: *request_id,
+                    asset_id: *asset_id,
+                }),
+                _ => {}
+            }
+        }
+        Ok(projected)
+    }
+}
+
+/// Typed result of one local asset request. The sequence and all platform job
+/// choices are allocated under application authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetLoadRequest {
+    pub sequence: u64,
+    pub commit: AppCommit,
+    pub fetch: AssetFetchJob,
+    pub load_cancellations: Vec<AssetJobIdentity>,
+    pub install_cancellations: Vec<AssetJobIdentity>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActiveAnimationClipReadModel {
     pub scene_request_id: RequestId,
@@ -2289,6 +2376,44 @@ impl AppStore {
         })
     }
 
+    /// Request one asset through Rust-owned sequence and effect authority.
+    /// The adapter supplies versioned identity and a logical URI, then executes
+    /// only the typed fetch/cancellation jobs returned by this method.
+    pub fn request_asset_load(
+        &self,
+        request_id: RequestId,
+        asset: AssetDescriptor,
+        scope: AssetLoadScope,
+    ) -> Result<AssetLoadRequest, ReduceError> {
+        let expected_asset = asset.clone();
+        let (sequence, commit) = self.dispatch_semantic(SemanticAction::RequestAsset {
+            request_id,
+            asset,
+            scope,
+        })?;
+        let mut jobs = AssetEffectJobs::from_commit(&commit)?;
+        let fetch = jobs.fetch.take().ok_or(ReduceError::EffectContract(
+            "an accepted asset request emitted no fetch job",
+        ))?;
+        if fetch.request_id != request_id || fetch.asset != expected_asset {
+            return Err(ReduceError::EffectContract(
+                "an asset request fetch job diverged from its accepted intent",
+            ));
+        }
+        if jobs.install.is_some() {
+            return Err(ReduceError::EffectContract(
+                "an asset request unexpectedly emitted an install job",
+            ));
+        }
+        Ok(AssetLoadRequest {
+            sequence,
+            commit,
+            fetch,
+            load_cancellations: jobs.load_cancellations,
+            install_cancellations: jobs.install_cancellations,
+        })
+    }
+
     /// Commit one presentation action and retain the exact renderer clip jobs
     /// generated transactionally with its cue/clock/navigation transition.
     pub fn dispatch_presentation(
@@ -2732,6 +2857,7 @@ pub enum ReduceError {
     InvalidPrimarySceneInstallMetadata(PrimarySceneInstallMetadataError),
     InvalidNavigationSettings(&'static str),
     InvalidRenderSettings(&'static str),
+    EffectContract(&'static str),
     InputSequenceExhausted,
     AnimationClipJobExhausted,
     PatchLabJobExhausted,
@@ -2769,6 +2895,9 @@ impl fmt::Display for ReduceError {
             }
             Self::InvalidRenderSettings(message) => {
                 write!(formatter, "render settings failed validation: {message}")
+            }
+            Self::EffectContract(message) => {
+                write!(formatter, "application effect contract failed: {message}")
             }
             Self::InputSequenceExhausted => {
                 formatter.write_str("local semantic input sequence is exhausted")
@@ -3487,6 +3616,70 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn typed_asset_requests_allocate_sequences_and_exact_platform_jobs() {
+        let store = AppStore::default();
+        let horse = asset(1, "horse.glb");
+        let chess = asset(2, "chess.glb");
+        let bathroom = asset(3, "bathroom.glb");
+        let horse_request = request(10);
+        let chess_request = request(11);
+        let bathroom_request = request(12);
+
+        let first = store
+            .request_asset_load(horse_request, horse.clone(), AssetLoadScope::PrimaryScene)
+            .unwrap();
+        assert_eq!(first.sequence, 0);
+        assert_eq!(
+            first.fetch,
+            AssetFetchJob {
+                request_id: horse_request,
+                asset: horse.clone(),
+            },
+        );
+        assert!(first.load_cancellations.is_empty());
+        assert!(first.install_cancellations.is_empty());
+
+        let replacement = store
+            .request_asset_load(chess_request, chess.clone(), AssetLoadScope::PrimaryScene)
+            .unwrap();
+        assert_eq!(replacement.sequence, 1);
+        assert_eq!(
+            replacement.load_cancellations,
+            vec![AssetJobIdentity {
+                request_id: horse_request,
+                asset_id: horse.id,
+            }],
+        );
+        assert!(replacement.install_cancellations.is_empty());
+
+        store
+            .dispatch(AppEvent::EffectCompleted(EffectCompletion::AssetLoad(
+                AssetLoadCompletion {
+                    request_id: chess_request,
+                    asset_id: chess.id,
+                    outcome: AssetLoadOutcome::Loaded {
+                        byte_length: 100,
+                        content_digest: None,
+                        metadata: AssetMetadata::default(),
+                    },
+                },
+            )))
+            .unwrap();
+        let after_decode = store
+            .request_asset_load(bathroom_request, bathroom, AssetLoadScope::PrimaryScene)
+            .unwrap();
+        assert_eq!(after_decode.sequence, 2);
+        assert!(after_decode.load_cancellations.is_empty());
+        assert_eq!(
+            after_decode.install_cancellations,
+            vec![AssetJobIdentity {
+                request_id: chess_request,
+                asset_id: chess.id,
+            }],
+        );
     }
 
     #[test]
