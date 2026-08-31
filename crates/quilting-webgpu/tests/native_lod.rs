@@ -1079,6 +1079,8 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             .unwrap();
         assert_eq!(focus_encoding.scene.indirect_draw_calls, 2);
         assert_eq!(focus_encoding.postprocess.render_passes, 8);
+        assert!(!focus_encoding.postprocess.plan_reused);
+        assert!(focus_encoding.postprocess.uniform_upload_bytes > 0);
         classifier
             .device()
             .poll(wgpu::PollType::wait_indefinitely())
@@ -1174,6 +1176,18 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
             .unwrap();
         assert_eq!(root_focus_encoding.scene.indirect_draw_calls, 2);
         assert_eq!(root_focus_encoding.postprocess.render_passes, 8);
+        assert!(root_focus_encoding.postprocess.plan_reused);
+        assert_eq!(root_focus_encoding.postprocess.uniform_upload_bytes, 0);
+        assert_eq!(
+            focus_target.memo_diagnostics().unwrap(),
+            quilting_webgpu::FocusPostprocessMemoDiagnostics {
+                plan_builds: 1,
+                plan_reuses: 1,
+                uniform_uploads: 1,
+                uniform_reuses: 1,
+                uniform_upload_bytes: focus_encoding.postprocess.uniform_upload_bytes,
+            },
+        );
         classifier
             .device()
             .poll(wgpu::PollType::wait_indefinitely())

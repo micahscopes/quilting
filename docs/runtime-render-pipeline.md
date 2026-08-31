@@ -406,6 +406,13 @@ blur, and final directional blur each name their label, fragment entry, and
 attachment class once. Pure descriptors and runtime handles iterate the same
 plan, while the separate per-frame `FocusPipelineKind` continues to describe
 scheduled executions rather than retained GPU identity.
+Each target additionally retains the exact bitwise schedule key, lowered pass
+records, and padded dynamic-uniform words. Camera/animation-only focused frames
+still execute the fullscreen passes over new pixels, but they rebuild no pass
+vector and issue no focus-uniform queue write. A changed viewport creates a new
+target; a changed focus packet atomically rebuilds and publishes the complete
+table. Encoding and target-lifetime memo diagnostics report actual reuse and
+upload bytes.
 
 `quilting_renderer::memo::DeviceMemo` is the effect boundary. It maps a pure
 descriptor to a concrete backend resource, inserts only after construction has

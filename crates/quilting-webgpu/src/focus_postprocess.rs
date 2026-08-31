@@ -345,6 +345,16 @@ impl FocusPostprocessTarget {
         &self.scene_color
     }
 
+    /// Return exact target-lifetime plan and uniform-publication evidence.
+    pub fn memo_diagnostics(&self) -> Result<FocusPostprocessMemoDiagnostics, LodWebGpuError> {
+        self.scratch
+            .lock()
+            .map(|scratch| scratch.diagnostics)
+            .map_err(|_| {
+                LodWebGpuError::Payload("focus encoding scratch lock was poisoned".to_string())
+            })
+    }
+
     fn view(&self, slot: FocusTextureSlot) -> &wgpu::TextureView {
         match slot {
             FocusTextureSlot::RawField => &self.raw_field_view,
@@ -379,6 +389,21 @@ pub struct FocusPostprocessEncoding {
     pub cleanup_jfa_passes: u32,
     pub kawase_passes: u32,
     pub directional_blur_passes: u32,
+    /// True when this target reused its exact retained pass plan and uniform
+    /// table instead of rebuilding and publishing them for the current frame.
+    pub plan_reused: bool,
+    pub uniform_upload_bytes: u64,
+}
+
+/// Target-lifetime evidence for the immutable focus pass plan and its padded
+/// dynamic-uniform table. Scene pixels still change every frame; these counts
+/// cover only CPU schedule construction and queue publication.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FocusPostprocessMemoDiagnostics {
+    pub plan_builds: u64,
+    pub plan_reuses: u64,
+    pub uniform_uploads: u64,
+    pub uniform_reuses: u64,
     pub uniform_upload_bytes: u64,
 }
 
@@ -422,10 +447,91 @@ struct PlannedFocusPass {
     final_output: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FocusPostprocessPlanKey {
+    viewport: [u32; 2],
+    mode: quilting_core::render::FocusPostprocessMode,
+    blur_radius_pixels: u16,
+    blur_strength_bits: u32,
+    focus_coordinate_bits: u32,
+    bandwidth_bits: u32,
+    normalize_range: bool,
+    stretch_range_bits: [u32; 2],
+    gaussian_passes: u8,
+    kawase_passes: u8,
+    kawase_offset_bits: u32,
+}
+
+impl FocusPostprocessPlanKey {
+    fn from_schedule(schedule: FocusPostprocessSchedule) -> Self {
+        let extent = schedule.full_extent();
+        let packet = schedule.packet();
+        Self {
+            viewport: [extent.width, extent.height],
+            mode: packet.mode,
+            blur_radius_pixels: packet.blur_radius_pixels,
+            blur_strength_bits: packet.blur_strength.to_bits(),
+            focus_coordinate_bits: packet.focus_coordinate.to_bits(),
+            bandwidth_bits: packet.bandwidth.to_bits(),
+            normalize_range: packet.normalize_range,
+            stretch_range_bits: packet.stretch_range.map(f32::to_bits),
+            gaussian_passes: packet.gaussian_passes,
+            kawase_passes: packet.kawase_passes,
+            kawase_offset_bits: packet.kawase_offset.to_bits(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FocusPlanPublication {
+    Upload { bytes: u64 },
+    Reuse,
+}
+
 #[derive(Default)]
 struct FocusEncodingScratch {
+    plan_key: Option<FocusPostprocessPlanKey>,
     passes: Vec<PlannedFocusPass>,
     uniform_words: Vec<f32>,
+    diagnostics: FocusPostprocessMemoDiagnostics,
+}
+
+impl FocusEncodingScratch {
+    fn prepare(
+        &mut self,
+        schedule: FocusPostprocessSchedule,
+        uniform_stride_bytes: u64,
+    ) -> Result<FocusPlanPublication, LodWebGpuError> {
+        let key = FocusPostprocessPlanKey::from_schedule(schedule);
+        if self.plan_key == Some(key) {
+            self.diagnostics.plan_reuses = self.diagnostics.plan_reuses.saturating_add(1);
+            self.diagnostics.uniform_reuses = self.diagnostics.uniform_reuses.saturating_add(1);
+            return Ok(FocusPlanPublication::Reuse);
+        }
+
+        build_focus_passes(schedule, uniform_stride_bytes, &mut self.passes)?;
+        if self.passes.len() > FOCUS_PASS_CAPACITY {
+            return Err(LodWebGpuError::Payload(format!(
+                "focus schedule requires {} passes; capacity is {FOCUS_PASS_CAPACITY}",
+                self.passes.len(),
+            )));
+        }
+        let stride_words = uniform_stride_bytes as usize / 4;
+        let word_count = self.passes.len() * stride_words;
+        self.uniform_words.clear();
+        self.uniform_words.resize(word_count, 0.0);
+        for (index, pass) in self.passes.iter().enumerate() {
+            let start = index * stride_words;
+            self.uniform_words[start..start + 16].copy_from_slice(&pass.uniform);
+        }
+        let bytes = (self.passes.len() as u64) * uniform_stride_bytes;
+        self.plan_key = Some(key);
+        self.diagnostics.plan_builds = self.diagnostics.plan_builds.saturating_add(1);
+        self.diagnostics.uniform_uploads = self.diagnostics.uniform_uploads.saturating_add(1);
+        self.diagnostics.uniform_upload_bytes =
+            self.diagnostics.uniform_upload_bytes.saturating_add(bytes);
+        Ok(FocusPlanPublication::Upload { bytes })
+    }
 }
 
 impl FocusPostprocessPipelines {
@@ -781,6 +887,7 @@ impl LodClassifierDevice {
                 uniform_words: Vec::with_capacity(
                     FOCUS_PASS_CAPACITY * (uniform_stride_bytes as usize / 4),
                 ),
+                ..FocusEncodingScratch::default()
             }),
         };
         for pair in focus_binding_pairs() {
@@ -899,27 +1006,18 @@ impl LodClassifierDevice {
         let mut scratch = target.scratch.lock().map_err(|_| {
             LodWebGpuError::Payload("focus encoding scratch lock was poisoned".to_string())
         })?;
-        let FocusEncodingScratch {
-            passes,
-            uniform_words,
-        } = &mut *scratch;
-        build_focus_passes(schedule, target.uniform_stride_bytes, passes)?;
-        if passes.len() > FOCUS_PASS_CAPACITY {
-            return Err(LodWebGpuError::Payload(format!(
-                "focus schedule requires {} passes; capacity is {FOCUS_PASS_CAPACITY}",
-                passes.len(),
-            )));
-        }
-        let stride_words = target.uniform_stride_bytes as usize / 4;
-        let word_count = passes.len() * stride_words;
-        uniform_words.clear();
-        uniform_words.resize(word_count, 0.0);
-        for (index, pass) in passes.iter().enumerate() {
-            let start = index * stride_words;
-            uniform_words[start..start + 16].copy_from_slice(&pass.uniform);
-        }
-        self.queue
-            .write_buffer(&target.uniform, 0, bytemuck::cast_slice(uniform_words));
+        let publication = scratch.prepare(schedule, target.uniform_stride_bytes)?;
+        let uniform_upload_bytes = match publication {
+            FocusPlanPublication::Upload { bytes } => {
+                self.queue.write_buffer(
+                    &target.uniform,
+                    0,
+                    bytemuck::cast_slice(&scratch.uniform_words),
+                );
+                bytes
+            }
+            FocusPlanPublication::Reuse => 0,
+        };
 
         let mut encoding = FocusPostprocessEncoding {
             render_passes: 0,
@@ -931,9 +1029,10 @@ impl LodClassifierDevice {
                 .map_or(0, |plan| plan.cleanup_steps().len() as u32),
             kawase_passes: u32::from(packet.kawase_passes),
             directional_blur_passes: schedule.directional_blur_passes().len() as u32,
-            uniform_upload_bytes: (passes.len() as u64) * target.uniform_stride_bytes,
+            plan_reused: matches!(publication, FocusPlanPublication::Reuse),
+            uniform_upload_bytes,
         };
-        for pass in passes {
+        for pass in &scratch.passes {
             let destination = match pass.destination {
                 FocusDestination::Texture(slot) => target.view(slot),
                 FocusDestination::Output => output_view,
@@ -1340,6 +1439,47 @@ mod tests {
         );
         assert_eq!(passes.last().unwrap().destination, FocusDestination::Output);
         assert_eq!(passes.last().unwrap().uniform_offset, 7 * 256);
+    }
+
+    #[test]
+    fn retained_focus_plan_skips_exact_schedule_and_uniform_republication() {
+        let schedule =
+            FocusPostprocessSchedule::build([1280, 720], packet(FocusPostprocessMode::Spheroidal))
+                .unwrap();
+        let mut scratch = FocusEncodingScratch {
+            passes: Vec::with_capacity(FOCUS_PASS_CAPACITY),
+            uniform_words: Vec::with_capacity(FOCUS_PASS_CAPACITY * 64),
+            ..FocusEncodingScratch::default()
+        };
+        assert_eq!(
+            scratch.prepare(schedule, 256).unwrap(),
+            FocusPlanPublication::Upload { bytes: 8 * 256 },
+        );
+        let first_words = scratch.uniform_words.clone();
+        assert_eq!(
+            scratch.prepare(schedule, 256).unwrap(),
+            FocusPlanPublication::Reuse,
+        );
+        assert_eq!(scratch.uniform_words, first_words);
+
+        let mut changed = schedule.packet();
+        changed.focus_coordinate = 0.61;
+        let changed = FocusPostprocessSchedule::build([1280, 720], changed).unwrap();
+        assert_eq!(
+            scratch.prepare(changed, 256).unwrap(),
+            FocusPlanPublication::Upload { bytes: 8 * 256 },
+        );
+        assert_ne!(scratch.uniform_words, first_words);
+        assert_eq!(
+            scratch.diagnostics,
+            FocusPostprocessMemoDiagnostics {
+                plan_builds: 2,
+                plan_reuses: 1,
+                uniform_uploads: 2,
+                uniform_reuses: 1,
+                uniform_upload_bytes: 16 * 256,
+            },
+        );
     }
 
     #[test]

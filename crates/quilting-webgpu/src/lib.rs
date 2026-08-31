@@ -24,8 +24,8 @@ pub use adaptive_overlay::{
 };
 pub use focus_postprocess::{
     focus_postprocess_pipeline_descriptors, FocusPostprocessEncoding,
-    FocusPostprocessPipelines, FocusPostprocessTarget, FocusRawFieldImage,
-    StagedFocusRawFieldReadback,
+    FocusPostprocessMemoDiagnostics, FocusPostprocessPipelines, FocusPostprocessTarget,
+    FocusRawFieldImage, StagedFocusRawFieldReadback,
 };
 pub use pbr_environment::{PbrEnvironmentBindings, PbrEnvironmentMap};
 pub use pbr_resources::{

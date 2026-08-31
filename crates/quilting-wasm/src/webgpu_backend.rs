@@ -287,6 +287,11 @@ pub(crate) struct WebGpuBackendDiagnostics {
     focus_target_ready: bool,
     focus_target_viewport: [u32; 2],
     focus_target_rebuilds: u64,
+    focus_plan_builds: u64,
+    focus_plan_reuses: u64,
+    focus_uniform_uploads: u64,
+    focus_uniform_reuses: u64,
+    focus_uniform_upload_bytes: u64,
     focus_frames: u64,
     focus_fallbacks: u64,
     pick_pipeline_ready: bool,
@@ -355,6 +360,12 @@ impl WebGpuBackend {
             .device
             .as_ref()
             .map(LodClassifierDevice::lod_state_memo_diagnostics)
+            .unwrap_or_default();
+        let focus_plan_memo = self
+            .focus
+            .as_ref()
+            .and_then(FocusPbrRenderResources::target)
+            .and_then(|target| target.memo_diagnostics().ok())
             .unwrap_or_default();
         let pbr_texture_residency = self
             .scene
@@ -538,6 +549,11 @@ impl WebGpuBackend {
                 .and_then(FocusPbrRenderResources::target)
                 .map_or([0, 0], |target| target.size()),
             focus_target_rebuilds: self.focus_target_rebuilds,
+            focus_plan_builds: focus_plan_memo.plan_builds,
+            focus_plan_reuses: focus_plan_memo.plan_reuses,
+            focus_uniform_uploads: focus_plan_memo.uniform_uploads,
+            focus_uniform_reuses: focus_plan_memo.uniform_reuses,
+            focus_uniform_upload_bytes: focus_plan_memo.uniform_upload_bytes,
             focus_frames: self.focus_frames,
             focus_fallbacks: self.focus_fallbacks,
             pick_pipeline_ready: self.pick_pipeline.is_some(),
