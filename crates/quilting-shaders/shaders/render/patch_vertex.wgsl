@@ -5,21 +5,25 @@
 #import quilting::lighting::matcap::{matcap_shade, procedural_matcap}
 #import quilting::lighting::pbr::{PBRInput, pbr_ambient, pbr_apply_tangent_normal, pbr_direct, pbr_evaluate_base_color, pbr_evaluate_emissive, pbr_tone_map}
 
-struct PatchRenderFrame {
+struct PatchRenderGlobal {
     mvp: mat4x4<f32>,
     mv: mat4x4<f32>,
-    // x = use rational QB; y = procedural matcap style; z = material slot;
-    // w = selected semantic node.
+    // x = use rational QB; y = procedural matcap style;
+    // z = selected semantic node; w = selected source face bit pattern.
     modes: vec4<i32>,
-    // x = selected source face or u32::MAX; y = focus field enabled; zw reserved.
-    selection: vec4<u32>,
+    // xyz = world-space camera; w = focus field enabled.
+    camera_pos_focus: vec4<f32>,
+    // Source-space focus center xyz + positive radius.
+    focus_sphere: vec4<f32>,
+}
+
+struct PatchRenderDomain {
     mob_a: vec4<f32>,
     mob_b: vec4<f32>,
     mob_c: vec4<f32>,
     mob_d: vec4<f32>,
-    camera_pos: vec4<f32>,
-    // Source-space focus center xyz + positive radius.
-    focus_sphere: vec4<f32>,
+    // x = material slot; yzw reserved.
+    modes: vec4<i32>,
 }
 
 struct PatchVertexOutput {
@@ -46,17 +50,17 @@ struct PatchVertexOutput {
 
 fn patch_focus_raw_field(
     input: PatchVertexOutput,
-    frame: PatchRenderFrame,
+    global: PatchRenderGlobal,
 ) -> vec4<f32> {
     let dof_distance = max(length(input.position_vs), 0.001);
     let dof_depth = clamp(log2(dof_distance) / 10.0 + 0.5, 0.0, 1.0);
-    let focus_radius = max(frame.focus_sphere.w, 1e-4);
-    let focus_radius_ratio = distance(input.source_position_ws, frame.focus_sphere.xyz)
+    let focus_radius = max(global.focus_sphere.w, 1e-4);
+    let focus_radius_ratio = distance(input.source_position_ws, global.focus_sphere.xyz)
         / focus_radius;
     // Normalized geodesic polar coordinate of the round S3 compactification
     // under stereographic projection. Sphere inversion sends u to 1-u.
     let focus_geodesic = 0.6366197723675814 * atan(focus_radius_ratio);
-    let focus_field = select(0.0, focus_geodesic, frame.selection.y != 0u);
+    let focus_field = select(0.0, focus_geodesic, global.camera_pos_focus.w > 0.5);
     return vec4<f32>(input.mobius_stretch, dof_depth, focus_field, 1.0);
 }
 
@@ -88,20 +92,21 @@ struct PatchPbrMaterial {
 }
 
 fn evaluate_prepared_patch_vertex(
-    frame: PatchRenderFrame,
+    global: PatchRenderGlobal,
+    domain: PatchRenderDomain,
     bary: vec3<f32>,
     record: PreparedPatchRecord,
 ) -> PatchVertexOutput {
     let surface = evaluate_patch_surface(
         PatchRenderTransform(
-            frame.mvp,
-            frame.mv,
-            frame.modes.x,
-            frame.mob_a,
-            frame.mob_b,
-            frame.mob_c,
-            frame.mob_d,
-            frame.camera_pos,
+            global.mvp,
+            global.mv,
+            global.modes.x,
+            domain.mob_a,
+            domain.mob_b,
+            domain.mob_c,
+            domain.mob_d,
+            global.camera_pos_focus,
         ),
         PatchSurfaceInput(
             bary,
@@ -131,7 +136,7 @@ fn evaluate_prepared_patch_vertex(
         surface.bitangent_vs,
         surface.normal_ws,
         surface.position_ws,
-        vec4<f32>(surface.camera_pos_ws, f32(frame.modes.y)),
+        vec4<f32>(surface.camera_pos_ws, f32(global.modes.y)),
         surface.fade,
         surface.tess_bary,
         surface.instance_id,

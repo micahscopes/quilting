@@ -270,14 +270,15 @@ pub fn resident_root_pipeline_descriptors(
     let root_bindings = functional::BindGroupLayoutDescriptor::new(
         0,
         vec![
-            buffer_binding(0, vertex_fragment, false, PATCH_RENDER_FRAME_BYTES, false),
-            buffer_binding(1, vertex, false, PREPARED_PATCH_RECORD_BYTES, false),
-            buffer_binding(2, vertex, false, PACKED_RECORD_BYTES, false),
-            buffer_binding(3, vertex, false, RESIDENT_BUCKET_RANGE_RECORD_BYTES, false),
-            buffer_binding(4, vertex, true, DRAW_BATCH_INDEX_BYTES, true),
-            buffer_binding(5, vertex_fragment, false, PACKED_RECORD_BYTES, false),
-            buffer_binding(6, vertex_fragment, false, 16, false),
-            buffer_binding(7, fragment, false, PATCH_PBR_MATERIAL_BYTES, false),
+            buffer_binding(0, vertex_fragment, false, PATCH_RENDER_GLOBAL_BYTES, false),
+            buffer_binding(1, vertex_fragment, false, PATCH_RENDER_DOMAIN_BYTES, false),
+            buffer_binding(2, vertex, false, PREPARED_PATCH_RECORD_BYTES, false),
+            buffer_binding(3, vertex, false, PACKED_RECORD_BYTES, false),
+            buffer_binding(4, vertex, false, RESIDENT_BUCKET_RANGE_RECORD_BYTES, false),
+            buffer_binding(5, vertex, true, DRAW_BATCH_INDEX_BYTES, true),
+            buffer_binding(6, vertex_fragment, false, PACKED_RECORD_BYTES, false),
+            buffer_binding(7, vertex_fragment, false, 16, false),
+            buffer_binding(8, fragment, false, PATCH_PBR_MATERIAL_BYTES, false),
         ],
     )?;
     let portable_atlas_bindings = functional::BindGroupLayoutDescriptor::new(
@@ -427,6 +428,24 @@ mod resident_pipeline_descriptor_tests {
         }
         assert_eq!(descriptors[0].layout().groups().len(), 3);
         assert_eq!(descriptors[4].layout().groups().len(), 1);
+        let root_entries = descriptors[0].layout().groups()[0].entries();
+        assert_eq!(root_entries.len(), 9);
+        assert_eq!(
+            root_entries[0].kind,
+            functional::BindingKind::StorageBuffer {
+                read_only: true,
+                dynamic_offset: false,
+                minimum_size: PATCH_RENDER_GLOBAL_BYTES,
+            },
+        );
+        assert_eq!(
+            root_entries[1].kind,
+            functional::BindingKind::StorageBuffer {
+                read_only: true,
+                dynamic_offset: false,
+                minimum_size: PATCH_RENDER_DOMAIN_BYTES,
+            },
+        );
         assert_eq!(
             descriptors[0].layout().groups()[0],
             descriptors[4].layout().groups()[0],
@@ -482,12 +501,14 @@ pub struct ResidentRootRenderBindings {
     domain_count: u32,
     pub(super) bucket_count: u32,
     pub(super) bucket_index_uniform_stride: u32,
-    frames: wgpu::Buffer,
+    global_frame: wgpu::Buffer,
+    render_domains: wgpu::Buffer,
     _materials: wgpu::Buffer,
     portable_material_textures: Option<pbr_resources::PbrPortableAtlasBindings>,
     pbr_environment: Option<PbrEnvironmentBindings>,
     pbr_scene_supported: bool,
-    frame_table: Mutex<RetainedFrameTable>,
+    global_frame_table: Mutex<RetainedFrameTable>,
+    render_domain_table: Mutex<RetainedFrameTable>,
     _bucket_index_uniform: wgpu::Buffer,
     visibility_bind_group: wgpu::BindGroup,
     pub(super) bind_group: wgpu::BindGroup,
@@ -830,50 +851,57 @@ impl LodClassifierDevice {
                             render_buffer_layout_visible(
                                 0,
                                 wgpu::BufferBindingType::Storage { read_only: true },
-                                PATCH_RENDER_FRAME_BYTES,
+                                PATCH_RENDER_GLOBAL_BYTES,
+                                false,
+                                wgpu::ShaderStages::VERTEX_FRAGMENT,
+                            ),
+                            render_buffer_layout_visible(
+                                1,
+                                wgpu::BufferBindingType::Storage { read_only: true },
+                                PATCH_RENDER_DOMAIN_BYTES,
                                 false,
                                 wgpu::ShaderStages::VERTEX_FRAGMENT,
                             ),
                             render_buffer_layout(
-                                1,
+                                2,
                                 wgpu::BufferBindingType::Storage { read_only: true },
                                 PREPARED_PATCH_RECORD_BYTES,
                                 false,
                             ),
                             render_buffer_layout(
-                                2,
+                                3,
                                 wgpu::BufferBindingType::Storage { read_only: true },
                                 PACKED_RECORD_BYTES,
                                 false,
                             ),
                             render_buffer_layout(
-                                3,
+                                4,
                                 wgpu::BufferBindingType::Storage { read_only: true },
                                 RESIDENT_BUCKET_RANGE_RECORD_BYTES,
                                 false,
                             ),
                             render_buffer_layout(
-                                4,
+                                5,
                                 wgpu::BufferBindingType::Uniform,
                                 DRAW_BATCH_INDEX_BYTES,
                                 true,
                             ),
                             render_buffer_layout_visible(
-                                5,
+                                6,
                                 wgpu::BufferBindingType::Storage { read_only: true },
                                 PACKED_RECORD_BYTES,
                                 false,
                                 wgpu::ShaderStages::VERTEX_FRAGMENT,
                             ),
                             render_buffer_layout_visible(
-                                6,
+                                7,
                                 wgpu::BufferBindingType::Storage { read_only: true },
                                 16,
                                 false,
                                 wgpu::ShaderStages::VERTEX_FRAGMENT,
                             ),
                             render_buffer_layout_visible(
-                                7,
+                                8,
                                 wgpu::BufferBindingType::Storage { read_only: true },
                                 PATCH_PBR_MATERIAL_BYTES,
                                 false,
@@ -1106,23 +1134,31 @@ impl LodClassifierDevice {
                 "resident root render bindings have incompatible retained domains".to_string(),
             ));
         }
-        let frame_bytes = u64::from(domains.domain_count)
-            .checked_mul(PATCH_RENDER_FRAME_BYTES)
-            .ok_or_else(|| {
-                LodWebGpuError::Payload("resident root frame table is too large".to_string())
-            })?;
-        let frame_word_count = usize::try_from(domains.domain_count)
-            .ok()
-            .and_then(|count| count.checked_mul(PATCH_RENDER_FRAME_WORDS))
+        let render_domain_bytes = u64::from(domains.domain_count)
+            .checked_mul(PATCH_RENDER_DOMAIN_BYTES)
             .ok_or_else(|| {
                 LodWebGpuError::Payload(
-                    "resident root frame staging table exceeds address space".to_string(),
+                    "resident root render-domain table is too large".to_string(),
                 )
             })?;
-        let frames = gpu_buffer(
+        let render_domain_word_count = usize::try_from(domains.domain_count)
+            .ok()
+            .and_then(|count| count.checked_mul(PATCH_RENDER_DOMAIN_WORDS))
+            .ok_or_else(|| {
+                LodWebGpuError::Payload(
+                    "resident root render-domain staging table exceeds address space".to_string(),
+                )
+            })?;
+        let global_frame = gpu_buffer(
             &self.device,
-            "resident root render frame table",
-            frame_bytes,
+            "resident root global frame",
+            PATCH_RENDER_GLOBAL_BYTES,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
+        let render_domains = gpu_buffer(
+            &self.device,
+            "resident root render-domain table",
+            render_domain_bytes,
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         );
         let uniform_alignment = self
@@ -1184,33 +1220,35 @@ impl LodClassifierDevice {
             layout: &visibility_layout,
             entries: &[
                 bind(0, &geometry.uniform),
-                bind(1, &frames),
-                bind(2, &preparation.patches.prepared_records),
-                bind(3, &geometry.root_eligibility),
-                bind(4, &domains.face_domain_rows),
-                bind(5, &domains.domain_records),
-                bind(6, &geometry.root_visibility),
+                bind(1, &global_frame),
+                bind(2, &render_domains),
+                bind(3, &preparation.patches.prepared_records),
+                bind(4, &geometry.root_eligibility),
+                bind(5, &domains.face_domain_rows),
+                bind(6, &domains.domain_records),
+                bind(7, &geometry.root_visibility),
             ],
         });
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("quilting resident root render bindings"),
             layout: &pipeline.bind_group_layout,
             entries: &[
-                bind(0, &frames),
-                bind(1, &preparation.patches.prepared_records),
-                bind(2, &geometry.compacted_faces),
-                bind(3, &geometry.bucket_ranges),
+                bind(0, &global_frame),
+                bind(1, &render_domains),
+                bind(2, &preparation.patches.prepared_records),
+                bind(3, &geometry.compacted_faces),
+                bind(4, &geometry.bucket_ranges),
                 wgpu::BindGroupEntry {
-                    binding: 4,
+                    binding: 5,
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                         buffer: &bucket_index_uniform,
                         offset: 0,
                         size: std::num::NonZeroU64::new(DRAW_BATCH_INDEX_BYTES),
                     }),
                 },
-                bind(5, &domains.face_domain_rows),
-                bind(6, &domains.domain_records),
-                bind(7, &material_buffer),
+                bind(6, &domains.face_domain_rows),
+                bind(7, &domains.domain_records),
+                bind(8, &material_buffer),
             ],
         });
         Ok(ResidentRootRenderBindings {
@@ -1219,12 +1257,22 @@ impl LodClassifierDevice {
             domain_count: domains.domain_count,
             bucket_count: geometry.bucket_count,
             bucket_index_uniform_stride,
-            frames,
+            global_frame,
+            render_domains,
             _materials: material_buffer,
             portable_material_textures,
             pbr_environment,
             pbr_scene_supported,
-            frame_table: Mutex::new(RetainedFrameTable::new(frame_word_count, frame_bytes)),
+            global_frame_table: Mutex::new(RetainedFrameTable::new(
+                PATCH_RENDER_GLOBAL_WORDS,
+                PATCH_RENDER_GLOBAL_WORDS,
+                PATCH_RENDER_GLOBAL_BYTES,
+            )),
+            render_domain_table: Mutex::new(RetainedFrameTable::new(
+                render_domain_word_count,
+                PATCH_RENDER_DOMAIN_WORDS,
+                render_domain_bytes,
+            )),
             _bucket_index_uniform: bucket_index_uniform,
             visibility_bind_group,
             bind_group,
@@ -1246,31 +1294,55 @@ impl LodClassifierDevice {
                 "resident root render frames belong to a different domain table".to_string(),
             ));
         }
-        let mut table = bindings.frame_table.lock().map_err(|_| {
-            LodWebGpuError::Payload("resident root frame staging lock was poisoned".to_string())
+        let global_words = PatchRenderGlobal::from_render_frame(frame, use_qb).to_words()?;
+        let mut global_table = bindings.global_frame_table.lock().map_err(|_| {
+            LodWebGpuError::Payload(
+                "resident root global-frame staging lock was poisoned".to_string(),
+            )
         })?;
-        let mut changed = table.begin_update();
+        let mut global_changed = global_table.begin_update();
+        global_changed |= global_table.replace_row(0, &global_words);
+        let global_publication = global_table.commit(global_changed);
+        if matches!(global_publication, FrameTablePublication::Upload { .. }) {
+            self.queue.write_buffer(
+                &bindings.global_frame,
+                0,
+                bytemuck::cast_slice(global_table.words.as_slice()),
+            );
+        }
+        self.record_frame_table_publication(global_publication);
+
+        let mut domain_table = bindings.render_domain_table.lock().map_err(|_| {
+            LodWebGpuError::Payload(
+                "resident root render-domain staging lock was poisoned".to_string(),
+            )
+        })?;
+        let mut domains_changed = domain_table.begin_update();
         for (row, domain) in domains.domains.iter().enumerate() {
-            let words = match PatchRenderFrame::from_transform(frame, domain.transform, use_qb)
-                .to_words()
-            {
+            let words = match u32::try_from(domain.material_index)
+                .map_err(|_| {
+                    LodWebGpuError::Payload("resident root material slot exceeds u32".to_string())
+                })
+                .and_then(|material_slot| {
+                    PatchRenderDomain::from_transform(domain.transform, material_slot).to_words()
+                }) {
                 Ok(words) => words,
                 Err(error) => {
-                    table.invalidate();
+                    domain_table.invalidate();
                     return Err(error);
                 }
             };
-            changed |= table.replace_row(row, &words);
+            domains_changed |= domain_table.replace_row(row, &words);
         }
-        let publication = table.commit(changed);
-        if matches!(publication, FrameTablePublication::Upload { .. }) {
+        let domain_publication = domain_table.commit(domains_changed);
+        if matches!(domain_publication, FrameTablePublication::Upload { .. }) {
             self.queue.write_buffer(
-                &bindings.frames,
+                &bindings.render_domains,
                 0,
-                bytemuck::cast_slice(table.words.as_slice()),
+                bytemuck::cast_slice(domain_table.words.as_slice()),
             );
         }
-        self.record_frame_table_publication(publication);
+        self.record_frame_table_publication(domain_publication);
         Ok(())
     }
 

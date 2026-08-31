@@ -1,4 +1,4 @@
-#import quilting::render::patch_vertex::{PatchPbrMaterial, PatchRenderFrame, PatchVertexOutput, evaluate_prepared_patch_vertex, patch_focus_raw_field, shade_patch_highlight, shade_patch_lod, shade_patch_matcap, shade_patch_normals, shade_patch_stretch, shade_patch_wire}
+#import quilting::render::patch_vertex::{PatchPbrMaterial, PatchRenderDomain, PatchRenderGlobal, PatchVertexOutput, evaluate_prepared_patch_vertex, patch_focus_raw_field, shade_patch_highlight, shade_patch_lod, shade_patch_matcap, shade_patch_normals, shade_patch_stretch, shade_patch_wire}
 #import quilting::render::patch_pbr_portable::shade_portable_patch_pbr
 #import quilting::surface::patch_prepare::PreparedPatchRecord
 #import quilting::compute::resident_bucket_types::{ResidentBucketRangeRecord, ResidentDrawDomainRecord}
@@ -10,14 +10,15 @@ struct DrawRootBucketIndex {
     _padding_c: u32,
 }
 
-@group(0) @binding(0) var<storage, read> frames: array<PatchRenderFrame>;
-@group(0) @binding(1) var<storage, read> prepared_records: array<PreparedPatchRecord>;
-@group(0) @binding(2) var<storage, read> compacted_faces: array<u32>;
-@group(0) @binding(3) var<storage, read> bucket_ranges: array<ResidentBucketRangeRecord>;
-@group(0) @binding(4) var<uniform> draw_bucket: DrawRootBucketIndex;
-@group(0) @binding(5) var<storage, read> face_domain_rows: array<u32>;
-@group(0) @binding(6) var<storage, read> draw_domains: array<ResidentDrawDomainRecord>;
-@group(0) @binding(7) var<storage, read> pbr_materials: array<PatchPbrMaterial>;
+@group(0) @binding(0) var<storage, read> global_frame: array<PatchRenderGlobal>;
+@group(0) @binding(1) var<storage, read> render_domains: array<PatchRenderDomain>;
+@group(0) @binding(2) var<storage, read> prepared_records: array<PreparedPatchRecord>;
+@group(0) @binding(3) var<storage, read> compacted_faces: array<u32>;
+@group(0) @binding(4) var<storage, read> bucket_ranges: array<ResidentBucketRangeRecord>;
+@group(0) @binding(5) var<uniform> draw_bucket: DrawRootBucketIndex;
+@group(0) @binding(6) var<storage, read> face_domain_rows: array<u32>;
+@group(0) @binding(7) var<storage, read> draw_domains: array<ResidentDrawDomainRecord>;
+@group(0) @binding(8) var<storage, read> pbr_materials: array<PatchPbrMaterial>;
 
 struct ResidentRootVertexInput {
     @location(0) bary: vec3<f32>,
@@ -34,7 +35,8 @@ fn render_resident_root_vertex(
     let domain_row = face_domain_rows[source_face];
     let domain = draw_domains[domain_row];
     var output = evaluate_prepared_patch_vertex(
-        frames[domain_row],
+        global_frame[0],
+        render_domains[domain_row],
         input.bary,
         prepared_records[source_face],
     );
@@ -77,9 +79,7 @@ fn render_resident_root_wire(input: PatchVertexOutput) -> @location(0) vec4<f32>
 
 @fragment
 fn render_resident_root_highlight(input: PatchVertexOutput) -> @location(0) vec4<f32> {
-    let source_face = u32(max(round(input.instance_id), 0.0));
-    let domain_row = face_domain_rows[source_face];
-    return shade_patch_highlight(input, frames[domain_row].selection.x);
+    return shade_patch_highlight(input, bitcast<u32>(global_frame[0].modes.w));
 }
 
 @fragment
@@ -101,7 +101,7 @@ fn render_resident_root_pbr(
         input,
         pbr_materials[material_index],
         material_index,
-        frames[domain_row].modes.w,
+        global_frame[0].modes.z,
     );
 }
 
@@ -124,15 +124,15 @@ fn render_resident_root_pbr_focus(
         domain.material_index,
         domain.material_index < material_count,
     );
-    let frame = frames[domain_row];
+    let global = global_frame[0];
     return ResidentRootPbrFocusOutput(
         shade_portable_patch_pbr(
             front_facing,
             input,
             pbr_materials[material_index],
             material_index,
-            frame.modes.w,
+            global.modes.z,
         ),
-        patch_focus_raw_field(input, frame),
+        patch_focus_raw_field(input, global),
     );
 }

@@ -18,7 +18,7 @@ pub struct AdaptiveOverlayScene {
     pub(super) patches: PatchPreparationScene,
     pub(super) visibility: VisibilityCompactionScene,
     pub(super) bindings: PatchRenderBindings,
-    _patch_frame_rows: wgpu::Buffer,
+    _patch_domain_rows: wgpu::Buffer,
     prepared_visibility_bind_group: wgpu::BindGroup,
     pbr_scene_supported: bool,
 }
@@ -275,21 +275,21 @@ impl LodClassifierDevice {
             .iter()
             .map(|&index| scene.batches[index as usize].clone())
             .collect::<Vec<_>>();
-        let mut patch_frame_rows = Vec::with_capacity(patches.patch_count as usize);
+        let mut patch_domain_rows = Vec::with_capacity(patches.patch_count as usize);
         for (frame_row, batch) in batches.iter().enumerate() {
             let frame_row = u32::try_from(frame_row)
                 .map_err(|_| LodWebGpuError::Payload("adaptive frame row exceeds u32".into()))?;
-            patch_frame_rows.extend(std::iter::repeat_n(frame_row, batch.members.len()));
+            patch_domain_rows.extend(std::iter::repeat_n(frame_row, batch.members.len()));
         }
-        if patch_frame_rows.len() != patches.patch_count as usize {
+        if patch_domain_rows.len() != patches.patch_count as usize {
             return Err(LodWebGpuError::Payload(
                 "adaptive frame rows do not cover the prepared patch domain".to_string(),
             ));
         }
-        let patch_frame_rows = buffer_init_or_zero(
+        let patch_domain_rows = buffer_init_or_zero(
             &self.device,
-            "adaptive patch frame rows",
-            bytemuck::cast_slice(&patch_frame_rows),
+            "adaptive patch domain rows",
+            bytemuck::cast_slice(&patch_domain_rows),
             wgpu::BufferUsages::STORAGE,
         );
         let prepared_visibility_layout = self.prepared_visibility_pipeline.get_bind_group_layout(0);
@@ -299,10 +299,11 @@ impl LodClassifierDevice {
                 layout: &prepared_visibility_layout,
                 entries: &[
                     bind(0, &patches.uniform),
-                    bind(1, &bindings.frames),
-                    bind(2, &patches.prepared_records),
-                    bind(3, &patch_frame_rows),
-                    bind(4, &visibility.source_visibility),
+                    bind(1, &bindings.global_frame),
+                    bind(2, &bindings.domains),
+                    bind(3, &patches.prepared_records),
+                    bind(4, &patch_domain_rows),
+                    bind(5, &visibility.source_visibility),
                 ],
             });
         Ok(Some(AdaptiveOverlayScene {
@@ -314,7 +315,7 @@ impl LodClassifierDevice {
             patches,
             visibility,
             bindings,
-            _patch_frame_rows: patch_frame_rows,
+            _patch_domain_rows: patch_domain_rows,
             prepared_visibility_bind_group,
             pbr_scene_supported: pipeline.style() == Some(RenderStyle::Pbr)
                 && supports_basic_pbr_frame(scene, RenderFrameOptions::default()),
@@ -361,30 +362,24 @@ impl LodClassifierDevice {
         overlay: &AdaptiveOverlayScene,
         use_qb: bool,
     ) -> Result<(), LodWebGpuError> {
-        let mut table = overlay.bindings.frame_table.lock().map_err(|_| {
-            LodWebGpuError::Payload("adaptive overlay frame lock was poisoned".to_string())
-        })?;
-        let mut changed = table.begin_update();
-        for (row, batch) in overlay.batches.iter().enumerate() {
-            let words = match PatchRenderFrame::from_render_frame(frame, batch, use_qb).to_words() {
-                Ok(words) => words,
-                Err(error) => {
-                    table.invalidate();
-                    return Err(error);
-                }
-            };
-            changed |= table.replace_row(row, &words);
-        }
-        let publication = table.commit(changed);
-        if matches!(publication, FrameTablePublication::Upload { .. }) {
-            self.queue.write_buffer(
-                &overlay.bindings.frames,
-                0,
-                bytemuck::cast_slice(table.words.as_slice()),
-            );
-        }
-        self.record_frame_table_publication(publication);
-        Ok(())
+        self.write_patch_render_frame_parts(
+            &overlay.bindings,
+            PatchRenderGlobal::from_render_frame(frame, use_qb),
+            overlay.batches.iter().map(|batch| {
+                let requested = u32::try_from(batch.id.key.material_index).map_err(|_| {
+                    LodWebGpuError::Payload("adaptive material slot exceeds u32".to_string())
+                })?;
+                let material_slot = if requested < overlay.bindings.material_count {
+                    requested
+                } else {
+                    0
+                };
+                Ok(PatchRenderDomain::from_transform(
+                    batch.transform,
+                    material_slot,
+                ))
+            }),
+        )
     }
 
     fn encode_adaptive_overlay_visibility(

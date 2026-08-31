@@ -1,4 +1,4 @@
-#import quilting::render::patch_vertex::{PatchPbrMaterial, PatchRenderFrame, PatchVertexOutput, evaluate_prepared_patch_vertex}
+#import quilting::render::patch_vertex::{PatchPbrMaterial, PatchRenderDomain, PatchRenderGlobal, PatchVertexOutput, evaluate_prepared_patch_vertex}
 #import quilting::render::patch_pick_packet::{PatchPickOutput, PatchPickViewport, encode_patch_pick, remap_patch_pick_clip}
 #import quilting::surface::patch_prepare::PreparedPatchRecord
 #import quilting::compute::resident_bucket_types::{ResidentBucketRangeRecord, ResidentDrawDomainRecord}
@@ -13,14 +13,15 @@ struct DrawRootBucketIndex {
 // Group zero deliberately matches the resident-root render family, including
 // its PBR-material slot. The query therefore consumes the current source-face
 // buckets without publishing a second root scene.
-@group(0) @binding(0) var<storage, read> frames: array<PatchRenderFrame>;
-@group(0) @binding(1) var<storage, read> prepared_records: array<PreparedPatchRecord>;
-@group(0) @binding(2) var<storage, read> compacted_faces: array<u32>;
-@group(0) @binding(3) var<storage, read> bucket_ranges: array<ResidentBucketRangeRecord>;
-@group(0) @binding(4) var<uniform> draw_bucket: DrawRootBucketIndex;
-@group(0) @binding(5) var<storage, read> face_domain_rows: array<u32>;
-@group(0) @binding(6) var<storage, read> draw_domains: array<ResidentDrawDomainRecord>;
-@group(0) @binding(7) var<storage, read> _pbr_materials: array<PatchPbrMaterial>;
+@group(0) @binding(0) var<storage, read> global_frame: array<PatchRenderGlobal>;
+@group(0) @binding(1) var<storage, read> render_domains: array<PatchRenderDomain>;
+@group(0) @binding(2) var<storage, read> prepared_records: array<PreparedPatchRecord>;
+@group(0) @binding(3) var<storage, read> compacted_faces: array<u32>;
+@group(0) @binding(4) var<storage, read> bucket_ranges: array<ResidentBucketRangeRecord>;
+@group(0) @binding(5) var<uniform> draw_bucket: DrawRootBucketIndex;
+@group(0) @binding(6) var<storage, read> face_domain_rows: array<u32>;
+@group(0) @binding(7) var<storage, read> draw_domains: array<ResidentDrawDomainRecord>;
+@group(0) @binding(8) var<storage, read> _pbr_materials: array<PatchPbrMaterial>;
 
 @group(1) @binding(0) var<uniform> pick_viewport: PatchPickViewport;
 
@@ -39,7 +40,8 @@ fn render_resident_root_pick_vertex(
     let domain_row = face_domain_rows[source_face];
     let domain = draw_domains[domain_row];
     var output = evaluate_prepared_patch_vertex(
-        frames[domain_row],
+        global_frame[0],
+        render_domains[domain_row],
         input.bary,
         prepared_records[source_face],
     );

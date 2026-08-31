@@ -19,8 +19,8 @@ and conformal entity transforms represented by a frame table remain exact.
 
 ## Contract
 
-Each retained frame table now owns its last packed words and an explicit
-publication witness. Packing compares every complete 64-word record with the
+Each retained global/domain table now owns its last packed words and an
+explicit publication witness. Packing compares every complete record with the
 resident staging row:
 
 - the first valid table always uploads, including a hypothetically all-zero
@@ -36,19 +36,20 @@ frame-record vector remains in the production encoder.
 ## Bounded traffic result
 
 Let `B`, `D`, and `O` be fallback batches, resident root domains, and adaptive
-overlay batches. Each record is 256 bytes.
+overlay batches. The later split-frame contract stores a 176-byte global row
+per family and an 80-byte local row per batch/domain.
 
 | Steady-state case | Before | After |
 | --- | ---: | ---: |
 | Animation-only fallback frame | `256B` bytes | `0` bytes |
 | Animation-only resident roots | `256D` bytes | `0` bytes |
 | Animation-only roots + overlay | `256(D+O)` bytes | `0` bytes |
-| Camera/focus/conformal-frame change | same table bytes | same table bytes |
+| Camera/focus change, per family | `256N` bytes | `176` bytes |
+| Local conformal/material change | `256N` bytes | `80N` bytes |
 
-The last row is intentionally unchanged: camera state is genuinely different.
-The next architectural reduction is to split frame-global camera/focus words
-from batch-local Möbius/material words, so camera motion does not replicate its
-payload across every domain.
+The first three rows are the exact-word memo result. The final two include the
+subsequent lossless split of frame-global camera/focus words from batch-local
+Möbius/material words; see `2026-08-31-webgpu-split-frame-state.md`.
 
 Device-lifetime diagnostics expose `frameTableUploads`, `frameTableReuses`, and
 `frameTableUploadBytes`, including writes made before a presentation skip.

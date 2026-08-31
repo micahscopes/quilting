@@ -1205,7 +1205,7 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
                 .iter()
                 .map(|binding| (binding.group, binding.binding))
                 .collect::<Vec<_>>(),
-            vec![(0, 0), (0, 1), (0, 2), (0, 3), (0, 4), (1, 0)],
+            vec![(0, 0), (0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (1, 0)],
         );
         assert!(reflect_graphics_entry_bindings(
             &module,
@@ -1260,6 +1260,7 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
                 (0, 4),
                 (0, 5),
                 (0, 6),
+                (0, 7),
                 (1, 0),
             ],
         );
@@ -1313,7 +1314,7 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
                 .iter()
                 .filter(|(_, variable)| variable.binding.is_some())
                 .count(),
-            20,
+            21,
             "the unsampled transmission texture pair is absent from shader reflection",
         );
         let mut layouter = naga::proc::Layouter::default();
@@ -1321,7 +1322,8 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             .update(module.to_ctx())
             .expect("patch render layouts");
         for (name, expected_size) in [
-            ("PatchRenderFrame", 256),
+            ("PatchRenderGlobal", 176),
+            ("PatchRenderDomain", 80),
             ("PatchPbrMaterial", 160),
             ("PbrEnvironmentUniform", 16),
             ("DrawBatchIndex", 16),
@@ -1458,8 +1460,8 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
                 .iter()
                 .filter(|(_, variable)| variable.binding.is_some())
                 .count(),
-            15,
-            "eight resident bindings, three portable texture bindings, and four environment bindings",
+            16,
+            "nine resident bindings, three portable texture bindings, and four environment bindings",
         );
         let entries = module
             .entry_points
@@ -1512,7 +1514,8 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             .update(module.to_ctx())
             .expect("resident root render layouts");
         for (name, expected_size) in [
-            ("PatchRenderFrame", 256),
+            ("PatchRenderGlobal", 176),
+            ("PatchRenderDomain", 80),
             ("DrawRootBucketIndex", 16),
             ("ResidentBucketRangeRecord", 20),
             ("ResidentDrawDomainRecord", 16),

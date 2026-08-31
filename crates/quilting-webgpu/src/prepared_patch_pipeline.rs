@@ -10,7 +10,8 @@ use crate::functional_pipeline::{
 use crate::pbr_resources::PBR_TEXTURE_CHANNELS;
 use crate::{
     DRAW_BATCH_INDEX_BYTES, PACKED_RECORD_BYTES, PATCH_PBR_MATERIAL_BYTES,
-    PATCH_RENDER_FRAME_BYTES, PREPARED_PATCH_RECORD_BYTES, VISIBILITY_RANGE_RECORD_BYTES,
+    PATCH_RENDER_DOMAIN_BYTES, PATCH_RENDER_GLOBAL_BYTES, PREPARED_PATCH_RECORD_BYTES,
+    VISIBILITY_RANGE_RECORD_BYTES,
 };
 use quilting_core::render::{RenderGeometry, RenderStyle};
 use quilting_core::render_pipeline as functional;
@@ -170,12 +171,13 @@ fn prepared_bindings(
     Ok(functional::BindGroupLayoutDescriptor::new(
         0,
         vec![
-            buffer_binding(0, vertex_fragment, false, PATCH_RENDER_FRAME_BYTES, false),
-            buffer_binding(1, vertex, false, PREPARED_PATCH_RECORD_BYTES, false),
-            buffer_binding(2, vertex, false, PACKED_RECORD_BYTES, false),
-            buffer_binding(3, vertex, false, VISIBILITY_RANGE_RECORD_BYTES, false),
-            buffer_binding(4, vertex_fragment, true, DRAW_BATCH_INDEX_BYTES, true),
-            buffer_binding(5, fragment, false, PATCH_PBR_MATERIAL_BYTES, false),
+            buffer_binding(0, vertex_fragment, false, PATCH_RENDER_GLOBAL_BYTES, false),
+            buffer_binding(1, vertex_fragment, false, PATCH_RENDER_DOMAIN_BYTES, false),
+            buffer_binding(2, vertex, false, PREPARED_PATCH_RECORD_BYTES, false),
+            buffer_binding(3, vertex, false, PACKED_RECORD_BYTES, false),
+            buffer_binding(4, vertex, false, VISIBILITY_RANGE_RECORD_BYTES, false),
+            buffer_binding(5, vertex_fragment, true, DRAW_BATCH_INDEX_BYTES, true),
+            buffer_binding(6, fragment, false, PATCH_PBR_MATERIAL_BYTES, false),
         ],
     )?)
 }
@@ -376,6 +378,26 @@ mod tests {
         let pbr = &descriptors[0];
         assert_eq!(pbr.layout().groups().len(), 3);
         assert_eq!(pbr.layout().groups()[1].entries().len(), 12);
+        let root_entries = pbr.layout().groups()[0].entries();
+        assert_eq!(root_entries.len(), 7);
+        assert_eq!(root_entries[0].binding, 0);
+        assert_eq!(root_entries[1].binding, 1);
+        assert_eq!(
+            root_entries[0].kind,
+            functional::BindingKind::StorageBuffer {
+                read_only: true,
+                dynamic_offset: false,
+                minimum_size: PATCH_RENDER_GLOBAL_BYTES,
+            },
+        );
+        assert_eq!(
+            root_entries[1].kind,
+            functional::BindingKind::StorageBuffer {
+                read_only: true,
+                dynamic_offset: false,
+                minimum_size: PATCH_RENDER_DOMAIN_BYTES,
+            },
+        );
         assert_eq!(descriptors[2].layout().groups().len(), 1);
         assert_eq!(
             pbr.layout().groups()[0],

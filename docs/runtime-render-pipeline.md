@@ -219,16 +219,18 @@ no longer retains comparison copies of the joint and morph vectors.
 and `residentPoseUploads/Initializations/Reuses` expose the bounded paths. A
 model replacement still forces a full upload, while a scene/preparation change
 forces only its local uniform initialization when the device pose is current.
-Retained fallback, resident-root, and adaptive-overlay frame tables likewise
-compare their exact packed 64-word rows before queue publication. An
-animation-only frame therefore reuses camera/conformal tables rather than
-resending 256 bytes per batch or domain; a packing failure invalidates the
-witness before returning. Fallback packing writes directly into retained
-staging storage instead of allocating an intermediate frame vector.
+Retained fallback, resident-root, and adaptive-overlay frame state is split
+losslessly into one 176-byte `PatchRenderGlobal` row and 80-byte
+`PatchRenderDomain` rows. Each table compares exact packed words before queue
+publication. An animation-only frame therefore reuses both halves; camera,
+focus, and selection motion uploads 176 bytes per retained family instead of
+resending 256 bytes per batch/domain; local Möbius or material changes upload
+only the compact domain table. A packing failure invalidates only the affected
+witness. Fallback packing writes directly into retained staging storage
+instead of allocating an intermediate frame vector. The same pair drives
+rendering, visibility, focus-field output, and both picking paths.
 `frameTableUploads`, `frameTableReuses`, and `frameTableUploadBytes` report the
-device-lifetime traffic, including work preceding a surface skip. Camera or
-focus changes still republish the tables; splitting frame-global view words
-from domain-local transform/material words remains the next bounded reduction.
+device-lifetime traffic, including work preceding a surface skip.
 `resolvedExecutionFrames`, `resolvedExecutionFallbacks`, and
 `lastExecutionError` make that gate observable through the existing render
 shadow diagnostics. Shadow scene validation and WebGL PBR lowering now happen

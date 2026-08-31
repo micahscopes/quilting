@@ -24,7 +24,9 @@ for (const required of [
   'frame_table_reuses: AtomicU64',
   'frame_table_upload_bytes: AtomicU64',
   'pub fn frame_table_memo_diagnostics',
-  'self.write_patch_render_frame_results(',
+  'self.write_patch_render_frame_parts(',
+  'global_frame_table: Mutex<RetainedFrameTable>',
+  'domain_table: Mutex<RetainedFrameTable>',
 ]) {
   assert.ok(webgpu.includes(required), `frame-table memo is missing ${required}`);
 }
@@ -36,22 +38,20 @@ assert.ok(frameEncoderStart >= 0 && frameEncoderEnd > frameEncoderStart,
   'could not isolate retained frame encoding');
 assert.ok(!frameEncoder.includes('collect::<Result<Vec<_>, LodWebGpuError>>()?'),
   'production fallback encoding must not allocate a temporary frame vector');
-assert.ok(frameEncoder.includes('self.write_patch_render_frame_results('),
+assert.ok(frameEncoder.includes('self.write_patch_render_frame_parts('),
   'fallback batches must pack directly into retained staging words');
 
-for (const [name, source] of [
-  ['resident roots', roots],
-  ['adaptive overlay', overlay],
-]) {
-  assert.ok(source.includes('let mut changed = table.begin_update();'),
-    `${name} must compare against retained words`);
-  assert.ok(source.includes('changed |= table.replace_row('),
-    `${name} must memoize every exact packed row`);
-  assert.ok(source.includes('table.invalidate();'),
-    `${name} must invalidate partial staging after a packing failure`);
-  assert.ok(source.includes('self.record_frame_table_publication(publication);'),
-    `${name} must expose actual queue traffic`);
-}
+assert.ok(roots.includes('let mut global_changed = global_table.begin_update();'),
+  'resident roots must memoize their global frame');
+assert.ok(roots.includes('let mut domains_changed = domain_table.begin_update();'),
+  'resident roots must memoize their local domains');
+assert.ok(roots.includes('domain_table.invalidate();'),
+  'resident roots must invalidate partial local staging after failure');
+assert.ok(roots.includes('self.record_frame_table_publication(global_publication);')
+  && roots.includes('self.record_frame_table_publication(domain_publication);'),
+  'resident roots must expose both publications');
+assert.ok(overlay.includes('self.write_patch_render_frame_parts('),
+  'adaptive overlays must use the shared retained split-frame memo');
 
 for (const required of [
   'frame_table_uploads: u64',

@@ -548,7 +548,7 @@ impl LodClassifierDevice {
                     .any(|(&source, batch)| scene.batches.get(source as usize) != Some(batch))
                 || overlay.visibility.batch_count != overlay.batches.len() as u32
                 || overlay.visibility.source_count != expected_sources
-                || overlay.bindings.frame_count != overlay.batches.len() as u32
+                || overlay.bindings.domain_count != overlay.batches.len() as u32
                 || overlay.patches.patch_count != expected_sources
             {
                 return Err(LodWebGpuError::Payload(
@@ -758,7 +758,7 @@ impl LodClassifierDevice {
         })?;
         if visibility.batch_count != expected_batches
             || visibility.source_count != expected_sources
-            || bindings.frame_count != expected_batches
+            || bindings.domain_count != expected_batches
             || patches.patch_count != expected_sources
         {
             return Err(LodWebGpuError::Payload(

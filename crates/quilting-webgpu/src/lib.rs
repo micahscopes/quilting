@@ -122,8 +122,10 @@ const PREPARED_PATCH_RECORD_WORDS: usize = 52;
 const PREPARED_PATCH_RECORD_BYTES: u64 = 208;
 const PATCH_SUBJECT_RECORD_BYTES: u64 = 128;
 const PATCH_SUBJECT_RECORD_WORDS: usize = 32;
-const PATCH_RENDER_FRAME_WORDS: usize = 64;
-const PATCH_RENDER_FRAME_BYTES: u64 = 256;
+const PATCH_RENDER_GLOBAL_WORDS: usize = 44;
+const PATCH_RENDER_GLOBAL_BYTES: u64 = 176;
+const PATCH_RENDER_DOMAIN_WORDS: usize = 20;
+const PATCH_RENDER_DOMAIN_BYTES: u64 = 80;
 const PATCH_PBR_MATERIAL_WORDS: usize = 40;
 const PATCH_PBR_MATERIAL_BYTES: u64 = 160;
 
@@ -362,73 +364,42 @@ pub struct VisibilityCompactionOutput {
     pub line_indirect_arguments: Vec<[u32; 5]>,
 }
 
-/// Backend-neutral dynamic values consumed by the WebGPU prepared-surface
-/// evaluator. Matrices use the same column-major convention as WebGL2.
+/// Frame-global dynamic values consumed once by every prepared-surface domain.
+/// Matrices use the same column-major convention as WebGL2.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PatchRenderFrame {
+pub struct PatchRenderGlobal {
     pub mvp: [f32; 16],
     pub mv: [f32; 16],
     pub use_qb: bool,
     pub matcap_style: quilting_core::render::MatcapStyle,
-    pub material_slot: u32,
     pub selected_node: Option<u32>,
     pub selected_face: Option<u32>,
-    pub mobius: [f32; 16],
     pub camera_position: [f32; 3],
     pub focus: FocusFieldPacket,
 }
 
-impl PatchRenderFrame {
-    /// Derive one backend record from the shared frame and a retained batch.
-    /// Affine model/normal state was already consumed by patch preparation;
-    /// only the batch-local conformal map remains dynamic at evaluation time.
-    pub fn from_render_frame(
-        frame: &RenderFrame,
-        batch: &quilting_core::render::RenderBatchSnapshot,
-        use_qb: bool,
-    ) -> Self {
-        Self::from_render_frame_with_material_slot(frame, batch, use_qb, 0)
-    }
-
-    pub fn from_render_frame_with_material_slot(
-        frame: &RenderFrame,
-        batch: &quilting_core::render::RenderBatchSnapshot,
-        use_qb: bool,
-        material_slot: u32,
-    ) -> Self {
-        let mut record = Self::from_transform(frame, batch.transform, use_qb);
-        record.material_slot = material_slot;
-        record
-    }
-
-    pub fn from_transform(
-        frame: &RenderFrame,
-        transform: RenderEntityTransform,
-        use_qb: bool,
-    ) -> Self {
+impl PatchRenderGlobal {
+    pub fn from_render_frame(frame: &RenderFrame, use_qb: bool) -> Self {
         Self {
             mvp: frame.view.mvp,
             mv: frame.view.model_view,
             use_qb,
             matcap_style: frame.options.matcap_style,
-            material_slot: 0,
             selected_node: frame
                 .view
                 .selected_node
                 .and_then(|node| node.try_into().ok()),
             selected_face: frame.options.highlight_face,
-            mobius: transform.mobius,
             camera_position: frame.view.camera_position,
             focus: frame.view.focus,
         }
     }
 
-    fn to_words(self) -> Result<[u32; PATCH_RENDER_FRAME_WORDS], LodWebGpuError> {
+    fn to_words(self) -> Result<[u32; PATCH_RENDER_GLOBAL_WORDS], LodWebGpuError> {
         if self
             .mvp
             .into_iter()
             .chain(self.mv)
-            .chain(self.mobius)
             .chain(self.camera_position)
             .chain(self.focus.sphere)
             .any(|value| !value.is_finite())
@@ -438,7 +409,7 @@ impl PatchRenderFrame {
                 "patch render frame contains non-finite values".to_string(),
             ));
         }
-        let mut words = [0u32; PATCH_RENDER_FRAME_WORDS];
+        let mut words = [0u32; PATCH_RENDER_GLOBAL_WORDS];
         for (word, value) in words[..16].iter_mut().zip(self.mvp) {
             *word = value.to_bits();
         }
@@ -447,20 +418,88 @@ impl PatchRenderFrame {
         }
         words[32] = u32::from(self.use_qb);
         words[33] = self.matcap_style.as_u32();
-        words[34] = self.material_slot;
-        words[35] = self.selected_node.unwrap_or(u32::MAX);
-        words[36] = self.selected_face.unwrap_or(u32::MAX);
-        words[37] = u32::from(self.focus.enabled);
-        for (word, value) in words[40..56].iter_mut().zip(self.mobius) {
+        words[34] = self.selected_node.unwrap_or(u32::MAX);
+        words[35] = self.selected_face.unwrap_or(u32::MAX);
+        for (word, value) in words[36..39].iter_mut().zip(self.camera_position) {
             *word = value.to_bits();
         }
-        for (word, value) in words[56..59].iter_mut().zip(self.camera_position) {
-            *word = value.to_bits();
-        }
-        for (word, value) in words[60..64].iter_mut().zip(self.focus.sphere) {
+        words[39] = f32::from(u8::from(self.focus.enabled)).to_bits();
+        for (word, value) in words[40..44].iter_mut().zip(self.focus.sphere) {
             *word = value.to_bits();
         }
         Ok(words)
+    }
+}
+
+/// Batch/domain-local values. Affine model/normal state was already consumed
+/// by patch preparation; only the conformal map and material row vary here.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PatchRenderDomain {
+    pub mobius: [f32; 16],
+    pub material_slot: u32,
+}
+
+impl PatchRenderDomain {
+    pub fn from_transform(transform: RenderEntityTransform, material_slot: u32) -> Self {
+        Self {
+            mobius: transform.mobius,
+            material_slot,
+        }
+    }
+
+    fn to_words(self) -> Result<[u32; PATCH_RENDER_DOMAIN_WORDS], LodWebGpuError> {
+        if self.mobius.into_iter().any(|value| !value.is_finite()) {
+            return Err(LodWebGpuError::Payload(
+                "patch render domain contains non-finite values".to_string(),
+            ));
+        }
+        let mut words = [0u32; PATCH_RENDER_DOMAIN_WORDS];
+        for (word, value) in words[..16].iter_mut().zip(self.mobius) {
+            *word = value.to_bits();
+        }
+        words[16] = self.material_slot;
+        Ok(words)
+    }
+}
+
+/// Lossless semantic pair used by compatibility fixtures and callers that
+/// prepare one complete retained domain at a time.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PatchRenderFrame {
+    pub global: PatchRenderGlobal,
+    pub domain: PatchRenderDomain,
+}
+
+impl PatchRenderFrame {
+    pub fn from_render_frame(
+        frame: &RenderFrame,
+        batch: &RenderBatchSnapshot,
+        use_qb: bool,
+    ) -> Self {
+        Self::from_render_frame_with_material_slot(frame, batch, use_qb, 0)
+    }
+
+    pub fn from_render_frame_with_material_slot(
+        frame: &RenderFrame,
+        batch: &RenderBatchSnapshot,
+        use_qb: bool,
+        material_slot: u32,
+    ) -> Self {
+        Self {
+            global: PatchRenderGlobal::from_render_frame(frame, use_qb),
+            domain: PatchRenderDomain::from_transform(batch.transform, material_slot),
+        }
+    }
+
+    pub fn from_transform(
+        frame: &RenderFrame,
+        transform: RenderEntityTransform,
+        use_qb: bool,
+    ) -> Self {
+        Self {
+            global: PatchRenderGlobal::from_render_frame(frame, use_qb),
+            domain: PatchRenderDomain::from_transform(transform, 0),
+        }
     }
 }
 
@@ -577,15 +616,19 @@ mod patch_pbr_material_tests {
 
     #[test]
     fn retained_frame_table_publishes_once_and_reuses_exact_words() {
-        let mut table = RetainedFrameTable::new(PATCH_RENDER_FRAME_WORDS, PATCH_RENDER_FRAME_BYTES);
-        let mut row = [0u32; PATCH_RENDER_FRAME_WORDS];
+        let mut table = RetainedFrameTable::new(
+            PATCH_RENDER_DOMAIN_WORDS,
+            PATCH_RENDER_DOMAIN_WORDS,
+            PATCH_RENDER_DOMAIN_BYTES,
+        );
+        let mut row = [0u32; PATCH_RENDER_DOMAIN_WORDS];
 
         let mut changed = table.begin_update();
         changed |= table.replace_row(0, &row);
         assert_eq!(
             table.commit(changed),
             FrameTablePublication::Upload {
-                bytes: PATCH_RENDER_FRAME_BYTES,
+                bytes: PATCH_RENDER_DOMAIN_BYTES,
             },
         );
 
@@ -599,7 +642,7 @@ mod patch_pbr_material_tests {
         assert_eq!(
             table.commit(changed),
             FrameTablePublication::Upload {
-                bytes: PATCH_RENDER_FRAME_BYTES,
+                bytes: PATCH_RENDER_DOMAIN_BYTES,
             },
         );
 
@@ -609,7 +652,7 @@ mod patch_pbr_material_tests {
         assert_eq!(
             table.commit(changed),
             FrameTablePublication::Upload {
-                bytes: PATCH_RENDER_FRAME_BYTES,
+                bytes: PATCH_RENDER_DOMAIN_BYTES,
             },
         );
     }
@@ -619,28 +662,35 @@ mod patch_pbr_material_tests {
         let mut mobius = identity_mobius();
         mobius[5] = 0.625;
         let frame = PatchRenderFrame {
-            mvp: identity_matrix(),
-            mv: translation_matrix(1.0, 2.0, 3.0),
-            use_qb: true,
-            matcap_style: quilting_core::render::MatcapStyle::GoldenSoft,
-            material_slot: 17,
-            selected_node: Some(23),
-            selected_face: Some(29),
-            mobius,
-            camera_position: [4.0, 5.0, 6.0],
-            focus: FocusFieldPacket {
-                sphere: [7.0, 8.0, 9.0, 10.0],
-                enabled: true,
+            global: PatchRenderGlobal {
+                mvp: identity_matrix(),
+                mv: translation_matrix(1.0, 2.0, 3.0),
+                use_qb: true,
+                matcap_style: quilting_core::render::MatcapStyle::GoldenSoft,
+                selected_node: Some(23),
+                selected_face: Some(29),
+                camera_position: [4.0, 5.0, 6.0],
+                focus: FocusFieldPacket {
+                    sphere: [7.0, 8.0, 9.0, 10.0],
+                    enabled: true,
+                },
+            },
+            domain: PatchRenderDomain {
+                mobius,
+                material_slot: 17,
             },
         };
-        let words = frame.to_words().unwrap();
-        assert_eq!(words.len(), PATCH_RENDER_FRAME_WORDS);
-        assert_eq!(words[32..37], [1, 2, 17, 23, 29]);
-        assert_eq!(words[37..40], [1, 0, 0]);
-        assert_eq!(words[40..56], mobius.map(f32::to_bits));
-        assert_eq!(words[56..59], [4.0, 5.0, 6.0].map(f32::to_bits));
-        assert_eq!(words[59], 0);
-        assert_eq!(words[60..64], [7.0, 8.0, 9.0, 10.0].map(f32::to_bits));
+        let global = frame.global.to_words().unwrap();
+        let domain = frame.domain.to_words().unwrap();
+        assert_eq!(global.len(), PATCH_RENDER_GLOBAL_WORDS);
+        assert_eq!(domain.len(), PATCH_RENDER_DOMAIN_WORDS);
+        assert_eq!(global[32..36], [1, 2, 23, 29]);
+        assert_eq!(global[36..39], [4.0, 5.0, 6.0].map(f32::to_bits));
+        assert_eq!(global[39], 1.0f32.to_bits());
+        assert_eq!(global[40..44], [7.0, 8.0, 9.0, 10.0].map(f32::to_bits));
+        assert_eq!(domain[..16], mobius.map(f32::to_bits));
+        assert_eq!(domain[16..20], [17, 0, 0, 0]);
+        assert_eq!(PATCH_RENDER_GLOBAL_BYTES + PATCH_RENDER_DOMAIN_BYTES, 256);
     }
 
     #[test]
@@ -1218,15 +1268,18 @@ enum FrameTablePublication {
 
 struct RetainedFrameTable {
     words: Vec<u32>,
+    row_words: usize,
     byte_len: u64,
     published: bool,
 }
 
 impl RetainedFrameTable {
-    fn new(word_count: usize, byte_len: u64) -> Self {
+    fn new(word_count: usize, row_words: usize, byte_len: u64) -> Self {
         debug_assert_eq!(word_count.saturating_mul(4) as u64, byte_len);
+        debug_assert!(row_words != 0 && word_count.is_multiple_of(row_words));
         Self {
             words: vec![0; word_count],
+            row_words,
             byte_len,
             published: false,
         }
@@ -1236,9 +1289,10 @@ impl RetainedFrameTable {
         !self.published
     }
 
-    fn replace_row(&mut self, row: usize, next: &[u32; PATCH_RENDER_FRAME_WORDS]) -> bool {
-        let start = row * PATCH_RENDER_FRAME_WORDS;
-        let destination = &mut self.words[start..start + PATCH_RENDER_FRAME_WORDS];
+    fn replace_row(&mut self, row: usize, next: &[u32]) -> bool {
+        debug_assert_eq!(next.len(), self.row_words);
+        let start = row * self.row_words;
+        let destination = &mut self.words[start..start + self.row_words];
         if destination == next {
             false
         } else {
@@ -1265,13 +1319,15 @@ impl RetainedFrameTable {
 
 /// Scene/frame bindings shared by every atlas bucket and indirect batch draw.
 pub struct PatchRenderBindings {
-    frame_count: u32,
+    domain_count: u32,
     material_count: u32,
-    frames: wgpu::Buffer,
+    global_frame: wgpu::Buffer,
+    domains: wgpu::Buffer,
     materials: wgpu::Buffer,
     material_textures: Option<PbrMaterialTextureBindings>,
     pbr_environment: Option<PbrEnvironmentBindings>,
-    frame_table: Mutex<RetainedFrameTable>,
+    global_frame_table: Mutex<RetainedFrameTable>,
+    domain_table: Mutex<RetainedFrameTable>,
     bind_group: wgpu::BindGroup,
 }
 
@@ -4243,40 +4299,47 @@ impl LodClassifierDevice {
                                 render_buffer_layout_visible(
                                     0,
                                     wgpu::BufferBindingType::Storage { read_only: true },
-                                    PATCH_RENDER_FRAME_BYTES,
+                                    PATCH_RENDER_GLOBAL_BYTES,
                                     false,
                                     wgpu::ShaderStages::VERTEX_FRAGMENT,
                                 ),
                                 render_buffer_layout_visible(
                                     1,
                                     wgpu::BufferBindingType::Storage { read_only: true },
-                                    PREPARED_PATCH_RECORD_BYTES,
+                                    PATCH_RENDER_DOMAIN_BYTES,
                                     false,
-                                    wgpu::ShaderStages::VERTEX,
+                                    wgpu::ShaderStages::VERTEX_FRAGMENT,
                                 ),
                                 render_buffer_layout_visible(
                                     2,
                                     wgpu::BufferBindingType::Storage { read_only: true },
-                                    PACKED_RECORD_BYTES,
+                                    PREPARED_PATCH_RECORD_BYTES,
                                     false,
                                     wgpu::ShaderStages::VERTEX,
                                 ),
                                 render_buffer_layout_visible(
                                     3,
                                     wgpu::BufferBindingType::Storage { read_only: true },
-                                    VISIBILITY_RANGE_RECORD_BYTES,
+                                    PACKED_RECORD_BYTES,
                                     false,
                                     wgpu::ShaderStages::VERTEX,
                                 ),
                                 render_buffer_layout_visible(
                                     4,
+                                    wgpu::BufferBindingType::Storage { read_only: true },
+                                    VISIBILITY_RANGE_RECORD_BYTES,
+                                    false,
+                                    wgpu::ShaderStages::VERTEX,
+                                ),
+                                render_buffer_layout_visible(
+                                    5,
                                     wgpu::BufferBindingType::Uniform,
                                     DRAW_BATCH_INDEX_BYTES,
                                     true,
                                     wgpu::ShaderStages::VERTEX_FRAGMENT,
                                 ),
                                 render_buffer_layout_visible(
-                                    5,
+                                    6,
                                     wgpu::BufferBindingType::Storage { read_only: true },
                                     PATCH_PBR_MATERIAL_BYTES,
                                     false,
@@ -4693,23 +4756,29 @@ impl LodClassifierDevice {
                     .to_string(),
             ));
         }
-        let frame_bytes = u64::from(visibility.batch_count)
-            .checked_mul(PATCH_RENDER_FRAME_BYTES)
+        let domain_bytes = u64::from(visibility.batch_count)
+            .checked_mul(PATCH_RENDER_DOMAIN_BYTES)
             .ok_or_else(|| {
-                LodWebGpuError::Payload("patch render frame table is too large".to_string())
+                LodWebGpuError::Payload("patch render domain table is too large".to_string())
             })?;
-        let frame_word_count = usize::try_from(visibility.batch_count)
+        let domain_word_count = usize::try_from(visibility.batch_count)
             .ok()
-            .and_then(|count| count.checked_mul(PATCH_RENDER_FRAME_WORDS))
+            .and_then(|count| count.checked_mul(PATCH_RENDER_DOMAIN_WORDS))
             .ok_or_else(|| {
                 LodWebGpuError::Payload(
-                    "patch render frame staging table exceeds address space".to_string(),
+                    "patch render domain staging table exceeds address space".to_string(),
                 )
             })?;
-        let frames = gpu_buffer(
+        let global_frame = gpu_buffer(
             &self.device,
-            "patch render frame table",
-            frame_bytes,
+            "patch render global frame",
+            PATCH_RENDER_GLOBAL_BYTES,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
+        let domains = gpu_buffer(
+            &self.device,
+            "patch render domain table",
+            domain_bytes,
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         );
         let material_words = patch_pbr_material_table_words(&scene.materials)?;
@@ -4735,29 +4804,40 @@ impl LodClassifierDevice {
             label: Some("quilting prepared QB render bindings"),
             layout: &pipeline.bind_group_layout,
             entries: &[
-                bind(0, &frames),
-                bind(1, &patches.prepared_records),
-                bind(2, &visibility.compacted_source_instances),
-                bind(3, &visibility.compacted_ranges),
+                bind(0, &global_frame),
+                bind(1, &domains),
+                bind(2, &patches.prepared_records),
+                bind(3, &visibility.compacted_source_instances),
+                bind(4, &visibility.compacted_ranges),
                 wgpu::BindGroupEntry {
-                    binding: 4,
+                    binding: 5,
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                         buffer: &visibility.batch_index_uniform,
                         offset: 0,
                         size: std::num::NonZeroU64::new(DRAW_BATCH_INDEX_BYTES),
                     }),
                 },
-                bind(5, &materials),
+                bind(6, &materials),
             ],
         });
         Ok(PatchRenderBindings {
-            frame_count: visibility.batch_count,
+            domain_count: visibility.batch_count,
             material_count,
-            frames,
+            global_frame,
+            domains,
             materials,
             material_textures,
             pbr_environment,
-            frame_table: Mutex::new(RetainedFrameTable::new(frame_word_count, frame_bytes)),
+            global_frame_table: Mutex::new(RetainedFrameTable::new(
+                PATCH_RENDER_GLOBAL_WORDS,
+                PATCH_RENDER_GLOBAL_WORDS,
+                PATCH_RENDER_GLOBAL_BYTES,
+            )),
+            domain_table: Mutex::new(RetainedFrameTable::new(
+                domain_word_count,
+                PATCH_RENDER_DOMAIN_WORDS,
+                domain_bytes,
+            )),
             bind_group,
         })
     }
@@ -6167,57 +6247,87 @@ impl LodClassifierDevice {
         Ok(encoding)
     }
 
-    /// Upload one exact frame record per retained batch. This table is written
-    /// before command submission, then indexed on-device by every indirect
-    /// draw; scenes with distinct per-entity Möbius maps therefore need no
-    /// queue writes between draws.
+    /// Upload one exact global frame plus one local conformal/material domain
+    /// per retained batch. Both tables are written before command submission;
+    /// scenes with distinct Möbius maps need no queue writes between draws.
     pub fn write_patch_render_frames(
         &self,
         bindings: &PatchRenderBindings,
         frames: &[PatchRenderFrame],
     ) -> Result<(), LodWebGpuError> {
-        self.write_patch_render_frame_results(bindings, frames.iter().copied().map(Ok))
+        let Some(first) = frames.first() else {
+            return Err(LodWebGpuError::Payload(
+                "patch render frame table must be nonempty".to_string(),
+            ));
+        };
+        if frames.iter().any(|frame| frame.global != first.global) {
+            return Err(LodWebGpuError::Payload(
+                "patch render domains disagree on frame-global state".to_string(),
+            ));
+        }
+        self.write_patch_render_frame_parts(
+            bindings,
+            first.global,
+            frames.iter().map(|frame| Ok(frame.domain)),
+        )
     }
 
-    fn write_patch_render_frame_results(
+    fn write_patch_render_frame_parts(
         &self,
         bindings: &PatchRenderBindings,
-        frames: impl ExactSizeIterator<Item = Result<PatchRenderFrame, LodWebGpuError>>,
+        global: PatchRenderGlobal,
+        domains: impl ExactSizeIterator<Item = Result<PatchRenderDomain, LodWebGpuError>>,
     ) -> Result<(), LodWebGpuError> {
-        if frames.len() != bindings.frame_count as usize {
+        if domains.len() != bindings.domain_count as usize {
             return Err(LodWebGpuError::Payload(format!(
-                "patch render frame table has {} records; expected {}",
-                frames.len(),
-                bindings.frame_count,
+                "patch render domain table has {} records; expected {}",
+                domains.len(),
+                bindings.domain_count,
             )));
         }
-        let mut table = bindings.frame_table.lock().map_err(|_| {
-            LodWebGpuError::Payload("patch render frame staging lock was poisoned".to_string())
+        let global_words = global.to_words()?;
+        let mut global_table = bindings.global_frame_table.lock().map_err(|_| {
+            LodWebGpuError::Payload("patch global-frame staging lock was poisoned".to_string())
         })?;
-        let mut changed = table.begin_update();
-        for (row, frame) in frames.enumerate() {
-            let words = match frame.and_then(PatchRenderFrame::to_words) {
+        let mut global_changed = global_table.begin_update();
+        global_changed |= global_table.replace_row(0, &global_words);
+        let global_publication = global_table.commit(global_changed);
+        if matches!(global_publication, FrameTablePublication::Upload { .. }) {
+            self.queue.write_buffer(
+                &bindings.global_frame,
+                0,
+                bytemuck::cast_slice(global_table.words.as_slice()),
+            );
+        }
+        self.record_frame_table_publication(global_publication);
+
+        let mut domain_table = bindings.domain_table.lock().map_err(|_| {
+            LodWebGpuError::Payload("patch render-domain staging lock was poisoned".to_string())
+        })?;
+        let mut domains_changed = domain_table.begin_update();
+        for (row, domain) in domains.enumerate() {
+            let words = match domain.and_then(PatchRenderDomain::to_words) {
                 Ok(words) => words,
                 Err(error) => {
-                    table.invalidate();
+                    domain_table.invalidate();
                     return Err(error);
                 }
             };
-            changed |= table.replace_row(row, &words);
+            domains_changed |= domain_table.replace_row(row, &words);
         }
         debug_assert_eq!(
-            std::mem::size_of_val(table.words.as_slice()) as u64,
-            u64::from(bindings.frame_count) * PATCH_RENDER_FRAME_BYTES,
+            std::mem::size_of_val(domain_table.words.as_slice()) as u64,
+            u64::from(bindings.domain_count) * PATCH_RENDER_DOMAIN_BYTES,
         );
-        let publication = table.commit(changed);
-        if matches!(publication, FrameTablePublication::Upload { .. }) {
+        let domain_publication = domain_table.commit(domains_changed);
+        if matches!(domain_publication, FrameTablePublication::Upload { .. }) {
             self.queue.write_buffer(
-                &bindings.frames,
+                &bindings.domains,
                 0,
-                bytemuck::cast_slice(table.words.as_slice()),
+                bytemuck::cast_slice(domain_table.words.as_slice()),
             );
         }
-        self.record_frame_table_publication(publication);
+        self.record_frame_table_publication(domain_publication);
         Ok(())
     }
 
@@ -6299,7 +6409,7 @@ impl LodClassifierDevice {
         if patches.patch_count != source_instance_count
             || visibility.source_count != source_instance_count
             || visibility.batch_count != batch_count
-            || bindings.frame_count != batch_count
+            || bindings.domain_count != batch_count
             || bindings.material_count as usize != scene.materials.len().max(1)
             || (frame.style == RenderStyle::Pbr
                 && bindings
@@ -6308,11 +6418,11 @@ impl LodClassifierDevice {
                     .is_none_or(|textures| textures.material_count() != bindings.material_count))
         {
             return Err(LodWebGpuError::Payload(format!(
-                "WebGPU render residency does not match scene: batches={batch_count}, instances={source_instance_count}, patch_records={}, visibility={}/{}, frames={}, materials={}/{}",
+                "WebGPU render residency does not match scene: batches={batch_count}, instances={source_instance_count}, patch_records={}, visibility={}/{}, domains={}, materials={}/{}",
                 patches.patch_count,
                 visibility.batch_count,
                 visibility.source_count,
-                bindings.frame_count,
+                bindings.domain_count,
                 bindings.material_count,
                 scene.materials.len().max(1),
             )));
@@ -6380,15 +6490,14 @@ impl LodClassifierDevice {
             }
         }
 
-        self.write_patch_render_frame_results(
+        self.write_patch_render_frame_parts(
             bindings,
+            PatchRenderGlobal::from_render_frame(frame, use_qb),
             scene.batches.iter().map(|batch| {
                 let material_slot =
                     patch_pbr_material_slot(&scene.materials, batch.id.key.material_index)?;
-                Ok(PatchRenderFrame::from_render_frame_with_material_slot(
-                    frame,
-                    batch,
-                    use_qb,
+                Ok(PatchRenderDomain::from_transform(
+                    batch.transform,
                     material_slot,
                 ))
             }),
