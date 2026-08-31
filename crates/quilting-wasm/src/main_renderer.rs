@@ -10394,14 +10394,18 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                                 glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
                             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
                             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+                            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+                            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
 
                             // Weight texture (attachment 1)
                             let weight_tex = gl.create_texture().unwrap();
                             gl.bind_texture(glow::TEXTURE_2D, Some(weight_tex));
-                            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, vw, vh, 0,
-                                glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+                            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA16F as i32, vw, vh, 0,
+                                glow::RGBA, glow::HALF_FLOAT, glow::PixelUnpackData::Slice(None));
                             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
                             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+                            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+                            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
 
                             // Depth renderbuffer
                             let depth_rb = gl.create_renderbuffer().unwrap();
@@ -10775,16 +10779,18 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                                 gl.bind_framebuffer(glow::FRAMEBUFFER, None);
                                 gl.draw_buffers(&[glow::BACK]);
                                 let stretch_tex = state.fuzzy_weight_tex.unwrap();
-                                // Need a separate FBO for the focused weight output
+                                // Need a separate half-float FBO for the focused weight output.
                                 if state.fuzzy_scene_tex.is_none() || state.fuzzy_scene_size != (vw, vh) {
                                     if let Some(old) = state.fuzzy_scene_fbo { gl.delete_framebuffer(old); }
                                     if let Some(old) = state.fuzzy_scene_tex { gl.delete_texture(old); }
                                     let tex = gl.create_texture().unwrap();
                                     gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                                    gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, vw, vh, 0,
-                                        glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+                                    gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA16F as i32, vw, vh, 0,
+                                        glow::RGBA, glow::HALF_FLOAT, glow::PixelUnpackData::Slice(None));
                                     gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
                                     gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+                                    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+                                    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
                                     let fbo = gl.create_framebuffer().unwrap();
                                     gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
                                     gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0,
@@ -10801,7 +10807,7 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                                 // fuzzy_scene_tex now has the focused weight; use it for JFA
                                 (state.pbr_color_tex.unwrap(), state.fuzzy_scene_tex.unwrap())
                             } else {
-                                // Radial: blit scene from default FB to a texture
+                                // Radial: blit scene color from the default FB to RGBA8.
                                 if state.fuzzy_scene_tex.is_none() || state.fuzzy_scene_size != (vw, vh) {
                                     if let Some(old) = state.fuzzy_scene_fbo { gl.delete_framebuffer(old); }
                                     if let Some(old) = state.fuzzy_scene_tex { gl.delete_texture(old); }
@@ -10811,6 +10817,8 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                                         glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
                                     gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
                                     gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+                                    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+                                    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
                                     let fbo = gl.create_framebuffer().unwrap();
                                     gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
                                     gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0,
@@ -10825,10 +10833,12 @@ pub fn mr_render(mvp: &[f32], mv: &[f32], camera_pos: &[f32]) {
                                     if let Some(old) = state.fuzzy_weight_tex { gl.delete_texture(old); }
                                     let tex = gl.create_texture().unwrap();
                                     gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                                    gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, vw, vh, 0,
-                                        glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+                                    gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA16F as i32, vw, vh, 0,
+                                        glow::RGBA, glow::HALF_FLOAT, glow::PixelUnpackData::Slice(None));
                                     gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
                                     gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+                                    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+                                    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
                                     let fbo = gl.create_framebuffer().unwrap();
                                     gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
                                     gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0,

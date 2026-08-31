@@ -517,6 +517,10 @@ pub struct JfaPipeline {
     // Firmness output
     firmness_fbo: glow::Framebuffer,
     firmness_tex: glow::Texture,
+    // Focus-mask smoothing scratch. This follows the configured field
+    // precision instead of borrowing the RGBA8 scene-color blur target.
+    kawase_fbo: glow::Framebuffer,
+    kawase_tex: glow::Texture,
     // Blur ping-pong
     blur_fbo: glow::Framebuffer,
     blur_tex: glow::Texture,
@@ -825,6 +829,9 @@ impl JfaPipeline {
         let (firmness_fbo, firmness_tex) = create_fbo_tex(gl, 1, 1, fmt)?;
         let firmness_tex = textures.stage(firmness_tex);
         let firmness_fbo = framebuffers.stage(firmness_fbo);
+        let (kawase_fbo, kawase_tex) = create_fbo_tex(gl, 1, 1, fmt)?;
+        let kawase_tex = textures.stage(kawase_tex);
+        let kawase_fbo = framebuffers.stage(kawase_fbo);
         let (blur_fbo, blur_tex) = create_fbo_tex(gl, 1, 1, glow::RGBA8)?;
         let blur_tex = textures.stage(blur_tex);
         let blur_fbo = framebuffers.stage(blur_fbo);
@@ -842,6 +849,7 @@ impl JfaPipeline {
             reduce_fbo_a, reduce_tex_a, reduce_fbo_b, reduce_tex_b,
             vao, ping_fbo, ping_tex, pong_fbo, pong_tex,
             firmness_fbo, firmness_tex,
+            kawase_fbo, kawase_tex,
             blur_fbo, blur_tex, blur_fbo_b, blur_tex_b,
             allocation, config,
             last_weight_tex: None, jfa_result_in_ping: false,
@@ -879,6 +887,9 @@ impl JfaPipeline {
             }
             if reallocate.firmness {
                 gl.bind_texture(glow::TEXTURE_2D, Some(self.firmness_tex));
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, fmt as i32, width, height, 0,
+                    ext_format, ext_type, glow::PixelUnpackData::Slice(None));
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.kawase_tex));
                 gl.tex_image_2d(glow::TEXTURE_2D, 0, fmt as i32, width, height, 0,
                     ext_format, ext_type, glow::PixelUnpackData::Slice(None));
             }
@@ -1054,7 +1065,7 @@ impl JfaPipeline {
             if self.config.kawase_passes > 0 {
                 for pass in 0..self.config.kawase_passes {
                     let offset = self.config.kawase_offset * (pass as f32 + 1.0);
-                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.blur_fbo_b));
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.kawase_fbo));
                     gl.viewport(0, 0, fw, fh);
                     gl.use_program(Some(self.prog_weight_kawase));
                     gl.active_texture(glow::TEXTURE0);
@@ -1067,7 +1078,7 @@ impl JfaPipeline {
                     }
                     gl.draw_arrays(glow::TRIANGLES, 0, 3);
                     // Copy back to firmness
-                    gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.blur_fbo_b));
+                    gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.kawase_fbo));
                     gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.firmness_fbo));
                     gl.blit_framebuffer(0, 0, fw, fh, 0, 0, fw, fh, glow::COLOR_BUFFER_BIT, glow::NEAREST);
                 }
@@ -1508,7 +1519,7 @@ impl JfaPipeline {
             for fbo in [
                 self.reduce_fbo_a, self.reduce_fbo_b,
                 self.ping_fbo, self.pong_fbo,
-                self.firmness_fbo,
+                self.firmness_fbo, self.kawase_fbo,
                 self.blur_fbo, self.blur_fbo_b,
             ] {
                 gl.delete_framebuffer(fbo);
@@ -1516,7 +1527,7 @@ impl JfaPipeline {
             for tex in [
                 self.reduce_tex_a, self.reduce_tex_b,
                 self.ping_tex, self.pong_tex,
-                self.firmness_tex,
+                self.firmness_tex, self.kawase_tex,
                 self.blur_tex, self.blur_tex_b,
             ] {
                 gl.delete_texture(tex);
