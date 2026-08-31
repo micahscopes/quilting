@@ -205,6 +205,12 @@ The main renderer creates this shared scene/plan/frame chain only when render
 parity is enabled or WebGPU will actually attempt the current diagnostic style
 (plus explicit one-shot PBR evidence). Merely having a ready headless adapter
 therefore adds no extraction, plan, or frame work to ordinary incumbent PBR.
+On the non-resident WebGPU fallback, camera/view-only frames now reuse the
+device's retained joint/morph payload and patch joint-count uniform. A scene or
+model invalidation still forces the next upload even when its numeric pose is
+unchanged. `fallbackPoseUploads` and `fallbackPoseReuses` expose that bounded
+memoization; resident-root pose publication remains a separate refactor because
+its root and optional overlay preparation uniforms must advance atomically.
 `resolvedExecutionFrames`, `resolvedExecutionFallbacks`, and
 `lastExecutionError` make that gate observable through the existing render
 shadow diagnostics. Shadow scene validation and WebGL PBR lowering now happen

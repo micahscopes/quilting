@@ -123,6 +123,7 @@ node scripts/smoke-primary-scene-install-boundary.mjs
 node scripts/smoke-patch-lab-effect-projection.mjs
 node scripts/smoke-patch-lab-job-boundary.mjs
 node scripts/smoke-shared-render-scene-extraction.mjs
+node scripts/smoke-webgpu-pose-upload-memo.mjs
 ```
 
 Opt into Binaryen only when producing the final size-optimized artifact:

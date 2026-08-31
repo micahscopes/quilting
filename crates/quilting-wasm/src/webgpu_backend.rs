@@ -76,6 +76,8 @@ struct WebGpuBackend {
     frame_failures: u64,
     visibility_uploads: u64,
     visibility_upload_bytes: u64,
+    fallback_pose_uploads: u64,
+    fallback_pose_reuses: u64,
     device_lod_dispatches: u64,
     device_lod_frames: u64,
     resident_root_scene_uploads: u64,
@@ -232,6 +234,8 @@ pub(crate) struct WebGpuBackendDiagnostics {
     frame_failures: u64,
     visibility_uploads: u64,
     visibility_upload_bytes: u64,
+    fallback_pose_uploads: u64,
+    fallback_pose_reuses: u64,
     device_lod_dispatches: u64,
     device_lod_frames: u64,
     resident_root_pipeline_ready: bool,
@@ -435,6 +439,8 @@ impl WebGpuBackend {
             frame_failures: self.frame_failures,
             visibility_uploads: self.visibility_uploads,
             visibility_upload_bytes: self.visibility_upload_bytes,
+            fallback_pose_uploads: self.fallback_pose_uploads,
+            fallback_pose_reuses: self.fallback_pose_reuses,
             device_lod_dispatches: self.device_lod_dispatches,
             device_lod_frames: self.device_lod_frames,
             resident_root_pipeline_ready: self.resident_root_pipeline.is_some(),
@@ -1927,11 +1933,13 @@ pub(crate) fn submit_frame(
             view,
             options,
         };
+        let pose_upload_required = backend.last_frame_input.is_none()
+            || backend.last_joint_matrices != joint_matrices
+            || backend.last_morph_weights != effective_morph_weights;
         let unchanged = backend.last_frame_input == Some(frame_input)
             && (device_lod_epoch.is_some()
                 || backend.last_face_visibility_bits == face_visibility_bits)
-            && backend.last_joint_matrices == joint_matrices
-            && backend.last_morph_weights == effective_morph_weights;
+            && !pose_upload_required;
         if unchanged {
             backend.next_face_visibility_bits = face_visibility_bits;
             backend.next_morph_weights = effective_morph_weights;
@@ -2040,7 +2048,7 @@ pub(crate) fn submit_frame(
                 .scene
                 .as_ref()
                 .ok_or_else(|| "WebGPU render frame requires scene residency".to_string())?;
-            if !resident_root_frame {
+            if !resident_root_frame && pose_upload_required {
                 device
                     .write_patch_render_pose_state(
                         model,
@@ -2060,6 +2068,13 @@ pub(crate) fn submit_frame(
             }
             Ok::<_, String>(frame)
         })();
+        if prepared_frame.is_ok() && !resident_root_frame {
+            if pose_upload_required {
+                backend.fallback_pose_uploads = backend.fallback_pose_uploads.saturating_add(1);
+            } else {
+                backend.fallback_pose_reuses = backend.fallback_pose_reuses.saturating_add(1);
+            }
+        }
         let result =
             prepared_frame.and_then(|frame| {
                 if backend.presentation.is_some() {
