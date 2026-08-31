@@ -960,6 +960,18 @@ impl HyperscopeAppShadow {
         })
     }
 
+    /// Resolve exact manifest URI identity after the platform has selected a
+    /// concrete byte source. A missing URI serializes as null/undefined; an
+    /// ambiguous manifest is rejected instead of taking first-match order.
+    #[wasm_bindgen(js_name = presentationAssetForExactUri)]
+    pub fn presentation_asset_for_exact_uri(&self, uri: &str) -> Result<JsValue, JsValue> {
+        let asset = self
+            .store
+            .presentation_asset_for_exact_uri(uri)
+            .map_err(js_error)?;
+        to_js(&asset)
+    }
+
     /// Serialize and atomically clear effects retained by quiet frame
     /// dispatches. A second drain is empty; job IDs and cancellation order are
     /// preserved exactly as committed by the reducer.

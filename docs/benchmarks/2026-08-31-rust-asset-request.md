@@ -19,6 +19,12 @@ Presentation/authored asset IDs remain explicit inputs. JavaScript retains its
 former UUID allocation only behind the `assetimpl=js|shadow` rollback lanes;
 the Rust lane reads both identities back from the typed fetch job.
 
+When a startup network candidate succeeds, the browser still reports the
+source/provenance fact, but exact manifest URI-to-asset resolution now runs in
+`AppStore`. Missing URIs remain session-local, while duplicate exact URIs are
+rejected rather than inheriting JavaScript's first-match ordering. The
+standalone presentation rollback lane retains the prior helper.
+
 ## Rollback and next boundary
 
 The explicitly sequenced `requestAsset` and `requestPrimaryAsset` methods
@@ -39,8 +45,9 @@ claim the entire loading pipeline has crossed the typed boundary.
   AppStore/WASM/browser path, rejects generic request-effect filtering, and
   parses both browser modules without compiling WASM.
 
-The four focused session-identity native tests passed, as did the incremental
-`wasm32-unknown-unknown` `quilting-wasm` check with `leptos-ui`. The targeted
-source oracle passed and parsed the browser module. Live-browser validation
-still requires a later binding refresh; no Trunk, binding-generation, or
-Binaryen step was part of this source cut.
+The four focused session-identity native tests and the exact-presentation-URI
+test passed, as did the incremental `wasm32-unknown-unknown` `quilting-wasm`
+check with `leptos-ui`. The targeted source oracles passed and parsed the
+browser module. Live-browser validation still requires a later binding
+refresh; no Trunk, binding-generation, or Binaryen step was part of this
+source cut.

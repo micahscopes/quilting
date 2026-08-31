@@ -1165,6 +1165,30 @@ impl fmt::Display for PresentationCompositionPlanError {
 
 impl Error for PresentationCompositionPlanError {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PresentationAssetResolutionError {
+    NoPresentation,
+    AmbiguousExactUri {
+        uri: String,
+        candidates: Vec<Uuid>,
+    },
+}
+
+impl fmt::Display for PresentationAssetResolutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoPresentation => formatter.write_str("no presentation is loaded"),
+            Self::AmbiguousExactUri { uri, candidates } => write!(
+                formatter,
+                "presentation URI '{uri}' ambiguously matches {} assets",
+                candidates.len(),
+            ),
+        }
+    }
+}
+
+impl Error for PresentationAssetResolutionError {}
+
 /// Coherent low-rate animation state for renderer adapters.
 /// This deliberately excludes cue composition, navigation, assets, and
 /// diagnostics; adapters can sample it at asynchronous clip/clock boundaries
@@ -2441,6 +2465,30 @@ impl AppState {
         })
     }
 
+    fn presentation_asset_for_exact_uri(
+        &self,
+        uri: &str,
+    ) -> Result<Option<PresentationAsset>, PresentationAssetResolutionError> {
+        let presentation = self
+            .presentation
+            .as_ref()
+            .ok_or(PresentationAssetResolutionError::NoPresentation)?
+            .presentation();
+        let candidates = presentation
+            .assets
+            .iter()
+            .filter(|asset| asset.uri == uri)
+            .collect::<Vec<_>>();
+        match candidates.as_slice() {
+            [] => Ok(None),
+            [asset] => Ok(Some((*asset).clone())),
+            _ => Err(PresentationAssetResolutionError::AmbiguousExactUri {
+                uri: uri.to_owned(),
+                candidates: candidates.iter().map(|asset| asset.id).collect(),
+            }),
+        }
+    }
+
     fn animation_runtime_read_model(&self) -> AnimationRuntimeReadModel {
         AnimationRuntimeReadModel {
             revision: self.revision,
@@ -3339,6 +3387,17 @@ impl AppStore {
         &self,
     ) -> Result<PresentationCompositionPlan, PresentationCompositionPlanError> {
         self.lock_state().presentation_composition_plan()
+    }
+
+    /// Resolve a byte source to durable presentation identity only when its
+    /// platform-reported URI exactly matches one unambiguous manifest entry.
+    /// Fetch provenance remains an adapter fact; URI-to-identity policy does
+    /// not.
+    pub fn presentation_asset_for_exact_uri(
+        &self,
+        uri: &str,
+    ) -> Result<Option<PresentationAsset>, PresentationAssetResolutionError> {
+        self.lock_state().presentation_asset_for_exact_uri(uri)
     }
 
     pub fn animation_runtime_snapshot(&self) -> AnimationRuntimeReadModel {
@@ -6500,6 +6559,49 @@ mod tests {
         assert!(matches!(
             store.presentation_composition_plan(),
             Err(PresentationCompositionPlanError::AmbiguousPrimaryAsset {
+                candidates,
+                ..
+            }) if candidates.len() == 2
+        ));
+    }
+
+    #[test]
+    fn presentation_exact_uri_identity_is_rust_owned_and_ambiguity_safe() {
+        let store = AppStore::default();
+        assert_eq!(
+            store.presentation_asset_for_exact_uri("/horse.glb"),
+            Err(PresentationAssetResolutionError::NoPresentation),
+        );
+
+        let presentation = presentation_fixture();
+        let horse = presentation.assets[0].clone();
+        store
+            .dispatch(AppEvent::PresentationLoaded(presentation))
+            .unwrap();
+        assert_eq!(
+            store
+                .presentation_asset_for_exact_uri("/horse.glb")
+                .unwrap(),
+            Some(horse),
+        );
+        assert_eq!(
+            store
+                .presentation_asset_for_exact_uri("horse.glb")
+                .unwrap(),
+            None,
+        );
+
+        let mut ambiguous = presentation_fixture();
+        let mut duplicate = ambiguous.assets[0].clone();
+        duplicate.id = Uuid::from_u128(0xa0000000_0000_4000_8000_000000000099);
+        ambiguous.assets.push(duplicate);
+        let ambiguous_store = AppStore::default();
+        ambiguous_store
+            .dispatch(AppEvent::PresentationLoaded(ambiguous))
+            .unwrap();
+        assert!(matches!(
+            ambiguous_store.presentation_asset_for_exact_uri("/horse.glb"),
+            Err(PresentationAssetResolutionError::AmbiguousExactUri {
                 candidates,
                 ..
             }) if candidates.len() == 2

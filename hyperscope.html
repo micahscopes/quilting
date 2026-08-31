@@ -4965,6 +4965,19 @@ function appShadowAssetId(uri, explicitId) {
   return assetId;
 }
 
+function durablePresentationFetchAssetId(requestedUri, provenance) {
+  if (provenance !== 'manifest-fetch') return null;
+  if (presentationAppAuthority()) {
+    const asset = rustAppShadow.presentationAssetForExactUri(String(requestedUri));
+    return asset?.id ?? null;
+  }
+  return durablePresentationAssetId(
+    rustPresentationManifest?.assets,
+    requestedUri,
+    provenance,
+  );
+}
+
 function recordAppShadowMismatch(code, message) {
   const mismatches = rustAppShadowDiagnostics.mismatches;
   if (mismatches.length === 64) mismatches.shift();
@@ -13973,8 +13986,7 @@ phase('model', ['workers'], async () => {
           continue;
         }
         buf = candidateBuf;
-        durableAssetId = durablePresentationAssetId(
-          rustPresentationManifest?.assets,
+        durableAssetId = durablePresentationFetchAssetId(
           candidate,
           'manifest-fetch',
         );

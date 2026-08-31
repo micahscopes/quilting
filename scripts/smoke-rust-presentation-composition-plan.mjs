@@ -17,11 +17,39 @@ for (const policy of [
   'asset.id == resident_id.as_uuid()',
   'presentation_uri_leaf(&asset.uri) == resident_leaf',
   'AmbiguousPrimaryAsset',
+  'PresentationAssetResolutionError',
+  'presentation_asset_for_exact_uri',
+  'AmbiguousExactUri',
 ]) {
   assert.ok(app.includes(policy), `composition plan is missing policy ${policy}`);
 }
 assert.ok(bridge.includes('#[wasm_bindgen(js_name = presentationCompositionPlan)]'),
   'the WASM adapter must expose the typed composition plan');
+assert.ok(bridge.includes('#[wasm_bindgen(js_name = presentationAssetForExactUri)]'),
+  'the WASM adapter must expose exact presentation asset identity');
+
+const fetchResolverStart = browser.indexOf('function durablePresentationFetchAssetId(');
+const fetchResolverEnd = browser.indexOf('function recordAppShadowMismatch(', fetchResolverStart);
+const fetchResolver = browser.slice(fetchResolverStart, fetchResolverEnd);
+assert.ok(fetchResolverStart >= 0 && fetchResolverEnd > fetchResolverStart,
+  'could not locate presentation fetch identity adapter');
+for (const required of [
+  "if (provenance !== 'manifest-fetch') return null;",
+  'if (presentationAppAuthority()) {',
+  'rustAppShadow.presentationAssetForExactUri(String(requestedUri))',
+  'durablePresentationAssetId(',
+]) {
+  assert.ok(fetchResolver.includes(required),
+    `presentation fetch identity adapter is missing ${required}`);
+}
+
+const modelPhaseStart = browser.indexOf("phase('model', ['workers'], async () => {");
+const modelPhaseEnd = browser.indexOf("phase('render',", modelPhaseStart);
+const modelPhase = browser.slice(modelPhaseStart, modelPhaseEnd);
+assert.ok(modelPhase.includes('durablePresentationFetchAssetId('),
+  'startup fetch completion must use the authority-aware identity resolver');
+assert.equal(modelPhase.includes('durablePresentationAssetId('), false,
+  'Rust startup must not resolve durable presentation identity in JavaScript');
 
 const start = browser.indexOf('async function initializePresentationComposition()');
 const end = browser.indexOf('\n// ============================================================', start);
