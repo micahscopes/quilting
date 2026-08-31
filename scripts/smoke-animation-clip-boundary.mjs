@@ -22,6 +22,7 @@ for (const required of [
   'pub fn complete_animation_clip_selection(',
   'SemanticAction::Animate(AnimationAction::SelectClip(index))',
   'matches_request: selected_index == Some(index)',
+  'state: AnimationClipSelectionReadModel',
 ]) {
   assert.ok(settings.includes(required) || app.includes(required),
     `application clip-request port is missing ${required}`);
@@ -60,6 +61,7 @@ for (const required of [
   'ShadowAnimationClipJobEffect::selection',
   'ShadowAnimationClipJobEffect::cancellation',
   'matches_request: request.matches_request',
+  'state: request.state.into()',
   'struct ShadowAnimationClipCompletionDispatch',
   'selection: dispatch.state.into()',
 ]) {
@@ -75,6 +77,7 @@ for (const required of [
   'app.requestAnimationClip(index)',
   'const effect = receipt.selection;',
   'const cancellations = receipt.cancellations;',
+  'const residencySnapshot = { animationClipSelection: receipt.state };',
   'if (!receipt.matchesRequest)',
 ]) {
   assert.ok(request.includes(required), `thin browser clip adapter is missing ${required}`);
@@ -85,6 +88,7 @@ for (const retired of [
   "effect.type === 'select_animation_clip'",
   "effect.type === 'cancel_animation_clip_selection'",
   'snapshot?.animationClipSelection?.active?.clip?.index',
+  'refreshAppShadowSnapshot()',
 ]) {
   assert.equal(request.includes(retired), false,
     `browser clip adapter must not retain ${retired}`);

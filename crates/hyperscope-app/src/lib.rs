@@ -837,13 +837,14 @@ impl AnimationClipEffects {
 /// Typed result of one local clip request. This is the shared application port
 /// for Leptos, WASM, and future Blender/session adapters; none of them should
 /// rediscover job semantics by filtering a generic [`AppCommit`] effect list.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AnimationClipRequest {
     pub sequence: u64,
     pub commit: AppCommit,
     pub requested_index: u32,
     pub selection: Option<AnimationClipJobEffect>,
     pub cancellations: Vec<AnimationClipJobEffect>,
+    pub state: AnimationClipSelectionReadModel,
     pub matches_request: bool,
 }
 
@@ -2409,6 +2410,7 @@ impl AppStore {
             selection: effects.selection,
             cancellations: effects.cancellations,
             matches_request: selected_index == Some(index),
+            state,
         })
     }
 
@@ -4215,6 +4217,8 @@ mod tests {
             }),
         );
         assert!(first.cancellations.is_empty());
+        assert_eq!(first.state.pending.as_ref().unwrap().job_id, 0);
+        assert_eq!(first.state.active.as_ref().unwrap().clip.index, 0);
         assert_eq!(
             first.commit.effects,
             vec![AppEffect::SelectAnimationClip {
@@ -4239,6 +4243,7 @@ mod tests {
         assert!(duplicate.selection.is_none());
         assert!(duplicate.cancellations.is_empty());
         assert!(duplicate.matches_request);
+        assert_eq!(duplicate.state.pending.as_ref().unwrap().job_id, 0);
 
         let back_to_active = store.request_animation_clip(0).unwrap();
         assert!(back_to_active.selection.is_none());
@@ -4252,6 +4257,8 @@ mod tests {
             }],
         );
         assert!(back_to_active.matches_request);
+        assert_eq!(back_to_active.state.active.as_ref().unwrap().clip.index, 0);
+        assert_eq!(back_to_active.state.pending, None);
         assert_eq!(
             back_to_active.commit.effects,
             vec![AppEffect::CancelAnimationClipSelection {

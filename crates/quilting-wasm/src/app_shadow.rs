@@ -1980,6 +1980,7 @@ impl HyperscopeAppShadow {
                 .iter()
                 .map(ShadowAnimationClipJobEffect::cancellation)
                 .collect(),
+            state: request.state.into(),
             matches_request: request.matches_request,
         })
     }
@@ -3717,6 +3718,7 @@ struct ShadowAnimationClipRequest {
     requested_index: u32,
     selection: Option<ShadowAnimationClipJobEffect>,
     cancellations: Vec<ShadowAnimationClipJobEffect>,
+    state: ShadowAnimationClipSelection,
     matches_request: bool,
 }
 

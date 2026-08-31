@@ -9205,6 +9205,7 @@ function beginAppAnimationClipSelection(index) {
   rustAppShadowDiagnostics.lastCommit = receipt.commit;
   const effect = receipt.selection;
   const cancellations = receipt.cancellations;
+  const residencySnapshot = { animationClipSelection: receipt.state };
   animationClipDiagnostics.cancellationEffects += cancellations.length;
   if (!receipt.matchesRequest) {
     recordAppShadowMismatch(
@@ -9215,13 +9216,12 @@ function beginAppAnimationClipSelection(index) {
   }
   if (!effect) {
     animationClipDiagnostics.noops += 1;
-    const snapshot = refreshAppShadowSnapshot();
-    observeAnimationClipResidency('selection-noop', snapshot);
+    observeAnimationClipResidency('selection-noop', residencySnapshot);
     return { receipt, effect: null, cancellations };
   }
   animationClipDiagnostics.effects += 1;
   animationClipDiagnostics.lastJobId = effect.job_id;
-  observeAnimationClipResidency('selection-pending');
+  observeAnimationClipResidency('selection-pending', residencySnapshot);
   return { receipt, effect, cancellations };
 }
 
