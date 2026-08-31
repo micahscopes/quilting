@@ -548,13 +548,19 @@ impl PatchLabRuntime {
             )));
         }
         self.pending_lod = None;
-        match completion.outcome {
-            PatchLabLodOutcome::Evaluated(summary) => {
-                self.latest_lod = Some(summary);
-                self.last_error = None;
-            }
-            PatchLabLodOutcome::Failed(error) => {
-                self.last_error = Some(error);
+        // A newer control value may have arrived while this worker job was in
+        // flight. Its completion is still the fence that releases the queued
+        // replacement, but publishing the superseded result would create a
+        // one-frame LOD/status blip before that replacement completes.
+        if !self.lod_dirty {
+            match completion.outcome {
+                PatchLabLodOutcome::Evaluated(summary) => {
+                    self.latest_lod = Some(summary);
+                    self.last_error = None;
+                }
+                PatchLabLodOutcome::Failed(error) => {
+                    self.last_error = Some(error);
+                }
             }
         }
         if self.lod_dirty {
@@ -795,6 +801,7 @@ mod tests {
                 parameters: newest.lod_parameters(RenderSettings::default()),
             })]
         );
+        assert_eq!(store.patch_lab_snapshot().latest_lod, None);
         let stale = store.dispatch(lod_evaluated(1, 0)).unwrap();
         assert_eq!(stale.disposition, CommitDisposition::IgnoredStale);
         assert_eq!(store.patch_lab_snapshot().pending_lod_job, Some(2));

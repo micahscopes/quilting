@@ -229,7 +229,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
     <div class="sr"><input type="range" id="min-px-sub" min="1" max="64" value="16" step="0.1"><span class="v" id="min-px-sub-v">16.0</span></div>
     <label>Atlas resolution</label>
     <div class="sr"><input type="range" id="atlas-exp" min="3" max="9" value="7" step="1"><span class="v" id="atlas-exp-v">7</span></div>
-    <label>Within-face grading (reload to apply)</label>
+    <label>Within-face grading</label>
     <div class="btns" id="lod-ratio-btns">
       <button data-v="2" class="a">2:1</button>
       <button data-v="4">4:1</button>
@@ -522,7 +522,7 @@ const BOOTSTRAP_POLICY_DEFAULTS = Object.freeze({
   animclockimpl: 'rust',
   animclipimpl: 'rust',
   renderstateimpl: 'rust',
-  patchlabimpl: 'js',
+  patchlabimpl: 'rust',
   appshadow: '0',
   routeimpl: 'rust',
   rendershadow: '0',
@@ -4558,6 +4558,11 @@ const rustPatchLabDiagnostics = {
   geometryCompletions: 0,
   lodCompletions: 0,
   staleCompletions: 0,
+  hostedEffects: 0,
+  completedEffects: 0,
+  cancelledEffects: 0,
+  preventedStaleInstalls: 0,
+  effectHostErrors: 0,
   comparisons: 0,
   mismatches: 0,
   errors: 0,
@@ -4572,6 +4577,8 @@ const rustPatchLabDiagnostics = {
   viewAuthority: 'browser-fallback',
   viewMountAttempts: 0,
   viewMountErrors: 0,
+  effectHostAuthority: RUST_PATCH_LAB_IMPLEMENTATION === 'rust'
+    ? 'browser-io-adapter' : 'observer',
 };
 globalThis.__hyperscopePatchLabDiagnostics = rustPatchLabDiagnostics;
 
@@ -4684,7 +4691,7 @@ function synchronizeRustPatchLabFromBrowser(context, active = patchLab.active) {
     const receipt = app.requestPatchLab(browser);
     observeRustAppShadowSequence(receipt.sequence, 'Rust Patch Lab synchronization');
     rustAppShadowDiagnostics.lastCommit = receipt.commit;
-    observeRustPatchLabEffects(receipt.effects, context);
+    hostRustPatchLabEffects(receipt.effects, context);
     rustPatchLabDiagnostics.synchronizations += 1;
     rustPatchLabDiagnostics.commits += 1;
     const rust = rustPatchLabControlProjection(app.snapshot());
@@ -4748,9 +4755,12 @@ function patchLabLodSummary(result) {
   };
 }
 
-function completeRustPatchLabGeometryFromBrowser(result, context) {
+function completeRustPatchLabGeometryFromBrowser(
+  result,
+  context,
+  jobId = rustPatchLabDiagnostics.pendingGeometryJob,
+) {
   if (RUST_PATCH_LAB_IMPLEMENTATION === 'js' || !rustAppShadow) return;
-  const jobId = rustPatchLabDiagnostics.pendingGeometryJob;
   if (jobId == null) return;
   try {
     const receipt = rustAppShadow.finishPatchLabGeometry(
@@ -4759,12 +4769,17 @@ function completeRustPatchLabGeometryFromBrowser(result, context) {
       Number(result?.num_faces || 0),
     );
     const commit = receipt.commit;
-    rustPatchLabDiagnostics.pendingGeometryJob = null;
-    rustPatchLabDiagnostics.installedGeometryJob = jobId;
+    if (rustPatchLabDiagnostics.pendingGeometryJob === String(jobId)) {
+      rustPatchLabDiagnostics.pendingGeometryJob = null;
+    }
+    if (commit.disposition !== 'ignored_stale') {
+      rustPatchLabDiagnostics.installedGeometryJob = String(jobId);
+    }
     rustPatchLabDiagnostics.geometryCompletions += 1;
     rustAppShadowDiagnostics.lastCommit = commit;
     if (commit.disposition === 'ignored_stale') rustPatchLabDiagnostics.staleCompletions += 1;
-    observeRustPatchLabEffects(receipt.effects, context);
+    hostRustPatchLabEffects(receipt.effects, context);
+    return receipt;
   } catch (error) {
     rustPatchLabDiagnostics.errors += 1;
     rustPatchLabDiagnostics.lastError = error?.message || String(error);
@@ -4772,29 +4787,37 @@ function completeRustPatchLabGeometryFromBrowser(result, context) {
   }
 }
 
-function completeRustPatchLabLodFromBrowser(result, context) {
+function completeRustPatchLabLodFromBrowser(
+  result,
+  context,
+  jobId = rustPatchLabDiagnostics.pendingLodJob,
+  geometryJobId = rustPatchLabDiagnostics.pendingLodGeometryJob,
+) {
   if (RUST_PATCH_LAB_IMPLEMENTATION === 'js' || !rustAppShadow) return;
-  const jobId = rustPatchLabDiagnostics.pendingLodJob;
-  const geometryJobId = rustPatchLabDiagnostics.pendingLodGeometryJob;
   if (jobId == null || geometryJobId == null) return;
   try {
     const summary = patchLabLodSummary(result);
     const receipt = rustAppShadow.finishPatchLabLod(jobId, geometryJobId, summary);
     const commit = receipt.commit;
-    rustPatchLabDiagnostics.pendingLodJob = null;
-    rustPatchLabDiagnostics.pendingLodGeometryJob = null;
+    if (rustPatchLabDiagnostics.pendingLodJob === String(jobId)) {
+      rustPatchLabDiagnostics.pendingLodJob = null;
+      rustPatchLabDiagnostics.pendingLodGeometryJob = null;
+    }
     rustPatchLabDiagnostics.lodCompletions += 1;
     rustAppShadowDiagnostics.lastCommit = commit;
     if (commit.disposition === 'ignored_stale') rustPatchLabDiagnostics.staleCompletions += 1;
-    observeRustPatchLabEffects(receipt.effects, context);
-    const latest = rustAppShadow.patchLabSnapshot()?.latestLod;
-    rustPatchLabDiagnostics.comparisons += 1;
-    if (!latest
-        || latest.sharedEdgeMismatches !== summary.sharedEdgeMismatches
-        || latest.renderedTriangles !== summary.renderedTriangles) {
-      rustPatchLabDiagnostics.mismatches += 1;
-      recordAppShadowMismatch('patch_lab_lod_completion', { context, summary, latest });
+    hostRustPatchLabEffects(receipt.effects, context);
+    if (commit.disposition !== 'ignored_stale') {
+      const latest = rustAppShadow.patchLabSnapshot()?.latestLod;
+      rustPatchLabDiagnostics.comparisons += 1;
+      if (!latest
+          || latest.sharedEdgeMismatches !== summary.sharedEdgeMismatches
+          || latest.renderedTriangles !== summary.renderedTriangles) {
+        rustPatchLabDiagnostics.mismatches += 1;
+        recordAppShadowMismatch('patch_lab_lod_completion', { context, summary, latest });
+      }
     }
+    return receipt;
   } catch (error) {
     rustPatchLabDiagnostics.errors += 1;
     rustPatchLabDiagnostics.lastError = error?.message || String(error);
@@ -4802,9 +4825,12 @@ function completeRustPatchLabLodFromBrowser(result, context) {
   }
 }
 
-function failRustPatchLabGeometryFromBrowser(error, context) {
+function failRustPatchLabGeometryFromBrowser(
+  error,
+  context,
+  jobId = rustPatchLabDiagnostics.pendingGeometryJob,
+) {
   if (RUST_PATCH_LAB_IMPLEMENTATION === 'js' || !rustAppShadow) return;
-  const jobId = rustPatchLabDiagnostics.pendingGeometryJob;
   if (jobId == null) return;
   try {
     const receipt = rustAppShadow.finishPatchLabGeometryFailed(
@@ -4814,19 +4840,25 @@ function failRustPatchLabGeometryFromBrowser(error, context) {
       true,
     );
     const commit = receipt.commit;
-    rustPatchLabDiagnostics.pendingGeometryJob = null;
+    if (rustPatchLabDiagnostics.pendingGeometryJob === String(jobId)) {
+      rustPatchLabDiagnostics.pendingGeometryJob = null;
+    }
     rustAppShadowDiagnostics.lastCommit = commit;
-    observeRustPatchLabEffects(receipt.effects, context);
+    hostRustPatchLabEffects(receipt.effects, context);
+    return receipt;
   } catch (completionError) {
     rustPatchLabDiagnostics.errors += 1;
     rustPatchLabDiagnostics.lastError = completionError?.message || String(completionError);
   }
 }
 
-function failRustPatchLabLodFromBrowser(error, context) {
+function failRustPatchLabLodFromBrowser(
+  error,
+  context,
+  jobId = rustPatchLabDiagnostics.pendingLodJob,
+  geometryJobId = rustPatchLabDiagnostics.pendingLodGeometryJob,
+) {
   if (RUST_PATCH_LAB_IMPLEMENTATION === 'js' || !rustAppShadow) return;
-  const jobId = rustPatchLabDiagnostics.pendingLodJob;
-  const geometryJobId = rustPatchLabDiagnostics.pendingLodGeometryJob;
   if (jobId == null || geometryJobId == null) return;
   try {
     const receipt = rustAppShadow.finishPatchLabLodFailed(
@@ -4837,10 +4869,13 @@ function failRustPatchLabLodFromBrowser(error, context) {
       true,
     );
     const commit = receipt.commit;
-    rustPatchLabDiagnostics.pendingLodJob = null;
-    rustPatchLabDiagnostics.pendingLodGeometryJob = null;
+    if (rustPatchLabDiagnostics.pendingLodJob === String(jobId)) {
+      rustPatchLabDiagnostics.pendingLodJob = null;
+      rustPatchLabDiagnostics.pendingLodGeometryJob = null;
+    }
     rustAppShadowDiagnostics.lastCommit = commit;
-    observeRustPatchLabEffects(receipt.effects, context);
+    hostRustPatchLabEffects(receipt.effects, context);
+    return receipt;
   } catch (completionError) {
     rustPatchLabDiagnostics.errors += 1;
     rustPatchLabDiagnostics.lastError = completionError?.message || String(completionError);
@@ -5105,7 +5140,7 @@ function synchronizeRustRenderSettingsPacket(app, settings, source) {
   }
   if (receipt.commit) {
     rustAppShadowDiagnostics.lastCommit = receipt.commit;
-    observeRustPatchLabEffects(receipt.patchLabEffects, `${source}-render-settings`);
+    hostRustPatchLabEffects(receipt.patchLabEffects, `${source}-render-settings`);
   }
   if (receipt.disposition === 'committed') rustRenderSettingsDiagnostics.dispatches += 1;
   rustRenderSettingsDiagnostics.lastRust = receipt.render;
@@ -5741,7 +5776,7 @@ function ensureRustPatchLabView() {
           publishedUi: true,
           effects: Array.isArray(effects) ? effects : [],
         };
-        observeRustPatchLabEffects(effects, 'leptos-control');
+        hostRustPatchLabEffects(effects, 'leptos-control');
       },
       action => {
         if (action === 'surface_wire') renderMode.set('both');
@@ -5754,14 +5789,15 @@ function ensureRustPatchLabView() {
         recordAppShadowMismatch('patch_lab_view_rejection', String(error));
       },
     );
+    const rustAuthority = RUST_PATCH_LAB_IMPLEMENTATION === 'rust';
     // Shadow mode exercises the complete Leptos projection while retaining
-    // incumbent interaction. Rust authority stays behind the fallback until
-    // the worker/renderer effect host below has measured completion parity.
-    host.hidden = true;
-    fallback.hidden = false;
+    // incumbent interaction. Rust mode exposes the FRP view; the browser owns
+    // only worker/renderer IO through the exact typed effect host.
+    host.hidden = !rustAuthority;
+    fallback.hidden = rustAuthority;
     rustPatchLabViewMounted = true;
-    rustPatchLabDiagnostics.viewAuthority = RUST_PATCH_LAB_IMPLEMENTATION === 'shadow'
-      ? 'hyperscope-web-shadow' : 'browser-fallback-awaiting-effect-host';
+    rustPatchLabDiagnostics.viewAuthority = rustAuthority
+      ? 'hyperscope-web' : 'hyperscope-web-shadow';
     return true;
   } catch (error) {
     host.hidden = true;
@@ -5836,8 +5872,8 @@ function acceptRustRenderSettingsViewCommit(
     rustRenderSettingsDiagnostics.dispatches += 1;
     rustRenderSettingsDiagnostics.lastRust = rust;
     rustRenderSettingsDiagnostics.lastDispatchSource = 'leptos-control';
-    observeRustPatchLabEffects(effects || [], 'leptos-render-control');
     applyRustRenderSettingsProjection(rust);
+    hostRustPatchLabEffects(effects || [], 'leptos-render-control');
     rustRenderSettingsDiagnostics.authorityWrites += 1;
   } catch (error) {
     rustRenderSettingsDiagnostics.errors += 1;
@@ -6162,7 +6198,7 @@ function applyRustAppFocusToRenderer(navigation, selection = selectedObject) {
 function drainRustFrameAdapterEffects(emittedCount, context) {
   if (!rustAppShadow || Number(emittedCount) <= 0) return;
   try {
-    observeRustPatchLabEffects(rustAppShadow.drainPatchLabEffects(), context);
+    hostRustPatchLabEffects(rustAppShadow.drainPatchLabEffects(), context);
   } catch (error) {
     rustAppShadowDiagnostics.frameErrors += 1;
     recordAppShadowMismatch(
@@ -7087,6 +7123,231 @@ const patchLab = {
   lastResult: null,
 };
 globalThis.__hyperscopePatchLab = patchLab;
+const rustPatchLabEffectHost = {
+  geometryJobs: new Map(),
+  lodJobs: new Map(),
+  lastProjection: null,
+};
+globalThis.__hyperscopePatchLabEffectHost = rustPatchLabEffectHost;
+
+function patchLabWireField(field) {
+  return field === 'manual_edges' ? 'edges' : field;
+}
+
+function projectRustPatchLabReadModelToBrowser({ syncRoute = true } = {}) {
+  if (!rustAppShadow) return null;
+  const state = rustAppShadow.patchLabSnapshot();
+  const controls = state?.controls;
+  if (!controls) return null;
+  const previous = {
+    active: patchLab.active,
+    shape: patchLab.shape,
+  };
+  patchLab.active = Boolean(state.active);
+  patchLab.shape = controls.shape;
+  patchLab.animate = Boolean(controls.animate);
+  patchLab.lastAnimatedAt = performance.now();
+  $('patch-lab-field').value = patchLabWireField(controls.field);
+  const manual = Array.from(controls.manualEdgeExponents || []);
+  for (const [index, id] of [
+    'patch-lab-edge-a',
+    'patch-lab-edge-b',
+    'patch-lab-edge-c',
+  ].entries()) {
+    if (Number.isFinite(Number(manual[index]))) $(id).value = String(manual[index]);
+  }
+  $('patch-lab-min').value = String(controls.minExponent);
+  $('patch-lab-max').value = String(controls.maxExponent);
+  const phase = Number(controls.phaseMicroradians) / 1e6;
+  $('patch-lab-phase').value = String(phase);
+  $('patch-lab-phase-v').textContent = phase.toFixed(2);
+  $('patch-lab-bend-slider').value = String(controls.bendPercent);
+  $('patch-lab-bend-slider-v').textContent = (Number(controls.bendPercent) / 100).toFixed(2);
+  $('patch-lab-grid-slider').value = String(controls.grid);
+  $('patch-lab-grid-slider-v').textContent = `${controls.grid}²`;
+  $('patch-lab-animate').classList.toggle('on', patchLab.animate);
+  updatePatchLabControlVisibility();
+  if (syncRoute && urlSyncReady) syncURL();
+  const projection = {
+    state,
+    wasActive: previous.active,
+    shapeChanged: previous.shape !== patchLab.shape,
+  };
+  rustPatchLabEffectHost.lastProjection = projection;
+  return projection;
+}
+
+function hostRustPatchLabEffects(effects, context) {
+  observeRustPatchLabEffects(effects, context);
+  if (RUST_PATCH_LAB_IMPLEMENTATION !== 'rust' || !Array.isArray(effects)) return;
+  const patchState = rustAppShadow?.patchLabSnapshot?.();
+  // A render-settings commit can legitimately carry no Patch Lab work before
+  // route activation. Do not let the reducer's inactive defaults overwrite
+  // the still-pending URL controls in that startup window.
+  const projection = patchState?.active || patchLab.active
+    ? projectRustPatchLabReadModelToBrowser({
+        syncRoute: context !== 'animation-frame',
+      })
+    : null;
+  rustPatchLabDiagnostics.hostedEffects += effects.length;
+  for (const effect of effects) {
+    switch (effect.type) {
+      case 'build_geometry':
+        void runRustPatchLabGeometryEffect(effect, projection, context);
+        break;
+      case 'cancel_geometry': {
+        const token = rustPatchLabEffectHost.geometryJobs.get(String(effect.job_id));
+        if (token) token.cancelled = true;
+        rustPatchLabDiagnostics.cancelledEffects += 1;
+        break;
+      }
+      case 'discard_geometry':
+        if (rustPatchLabDiagnostics.installedGeometryJob === String(effect.geometry_job_id)) {
+          rustPatchLabDiagnostics.installedGeometryJob = null;
+        }
+        break;
+      case 'evaluate_lod':
+        void runRustPatchLabLodEffect(effect, context);
+        break;
+      case 'cancel_lod': {
+        const token = rustPatchLabEffectHost.lodJobs.get(String(effect.job_id));
+        if (token) token.cancelled = true;
+        rustPatchLabDiagnostics.cancelledEffects += 1;
+        break;
+      }
+      default:
+        break;
+    }
+  }
+}
+
+async function runRustPatchLabGeometryEffect(effect, projection, context) {
+  const jobId = String(effect.job_id);
+  const token = { cancelled: false, jobId };
+  rustPatchLabEffectHost.geometryJobs.set(jobId, token);
+  const preserveView = Boolean(projection?.wasActive && !projection?.shapeChanged);
+  const generation = beginPatchLabPlatformGeometry(effect.shape, { preserveView });
+  try {
+    const response = await workerCall('load_patch_lab', {
+      shape: effect.shape,
+      grid: Number(effect.grid),
+      bend: Number(effect.bend_percent) / 100,
+    });
+    const result = response.result;
+    if (!result?.instances) throw new Error('Rust returned no laboratory geometry');
+    const state = rustAppShadow?.patchLabSnapshot?.();
+    const current = !token.cancelled
+      && patchLab.active
+      && generation === patchLab.loadGeneration
+      && String(state?.pendingGeometryJob) === jobId;
+    if (current) {
+      installPatchLabPlatformGeometry(result, { preserveView });
+    } else {
+      rustPatchLabDiagnostics.preventedStaleInstalls += 1;
+    }
+    completeRustPatchLabGeometryFromBrowser(
+      result,
+      `${context}-geometry-effect`,
+      jobId,
+    );
+    rustPatchLabDiagnostics.completedEffects += 1;
+  } catch (error) {
+    failRustPatchLabGeometryFromBrowser(error, `${context}-geometry-effect`, jobId);
+    if (!token.cancelled) $('patch-lab-stats').textContent = `Patch lab failed: ${error.message}`;
+    rustPatchLabDiagnostics.effectHostErrors += 1;
+  } finally {
+    rustPatchLabEffectHost.geometryJobs.delete(jobId);
+  }
+}
+
+function rustPatchLabLodRequestFromEffect(effect) {
+  const manual = Array.from(effect.manual_edge_exponents || []);
+  return {
+    field: patchLabWireField(effect.field),
+    phase: Number(effect.phase_microradians) / 1e6,
+    minExp: Number(effect.min_exponent),
+    maxExp: Number(effect.max_exponent),
+    edgeAExp: Number(manual[0]),
+    edgeBExp: Number(manual[1]),
+    edgeCExp: Number(manual[2]),
+    maxFaceEdgeRatio: Number(effect.max_face_edge_ratio),
+  };
+}
+
+async function waitForRustPatchLabResidentPolicy(effect, token) {
+  const exponent = Number(effect.atlas_exponent);
+  for (let attempt = 0; attempt < 240; attempt += 1) {
+    if (token.cancelled) return false;
+    if (residentAtlasExponent === exponent
+        && activeLodGradingRatio === Number(effect.max_face_edge_ratio)) return true;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  throw new Error(
+    `Patch Lab LOD job ${effect.job_id} waited for atlas ${exponent}`
+    + ` / grading ${effect.max_face_edge_ratio}:1`,
+  );
+}
+
+async function runRustPatchLabLodEffect(effect, context) {
+  const jobId = String(effect.job_id);
+  const geometryJobId = String(effect.geometry_job_id);
+  const token = { cancelled: false, jobId, geometryJobId };
+  rustPatchLabEffectHost.lodJobs.set(jobId, token);
+  const request = rustPatchLabLodRequestFromEffect(effect);
+  try {
+    if (!await waitForRustPatchLabResidentPolicy(effect, token)) return;
+    const response = await workerCall('update_patch_lab_lods', request);
+    if (!response.result?.face_lods) throw new Error('Rust returned no Patch Lab LOD field');
+    const before = rustAppShadow?.patchLabSnapshot?.();
+    const current = !token.cancelled
+      && patchLab.active
+      && String(before?.pendingLodJob) === jobId
+      && String(before?.installedGeometry?.jobId) === geometryJobId
+      && !before?.lodDirty;
+    if (current) {
+      const faceLods = new Float32Array(
+        response.result.face_lods.buffer || response.result.face_lods,
+      );
+      mr_buildBatches(faceLods);
+      renderPatchLabStats(response.result, request);
+      if (urlSyncReady) syncURL();
+    } else {
+      rustPatchLabDiagnostics.preventedStaleInstalls += 1;
+    }
+    const receipt = completeRustPatchLabLodFromBrowser(
+      response.result,
+      `${context}-lod-effect`,
+      jobId,
+      geometryJobId,
+    );
+    if (current && receipt?.commit?.disposition === 'ignored_stale') {
+      throw new Error(`Patch Lab LOD job ${jobId} became stale during its install fence`);
+    }
+    rustPatchLabDiagnostics.completedEffects += 1;
+  } catch (error) {
+    failRustPatchLabLodFromBrowser(
+      error,
+      `${context}-lod-effect`,
+      jobId,
+      geometryJobId,
+    );
+    if (!token.cancelled) $('patch-lab-stats').textContent = `LOD field failed: ${error.message}`;
+    rustPatchLabDiagnostics.effectHostErrors += 1;
+  } finally {
+    rustPatchLabEffectHost.lodJobs.delete(jobId);
+  }
+}
+
+async function waitForRustPatchLabSettled(timeoutMs = 12_000) {
+  const deadline = performance.now() + timeoutMs;
+  while (performance.now() < deadline) {
+    const state = rustAppShadow?.patchLabSnapshot?.();
+    if (state?.active && state.installedGeometry && state.latestLod
+        && state.pendingGeometryJob == null && state.pendingLodJob == null) return state;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  throw new Error('Rust Patch Lab did not settle before the platform deadline');
+}
 let nodeFocusRecords = new Map();
 let sceneSourceBound = null;
 let selectedObject = null;
@@ -10058,6 +10319,22 @@ const lod = {
 };
 let activeLodGradingRatio = 2;
 let residentAtlasExponent = null;
+let residentAtlasDebounceTimer = null;
+let residentAtlasRebuildInFlight = false;
+let residentAtlasPendingExponent = null;
+let residentAtlasPendingGradingRatio = null;
+const residentAtlasDiagnostics = {
+  requestedExponent: null,
+  requestedGradingRatio: null,
+  residentExponent: null,
+  residentGradingRatio: null,
+  inFlight: false,
+  builds: 0,
+  skippedStaleBuilds: 0,
+  last: null,
+  error: null,
+};
+globalThis.__hyperscopeResidentAtlas = residentAtlasDiagnostics;
 bindSlider('res', lod.res, v => v === 0 ? 'auto' : String(1 << v));
 bindSlider('tess-density', lod.density, v => v.toFixed(0));
 bindSlider('min-px-sub', lod.minPx, v => v.toFixed(1));
@@ -10125,7 +10402,7 @@ function updatePatchLabControlVisibility() {
   $('patch-lab-policy-note').textContent =
     `Each edge slider is a request. The active resident-LOD policy grades each face to ${activeLodGradingRatio}:1, and the cached atlas contains only the resulting reachable triples; labels show request → resident.`
     + (requestedRatio !== activeLodGradingRatio
-      ? ` Reload to apply the requested ${requestedRatio}:1 policy.`
+      ? ` Preparing the requested ${requestedRatio}:1 resident policy…`
       : '');
   $('patch-lab-exit').disabled = !patchLab.active;
 }
@@ -10221,15 +10498,7 @@ async function updatePatchLabLods() {
   }
 }
 
-async function loadPatchLab(
-  shape,
-  { preserveField = false, preserveView = false, fromUrl = false } = {},
-) {
-  shape = patchLabShape(shape);
-  if (!shape) throw new Error('unknown Patch Lab shape');
-  if (!patchLab.active) {
-    patchLab.returnUrl = fromUrl ? patchLabReturnUrl() : location.href;
-  }
+function beginPatchLabPlatformGeometry(shape, { preserveView = false } = {}) {
   patchLab.active = true;
   patchLab.shape = shape;
   patchLab.updateDirty = false;
@@ -10237,23 +10506,11 @@ async function loadPatchLab(
   patchLab.lastResult = null;
   remeshedMode = false;
   const generation = ++patchLab.loadGeneration;
-  if (!preserveField) {
-    if (shape === 'triangle') {
-      $('patch-lab-field').value = 'edges';
-    } else if ($('patch-lab-field').value === 'edges') {
-      $('patch-lab-field').value = 'wave';
-    }
-  } else if (shape !== 'triangle' && $('patch-lab-field').value === 'edges') {
-    // Manual edge coordinates are intentionally defined only for the single
-    // triangle; multi-face scenes use a spatial field plus reconciliation.
-    $('patch-lab-field').value = 'wave';
-  }
   updatePatchLabControlVisibility();
   $('patch-lab-stats').textContent = `Loading ${shape} laboratory…`;
-  synchronizeRustPatchLabFromBrowser('browser-geometry-request');
 
   // The laboratory owns the current source geometry. Stop model animation and
-  // authored scene updates; exiting reloads the exact pre-lab URL.
+  // authored scene updates; exiting restores the exact pre-lab URL.
   animating_sig.set(false);
   animationPoseBlockGeneration += 1;
   animationPoseBlocked = false;
@@ -10268,6 +10525,61 @@ async function loadPatchLab(
   $('presentation-card').classList.remove('active');
   $('presentation-card-rust').hidden = true;
   clearSelectedObject('Patch laboratory');
+  return generation;
+}
+
+function installPatchLabPlatformGeometry(result, { preserveView = false } = {}) {
+  currentInstances = new Float32Array(result.instances.buffer || result.instances);
+  currentFaceNodes = new Int32Array(result.num_faces);
+  currentPrimaryFaceCount = result.num_faces;
+  mr_setFaceNodes(currentFaceNodes);
+  setRendererInstanceData(currentInstances, result.num_faces);
+  mr_setFaceMaterials(new Int32Array(result.face_materials.buffer || result.face_materials));
+  rebuildNodeFocusRecords();
+
+  // Shape selection starts from a stable inspection frame. Geometry edits and
+  // URL restoration retain the exact authored camera/render state.
+  if (!preserveView) {
+    mob.xform.set('identity');
+    zoom = patchLab.shape === 'cube' ? 3.8 : 3.25;
+    rotX = patchLab.shape === 'cube' ? 0.35 : 0.08;
+    rotY = patchLab.shape === 'cube' ? 0.55 : 0.0;
+    cameraRoll = 0;
+    panX = 0; panY = 0; panZ = 0;
+    setManualCameraBasisFromEuler();
+    renderMode.set('both');
+  }
+}
+
+async function loadPatchLab(
+  shape,
+  { preserveField = false, preserveView = false, fromUrl = false } = {},
+) {
+  shape = patchLabShape(shape);
+  if (!shape) throw new Error('unknown Patch Lab shape');
+  if (!patchLab.active) {
+    patchLab.returnUrl = fromUrl ? patchLabReturnUrl() : location.href;
+  }
+  patchLab.active = true;
+  patchLab.shape = shape;
+  if (!preserveField) {
+    if (shape === 'triangle') {
+      $('patch-lab-field').value = 'edges';
+    } else if ($('patch-lab-field').value === 'edges') {
+      $('patch-lab-field').value = 'wave';
+    }
+  } else if (shape !== 'triangle' && $('patch-lab-field').value === 'edges') {
+    // Manual edge coordinates are intentionally defined only for the single
+    // triangle; multi-face scenes use a spatial field plus reconciliation.
+    $('patch-lab-field').value = 'wave';
+  }
+  updatePatchLabControlVisibility();
+  const receipt = synchronizeRustPatchLabFromBrowser('browser-geometry-request');
+  if (RUST_PATCH_LAB_IMPLEMENTATION === 'rust') {
+    if (!receipt) throw new Error('Rust Patch Lab activation failed');
+    return waitForRustPatchLabSettled();
+  }
+  const generation = beginPatchLabPlatformGeometry(shape, { preserveView });
 
   try {
     const response = await workerCall('load_patch_lab', {
@@ -10278,27 +10590,8 @@ async function loadPatchLab(
     if (!patchLab.active || generation !== patchLab.loadGeneration) return;
     const result = response.result;
     if (!result?.instances) throw new Error('Rust returned no laboratory geometry');
-    currentInstances = new Float32Array(result.instances.buffer || result.instances);
-    currentFaceNodes = new Int32Array(result.num_faces);
-    currentPrimaryFaceCount = result.num_faces;
-    mr_setFaceNodes(currentFaceNodes);
-    setRendererInstanceData(currentInstances, result.num_faces);
-    mr_setFaceMaterials(new Int32Array(result.face_materials.buffer || result.face_materials));
-    rebuildNodeFocusRecords();
+    installPatchLabPlatformGeometry(result, { preserveView });
     completeRustPatchLabGeometryFromBrowser(result, 'browser-geometry-completion');
-
-    // Shape selection starts from a stable inspection frame. Geometry edits
-    // and URL restoration retain the exact authored camera/render state.
-    if (!preserveView) {
-      mob.xform.set('identity');
-      zoom = shape === 'cube' ? 3.8 : 3.25;
-      rotX = shape === 'cube' ? 0.35 : 0.08;
-      rotY = shape === 'cube' ? 0.55 : 0.0;
-      cameraRoll = 0;
-      panX = 0; panY = 0; panZ = 0;
-      setManualCameraBasisFromEuler();
-      renderMode.set('both');
-    }
     await updatePatchLabLods();
   } catch (error) {
     failRustPatchLabGeometryFromBrowser(error, 'browser-geometry-failure');
@@ -10369,11 +10662,13 @@ $('patch-lab-exit').addEventListener('click', () => {
 effect(() => {
   lod.atlas.get();
   updatePatchLabControlVisibility();
-  if (patchLab.active) updatePatchLabLods();
+  if (wasmOk.peek()) scheduleResidentAtlasRebuild();
+  if (patchLab.active && RUST_PATCH_LAB_IMPLEMENTATION !== 'rust') updatePatchLabLods();
 });
 effect(() => {
   lod.grading.get();
   updatePatchLabControlVisibility();
+  if (wasmOk.peek()) scheduleResidentAtlasRebuild();
   syncURL();
 });
 updatePatchLabControlVisibility();
@@ -12345,7 +12640,8 @@ function frame(ts) {
     // pose. Do not independently sample this RAF clock here.
   }
 
-  if (patchLab.active && patchLab.animate && ts - patchLab.lastAnimatedAt >= 90) {
+  if (RUST_PATCH_LAB_IMPLEMENTATION !== 'rust'
+      && patchLab.active && patchLab.animate && ts - patchLab.lastAnimatedAt >= 90) {
     const elapsed = (ts - patchLab.lastAnimatedAt) / 1000;
     patchLab.lastAnimatedAt = ts;
     const phase = (parseFloat($('patch-lab-phase').value) + elapsed * 1.35) % (Math.PI * 2);
@@ -14252,24 +14548,13 @@ phase('workers', ['wasm'], async () => {
   }
 });
 
-let residentAtlasDebounceTimer = null;
-let residentAtlasRebuildInFlight = false;
-let residentAtlasPendingExponent = null;
-const residentAtlasDiagnostics = {
-  requestedExponent: null,
-  residentExponent: null,
-  inFlight: false,
-  builds: 0,
-  skippedStaleBuilds: 0,
-  last: null,
-  error: null,
-};
-globalThis.__hyperscopeResidentAtlas = residentAtlasDiagnostics;
-
 function scheduleResidentAtlasRebuild() {
   const exponent = Math.max(3, Math.min(9, Math.round(lod.atlas.peek())));
+  const gradingRatio = Number(lod.grading.peek());
   residentAtlasPendingExponent = exponent;
+  residentAtlasPendingGradingRatio = gradingRatio;
   residentAtlasDiagnostics.requestedExponent = exponent;
+  residentAtlasDiagnostics.requestedGradingRatio = gradingRatio;
   clearTimeout(residentAtlasDebounceTimer);
   residentAtlasDebounceTimer = setTimeout(() => {
     residentAtlasDebounceTimer = null;
@@ -14284,15 +14569,18 @@ async function rebuildResidentAtlas() {
   try {
     while (residentAtlasPendingExponent != null) {
       const exponent = residentAtlasPendingExponent;
+      const gradingRatio = residentAtlasPendingGradingRatio;
       residentAtlasPendingExponent = null;
-      if (exponent === residentAtlasExponent) continue;
+      residentAtlasPendingGradingRatio = null;
+      if (exponent === residentAtlasExponent && gradingRatio === activeLodGradingRatio) continue;
       const previousExponent = residentAtlasExponent;
+      const previousGradingRatio = activeLodGradingRatio;
       const flatTriples = required_tessellation_atlas_triples(
         exponent,
-        activeLodGradingRatio,
+        gradingRatio,
       );
       if (!flatTriples.length) {
-        throw new Error(`no atlas patches are reachable at ${activeLodGradingRatio}:1`);
+        throw new Error(`no atlas patches are reachable at ${gradingRatio}:1`);
       }
       const requestedPatches = flatTriples.length / 3;
       $('atlas-exp-v').textContent = `${exponent} …`;
@@ -14300,12 +14588,13 @@ async function rebuildResidentAtlas() {
       const startedAt = performance.now();
       const build = await workerCall('build_required_atlas', {
         maxLodExp: exponent,
-        maxFaceEdgeRatio: activeLodGradingRatio,
+        maxFaceEdgeRatio: gradingRatio,
       });
       const generationMs = Number(build.ms) || 0;
       if (build.error) throw new Error(build.error);
       if (residentAtlasPendingExponent != null
-          && residentAtlasPendingExponent !== exponent) {
+          && (residentAtlasPendingExponent !== exponent
+            || residentAtlasPendingGradingRatio !== gradingRatio)) {
         residentAtlasDiagnostics.skippedStaleBuilds += 1;
         continue;
       }
@@ -14317,7 +14606,8 @@ async function rebuildResidentAtlas() {
         throw new Error('live tessellation atlas export was incomplete');
       }
       if (residentAtlasPendingExponent != null
-          && residentAtlasPendingExponent !== exponent) {
+          && (residentAtlasPendingExponent !== exponent
+            || residentAtlasPendingGradingRatio !== gradingRatio)) {
         residentAtlasDiagnostics.skippedStaleBuilds += 1;
         continue;
       }
@@ -14327,7 +14617,8 @@ async function rebuildResidentAtlas() {
         throw new Error(refresh.error || 'LOD worker rejected the replacement atlas');
       }
       if (residentAtlasPendingExponent != null
-          && residentAtlasPendingExponent !== exponent) {
+          && (residentAtlasPendingExponent !== exponent
+            || residentAtlasPendingGradingRatio !== gradingRatio)) {
         residentAtlasDiagnostics.skippedStaleBuilds += 1;
         continue;
       }
@@ -14336,15 +14627,22 @@ async function rebuildResidentAtlas() {
       if (!mr_uploadTessAtlas(packed.patches, packed.bary, packed.tris, packed.lines)) {
         throw new Error('renderer rejected the replacement tessellation atlas');
       }
+      if (!mr_setLodGradingRatio(gradingRatio)) {
+        throw new Error(`renderer rejected ${gradingRatio}:1 LOD grading`);
+      }
       refreshWebGpuBackendDiagnostics();
       const uploadMs = performance.now() - uploadStartedAt;
       residentAtlasExponent = exponent;
+      activeLodGradingRatio = gradingRatio;
       residentAtlasDiagnostics.residentExponent = exponent;
+      residentAtlasDiagnostics.residentGradingRatio = gradingRatio;
       residentAtlasDiagnostics.builds += 1;
       residentAtlasDiagnostics.error = null;
       residentAtlasDiagnostics.last = {
         previousExponent,
+        previousGradingRatio,
         exponent,
+        gradingRatio,
         requestedPatches,
         packedPatches: packed.patches.length / 7,
         vertices: packed.bary.length / 3,
@@ -14358,12 +14656,12 @@ async function rebuildResidentAtlas() {
       };
       updatePatchLabControlVisibility();
       if (patchLab.active) {
-        await updatePatchLabLods();
+        if (RUST_PATCH_LAB_IMPLEMENTATION !== 'rust') await updatePatchLabLods();
       } else if (meshInfo) {
         lodFullSceneDirty = true;
         debouncedLodRecompute();
       }
-      $('stats').textContent = `Atlas LoD ${exponent} resident · ${requestedPatches} patches`;
+      $('stats').textContent = `Atlas LoD ${exponent} · ${gradingRatio}:1 resident · ${requestedPatches} patches`;
     }
   } catch (error) {
     residentAtlasDiagnostics.error = error?.message || String(error);
@@ -14374,7 +14672,8 @@ async function rebuildResidentAtlas() {
     residentAtlasDiagnostics.inFlight = false;
     $('atlas-exp-v').textContent = String(residentAtlasExponent ?? lod.atlas.peek());
     if (residentAtlasPendingExponent != null
-        && residentAtlasPendingExponent !== residentAtlasExponent) {
+        && (residentAtlasPendingExponent !== residentAtlasExponent
+          || residentAtlasPendingGradingRatio !== activeLodGradingRatio)) {
       queueMicrotask(rebuildResidentAtlas);
     }
   }
@@ -14506,7 +14805,9 @@ phase('atlas', ['workers'], async () => {
   const uploadMs = performance.now() - uploadStartedAt;
   residentAtlasExponent = ATLAS_EXP;
   residentAtlasDiagnostics.requestedExponent = ATLAS_EXP;
+  residentAtlasDiagnostics.requestedGradingRatio = activeLodGradingRatio;
   residentAtlasDiagnostics.residentExponent = ATLAS_EXP;
+  residentAtlasDiagnostics.residentGradingRatio = activeLodGradingRatio;
   startupDiagnostics.atlas = {
     requestedPatches: allTriples.length,
     maxFaceEdgeRatio: activeLodGradingRatio,

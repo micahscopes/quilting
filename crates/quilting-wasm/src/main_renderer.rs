@@ -7064,10 +7064,13 @@ pub fn mr_set_face_nodes(nodes: &[i32]) {
     });
 }
 
-/// Select the measured within-face LOD grading policy before model residency.
-/// A live switch would require recovering the unpromoted classifier snapshot
-/// and replacing the atlas atomically, so the browser intentionally exposes
-/// this as a reload-to-apply setting.
+/// Select the measured within-face LOD grading policy.
+///
+/// A resident atlas replacement retires every batch before publishing its new
+/// lookup, which creates a safe live-policy handoff: the browser uploads the
+/// replacement atlas, changes this policy while no batch can refer to the old
+/// grading, then submits a freshly classified/reconciled batch snapshot. A
+/// direct policy mutation with live batches remains rejected.
 #[wasm_bindgen(js_name = "mr_setLodGradingRatio")]
 pub fn mr_set_lod_grading_ratio(ratio: u32) -> bool {
     let Some(grading) = batch::FaceLodGrading::from_ratio(ratio) else {
@@ -7076,9 +7079,9 @@ pub fn mr_set_lod_grading_ratio(ratio: u32) -> bool {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         let Some(state) = state.as_mut() else { return false };
-        if state.num_faces != 0 && state.lod_grading != grading {
+        if !state.batches.is_empty() && state.lod_grading != grading {
             web_sys::console::warn_1(
-                &"LOD grading ratio changes require a reload before model residency".into(),
+                &"LOD grading ratio changes require a batch-free atlas replacement fence".into(),
             );
             return false;
         }

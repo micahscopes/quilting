@@ -62,7 +62,7 @@ const packet = browser.slice(packetStart, packetEnd);
 for (const required of [
   'app.synchronizeRenderSettings(settings)',
   'if (receipt.sequence != null)',
-  'observeRustPatchLabEffects(receipt.patchLabEffects,',
+  'hostRustPatchLabEffects(receipt.patchLabEffects,',
   "receipt.disposition === 'committed'",
 ]) {
   assert.ok(packet.includes(required), `thin render-settings packet adapter is missing ${required}`);

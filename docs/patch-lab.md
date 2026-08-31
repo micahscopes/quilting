@@ -39,9 +39,11 @@ The default 2:1 policy bounds anisotropic triangle fans and makes a detail peak
 decay by one power-of-two level per neighboring source face, but its monotone
 promotions can also create a conservative halo of extra resident triangles.
 The optional 4:1 policy reduces that halo while allowing more anisotropic
-topology. Changing policy requires a reload because the cache contains only
-the triples reachable under the active policy; the atlas itself is not what
-causes promotion.
+topology. Changing policy debounces one replacement atlas containing exactly
+the triples reachable under the new policy. The renderer retires the old
+batches before switching policy, and Rust requests a fresh reconciled LOD
+snapshot before anything draws from the replacement; the atlas itself is not
+what causes promotion.
 
 For example, requesting `1 / 8 / 128` on the single triangle produces a
 renderable `64 / 64 / 128` under 2:1 or `32 / 32 / 128` under 4:1. The UI
@@ -49,10 +51,13 @@ reports either result as two promoted edges rather than
 silently presenting the reconciled values as if they had been requested.
 
 The deterministic geometry and field implementation lives in
-`quilting_core::educational`. Browser code only selects parameters, transfers
-the compact six-float-per-face LOD result, and displays diagnostics. This is
-intentional: a native or future WebGPU frontend can reuse the same lesson and
-the same invariants without porting JavaScript behavior.
+`quilting_core::educational`. Rust application state owns controls, animation
+phase, job identity, coalescing, stale-completion policy, and the Leptos/FRP
+view. Browser code is a thin IO adapter that runs typed geometry/LOD jobs,
+transfers the compact six-float-per-face result, and installs only the result
+whose exact Rust job is still current. This is intentional: a native or future
+WebGPU frontend can reuse the same lesson and invariants without porting
+JavaScript behavior.
 
 ## Runtime isolation
 

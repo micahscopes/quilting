@@ -56,7 +56,7 @@ const synchronizationEnd = browser.indexOf('function patchLabHistogramBins(', sy
 const synchronization = browser.slice(synchronizationStart, synchronizationEnd);
 for (const required of [
   'app.requestPatchLab(browser)',
-  'observeRustPatchLabEffects(receipt.effects, context)',
+  'hostRustPatchLabEffects(receipt.effects, context)',
 ]) {
   assert.ok(synchronization.includes(required), `Patch Lab request adapter is missing ${required}`);
 }
@@ -69,7 +69,7 @@ for (const required of [
   'rustAppShadow.finishPatchLabLod(',
   'rustAppShadow.finishPatchLabGeometryFailed(',
   'rustAppShadow.finishPatchLabLodFailed(',
-  'observeRustPatchLabEffects(receipt.effects, context)',
+  'hostRustPatchLabEffects(receipt.effects, context)',
 ]) {
   assert.ok(completion.includes(required), `Patch Lab completion adapter is missing ${required}`);
 }
@@ -83,7 +83,7 @@ for (const required of [
   "case 'evaluate_lod':",
   'returned an invalid Patch Lab job',
 ]) {
-  assert.ok(observer.includes(required), `typed Patch Lab executor is missing ${required}`);
+  assert.ok(observer.includes(required), `typed Patch Lab observer is missing ${required}`);
 }
 for (const retired of [
   'unwrapRustPatchLabEffect',
@@ -92,8 +92,37 @@ for (const retired of [
   '.filter(',
 ]) {
   assert.equal(observer.includes(retired), false,
-    `typed Patch Lab executor must not retain ${retired}`);
+    `typed Patch Lab observer must not retain ${retired}`);
 }
+
+const hostStart = browser.indexOf('function hostRustPatchLabEffects(');
+const hostEnd = browser.indexOf('async function waitForRustPatchLabSettled(', hostStart);
+const host = browser.slice(hostStart, hostEnd);
+for (const required of [
+  'observeRustPatchLabEffects(effects, context)',
+  'projectRustPatchLabReadModelToBrowser({',
+  "case 'build_geometry':",
+  'runRustPatchLabGeometryEffect(effect, projection, context)',
+  "case 'evaluate_lod':",
+  'runRustPatchLabLodEffect(effect, context)',
+  'String(before?.pendingLodJob) === jobId',
+  '!before?.lodDirty',
+  'mr_buildBatches(faceLods)',
+  'completeRustPatchLabLodFromBrowser(',
+]) {
+  assert.ok(host.includes(required), `Rust Patch Lab effect host is missing ${required}`);
+}
+assert.equal(
+  (browser.match(/observeRustPatchLabEffects\(/g) || []).length,
+  2,
+  'effects must be observed only at the observer declaration and inside the effect host',
+);
+
+assert.ok(browser.includes("patchlabimpl: 'rust'"),
+  'browser defaults must select Rust Patch Lab authority');
+assert.ok(read('crates/hyperscope-app/src/settings.rs')
+  .includes('spec!("patchlabimpl", "rust", Implementation)'),
+  'Rust route defaults must select Rust Patch Lab authority');
 
 for (const retired of [
   'commit.effects',

@@ -466,10 +466,13 @@ The default 2:1 maximum within one source face is a conservative quality and
 residency policy: it avoids extreme fans, but it also promotes low edges and
 propagates a graded LOD halo through neighboring faces. The measured 4:1
 experiment is available through the validated `lodratio=4` route and the
-reload-to-apply control. It increases the number and size of cached atlas
-entries while potentially reducing the much larger per-scene resident draw
-workload. Cache identity includes both ratio and maximum exponent, and the
-renderer rejects unsupported or post-residency policy changes.
+live control. Atlas exponent and grading changes share a debounced replacement:
+uploading the replacement retires old batches, the renderer changes policy at
+that batch-free fence, and a newly classified/reconciled snapshot restores
+residency. The 4:1 policy increases the number and size of cached atlas entries
+while potentially reducing the much larger per-scene resident draw workload.
+Cache identity includes both ratio and maximum exponent, and unsupported or
+unfenced policy changes remain rejected.
 
 `TessellationAtlas::build_for_keys` makes the topology choice explicit over
 the same reachable key set:
