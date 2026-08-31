@@ -1105,6 +1105,18 @@ pub struct PresentationReadModel {
     pub animation_residency: Option<PresentationAnimationResidencyBinding>,
 }
 
+/// Coherent low-rate presentation-animation state for renderer adapters.
+/// This deliberately excludes cue composition, navigation, assets, and
+/// diagnostics; adapters can sample it after an asynchronous clip boundary
+/// without serializing the complete application.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PresentationAnimationReadModel {
+    pub revision: u64,
+    pub residency: Option<PresentationAnimationResidencyBinding>,
+    pub clip_state: AnimationClipSelectionReadModel,
+    pub clock: AnimationClock,
+}
+
 /// One coherent application revision of the active presentation composition.
 /// Renderer handles enter through [`PackedPresentationLayerBinding`]; all
 /// semantic layer and authored transform state is sampled under one lock.
@@ -2236,6 +2248,15 @@ impl AppState {
         })
     }
 
+    fn presentation_animation_read_model(&self) -> PresentationAnimationReadModel {
+        PresentationAnimationReadModel {
+            revision: self.revision,
+            residency: self.presentation_animation_residency,
+            clip_state: self.animation_clip_selection_read_model(),
+            clock: self.animation,
+        }
+    }
+
     fn asset_read_models(&self) -> Vec<AssetReadModel> {
         self.assets
             .values()
@@ -2977,6 +2998,10 @@ impl AppStore {
 
     pub fn presentation_snapshot(&self) -> Option<PresentationReadModel> {
         self.presentation.get_cloned()
+    }
+
+    pub fn presentation_animation_snapshot(&self) -> PresentationAnimationReadModel {
+        self.lock_state().presentation_animation_read_model()
     }
 
     /// Resolve the active cue against resident renderer nodes without
@@ -4648,6 +4673,13 @@ mod tests {
             Some(binding),
         );
         assert_eq!(store.summary_snapshot().pending_animation_clip, Some(1));
+        let animation_state = store.presentation_animation_snapshot();
+        assert_eq!(animation_state.revision, bound.commit.revision);
+        assert_eq!(animation_state.residency, Some(binding));
+        assert_eq!(
+            animation_state.clip_state.pending.as_ref().unwrap().clip.index,
+            1,
+        );
 
         // The next cue uses a different layer instance of the same authored
         // horse asset. Asset-level residency remains valid and the already

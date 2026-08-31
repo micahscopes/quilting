@@ -3263,9 +3263,9 @@ function primaryPresentationAnimation(snapshot) {
 async function applyPresentationAnimationState(snapshot = rustPresentationSnapshot) {
   const generation = ++presentationAnimationGeneration;
   if (ANIMATION_CLIP_IMPLEMENTATION === 'rust' && presentationAppAuthority()) {
-    const residency = refreshAppShadowSnapshot()?.presentation?.animationResidency;
-    if (!residency) return false;
-    return applyRustPresentationAnimationTransport('presentation-state');
+    const state = rustAppShadow.presentationAnimationState();
+    if (!state.residency) return false;
+    return applyRustPresentationAnimationTransport('presentation-state', state);
   }
   let animation;
   try {
@@ -3306,7 +3306,7 @@ async function applyPresentationAnimationState(snapshot = rustPresentationSnapsh
     $('time').value = animTime;
     $('time-v').textContent = animTime.toFixed(2);
     rebaseAnimationPoseContinuity();
-    const applicationPlayback = rustAppShadow?.snapshot()?.animationPlaying;
+    const applicationPlayback = rustAppShadow?.presentationAnimationState()?.playing;
     const playing = typeof applicationPlayback === 'boolean'
       ? applicationPlayback
       : Boolean(animation.playing);
@@ -3345,7 +3345,7 @@ function observePresentationClipJob(job, context) {
   return { effect, cancellations };
 }
 
-function applyRustPresentationAnimationTransport(context) {
+function applyRustPresentationAnimationTransport(context, state = null) {
   try {
     writeRustAnimationSample(rustAppShadow, null);
     const playing = installedAnimationSamplePacket[0] >= 0.5;
@@ -3359,17 +3359,17 @@ function applyRustPresentationAnimationTransport(context) {
     rebaseAnimationPoseContinuity();
     tickAnimation(animTime, animationPoseClockSeconds);
     debouncedLodRecompute();
-    const app = refreshAppShadowSnapshot();
+    const current = state || rustAppShadow.presentationAnimationState();
     rustPresentationDiagnostics.activeAnimation = {
       clipIndex,
-      clip: app?.animationClipSelection?.active?.clip?.name ?? null,
-      timeSeconds: app?.animationTimeSeconds ?? null,
+      clip: current?.clipState?.active?.clip?.name ?? null,
+      timeSeconds: current?.timeSeconds ?? null,
       playing,
       speed: presentationAnimationSpeed,
       source: 'hyperscope-app',
     };
     rustPresentationDiagnostics.animationResidency =
-      app?.presentation?.animationResidency ?? null;
+      current?.residency ?? null;
     rustPresentationDiagnostics.error = null;
     return true;
   } catch (error) {
@@ -3388,10 +3388,10 @@ async function applyCommittedPresentationAnimationEffects(
     return applyPresentationAnimationState(snapshot);
   }
   const job = observePresentationClipJob(clipJob, context);
-  const app = refreshAppShadowSnapshot();
-  if (!app?.presentation?.animationResidency) return false;
+  const state = rustAppShadow.presentationAnimationState();
+  if (!state?.residency) return false;
   const requestedIndex = job.effect?.clip_index
-    ?? app?.animationClipSelection?.active?.clip?.index;
+    ?? state?.clipState?.active?.clip?.index;
   if (job.effect || job.cancellations.length > 0) {
     if (!Number.isSafeInteger(requestedIndex) || requestedIndex < 0) {
       throw new Error(`${context}: Rust clip effects have no valid destination`);
@@ -3402,7 +3402,7 @@ async function applyCommittedPresentationAnimationEffects(
     });
     if (!switched) throw new Error(`${context}: renderer clip adaptation failed`);
   }
-  return applyRustPresentationAnimationTransport(context);
+  return applyRustPresentationAnimationTransport(context, job.effect ? null : state);
 }
 
 async function bindPrimaryPresentationAnimationResidency(presentationAssetId) {

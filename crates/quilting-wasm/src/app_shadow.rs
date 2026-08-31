@@ -2545,6 +2545,22 @@ impl HyperscopeAppShadow {
         Ok(())
     }
 
+    /// Return only the coherent low-rate state needed by presentation
+    /// animation adaptation. High-rate sampling remains allocation-free through
+    /// `writeInstalledAnimationSample`.
+    #[wasm_bindgen(js_name = presentationAnimationState)]
+    pub fn presentation_animation_state(&self) -> Result<JsValue, JsValue> {
+        let state = self.store.presentation_animation_snapshot();
+        to_js(&ShadowPresentationAnimationState {
+            revision: state.revision.to_string(),
+            residency: state.residency.map(Into::into),
+            clip_state: state.clip_state.into(),
+            playing: state.clock.playing,
+            time_seconds: state.clock.time_seconds,
+            speed: state.clock.speed,
+        })
+    }
+
     /// Atomically admit one transport-neutral authored checkpoint. The
     /// revision travels as decimal text so JavaScript cannot truncate a u64;
     /// commands retain the canonical protocol JSON shape shared with Blender.
@@ -3783,6 +3799,17 @@ struct ShadowPresentationAnimationResidencyDispatch {
     active: Option<PresentationSnapshot>,
     selection: Option<ShadowAnimationClipJobEffect>,
     cancellations: Vec<ShadowAnimationClipJobEffect>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowPresentationAnimationState {
+    revision: String,
+    residency: Option<ShadowPresentationAnimationResidency>,
+    clip_state: ShadowAnimationClipSelection,
+    playing: bool,
+    time_seconds: f64,
+    speed: f64,
 }
 
 fn presentation_animation_residency_to_js(
