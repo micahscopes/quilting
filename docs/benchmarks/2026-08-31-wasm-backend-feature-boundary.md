@@ -23,4 +23,14 @@ cargo check --target wasm32-unknown-unknown -p quilting-wasm --features leptos-u
 Finished `dev` profile ... in 16.05s
 ```
 
-The feature-enabled WebGPU check remains a separate gate.
+The feature-enabled WebGPU adapter check also passes:
+
+```text
+cargo check --target wasm32-unknown-unknown -p quilting-wasm \
+  --features leptos-ui,webgpu-backend
+Finished `dev` profile ... in 21.95s
+```
+
+Together these checks prove both sides of the feature boundary compile. They
+do not substitute for browser extraction/image equivalence or fallback tests.
+Neither check invoked Trunk, wasm-pack, binding generation, or wasm-opt.
