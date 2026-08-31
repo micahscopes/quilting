@@ -4967,6 +4967,7 @@ function appShadowAssetId(uri, explicitId) {
 
 function durablePresentationFetchAssetId(requestedUri, provenance) {
   if (provenance !== 'manifest-fetch') return null;
+  if (!RUST_PRESENTATION_ENABLED) return null;
   if (presentationAppAuthority()) {
     const asset = rustAppShadow.presentationAssetForExactUri(String(requestedUri));
     return asset?.id ?? null;

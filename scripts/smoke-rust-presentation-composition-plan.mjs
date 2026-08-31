@@ -35,6 +35,7 @@ assert.ok(fetchResolverStart >= 0 && fetchResolverEnd > fetchResolverStart,
   'could not locate presentation fetch identity adapter');
 for (const required of [
   "if (provenance !== 'manifest-fetch') return null;",
+  'if (!RUST_PRESENTATION_ENABLED) return null;',
   'if (presentationAppAuthority()) {',
   'rustAppShadow.presentationAssetForExactUri(String(requestedUri))',
   'durablePresentationAssetId(',

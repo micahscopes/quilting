@@ -15,6 +15,12 @@ Ambiguous and missing identities are typed failures. Secondary assets retain
 manifest order. The standalone browser resolver remains only for `js|shadow`
 rollback.
 
+The manifest identity adapter is also gated by presentation enablement. The
+Rust implementation is the bootstrap default even for an ordinary standalone
+`?glb=...` route, but that does not imply a presentation has been loaded. A
+standalone asset therefore returns no durable presentation identity instead of
+calling the application resolver and failing startup with `NoPresentation`.
+
 ## Evidence
 
 Two focused native fixtures pass and cover uninstalled state, session-ID URI
@@ -22,11 +28,16 @@ resolution, exact binding precedence, secondary ordering, and ambiguous
 basenames. The source oracle freezes the typed application/WASM boundary,
 Rust-authority adapter, rollback resolver, and inline-module syntax. The
 neighboring presentation-dispatch oracle and checked-in generated-WASM
-rollback suite also pass. The WebGL2-only wasm32 adapter check passes:
+rollback suite also pass. The original WebGL2-only wasm32 adapter check passed:
 
 ```text
 cargo check --target wasm32-unknown-unknown -p quilting-wasm --features leptos-ui
 Finished `dev` profile ... in 11.49s
 ```
 
-Trunk, wasm-pack, binding generation, and wasm-opt were not run.
+A live Chrome peer regression subsequently loaded the ordinary horse route
+without `presentation=1`: 984 faces reached device LOD and one WebGPU normals
+frame, with no warning, error, or fallback. This specifically covers the
+bootstrap combination that exposed the missing enablement guard. The documented
+Trunk development profile rebuilt generated bindings through
+`wasm-pack --dev --no-opt`; `wasm-opt` was not run.
