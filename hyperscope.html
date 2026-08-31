@@ -897,7 +897,6 @@ function synchronizeGraphicsBackendPresentation() {
   const webglCanvas = $('cv');
   const residency = graphicsBackendDiagnostics.residency;
   const failed = residency?.state === 'failed'
-    || (residency?.frameFailures || 0) > 0
     || (residency?.presentationLosses || 0) > 0;
   const presenting = GRAPHICS_BACKEND_REQUEST === 'webgpu'
     && webGpuPresentationSupportsRenderMode(
@@ -907,6 +906,7 @@ function synchronizeGraphicsBackendPresentation() {
     && graphicsBackendDiagnostics.presentationArmed
     && residency?.state === 'ready'
     && residency?.presentationReady === true
+    && residency?.presentationFrameAdmitted === true
     && (residency?.presentationFrames || 0) > 0
     && residency?.presentationStyle === graphicsBackendDiagnostics.renderMode
     && !failed;
@@ -11003,17 +11003,26 @@ let lodFullSceneDirty = true;
 let lodDeltaResetPending = false;
 let skinTexW = 0;
 
-function webGpuLodAuthorityEligible() {
+function webGpuLodRecoveryEligible() {
   const residency = graphicsBackendDiagnostics.residency;
   return GRAPHICS_BACKEND_REQUEST === 'webgpu'
-    && graphicsBackendDiagnostics.effective === 'webgpu'
-    && graphicsBackendDiagnostics.state === 'presenting'
     && residency?.state === 'ready'
     && residency?.presentationReady === true
-    && residency?.presentationStyle === graphicsBackendDiagnostics.renderMode
-    && (residency?.presentationFrames || 0) > 0
-    && (residency?.frameFailures || 0) === 0
+    && webGpuPresentationSupportsRenderMode(
+      graphicsBackendDiagnostics.renderMode,
+      residency,
+    )
     && (residency?.presentationLosses || 0) === 0;
+}
+
+function webGpuLodAuthorityEligible() {
+  const residency = graphicsBackendDiagnostics.residency;
+  return webGpuLodRecoveryEligible()
+    && graphicsBackendDiagnostics.effective === 'webgpu'
+    && graphicsBackendDiagnostics.state === 'presenting'
+    && residency?.presentationStyle === graphicsBackendDiagnostics.renderMode
+    && residency?.presentationFrameAdmitted === true
+    && (residency?.presentationFrames || 0) > 0;
 }
 
 function activateWebGpuLodAuthority() {
@@ -11506,6 +11515,7 @@ async function recomputeLods() {
 
     let resetDelta = lodDeltaResetPending;
     const deviceAuthorityEligible = webGpuLodAuthorityEligible();
+    const deviceRecoveryEligible = webGpuLodRecoveryEligible();
     let browserRetiredBeforeDispatch = false;
     if (webGpuLodAuthorityDiagnostics.active && !deviceAuthorityEligible) {
       browserRetiredBeforeDispatch = retireWebGpuLodAuthority(
@@ -11519,13 +11529,14 @@ async function recomputeLods() {
         // coherent on that device. A primary-only dispatch would deliberately
         // invalidate the device epoch and force the incumbent readback path.
         const browserBeginFlags = browserWebGpuLodAuthorityFlags(
-          (deviceAuthorityEligible ? WEBGPU_LOD_COMPLETE_SCENE : 0)
+          (deviceRecoveryEligible ? WEBGPU_LOD_COMPLETE_SCENE : 0)
           | (browserRetiredBeforeDispatch ? WEBGPU_LOD_INCUMBENT_REQUIRED : 0),
         );
         rustBeginFlags = callRustWebGpuLodAuthority(
           'beginWebGpuLodDispatch',
           'device-dispatch-begin',
           deviceAuthorityEligible,
+          deviceRecoveryEligible,
         );
         recordWebGpuLodAuthorityParity(
           'device-dispatch-begin',
@@ -11543,10 +11554,10 @@ async function recomputeLods() {
         const deviceFullScene = chooseWebGpuLodAuthorityFlag(
           rustBeginFlags,
           WEBGPU_LOD_COMPLETE_SCENE,
-          deviceAuthorityEligible,
+          deviceRecoveryEligible,
         );
         webGpuLodAuthorityDiagnostics.dispatches += 1;
-        if (deviceAuthorityEligible) {
+        if (deviceRecoveryEligible) {
           webGpuLodAuthorityDiagnostics.fullSceneDispatches += 1;
         }
         const deviceLodDispatched = quiltingWasmBackend.mr_dispatchWebGpuLod(

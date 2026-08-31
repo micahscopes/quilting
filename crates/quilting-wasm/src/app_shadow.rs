@@ -331,12 +331,15 @@ impl HyperscopeAppShadow {
     pub fn begin_webgpu_lod_dispatch(
         &self,
         presentation_authoritative: bool,
+        complete_scene_required: bool,
     ) -> Result<u8, JsValue> {
         let mut authority = self.webgpu_lod_authority.borrow_mut();
         let observed = authority
             .observe_presentation(presentation_authoritative)
             .map_err(js_error)?;
-        let begun = authority.begin_dispatch().map_err(js_error)?;
+        let begun = authority
+            .begin_dispatch(complete_scene_required)
+            .map_err(js_error)?;
         let complete_scene = begun
             .dispatch
             .is_some_and(|dispatch| dispatch.complete_scene);

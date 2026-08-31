@@ -66,9 +66,12 @@ struct WebGpuBackend {
     /// buffers. Picking consumes this completed-frame witness even while a
     /// newer device LOD epoch is waiting for its presentation frame.
     last_completed_frame_input: Option<LiveFrameInput>,
-    /// A matching `last_frame_input` can retain visible pixels only when that
-    /// exact frame was submitted to the presentation surface.
-    last_frame_presented: bool,
+    /// Exact input represented by pixels retained on the browser presentation
+    /// surface. Offscreen evidence must not overwrite this witness.
+    last_presentation_input: Option<LiveFrameInput>,
+    /// Whether the most recent requested live presentation frame was either
+    /// submitted or proven identical to `last_presentation_input`.
+    presentation_frame_admitted: bool,
     last_presentation_style: Option<RenderStyle>,
     frame_evidence: Option<FrameEvidenceMetadata>,
     last_face_visibility_bits: Vec<u32>,
@@ -257,6 +260,7 @@ pub(crate) struct WebGpuBackendDiagnostics {
     presentation_viewport: [u32; 2],
     presentation_color_format: Option<String>,
     presentation_style: Option<&'static str>,
+    presentation_frame_admitted: bool,
     presentation_frames: u64,
     presentation_skips: u64,
     presentation_losses: u64,
@@ -364,6 +368,7 @@ impl WebGpuBackend {
         if self.presentation.is_some() {
             self.last_frame_input = None;
             self.last_completed_frame_input = None;
+            self.presentation_frame_admitted = false;
         }
         LiveFrameDisposition::IncumbentRequired
     }
@@ -494,6 +499,7 @@ impl WebGpuBackend {
                 .presentation
                 .as_ref()
                 .and(self.last_presentation_style.map(render_style_name)),
+            presentation_frame_admitted: self.presentation_frame_admitted,
             presentation_frames: presentation
                 .as_ref()
                 .map_or(0, |presentation| presentation.frames_presented),
@@ -639,6 +645,7 @@ impl WebGpuBackend {
         self.next_morph_weights = morph_weights;
         self.frame_failures = self.frame_failures.saturating_add(1);
         self.last_completed_frame_input = None;
+        self.presentation_frame_admitted = false;
         self.last_frame_failure = Some(error.clone());
         self.last_error = Some(error.clone());
         error
@@ -851,7 +858,8 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
                     backend.frame_evidence_requested = false;
                     backend.last_frame_input = None;
                     backend.last_completed_frame_input = None;
-                    backend.last_frame_presented = false;
+                    backend.last_presentation_input = None;
+                    backend.presentation_frame_admitted = false;
                     backend.last_presentation_style = None;
                     backend.frame_evidence = None;
                     backend.last_device_lod_epoch = None;
@@ -987,7 +995,8 @@ pub(crate) async fn initialize_presentation(
         backend.frame_evidence_requested = false;
         backend.last_frame_input = None;
         backend.last_completed_frame_input = None;
-        backend.last_frame_presented = false;
+        backend.last_presentation_input = None;
+        backend.presentation_frame_admitted = false;
         backend.last_presentation_style = None;
         backend.frame_evidence = None;
         backend.last_device_lod_epoch = None;
@@ -1286,6 +1295,8 @@ pub(crate) fn replace_atlas(
                 backend.frame_evidence = None;
                 backend.last_frame_input = None;
                 backend.last_completed_frame_input = None;
+                backend.last_presentation_input = None;
+                backend.presentation_frame_admitted = false;
                 backend.last_device_lod_epoch = None;
                 backend.last_face_visibility_bits.clear();
                 backend.next_face_visibility_bits.clear();
@@ -1336,6 +1347,8 @@ pub(crate) fn replace_model(
                 backend.frame_evidence = None;
                 backend.last_frame_input = None;
                 backend.last_completed_frame_input = None;
+                backend.last_presentation_input = None;
+                backend.presentation_frame_admitted = false;
                 backend.last_device_lod_epoch = None;
                 backend.last_face_visibility_bits.clear();
                 backend.next_face_visibility_bits.clear();
@@ -1520,6 +1533,7 @@ pub(crate) fn record_frame_prerequisite_failure(error: impl ToString) {
         if backend.state == "ready" {
             let error = error.to_string();
             backend.frame_failures = backend.frame_failures.saturating_add(1);
+            backend.presentation_frame_admitted = false;
             backend.last_frame_failure = Some(error.clone());
             backend.last_error = Some(error);
         }
@@ -1898,6 +1912,8 @@ pub(crate) fn replace_scene(
                 backend.frame_evidence = None;
                 backend.last_frame_input = None;
                 backend.last_completed_frame_input = None;
+                backend.last_presentation_input = None;
+                backend.presentation_frame_admitted = false;
                 backend.next_morph_weights.clear();
                 backend.patch_pose_uniforms_ready = false;
                 backend.publish_resident_scene(resident_root_candidate, resident_root_failure);
@@ -1953,6 +1969,8 @@ pub(crate) fn replace_scene(
                 backend.frame_evidence = None;
                 backend.last_frame_input = None;
                 backend.last_completed_frame_input = None;
+                backend.last_presentation_input = None;
+                backend.presentation_frame_admitted = false;
                 backend.last_face_visibility_bits.clear();
                 backend.next_face_visibility_bits.clear();
                 backend.next_morph_weights.clear();
@@ -2155,7 +2173,7 @@ pub(crate) fn submit_frame(
             backend.next_morph_weights = effective_morph_weights;
             backend.frames_skipped_unchanged = backend.frames_skipped_unchanged.saturating_add(1);
             if presentation_frame
-                && backend.last_frame_presented
+                && backend.last_presentation_input == Some(frame_input)
                 && backend.last_frame_revision != 0
             {
                 // No GPU work is necessary, but the retained presentation and
@@ -2164,7 +2182,13 @@ pub(crate) fn submit_frame(
                 // pick between frames is not rejected solely because the
                 // browser kept asking us to present identical state.
                 backend.last_source_render_call = source_render_call;
+                backend.presentation_frame_admitted = true;
+                backend.last_frame_failure = None;
+                backend.last_error = None;
                 return Ok(LiveFrameDisposition::PresentationRetained);
+            }
+            if presentation_frame {
+                backend.presentation_frame_admitted = false;
             }
             return Ok(LiveFrameDisposition::IncumbentRequired);
         }
@@ -2619,10 +2643,13 @@ pub(crate) fn submit_frame(
                 backend.next_morph_weights = effective_morph_weights;
                 backend.last_frame_input = Some(frame_input);
                 backend.last_completed_frame_input = Some(frame_input);
-                backend.last_frame_presented = presentation_frame;
                 if presentation_frame {
+                    backend.last_presentation_input = Some(frame_input);
+                    backend.presentation_frame_admitted = true;
                     backend.last_presentation_style = Some(style);
                 } else {
+                    backend.presentation_frame_admitted =
+                        backend.last_presentation_input == Some(frame_input);
                     backend.frame_evidence = Some(FrameEvidenceMetadata {
                         frame_revision,
                         source_render_call,
@@ -2658,6 +2685,7 @@ pub(crate) fn submit_frame(
                     backend.focus_frames = backend.focus_frames.saturating_add(1);
                     backend.last_focus_error = None;
                 }
+                backend.last_frame_failure = None;
                 backend.last_error = None;
                 Ok(if presentation_frame {
                     LiveFrameDisposition::PresentationSubmitted(logical_submission)
@@ -2666,22 +2694,25 @@ pub(crate) fn submit_frame(
                 })
             }
             Ok(None) => {
-                let retained_style_matches = backend
-                    .last_frame_input
-                    .is_some_and(|last_frame| last_frame.style == style);
+                let presentation_matches =
+                    backend.last_presentation_input == Some(frame_input);
                 backend.next_face_visibility_bits = face_visibility_bits;
                 backend.next_morph_weights = effective_morph_weights;
-                Ok(
-                    if presentation_frame
-                        && backend.last_frame_presented
-                        && backend.last_frame_revision != 0
-                        && retained_style_matches
-                    {
-                        LiveFrameDisposition::PresentationRetained
-                    } else {
-                        LiveFrameDisposition::IncumbentRequired
-                    },
-                )
+                if presentation_frame
+                    && backend.last_frame_revision != 0
+                    && presentation_matches
+                {
+                    backend.last_source_render_call = source_render_call;
+                    backend.presentation_frame_admitted = true;
+                    backend.last_frame_failure = None;
+                    backend.last_error = None;
+                    Ok(LiveFrameDisposition::PresentationRetained)
+                } else {
+                    if presentation_frame {
+                        backend.presentation_frame_admitted = false;
+                    }
+                    Ok(LiveFrameDisposition::IncumbentRequired)
+                }
             }
             Err(error) => {
                 Err(backend.reject_frame(face_visibility_bits, effective_morph_weights, error))
@@ -2964,6 +2995,12 @@ fn render_style_name(style: RenderStyle) -> &'static str {
 mod tests {
     use super::*;
     use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[test]
+    fn presentation_health_starts_unadmitted_and_is_explicitly_serialized() {
+        let diagnostics = serde_json::to_value(WebGpuBackend::default().diagnostics()).unwrap();
+        assert_eq!(diagnostics["presentationFrameAdmitted"], false);
+    }
 
     #[test]
     fn explicit_evidence_routes_a_live_device_offscreen() {

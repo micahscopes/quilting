@@ -215,8 +215,13 @@ impl WebGpuLodAuthority {
         Ok(self.transition(disposition, None))
     }
 
+    /// Begin one device dispatch. `complete_scene_required` lets an adapter
+    /// prewarm a complete recovery epoch while WebGL is temporarily visible;
+    /// completion still cannot activate device authority until presentation
+    /// is independently observed as authoritative.
     pub fn begin_dispatch(
         &mut self,
+        complete_scene_required: bool,
     ) -> Result<WebGpuLodAuthorityTransition, WebGpuLodAuthorityError> {
         if self.pending_dispatch.is_some() {
             return Err(WebGpuLodAuthorityError::DispatchAlreadyPending);
@@ -229,7 +234,7 @@ impl WebGpuLodAuthority {
         self.next_dispatch_token = token.checked_add(1);
         let dispatch = WebGpuLodDispatch {
             token,
-            complete_scene: self.presentation_authoritative,
+            complete_scene: self.presentation_authoritative || complete_scene_required,
         };
         self.pending_dispatch = Some(PendingWebGpuLodDispatch {
             dispatch,
@@ -336,7 +341,7 @@ mod tests {
 
     fn begin(authority: &mut WebGpuLodAuthority) -> WebGpuLodDispatch {
         authority
-            .begin_dispatch()
+            .begin_dispatch(false)
             .expect("dispatch starts")
             .dispatch
             .expect("dispatch receipt")
@@ -399,6 +404,24 @@ mod tests {
     }
 
     #[test]
+    fn complete_recovery_dispatch_prewarms_without_seizing_authority() {
+        let mut authority = WebGpuLodAuthority::default();
+        let recovery = authority
+            .begin_dispatch(true)
+            .unwrap()
+            .dispatch
+            .unwrap();
+        assert!(recovery.complete_scene);
+        let completed = authority.complete_dispatch(recovery.token, true).unwrap();
+        assert_eq!(
+            completed.disposition,
+            WebGpuLodAuthorityDisposition::Unchanged
+        );
+        assert!(!completed.snapshot.active);
+        assert!(!completed.snapshot.presentation_authoritative);
+    }
+
+    #[test]
     fn presentation_epoch_rejects_stale_device_completion() {
         let mut authority = WebGpuLodAuthority::default();
         authority.observe_presentation(true).unwrap();
@@ -448,7 +471,7 @@ mod tests {
         };
         let before = authority.snapshot();
         assert_eq!(
-            authority.begin_dispatch(),
+            authority.begin_dispatch(false),
             Err(WebGpuLodAuthorityError::DispatchTokenExhausted)
         );
         assert_eq!(authority.snapshot(), before);
@@ -459,7 +482,7 @@ mod tests {
         };
         let before = authority.snapshot();
         assert_eq!(
-            authority.begin_dispatch(),
+            authority.begin_dispatch(false),
             Err(WebGpuLodAuthorityError::RevisionExhausted)
         );
         assert_eq!(authority.snapshot(), before);
