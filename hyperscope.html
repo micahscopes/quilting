@@ -950,6 +950,7 @@ const lodTelemetry = {
   poseContinuityEpoch: 0,
   poseLagRevisions: 0,
   poseMismatches: 0,
+  poseRetiredPublications: 0,
   inFlight: false,
   dirty: false,
   lastSummaryAtMs: performance.now(),
@@ -6416,6 +6417,8 @@ const animationPoseDiagnostics = {
   rebases: 0,
   errors: 0,
   lastError: null,
+  lastRejectedRequest: null,
+  lastAppliedRequest: null,
 };
 globalThis.__hyperscopeAnimationPoseDiagnostics = animationPoseDiagnostics;
 
@@ -9070,7 +9073,6 @@ function activateHyperscape(buffer) {
     authoredLodPending = false;
     authoredLodReasons = new Set();
     authoredLodSkipped = 0;
-    previousFrameTs = null;
     $('hyperscape-diagnostics').textContent = 'Hyperscape: no authored scene';
     return false;
   }
@@ -9081,7 +9083,6 @@ function activateHyperscape(buffer) {
   authoredLodPending = hyperscapeActive;
   authoredLodReasons = new Set(hyperscapeActive ? ['scene-load'] : []);
   authoredLodSkipped = 0;
-  previousFrameTs = null;
   $('hyperscape-diagnostics').textContent = hyperscapeActive
     ? 'Hyperscape: authored ECS scene active'
     : 'Hyperscape: no authored scene';
@@ -11042,6 +11043,7 @@ async function evaluateAnimationPose(request) {
         );
         if (accepted) {
           animationPoseApplied = request;
+          animationPoseDiagnostics.lastAppliedRequest = request;
           // Classify the exact pose that the renderer accepted. If a previous
           // classification is still pending, the scheduler retains this as
           // the single newest follow-up instead of sampling an unrelated clock.
@@ -11049,7 +11051,13 @@ async function evaluateAnimationPose(request) {
         }
       }
     }
-  } catch (e) { console.warn('Animation tick error:', e); }
+  } catch (e) {
+    animationPoseDiagnostics.errors += 1;
+    animationPoseDiagnostics.lastError = e?.message || String(e);
+    animationPoseDiagnostics.lastRejectedRequest = request;
+    animationPoseDiagnostics.state = 'error';
+    console.warn('Animation tick error:', e, { request, applied: animationPoseApplied });
+  }
   finally {
     animInFlight = false;
     const pending = animationPosePending;
@@ -11133,7 +11141,7 @@ function acceptLodPoseStamp(response, request) {
     if (response.pose_revision != null || response.pose_continuity_epoch != null) {
       rejectLodPublication('static LOD publication unexpectedly carried an animation pose');
     }
-    return;
+    return true;
   }
   const matches = Number(response.pose_time) === request.t
     && Number(response.pose_sample_time) === request.sampleTime
@@ -11145,13 +11153,23 @@ function acceptLodPoseStamp(response, request) {
   }
   const current = animationPoseApplied;
   if (!current || current.continuityEpoch !== request.continuityEpoch) {
-    lodTelemetry.poseMismatches += 1;
-    rejectLodPublication('LOD worker completed after its pose epoch was retired');
+    // Crossing a looping/seek continuity boundary while the worker is busy is
+    // expected cancellation, not corrupt output. The worker delta encoder did
+    // observe this unpublished result, so require a fresh full snapshot before
+    // accepting its next sparse publication.
+    lodTelemetry.poseRetiredPublications += 1;
+    lodDeltaResetPending = true;
+    lodFullSceneDirty = true;
+    lodDirty = true;
+    return false;
   }
   lodTelemetry.poseCompletedRevision = request.revision;
   lodTelemetry.poseContinuityEpoch = request.continuityEpoch;
   lodTelemetry.poseLagRevisions = Math.max(0, current.revision - request.revision);
+  return true;
 }
+
+class RetiredLodPublication extends Error {}
 
 function debouncedLodRecompute(scope = 'scene') {
   if (remeshedMode || patchLab.active) return;
@@ -11353,7 +11371,7 @@ async function recomputeLods() {
     // the worker was busy, `lodDirty` schedules one coalesced follow-up below;
     // discarding the completed result would starve continuously animated scenes.
     if (resp.lods && !remeshedMode) {
-      acceptLodPoseStamp(resp, lodPose);
+      if (!acceptLodPoseStamp(resp, lodPose)) throw new RetiredLodPublication();
       acceptLodDeltaSequence(resp, !!wt.full_snapshot);
       const faceLods = new Float32Array(resp.lods.buffer || resp.lods);
       const classifiedFaces = Number(resp.classified_faces)
@@ -11556,9 +11574,11 @@ async function recomputeLods() {
       resp.debug,
     );
   } catch (e) {
-    lodTelemetry.errors += 1;
-    if (!primaryOnly) lodFullSceneDirty = true;
-    console.warn('LOD recompute error:', e);
+    if (!(e instanceof RetiredLodPublication)) {
+      lodTelemetry.errors += 1;
+      if (!primaryOnly) lodFullSceneDirty = true;
+      console.warn('LOD recompute error:', e);
+    }
   }
   if (LOD_IMPLEMENTATION !== 'rust'
       && sameContextDispatched
@@ -11726,7 +11746,11 @@ function frame(ts) {
     }
   }
 
-  if (animating && !patchLab.active && !animationPoseBlocked && gpuSkinned && meshInfo) {
+  // The initial RAF (and any deliberately rebased frame clock) has no elapsed
+  // semantic animation time. The explicit model/clip install tick already
+  // publishes that pose, so do not issue a newer revision with the same stamp.
+  if (animating && deltaSeconds > 0
+      && !patchLab.active && !animationPoseBlocked && gpuSkinned && meshInfo) {
     const duration = Number(meshInfo.duration) || 0;
     const timeMin = Number(meshInfo.time_min) || 0;
     if (ANIMATION_CLOCK_IMPLEMENTATION !== 'rust') {

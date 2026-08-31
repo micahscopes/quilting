@@ -619,6 +619,28 @@ established WebGL2 classifier. WebGL2 remains runtime authority until that
 evidence exists. Compaction and indirect submission are still separate work;
 this diagnostic executor continues to read every packed face word back.
 
+### Zero-delta startup and retired-pose recovery checkpoint
+
+The 2026-08-31 lifecycle checkpoint closes two gaps found by the shared
+Chromium regression pass. Model and clip installation already publish the
+initial animation pose. A first RAF with no elapsed time must therefore not
+publish a newer revision with the same semantic sample stamp; doing so correctly
+tripped the renderer's strict within-epoch monotonicity invariant. Scene
+activation also no longer resets the shared RAF clock.
+
+An LOD result that finishes after a loop/seek continuity boundary is expected
+retirement rather than malformed output. It is now discarded quietly, counted
+separately, and forces the worker's next publication to be a full snapshot
+because the unpublished result advanced the worker-side delta encoder.
+Mismatched stamps still take the hard error path.
+
+The live gate used the animated horse with `gfx=webgpu`, `mode=normals`, and
+the default JavaScript pose/LOD schedulers. Over 15 seconds it crossed multiple
+clip loops and reported 157 submitted WebGPU presentation frames, zero pose
+errors, zero LOD errors/mismatches, and zero WebGPU frame failures. This was a
+lifecycle regression check in a background browser tab, not a frame-rate
+benchmark.
+
 ## Remaining promotion work
 
 The renderer-context implementation is now a real opt-in authority, but the

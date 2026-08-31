@@ -447,7 +447,7 @@ for (const requiredPoseGate of [
   'skipAnimation: !lodPoseAnimated',
   'capturePose: lodPoseAnimated && (',
   'RUST_ROUND_SHADOW_ENABLED && !roundAuthoredScene',
-  'acceptLodPoseStamp(resp, lodPose);',
+  'if (!acceptLodPoseStamp(resp, lodPose)) throw new RetiredLodPublication();',
   'acceptLodDeltaSequence(resp, !!wt.full_snapshot);',
   'let resetDelta = lodDeltaResetPending;',
 ]) {
@@ -601,12 +601,36 @@ assert.ok(
 );
 assert.ok(
   browserSource.includes("debouncedLodRecompute('primary-animation');")
-    && browserSource.includes('animationPoseApplied = request;'),
+    && browserSource.includes('animationPoseApplied = request;')
+    && browserSource.includes('animationPoseDiagnostics.lastRejectedRequest = request;'),
   'LOD scheduling must originate from the exact pose accepted by the renderer',
 );
+const hyperscapeActivation = browserSource.slice(
+  browserSource.indexOf('function activateHyperscape(buffer)'),
+  browserSource.indexOf('function numericArraysEqual('),
+);
+assert.ok(
+  !hyperscapeActivation.includes('previousFrameTs = null;'),
+  'scene activation must not reset the shared RAF clock and emit duplicate pose sample times',
+);
+for (const retiredPoseStep of [
+  'poseRetiredPublications: 0',
+  'lodTelemetry.poseRetiredPublications += 1;',
+  'lodDeltaResetPending = true;',
+  'if (!(e instanceof RetiredLodPublication))',
+]) {
+  assert.ok(
+    lodAdapter.includes(retiredPoseStep) || browserSource.includes(retiredPoseStep),
+    `retired animation LOD publications need quiet full-snapshot recovery: ${retiredPoseStep}`,
+  );
+}
 const animationFrame = browserSource.slice(
-  browserSource.indexOf('if (animating && !patchLab.active && gpuSkinned && meshInfo) {'),
+  browserSource.indexOf('if (animating && deltaSeconds > 0'),
   browserSource.indexOf('if (patchLab.active && patchLab.animate'),
+);
+assert.ok(
+  animationFrame.startsWith('if (animating && deltaSeconds > 0'),
+  'a zero-delta RAF must not submit a duplicate semantic animation sample',
 );
 assert.ok(
   !animationFrame.includes("debouncedLodRecompute('primary-animation')"),
