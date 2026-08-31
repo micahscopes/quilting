@@ -847,6 +847,16 @@ pub struct AnimationClipRequest {
     pub matches_request: bool,
 }
 
+/// Typed result of completing one renderer-side primary scene install. Scene
+/// replacement may invalidate a clip-selection job from the formerly resident
+/// scene; adapters must observe these exact cancellation identities before
+/// starting any route- or presentation-selected clip for the new scene.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrimarySceneInstallCompletionDispatch {
+    pub commit: AppCommit,
+    pub clip_cancellations: Vec<AnimationClipJobEffect>,
+}
+
 /// Typed presentation action result, including any renderer clip jobs emitted
 /// transactionally with the cue change.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2454,6 +2464,37 @@ impl AppStore {
         Ok(AssetLoadCompletionDispatch {
             commit,
             install: jobs.install.take(),
+        })
+    }
+
+    /// Complete one renderer-side primary scene install and expose the exact
+    /// animation jobs invalidated by replacing the resident scene. No adapter
+    /// needs to inspect the generic application effect list.
+    pub fn complete_primary_scene_install(
+        &self,
+        completion: PrimarySceneInstallCompletion,
+    ) -> Result<PrimarySceneInstallCompletionDispatch, ReduceError> {
+        let commit = self.dispatch(AppEvent::EffectCompleted(
+            EffectCompletion::PrimarySceneInstall(completion),
+        ))?;
+        if commit
+            .effects
+            .iter()
+            .any(|effect| !matches!(effect, AppEffect::CancelAnimationClipSelection { .. }))
+        {
+            return Err(ReduceError::EffectContract(
+                "a primary scene install completion emitted a non-cancellation renderer job",
+            ));
+        }
+        let jobs = AnimationClipEffects::from_commit(&commit);
+        if jobs.selection.is_some() {
+            return Err(ReduceError::EffectContract(
+                "a primary scene install completion emitted a clip selection job",
+            ));
+        }
+        Ok(PrimarySceneInstallCompletionDispatch {
+            commit,
+            clip_cancellations: jobs.cancellations,
         })
     }
 
@@ -4264,6 +4305,90 @@ mod tests {
                 .sample_time_seconds,
             2.75,
             "the installed clip frame must retain reverse Euclidean wrapping",
+        );
+    }
+
+    #[test]
+    fn typed_scene_install_completion_exposes_obsolete_clip_cancellation() {
+        let store = AppStore::default();
+        let horse = asset(1, "horse.glb");
+        let chess = asset(2, "chess.glb");
+        let horse_request = request(10);
+        let chess_request = request(11);
+
+        dispatch_scoped_request(
+            &store,
+            1,
+            horse_request,
+            horse.clone(),
+            AssetLoadScope::PrimaryScene,
+        );
+        store
+            .dispatch(AppEvent::EffectCompleted(EffectCompletion::AssetLoad(
+                AssetLoadCompletion {
+                    request_id: horse_request,
+                    asset_id: horse.id,
+                    outcome: AssetLoadOutcome::Loaded {
+                        byte_length: 100,
+                        content_digest: None,
+                        metadata: AssetMetadata::default(),
+                    },
+                },
+            )))
+            .unwrap();
+        store
+            .complete_primary_scene_install(PrimarySceneInstallCompletion {
+                request_id: horse_request,
+                asset_id: horse.id,
+                outcome: PrimarySceneInstallOutcome::Installed(install_metadata()),
+            })
+            .unwrap();
+
+        let pending = store.request_animation_clip(1).unwrap();
+        let obsolete = pending.selection.unwrap();
+        dispatch_scoped_request(
+            &store,
+            3,
+            chess_request,
+            chess.clone(),
+            AssetLoadScope::PrimaryScene,
+        );
+        store
+            .dispatch(AppEvent::EffectCompleted(EffectCompletion::AssetLoad(
+                AssetLoadCompletion {
+                    request_id: chess_request,
+                    asset_id: chess.id,
+                    outcome: AssetLoadOutcome::Loaded {
+                        byte_length: 200,
+                        content_digest: None,
+                        metadata: AssetMetadata::default(),
+                    },
+                },
+            )))
+            .unwrap();
+
+        let installed = store
+            .complete_primary_scene_install(PrimarySceneInstallCompletion {
+                request_id: chess_request,
+                asset_id: chess.id,
+                outcome: PrimarySceneInstallOutcome::Installed(install_metadata()),
+            })
+            .unwrap();
+        assert_eq!(installed.clip_cancellations, vec![obsolete]);
+        assert_eq!(
+            installed.commit.effects,
+            vec![AppEffect::CancelAnimationClipSelection {
+                job_id: obsolete.job_id,
+                scene_request_id: obsolete.scene_request_id,
+                asset_id: obsolete.asset_id,
+                clip_index: obsolete.clip_index,
+            }],
+        );
+        assert_eq!(store.summary_snapshot().pending_animation_clip_job, None);
+        assert_eq!(store.summary_snapshot().active_animation_clip, Some(0));
+        assert_eq!(
+            store.summary_snapshot().installed_primary_scene_asset,
+            Some(chess.id),
         );
     }
 

@@ -34,7 +34,8 @@ use hyperscope_app::{
     PatchLabReadModel, PatchLabSessionDispatch, PatchLabSessionIntent, PatchLabShape,
     PresentationAction,
     PresentationAnimationResidencyBinding, PrimarySceneInstallCompletion,
-    PrimarySceneInstallMetadata, PrimarySceneInstallOutcome, RenderSettings,
+    PrimarySceneInstallCompletionDispatch, PrimarySceneInstallMetadata,
+    PrimarySceneInstallOutcome, RenderSettings,
     RenderSettingsSynchronizationDisposition, SemanticAction, Timed,
 };
 use quilting_core::render_evidence::RenderPickEvidenceReport;
@@ -718,29 +719,39 @@ impl HyperscopeAppShadow {
         num_faces: u32,
         animation_clips_json: &str,
     ) -> Result<JsValue, JsValue> {
-        let clips = serde_json::from_str::<Vec<ShadowAnimationClipInput>>(animation_clips_json)
-            .map_err(|error| {
-                js_error(format!(
-                    "primary scene animation clips are invalid JSON: {error}"
-                ))
-            })?
-            .into_iter()
-            .map(|clip| AnimationClipDescriptor {
-                index: clip.index,
-                name: clip.name,
-                time_min_seconds: clip.time_min_seconds,
-                time_max_seconds: clip.time_max_seconds,
-            })
-            .collect();
-        self.complete_primary_scene_install(
+        let dispatch = self.complete_primary_scene_install_dispatch(
             request_id,
             asset_id,
             PrimarySceneInstallOutcome::Installed(PrimarySceneInstallMetadata {
                 num_vertices,
                 num_faces,
-                animation_clips: clips,
+                animation_clips: decode_animation_clips(animation_clips_json)?,
             }),
-        )
+        )?;
+        commit_to_js(&dispatch.commit)
+    }
+
+    /// Complete a renderer-side primary install through the typed application
+    /// port, including any obsolete animation clip jobs invalidated by scene
+    /// replacement.
+    #[wasm_bindgen(js_name = finishPrimarySceneInstalled)]
+    pub fn finish_primary_scene_installed(
+        &self,
+        request_id: &str,
+        asset_id: &str,
+        num_vertices: u32,
+        num_faces: u32,
+        animation_clips_json: &str,
+    ) -> Result<JsValue, JsValue> {
+        primary_scene_install_completion_to_js(self.complete_primary_scene_install_dispatch(
+            request_id,
+            asset_id,
+            PrimarySceneInstallOutcome::Installed(PrimarySceneInstallMetadata {
+                num_vertices,
+                num_faces,
+                animation_clips: decode_animation_clips(animation_clips_json)?,
+            }),
+        )?)
     }
 
     #[wasm_bindgen(js_name = completePrimarySceneInstallFailed)]
@@ -752,7 +763,7 @@ impl HyperscopeAppShadow {
         message: &str,
         retryable: bool,
     ) -> Result<JsValue, JsValue> {
-        self.complete_primary_scene_install(
+        let dispatch = self.complete_primary_scene_install_dispatch(
             request_id,
             asset_id,
             PrimarySceneInstallOutcome::Failed {
@@ -760,7 +771,28 @@ impl HyperscopeAppShadow {
                 message: message.to_owned(),
                 retryable,
             },
-        )
+        )?;
+        commit_to_js(&dispatch.commit)
+    }
+
+    #[wasm_bindgen(js_name = finishPrimarySceneInstallFailed)]
+    pub fn finish_primary_scene_install_failed(
+        &self,
+        request_id: &str,
+        asset_id: &str,
+        code: &str,
+        message: &str,
+        retryable: bool,
+    ) -> Result<JsValue, JsValue> {
+        primary_scene_install_completion_to_js(self.complete_primary_scene_install_dispatch(
+            request_id,
+            asset_id,
+            PrimarySceneInstallOutcome::Failed {
+                code: code.to_owned(),
+                message: message.to_owned(),
+                retryable,
+            },
+        )?)
     }
 
     /// Resolve renderer-local glTF nodes to application-local selection IDs
@@ -2979,23 +3011,19 @@ impl HyperscopeAppShadow {
             .map_err(js_error)
     }
 
-    fn complete_primary_scene_install(
+    fn complete_primary_scene_install_dispatch(
         &self,
         request_id: &str,
         asset_id: &str,
         outcome: PrimarySceneInstallOutcome,
-    ) -> Result<JsValue, JsValue> {
-        let commit = self
-            .store
-            .dispatch(AppEvent::EffectCompleted(
-                EffectCompletion::PrimarySceneInstall(PrimarySceneInstallCompletion {
-                    request_id: request_id_from_str(request_id)?,
-                    asset_id: asset_id_from_str(asset_id)?,
-                    outcome,
-                }),
-            ))
-            .map_err(js_error)?;
-        commit_to_js(&commit)
+    ) -> Result<PrimarySceneInstallCompletionDispatch, JsValue> {
+        self.store
+            .complete_primary_scene_install(PrimarySceneInstallCompletion {
+                request_id: request_id_from_str(request_id)?,
+                asset_id: asset_id_from_str(asset_id)?,
+                outcome,
+            })
+            .map_err(js_error)
     }
 
     fn complete_animation_clip_selection(
@@ -3165,6 +3193,26 @@ struct ShadowAnimationClipInput {
     name: String,
     time_min_seconds: f64,
     time_max_seconds: f64,
+}
+
+fn decode_animation_clips(value: &str) -> Result<Vec<AnimationClipDescriptor>, JsValue> {
+    serde_json::from_str::<Vec<ShadowAnimationClipInput>>(value)
+        .map_err(|error| {
+            js_error(format!(
+                "primary scene animation clips are invalid JSON: {error}"
+            ))
+        })
+        .map(|clips| {
+            clips
+                .into_iter()
+                .map(|clip| AnimationClipDescriptor {
+                    index: clip.index,
+                    name: clip.name,
+                    time_min_seconds: clip.time_min_seconds,
+                    time_max_seconds: clip.time_max_seconds,
+                })
+                .collect()
+        })
 }
 
 #[derive(Serialize)]
@@ -3597,6 +3645,26 @@ struct ShadowAnimationClipRequest {
     selection: Option<ShadowAnimationClipJobEffect>,
     cancellations: Vec<ShadowAnimationClipJobEffect>,
     matches_request: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowPrimarySceneInstallCompletionDispatch {
+    commit: ShadowCommit,
+    clip_cancellations: Vec<ShadowAnimationClipJobEffect>,
+}
+
+fn primary_scene_install_completion_to_js(
+    dispatch: PrimarySceneInstallCompletionDispatch,
+) -> Result<JsValue, JsValue> {
+    to_js(&ShadowPrimarySceneInstallCompletionDispatch {
+        commit: shadow_commit(&dispatch.commit),
+        clip_cancellations: dispatch
+            .clip_cancellations
+            .iter()
+            .map(ShadowAnimationClipJobEffect::cancellation)
+            .collect(),
+    })
 }
 
 #[derive(Serialize)]

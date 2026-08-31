@@ -6104,18 +6104,50 @@ function primarySceneInstallFacts(info) {
   };
 }
 
+function observePrimarySceneInstallClipCancellations(cancellations, context) {
+  if (!Array.isArray(cancellations)) {
+    throw new Error(`${context} returned non-array animation clip cancellations`);
+  }
+  for (const cancellation of cancellations) {
+    if (!cancellation || cancellation.type !== 'cancel_animation_clip_selection'
+        || !/^\d+$/.test(String(cancellation.job_id ?? ''))
+        || !/^\d+$/.test(String(cancellation.clip_index ?? ''))
+        || typeof cancellation.scene_request_id !== 'string'
+        || typeof cancellation.asset_id !== 'string') {
+      throw new Error(`${context} returned an invalid animation clip cancellation`);
+    }
+  }
+  if (cancellations.length === 0) return;
+  animationClipDiagnostics.cancellationEffects += cancellations.length;
+  if (cancellations.some(cancellation =>
+    String(cancellation.job_id) === String(animationClipDiagnostics.lastJobId))) {
+    animationClipDiagnostics.lastJobId = null;
+  }
+  // Scene replacement is the semantic cancellation fence. Any asynchronous
+  // worker switch or presentation transport admitted for the old resident
+  // scene must fail its generation check before touching the new scene.
+  animationPoseBlockGeneration += 1;
+  presentationAnimationGeneration += 1;
+  animationPoseBlocked = false;
+}
+
 function completeAppPrimarySceneInstall(token, info) {
   if (!token || token.scope !== 'primary_scene' || token.installCompleted || !rustAppShadow) {
     return 'unobserved';
   }
   const facts = primarySceneInstallFacts(info);
   try {
-    const commit = rustAppShadow.completePrimarySceneInstalled(
+    const receipt = rustAppShadow.finishPrimarySceneInstalled(
       token.requestId,
       token.assetId,
       facts.numVertices,
       facts.numFaces,
       JSON.stringify(facts.animationClips),
+    );
+    const commit = receipt.commit;
+    observePrimarySceneInstallClipCancellations(
+      receipt.clipCancellations,
+      'primary scene install completion',
     );
     token.installCompleted = true;
     rustAppShadowDiagnostics.lastCommit = commit;
@@ -6147,12 +6179,17 @@ function failAppPrimarySceneInstall(token, code, error, retryable = false) {
   }
   const message = error?.message || String(error);
   try {
-    const commit = rustAppShadow.completePrimarySceneInstallFailed(
+    const receipt = rustAppShadow.finishPrimarySceneInstallFailed(
       token.requestId,
       token.assetId,
       code,
       message,
       retryable,
+    );
+    const commit = receipt.commit;
+    observePrimarySceneInstallClipCancellations(
+      receipt.clipCancellations,
+      'primary scene install failure',
     );
     token.installCompleted = true;
     rustAppShadowDiagnostics.lastCommit = commit;

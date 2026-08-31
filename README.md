@@ -119,6 +119,7 @@ node scripts/smoke-animation-clip-boundary.mjs
 node scripts/smoke-presentation-dispatch-boundary.mjs
 node scripts/smoke-asset-request-boundary.mjs
 node scripts/smoke-asset-completion-boundary.mjs
+node scripts/smoke-primary-scene-install-boundary.mjs
 node scripts/smoke-patch-lab-effect-projection.mjs
 node scripts/smoke-patch-lab-job-boundary.mjs
 ```
