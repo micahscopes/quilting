@@ -25,7 +25,8 @@ use hyperscope_app::{
     AppEffect, AppEvent, AppFrameSnapshot, AppStore, AssetFetchJob, AssetJobIdentity,
     AssetLoadCompletion, AssetLoadCompletionDispatch, AssetLoadOutcome, AssetLoadRequest,
     AssetLoadScope, AssetMetadata, AssetReadModel, AssetStatus, AuthoredRevision, CommitDisposition,
-    FocusPostprocessMode, FocusPostprocessSettings, FrameTick, InstalledPrimarySceneReadModel,
+    FocusPostprocessMode, FocusPostprocessSettings, FrameTick, GraphicsPresentationDecision,
+    InstalledPrimarySceneReadModel,
     LocalPeerDisposition, LocalPeerIngress, LocalPeerLane,
     LocalPeerReceipt, NavigationSettings,
     NavigationSettingsSynchronizationDisposition, NavigationSynchronization, PatchLabCompletion,
@@ -39,9 +40,9 @@ use hyperscope_app::{
     PrimarySceneInstallOutcome, RenderSettings,
     RenderSettingsSynchronizationDisposition, SemanticAction, Timed,
     WebGpuLodAuthority, WebGpuLodAuthorityDisposition, WebGpuLodAuthorityPhase,
-    WebGpuLodAuthorityReason, WebGpuLodAuthoritySnapshot,
+    WebGpuLodAuthorityReason, WebGpuLodAuthoritySnapshot, WebGpuPresentationEvidence,
 };
-use quilting_core::render_evidence::RenderPickEvidenceReport;
+use quilting_core::{render::RenderStyle, render_evidence::RenderPickEvidenceReport};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -148,6 +149,37 @@ impl From<WebGpuLodAuthoritySnapshot> for ShadowWebGpuLodAuthority {
             last_reason: snapshot.last_reason.map(webgpu_lod_reason_name),
         }
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowGraphicsPresentationDecision {
+    phase: &'static str,
+    supports_requested_style: bool,
+    failed: bool,
+    present_webgpu: bool,
+    device_lod_recovery_eligible: bool,
+    device_lod_authority_eligible: bool,
+}
+
+impl From<GraphicsPresentationDecision> for ShadowGraphicsPresentationDecision {
+    fn from(decision: GraphicsPresentationDecision) -> Self {
+        Self {
+            phase: decision.phase.wire_name(),
+            supports_requested_style: decision.supports_requested_style,
+            failed: decision.failed,
+            present_webgpu: decision.present_webgpu,
+            device_lod_recovery_eligible: decision.device_lod_recovery_eligible,
+            device_lod_authority_eligible: decision.device_lod_authority_eligible,
+        }
+    }
+}
+
+fn browser_render_style(name: &str) -> Option<RenderStyle> {
+    RenderStyle::from_wire_name(match name {
+        "both" => "matcap_wire",
+        name => name,
+    })
 }
 
 /// Pure generated-WASM oracle for the normalized SpaceMouse camera boundary.
@@ -305,6 +337,46 @@ impl HyperscopeAppShadow {
             backend_pick_evidence: RefCell::new(InteractionPickEvidenceObserver::default()),
             pending_adapter_effects: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Interpret renderer residency into one backend-neutral presentation
+    /// decision. The browser remains responsible only for observing platform
+    /// facts and applying the returned decision to its canvases.
+    #[wasm_bindgen(js_name = resolveGraphicsBackendPresentation)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_graphics_backend_presentation(
+        &self,
+        live_presentation_requested: bool,
+        requested_style: &str,
+        presentation_armed: bool,
+        backend_state: &str,
+        surface_ready: bool,
+        pbr_presentation_ready: bool,
+        focus_postprocess_requested: bool,
+        focus_presentation_ready: bool,
+        frame_admitted: bool,
+        has_presented_frame: bool,
+        surface_lost: bool,
+        presented_style: &str,
+    ) -> Result<JsValue, JsValue> {
+        let decision = hyperscope_app::resolve_graphics_presentation(
+            WebGpuPresentationEvidence {
+                live_presentation_requested,
+                requested_style: browser_render_style(requested_style),
+                presentation_armed,
+                backend_ready: backend_state == "ready",
+                backend_failed: backend_state == "failed",
+                surface_ready,
+                pbr_presentation_ready,
+                focus_postprocess_requested,
+                focus_presentation_ready,
+                frame_admitted,
+                has_presented_frame,
+                surface_lost,
+                presented_style: browser_render_style(presented_style),
+            },
+        );
+        to_js(&ShadowGraphicsPresentationDecision::from(decision))
     }
 
     /// Observe whether WebGPU is the actual visible presenter. The compact

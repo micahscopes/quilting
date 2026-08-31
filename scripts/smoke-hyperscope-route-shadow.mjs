@@ -113,6 +113,8 @@ assert.equal(specs.find(spec => spec.key === 'pickimpl').kind, 'implementation')
 assert.equal(specs.find(spec => spec.key === 'pickimpl').defaultValue, 'js');
 assert.equal(specs.find(spec => spec.key === 'presentimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'presentimpl').defaultValue, 'rust');
+assert.equal(specs.find(spec => spec.key === 'gfxpresentimpl').kind, 'implementation');
+assert.equal(specs.find(spec => spec.key === 'gfxpresentimpl').defaultValue, 'rust');
 assert.equal(specs.find(spec => spec.key === 'assetimpl').kind, 'implementation');
 assert.equal(specs.find(spec => spec.key === 'assetimpl').defaultValue, 'rust');
 assert.equal(specs.find(spec => spec.key === 'sceneimpl').kind, 'implementation');
@@ -296,6 +298,7 @@ assert.deepEqual(Object.keys(policyDefaults), [
   'pickimpl',
   'presentation',
   'presentimpl',
+  'gfxpresentimpl',
   'roundshadow',
   'selectionimpl',
   'sceneimpl',
@@ -704,7 +707,7 @@ for (const graphicsBackendStep of [
   'await quiltingWasmBackend.mr_initWebGpuPresentation(',
   'quiltingWasmBackend.mr_uploadWebGpuComposedModel(',
   "graphicsBackendDiagnostics.state = 'presentation-ready';",
-  "graphicsBackendDiagnostics.state = 'presenting';",
+  'graphicsBackendDiagnostics.state = decision.phase;',
   'function webGpuPresentationSupportsRenderMode(mode, residency = null)',
   'residency?.presentationStyle === graphicsBackendDiagnostics.renderMode',
   "presentationCanvas.classList.toggle('webgpu-presenting', presenting);",
@@ -722,7 +725,8 @@ const webGpuModeSupportSource = browserSource.match(
 )?.[0];
 assert.ok(webGpuModeSupportSource, 'could not locate WebGPU mode support predicate');
 const webGpuPresentationSupportsRenderMode = runInNewContext(
-  `${webGpuModeSupportSource}; webGpuPresentationSupportsRenderMode`,
+  `const graphicsBackendDiagnostics = { focusPostprocessRequested: false };
+  ${webGpuModeSupportSource}; webGpuPresentationSupportsRenderMode`,
 );
 for (const mode of ['matcap', 'wire', 'normals', 'both', 'lod', 'stretch']) {
   assert.equal(webGpuPresentationSupportsRenderMode(mode), true, `${mode} should use WebGPU`);
@@ -736,6 +740,29 @@ assert.equal(webGpuPresentationSupportsRenderMode('pbr', {
   presentationStyle: 'wire',
   presentationFrames: 1,
 }), false, 'nonresident PBR must not arm from another style retained frame');
+const webGpuFocusPresentationSupportsRenderMode = runInNewContext(
+  `const graphicsBackendDiagnostics = { focusPostprocessRequested: true };
+  ${webGpuModeSupportSource}; webGpuPresentationSupportsRenderMode`,
+);
+assert.equal(
+  webGpuFocusPresentationSupportsRenderMode('matcap', {
+    focusPipelineReady: true,
+    focusSceneReady: true,
+    environmentReady: true,
+  }),
+  false,
+  'focus post-processing must not claim unsupported diagnostic composition',
+);
+assert.equal(
+  webGpuFocusPresentationSupportsRenderMode('pbr', {
+    pbrPresentationReady: true,
+    focusPipelineReady: true,
+    focusSceneReady: true,
+    environmentReady: true,
+  }),
+  true,
+  'ready PBR focus composition should remain presentable',
+);
 assert.ok(
   browserSource.includes(
     'residency?.presentationStyle === graphicsBackendDiagnostics.renderMode',
@@ -1209,6 +1236,16 @@ assert.deepEqual(
   canonicalizeHyperscopeRoute([['presentimpl', 'js']]).pairs,
   [['presentimpl', 'js']],
   'canonical routes must retain an explicit presentation rollback',
+);
+assert.deepEqual(
+  canonicalizeHyperscopeRoute([['gfxpresentimpl', 'rust']]).pairs,
+  [],
+  'canonical routes must omit the Rust graphics-presentation policy default',
+);
+assert.deepEqual(
+  canonicalizeHyperscopeRoute([['gfxpresentimpl', 'shadow']]).pairs,
+  [['gfxpresentimpl', 'shadow']],
+  'canonical routes must retain an explicit graphics-presentation shadow',
 );
 assert.deepEqual(
   canonicalizeHyperscopeRoute([['sceneimpl', 'rust']]).pairs,

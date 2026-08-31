@@ -510,6 +510,7 @@ const BOOTSTRAP_POLICY_DEFAULTS = Object.freeze({
   pickimpl: 'js',
   presentation: '0',
   presentimpl: 'rust',
+  gfxpresentimpl: 'rust',
   roundshadow: '0',
   selectionimpl: 'rust',
   sceneimpl: 'rust',
@@ -598,6 +599,9 @@ const RUST_PRESENTATION_ENABLED =
 const RUST_PRESENTATION_IMPLEMENTATION = implementationFromRoute(
   initialBrowserParams, 'presentimpl',
 );
+const GRAPHICS_PRESENTATION_IMPLEMENTATION = implementationFromRoute(
+  initialBrowserParams, 'gfxpresentimpl',
+);
 const RUST_ROUND_SHADOW_ENABLED =
   bootstrapToggleFromRoute(initialBrowserParams, 'roundshadow');
 const RUST_SELECTION_IMPLEMENTATION = implementationFromRoute(
@@ -642,6 +646,7 @@ const RUST_APP_SHADOW_ENABLED =
   || PICK_IMPLEMENTATION !== 'js'
   || RUST_SELECTION_IMPLEMENTATION !== 'js'
   || RUST_SCENE_IMPLEMENTATION !== 'js'
+  || GRAPHICS_PRESENTATION_IMPLEMENTATION !== 'js'
   || (RUST_PRESENTATION_ENABLED && RUST_PRESENTATION_IMPLEMENTATION !== 'js');
 const RUST_ROUTE_IMPLEMENTATION = implementationFromRoute(
   initialRouteParams, 'routeimpl',
@@ -666,6 +671,7 @@ const graphicsBackendDiagnostics = {
   fallbackReason: null,
   residency: null,
   renderMode: 'pbr',
+  focusPostprocessRequested: false,
   presentationArmed: false,
   lastRefreshAt: -Infinity,
   refresh() {
@@ -886,30 +892,154 @@ function readBackendPickEvidence(app) {
 }
 
 function webGpuPresentationSupportsRenderMode(mode, residency = null) {
+  if (graphicsBackendDiagnostics.focusPostprocessRequested) {
+    return mode === 'pbr'
+      && residency?.pbrPresentationReady === true
+      && residency?.focusPipelineReady === true
+      && residency?.focusSceneReady === true
+      && residency?.environmentReady === true;
+  }
   const diagnosticStyle = mode === 'matcap' || mode === 'wire' || mode === 'normals'
     || mode === 'both' || mode === 'lod' || mode === 'stretch';
   return diagnosticStyle || (mode === 'pbr'
     && residency?.pbrPresentationReady === true);
 }
 
-function synchronizeGraphicsBackendPresentation() {
-  const presentationCanvas = $('cv-webgpu');
-  const webglCanvas = $('cv');
-  const residency = graphicsBackendDiagnostics.residency;
+const graphicsPresentationPolicyDiagnostics = {
+  implementation: GRAPHICS_PRESENTATION_IMPLEMENTATION,
+  authority: GRAPHICS_PRESENTATION_IMPLEMENTATION === 'rust'
+    ? 'awaiting-rust' : 'browser-oracle',
+  comparisons: 0,
+  mismatchCount: 0,
+  errors: 0,
+  lastBrowser: null,
+  lastRust: null,
+  lastEffective: null,
+  mismatches: [],
+};
+globalThis.__hyperscopeGraphicsPresentationPolicy =
+  graphicsPresentationPolicyDiagnostics;
+
+function browserGraphicsPresentationDecision(residency) {
+  const livePresentationRequested = GRAPHICS_BACKEND_REQUEST === 'webgpu';
+  const supportsRequestedStyle = webGpuPresentationSupportsRenderMode(
+    graphicsBackendDiagnostics.renderMode,
+    residency,
+  );
   const failed = residency?.state === 'failed'
     || (residency?.presentationLosses || 0) > 0;
-  const presenting = GRAPHICS_BACKEND_REQUEST === 'webgpu'
-    && webGpuPresentationSupportsRenderMode(
-      graphicsBackendDiagnostics.renderMode,
-      residency,
-    )
-    && graphicsBackendDiagnostics.presentationArmed
+  const deviceLodRecoveryEligible = livePresentationRequested
     && residency?.state === 'ready'
     && residency?.presentationReady === true
+    && supportsRequestedStyle
+    && (residency?.presentationLosses || 0) === 0;
+  const presentWebgpu = deviceLodRecoveryEligible
+    && graphicsBackendDiagnostics.presentationArmed
     && residency?.presentationFrameAdmitted === true
     && (residency?.presentationFrames || 0) > 0
     && residency?.presentationStyle === graphicsBackendDiagnostics.renderMode
     && !failed;
+  const phase = !livePresentationRequested ? 'disabled'
+    : failed ? 'fallback'
+      : presentWebgpu ? 'presenting'
+        : residency?.presentationReady === true && !supportsRequestedStyle
+          ? 'unsupported-mode'
+          : residency?.presentationReady === true ? 'presentation-ready'
+            : 'awaiting-presentation';
+  return {
+    phase,
+    supportsRequestedStyle,
+    failed,
+    presentWebgpu,
+    deviceLodRecoveryEligible,
+    deviceLodAuthorityEligible: presentWebgpu,
+  };
+}
+
+function resolveRustGraphicsPresentationDecision(residency) {
+  if (!rustAppShadow) return null;
+  try {
+    return rustAppShadow.resolveGraphicsBackendPresentation(
+      GRAPHICS_BACKEND_REQUEST === 'webgpu',
+      graphicsBackendDiagnostics.renderMode,
+      graphicsBackendDiagnostics.presentationArmed,
+      residency?.state || '',
+      residency?.presentationReady === true,
+      residency?.pbrPresentationReady === true,
+      graphicsBackendDiagnostics.focusPostprocessRequested,
+      residency?.pbrPresentationReady === true
+        && residency?.focusPipelineReady === true
+        && residency?.focusSceneReady === true
+        && residency?.environmentReady === true,
+      residency?.presentationFrameAdmitted === true,
+      (residency?.presentationFrames || 0) > 0,
+      (residency?.presentationLosses || 0) > 0,
+      residency?.presentationStyle || '',
+    );
+  } catch (error) {
+    graphicsPresentationPolicyDiagnostics.errors += 1;
+    const count = graphicsPresentationPolicyDiagnostics.errors;
+    if (count === 1 || (count & (count - 1)) === 0) {
+      console.warn('Rust graphics presentation policy unavailable:', error);
+    }
+    return null;
+  }
+}
+
+function recordGraphicsPresentationPolicyParity(browser, rust) {
+  graphicsPresentationPolicyDiagnostics.lastBrowser = browser;
+  graphicsPresentationPolicyDiagnostics.lastRust = rust;
+  if (!rust) return;
+  graphicsPresentationPolicyDiagnostics.comparisons += 1;
+  const keys = [
+    'phase',
+    'supportsRequestedStyle',
+    'failed',
+    'presentWebgpu',
+    'deviceLodRecoveryEligible',
+    'deviceLodAuthorityEligible',
+  ];
+  const differences = keys.filter(key => browser[key] !== rust[key]);
+  if (differences.length === 0) return;
+  graphicsPresentationPolicyDiagnostics.mismatchCount += 1;
+  graphicsPresentationPolicyDiagnostics.mismatches.push({
+    differences,
+    browser,
+    rust,
+    atMs: performance.now(),
+  });
+  if (graphicsPresentationPolicyDiagnostics.mismatches.length > 16) {
+    graphicsPresentationPolicyDiagnostics.mismatches.splice(
+      0,
+      graphicsPresentationPolicyDiagnostics.mismatches.length - 16,
+    );
+  }
+}
+
+function chooseGraphicsPresentationDecision(browser, rust) {
+  if (GRAPHICS_PRESENTATION_IMPLEMENTATION === 'rust' && rust) {
+    graphicsPresentationPolicyDiagnostics.authority = 'hyperscope-app';
+    graphicsPresentationPolicyDiagnostics.lastEffective = rust;
+    return rust;
+  }
+  graphicsPresentationPolicyDiagnostics.authority =
+    GRAPHICS_PRESENTATION_IMPLEMENTATION === 'rust'
+      ? 'browser-oracle-fallback'
+      : GRAPHICS_PRESENTATION_IMPLEMENTATION === 'shadow'
+        ? 'browser-oracle-shadow' : 'browser-oracle';
+  graphicsPresentationPolicyDiagnostics.lastEffective = browser;
+  return browser;
+}
+
+function synchronizeGraphicsBackendPresentation() {
+  const presentationCanvas = $('cv-webgpu');
+  const webglCanvas = $('cv');
+  const residency = graphicsBackendDiagnostics.residency;
+  const browserDecision = browserGraphicsPresentationDecision(residency);
+  const rustDecision = resolveRustGraphicsPresentationDecision(residency);
+  recordGraphicsPresentationPolicyParity(browserDecision, rustDecision);
+  const decision = chooseGraphicsPresentationDecision(browserDecision, rustDecision);
+  const presenting = decision.presentWebgpu;
   presentationCanvas.classList.toggle('webgpu-presenting', presenting);
   webglCanvas.classList.toggle('webgpu-input-layer', presenting);
   const previousEffective = graphicsBackendDiagnostics.effective;
@@ -936,20 +1066,12 @@ function synchronizeGraphicsBackendPresentation() {
     }
   }
   if (GRAPHICS_BACKEND_REQUEST === 'webgpu') {
-    if (failed) {
-      graphicsBackendDiagnostics.state = 'fallback';
+    graphicsBackendDiagnostics.state = decision.phase;
+    if (decision.failed) {
       graphicsBackendDiagnostics.fallbackReason = residency?.lastFrameFailure
         || residency?.lastError
         || 'WebGPU presentation failed';
-    } else if (presenting) {
-      graphicsBackendDiagnostics.state = 'presenting';
-      graphicsBackendDiagnostics.fallbackReason = null;
-    } else if (residency?.presentationReady) {
-      graphicsBackendDiagnostics.state = webGpuPresentationSupportsRenderMode(
-        graphicsBackendDiagnostics.renderMode,
-        residency,
-      )
-        ? 'presentation-ready' : 'unsupported-mode';
+    } else {
       graphicsBackendDiagnostics.fallbackReason = null;
     }
   }
@@ -2090,6 +2212,11 @@ function syncURL() {
       'presentimpl',
       RUST_PRESENTATION_IMPLEMENTATION,
       PARAM_DEFAULTS.presentimpl,
+    );
+    set(
+      'gfxpresentimpl',
+      GRAPHICS_PRESENTATION_IMPLEMENTATION,
+      PARAM_DEFAULTS.gfxpresentimpl,
     );
     if (RUST_ROUND_SHADOW_ENABLED) p.set('roundshadow', '1');
     if (EXPLICIT_RUST_APP_SHADOW_ENABLED) p.set('appshadow', '1');
@@ -8797,9 +8924,20 @@ const renderMode = signal('pbr', 'mode');
 bindBtnGroup('render-btns', renderMode);
 effect(() => {
   const v = renderMode.get();
+  // A supported style change can be staged atomically against the currently
+  // visible WebGPU frame. Keep that exact old frame visible until the next RAF
+  // submits the requested style; synchronizing here would retire style-agnostic
+  // device LOD authority before the renderer had a chance to replace it.
+  const stageWebGpuStyleTransition = GRAPHICS_BACKEND_REQUEST === 'webgpu'
+    && graphicsBackendDiagnostics.effective === 'webgpu'
+    && webGpuPresentationSupportsRenderMode(
+      v,
+      graphicsBackendDiagnostics.residency,
+    );
   graphicsBackendDiagnostics.renderMode = v;
   graphicsBackendDiagnostics.presentationArmed = false;
-  synchronizeGraphicsBackendPresentation();
+  graphicsBackendDiagnostics.lastRefreshAt = -Infinity;
+  if (!stageWebGpuStyleTransition) synchronizeGraphicsBackendPresentation();
   if (!wasmOk.get()) return;
   // Fuzzy debug views: render PBR underneath, then debug blit replaces output
   const fzDebug = { 'fz-weight': 1, 'fz-jfa': 2, 'fz-firmness': 3 }[v];
@@ -9806,6 +9944,7 @@ function applyFuzzyRendererState() {
       && rustCommittedFocusField?.enabled && mode !== 3) return false;
 
   const enabled = mode === 3 ? focusField.enabled : fz.enabled.peek();
+  graphicsBackendDiagnostics.focusPostprocessRequested = enabled;
   const focus = mode === 3 ? focusField.coordinate : fz.focus.peek() / 100.0;
   const bandwidth = mode === 3
     ? focusField.angularAperture
@@ -11004,25 +11143,15 @@ let lodDeltaResetPending = false;
 let skinTexW = 0;
 
 function webGpuLodRecoveryEligible() {
-  const residency = graphicsBackendDiagnostics.residency;
-  return GRAPHICS_BACKEND_REQUEST === 'webgpu'
-    && residency?.state === 'ready'
-    && residency?.presentationReady === true
-    && webGpuPresentationSupportsRenderMode(
-      graphicsBackendDiagnostics.renderMode,
-      residency,
-    )
-    && (residency?.presentationLosses || 0) === 0;
+  return (graphicsPresentationPolicyDiagnostics.lastEffective
+    || browserGraphicsPresentationDecision(graphicsBackendDiagnostics.residency))
+    .deviceLodRecoveryEligible;
 }
 
 function webGpuLodAuthorityEligible() {
-  const residency = graphicsBackendDiagnostics.residency;
-  return webGpuLodRecoveryEligible()
-    && graphicsBackendDiagnostics.effective === 'webgpu'
-    && graphicsBackendDiagnostics.state === 'presenting'
-    && residency?.presentationStyle === graphicsBackendDiagnostics.renderMode
-    && residency?.presentationFrameAdmitted === true
-    && (residency?.presentationFrames || 0) > 0;
+  return (graphicsPresentationPolicyDiagnostics.lastEffective
+    || browserGraphicsPresentationDecision(graphicsBackendDiagnostics.residency))
+    .deviceLodAuthorityEligible;
 }
 
 function activateWebGpuLodAuthority() {
