@@ -2829,11 +2829,24 @@ fn current_render_frame(
 }
 
 #[cfg(feature = "webgpu-backend")]
+fn webgpu_render_style_requested(
+    style: RenderStyle,
+    live_presentation_requested: bool,
+    evidence_requested: bool,
+) -> bool {
+    quilting_webgpu::supports_patch_presentation_style(style)
+        || (style == RenderStyle::Pbr
+            && (live_presentation_requested || evidence_requested))
+}
+
+#[cfg(feature = "webgpu-backend")]
 fn webgpu_frame_requested(renderer: &MainState) -> bool {
     crate::webgpu_backend::frame_contract_required()
-        && (quilting_webgpu::supports_patch_presentation_style(renderer.render_style)
-            || (renderer.render_style == RenderStyle::Pbr
-                && renderer.backend_evidence_requested))
+        && webgpu_render_style_requested(
+            renderer.render_style,
+            crate::webgpu_backend::live_presentation_requested(),
+            renderer.backend_evidence_requested,
+        )
 }
 
 #[cfg(feature = "webgpu-backend")]
@@ -11046,6 +11059,31 @@ fn render_highlight_to(
 mod tests {
     use super::*;
     use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[cfg(feature = "webgpu-backend")]
+    #[wasm_bindgen_test]
+    fn live_presentation_requests_resident_pbr_without_enabling_headless_shadow_work() {
+        assert!(webgpu_render_style_requested(
+            RenderStyle::Normals,
+            false,
+            false,
+        ));
+        assert!(!webgpu_render_style_requested(
+            RenderStyle::Pbr,
+            false,
+            false,
+        ));
+        assert!(webgpu_render_style_requested(
+            RenderStyle::Pbr,
+            true,
+            false,
+        ));
+        assert!(webgpu_render_style_requested(
+            RenderStyle::Pbr,
+            false,
+            true,
+        ));
+    }
 
     #[cfg(feature = "webgpu-backend")]
     #[wasm_bindgen_test]

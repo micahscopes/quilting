@@ -39,6 +39,14 @@ bindings are resident. The WASM diagnostics expose that coherent fact as
 surface frame has also been submitted. Diagnostic styles remain
 unconditionally supported by the existing static predicate.
 
+The 2026-08-31 browser regression found and removed a circular first-frame
+gate: browser admission had required an already-presented PBR frame, while the
+renderer requested PBR work only for one-shot headless evidence. A selected
+live surface now requests capability-gated PBR continuously; a headless
+pick/parity device still does not acquire that workload without an explicit
+evidence request. Canvas promotion continues to require an actual submitted
+frame whose retained style is exactly PBR.
+
 An incumbent-required frame clears the retained presentation witness. This is
 important when a previously valid PBR scene later enables unsupported focus
 postprocessing: the browser falls back to WebGL2 instead of leaving a stale

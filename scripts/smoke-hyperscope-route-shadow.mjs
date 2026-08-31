@@ -482,8 +482,9 @@ for (const animationClipAuthorityStep of [
   'Animation switched, but Rust completion failed:',
   'globalThis.__hyperscopeAnimationClipDiagnostics = animationClipDiagnostics;',
   "observeAnimationClipResidency('scene-installed', snapshot);",
-  "observeAnimationClipResidency('selection-pending');",
-  "observeAnimationClipResidency(error ? 'selection-failed' : 'selection-complete', snapshot);",
+  "observeAnimationClipResidency('selection-pending', residencySnapshot);",
+  "error ? 'selection-failed' : 'selection-complete',",
+  '{ animationClipSelection: receipt.selection },',
   'clipJob.cancellations.length === 0',
   'animationClipDiagnostics.repairs += 1;',
   'rendererAnimationClipIndex = null;',
@@ -729,14 +730,18 @@ for (const mode of ['matcap', 'wire', 'normals', 'both', 'lod', 'stretch']) {
 assert.equal(webGpuPresentationSupportsRenderMode('pbr'), false);
 assert.equal(webGpuPresentationSupportsRenderMode('pbr', {
   pbrPresentationReady: true,
-  presentationStyle: 'pbr',
-  presentationFrames: 1,
-}), true, 'proven resident PBR should use WebGPU');
+}), true, 'resident PBR should arm its first WebGPU presentation');
 assert.equal(webGpuPresentationSupportsRenderMode('pbr', {
-  pbrPresentationReady: true,
+  pbrPresentationReady: false,
   presentationStyle: 'wire',
   presentationFrames: 1,
-}), false, 'PBR must not expose a retained frame from another style');
+}), false, 'nonresident PBR must not arm from another style retained frame');
+assert.ok(
+  browserSource.includes(
+    'residency?.presentationStyle === graphicsBackendDiagnostics.renderMode',
+  ) && browserSource.includes('(residency?.presentationFrames || 0) > 0'),
+  'canvas promotion must still require a submitted frame in the requested style',
+);
 for (const stalePresentationGuard of [
   'fn incumbent_required(&mut self) -> LiveFrameDisposition',
   'self.last_frame_input = None;',
@@ -749,8 +754,10 @@ for (const stalePresentationGuard of [
 }
 for (const sharedFramePlanStep of [
   'fn refresh_render_command_plan(renderer: &mut MainState, backend_plan_required: bool)',
+  'fn webgpu_render_style_requested(',
   'fn webgpu_frame_requested(renderer: &MainState) -> bool',
-  'quilting_webgpu::supports_patch_presentation_style(renderer.render_style)',
+  'quilting_webgpu::supports_patch_presentation_style(style)',
+  'crate::webgpu_backend::live_presentation_requested()',
   'RenderCommandPlan::build(scene, style, options)',
   'fn current_render_frame(',
   'RenderFrame::from_command_plan(',

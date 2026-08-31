@@ -65,3 +65,14 @@ cargo check -p quilting-wasm --target wasm32-unknown-unknown \
 
 No linked WebGPU test binary, Trunk server, `wasm-pack`, binding generation, or
 `wasm-opt` is involved.
+
+## Live browser evidence
+
+The subsequent live-PBR admission checkpoint made this path observable on the
+selected browser surface. Shared Chromium ran the animated horse in PBR with
+spheroidal focus for 15 seconds and reported 417 submitted WebGPU/focus frames,
+zero frame failures, and no warning/error console entries. The retained policy
+built once and reused 416 times; its uniform table uploaded once (2,048 bytes)
+and reused 416 times. Camera/inversion motion occurred during the sample, so
+the source image and scene state changed while the focus schedule remained
+exactly stable. This is lifecycle/traffic evidence, not a frame-rate benchmark.

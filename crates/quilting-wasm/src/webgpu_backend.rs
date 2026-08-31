@@ -1430,6 +1430,13 @@ pub(crate) fn frame_contract_required() -> bool {
     })
 }
 
+/// Whether the selected WebGPU device owns a browser presentation surface.
+/// Headless parity/pick devices must not turn ordinary PBR rendering into a
+/// continuous shadow workload; an explicit evidence request remains separate.
+pub(crate) fn live_presentation_requested() -> bool {
+    BACKEND.with(|slot| slot.borrow().presentation.is_some())
+}
+
 pub(crate) fn shadow_evidence_ready() -> bool {
     BACKEND.with(|slot| {
         let backend = slot.borrow();

@@ -745,9 +745,7 @@ function webGpuPresentationSupportsRenderMode(mode, residency = null) {
   const diagnosticStyle = mode === 'matcap' || mode === 'wire' || mode === 'normals'
     || mode === 'both' || mode === 'lod' || mode === 'stretch';
   return diagnosticStyle || (mode === 'pbr'
-    && residency?.pbrPresentationReady === true
-    && residency?.presentationStyle === 'pbr'
-    && (residency?.presentationFrames || 0) > 0);
+    && residency?.pbrPresentationReady === true);
 }
 
 function synchronizeGraphicsBackendPresentation() {
