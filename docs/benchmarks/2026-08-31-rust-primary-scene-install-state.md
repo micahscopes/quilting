@@ -23,7 +23,6 @@ Rust coverage checks that a replacement completion returns the new installed
 asset, its initial active clip, no pending clip, and the exact cancellation for
 the old scene. `node scripts/smoke-primary-scene-install-boundary.mjs` requires
 the compact AppStore/WASM/browser fields and rejects full application snapshots
-from ordinary install success and failure adapters. The underlying native
-scene-replacement test passed under a one-job, lowest-priority Cargo run before
-the receipt assertions were extended; rerunning those assertions and wasm32 is
-deferred while unrelated Rust/Trunk work occupies the machine.
+from ordinary install success and failure adapters. The focused native
+scene-replacement test passes with the extended receipt assertions under a
+one-job, lowest-priority Cargo run. The wasm32 adapter check remains pending.

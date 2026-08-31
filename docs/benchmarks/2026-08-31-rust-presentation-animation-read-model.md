@@ -19,5 +19,5 @@ Application coverage checks the model revision, exact residency, and pending
 clip selected by the same binding commit. The presentation source smoke
 requires the Rust/WASM read-model boundary and rejects complete application
 snapshots from ordinary presentation animation adaptation. Neighboring typed
-boundary smokes and inline JavaScript syntax pass. Native and wasm32 checks
-remain deferred while an unrelated ESP release compiler occupies the machine.
+boundary smokes and inline JavaScript syntax pass. The focused native test
+proves the model revision, binding, and pending clip; wasm32 remains pending.

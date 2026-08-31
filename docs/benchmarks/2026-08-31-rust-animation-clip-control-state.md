@@ -16,5 +16,5 @@ and the exact platform job receipt required to switch renderer resources.
 The animation-clip boundary smoke requires both indices in the CSR callback,
 checks their browser projection, and rejects complete application snapshots
 from the callback. The complete presentation oracle and inline JavaScript
-syntax also pass. Native and wasm32 checks remain deferred under unrelated
-system build pressure.
+syntax also pass. The native animation-control crate compiles with its focused
+playback test; the wasm32-only CSR callback remains pending.

@@ -18,5 +18,5 @@ specialized paths.
 The presentation oracle requires the compact callback fields and rejects full
 application snapshots from both ordinary playback functions and the Leptos
 commit callback. The complete presentation smoke, presentation boundary smoke,
-and inline JavaScript syntax pass. Native and wasm32 reruns remain queued while
-an unrelated Walkie Songie release compiler occupies the machine.
+and inline JavaScript syntax pass. The focused native Hyperscope Web playback
+test passes with the complete clock receipt; wasm32 CSR remains pending.

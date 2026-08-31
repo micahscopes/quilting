@@ -20,5 +20,5 @@ The application residency test exercises the atomic installed-scene port and
 checks its exact binding, cue, and clip-selection job. The presentation source
 smoke requires the AppStore and WASM ports and rejects the legacy identity
 round-trip and full snapshots from the ordinary browser binding path. Inline
-JavaScript and neighboring typed boundary smokes pass. Native and wasm32
-reruns are deferred while system load remains above the safe build threshold.
+JavaScript and neighboring typed boundary smokes pass. The focused native
+residency test passes; the wasm32 adapter check remains pending.

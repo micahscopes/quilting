@@ -21,5 +21,5 @@ The application test now checks the exact ready asset returned with a decoded
 primary load. The asset-completion source smoke requires the AppStore, WASM,
 and browser fields, and rejects full application snapshots from both ordinary
 success and failure adapters. JavaScript syntax and neighboring typed boundary
-smokes pass. Native and wasm32 reruns remain deferred while an unrelated
-release build occupies the machine.
+smokes pass. The focused native typed-asset test passes under a one-job,
+lowest-priority Cargo run; the wasm32 adapter check remains pending.
