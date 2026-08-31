@@ -8,7 +8,8 @@ clip state, and the playback clock.
 
 The renderer adapter continues to use the allocation-free installed-animation
 sample packet for each applied pose. It reads the compact model at cue, clip,
-clock synchronization, URL restoration, and paused-seek boundaries. These
+clip-parity repair, clock synchronization, URL restoration, and paused-seek
+boundaries. These
 paths no longer
 serialize cue composition, assets, authored scene state, navigation, Patch Lab,
 jobs, or diagnostics through the complete application snapshot.

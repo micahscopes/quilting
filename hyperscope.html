@@ -6422,7 +6422,8 @@ globalThis.__hyperscopeAnimationClipDiagnostics = animationClipDiagnostics;
 
 function observeAnimationClipResidency(context, snapshot = null) {
   if (ANIMATION_CLIP_IMPLEMENTATION === 'js' || !rustAppShadow) return true;
-  const selection = (snapshot || refreshAppShadowSnapshot())?.animationClipSelection;
+  const selection = snapshot?.animationClipSelection
+    ?? rustAppShadow.animationRuntimeState()?.clipState;
   const rustActive = selection?.active?.clip?.index ?? null;
   const rustPending = selection?.pending?.clip?.index ?? null;
   animationClipDiagnostics.rendererResidentClip = rendererAnimationClipIndex;

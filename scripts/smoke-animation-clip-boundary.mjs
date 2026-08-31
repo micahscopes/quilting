@@ -139,6 +139,14 @@ assert.ok(range.includes('app?.animationRuntimeState()?.clipState?.active?.clip'
 assert.equal(range.includes('.snapshot()'), false,
   'clock range lookup must not serialize the complete application state');
 
+const residencyStart = browser.indexOf('function observeAnimationClipResidency(');
+const residencyEnd = browser.indexOf('function currentAnimationClipRange()', residencyStart);
+const residency = browser.slice(residencyStart, residencyEnd);
+assert.ok(residency.includes('rustAppShadow.animationRuntimeState()?.clipState'),
+  'clip parity fallback must use the compact Rust animation runtime state');
+assert.equal(residency.includes('refreshAppShadowSnapshot()'), false,
+  'clip parity fallback must not serialize the complete application state');
+
 const moduleSource = browser.match(/<script type="module">([\s\S]*?)<\/script>/)?.[1];
 assert.ok(moduleSource, 'could not extract the Hyperscope inline module');
 const syntax = spawnSync(process.execPath, ['--input-type=module', '--check'], {
