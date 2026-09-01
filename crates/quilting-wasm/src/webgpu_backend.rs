@@ -25,7 +25,7 @@ use quilting_webgpu::{
     PatchRenderSceneUpdate, PbrEnvironmentMap, PbrTextureTable, PoseUploadPolicy,
     ResidentGeometryBucketScene, ResidentRootPickPipeline, ResidentRootPreparationScene,
     ResidentRootRenderBindings, ResidentRootRenderPipeline, StagedOffscreenImageReadback,
-    StagedPatchPickReadback, SurfacePresentation, WebGpuAdapterSummary,
+    StagedPatchPickReadback, SurfacePresentation, WebGpuAdapterSummary, WebGpuDeviceLostReason,
 };
 use serde::Serialize;
 use std::cell::RefCell;
@@ -37,6 +37,15 @@ thread_local! {
 #[derive(Default)]
 struct WebGpuBackend {
     state: &'static str,
+    /// Monotonic identity of the currently requested device. Asynchronous loss
+    /// from an older generation must never invalidate a newer ready backend.
+    device_epoch: u64,
+    pending_device_recovery: bool,
+    device_losses: u64,
+    device_recoveries: u64,
+    stale_device_loss_callbacks: u64,
+    last_device_loss_reason: Option<&'static str>,
+    last_device_loss_message: Option<String>,
     device: Option<LodClassifierDevice>,
     adapter: Option<WebGpuAdapterSummary>,
     atlas: Option<PackedPatchAtlas>,
@@ -234,6 +243,13 @@ pub(crate) enum LiveFrameDisposition {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WebGpuBackendDiagnostics {
     state: &'static str,
+    device_epoch: u64,
+    device_losses: u64,
+    device_recoveries: u64,
+    stale_device_loss_callbacks: u64,
+    device_loss_recovery_eligible: bool,
+    last_device_loss_reason: Option<&'static str>,
+    last_device_loss_message: Option<String>,
     adapter_name: Option<String>,
     adapter_backend: Option<String>,
     adapter_device_type: Option<String>,
@@ -459,6 +475,15 @@ impl WebGpuBackend {
             } else {
                 self.state
             },
+            device_epoch: self.device_epoch,
+            device_losses: self.device_losses,
+            device_recoveries: self.device_recoveries,
+            stale_device_loss_callbacks: self.stale_device_loss_callbacks,
+            device_loss_recovery_eligible: self.device.is_none()
+                && self.device_losses > self.device_recoveries
+                && self.state != "initializing",
+            last_device_loss_reason: self.last_device_loss_reason,
+            last_device_loss_message: self.last_device_loss_message.clone(),
             adapter_name: self.adapter.as_ref().map(|adapter| adapter.name.clone()),
             adapter_backend: self.adapter.as_ref().map(|adapter| adapter.backend.clone()),
             adapter_device_type: self
@@ -697,8 +722,142 @@ impl WebGpuBackend {
         }
     }
 
+    fn begin_device_epoch(&mut self) -> Result<u64, String> {
+        let next_epoch = self
+            .device_epoch
+            .checked_add(1)
+            .ok_or_else(|| "WebGPU device epoch exhausted".to_string())?;
+        // Publish the new identity before releasing a failed prior device. A
+        // delayed callback from that device is then observably stale and
+        // cannot tear down the replacement generation.
+        self.device_epoch = next_epoch;
+        let recovering = self.device_losses > self.device_recoveries;
+        self.clear_device_epoch_resources();
+        self.pending_device_recovery = recovering;
+        self.state = "initializing";
+        self.initialization_attempts = self.initialization_attempts.saturating_add(1);
+        self.last_error = None;
+        Ok(next_epoch)
+    }
+
+    fn clear_device_epoch_resources(&mut self) {
+        // Drop resources before the device that created them. Counters and
+        // loss history deliberately survive this device-local invalidation.
+        self.presentation = None;
+        self.target = None;
+        self.pick_target = None;
+        self.resident_roots = None;
+        self.scene = None;
+        self.focus = None;
+        self.resident_root_pick_pipeline = None;
+        self.resident_root_pipeline = None;
+        self.pick_pipeline = None;
+        self.pipelines = None;
+        self.model = None;
+        self.model_source = None;
+        self.environment = None;
+        self.textures = None;
+        self.atlas = None;
+        self.device = None;
+
+        self.scene_source_revision = None;
+        self.frame_evidence_requested = false;
+        self.last_frame_input = None;
+        self.last_completed_frame_input = None;
+        self.last_presentation_input = None;
+        self.presentation_frame_admitted = false;
+        self.last_presentation_style = None;
+        self.frame_evidence = None;
+        self.last_face_visibility_bits.clear();
+        self.next_face_visibility_bits.clear();
+        self.next_morph_weights.clear();
+        self.device_pose_identity = None;
+        self.patch_pose_uniforms_ready = false;
+        self.resident_pose_uniforms_ready = false;
+        self.last_device_lod_epoch = None;
+        self.last_device_lod_classified_faces = 0;
+        self.last_frame_revision = 0;
+        self.last_source_render_call = 0;
+        self.last_indirect_draw_calls = 0;
+        self.last_source_instances = 0;
+        self.last_logical_submission = RenderSubmissionStats::default();
+        self.last_viewport = [0, 0];
+        self.last_frame_used_resident_roots = false;
+        self.last_resident_root_error = None;
+        self.last_focus_error = None;
+        self.last_pick_error = None;
+    }
+
+    fn complete_device_epoch(&mut self, epoch: u64) -> Result<(), String> {
+        if self.device_epoch != epoch || self.state != "initializing" {
+            return Err(self.last_error.clone().unwrap_or_else(|| {
+                format!(
+                    "WebGPU device epoch {epoch} completed after epoch {} entered state '{}'",
+                    self.device_epoch, self.state
+                )
+            }));
+        }
+        if self.pending_device_recovery {
+            self.device_recoveries = self.device_recoveries.saturating_add(1);
+        }
+        self.pending_device_recovery = false;
+        self.state = "ready";
+        self.last_error = None;
+        Ok(())
+    }
+
+    fn fail_device_epoch(&mut self, epoch: u64, error: impl ToString) -> String {
+        let error = error.to_string();
+        if self.device_epoch != epoch {
+            return format!(
+                "stale WebGPU device epoch {epoch} failed after epoch {}: {error}",
+                self.device_epoch
+            );
+        }
+        if self.state == "lost" {
+            return self.last_error.clone().unwrap_or(error);
+        }
+        self.pending_device_recovery = false;
+        self.state = "failed";
+        self.last_error = Some(error.clone());
+        error
+    }
+
+    fn lose_device_epoch(
+        &mut self,
+        epoch: u64,
+        reason: WebGpuDeviceLostReason,
+        message: String,
+    ) -> bool {
+        if epoch != self.device_epoch
+            || (self.device.is_none() && self.state != "initializing")
+        {
+            self.stale_device_loss_callbacks =
+                self.stale_device_loss_callbacks.saturating_add(1);
+            return false;
+        }
+        if self.state == "lost" {
+            return false;
+        }
+        let detail = if message.is_empty() {
+            format!("WebGPU device lost ({})", reason.as_str())
+        } else {
+            format!("WebGPU device lost ({}): {message}", reason.as_str())
+        };
+        self.clear_device_epoch_resources();
+        self.pending_device_recovery = false;
+        self.device_losses = self.device_losses.saturating_add(1);
+        self.last_device_loss_reason = Some(reason.as_str());
+        self.last_device_loss_message = Some(message);
+        self.last_frame_failure = Some(detail.clone());
+        self.last_error = Some(detail);
+        self.state = "lost";
+        true
+    }
+
     fn fail(&mut self, error: impl ToString) -> String {
         let error = error.to_string();
+        self.pending_device_recovery = false;
         self.state = "failed";
         self.last_error = Some(error.clone());
         error
@@ -859,28 +1018,49 @@ fn create_resident_root_pick_resource(
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn install_device_loss_callback(device: &LodClassifierDevice, epoch: u64) {
+    device.set_device_lost_callback(move |reason, message| {
+        let transitioned = BACKEND.with(|slot| {
+            slot.borrow_mut()
+                .lose_device_epoch(epoch, reason, message)
+        });
+        if transitioned {
+            if let (Some(window), Ok(event)) = (
+                web_sys::window(),
+                web_sys::Event::new("hyperscope-webgpu-device-lost"),
+            ) {
+                let _ = window.dispatch_event(&event);
+            }
+        }
+    });
+}
+
 pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
-    let should_request = BACKEND.with(|slot| {
+    let request_epoch = BACKEND.with(|slot| {
         let mut backend = slot.borrow_mut();
         match backend.state {
-            "ready" => return Ok(false),
+            "ready" => return Ok(None),
             "initializing" => {
                 return Err("WebGPU backend initialization is already in progress".to_string());
             }
             _ => {}
         }
-        backend.state = "initializing";
-        backend.initialization_attempts = backend.initialization_attempts.saturating_add(1);
-        backend.last_error = None;
-        Ok(true)
+        backend.begin_device_epoch().map(Some)
     })?;
-    if should_request {
+    if let Some(epoch) = request_epoch {
         match LodClassifierDevice::request_headless("Hyperscope WebGPU shadow").await {
             Ok((device, adapter)) => {
+                #[cfg(target_arch = "wasm32")]
+                install_device_loss_callback(&device, epoch);
                 let pipelines = device
                     .create_offscreen_diagnostic_patch_render_pipelines()
                     .map_err(|error| error.to_string())
-                    .map_err(|error| BACKEND.with(|slot| slot.borrow_mut().fail(error)))?;
+                    .map_err(|error| {
+                        BACKEND.with(|slot| {
+                            slot.borrow_mut().fail_device_epoch(epoch, error)
+                        })
+                    })?;
                 let (pick_pipeline, pick_target, mut pick_error) =
                     create_pick_resources(&device, &pipelines);
                 let (resident_root_pipeline, resident_root_error) =
@@ -907,40 +1087,21 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
                 let focus_failed = focus_error.is_some();
                 BACKEND.with(|slot| {
                     let mut backend = slot.borrow_mut();
+                    if backend.device_epoch != epoch || backend.state != "initializing" {
+                        return Err(backend.last_error.clone().unwrap_or_else(|| {
+                            format!(
+                                "WebGPU device epoch {epoch} lost authority before publication"
+                            )
+                        }));
+                    }
                     backend.device = Some(device);
                     backend.adapter = Some(adapter);
-                    backend.atlas = None;
-                    backend.textures = None;
-                    backend.environment = None;
-                    backend.model = None;
-                    backend.model_source = None;
                     backend.pipelines = Some(pipelines);
                     backend.pick_pipeline = pick_pipeline;
                     backend.pick_target = pick_target;
                     backend.resident_root_pipeline = resident_root_pipeline;
                     backend.resident_root_pick_pipeline = resident_root_pick_pipeline;
                     backend.focus = focus;
-                    backend.resident_roots = None;
-                    backend.scene = None;
-                    backend.scene_source_revision = None;
-                    backend.target = None;
-                    backend.presentation = None;
-                    backend.frame_evidence_requested = false;
-                    backend.last_frame_input = None;
-                    backend.last_completed_frame_input = None;
-                    backend.last_presentation_input = None;
-                    backend.presentation_frame_admitted = false;
-                    backend.last_presentation_style = None;
-                    backend.frame_evidence = None;
-                    backend.last_device_lod_epoch = None;
-                    backend.last_device_lod_classified_faces = 0;
-                    backend.last_frame_used_resident_roots = false;
-                    backend.last_face_visibility_bits.clear();
-                    backend.next_face_visibility_bits.clear();
-                    backend.next_morph_weights.clear();
-                    backend.device_pose_identity = None;
-                    backend.patch_pose_uniforms_ready = false;
-                    backend.resident_pose_uniforms_ready = false;
                     if resident_root_error.is_some() {
                         backend.resident_root_fallbacks =
                             backend.resident_root_fallbacks.saturating_add(1);
@@ -951,13 +1112,13 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
                     if focus_failed {
                         backend.focus_fallbacks = backend.focus_fallbacks.saturating_add(1);
                     }
-                    backend.last_logical_submission = RenderSubmissionStats::default();
-                    backend.state = "ready";
-                    backend.last_error = None;
-                });
+                    backend.complete_device_epoch(epoch)
+                })?;
             }
             Err(error) => {
-                return Err(BACKEND.with(|slot| slot.borrow_mut().fail(error)));
+                return Err(BACKEND.with(|slot| {
+                    slot.borrow_mut().fail_device_epoch(epoch, error)
+                }));
             }
         }
     }
@@ -974,10 +1135,10 @@ pub(crate) async fn initialize_presentation(
     canvas: web_sys::HtmlCanvasElement,
     size: [u32; 2],
 ) -> Result<WebGpuBackendDiagnostics, String> {
-    let should_request = BACKEND.with(|slot| {
+    let request_epoch = BACKEND.with(|slot| {
         let mut backend = slot.borrow_mut();
         match backend.state {
-            "ready" if backend.presentation.is_some() => return Ok(false),
+            "ready" if backend.presentation.is_some() => return Ok(None),
             "ready" => {
                 return Err(
                     "headless WebGPU backend is already initialized; presentation requires a fresh startup"
@@ -989,14 +1150,11 @@ pub(crate) async fn initialize_presentation(
             }
             _ => {}
         }
-        backend.state = "initializing";
-        backend.initialization_attempts = backend.initialization_attempts.saturating_add(1);
-        backend.last_error = None;
-        Ok(true)
+        backend.begin_device_epoch().map(Some)
     })?;
-    if !should_request {
+    let Some(epoch) = request_epoch else {
         return Ok(diagnostics());
-    }
+    };
 
     let request = LodClassifierDevice::request_canvas_presentation(
         canvas,
@@ -1006,8 +1164,13 @@ pub(crate) async fn initialize_presentation(
     .await;
     let (device, adapter, presentation) = match request {
         Ok(request) => request,
-        Err(error) => return Err(BACKEND.with(|slot| slot.borrow_mut().fail(error))),
+        Err(error) => {
+            return Err(BACKEND.with(|slot| {
+                slot.borrow_mut().fail_device_epoch(epoch, error)
+            }));
+        }
     };
+    install_device_loss_callback(&device, epoch);
     let pipelines = device
         .create_diagnostic_patch_render_pipelines(
             presentation.color_format(),
@@ -1015,7 +1178,9 @@ pub(crate) async fn initialize_presentation(
             1,
         )
         .map_err(|error| error.to_string())
-        .map_err(|error| BACKEND.with(|slot| slot.borrow_mut().fail(error)))?;
+        .map_err(|error| {
+            BACKEND.with(|slot| slot.borrow_mut().fail_device_epoch(epoch, error))
+        })?;
     let (pick_pipeline, pick_target, mut pick_error) = create_pick_resources(&device, &pipelines);
     let (resident_root_pipeline, resident_root_error) = match device
         .create_resident_root_render_pipeline(
@@ -1045,40 +1210,20 @@ pub(crate) async fn initialize_presentation(
     let focus_failed = focus_error.is_some();
     BACKEND.with(|slot| {
         let mut backend = slot.borrow_mut();
+        if backend.device_epoch != epoch || backend.state != "initializing" {
+            return Err(backend.last_error.clone().unwrap_or_else(|| {
+                format!("WebGPU device epoch {epoch} lost authority before publication")
+            }));
+        }
         backend.device = Some(device);
         backend.adapter = Some(adapter);
-        backend.atlas = None;
-        backend.textures = None;
-        backend.environment = None;
-        backend.model = None;
-        backend.model_source = None;
         backend.pipelines = Some(pipelines);
         backend.pick_pipeline = pick_pipeline;
         backend.pick_target = pick_target;
         backend.resident_root_pipeline = resident_root_pipeline;
         backend.resident_root_pick_pipeline = resident_root_pick_pipeline;
         backend.focus = focus;
-        backend.resident_roots = None;
-        backend.scene = None;
-        backend.scene_source_revision = None;
-        backend.target = None;
         backend.presentation = Some(presentation);
-        backend.frame_evidence_requested = false;
-        backend.last_frame_input = None;
-        backend.last_completed_frame_input = None;
-        backend.last_presentation_input = None;
-        backend.presentation_frame_admitted = false;
-        backend.last_presentation_style = None;
-        backend.frame_evidence = None;
-        backend.last_device_lod_epoch = None;
-        backend.last_device_lod_classified_faces = 0;
-        backend.last_frame_used_resident_roots = false;
-        backend.last_face_visibility_bits.clear();
-        backend.next_face_visibility_bits.clear();
-        backend.next_morph_weights.clear();
-        backend.device_pose_identity = None;
-        backend.patch_pose_uniforms_ready = false;
-        backend.resident_pose_uniforms_ready = false;
         if resident_root_error.is_some() {
             backend.resident_root_fallbacks = backend.resident_root_fallbacks.saturating_add(1);
         }
@@ -1088,10 +1233,8 @@ pub(crate) async fn initialize_presentation(
         if focus_failed {
             backend.focus_fallbacks = backend.focus_fallbacks.saturating_add(1);
         }
-        backend.last_logical_submission = RenderSubmissionStats::default();
-        backend.state = "ready";
-        backend.last_error = None;
-    });
+        backend.complete_device_epoch(epoch)
+    })?;
     Ok(diagnostics())
 }
 
@@ -3109,6 +3252,13 @@ mod tests {
     #[test]
     fn presentation_health_starts_unadmitted_and_is_explicitly_serialized() {
         let diagnostics = serde_json::to_value(WebGpuBackend::default().diagnostics()).unwrap();
+        assert_eq!(diagnostics["deviceEpoch"], 0);
+        assert_eq!(diagnostics["deviceLosses"], 0);
+        assert_eq!(diagnostics["deviceRecoveries"], 0);
+        assert_eq!(diagnostics["staleDeviceLossCallbacks"], 0);
+        assert_eq!(diagnostics["deviceLossRecoveryEligible"], false);
+        assert_eq!(diagnostics["lastDeviceLossReason"], serde_json::Value::Null);
+        assert_eq!(diagnostics["lastDeviceLossMessage"], serde_json::Value::Null);
         assert_eq!(diagnostics["presentationFrameAdmitted"], false);
         assert_eq!(diagnostics["pbrTextureMinMipLevels"], 0);
         assert_eq!(diagnostics["pbrTextureMipLevels"], 0);
@@ -3128,6 +3278,84 @@ mod tests {
         assert_eq!(diagnostics["pbrTextureEstimatedUploadPeakBytes"], 0);
         assert_eq!(diagnostics["pbrTextureTotalAllocatedMipTexels"], 0);
         assert_eq!(diagnostics["pbrTextureTotalAllocatedBytes"], 0);
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn device_loss_atomically_invalidates_the_current_epoch() {
+        let mut backend = WebGpuBackend::default();
+        backend.state = "initializing";
+        backend.device_epoch = 7;
+        backend.presentation_frame_admitted = true;
+        backend.last_frame_revision = 41;
+        backend.last_viewport = [640, 480];
+        backend.next_face_visibility_bits.extend([1, 2, 3]);
+
+        assert!(backend.lose_device_epoch(
+            7,
+            WebGpuDeviceLostReason::Unknown,
+            "context pressure".to_string(),
+        ));
+
+        assert_eq!(backend.state, "lost");
+        assert_eq!(backend.device_losses, 1);
+        assert_eq!(backend.device_recoveries, 0);
+        assert!(!backend.presentation_frame_admitted);
+        assert_eq!(backend.last_frame_revision, 0);
+        assert_eq!(backend.last_viewport, [0, 0]);
+        assert!(backend.next_face_visibility_bits.is_empty());
+        assert_eq!(backend.last_device_loss_reason, Some("unknown"));
+        assert_eq!(
+            backend.last_error.as_deref(),
+            Some("WebGPU device lost (unknown): context pressure"),
+        );
+        assert!(backend.diagnostics().device_loss_recovery_eligible);
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn delayed_loss_from_an_old_epoch_cannot_retire_a_replacement() {
+        let mut backend = WebGpuBackend::default();
+        backend.state = "ready";
+        backend.device_epoch = 12;
+        backend.presentation_frame_admitted = true;
+
+        assert!(!backend.lose_device_epoch(
+            11,
+            WebGpuDeviceLostReason::Destroyed,
+            "old device dropped".to_string(),
+        ));
+
+        assert_eq!(backend.state, "ready");
+        assert_eq!(backend.device_epoch, 12);
+        assert_eq!(backend.device_losses, 0);
+        assert_eq!(backend.stale_device_loss_callbacks, 1);
+        assert!(backend.presentation_frame_admitted);
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn a_lost_epoch_can_reserve_and_complete_one_recovery_generation() {
+        let mut backend = WebGpuBackend::default();
+        backend.state = "initializing";
+        backend.device_epoch = 3;
+        assert!(backend.lose_device_epoch(
+            3,
+            WebGpuDeviceLostReason::Unknown,
+            String::new(),
+        ));
+
+        let recovery_epoch = backend.begin_device_epoch().unwrap();
+        assert_eq!(recovery_epoch, 4);
+        assert_eq!(backend.state, "initializing");
+        assert!(backend.pending_device_recovery);
+        backend.complete_device_epoch(recovery_epoch).unwrap();
+
+        assert_eq!(backend.state, "ready");
+        assert_eq!(backend.device_losses, 1);
+        assert_eq!(backend.device_recoveries, 1);
+        assert!(!backend.pending_device_recovery);
+        assert!(!backend.diagnostics().device_loss_recovery_eligible);
     }
 
     #[test]

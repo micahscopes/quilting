@@ -367,7 +367,7 @@ impl HyperscopeAppShadow {
                 requested_style: browser_render_style(requested_style),
                 presentation_armed,
                 backend_ready: backend_state == "ready",
-                backend_failed: backend_state == "failed",
+                backend_failed: backend_state == "failed" || backend_state == "lost",
                 surface_ready,
                 pbr_presentation_ready,
                 focus_postprocess_requested,

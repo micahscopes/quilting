@@ -43,7 +43,7 @@ js-sys = "0.3"
 rustc-hash = "2"
 web-sys = { version = "0.3", features = [
     "console", "Performance", "OffscreenCanvas", "WebGl2RenderingContext",
-    "Window", "Document", "Element", "HtmlCanvasElement", "HtmlElement", "ImageBitmap",
+    "Window", "Document", "Element", "Event", "EventTarget", "HtmlCanvasElement", "HtmlElement", "ImageBitmap",
 ] }
 glow = "0.16"
 quilting-renderer = { version = "0.1.0", path = "../quilting-renderer" }

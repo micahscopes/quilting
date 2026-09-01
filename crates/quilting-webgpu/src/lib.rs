@@ -368,6 +368,24 @@ pub struct WebGpuAdapterSummary {
     pub device_type: String,
 }
 
+/// Backend-neutral reason reported when the device epoch can no longer be
+/// used. This keeps browser lifecycle adapters independent of wgpu's public
+/// type surface while still preserving the distinction exposed by WebGPU.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebGpuDeviceLostReason {
+    Unknown,
+    Destroyed,
+}
+
+impl WebGpuDeviceLostReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Destroyed => "destroyed",
+        }
+    }
+}
+
 /// Diagnostic copy of the exact same-device visibility outputs. The retained
 /// GPU buffers remain suitable for direct storage/indirect consumption; this
 /// owned projection exists only for conformance gates.
@@ -627,6 +645,12 @@ mod patch_pbr_material_tests {
         assert!(PoseUploadPolicy::PublishPreparation.should_publish_preparation());
         assert!(!PoseUploadPolicy::Reuse.should_publish_dynamic());
         assert!(!PoseUploadPolicy::Reuse.should_publish_preparation());
+    }
+
+    #[test]
+    fn device_loss_reasons_have_stable_wire_names() {
+        assert_eq!(WebGpuDeviceLostReason::Unknown.as_str(), "unknown");
+        assert_eq!(WebGpuDeviceLostReason::Destroyed.as_str(), "destroyed");
     }
 
     #[test]
@@ -1866,6 +1890,22 @@ impl LodClassifierDevice {
     /// surrounding render graph.
     pub fn device(&self) -> &wgpu::Device {
         &self.device
+    }
+
+    /// Observe terminal loss of this exact device epoch. Callers must discard
+    /// every resource created from the device before attempting recovery on a
+    /// newly requested device.
+    pub fn set_device_lost_callback(
+        &self,
+        callback: impl Fn(WebGpuDeviceLostReason, String) + Send + 'static,
+    ) {
+        self.device.set_device_lost_callback(move |reason, message| {
+            let reason = match reason {
+                wgpu::DeviceLostReason::Destroyed => WebGpuDeviceLostReason::Destroyed,
+                wgpu::DeviceLostReason::Unknown => WebGpuDeviceLostReason::Unknown,
+            };
+            callback(reason, message);
+        });
     }
 
     /// Borrow the application-supplied queue. Frame uploads are ordered before

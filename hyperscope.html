@@ -703,6 +703,16 @@ const graphicsBackendDiagnostics = {
   },
 };
 globalThis.__hyperscopeGraphicsBackend = graphicsBackendDiagnostics;
+globalThis.addEventListener('hyperscope-webgpu-device-lost', () => {
+  queueMicrotask(() => {
+    // The Rust callback has already invalidated the complete device epoch.
+    // Retire its canvas before another frame; recovery remains an explicit
+    // replay so a contended browser cannot thrash device creation or claim
+    // empty residency.
+    graphicsBackendDiagnostics.presentationArmed = false;
+    refreshWebGpuBackendDiagnostics();
+  });
+});
 
 const webGpuLodAuthorityDiagnostics = {
   requested: GRAPHICS_BACKEND_REQUEST === 'webgpu',
@@ -945,6 +955,7 @@ function browserGraphicsPresentationDecision(residency) {
     residency,
   );
   const failed = residency?.state === 'failed'
+    || residency?.state === 'lost'
     || (residency?.presentationLosses || 0) > 0;
   const deviceLodRecoveryEligible = livePresentationRequested
     && residency?.state === 'ready'
