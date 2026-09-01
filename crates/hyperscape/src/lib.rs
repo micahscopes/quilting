@@ -45,9 +45,12 @@ pub use navigation::{
 };
 pub use interaction::{
     InteractionAction, InteractionActionQueue, InteractionActivation, InteractionActivations,
-    InteractionController, InteractionHit, InteractionPickEvidenceDiagnostics,
-    InteractionPickEvidenceDisposition, InteractionPickEvidenceObserver,
-    InteractionPickEvidenceState, InteractionPolicy, InteractionSnapshot, InteractionState,
+    InteractionController, InteractionHit, InteractionPickAuthority,
+    InteractionPickAuthorityDiagnostics, InteractionPickAuthorityDisposition,
+    InteractionPickAuthorityError, InteractionPickAuthorityState,
+    InteractionPickEvidenceDiagnostics, InteractionPickEvidenceDisposition,
+    InteractionPickEvidenceObserver, InteractionPickEvidenceState, InteractionPickRequest,
+    InteractionPolicy, InteractionSnapshot, InteractionState,
     InteractionSurfacePoint, InteractionTarget, InteractionTargetError, InteractionTargetSample,
     InteractionTargetTable, ScheduledInteractionAction,
 };

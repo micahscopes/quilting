@@ -317,6 +317,184 @@ impl InteractionTargetTable {
     }
 }
 
+/// Identity of one asynchronous renderer pick. The target epoch joins packed
+/// renderer handles to the exact semantic table observed when the request was
+/// staged; the monotonic request ID rejects out-of-order pointer completions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InteractionPickRequest {
+    pub request_id: u64,
+    pub target_epoch: u32,
+}
+
+/// Current process-local state of the authoritative asynchronous pick lane.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InteractionPickAuthorityState {
+    #[default]
+    Idle,
+    Staging,
+    Reading,
+    Accepted,
+    StageRejected,
+    StaleTargetEpoch,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractionPickAuthorityDisposition {
+    Current,
+    IgnoredSuperseded,
+    IgnoredStaleTargetEpoch,
+}
+
+/// Bounded lifecycle telemetry. Individual hits remain in the semantic
+/// interaction reducer or the caller; this observer retains no per-click
+/// payload and cannot grow with session duration.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InteractionPickAuthorityDiagnostics {
+    pub state: InteractionPickAuthorityState,
+    pub requests: u64,
+    pub staged: u64,
+    pub stage_rejects: u64,
+    pub readbacks: u64,
+    pub accepted: u64,
+    pub superseded_requests: u64,
+    pub stale_completions: u64,
+    pub stale_target_epochs: u64,
+    pub errors: u64,
+    pub latest_request_id: Option<u64>,
+    pub latest_target_epoch: Option<u32>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InteractionPickAuthority {
+    next_request_id: u64,
+    latest: Option<InteractionPickRequest>,
+    diagnostics: InteractionPickAuthorityDiagnostics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractionPickAuthorityError {
+    RequestIdExhausted,
+}
+
+impl fmt::Display for InteractionPickAuthorityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RequestIdExhausted => {
+                formatter.write_str("interaction pick request ID exhausted")
+            }
+        }
+    }
+}
+
+impl Error for InteractionPickAuthorityError {}
+
+impl InteractionPickAuthority {
+    pub fn snapshot(&self) -> InteractionPickAuthorityDiagnostics {
+        self.diagnostics.clone()
+    }
+
+    pub fn begin(
+        &mut self,
+        target_epoch: u32,
+    ) -> Result<InteractionPickRequest, InteractionPickAuthorityError> {
+        let request_id = self
+            .next_request_id
+            .checked_add(1)
+            .ok_or(InteractionPickAuthorityError::RequestIdExhausted)?;
+        self.next_request_id = request_id;
+        if self.latest.is_some() {
+            self.diagnostics.superseded_requests =
+                self.diagnostics.superseded_requests.saturating_add(1);
+        }
+        let request = InteractionPickRequest {
+            request_id,
+            target_epoch,
+        };
+        self.latest = Some(request);
+        self.diagnostics.requests = self.diagnostics.requests.saturating_add(1);
+        self.diagnostics.state = InteractionPickAuthorityState::Staging;
+        self.diagnostics.latest_request_id = Some(request_id);
+        self.diagnostics.latest_target_epoch = Some(target_epoch);
+        self.diagnostics.last_error = None;
+        Ok(request)
+    }
+
+    pub fn record_stage(
+        &mut self,
+        request: InteractionPickRequest,
+        rejection: Option<String>,
+    ) -> InteractionPickAuthorityDisposition {
+        if self.latest != Some(request) {
+            self.record_stale_completion();
+            return InteractionPickAuthorityDisposition::IgnoredSuperseded;
+        }
+        if let Some(error) = rejection {
+            self.diagnostics.stage_rejects = self.diagnostics.stage_rejects.saturating_add(1);
+            self.diagnostics.state = InteractionPickAuthorityState::StageRejected;
+            self.diagnostics.last_error = Some(error);
+            self.clear_latest();
+        } else {
+            self.diagnostics.staged = self.diagnostics.staged.saturating_add(1);
+            self.diagnostics.state = InteractionPickAuthorityState::Reading;
+        }
+        InteractionPickAuthorityDisposition::Current
+    }
+
+    pub fn complete(
+        &mut self,
+        request: InteractionPickRequest,
+        current_target_epoch: u32,
+    ) -> InteractionPickAuthorityDisposition {
+        if self.latest != Some(request) {
+            self.record_stale_completion();
+            return InteractionPickAuthorityDisposition::IgnoredSuperseded;
+        }
+        self.diagnostics.readbacks = self.diagnostics.readbacks.saturating_add(1);
+        self.diagnostics.last_error = None;
+        if request.target_epoch != current_target_epoch {
+            self.diagnostics.stale_target_epochs =
+                self.diagnostics.stale_target_epochs.saturating_add(1);
+            self.diagnostics.state = InteractionPickAuthorityState::StaleTargetEpoch;
+            self.clear_latest();
+            return InteractionPickAuthorityDisposition::IgnoredStaleTargetEpoch;
+        }
+        self.diagnostics.accepted = self.diagnostics.accepted.saturating_add(1);
+        self.diagnostics.state = InteractionPickAuthorityState::Accepted;
+        self.clear_latest();
+        InteractionPickAuthorityDisposition::Current
+    }
+
+    pub fn record_error(
+        &mut self,
+        request: InteractionPickRequest,
+        error: impl Into<String>,
+    ) -> InteractionPickAuthorityDisposition {
+        if self.latest != Some(request) {
+            self.record_stale_completion();
+            return InteractionPickAuthorityDisposition::IgnoredSuperseded;
+        }
+        self.diagnostics.errors = self.diagnostics.errors.saturating_add(1);
+        self.diagnostics.state = InteractionPickAuthorityState::Error;
+        self.diagnostics.last_error = Some(error.into());
+        self.clear_latest();
+        InteractionPickAuthorityDisposition::Current
+    }
+
+    fn record_stale_completion(&mut self) {
+        self.diagnostics.stale_completions = self.diagnostics.stale_completions.saturating_add(1);
+    }
+
+    fn clear_latest(&mut self) {
+        self.latest = None;
+        self.diagnostics.latest_request_id = None;
+        self.diagnostics.latest_target_epoch = None;
+    }
+}
+
 /// Current state of the opt-in retained-renderer pick comparison lane. This is
 /// process-local evidence, not authored scene or interaction state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -1000,6 +1178,110 @@ mod tests {
                 actual: 8,
             }),
         );
+    }
+
+    #[test]
+    fn pick_authority_accepts_only_the_newest_request() {
+        let mut authority = InteractionPickAuthority::default();
+        let first = authority.begin(9).unwrap();
+        assert_eq!(
+            authority.record_stage(first, None),
+            InteractionPickAuthorityDisposition::Current,
+        );
+        let second = authority.begin(9).unwrap();
+        authority.record_stage(second, None);
+
+        assert_eq!(
+            authority.complete(first, 9),
+            InteractionPickAuthorityDisposition::IgnoredSuperseded,
+        );
+        let reading = authority.snapshot();
+        assert_eq!(reading.state, InteractionPickAuthorityState::Reading);
+        assert_eq!(reading.superseded_requests, 1);
+        assert_eq!(reading.stale_completions, 1);
+        assert_eq!(reading.latest_request_id, Some(second.request_id));
+        assert_eq!(reading.readbacks, 0);
+
+        assert_eq!(
+            authority.complete(second, 9),
+            InteractionPickAuthorityDisposition::Current,
+        );
+        let accepted = authority.snapshot();
+        assert_eq!(accepted.state, InteractionPickAuthorityState::Accepted);
+        assert_eq!(accepted.requests, 2);
+        assert_eq!(accepted.staged, 2);
+        assert_eq!(accepted.readbacks, 1);
+        assert_eq!(accepted.accepted, 1);
+        assert_eq!(accepted.latest_request_id, None);
+    }
+
+    #[test]
+    fn pick_authority_rejects_a_replaced_target_epoch() {
+        let mut authority = InteractionPickAuthority::default();
+        let request = authority.begin(12).unwrap();
+        authority.record_stage(request, None);
+        assert_eq!(
+            authority.complete(request, 13),
+            InteractionPickAuthorityDisposition::IgnoredStaleTargetEpoch,
+        );
+        let stale = authority.snapshot();
+        assert_eq!(stale.state, InteractionPickAuthorityState::StaleTargetEpoch);
+        assert_eq!(stale.readbacks, 1);
+        assert_eq!(stale.accepted, 0);
+        assert_eq!(stale.stale_target_epochs, 1);
+        assert_eq!(stale.latest_request_id, None);
+    }
+
+    #[test]
+    fn stale_pick_failures_do_not_clobber_a_newer_request() {
+        let mut authority = InteractionPickAuthority::default();
+        let first = authority.begin(3).unwrap();
+        authority.record_stage(first, None);
+        let second = authority.begin(3).unwrap();
+        authority.record_stage(second, None);
+        assert_eq!(
+            authority.record_error(first, "old readback failed"),
+            InteractionPickAuthorityDisposition::IgnoredSuperseded,
+        );
+        assert_eq!(
+            authority.snapshot().state,
+            InteractionPickAuthorityState::Reading
+        );
+        assert_eq!(authority.snapshot().errors, 0);
+
+        assert_eq!(
+            authority.record_error(second, "device lost"),
+            InteractionPickAuthorityDisposition::Current,
+        );
+        let failed = authority.snapshot();
+        assert_eq!(failed.state, InteractionPickAuthorityState::Error);
+        assert_eq!(failed.errors, 1);
+        assert_eq!(failed.stale_completions, 1);
+        assert_eq!(failed.last_error.as_deref(), Some("device lost"));
+
+        let rejected = authority.begin(4).unwrap();
+        assert_eq!(
+            authority.record_stage(rejected, Some("backend warming".to_string())),
+            InteractionPickAuthorityDisposition::Current,
+        );
+        let rejected = authority.snapshot();
+        assert_eq!(rejected.state, InteractionPickAuthorityState::StageRejected);
+        assert_eq!(rejected.stage_rejects, 1);
+        assert_eq!(rejected.latest_request_id, None);
+    }
+
+    #[test]
+    fn pick_request_exhaustion_does_not_mutate_diagnostics() {
+        let mut authority = InteractionPickAuthority {
+            next_request_id: u64::MAX,
+            ..InteractionPickAuthority::default()
+        };
+        let before = authority.snapshot();
+        assert_eq!(
+            authority.begin(1),
+            Err(InteractionPickAuthorityError::RequestIdExhausted),
+        );
+        assert_eq!(authority.snapshot(), before);
     }
 
     #[test]
