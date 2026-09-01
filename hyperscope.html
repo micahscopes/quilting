@@ -865,15 +865,29 @@ const backendPickDiagnostics = {
 };
 globalThis.__hyperscopeBackendPickDiagnostics = backendPickDiagnostics;
 
-function updateBackendPickDiagnostics(snapshot) {
+function updateBackendPickDiagnostics(snapshot, effective = 'webgl2') {
   if (snapshot && typeof snapshot === 'object') {
     Object.assign(backendPickDiagnostics, snapshot, {
       enabled: PICK_IMPLEMENTATION !== 'js',
       requested: PICK_IMPLEMENTATION,
-      effective: 'webgl2',
+      effective,
     });
   }
   return backendPickDiagnostics;
+}
+
+const IGNORED_BACKEND_PICK = Object.freeze({
+  ignored: true,
+  surface: null,
+  allowFaceFallback: false,
+});
+
+function backendPickResult(surface, allowFaceFallback) {
+  return {
+    ignored: false,
+    surface: surface ?? null,
+    allowFaceFallback,
+  };
 }
 
 function warnBackendPickError(error, phase) {
@@ -894,6 +908,23 @@ function recordBackendPickError(error, phase) {
     console.warn('Rust backend-pick error observer unavailable:', observerError);
   }
   warnBackendPickError(error, phase);
+}
+
+function recordBackendPickAuthorityError(app, error, phase) {
+  const message = error?.message || String(error);
+  try {
+    updateBackendPickDiagnostics(app.backendPickAuthorityDiagnostics(), 'webgl2');
+  } catch (diagnosticsError) {
+    console.warn('Rust backend-pick authority diagnostics unavailable:', diagnosticsError);
+  }
+  backendPickDiagnostics.adapterErrors =
+    (Number(backendPickDiagnostics.adapterErrors) || 0) + 1;
+  backendPickDiagnostics.lastAdapterError = `${phase}: ${message}`;
+  backendPickDiagnostics.adapterState = 'webgl2-rollback';
+  const count = backendPickDiagnostics.adapterErrors;
+  if (count === 1 || (count & (count - 1)) === 0) {
+    console.warn(`WebGPU authoritative pick ${phase} failed; using WebGL2 rollback:`, error);
+  }
 }
 
 function readBackendPickEvidence(app) {
@@ -7783,9 +7814,52 @@ function pickFaceAtCanvasPixel(x, y) {
   return mr_pick(pickMvp, pickView, pickCameraPos, x, y);
 }
 
-function pickSurfaceAtCanvasPixel(x, y) {
-  if (!preparePickCamera()) return null;
-  if (PICK_IMPLEMENTATION !== 'js') {
+async function pickSurfaceAtCanvasPixel(x, y) {
+  if (PICK_IMPLEMENTATION === 'rust') {
+    const inputRevision = manualCameraInputRevision;
+    let app = null;
+    try {
+      app = ensureRustAppShadow('backend-pick-authority');
+      if (typeof app.pickBackendSurface !== 'function'
+          || typeof app.backendPickAuthorityDiagnostics !== 'function') {
+        throw new Error('authoritative backend pick AppShadow exports are unavailable');
+      }
+      const result = await app.pickBackendSurface(x, y);
+      updateBackendPickDiagnostics(app.backendPickAuthorityDiagnostics(), 'webgpu');
+      if (result?.disposition !== 'accepted') return IGNORED_BACKEND_PICK;
+      if (inputRevision !== manualCameraInputRevision) {
+        backendPickDiagnostics.adapterState = 'ignored-camera-input';
+        return IGNORED_BACKEND_PICK;
+      }
+
+      const surface = result.surface ?? null;
+      if (surface) {
+        const packedIdentity = packedNodeIdentities.get(Number(surface.node));
+        const semanticIdentity = result.hit?.identity;
+        if (!packedIdentity || !semanticIdentity
+            || packedIdentity.assetId !== semanticIdentity.asset_id
+            || packedIdentity.entityId !== semanticIdentity.entity_id) {
+          throw new Error('authoritative backend pick identity no longer matches the browser scene');
+        }
+      } else if (result.hit) {
+        throw new Error('authoritative backend pick returned identity without a surface address');
+      }
+      backendPickDiagnostics.adapterState = 'webgpu-authoritative';
+      backendPickDiagnostics.lastAdapterError = null;
+      return backendPickResult(surface, false);
+    } catch (error) {
+      if (app) recordBackendPickAuthorityError(app, error, 'readback');
+      else console.warn('WebGPU authoritative pick unavailable; using WebGL2 rollback:', error);
+    }
+    if (!preparePickCamera()) return backendPickResult(null, false);
+    return backendPickResult(
+      mr_pickSurface(pickMvp, pickView, pickCameraPos, x, y),
+      true,
+    );
+  }
+
+  if (!preparePickCamera()) return backendPickResult(null, false);
+  if (PICK_IMPLEMENTATION === 'shadow') {
     try {
       const app = ensureRustAppShadow('backend-pick');
       if (typeof app.stageBackendPickEvidence !== 'function'
@@ -7803,12 +7877,15 @@ function pickSurfaceAtCanvasPixel(x, y) {
       if (staged?.staged) {
         readBackendPickEvidence(app);
       }
-      return staged?.webgl ?? null;
+      return backendPickResult(staged?.webgl ?? null, true);
     } catch (error) {
       recordBackendPickError(error, 'stage');
     }
   }
-  return mr_pickSurface(pickMvp, pickView, pickCameraPos, x, y);
+  return backendPickResult(
+    mr_pickSurface(pickMvp, pickView, pickCameraPos, x, y),
+    true,
+  );
 }
 
 function surfaceCross(left, right) {
@@ -9017,13 +9094,15 @@ function selectObjectFromFace(
   return true;
 }
 
-function selectObjectAtViewCenter() {
+async function selectObjectAtViewCenter() {
   const x = Math.floor(canvas.width * 0.5);
   const y = Math.floor(canvas.height * 0.5);
-  const pickedSurface = pickSurfaceAtCanvasPixel(x, y);
+  const pick = await pickSurfaceAtCanvasPixel(x, y);
+  if (pick.ignored) return false;
+  const pickedSurface = pick.surface;
   const faceId = Number.isInteger(Number(pickedSurface?.face))
     ? Number(pickedSurface.face)
-    : pickFaceAtCanvasPixel(x, y);
+    : pick.allowFaceFallback ? pickFaceAtCanvasPixel(x, y) : -1;
   if (faceId < 0 && selectedObject) return reframeSelectedObject();
   if (faceId < 0) {
     selectionLabel('No object at view center · no recovery selection');
@@ -9034,15 +9113,17 @@ function selectObjectAtViewCenter() {
 
 let mouseDragDistance = Infinity;
 let focusKeyHeld = false;
-canvas.addEventListener('click', e => {
+canvas.addEventListener('click', async e => {
   if (!isPrimarySelectionClick(e.button, mouseDragDistance)) return;
   const rect = canvas.getBoundingClientRect();
   const x = Math.floor((e.clientX - rect.left) * (canvas.width / rect.width));
   const y = Math.floor((e.clientY - rect.top) * (canvas.height / rect.height));
-  const pickedSurface = pickSurfaceAtCanvasPixel(x, y);
+  const pick = await pickSurfaceAtCanvasPixel(x, y);
+  if (pick.ignored) return;
+  const pickedSurface = pick.surface;
   const faceId = Number.isInteger(Number(pickedSurface?.face))
     ? Number(pickedSurface.face)
-    : pickFaceAtCanvasPixel(x, y);
+    : pick.allowFaceFallback ? pickFaceAtCanvasPixel(x, y) : -1;
   if (faceId < 0) {
     clearSelectedObject('Focus sphere unanchored');
     mr_highlightFace(-1);
@@ -9054,7 +9135,7 @@ canvas.addEventListener('click', e => {
   });
 });
 
-canvas.addEventListener('contextmenu', e => {
+canvas.addEventListener('contextmenu', async e => {
   e.preventDefault();
   const fixedAnchorRequested = e.shiftKey;
   const startFrame = claimManualCameraFromActiveView({
@@ -9064,7 +9145,9 @@ canvas.addEventListener('contextmenu', e => {
   const rect = canvas.getBoundingClientRect();
   const x = Math.floor((e.clientX - rect.left) * (canvas.width / rect.width));
   const y = Math.floor((e.clientY - rect.top) * (canvas.height / rect.height));
-  const picked = pickSurfaceAtCanvasPixel(x, y);
+  const pick = await pickSurfaceAtCanvasPixel(x, y);
+  if (pick.ignored) return;
+  const picked = pick.surface;
   if (!picked?.barycentric) {
     if (fixedAnchorRequested && surfaceCameraAnchor.active) detachSurfaceCameraAnchor();
     else if (!fixedAnchorRequested && surfaceWalk.active) detachSurfaceWalk();
@@ -9086,7 +9169,7 @@ canvas.addEventListener('contextmenu', e => {
     picked.face,
     new Float32Array(picked.barycentric),
     surfaceWalkEyeHeight(),
-    pickCameraPos,
+    new Float32Array(startFrame.eye),
   );
   const rustSurfaceSnapshot = attachSurfaceWalkRustShadow(picked, startFrame);
   if (snapshot?.status === 'attached' && SURFACE_WALK_IMPLEMENTATION !== 'rust') {
@@ -12682,7 +12765,7 @@ function frame(ts) {
   // report rate and lets the worker coalesce LOD updates behind the main-GPU
   // current-pose visibility pass. Authored cameras remain authoritative.
   const doubleTappedButtons = spaceMouseButtonGestures.update(spaceMouse.buttons, ts);
-  if (doubleTappedButtons & SPACEMOUSE_RIGHT_BUTTON) selectObjectAtViewCenter();
+  if (doubleTappedButtons & SPACEMOUSE_RIGHT_BUTTON) void selectObjectAtViewCenter();
   if (doubleTappedButtons & SPACEMOUSE_LEFT_BUTTON) fitOrToggleInversionToSelection(ts);
   const buttonSpaceMouseMode = spaceMouseModifierMode(spaceMouse.buttons);
   const spaceMouseMode = focusKeyHeld && buttonSpaceMouseMode === 'camera'

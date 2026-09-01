@@ -45,6 +45,16 @@ for (const required of [
 }
 
 for (const required of [
+  'pub struct InteractionPickAuthority',
+  'pub fn observe_readback(',
+  'self.latest != Some(request)',
+  'request.target_epoch != current_target_epoch',
+  'InteractionPickAuthorityState::Resolving',
+]) {
+  assert.ok(interaction.includes(required), `Hyperscape pick authority is missing ${required}`);
+}
+
+for (const required of [
   '#[wasm_bindgen(js_name = stageBackendPickEvidence)]',
   '#[wasm_bindgen(js_name = readBackendPickEvidence)]',
   '.interaction_targets',
@@ -53,6 +63,17 @@ for (const required of [
   '.record_report(&targets, report)',
 ]) {
   assert.ok(appShadow.includes(required), `AppShadow pick boundary is missing ${required}`);
+}
+
+for (const required of [
+  '#[wasm_bindgen(js_name = pickBackendSurface)]',
+  '#[wasm_bindgen(js_name = backendPickAuthorityDiagnostics)]',
+  'crate::main_renderer::stage_backend_pick_authority(',
+  '.observe_readback(request, current_target_epoch)',
+  'crate::main_renderer::resolve_backend_pick_surface(raw)',
+  '.accept(request)',
+]) {
+  assert.ok(appShadow.includes(required), `AppShadow pick authority is missing ${required}`);
 }
 
 for (const required of [
@@ -65,6 +86,16 @@ for (const required of [
   'state.highlight_face = prior_highlight;',
 ]) {
   assert.ok(renderer.includes(required), `renderer pick boundary is missing ${required}`);
+}
+
+for (const required of [
+  'pub(crate) struct BackendPickAuthorityCapture',
+  'pub(crate) fn stage_backend_pick_authority(',
+  'pub(crate) fn resolve_backend_pick_surface(',
+  'staged.source_render_call() != source_render_call',
+  'staged.viewport() != viewport',
+]) {
+  assert.ok(renderer.includes(required), `renderer pick authority is missing ${required}`);
 }
 
 for (const required of [
@@ -81,12 +112,35 @@ for (const required of [
 }
 
 for (const required of [
+  'pub(crate) struct StagedWebGpuPick',
+  'viewport: backend.last_viewport,',
+  'pub(crate) fn viewport(&self) -> [u32; 2]',
+]) {
+  assert.ok(webgpuBackend.includes(required), `WebGPU pick authority is missing ${required}`);
+}
+
+for (const required of [
   'const staged = app.stageBackendPickEvidence(',
   'Promise.resolve(app.readBackendPickEvidence())',
   'updateBackendPickDiagnostics(app.backendPickDiagnostics())',
-  'return staged?.webgl ?? null;',
+  'return backendPickResult(staged?.webgl ?? null, true);',
 ]) {
   assert.ok(browser.includes(required), `browser pick adapter is missing ${required}`);
+}
+
+
+for (const required of [
+  'async function pickSurfaceAtCanvasPixel(x, y)',
+  "if (PICK_IMPLEMENTATION === 'rust')",
+  'const result = await app.pickBackendSurface(x, y);',
+  "result?.disposition !== 'accepted'",
+  "packedIdentity.assetId !== semanticIdentity.asset_id",
+  "packedIdentity.entityId !== semanticIdentity.entity_id",
+  "backendPickDiagnostics.adapterState = 'webgpu-authoritative';",
+  'mr_pickSurface(pickMvp, pickView, pickCameraPos, x, y)',
+  'if (pick.ignored) return;',
+]) {
+  assert.ok(browser.includes(required), `browser pick authority is missing ${required}`);
 }
 
 for (const retired of [
