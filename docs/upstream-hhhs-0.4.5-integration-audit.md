@@ -3,7 +3,7 @@
 Date: 2026-09-01
 
 Reviewed candidate through: `hhhs-rs`
-`e68402fe3efe6a22212c804f84c038ee3838d499`
+`3968ae1dd1bd5b4a86f8aaa426d955a334cf9ecb`
 
 Initial audit baseline: `2bfba3662cfb175b9700393acc38ee09c507ccc4`
 
@@ -29,11 +29,13 @@ machinery. The strict host encapsulation is valuable and should not be
 weakened to ease that migration.
 
 The audit did reveal several generic composition gaps. Upstream resolved both
-initial P0 requests in subsequent pushed commits. Hyperscope has now adopted
-the exact `e68402f` candidate, including the exclusive host and browser log,
-while deliberately treating it as a candidate SHA rather than a release tag.
-The remaining requests are ergonomic, integration, or measured-performance
-work.
+initial P0 requests in subsequent pushed commits. Hyperscope first adopted
+`e68402f`, including the exclusive host and browser log, and now pins the
+later exact `3968ae1` candidate. The newer checkpoint adds structurally
+read-only durable-host views, exact-entry capability authoring, durable-commit
+session receipts, and restart-safe session lanes. It remains a candidate SHA,
+not a release tag. The remaining requests are integration and
+measured-performance work.
 
 ## Resolved P0 requests
 
@@ -283,7 +285,7 @@ These are not upstream requests:
 
 ## Downstream migration outcome
 
-At exact candidate `e68402f`, Hyperscope:
+At exact candidate `3968ae1`, Hyperscope:
 
 - removed its separately retained `Arc<MemoryStorage>` and reads through
   `DurableReplicaHost::snapshot`;
@@ -302,6 +304,13 @@ At exact candidate `e68402f`, Hyperscope:
 - keeps the exact upstream revision pinned so the full HHHS dependency graph
   and wire generation move together.
 
+The new `ReplicaReadHandle` also resolves the ownership concern recorded in
+the adoption probe below: a runtime-neutral reactive materializer can now read
+and subscribe without cloning Replica authority, its writer, or its durability
+sink. Hyperscope has not yet reintroduced the deleted convenience methods;
+that follow-up should compose the upstream read handle directly and preserve
+placement-generation reset as an explicit event.
+
 Hyperscope still should:
 
 - not commit the 0.4.4-specific bounded carrier-record retry pool until it is
@@ -309,9 +318,9 @@ Hyperscope still should:
   repair path;
 - use `hhhs-session` transient samples for camera/selection/control presence,
   and durable causal events only for explicit authored intent;
-- adopt the forthcoming consolidated candidate only after its native, WASM,
-  and API gates pass, rather than advancing through testkit-only intermediate
-  commits.
+- introduce `hhhs-session` only through an explicit application service that
+  keeps prediction, durable commit, projection, announcement, repair, and peer
+  acknowledgement distinct.
 
 ## Exact downstream adoption probe
 
@@ -341,7 +350,8 @@ therefore chose the second of these outcomes:
 2. Hyperscope removes those unused durable-project reactive convenience
    methods and keeps application FRP downstream of committed host snapshots.
 
-The exact dependency graph now pins `e68402f`. This is a reviewable candidate
+The probe remains useful adoption history, but the exact dependency graph now
+pins `3968ae1`. This is a reviewable candidate
 checkpoint, not a claim that HHHS `v0.4.5` has been released or qualified.
 
 ## Audit evidence
@@ -350,11 +360,13 @@ At the reviewed and adopted revision:
 
 - the downstream `hyperscape-hhhs` suite passes 27 tests after exclusive-host
   migration;
-- the downstream `hyperscope-hhhs-shadow` suite passes 24 tests after strict
-  fence/reopen migration;
+- the downstream `hyperscope-hhhs-shadow` suite passes 25 tests after strict
+  fence/reopen migration and the Blender v0.2 conformal-frame restart proof;
 - the downstream `hyperscope-web` durable-history suite passes 9 native tests;
 - `hyperscope-web` and the `quilting-wasm` Leptos/durable-history composition
   both pass `wasm32-unknown-unknown` checks;
+- the three HHHS-dependent native suites and downstream-only strict Clippy
+  pass on exact `3968ae1`;
 - upstream's protocol-v5 browser projection suite passed 20/20 in real
   Chromium after the retained-byte accounting and uncredited-frame rejection
   regressions were added;
