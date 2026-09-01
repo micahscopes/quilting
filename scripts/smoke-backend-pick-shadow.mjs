@@ -71,6 +71,10 @@ for (const required of [
   'crate::main_renderer::stage_backend_pick_authority(',
   '.observe_readback(request, current_target_epoch)',
   'crate::main_renderer::resolve_backend_pick_surface(raw)',
+  '.publish(request, hit.expect("activation readiness requires a hit"))',
+  '#[wasm_bindgen(js_name = activateBackendPick)]',
+  'InteractionAction::ActivatePrimary(hit)',
+  '#[wasm_bindgen(js_name = discardBackendPickActivation)]',
   '.accept(request)',
 ]) {
   assert.ok(appShadow.includes(required), `AppShadow pick authority is missing ${required}`);
@@ -130,13 +134,17 @@ for (const required of [
 
 
 for (const required of [
-  'async function pickSurfaceAtCanvasPixel(x, y)',
+  'async function pickSurfaceAtCanvasPixel(x, y, retainForActivation = false)',
   "if (PICK_IMPLEMENTATION === 'rust')",
-  'const result = await app.pickBackendSurface(x, y);',
+  'result = await app.pickBackendSurface(x, y, retainForActivation);',
   "result?.disposition !== 'accepted'",
   "packedIdentity.assetId !== semanticIdentity.asset_id",
   "packedIdentity.entityId !== semanticIdentity.entity_id",
   "backendPickDiagnostics.adapterState = 'webgpu-authoritative';",
+  'result.activationReady ? result.requestId : null,',
+  'function activateSelectedObjectBackendPick(requestId, nowMs = performance.now())',
+  'const navigation = rustAppShadow.activateBackendPick(requestId);',
+  '? activateSelectedObjectBackendPick(backendActivationRequestId, selectedAtMs)',
   'mr_pickSurface(pickMvp, pickView, pickCameraPos, x, y)',
   'if (pick.ignored) return;',
 ]) {

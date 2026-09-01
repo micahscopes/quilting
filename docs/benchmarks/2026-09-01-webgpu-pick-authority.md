@@ -25,10 +25,32 @@ and viewport equal the current renderer state. Rust owns monotonic request
 ordering and the interaction-target epoch fence; JavaScript retains only the
 platform-specific manual-input revision fence and the explicit rollback.
 
+## Semantic activation handoff
+
+An accepted query requested by `selectionimpl=rust` may publish one bounded,
+single-use activation token. The token retains the already validated
+`InteractionHit` inside Rust; JavaScript receives only its decimal request ID.
+New queries and interaction-target replacements invalidate it, a wrong request
+cannot consume the current token, and a stale target epoch consumes and rejects
+it.
+
+After the adapter verifies that its displayed packed-node identity agrees with
+the Rust join, it consumes the token as one
+`InteractionAction::ActivatePrimary(hit)`. Hyperscape applies the corresponding
+selection/focus navigation at one application-frame boundary. This replaces
+the former browser reconstruction of three separate hover, press, and release
+inputs and avoids exposing a half-applied interaction state. Platform-stale or
+adapter-rejected results explicitly discard the token. If activation or view
+projection fails, the existing direct Rust focus-anchor path remains the
+measured rollback.
+
 ## Static and CPU evidence
 
-- 15 `hyperscape::interaction` tests pass, including newest-request,
-  target-epoch, error, and resolve-before-accept behavior.
+- 19 `hyperscape::interaction` tests pass, including newest-request,
+  target-epoch, resolve-before-accept, bounded token, single-use, wrong-request,
+  stale-token, and atomic activation behavior.
+- The `hyperscope-app` exact-pick test proves one semantic input produces one
+  interaction activation and one routed navigation anchor after one frame.
 - `quilting-wasm` checks for `wasm32-unknown-unknown` with
   `leptos-ui,webgpu-backend`.
 - 32 `hyperscope-app` route/settings tests pass.

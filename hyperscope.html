@@ -880,14 +880,34 @@ const IGNORED_BACKEND_PICK = Object.freeze({
   ignored: true,
   surface: null,
   allowFaceFallback: false,
+  activationRequestId: null,
 });
 
-function backendPickResult(surface, allowFaceFallback) {
+function backendPickResult(surface, allowFaceFallback, activationRequestId = null) {
   return {
     ignored: false,
     surface: surface ?? null,
     allowFaceFallback,
+    activationRequestId,
   };
+}
+
+function discardBackendPickActivation(app, result) {
+  if (!result?.activationReady || !result?.requestId
+      || typeof app?.discardBackendPickActivation !== 'function') return false;
+  try {
+    return app.discardBackendPickActivation(result.requestId);
+  } catch (error) {
+    console.warn('Rust backend-pick activation discard failed:', error);
+    return false;
+  }
+}
+
+function discardBackendPickActivationRequest(requestId) {
+  return discardBackendPickActivation(rustAppShadow, {
+    activationReady: Boolean(requestId),
+    requestId,
+  });
 }
 
 function warnBackendPickError(error, phase) {
@@ -4542,10 +4562,13 @@ const rustAppShadowDiagnostics = {
 globalThis.__hyperscopeAppShadowDiagnostics = rustAppShadowDiagnostics;
 
 const rustInteractionDiagnostics = {
-  enabled: RUST_SELECTION_IMPLEMENTATION === 'shadow',
-  implementation: RUST_SELECTION_IMPLEMENTATION === 'shadow' ? 'shadow' : 'inactive',
-  state: RUST_SELECTION_IMPLEMENTATION === 'shadow' ? 'awaiting-pick' : 'disabled',
+  enabled: RUST_SELECTION_IMPLEMENTATION !== 'js',
+  implementation: RUST_SELECTION_IMPLEMENTATION,
+  state: RUST_SELECTION_IMPLEMENTATION === 'js' ? 'disabled' : 'awaiting-pick',
   dispatches: 0,
+  authorityActivations: 0,
+  authorityActivationErrors: 0,
+  authorityActivationFallbacks: 0,
   exactSurfacePicks: 0,
   entityOnlyPicks: 0,
   targetReplacements: 0,
@@ -4558,6 +4581,7 @@ const rustInteractionDiagnostics = {
   fallbacks: 0,
   errors: 0,
   lastInput: null,
+  lastActivationRequestId: null,
   lastSnapshot: null,
   lastError: null,
 };
@@ -7814,20 +7838,22 @@ function pickFaceAtCanvasPixel(x, y) {
   return mr_pick(pickMvp, pickView, pickCameraPos, x, y);
 }
 
-async function pickSurfaceAtCanvasPixel(x, y) {
+async function pickSurfaceAtCanvasPixel(x, y, retainForActivation = false) {
   if (PICK_IMPLEMENTATION === 'rust') {
     const inputRevision = manualCameraInputRevision;
     let app = null;
+    let result = null;
     try {
       app = ensureRustAppShadow('backend-pick-authority');
       if (typeof app.pickBackendSurface !== 'function'
           || typeof app.backendPickAuthorityDiagnostics !== 'function') {
         throw new Error('authoritative backend pick AppShadow exports are unavailable');
       }
-      const result = await app.pickBackendSurface(x, y);
+      result = await app.pickBackendSurface(x, y, retainForActivation);
       updateBackendPickDiagnostics(app.backendPickAuthorityDiagnostics(), 'webgpu');
       if (result?.disposition !== 'accepted') return IGNORED_BACKEND_PICK;
       if (inputRevision !== manualCameraInputRevision) {
+        discardBackendPickActivation(app, result);
         backendPickDiagnostics.adapterState = 'ignored-camera-input';
         return IGNORED_BACKEND_PICK;
       }
@@ -7846,8 +7872,13 @@ async function pickSurfaceAtCanvasPixel(x, y) {
       }
       backendPickDiagnostics.adapterState = 'webgpu-authoritative';
       backendPickDiagnostics.lastAdapterError = null;
-      return backendPickResult(surface, false);
+      return backendPickResult(
+        surface,
+        false,
+        result.activationReady ? result.requestId : null,
+      );
     } catch (error) {
+      discardBackendPickActivation(app, result);
       if (app) recordBackendPickAuthorityError(app, error, 'readback');
       else console.warn('WebGPU authoritative pick unavailable; using WebGL2 rollback:', error);
     }
@@ -8514,6 +8545,70 @@ function mirrorSelectedObjectInteractionToApp(nowMs = performance.now()) {
   }
 }
 
+function activateSelectedObjectBackendPick(requestId, nowMs = performance.now()) {
+  if (RUST_SELECTION_IMPLEMENTATION !== 'rust'
+      || !rustAppShadow || !selectedObject?.identity || !requestId) return 'unobserved';
+  const target = focusSphereFromBound(selectedObject.bound, FOCUS_SPHERE_MARGIN, 0.02);
+  if (!target) return 'invalid';
+  rustInteractionDiagnostics.lastActivationRequestId = requestId;
+  try {
+    if (typeof rustAppShadow.activateBackendPick !== 'function') {
+      throw new Error('backend pick activation AppShadow export is unavailable');
+    }
+    advanceRustApplicationClockToSelectionEvent(nowMs);
+    synchronizeRustApplicationPresentationFromBrowser();
+    const navigation = rustAppShadow.activateBackendPick(requestId);
+    const interaction = rustAppShadow.interactionSnapshot();
+    const selected = interaction?.selected;
+    const hovered = interaction?.hovered;
+    const matched = selected?.asset_id === selectedObject.identity.assetId
+      && selected?.entity_id === selectedObject.identity.entityId
+      && hovered?.identity?.asset_id === selectedObject.identity.assetId
+      && hovered?.identity?.entity_id === selectedObject.identity.entityId
+      && interaction?.active == null;
+    if (!matched) {
+      throw new Error('backend pick activation did not select its resolved semantic identity');
+    }
+    rustAppShadowSelectionQueued = true;
+    rustAppSelectionTransitionActive =
+      Number(navigation.focus?.focus_transition_remaining || 0) > 0;
+    rustAppShadowDiagnostics.mappedSelectionPicks += 1;
+    rustAppShadowDiagnostics.selectionDispatches += 1;
+    rustInteractionDiagnostics.dispatches += 1;
+    rustInteractionDiagnostics.authorityActivations += 1;
+    rustInteractionDiagnostics.exactSurfacePicks += 1;
+    rustInteractionDiagnostics.lastSnapshot = interaction;
+    rustInteractionDiagnostics.state = 'authoritative';
+    rustInteractionDiagnostics.lastError = null;
+    compareAppSelectedFocus({
+      ...selectedObject.identity,
+      node: selectedObject.node,
+      bound: selectedObject.bound,
+      sourcePivot: Array.from(hovered.source_pivot, Number),
+      margin: target.margin,
+    }, navigation.selected_focus);
+    if (!applyRustSelectedFocusNavigation(navigation)) {
+      throw new Error('backend pick navigation could not enter the browser view');
+    }
+    if (!applyRustAppFocusToRenderer(navigation)) {
+      throw new Error('backend pick focus could not enter the resident renderer');
+    }
+    if (RUST_NAVIGATION_IMPLEMENTATION !== 'js') rustManualCameraActive = true;
+    compareAppSelectionTransitionFrame(navigation, nowMs);
+    refreshAppShadowSnapshot();
+    return 'mapped';
+  } catch (error) {
+    rustInteractionDiagnostics.errors += 1;
+    rustInteractionDiagnostics.authorityActivationErrors += 1;
+    rustInteractionDiagnostics.lastError = error?.message || String(error);
+    recordAppShadowMismatch(
+      'interaction_pick_activation',
+      rustInteractionDiagnostics.lastError,
+    );
+    return 'error';
+  }
+}
+
 function mirrorSelectedObjectToApp(nowMs = performance.now()) {
   if (RUST_SELECTION_IMPLEMENTATION === 'shadow') {
     const interactionResult = mirrorSelectedObjectInteractionToApp(nowMs);
@@ -9011,9 +9106,14 @@ function restorePendingRouteSelection(context) {
 
 function selectObjectFromFace(
   faceId,
-  { highlightFace = false, pickedSurface = null } = {},
+  {
+    highlightFace = false,
+    pickedSurface = null,
+    backendActivationRequestId = null,
+  } = {},
 ) {
   if (faceId < 0 || faceId >= currentFaceNodes.length || !currentInstances) {
+    discardBackendPickActivationRequest(backendActivationRequestId);
     clearSelectedObject('No object at view center');
     mr_highlightFace(-1);
     return false;
@@ -9024,11 +9124,13 @@ function selectObjectFromFace(
   // authored/layer Euclidean transforms and before the Möbius map.
   const sourceAnchor = bound?.center?.slice();
   if (!bound || !sourceAnchor) {
+    discardBackendPickActivationRequest(backendActivationRequestId);
     clearSelectedObject(`Node ${node} has no focus bounds`);
     mr_highlightFace(-1);
     return false;
   }
   if (!claimManualCameraFromActiveView()) {
+    discardBackendPickActivationRequest(backendActivationRequestId);
     selectionLabel('Could not claim the current camera for selection');
     return false;
   }
@@ -9072,7 +9174,14 @@ function selectObjectFromFace(
     // the application reducer own the only sphere transition. Unmapped local
     // assets retain the exact browser fallback instead of becoming inert.
     prepareSelectionFocusField();
-    if (mirrorSelectedObjectToApp(selectedAtMs) !== 'mapped') {
+    let mapped = backendActivationRequestId
+      ? activateSelectedObjectBackendPick(backendActivationRequestId, selectedAtMs)
+      : mirrorSelectedObjectToApp(selectedAtMs);
+    if (backendActivationRequestId && mapped !== 'mapped') {
+      rustInteractionDiagnostics.authorityActivationFallbacks += 1;
+      mapped = mirrorSelectedObjectDirectToApp(selectedAtMs);
+    }
+    if (mapped !== 'mapped') {
       anchorFocusSphereToSelection(selectedAtMs);
     }
   } else {
@@ -9097,7 +9206,11 @@ function selectObjectFromFace(
 async function selectObjectAtViewCenter() {
   const x = Math.floor(canvas.width * 0.5);
   const y = Math.floor(canvas.height * 0.5);
-  const pick = await pickSurfaceAtCanvasPixel(x, y);
+  const pick = await pickSurfaceAtCanvasPixel(
+    x,
+    y,
+    RUST_SELECTION_IMPLEMENTATION === 'rust',
+  );
   if (pick.ignored) return false;
   const pickedSurface = pick.surface;
   const faceId = Number.isInteger(Number(pickedSurface?.face))
@@ -9108,7 +9221,10 @@ async function selectObjectAtViewCenter() {
     selectionLabel('No object at view center · no recovery selection');
     return false;
   }
-  return selectObjectFromFace(faceId, { pickedSurface });
+  return selectObjectFromFace(faceId, {
+    pickedSurface,
+    backendActivationRequestId: pick.activationRequestId,
+  });
 }
 
 let mouseDragDistance = Infinity;
@@ -9118,7 +9234,11 @@ canvas.addEventListener('click', async e => {
   const rect = canvas.getBoundingClientRect();
   const x = Math.floor((e.clientX - rect.left) * (canvas.width / rect.width));
   const y = Math.floor((e.clientY - rect.top) * (canvas.height / rect.height));
-  const pick = await pickSurfaceAtCanvasPixel(x, y);
+  const pick = await pickSurfaceAtCanvasPixel(
+    x,
+    y,
+    RUST_SELECTION_IMPLEMENTATION === 'rust',
+  );
   if (pick.ignored) return;
   const pickedSurface = pick.surface;
   const faceId = Number.isInteger(Number(pickedSurface?.face))
@@ -9132,6 +9252,7 @@ canvas.addEventListener('click', async e => {
   selectObjectFromFace(faceId, {
     highlightFace: e.ctrlKey || e.metaKey,
     pickedSurface,
+    backendActivationRequestId: pick.activationRequestId,
   });
 });
 
