@@ -3,7 +3,7 @@
 Date: 2026-09-01
 
 Reviewed candidate through: `hhhs-rs`
-`3968ae1dd1bd5b4a86f8aaa426d955a334cf9ecb`
+`7575510b7f8d95588c39cc4d0f22bd77a1979760`
 
 Initial audit baseline: `2bfba3662cfb175b9700393acc38ee09c507ccc4`
 
@@ -30,11 +30,12 @@ weakened to ease that migration.
 
 The audit did reveal several generic composition gaps. Upstream resolved both
 initial P0 requests in subsequent pushed commits. Hyperscope first adopted
-`e68402f`, including the exclusive host and browser log, and now pins the
-later exact `3968ae1` candidate. The newer checkpoint adds structurally
+`e68402f`, including the exclusive host and browser log, adopted `3968ae1`,
+and now pins the later exact `7575510` candidate. These checkpoints add structurally
 read-only durable-host views, exact-entry capability authoring, durable-commit
-session receipts, and restart-safe session lanes. It remains a candidate SHA,
-not a release tag. The remaining requests are integration and
+session receipts, restart-safe session lanes, and a complete executable
+browser/session composition oracle. It remains a candidate SHA, not a release
+tag. The remaining requests are downstream integration and
 measured-performance work.
 
 ## Resolved P0 requests
@@ -285,7 +286,7 @@ These are not upstream requests:
 
 ## Downstream migration outcome
 
-At exact candidate `3968ae1`, Hyperscope:
+At exact candidate `7575510`, Hyperscope:
 
 - removed its separately retained `Arc<MemoryStorage>` and reads through
   `DurableReplicaHost::snapshot`;
@@ -352,7 +353,7 @@ therefore chose the second of these outcomes:
    methods and keeps application FRP downstream of committed host snapshots.
 
 The probe remains useful adoption history, but the exact dependency graph now
-pins `3968ae1`. This is a reviewable candidate
+pins `7575510`. This is a reviewable candidate
 checkpoint, not a claim that HHHS `v0.4.5` has been released or qualified.
 
 ## Audit evidence
