@@ -30,7 +30,8 @@ assert.equal(
 
 for (const required of [
   'complete_scene_required: bool',
-  'self.presentation_authoritative || complete_scene_required',
+  'complete_scene: complete_scene_required',
+  '|| (self.presentation_authoritative && !self.active),',
   'complete_recovery_dispatch_prewarms_without_seizing_authority',
 ]) {
   assert.ok(lodAuthority.includes(required), `Rust LOD recovery policy is missing ${required}`);
@@ -49,9 +50,10 @@ assert.ok(
 for (const required of [
   'function webGpuLodRecoveryEligible()',
   'const deviceRecoveryEligible = webGpuLodRecoveryEligible();',
+  'const deviceCompleteSceneRequired = deviceRecoveryEligible',
   "'beginWebGpuLodDispatch',",
-  'deviceAuthorityEligible,\n          deviceRecoveryEligible,',
-  '(deviceRecoveryEligible ? WEBGPU_LOD_COMPLETE_SCENE : 0)',
+  'deviceAuthorityEligible,\n          deviceCompleteSceneRequired,',
+  '(deviceCompleteSceneRequired ? WEBGPU_LOD_COMPLETE_SCENE : 0)',
 ]) {
   assert.ok(browser.includes(required), `WebGPU recovery dispatch is missing ${required}`);
 }
