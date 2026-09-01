@@ -2189,3 +2189,24 @@ failure, and the browser console retained zero errors. This is direct evidence
 that the WebGPU screen-space floor acts as a tessellation cap and accounts for
 the density of authored patches rather than continuing to draw the incumbent's
 stale high-density batches.
+
+## Animated inversion and motion residency
+
+`scripts/audit-webgpu-motion-residency.mjs` exercises the animated horse under
+spherical reflection, then pauses animation, drags the camera through Chrome's
+input protocol, and changes the inversion radius. The isolated live run on
+2026-09-01 observed one bootstrap WebGL frame and one 3,936-byte same-context
+LOD readback before device authority became active. Those counters then stayed
+exactly fixed through every measured phase; this is a fallback bootstrap cost,
+not recurring presentation work.
+
+During the measured animated interval, WebGPU presentation frames and device
+LOD dispatches each advanced by one. Classifier pose uploads advanced by one,
+resident pose uploads did not advance, and resident pose reuses advanced by
+one: classification publishes the pose once and rendering consumes that same
+device state. After pausing, camera motion advanced device LOD from epoch 7 to
+9 and inversion-radius motion advanced it to epoch 10. WebGL patch frames,
+WebGL patch preparation, WebGL visibility, same-context dispatch/completion,
+readback allocation, and readback byte counters did not move. CPU visibility
+uploads remained zero throughout, with zero frame failures, authority
+mismatches, or browser runtime errors.
