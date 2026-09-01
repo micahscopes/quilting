@@ -9,8 +9,9 @@ use crate::{
     AnimationAction, AnimationClipDescriptor, AnimationClipSelectionCompletion,
     AnimationClipSelectionOutcome, AppCommit, AppEffect, AppEvent, AppStore, AssetLoadCompletion,
     AssetLoadOutcome, AssetLoadScope, AssetMetadata, AssetStatus, AuthoredProjectionSnapshot,
-    AuthoredRevision, CommitDisposition, EffectCompletion, FrameTick, NavigationSettings,
-    NavigationSynchronization, PatchLabEffect, PresentationAction,
+    AuthoredRevision, AuthoredSessionCompletion, AuthoredSessionEffect, AuthoredSessionIntent,
+    AuthoredSessionOpenOutcome, AuthoredSessionStatus, CommitDisposition, EffectCompletion,
+    FrameTick, NavigationSettings, NavigationSynchronization, PatchLabEffect, PresentationAction,
     PresentationAnimationResidencyBinding, PrimarySceneInstallCompletion,
     PrimarySceneInstallMetadata, PrimarySceneInstallOutcome, ReceivedPresence, RenderSettings,
     SemanticAction, Timed,
@@ -22,14 +23,15 @@ use hyperscape::{
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetEntityId, AssetId, AuthoredEnvelope, EntityId, EphemeralPresence, PeerId,
-    PresenceEnvelope, RequestId, WireTransform,
+    PresenceEnvelope, ProjectId, RequestId, WireTransform,
 };
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
 
-pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.28";
+pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.29";
+pub const LEGACY_APP_REPLAY_VERSION_0_28: &str = "hyperscope-app-replay/0.28";
 pub const LEGACY_APP_REPLAY_VERSION_0_27: &str = "hyperscope-app-replay/0.27";
 pub const LEGACY_APP_REPLAY_VERSION_0_26: &str = "hyperscope-app-replay/0.26";
 pub const LEGACY_APP_REPLAY_VERSION_0_25: &str = "hyperscope-app-replay/0.25";
@@ -82,6 +84,20 @@ enum ReplaySchema {
     V0_26,
     V0_27,
     V0_28,
+    V0_29,
+}
+
+impl ReplaySchema {
+    /// Schema 0.29 adds authored-session events without changing any older
+    /// event semantics. Reuse the 0.28 compatibility gates for that shared
+    /// surface instead of duplicating the latest variant through every
+    /// historical feature list.
+    fn compatibility_baseline(self) -> Self {
+        match self {
+            Self::V0_29 => Self::V0_28,
+            schema => schema,
+        }
+    }
 }
 pub const APP_REPLAY_FINGERPRINT_ALGORITHM: &str = "fnv1a-128-json";
 const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
@@ -146,6 +162,16 @@ pub enum AppReplayEvent {
         sequence: u64,
         at_seconds: f64,
         settings: NavigationSettings,
+    },
+    SetAuthoredSession {
+        sequence: u64,
+        at_seconds: f64,
+        intent: Option<AuthoredSessionIntent>,
+    },
+    CompleteAuthoredSession {
+        job_id: u64,
+        project_id: ProjectId,
+        outcome: AuthoredSessionOpenOutcome,
     },
     RequestAsset {
         sequence: u64,
@@ -1074,6 +1100,9 @@ pub enum AppReplayEffect {
     PatchLab {
         effect: PatchLabEffect,
     },
+    AuthoredSession {
+        effect: AuthoredSessionEffect,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1082,6 +1111,11 @@ pub struct AppReplayState {
     pub revision: u64,
     pub elapsed_seconds: f64,
     pub authored_projection_revision: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "AuthoredSessionStatus::is_disabled"
+    )]
+    pub authored_session: AuthoredSessionStatus,
     pub active_cue: Option<Uuid>,
     pub active_scene: Option<Uuid>,
     pub active_view: Option<Uuid>,
@@ -1371,7 +1405,8 @@ pub fn run_app_replay(script: &AppReplayScript) -> Result<AppReplayTrace, AppRep
         LEGACY_APP_REPLAY_VERSION_0_25 => ReplaySchema::V0_25,
         LEGACY_APP_REPLAY_VERSION_0_26 => ReplaySchema::V0_26,
         LEGACY_APP_REPLAY_VERSION_0_27 => ReplaySchema::V0_27,
-        APP_REPLAY_VERSION => ReplaySchema::V0_28,
+        LEGACY_APP_REPLAY_VERSION_0_28 => ReplaySchema::V0_28,
+        APP_REPLAY_VERSION => ReplaySchema::V0_29,
         _ => return Err(AppReplayError::UnsupportedVersion(script.version.clone())),
     };
     let store = AppStore::default();
@@ -1470,6 +1505,7 @@ fn replay_event(
     event: &AppReplayEvent,
     schema: ReplaySchema,
 ) -> AppReplayOutcome {
+    let compatibility_schema = schema.compatibility_baseline();
     let result: Result<AppCommit, String> = replay_app_event(event, schema)
         .and_then(|event| store.dispatch(event).map_err(|error| error.to_string()))
         .map(|mut commit| {
@@ -1480,7 +1516,7 @@ fn replay_event(
             // not a second application mutation path: only replay can request
             // historical reducer semantics.
             if !matches!(
-                schema,
+                compatibility_schema,
                 ReplaySchema::V0_20
                     | ReplaySchema::V0_21
                     | ReplaySchema::V0_22
@@ -1542,6 +1578,8 @@ fn replay_event(
 }
 
 fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppEvent, String> {
+    let supports_authored_sessions = schema == ReplaySchema::V0_29;
+    let schema = schema.compatibility_baseline();
     match event {
         AppReplayEvent::LoadPresentation { presentation } => {
             Ok(AppEvent::PresentationLoaded(presentation.clone()))
@@ -1756,6 +1794,36 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                 at_seconds: *at_seconds,
                 value: SemanticAction::SetNavigationSettings(*settings),
             }))
+        }
+        AppReplayEvent::SetAuthoredSession {
+            sequence,
+            at_seconds,
+            intent,
+        } => {
+            if !supports_authored_sessions {
+                return Err("authored sessions require app replay 0.29".to_owned());
+            }
+            Ok(AppEvent::Input(Timed {
+                sequence: *sequence,
+                at_seconds: *at_seconds,
+                value: SemanticAction::SetAuthoredSession(*intent),
+            }))
+        }
+        AppReplayEvent::CompleteAuthoredSession {
+            job_id,
+            project_id,
+            outcome,
+        } => {
+            if !supports_authored_sessions {
+                return Err("authored sessions require app replay 0.29".to_owned());
+            }
+            Ok(AppEvent::EffectCompleted(
+                EffectCompletion::AuthoredSession(AuthoredSessionCompletion {
+                    job_id: *job_id,
+                    project_id: *project_id,
+                    outcome: outcome.clone(),
+                }),
+            ))
         }
         AppReplayEvent::RequestAsset {
             sequence,
@@ -2167,6 +2235,9 @@ fn replay_effect(effect: &AppEffect) -> AppReplayEffect {
         AppEffect::PatchLab(effect) => AppReplayEffect::PatchLab {
             effect: effect.clone(),
         },
+        AppEffect::AuthoredSession(effect) => AppReplayEffect::AuthoredSession {
+            effect: effect.clone(),
+        },
     }
 }
 
@@ -2184,6 +2255,7 @@ fn replay_state(store: &AppStore) -> AppReplayState {
         revision: frame.revision,
         elapsed_seconds: frame.elapsed_seconds,
         authored_projection_revision: state.authored_projection_revision,
+        authored_session: state.authored_session.status().clone(),
         active_cue: active.map(|snapshot| snapshot.cue_id),
         active_scene: active.map(|snapshot| snapshot.scene_id),
         active_view: active.map(|snapshot| snapshot.view_id),
@@ -2423,6 +2495,7 @@ mod tests {
             left.authored_projection_revision,
             right.authored_projection_revision
         );
+        assert_eq!(left.authored_session, right.authored_session);
         assert_eq!(left.assets, right.assets);
         assert_eq!(left.authored_assets, right.authored_assets);
         assert_eq!(left.authored_entities, right.authored_entities);
@@ -3039,6 +3112,7 @@ mod tests {
                 SemanticAction::SetNavigationSettings(_) => "set_navigation_settings",
                 SemanticAction::SetRenderSettings(_) => "set_render_settings",
                 SemanticAction::SetPatchLab(_) => "set_patch_lab",
+                SemanticAction::SetAuthoredSession(_) => "set_authored_session",
                 SemanticAction::RequestAsset { .. } => "request_asset",
                 SemanticAction::CancelAsset(_) => "cancel_asset",
             },
@@ -3057,6 +3131,9 @@ mod tests {
                     "effect_completed_animation_clip_selection"
                 }
                 EffectCompletion::PatchLab(_) => "effect_completed_patch_lab",
+                EffectCompletion::AuthoredSession(_) => {
+                    "effect_completed_authored_session"
+                }
             },
             AppEvent::RemotePresence(_) => "remote_presence",
             AppEvent::AuthoredProjectionRestored(_) => "authored_projection_restored",
@@ -3145,6 +3222,23 @@ mod tests {
                     entities: Vec::new(),
                 },
             },
+            AppReplayEvent::SetAuthoredSession {
+                sequence: 0,
+                at_seconds: 0.0,
+                intent: Some(AuthoredSessionIntent {
+                    project_id: ProjectId::from_u128(0xd0).unwrap(),
+                    proposal_role: crate::AuthoredProposalRole::Replica,
+                }),
+            },
+            AppReplayEvent::CompleteAuthoredSession {
+                job_id: 0,
+                project_id: ProjectId::from_u128(0xd0).unwrap(),
+                outcome: AuthoredSessionOpenOutcome::Opened {
+                    history_len: 0,
+                    projection_revision: None,
+                    restored_projection: false,
+                },
+            },
         ];
         let covered = presentation
             .events
@@ -3152,7 +3246,7 @@ mod tests {
             .chain(navigation.events.iter())
             .chain(orchestration.events.iter())
             .chain(current_events.iter())
-            .filter_map(|event| replay_app_event(event, ReplaySchema::V0_28).ok())
+            .filter_map(|event| replay_app_event(event, ReplaySchema::V0_29).ok())
             .map(|event| authoritative_app_event_name(&event))
             .collect::<std::collections::BTreeSet<_>>();
         let authored_covered = orchestration
@@ -3175,6 +3269,7 @@ mod tests {
                 "cancel_asset",
                 "effect_completed_animation_clip_selection",
                 "effect_completed_asset_load",
+                "effect_completed_authored_session",
                 "effect_completed_primary_scene_install",
                 "frame",
                 "interact",
@@ -3186,6 +3281,7 @@ mod tests {
                 "remote_presence",
                 "request_asset",
                 "set_navigation_settings",
+                "set_authored_session",
                 "set_render_settings",
             ])
         );
@@ -3197,6 +3293,67 @@ mod tests {
                 "upsert_asset",
             ])
         );
+    }
+
+    #[test]
+    fn authored_session_lifecycle_roundtrips_only_in_schema_0_29() {
+        let project_id = ProjectId::from_u128(0xd1).unwrap();
+        let intent = AuthoredSessionIntent {
+            project_id,
+            proposal_role: crate::AuthoredProposalRole::AdmissionAuthority,
+        };
+        let script = AppReplayScript::new(vec![
+            AppReplayEvent::SetAuthoredSession {
+                sequence: 0,
+                at_seconds: 0.0,
+                intent: Some(intent),
+            },
+            AppReplayEvent::CompleteAuthoredSession {
+                job_id: 0,
+                project_id,
+                outcome: AuthoredSessionOpenOutcome::Opened {
+                    history_len: 4,
+                    projection_revision: Some(2),
+                    restored_projection: true,
+                },
+            },
+        ]);
+        let encoded = serde_json::to_string(&script).unwrap();
+        assert_eq!(serde_json::from_str::<AppReplayScript>(&encoded).unwrap(), script);
+
+        let trace = run_app_replay(&script).unwrap();
+        assert_eq!(
+            trace.records[0].outcome,
+            AppReplayOutcome::Committed {
+                revision: 1,
+                disposition: ReplayCommitDisposition::Applied,
+                published_ui: true,
+                effects: vec![AppReplayEffect::AuthoredSession {
+                    effect: AuthoredSessionEffect::Open { job_id: 0, intent },
+                }],
+            }
+        );
+        assert_eq!(
+            trace.records[1].state.authored_session,
+            AuthoredSessionStatus::Active {
+                intent,
+                history_len: 4,
+                projection_revision: Some(2),
+                restored_projection: true,
+            }
+        );
+
+        let mut legacy = script;
+        legacy.version = LEGACY_APP_REPLAY_VERSION_0_28.to_owned();
+        let legacy_trace = run_app_replay(&legacy).unwrap();
+        assert!(legacy_trace.records.iter().all(|record| matches!(
+            record.outcome,
+            AppReplayOutcome::Rejected { .. }
+        )));
+        assert!(legacy_trace
+            .records
+            .iter()
+            .all(|record| record.state.authored_session.is_disabled()));
     }
 
     #[test]

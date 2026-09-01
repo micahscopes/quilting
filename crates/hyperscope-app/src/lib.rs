@@ -10,6 +10,7 @@
 #[cfg(feature = "replay")]
 mod replay;
 mod animation_pose;
+mod authored_session;
 mod backend_presentation;
 mod lod_authority;
 mod peer;
@@ -20,6 +21,7 @@ mod settings;
 #[cfg(feature = "replay")]
 pub use replay::*;
 pub use animation_pose::*;
+pub use authored_session::*;
 pub use backend_presentation::*;
 pub use lod_authority::*;
 pub use peer::*;
@@ -191,6 +193,7 @@ pub enum SemanticAction {
     SetNavigationSettings(NavigationSettings),
     SetRenderSettings(RenderSettings),
     SetPatchLab(PatchLabSessionIntent),
+    SetAuthoredSession(Option<AuthoredSessionIntent>),
     RequestAsset {
         request_id: RequestId,
         asset: AssetDescriptor,
@@ -690,6 +693,7 @@ pub enum EffectCompletion {
     PrimarySceneInstall(PrimarySceneInstallCompletion),
     AnimationClipSelection(AnimationClipSelectionCompletion),
     PatchLab(PatchLabCompletion),
+    AuthoredSession(AuthoredSessionCompletion),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -744,6 +748,7 @@ pub enum AppEffect {
         clip_index: u32,
     },
     PatchLab(PatchLabEffect),
+    AuthoredSession(AuthoredSessionEffect),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -760,6 +765,25 @@ pub struct AppCommit {
     /// Whether this dispatch published futures-signals read models. `false`
     /// means authoritative state advanced and the adapter may publish later.
     pub published_ui: bool,
+}
+
+/// Typed result of selecting or clearing the durable authored project.
+/// Platform adapters execute only these resource effects; bearer credentials,
+/// storage handles, and relay endpoints never enter semantic application
+/// state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthoredSessionDispatch {
+    pub sequence: u64,
+    pub commit: AppCommit,
+    pub state: AuthoredSessionReadModel,
+    pub effects: Vec<AuthoredSessionEffect>,
+}
+
+/// Typed result of completing one authored-session resource opening.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthoredSessionCompletionDispatch {
+    pub commit: AppCommit,
+    pub state: AuthoredSessionReadModel,
 }
 
 /// One transactionally staged deselection integrated at the current virtual
@@ -1585,6 +1609,7 @@ pub struct AppState {
     navigation_settings: NavigationSettings,
     render_settings: RenderSettings,
     patch_lab: PatchLabRuntime,
+    authored_session: AuthoredSessionRuntime,
     assets: BTreeMap<AssetId, AssetRecord>,
     primary_scene_load: Option<(RequestId, AssetId)>,
     ready_primary_asset: Option<PrimaryAssetReadModel>,
@@ -1619,6 +1644,7 @@ impl Default for AppState {
             navigation_settings: NavigationSettings::default(),
             render_settings: RenderSettings::default(),
             patch_lab: PatchLabRuntime::default(),
+            authored_session: AuthoredSessionRuntime::default(),
             assets: BTreeMap::new(),
             primary_scene_load: None,
             ready_primary_asset: None,
@@ -1888,6 +1914,22 @@ impl AppState {
                             staged.frame_elapsed_seconds,
                             &mut effects,
                         )?;
+                        *self = staged;
+                    }
+                    SemanticAction::SetAuthoredSession(intent) => {
+                        if !input_may_run_now {
+                            return Err(ReduceError::FutureEffectInput);
+                        }
+                        let mut staged = self.clone();
+                        let session_effects = staged
+                            .authored_session
+                            .set_intent(intent)
+                            .map_err(ReduceError::AuthoredSession)?;
+                        effects.extend(
+                            session_effects
+                                .into_iter()
+                                .map(AppEffect::AuthoredSession),
+                        );
                         *self = staged;
                     }
                     SemanticAction::RequestAsset {
@@ -2262,6 +2304,23 @@ impl AppState {
                         disposition = CommitDisposition::IgnoredStale;
                         self.push_diagnostic("stale_patch_lab_completion", message);
                     }
+                }
+            }
+            AppEvent::EffectCompleted(EffectCompletion::AuthoredSession(completion)) => {
+                let job_id = completion.job_id;
+                let project_id = completion.project_id;
+                if !self
+                    .authored_session
+                    .complete(completion)
+                    .map_err(ReduceError::AuthoredSession)?
+                {
+                    disposition = CommitDisposition::IgnoredStale;
+                    self.push_diagnostic(
+                        "stale_authored_session_completion",
+                        format!(
+                            "ignored authored project {project_id} completion for inactive job {job_id}",
+                        ),
+                    );
                 }
             }
             AppEvent::RemotePresence(received) => {
@@ -2953,6 +3012,13 @@ impl AppState {
                 .collect(),
         }
     }
+
+    fn authored_session_read_model(&self) -> AuthoredSessionReadModel {
+        AuthoredSessionReadModel {
+            revision: self.revision,
+            status: self.authored_session.status().clone(),
+        }
+    }
 }
 
 /// Thread-safe reducer host with futures-signals projections. Signal vectors
@@ -2970,6 +3036,7 @@ pub struct AppStore {
     primary_asset: Mutable<Option<PrimaryAssetReadModel>>,
     installed_primary_scene: Mutable<Option<InstalledPrimarySceneReadModel>>,
     animation_clip_selection: Mutable<AnimationClipSelectionReadModel>,
+    authored_session: Mutable<AuthoredSessionReadModel>,
     authored_assets: MutableVec<AssetDescriptor>,
     authored_entities: MutableVec<AuthoredEntityReadModel>,
     diagnostics: MutableVec<DiagnosticReadModel>,
@@ -2994,6 +3061,7 @@ impl AppStore {
         let primary_asset = state.primary_asset_read_model();
         let installed_primary_scene = state.installed_primary_scene_read_model();
         let animation_clip_selection = state.animation_clip_selection_read_model();
+        let authored_session = state.authored_session_read_model();
         let authored = state.authored_scene_read_model();
         let diagnostics = state.diagnostic_read_models();
         let presentation = state.presentation_read_model();
@@ -3009,6 +3077,7 @@ impl AppStore {
             primary_asset: Mutable::new(primary_asset),
             installed_primary_scene: Mutable::new(installed_primary_scene),
             animation_clip_selection: Mutable::new(animation_clip_selection),
+            authored_session: Mutable::new(authored_session),
             authored_assets: MutableVec::new_with_values(authored.assets),
             authored_entities: MutableVec::new_with_values(authored.entities),
             diagnostics: MutableVec::new_with_values(diagnostics),
@@ -3436,6 +3505,54 @@ impl AppStore {
         })
     }
 
+    /// Select, replace, retry, or clear the durable authored project through
+    /// reducer-owned semantic state. The returned effects are the complete
+    /// resource lifecycle that a browser, worker, or native host must execute.
+    pub fn set_authored_session(
+        &self,
+        intent: Option<AuthoredSessionIntent>,
+    ) -> Result<AuthoredSessionDispatch, ReduceError> {
+        let (sequence, commit) =
+            self.dispatch_semantic(SemanticAction::SetAuthoredSession(intent))?;
+        let effects = commit
+            .effects
+            .iter()
+            .map(|effect| match effect {
+                AppEffect::AuthoredSession(effect) => Ok(effect.clone()),
+                _ => Err(ReduceError::EffectContract(
+                    "an authored-session intent emitted an unrelated platform effect",
+                )),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(AuthoredSessionDispatch {
+            sequence,
+            commit,
+            state: self.authored_session_snapshot(),
+            effects,
+        })
+    }
+
+    /// Admit one platform opening result. Job and project identity are checked
+    /// by the reducer, so a late IndexedDB or worker callback cannot replace a
+    /// newer session selection.
+    pub fn complete_authored_session(
+        &self,
+        completion: AuthoredSessionCompletion,
+    ) -> Result<AuthoredSessionCompletionDispatch, ReduceError> {
+        let commit = self.dispatch(AppEvent::EffectCompleted(
+            EffectCompletion::AuthoredSession(completion),
+        ))?;
+        if !commit.effects.is_empty() {
+            return Err(ReduceError::EffectContract(
+                "an authored-session completion emitted a follow-up platform effect",
+            ));
+        }
+        Ok(AuthoredSessionCompletionDispatch {
+            commit,
+            state: self.authored_session_snapshot(),
+        })
+    }
+
     /// Commit one presentation action and retain the exact renderer clip jobs
     /// generated transactionally with its cue/clock/navigation transition.
     pub fn dispatch_presentation(
@@ -3705,6 +3822,7 @@ impl AppStore {
         let primary_asset = state.primary_asset_read_model();
         let installed_primary_scene = state.installed_primary_scene_read_model();
         let animation_clip_selection = state.animation_clip_selection_read_model();
+        let authored_session = state.authored_session_read_model();
         let authored = state.authored_scene_read_model();
         let diagnostics = state.diagnostic_read_models();
         let presentation = state.presentation_read_model();
@@ -3722,6 +3840,7 @@ impl AppStore {
             .set_neq(installed_primary_scene);
         self.animation_clip_selection
             .set_neq(animation_clip_selection);
+        self.authored_session.set_neq(authored_session);
         self.authored_assets
             .lock_mut()
             .replace_cloned(authored.assets);
@@ -3829,6 +3948,10 @@ impl AppStore {
 
     pub fn animation_clip_selection_snapshot(&self) -> AnimationClipSelectionReadModel {
         self.animation_clip_selection.get_cloned()
+    }
+
+    pub fn authored_session_snapshot(&self) -> AuthoredSessionReadModel {
+        self.authored_session.get_cloned()
     }
 
     pub fn authored_scene_snapshot(&self) -> AuthoredSceneReadModel {
@@ -3977,6 +4100,10 @@ impl AppStore {
         self.animation_clip_selection.signal_cloned()
     }
 
+    pub fn authored_session_signal(&self) -> MutableSignalCloned<AuthoredSessionReadModel> {
+        self.authored_session.signal_cloned()
+    }
+
     pub fn authored_asset_signal_vec(&self) -> MutableSignalVec<AssetDescriptor> {
         self.authored_assets.signal_vec_cloned()
     }
@@ -4007,6 +4134,7 @@ pub enum ReduceError {
     InvalidPrimarySceneInstallMetadata(PrimarySceneInstallMetadataError),
     InvalidNavigationSettings(&'static str),
     InvalidRenderSettings(&'static str),
+    AuthoredSession(AuthoredSessionError),
     EffectContract(&'static str),
     InputSequenceExhausted,
     SessionRequestIdentityExhausted,
@@ -4050,6 +4178,9 @@ impl fmt::Display for ReduceError {
             }
             Self::InvalidRenderSettings(message) => {
                 write!(formatter, "render settings failed validation: {message}")
+            }
+            Self::AuthoredSession(error) => {
+                write!(formatter, "authored session failed validation: {error}")
             }
             Self::EffectContract(message) => {
                 write!(formatter, "application effect contract failed: {message}")
@@ -4126,6 +4257,7 @@ impl Error for ReduceError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::InvalidPrimarySceneInstallMetadata(error) => Some(error),
+            Self::AuthoredSession(error) => Some(error),
             _ => None,
         }
     }
@@ -7733,6 +7865,108 @@ mod tests {
         );
         assert_eq!(store.summary_snapshot(), before_summary);
         assert_eq!(store.authored_scene_snapshot(), before_scene);
+    }
+
+    #[test]
+    fn authored_session_effects_and_frp_state_reject_late_platform_openings() {
+        let store = AppStore::default();
+        let first = AuthoredSessionIntent {
+            project_id: hyperscape_protocol::ProjectId::from_u128(0xa1).unwrap(),
+            proposal_role: AuthoredProposalRole::Replica,
+        };
+        let opened = store.set_authored_session(Some(first)).unwrap();
+        assert_eq!(
+            opened.effects,
+            vec![AuthoredSessionEffect::Open {
+                job_id: 0,
+                intent: first,
+            }]
+        );
+        assert_eq!(opened.state.revision, opened.commit.revision);
+
+        let repeated = store.set_authored_session(Some(first)).unwrap();
+        assert!(repeated.effects.is_empty());
+        assert_eq!(
+            repeated.state.status,
+            AuthoredSessionStatus::Opening {
+                job_id: 0,
+                intent: first,
+            }
+        );
+
+        let second = AuthoredSessionIntent {
+            project_id: hyperscape_protocol::ProjectId::from_u128(0xa2).unwrap(),
+            proposal_role: AuthoredProposalRole::AdmissionAuthority,
+        };
+        let replaced = store.set_authored_session(Some(second)).unwrap();
+        assert_eq!(
+            replaced.effects,
+            vec![
+                AuthoredSessionEffect::CancelOpen {
+                    job_id: 0,
+                    project_id: first.project_id,
+                },
+                AuthoredSessionEffect::Open {
+                    job_id: 1,
+                    intent: second,
+                },
+            ]
+        );
+
+        let stale = store
+            .complete_authored_session(AuthoredSessionCompletion {
+                job_id: 0,
+                project_id: first.project_id,
+                outcome: AuthoredSessionOpenOutcome::Opened {
+                    history_len: 99,
+                    projection_revision: Some(99),
+                    restored_projection: true,
+                },
+            })
+            .unwrap();
+        assert_eq!(stale.commit.disposition, CommitDisposition::IgnoredStale);
+        assert_eq!(
+            stale.state.status,
+            AuthoredSessionStatus::Opening {
+                job_id: 1,
+                intent: second,
+            }
+        );
+
+        let active = store
+            .complete_authored_session(AuthoredSessionCompletion {
+                job_id: 1,
+                project_id: second.project_id,
+                outcome: AuthoredSessionOpenOutcome::Opened {
+                    history_len: 7,
+                    projection_revision: Some(3),
+                    restored_projection: true,
+                },
+            })
+            .unwrap();
+        assert_eq!(
+            active.state.status,
+            AuthoredSessionStatus::Active {
+                intent: second,
+                history_len: 7,
+                projection_revision: Some(3),
+                restored_projection: true,
+            }
+        );
+        assert_eq!(
+            active.state.revision,
+            store.summary_snapshot().revision,
+            "session FRP projection publishes before the summary commit fence",
+        );
+
+        let closed = store.set_authored_session(None).unwrap();
+        assert_eq!(
+            closed.effects,
+            vec![AuthoredSessionEffect::Close {
+                project_id: second.project_id,
+            }]
+        );
+        assert_eq!(closed.state.status, AuthoredSessionStatus::Disabled);
     }
 
     #[test]
