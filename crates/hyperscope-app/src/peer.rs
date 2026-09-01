@@ -186,6 +186,31 @@ impl LocalPeerIngress {
         })
     }
 
+    /// Rebuild authored deduplication and sender-sequence floors from durable
+    /// envelopes in their canonical history order.
+    ///
+    /// Presence and pending local-echo memory intentionally start empty: they
+    /// are ephemeral process state. All envelopes are validated before the
+    /// recovered ingress is returned.
+    pub fn from_authored_history(
+        message_capacity: usize,
+        envelopes: &[AuthoredEnvelope],
+    ) -> Result<Self, LocalPeerIngressError> {
+        for envelope in envelopes {
+            envelope
+                .validate()
+                .map_err(|error| LocalPeerIngressError::InvalidEnvelope(error.to_string()))?;
+        }
+        let mut ingress = Self::new(message_capacity)?;
+        for envelope in envelopes {
+            ingress.seen_authored.insert(envelope.header.message_id);
+            ingress
+                .authored_sender_sequences
+                .observe(envelope.header.sender, envelope.header.sequence);
+        }
+        Ok(ingress)
+    }
+
     /// Remember one locally applied authored message before it is sent. A
     /// relay echo is consumed without dispatching a second authored revision.
     pub fn record_local_authored(
@@ -759,6 +784,71 @@ mod tests {
             store.authored_scene_snapshot().entities[0].transform,
             transform(2.0),
         );
+    }
+
+    #[test]
+    fn recovered_authored_history_restores_dedup_and_sender_floors_only() {
+        let entity = EntityId::from_u128(101).unwrap();
+        let first = authored(
+            40,
+            AuthoredCommand::SetEntityTransform {
+                entity,
+                transform: transform(1.0),
+            },
+        );
+        let second = authored(
+            41,
+            AuthoredCommand::SetEntityTransform {
+                entity,
+                transform: transform(2.0),
+            },
+        );
+        let mut ingress =
+            LocalPeerIngress::from_authored_history(1, &[first.clone(), second.clone()]).unwrap();
+        let store = AppStore::default();
+        let before = store.summary_snapshot();
+
+        assert_eq!(
+            ingress
+                .accept(&store, LocalPeerEnvelope::Authored(second), 0.0)
+                .unwrap()
+                .disposition,
+            LocalPeerDisposition::IgnoredDuplicate,
+        );
+        assert_eq!(
+            ingress
+                .accept(&store, LocalPeerEnvelope::Authored(first), 0.0)
+                .unwrap()
+                .disposition,
+            LocalPeerDisposition::IgnoredStale,
+        );
+        assert_eq!(store.summary_snapshot(), before);
+
+        let next = authored(
+            42,
+            AuthoredCommand::SetEntityTransform {
+                entity,
+                transform: transform(3.0),
+            },
+        );
+        assert_eq!(
+            ingress
+                .accept(&store, LocalPeerEnvelope::Authored(next), 0.0)
+                .unwrap()
+                .disposition,
+            LocalPeerDisposition::Applied,
+        );
+        assert_eq!(
+            store.authored_scene_snapshot().entities[0].transform,
+            transform(3.0),
+        );
+
+        let mut invalid = authored(43, AuthoredCommand::RemoveEntity { entity });
+        invalid.header.version.major = u16::MAX;
+        assert!(matches!(
+            LocalPeerIngress::from_authored_history(1, &[invalid]),
+            Err(LocalPeerIngressError::InvalidEnvelope(_)),
+        ));
     }
 
     #[test]
