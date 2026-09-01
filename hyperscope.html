@@ -4574,6 +4574,8 @@ const rustInteractionDiagnostics = {
   state: RUST_SELECTION_IMPLEMENTATION === 'js' ? 'disabled' : 'awaiting-pick',
   dispatches: 0,
   authorityActivations: 0,
+  backendTokenActivations: 0,
+  packedAuthorityActivations: 0,
   authorityActivationErrors: 0,
   authorityActivationFallbacks: 0,
   authorityClears: 0,
@@ -4591,6 +4593,7 @@ const rustInteractionDiagnostics = {
   errors: 0,
   lastInput: null,
   lastActivationRequestId: null,
+  lastActivationSource: null,
   lastSnapshot: null,
   lastError: null,
 };
@@ -8602,6 +8605,67 @@ function mirrorSelectedObjectInteractionToApp(nowMs = performance.now()) {
   }
 }
 
+function commitSelectedObjectInteractionActivation(
+  navigation,
+  interaction,
+  target,
+  nowMs,
+  source,
+) {
+  const selected = interaction?.selected;
+  const hovered = interaction?.hovered;
+  const matched = selected?.asset_id === selectedObject.identity.assetId
+    && selected?.entity_id === selectedObject.identity.entityId
+    && hovered?.identity?.asset_id === selectedObject.identity.assetId
+    && hovered?.identity?.entity_id === selectedObject.identity.entityId
+    && interaction?.active == null;
+  if (!matched) {
+    throw new Error(`${source} did not select its resolved semantic identity`);
+  }
+  rustAppShadowSelectionQueued = true;
+  rustAppSelectionTransitionActive =
+    Number(navigation.focus?.focus_transition_remaining || 0) > 0;
+  rustAppShadowDiagnostics.mappedSelectionPicks += 1;
+  rustAppShadowDiagnostics.selectionDispatches += 1;
+  rustInteractionDiagnostics.dispatches += 1;
+  rustInteractionDiagnostics.authorityActivations += 1;
+  rustInteractionDiagnostics[hovered?.face == null
+    ? 'entityOnlyPicks' : 'exactSurfacePicks'] += 1;
+  rustInteractionDiagnostics.lastSnapshot = interaction;
+  rustInteractionDiagnostics.lastActivationSource = source;
+  rustInteractionDiagnostics.state = 'authoritative';
+  rustInteractionDiagnostics.lastError = null;
+  compareAppSelectedFocus({
+    ...selectedObject.identity,
+    node: selectedObject.node,
+    bound: selectedObject.bound,
+    sourcePivot: Array.from(hovered.source_pivot, Number),
+    margin: target.margin,
+  }, navigation.selected_focus);
+  if (!applyRustSelectedFocusNavigation(navigation)) {
+    throw new Error(`${source} navigation could not enter the browser view`);
+  }
+  if (!applyRustAppFocusToRenderer(navigation)) {
+    throw new Error(`${source} focus could not enter the resident renderer`);
+  }
+  if (RUST_NAVIGATION_IMPLEMENTATION !== 'js') rustManualCameraActive = true;
+  compareAppSelectionTransitionFrame(navigation, nowMs);
+  refreshAppShadowSnapshot();
+  return 'mapped';
+}
+
+function recordSelectedObjectInteractionActivationError(source, error) {
+  rustInteractionDiagnostics.errors += 1;
+  rustInteractionDiagnostics.authorityActivationErrors += 1;
+  rustInteractionDiagnostics.lastActivationSource = source;
+  rustInteractionDiagnostics.lastError = error?.message || String(error);
+  recordAppShadowMismatch(
+    'interaction_pick_activation',
+    `${source}: ${rustInteractionDiagnostics.lastError}`,
+  );
+  return 'error';
+}
+
 function activateSelectedObjectBackendPick(requestId, nowMs = performance.now()) {
   if (RUST_SELECTION_IMPLEMENTATION !== 'rust'
       || !rustAppShadow || !selectedObject?.identity || !requestId) return 'unobserved';
@@ -8616,53 +8680,76 @@ function activateSelectedObjectBackendPick(requestId, nowMs = performance.now())
     synchronizeRustApplicationPresentationFromBrowser();
     const navigation = rustAppShadow.activateBackendPick(requestId);
     const interaction = rustAppShadow.interactionSnapshot();
-    const selected = interaction?.selected;
-    const hovered = interaction?.hovered;
-    const matched = selected?.asset_id === selectedObject.identity.assetId
-      && selected?.entity_id === selectedObject.identity.entityId
-      && hovered?.identity?.asset_id === selectedObject.identity.assetId
-      && hovered?.identity?.entity_id === selectedObject.identity.entityId
-      && interaction?.active == null;
-    if (!matched) {
-      throw new Error('backend pick activation did not select its resolved semantic identity');
-    }
-    rustAppShadowSelectionQueued = true;
-    rustAppSelectionTransitionActive =
-      Number(navigation.focus?.focus_transition_remaining || 0) > 0;
-    rustAppShadowDiagnostics.mappedSelectionPicks += 1;
-    rustAppShadowDiagnostics.selectionDispatches += 1;
-    rustInteractionDiagnostics.dispatches += 1;
-    rustInteractionDiagnostics.authorityActivations += 1;
-    rustInteractionDiagnostics.exactSurfacePicks += 1;
-    rustInteractionDiagnostics.lastSnapshot = interaction;
-    rustInteractionDiagnostics.state = 'authoritative';
-    rustInteractionDiagnostics.lastError = null;
-    compareAppSelectedFocus({
-      ...selectedObject.identity,
-      node: selectedObject.node,
-      bound: selectedObject.bound,
-      sourcePivot: Array.from(hovered.source_pivot, Number),
-      margin: target.margin,
-    }, navigation.selected_focus);
-    if (!applyRustSelectedFocusNavigation(navigation)) {
-      throw new Error('backend pick navigation could not enter the browser view');
-    }
-    if (!applyRustAppFocusToRenderer(navigation)) {
-      throw new Error('backend pick focus could not enter the resident renderer');
-    }
-    if (RUST_NAVIGATION_IMPLEMENTATION !== 'js') rustManualCameraActive = true;
-    compareAppSelectionTransitionFrame(navigation, nowMs);
-    refreshAppShadowSnapshot();
-    return 'mapped';
-  } catch (error) {
-    rustInteractionDiagnostics.errors += 1;
-    rustInteractionDiagnostics.authorityActivationErrors += 1;
-    rustInteractionDiagnostics.lastError = error?.message || String(error);
-    recordAppShadowMismatch(
-      'interaction_pick_activation',
-      rustInteractionDiagnostics.lastError,
+    rustInteractionDiagnostics.backendTokenActivations += 1;
+    return commitSelectedObjectInteractionActivation(
+      navigation,
+      interaction,
+      target,
+      nowMs,
+      'backend-token',
     );
-    return 'error';
+  } catch (error) {
+    return recordSelectedObjectInteractionActivationError('backend-token', error);
+  }
+}
+
+function activateSelectedObjectPackedPick(nowMs = performance.now()) {
+  if (RUST_SELECTION_IMPLEMENTATION !== 'rust'
+      || !rustAppShadow || !selectedObject?.identity) return 'unobserved';
+  const target = focusSphereFromBound(selectedObject.bound, FOCUS_SPHERE_MARGIN, 0.02);
+  if (!target) return 'invalid';
+  const surface = selectedObject.surface;
+  const exactSurface = surface?.face === selectedObject.face
+    && surface.barycentric?.length === 3
+    && surface.barycentric.every(Number.isFinite);
+  const sourcePivot = surface?.sourcePosition?.length === 3
+    && surface.sourcePosition.every(Number.isFinite)
+    ? surface.sourcePosition : selectedObject.sourceAnchor;
+  const outputPoint = surface?.outputPosition || selectedObject.outputAnchor;
+  const cameraEye = activeCameraFrame().eye;
+  const outputDistance = outputPoint?.length === 3
+    ? Math.hypot(...outputPoint.map((value, axis) => value - cameraEye[axis]))
+    : NaN;
+  rustInteractionDiagnostics.lastInput = {
+    node: selectedObject.node,
+    face: exactSurface ? surface.face : null,
+    barycentric: exactSurface ? surface.barycentric.slice() : null,
+    sourcePosition: sourcePivot.slice(),
+    outputPosition: outputPoint?.slice() || null,
+    outputDistance,
+  };
+  try {
+    if (typeof rustAppShadow.activatePackedInteraction !== 'function') {
+      throw new Error('packed interaction activation AppShadow export is unavailable');
+    }
+    if (!Number.isFinite(outputDistance)) {
+      throw new Error('interaction pick has no finite displayed-chart distance');
+    }
+    if (!Number.isInteger(rustInteractionDiagnostics.targetEpoch)) {
+      throw new Error('interaction target table has no current residency epoch');
+    }
+    advanceRustApplicationClockToSelectionEvent(nowMs);
+    synchronizeRustApplicationPresentationFromBrowser();
+    const navigation = rustAppShadow.activatePackedInteraction(
+      rustInteractionDiagnostics.targetEpoch,
+      selectedObject.node,
+      new Float64Array(sourcePivot),
+      outputDistance,
+      exactSurface ? surface.face : -1,
+      new Float64Array(exactSurface ? surface.barycentric : []),
+    );
+    const interaction = rustAppShadow.interactionSnapshot();
+    rustInteractionDiagnostics.packedDispatches += 1;
+    rustInteractionDiagnostics.packedAuthorityActivations += 1;
+    return commitSelectedObjectInteractionActivation(
+      navigation,
+      interaction,
+      target,
+      nowMs,
+      'packed-pick',
+    );
+  } catch (error) {
+    return recordSelectedObjectInteractionActivationError('packed-pick', error);
   }
 }
 
@@ -9233,8 +9320,8 @@ function selectObjectFromFace(
     prepareSelectionFocusField();
     let mapped = backendActivationRequestId
       ? activateSelectedObjectBackendPick(backendActivationRequestId, selectedAtMs)
-      : mirrorSelectedObjectToApp(selectedAtMs);
-    if (backendActivationRequestId && mapped !== 'mapped') {
+      : activateSelectedObjectPackedPick(selectedAtMs);
+    if (mapped !== 'mapped') {
       rustInteractionDiagnostics.authorityActivationFallbacks += 1;
       mapped = mirrorSelectedObjectDirectToApp(selectedAtMs);
     }
@@ -14287,7 +14374,15 @@ async function initializePresentationComposition() {
     selectedObject.identity = packedNodeIdentities.get(selectedObject.node) || null;
     if (selectedObject.identity) {
       retainRouteSelectionIdentity(selectedObject.identity);
-      mirrorSelectedObjectToApp();
+      if (RUST_SELECTION_IMPLEMENTATION === 'rust') {
+        const mapped = activateSelectedObjectPackedPick();
+        if (mapped !== 'mapped') {
+          rustInteractionDiagnostics.authorityActivationFallbacks += 1;
+          mirrorSelectedObjectDirectToApp();
+        }
+      } else {
+        mirrorSelectedObjectToApp();
+      }
       syncURL();
     }
   }

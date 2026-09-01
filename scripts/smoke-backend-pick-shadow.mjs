@@ -77,6 +77,8 @@ for (const required of [
   '#[wasm_bindgen(js_name = discardBackendPickActivation)]',
   '#[wasm_bindgen(js_name = clearSelection)]',
   'self.store.dispatch_selection_clear()',
+  '#[wasm_bindgen(js_name = activatePackedInteraction)]',
+  'self.activate_interaction_hit(hit)',
   '.accept(request)',
 ]) {
   assert.ok(appShadow.includes(required), `AppShadow pick authority is missing ${required}`);
@@ -146,6 +148,10 @@ for (const required of [
   'result.activationReady ? result.requestId : null,',
   'function activateSelectedObjectBackendPick(requestId, nowMs = performance.now())',
   'const navigation = rustAppShadow.activateBackendPick(requestId);',
+  'function activateSelectedObjectPackedPick(nowMs = performance.now())',
+  'const navigation = rustAppShadow.activatePackedInteraction(',
+  ': activateSelectedObjectPackedPick(selectedAtMs);',
+  'function commitSelectedObjectInteractionActivation(',
   '? activateSelectedObjectBackendPick(backendActivationRequestId, selectedAtMs)',
   "typeof rustAppShadow.clearSelection === 'function'",
   'navigation = rustAppShadow.clearSelection();',
@@ -155,6 +161,12 @@ for (const required of [
 ]) {
   assert.ok(browser.includes(required), `browser pick authority is missing ${required}`);
 }
+
+assert.equal(
+  browser.includes(': mirrorSelectedObjectToApp(selectedAtMs);'),
+  false,
+  'Rust selection still bypasses interaction authority for ordinary picks',
+);
 
 for (const retired of [
   'quiltingWasmBackend.mr_stageBackendPickEvidence(',

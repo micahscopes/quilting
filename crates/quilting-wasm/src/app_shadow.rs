@@ -1854,6 +1854,43 @@ impl HyperscopeAppShadow {
         self.dispatch_interaction(InteractionAction::SetHover(Some(hit)))
     }
 
+    /// Resolve one renderer-local hit through the current semantic target
+    /// table and activate it atomically. This is the ordinary WebGL/JS picker
+    /// counterpart to the token-checked asynchronous WebGPU boundary.
+    #[wasm_bindgen(js_name = activatePackedInteraction)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn activate_packed_interaction(
+        &self,
+        target_epoch: u32,
+        packed_node: u32,
+        source_pivot: &[f64],
+        output_distance: f64,
+        face: i32,
+        barycentric: &[f64],
+    ) -> Result<JsValue, JsValue> {
+        let mut sample = InteractionTargetSample::new_for_epoch(
+            target_epoch,
+            packed_node,
+            vector3(source_pivot, "interaction source pivot")?,
+            output_distance,
+        )
+        .map_err(js_error)?;
+        if let Some((face, barycentric)) = interaction_surface(face, barycentric)? {
+            sample = sample.with_surface(face, barycentric).map_err(js_error)?;
+        }
+        let hit = self
+            .interaction_targets
+            .try_borrow()
+            .map_err(|_| JsValue::from_str("interaction targets are being replaced"))?
+            .resolve(sample)
+            .map_err(js_error)?;
+        self.backend_pick_activation
+            .try_borrow_mut()
+            .map_err(|_| js_error("backend pick activation is already borrowed"))?
+            .clear();
+        self.activate_interaction_hit(hit)
+    }
+
     /// Resolve one backend-local pick into the shared interaction vocabulary.
     /// A negative-one face with an empty barycentric slice means the adapter
     /// has entity-level identity only; a nonnegative face requires exactly
@@ -2233,21 +2270,7 @@ impl HyperscopeAppShadow {
             .map_err(|_| js_error("backend pick activation is already borrowed"))?
             .take(request_id, target_epoch)
             .map_err(js_error)?;
-        self.dispatch_interaction(InteractionAction::ActivatePrimary(hit))?;
-        self.advance_frame_delta_quiet(0.0)?;
-        let frame = self.store.frame_snapshot();
-        if frame.interaction.hovered != Some(hit)
-            || frame.interaction.active.is_some()
-            || frame.interaction.selected != Some(hit.identity)
-        {
-            return Err(js_error(
-                "backend pick activation did not commit the resolved semantic hit",
-            ));
-        }
-        navigation_to_js(
-            frame,
-            self.store.navigation_diagnostics_snapshot(),
-        )
+        self.activate_interaction_hit(hit)
     }
 
     /// Explicitly retire a platform-stale accepted pick, for example when the
@@ -3633,6 +3656,24 @@ impl HyperscopeAppShadow {
             .dispatch_semantic(SemanticAction::Interact(action))
             .map_err(js_error)?;
         Ok(sequence)
+    }
+
+    fn activate_interaction_hit(&self, hit: InteractionHit) -> Result<JsValue, JsValue> {
+        self.dispatch_interaction(InteractionAction::ActivatePrimary(hit))?;
+        self.advance_frame_delta_quiet(0.0)?;
+        let frame = self.store.frame_snapshot();
+        if frame.interaction.hovered != Some(hit)
+            || frame.interaction.active.is_some()
+            || frame.interaction.selected != Some(hit.identity)
+        {
+            return Err(js_error(
+                "interaction activation did not commit the resolved semantic hit",
+            ));
+        }
+        navigation_to_js(
+            frame,
+            self.store.navigation_diagnostics_snapshot(),
+        )
     }
 
     fn surface_anchor_target(
