@@ -22,6 +22,13 @@ for (const required of [
 ]) {
   assert.ok(backend.includes(required), `WebGPU presentation health is missing ${required}`);
 }
+for (const required of [
+  'function refreshWebGpuBackendDiagnostics(armRenderedFrame = false)',
+  'if (armRenderedFrame) {',
+  'refreshWebGpuBackendDiagnostics(true);',
+]) {
+  assert.ok(browser.includes(required), `post-render readiness is missing ${required}`);
+}
 assert.equal(
   backend.includes('last_frame_presented'),
   false,

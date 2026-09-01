@@ -1103,11 +1103,24 @@ function synchronizeGraphicsBackendPresentation() {
   return presenting;
 }
 
-function refreshWebGpuBackendDiagnostics() {
+function refreshWebGpuBackendDiagnostics(armRenderedFrame = false) {
   if (!WEBGPU_SHADOW_ENABLED) return null;
   try {
     graphicsBackendDiagnostics.residency =
       quiltingWasmBackend.mr_webGpuBackendDiagnostics();
+    if (armRenderedFrame) {
+      // Resource publication can complete inside the render call that
+      // immediately precedes this refresh. Re-evaluate support from that
+      // post-render snapshot so a large paused/static scene does not need an
+      // unrelated second frame before its already-admitted image can present.
+      // Explicit diagnostics refreshes keep the default false and therefore
+      // cannot seize presentation authority on their own.
+      graphicsBackendDiagnostics.presentationArmed =
+        webGpuPresentationSupportsRenderMode(
+          graphicsBackendDiagnostics.renderMode,
+          graphicsBackendDiagnostics.residency,
+        );
+    }
   } catch (error) {
     graphicsBackendDiagnostics.fallbackReason = error?.message || String(error);
   }
@@ -13069,7 +13082,7 @@ function frame(ts) {
     const refreshDue = ts - graphicsBackendDiagnostics.lastRefreshAt >= 250;
     if (graphicsBackendDiagnostics.effective !== 'webgpu' || refreshDue) {
       graphicsBackendDiagnostics.lastRefreshAt = ts;
-      refreshWebGpuBackendDiagnostics();
+      refreshWebGpuBackendDiagnostics(true);
     }
   }
 }

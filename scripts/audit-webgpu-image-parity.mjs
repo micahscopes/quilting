@@ -7,6 +7,13 @@ const pagePort = process.env.HYPERSCOPE_PORT || '8888';
 const requiredStyle = process.env.HYPERSCOPE_BACKEND_EVIDENCE_STYLE || 'normals';
 const requireImageParity = process.env.HYPERSCOPE_REQUIRE_IMAGE_PARITY !== '0';
 const focusPolicy = process.env.HYPERSCOPE_BACKEND_EVIDENCE_FOCUS || 'off';
+const lodImplementation =
+  process.env.HYPERSCOPE_BACKEND_EVIDENCE_LOD_IMPL || 'rust';
+const evidenceTimeoutMs = Number(
+  process.env.HYPERSCOPE_BACKEND_EVIDENCE_TIMEOUT_MS || 30_000,
+);
+assert.ok(Number.isFinite(evidenceTimeoutMs) && evidenceTimeoutMs >= 1_000,
+  'HYPERSCOPE_BACKEND_EVIDENCE_TIMEOUT_MS must be at least 1000');
 // The composite compares two independently rasterized coplanar line passes.
 // Keep its high-delta budget below one percent while pure styles retain the
 // tighter half-percent gate; mean error and silhouette limits remain shared.
@@ -26,6 +33,8 @@ const permittedStyles = new Set(['pbr', 'matcap', 'wire', 'normals', 'both', 'lo
 assert.ok(permittedStyles.has(requiredStyle), `unsupported evidence style ${requiredStyle}`);
 assert.ok(['off', 'preserve'].includes(focusPolicy),
   'HYPERSCOPE_BACKEND_EVIDENCE_FOCUS must be off or preserve');
+assert.ok(['js', 'shadow', 'rust'].includes(lodImplementation),
+  'HYPERSCOPE_BACKEND_EVIDENCE_LOD_IMPL must be js, shadow, or rust');
 
 const targetsBefore = await (await fetch(`${cdpEndpoint}/json/list`)).json();
 const originalPage = targetsBefore.find(target => target.type === 'page'
@@ -45,7 +54,7 @@ route.searchParams.set('animate', '0');
 // resident readback below then records the actual device-selected topology.
 if (!route.searchParams.has('minpx')) route.searchParams.set('minpx', '1');
 if (focusPolicy === 'off') route.searchParams.set('fuzzy', '0');
-route.searchParams.set('lodimpl', 'rust');
+route.searchParams.set('lodimpl', lodImplementation);
 
 const page = await (await fetch(
   `${cdpEndpoint}/json/new?${encodeURIComponent(route.href)}`,
@@ -160,7 +169,7 @@ async function snapshot() {
   return evaluate(snapshotExpression);
 }
 
-async function waitFor(label, predicate, timeoutMs = 30_000) {
+async function waitFor(label, predicate, timeoutMs = evidenceTimeoutMs) {
   const deadline = Date.now() + timeoutMs;
   let current = null;
   while (Date.now() < deadline) {
@@ -171,7 +180,7 @@ async function waitFor(label, predicate, timeoutMs = 30_000) {
   throw new Error(`${label} did not settle: ${JSON.stringify(current)}`);
 }
 
-async function waitForQuiescentPresentation(timeoutMs = 30_000, quietMs = 1_000) {
+async function waitForQuiescentPresentation(timeoutMs = evidenceTimeoutMs, quietMs = 1_000) {
   const deadline = Date.now() + timeoutMs;
   let fingerprint = null;
   let unchangedSince = Date.now();
