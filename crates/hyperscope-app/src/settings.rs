@@ -366,6 +366,16 @@ pub struct RoutePresentationSettings {
     pub cue_id: Option<uuid::Uuid>,
 }
 
+/// Primary-scene startup intent before AppStore allocates request and asset
+/// identity. URI decoding belongs to the platform, while clip choice and
+/// playback are application semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutePrimaryAssetSettings {
+    pub uri: String,
+    pub animation_clip: Option<u32>,
+    pub playing: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteTransformKind {
     Identity,
@@ -593,7 +603,10 @@ impl HyperscopeRoute {
     }
 
     fn validate_presentation_cue(&mut self) {
-        let cue_present = self.values.get("cue").is_some_and(|value| !value.is_empty());
+        let cue_present = self
+            .values
+            .get("cue")
+            .is_some_and(|value| !value.is_empty());
         if cue_present && self.value("presentation") != Some("1") {
             self.diagnostics.push(RouteDiagnostic {
                 code: RouteDiagnosticCode::InvalidValue,
@@ -842,6 +855,37 @@ impl HyperscopeRoute {
             Some(cue_id)
         };
         Ok(RoutePresentationSettings { enabled, cue_id })
+    }
+
+    /// Resolve the primary-scene URI and initial animation intent without
+    /// allocating durable or renderer-local asset identity. AppStore remains
+    /// responsible for turning this packet into one scoped asset request.
+    pub fn primary_asset_settings(&self) -> Result<RoutePrimaryAssetSettings, &'static str> {
+        let uri = self
+            .value("glb")
+            .filter(|value| hyperscope_control_spec("glb").is_some_and(|spec| spec.accepts(value)))
+            .ok_or("route primary asset URI is invalid")?
+            .to_owned();
+        let animation = self
+            .value("anim")
+            .filter(|value| hyperscope_control_spec("anim").is_some_and(|spec| spec.accepts(value)))
+            .and_then(|value| value.parse::<i32>().ok())
+            .ok_or("route animation clip is invalid")?;
+        let animation_clip = if animation < 0 {
+            None
+        } else {
+            Some(u32::try_from(animation).map_err(|_| "route animation clip is invalid")?)
+        };
+        let playing = match self.value("animate") {
+            Some("0") => false,
+            Some("1") => true,
+            _ => return Err("route animation playback value is invalid"),
+        };
+        Ok(RoutePrimaryAssetSettings {
+            uri,
+            animation_clip,
+            playing,
+        })
     }
 
     /// Resolve the complete educational Patch Lab session carried by a URL.
@@ -1166,6 +1210,39 @@ mod tests {
             invalid.diagnostics()[0].code,
             RouteDiagnosticCode::InvalidValue
         );
+    }
+
+    #[test]
+    fn primary_asset_route_resolves_uri_clip_and_playback_without_identity() {
+        assert_eq!(
+            HyperscopeRoute::default().primary_asset_settings().unwrap(),
+            RoutePrimaryAssetSettings {
+                uri: "horse.glb".to_owned(),
+                animation_clip: None,
+                playing: true,
+            },
+        );
+
+        let paused = HyperscopeRoute::from_pairs([
+            ("glb", "local-glbs/classic_chessboard.glb"),
+            ("anim", "17"),
+            ("animate", "0"),
+        ]);
+        assert!(paused.diagnostics().is_empty());
+        assert_eq!(
+            paused.primary_asset_settings().unwrap(),
+            RoutePrimaryAssetSettings {
+                uri: "local-glbs/classic_chessboard.glb".to_owned(),
+                animation_clip: Some(17),
+                playing: false,
+            },
+        );
+
+        for (key, value) in [("glb", ""), ("anim", "1.5"), ("animate", "yes")] {
+            let route = HyperscopeRoute::from_pairs([(key, value)]);
+            assert!(!route.diagnostics().is_empty(), "{key}={value}");
+            assert!(route.primary_asset_settings().is_err(), "{key}={value}");
+        }
     }
 
     #[test]

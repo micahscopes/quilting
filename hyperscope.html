@@ -11295,6 +11295,7 @@ applyParams = function(
   validatedRouteAnimationClock = null,
   validatedNavigationSettings = null,
   validatedPatchLabSession = null,
+  validatedPrimaryAssetSettings = null,
 ) {
   const finite = (value, fallback, minimum, maximum) => {
     const parsed = Number(value);
@@ -11351,7 +11352,9 @@ applyParams = function(
     lod.atlas.set(integer(params.atlas, 7, 3, 9));
     lod.grading.set(params.lodratio === '4' ? '4' : '2');
   }
-  setAnimationPlaybackIntent(params.animate !== '0');
+  setAnimationPlaybackIntent(
+    validatedPrimaryAssetSettings?.playing ?? params.animate !== '0',
+  );
   pendingRouteAnimationClock = rustRouteAdmitted
     ? validatedRouteAnimationClock
     : params.animtimeProvided || params.animspeedProvided
@@ -15031,6 +15034,7 @@ let initRouteAnimationClock = null;
 let initNavigationSettings = null;
 let initPatchLabSession = null;
 let initPresentationSettings = null;
+let initPrimaryAssetSettings = null;
 currentGlb = initParams.glb;
 let initialPatchLabShape = patchLabShape(initParams.lab);
 // Set camera early (not WASM-dependent)
@@ -15079,7 +15083,8 @@ phase('wasm', [], async () => {
           && startupRoute.renderSettings
           && startupRoute.navigationSettings
           && startupRoute.patchLabSession
-          && startupRoute.presentationSettings) {
+          && startupRoute.presentationSettings
+          && startupRoute.primaryAssetSettings) {
         initParams = readParams(
           new URLSearchParams(startupRoute.resolvedPairs),
           new URLSearchParams(startupRoute.pairs),
@@ -15091,10 +15096,11 @@ phase('wasm', [], async () => {
         initNavigationSettings = startupRoute.navigationSettings;
         initPatchLabSession = startupRoute.patchLabSession;
         initPresentationSettings = startupRoute.presentationSettings;
+        initPrimaryAssetSettings = startupRoute.primaryAssetSettings;
         if (initPresentationSettings.enabled !== RUST_PRESENTATION_ENABLED) {
           throw new Error('Rust presentation route disagrees with the pre-WASM bootstrap');
         }
-        currentGlb = initParams.glb;
+        currentGlb = initPrimaryAssetSettings.uri;
         initialPatchLabShape = initPatchLabSession.active
           ? initPatchLabSession.controls.shape : null;
         rustRouteShadowDiagnostics.startupSource = 'rust';
@@ -15170,6 +15176,7 @@ phase('wasm', [], async () => {
     initRouteAnimationClock,
     initNavigationSettings,
     initPatchLabSession,
+    initPrimaryAssetSettings,
   ); // Set signal values first
   if (RUST_RENDER_SETTINGS_IMPLEMENTATION !== 'js'
       && initRustRouteAdmitted
@@ -15620,7 +15627,7 @@ phase('render', ['wasm', 'atlas', 'model'], async () => {
             await applyPresentationAnimationState(rustPresentationSnapshot);
           } else {
             const animIdx = initRustRouteAdmitted
-              ? Number(initParams.anim)
+              ? (initPrimaryAssetSettings?.animationClip ?? -1)
               : parseInt(initParams.anim);
             if (animIdx >= 0 && $('anim-sel').querySelector(`option[value="${animIdx}"]`)) {
               await selectAnimationIndex(animIdx);

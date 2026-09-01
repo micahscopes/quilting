@@ -292,6 +292,12 @@ The first application boundary is now explicit:
   plausible-looking link that the non-presentation client silently ignores;
   the unavoidable pre-WASM worker-allocation bit is checked against the typed
   packet before presentation startup proceeds.
+  Primary-scene URI, optional startup clip, and playback state likewise cross
+  as one typed `RoutePrimaryAssetSettings` packet. This value intentionally
+  carries no asset identity: AppStore still allocates request/session IDs and
+  emits the scoped fetch effect. Rust converts clip `-1` to absence and
+  nonnegative integral clips to `u32`; the browser's old `parseInt` remains
+  only in the explicit fallback lane.
   Camera/conformal-transform state, SpaceMouse policy, and surface-walk policy
   additionally leave Rust as one typed `RouteNavigationSettings` value.
   Centiseconds and percentages become semantic seconds and fractions before

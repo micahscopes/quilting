@@ -13,6 +13,7 @@ struct RouteShadowResult {
     navigation_settings: Option<RouteNavigationSettings>,
     patch_lab_session: Option<RoutePatchLabSession>,
     presentation_settings: Option<RoutePresentationSettings>,
+    primary_asset_settings: Option<RoutePrimaryAssetSettings>,
     #[serde(skip_serializing_if = "Option::is_none")]
     selection: Option<RouteSelection>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -86,6 +87,15 @@ struct RoutePresentationSettings {
     enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     cue_id: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RoutePrimaryAssetSettings {
+    uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    animation_clip: Option<u32>,
+    playing: bool,
 }
 
 #[derive(Serialize)]
@@ -249,6 +259,15 @@ pub fn canonicalize_hyperscope_route(pairs: JsValue) -> Result<JsValue, JsValue>
                 enabled: settings.enabled,
                 cue_id: settings.cue_id.map(|cue_id| cue_id.to_string()),
             });
+    let primary_asset_settings =
+        route
+            .primary_asset_settings()
+            .ok()
+            .map(|settings| RoutePrimaryAssetSettings {
+                uri: settings.uri,
+                animation_clip: settings.animation_clip,
+                playing: settings.playing,
+            });
     let navigation_settings =
         route
             .navigation_settings()
@@ -303,6 +322,7 @@ pub fn canonicalize_hyperscope_route(pairs: JsValue) -> Result<JsValue, JsValue>
         navigation_settings,
         patch_lab_session,
         presentation_settings,
+        primary_asset_settings,
         selection,
         animation_clock,
     })
