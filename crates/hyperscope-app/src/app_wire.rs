@@ -7,10 +7,113 @@
 use serde::Serialize;
 
 use crate::{
-    AppCommit, AppEffect, AuthoredProposalRole, AuthoredSessionEffect, CommitDisposition,
-    PatchLabControls, PatchLabEffect, PatchLabEffects, PatchLabFailure, PatchLabGeometryReadModel,
-    PatchLabHistogramBin, PatchLabLodSummary, PatchLabReadModel,
+    AppCommit, AppEffect, AppRenderSnapshot, AuthoredProposalRole, AuthoredSessionEffect,
+    CommitDisposition, FocusPostprocessSettings, PatchLabControls, PatchLabEffect, PatchLabEffects,
+    PatchLabFailure, PatchLabGeometryReadModel, PatchLabHistogramBin, PatchLabLodSummary,
+    PatchLabReadModel, RenderSettings,
 };
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderSettingsWire {
+    style: &'static str,
+    resolution_level: u8,
+    density: f64,
+    screen_attenuation: bool,
+    min_pixels_per_subdivision: f64,
+    atlas_exponent: u8,
+    max_face_edge_ratio: u8,
+    focus_postprocess: FocusPostprocessWire,
+}
+
+impl From<RenderSettings> for RenderSettingsWire {
+    fn from(settings: RenderSettings) -> Self {
+        Self {
+            style: settings.style.wire_name(),
+            resolution_level: settings.resolution_level,
+            density: settings.tessellation.density,
+            screen_attenuation: settings.tessellation.screen_attenuation,
+            min_pixels_per_subdivision: settings.tessellation.min_pixels_per_subdivision,
+            atlas_exponent: settings.atlas_exponent,
+            max_face_edge_ratio: settings.max_face_edge_ratio,
+            focus_postprocess: settings.focus_postprocess.into(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppRenderSnapshotWire {
+    revision: String,
+    style: &'static str,
+    resolution_level: u8,
+    density: f64,
+    screen_attenuation: bool,
+    min_pixels_per_subdivision: f64,
+    atlas_exponent: u8,
+    max_face_edge_ratio: u8,
+    focus_postprocess: FocusPostprocessWire,
+}
+
+impl From<AppRenderSnapshot> for AppRenderSnapshotWire {
+    fn from(snapshot: AppRenderSnapshot) -> Self {
+        let RenderSettingsWire {
+            style,
+            resolution_level,
+            density,
+            screen_attenuation,
+            min_pixels_per_subdivision,
+            atlas_exponent,
+            max_face_edge_ratio,
+            focus_postprocess,
+        } = snapshot.settings.into();
+        Self {
+            revision: snapshot.revision.to_string(),
+            style,
+            resolution_level,
+            density,
+            screen_attenuation,
+            min_pixels_per_subdivision,
+            atlas_exponent,
+            max_face_edge_ratio,
+            focus_postprocess,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FocusPostprocessWire {
+    enabled: bool,
+    mode: u8,
+    diagnostic_view: u8,
+    blur_radius_pixels: u16,
+    blur_strength: f64,
+    focus_coordinate: f64,
+    bandwidth: f64,
+    normalize_range: bool,
+    gaussian_passes: u8,
+    kawase_passes: u8,
+    kawase_offset: f64,
+}
+
+impl From<FocusPostprocessSettings> for FocusPostprocessWire {
+    fn from(settings: FocusPostprocessSettings) -> Self {
+        Self {
+            enabled: settings.enabled,
+            mode: settings.mode.wire_index(),
+            diagnostic_view: settings.diagnostic_view.wire_index(),
+            blur_radius_pixels: settings.blur_radius_pixels,
+            blur_strength: settings.blur_strength,
+            focus_coordinate: settings.focus_coordinate,
+            bandwidth: settings.bandwidth,
+            normalize_range: settings.normalize_range,
+            gaussian_passes: settings.gaussian_passes,
+            kawase_passes: settings.kawase_passes,
+            kawase_offset: settings.kawase_offset,
+        }
+    }
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -493,5 +596,32 @@ mod tests {
             value["latestLod"]["histogram"][0]["edgeSubdivisions"],
             json!([4, 4, 8])
         );
+    }
+
+    #[test]
+    fn render_snapshot_reuses_route_packet_fields_without_policy_drift() {
+        let settings = RenderSettings::default();
+        let route_packet = serde_json::to_value(RenderSettingsWire::from(settings)).unwrap();
+        let live = serde_json::to_value(AppRenderSnapshotWire::from(AppRenderSnapshot {
+            revision: u64::MAX,
+            settings,
+        }))
+        .unwrap();
+
+        assert_eq!(live["revision"], json!(u64::MAX.to_string()));
+        for key in [
+            "style",
+            "resolutionLevel",
+            "density",
+            "screenAttenuation",
+            "minPixelsPerSubdivision",
+            "atlasExponent",
+            "maxFaceEdgeRatio",
+            "focusPostprocess",
+        ] {
+            assert_eq!(live[key], route_packet[key], "wire field {key}");
+        }
+        assert_eq!(live["focusPostprocess"]["gaussianPasses"], json!(1));
+        assert_eq!(live["focusPostprocess"]["kawasePasses"], json!(3));
     }
 }

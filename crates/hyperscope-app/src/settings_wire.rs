@@ -7,8 +7,8 @@
 use serde::Serialize;
 
 use crate::{
-    FocusPostprocessSettings, HyperscopeRoute, PatchLabControlsWire, PatchLabSessionIntent,
-    RenderSettings, RouteAnimationClock, RouteNavigationSettings, RoutePresentationSettings,
+    HyperscopeRoute, PatchLabControlsWire, PatchLabSessionIntent, RenderSettingsWire,
+    RouteAnimationClock, RouteNavigationSettings, RoutePresentationSettings,
     RoutePrimaryAssetSettings, RouteRendererAssetSettings, HYPERSCOPE_CONTROL_SPECS,
 };
 
@@ -19,7 +19,7 @@ pub struct RouteWireResult {
     resolved_pairs: Vec<[String; 2]>,
     diagnostics: Vec<RouteWireDiagnostic>,
     startup_settings: Option<RouteStartupWireSettings>,
-    render_settings: Option<RouteRenderWireSettings>,
+    render_settings: Option<RenderSettingsWire>,
     navigation_settings: Option<RouteNavigationWireSettings>,
     patch_lab_session: Option<RoutePatchLabWireSession>,
     presentation_settings: Option<RoutePresentationWireSettings>,
@@ -34,7 +34,7 @@ pub struct RouteWireResult {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RouteStartupWireSettings {
-    render_settings: RouteRenderWireSettings,
+    render_settings: RenderSettingsWire,
     navigation_settings: RouteNavigationWireSettings,
     patch_lab_session: RoutePatchLabWireSession,
     presentation_settings: RoutePresentationWireSettings,
@@ -71,35 +71,6 @@ struct RouteNumericControlDomainWire {
     maximum: f64,
     integral: bool,
     step: f64,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RouteRenderWireSettings {
-    style: &'static str,
-    resolution_level: u8,
-    density: f64,
-    screen_attenuation: bool,
-    min_pixels_per_subdivision: f64,
-    atlas_exponent: u8,
-    max_face_edge_ratio: u8,
-    focus_postprocess: FocusPostprocessWireSettings,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct FocusPostprocessWireSettings {
-    enabled: bool,
-    mode: u8,
-    diagnostic_view: u8,
-    blur_radius_pixels: u16,
-    blur_strength: f64,
-    focus_coordinate: f64,
-    bandwidth: f64,
-    normalize_range: bool,
-    gaussian_passes: u8,
-    kawase_passes: u8,
-    kawase_offset: f64,
 }
 
 #[derive(Serialize)]
@@ -296,39 +267,6 @@ pub fn hyperscope_control_specs_wire() -> Vec<RouteControlSpecWire> {
             choices: (!spec.choices.is_empty()).then_some(spec.choices),
         })
         .collect()
-}
-
-impl From<RenderSettings> for RouteRenderWireSettings {
-    fn from(settings: RenderSettings) -> Self {
-        Self {
-            style: settings.style.wire_name(),
-            resolution_level: settings.resolution_level,
-            density: settings.tessellation.density,
-            screen_attenuation: settings.tessellation.screen_attenuation,
-            min_pixels_per_subdivision: settings.tessellation.min_pixels_per_subdivision,
-            atlas_exponent: settings.atlas_exponent,
-            max_face_edge_ratio: settings.max_face_edge_ratio,
-            focus_postprocess: settings.focus_postprocess.into(),
-        }
-    }
-}
-
-impl From<FocusPostprocessSettings> for FocusPostprocessWireSettings {
-    fn from(settings: FocusPostprocessSettings) -> Self {
-        Self {
-            enabled: settings.enabled,
-            mode: settings.mode.wire_index(),
-            diagnostic_view: settings.diagnostic_view.wire_index(),
-            blur_radius_pixels: settings.blur_radius_pixels,
-            blur_strength: settings.blur_strength,
-            focus_coordinate: settings.focus_coordinate,
-            bandwidth: settings.bandwidth,
-            normalize_range: settings.normalize_range,
-            gaussian_passes: settings.gaussian_passes,
-            kawase_passes: settings.kawase_passes,
-            kawase_offset: settings.kawase_offset,
-        }
-    }
 }
 
 impl From<PatchLabSessionIntent> for RoutePatchLabWireSession {

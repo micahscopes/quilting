@@ -26,8 +26,9 @@ use hyperscope_app::{
     AnimationClipDescriptor, AnimationClipJobEffect, AnimationClipSelectionCompletion,
     AnimationClipSelectionOutcome, AnimationClipSelectionReadModel, AnimationClock,
     AnimationPoseRequestDisposition, AnimationPoseScheduler, AnimationPoseStamp, AppCommit,
-    AppCommitWire, AppEffect, AppEvent, AppFrameSnapshot, AppStore, AssetFetchJob, AssetJobIdentity,
-    AssetLoadCompletion, AssetLoadCompletionDispatch, AssetLoadOutcome, AssetLoadRequest,
+    AppCommitWire, AppEffect, AppEvent, AppFrameSnapshot, AppRenderSnapshotWire, AppStore,
+    AssetFetchJob, AssetJobIdentity, AssetLoadCompletion, AssetLoadCompletionDispatch,
+    AssetLoadOutcome, AssetLoadRequest,
     AssetLoadScope, AssetMetadata, AssetReadModel, AssetStatus, AuthoredRevision,
     AuthoringLeaseStatus,
     FocusDiagnosticView, FocusPostprocessMode, FocusPostprocessSettings, FrameTick,
@@ -4302,7 +4303,7 @@ struct ShadowSnapshot {
     animation_time_seconds: f64,
     animation_speed: f64,
     navigation_settings: ShadowNavigationSettings,
-    render_settings: ShadowRenderSettings,
+    render_settings: AppRenderSnapshotWire,
     patch_lab: PatchLabReadModelWire,
     assets: Vec<ShadowAsset>,
     loading_assets: usize,
@@ -4596,7 +4597,7 @@ struct ShadowPendingAnimationClip {
 #[serde(rename_all = "camelCase")]
 struct ShadowRenderSettingsReceipt {
     commit: AppCommitWire,
-    render: ShadowRenderSettings,
+    render: AppRenderSnapshotWire,
 }
 
 #[derive(Serialize)]
@@ -4607,7 +4608,7 @@ struct ShadowRenderSettingsSynchronizationReceipt {
     commit: Option<AppCommitWire>,
     patch_lab_effects: Vec<PatchLabEffectWire>,
     matches_input: bool,
-    render: ShadowRenderSettings,
+    render: AppRenderSnapshotWire,
 }
 
 #[derive(Deserialize)]
@@ -4712,70 +4713,6 @@ impl From<hyperscope_app::AppNavigationSettingsSnapshot> for ShadowNavigationSet
             speed_octave_steps: walk.speed_octave_steps,
             body_scale_octave_steps: walk.body_scale_octave_steps,
             eye_height_octave_steps: walk.eye_height_octave_steps,
-        }
-    }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ShadowRenderSettings {
-    revision: String,
-    style: &'static str,
-    resolution_level: u8,
-    density: f64,
-    screen_attenuation: bool,
-    min_pixels_per_subdivision: f64,
-    atlas_exponent: u8,
-    max_face_edge_ratio: u8,
-    focus_postprocess: FocusPostprocessShadow,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct FocusPostprocessShadow {
-    enabled: bool,
-    mode: u8,
-    diagnostic_view: u8,
-    blur_radius_pixels: u16,
-    blur_strength: f64,
-    focus_coordinate: f64,
-    bandwidth: f64,
-    normalize_range: bool,
-    gaussian_passes: u8,
-    kawase_passes: u8,
-    kawase_offset: f64,
-}
-
-impl From<FocusPostprocessSettings> for FocusPostprocessShadow {
-    fn from(settings: FocusPostprocessSettings) -> Self {
-        Self {
-            enabled: settings.enabled,
-            mode: settings.mode.wire_index(),
-            diagnostic_view: settings.diagnostic_view.wire_index(),
-            blur_radius_pixels: settings.blur_radius_pixels,
-            blur_strength: settings.blur_strength,
-            focus_coordinate: settings.focus_coordinate,
-            bandwidth: settings.bandwidth,
-            normalize_range: settings.normalize_range,
-            gaussian_passes: settings.gaussian_passes,
-            kawase_passes: settings.kawase_passes,
-            kawase_offset: settings.kawase_offset,
-        }
-    }
-}
-
-impl From<hyperscope_app::AppRenderSnapshot> for ShadowRenderSettings {
-    fn from(snapshot: hyperscope_app::AppRenderSnapshot) -> Self {
-        Self {
-            revision: snapshot.revision.to_string(),
-            style: snapshot.settings.style.wire_name(),
-            resolution_level: snapshot.settings.resolution_level,
-            density: snapshot.settings.tessellation.density,
-            screen_attenuation: snapshot.settings.tessellation.screen_attenuation,
-            min_pixels_per_subdivision: snapshot.settings.tessellation.min_pixels_per_subdivision,
-            atlas_exponent: snapshot.settings.atlas_exponent,
-            max_face_edge_ratio: snapshot.settings.max_face_edge_ratio,
-            focus_postprocess: snapshot.settings.focus_postprocess.into(),
         }
     }
 }

@@ -262,6 +262,11 @@ The first application boundary is now explicit:
   defaults and clamps run only for explicit JavaScript authority or a recorded
   Rust startup fallback. A missing typed projection fails over visibly rather
   than being mistaken for successful Rust authority.
+  Route startup and live reducer projections share one `RenderSettingsWire`
+  conversion, including the complete focus-postprocess packet. The live
+  `AppRenderSnapshotWire` adds only its decimal revision and preserves the
+  browser's plain-object ABI; input decoding and validation remain a distinct
+  adapter concern.
   The browser wire schema is also application-owned: enabling the narrow
   `hyperscope-app/wire` feature exposes the exact serialized route result,
   atomic startup packet, and control registry without making serde part of the
