@@ -59,6 +59,37 @@ function appOracle({ reject = null } = {}) {
   };
 }
 
+const authoredRecordFrame = `{"lane":"authored_record","version":{"major":0,"minor":1},"project_id":"30000000-0000-4000-8000-000000000001","record_base64":"AP8Q"}`;
+
+function durablePeerOracle() {
+  return {
+    local: [],
+    records: [],
+    recordedPresence: [],
+    async receiveLocalPeerEnvelope(atSeconds, frameJson) {
+      this.local.push({ atSeconds, frameJson });
+      return {
+        peer: {
+          lane: frameJson.includes('"lane":"presence"') ? 'presence' : 'authored',
+          disposition: 'applied',
+        },
+        durableDisposition: frameJson.includes('"lane":"authored"') ? 'applied' : 'none',
+        replicaRecordFrameJson: frameJson.includes('"lane":"authored"')
+          ? authoredRecordFrame
+          : null,
+        appProjectionFault: null,
+      };
+    },
+    async receiveReplicaRecordFrame(frameJson) {
+      this.records.push(frameJson);
+      return { durableDisposition: 'applied', appProjectionFault: null };
+    },
+    recordLocalPresenceEnvelope(envelopeJson) {
+      this.recordedPresence.push(envelopeJson);
+    },
+  };
+}
+
 function batch({
   generation = 'generation-a',
   requestedAfter = '0',
@@ -129,13 +160,13 @@ test('browser carrier rejects ambiguous configuration and never accepts a token 
   );
 });
 
-test('exact u64 application JSON reaches Rust without JavaScript numeric parsing', () => {
+test('exact u64 application JSON reaches Rust without JavaScript numeric parsing', async () => {
   const app = appOracle();
   const relay = transport(app);
   const frameJson = `{"lane":"authored","envelope":${authoredEnvelope(
     '18446744073709551615',
   )}}`;
-  const hasMore = relay.acceptBatch(batch({
+  const hasMore = await relay.acceptBatch(batch({
     latestCursor: '1',
     oldestCursor: '1',
     frames: [{ cursor: '1', frameJson }],
@@ -147,12 +178,12 @@ test('exact u64 application JSON reaches Rust without JavaScript numeric parsing
   assert.equal(relay.snapshot().appliedFrames, 1);
 });
 
-test('Rust semantic rejection cannot advance the delivery cursor', () => {
+test('Rust semantic rejection cannot advance the delivery cursor', async () => {
   const app = appOracle({ reject: frame => frame.includes('bad_semantics') });
   const relay = transport(app);
   const frameJson = '{"lane":"bad_semantics","envelope":{}}';
-  assert.throws(
-    () => relay.acceptBatch(batch({
+  await assert.rejects(
+    relay.acceptBatch(batch({
       latestCursor: '1',
       oldestCursor: '1',
       frames: [{ cursor: '1', frameJson }],
@@ -162,10 +193,10 @@ test('Rust semantic rejection cannot advance the delivery cursor', () => {
   assert.equal(relay.snapshot().cursor, '0');
 });
 
-test('generation changes discard the stale response and repoll from zero', () => {
+test('generation changes discard the stale response and repoll from zero', async () => {
   const app = appOracle();
   const relay = transport(app);
-  assert.equal(relay.acceptBatch(batch(), 0n), false);
+  assert.equal(await relay.acceptBatch(batch(), 0n), false);
   const frameJson = `{"lane":"authored","envelope":${authoredEnvelope('1')}}`;
   const changed = batch({
     generation: 'generation-b',
@@ -173,7 +204,7 @@ test('generation changes discard the stale response and repoll from zero', () =>
     oldestCursor: '1',
     frames: [{ cursor: '1', frameJson }],
   });
-  assert.equal(relay.acceptBatch(changed, 0n), true);
+  assert.equal(await relay.acceptBatch(changed, 0n), true);
   assert.equal(app.received.length, 0);
   assert.deepEqual(
     {
@@ -184,15 +215,15 @@ test('generation changes discard the stale response and repoll from zero', () =>
     },
     { generation: 'generation-b', cursor: '0', restarts: 1, gaps: 1 },
   );
-  assert.equal(relay.acceptBatch(changed, 0n), false);
+  assert.equal(await relay.acceptBatch(changed, 0n), false);
   assert.equal(app.received.length, 1);
 });
 
-test('bounded-history gaps surface degraded state while applying the retained suffix', () => {
+test('bounded-history gaps surface degraded state while applying the retained suffix', async () => {
   const relay = transport();
   const first = `{"lane":"authored","envelope":${authoredEnvelope('1')}}`;
   const second = `{"lane":"presence","envelope":${presenceEnvelope}}`;
-  relay.acceptBatch(batch({
+  await relay.acceptBatch(batch({
     resumeAfter: '1',
     latestCursor: '3',
     oldestCursor: '2',
@@ -206,6 +237,79 @@ test('bounded-history gaps surface degraded state while applying the retained su
   assert.equal(relay.degraded, true);
   assert.equal(relay.snapshot().gaps, 1);
   assert.equal(relay.snapshot().cursor, '3');
+});
+
+test('durable proposal promotion is explicit and announces Rust-authored record JSON', async () => {
+  const durablePeer = durablePeerOracle();
+  const relay = transport(appOracle(), {
+    durablePeer,
+    authoredProposalPolicy: 'admit',
+  });
+  const proposal = `{"lane":"authored","envelope":${authoredEnvelope('1')}}`;
+  await relay.acceptBatch(batch({
+    latestCursor: '1',
+    oldestCursor: '1',
+    frames: [{ cursor: '1', frameJson: proposal }],
+  }), 0n);
+  assert.equal(durablePeer.local.length, 1);
+  assert.equal(relay.outbound.length, 1);
+  assert.equal(relay.outbound[0].frameJson, authoredRecordFrame);
+  assert.equal(relay.snapshot().appliedFrames, 1);
+
+  await relay.acceptBatch(batch({
+    requestedAfter: '1',
+    resumeAfter: '1',
+    latestCursor: '2',
+    oldestCursor: '1',
+    frames: [{ cursor: '2', frameJson: authoredRecordFrame }],
+  }), 1n);
+  assert.deepEqual(durablePeer.records, [authoredRecordFrame]);
+  assert.equal(relay.snapshot().cursor, '2');
+});
+
+test('durable replicas ignore raw proposals unless selected as admission authority', async () => {
+  const durablePeer = durablePeerOracle();
+  const relay = transport(appOracle(), { durablePeer });
+  const proposal = `{"lane":"authored","envelope":${authoredEnvelope('1')}}`;
+  await relay.acceptBatch(batch({
+    latestCursor: '1',
+    oldestCursor: '1',
+    frames: [{ cursor: '1', frameJson: proposal }],
+  }), 0n);
+  assert.equal(durablePeer.local.length, 0);
+  assert.equal(relay.outbound.length, 0);
+  assert.equal(relay.snapshot().lastReceipt.disposition, 'ignored_not_admission_authority');
+});
+
+test('durable admission reserves announce capacity across its asynchronous write', async () => {
+  let finishAdmission;
+  const gate = new Promise(resolve => { finishAdmission = resolve; });
+  const durablePeer = durablePeerOracle();
+  const receive = durablePeer.receiveLocalPeerEnvelope.bind(durablePeer);
+  durablePeer.receiveLocalPeerEnvelope = async (...args) => {
+    await gate;
+    return receive(...args);
+  };
+  const relay = transport(appOracle(), {
+    durablePeer,
+    authoredProposalPolicy: 'admit',
+    outboundCapacity: 1,
+  });
+  const proposal = `{"lane":"authored","envelope":${authoredEnvelope('1')}}`;
+  const admission = relay.acceptBatch(batch({
+    latestCursor: '1',
+    oldestCursor: '1',
+    frames: [{ cursor: '1', frameJson: proposal }],
+  }), 0n);
+  await Promise.resolve();
+  assert.equal(relay.snapshot().queuedFrames, 1);
+  assert.throws(
+    () => relay.sendPresenceEnvelope(presenceEnvelope),
+    /outbound queue is full/,
+  );
+  finishAdmission();
+  await admission;
+  assert.equal(relay.outbound[0].frameJson, authoredRecordFrame);
 });
 
 test('failed posts retain strict authored order through retry', async () => {

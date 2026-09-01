@@ -1,6 +1,8 @@
 // Thin browser carrier for Hyperscope's generated Rust/WASM peer boundary.
 // This module owns HTTP delivery cursors only. It never allocates application
-// revisions, parses authored commands, persists history, or repairs gaps.
+// revisions, parses authored commands, persists history, or repairs gaps. A
+// durable peer must explicitly opt into admitting raw authored proposals;
+// ordinary replicas consume only Rust-authored record frames.
 
 export const DEFAULT_LOCAL_PEER_RELAY_URL = 'http://127.0.0.1:42117';
 export const DEFAULT_LOCAL_PEER_POLL_INTERVAL_MS = 50;
@@ -18,6 +20,8 @@ export class BrowserLocalPeerRelay {
     baseUrl = DEFAULT_LOCAL_PEER_RELAY_URL,
     token,
     app,
+    durablePeer = null,
+    authoredProposalPolicy = durablePeer ? 'ignore' : 'legacy',
     fetchImpl = globalThis.fetch?.bind(globalThis),
     nowSeconds = () => performance.now() / 1000,
     pollIntervalMs = DEFAULT_LOCAL_PEER_POLL_INTERVAL_MS,
@@ -28,12 +32,30 @@ export class BrowserLocalPeerRelay {
   }) {
     this.baseUrl = validateBaseUrl(baseUrl);
     this.#token = validateToken(token);
-    if (!app
-        || typeof app.receiveLocalPeerEnvelope !== 'function'
-        || typeof app.recordLocalAuthoredEnvelope !== 'function'
-        || typeof app.recordLocalPresenceEnvelope !== 'function') {
+    if (!app || typeof app.receiveLocalPeerEnvelope !== 'function') {
       throw new BrowserLocalPeerRelayError(
         'browser relay requires the generated Rust/WASM peer application boundary',
+      );
+    }
+    if (durablePeer != null
+        && (typeof durablePeer.receiveLocalPeerEnvelope !== 'function'
+          || typeof durablePeer.receiveReplicaRecordFrame !== 'function'
+          || typeof durablePeer.recordLocalPresenceEnvelope !== 'function')) {
+      throw new BrowserLocalPeerRelayError(
+        'durable relay requires the generated Rust/WASM durable peer boundary',
+      );
+    }
+    if (!['legacy', 'ignore', 'admit'].includes(authoredProposalPolicy)
+        || (authoredProposalPolicy === 'admit' && durablePeer == null)) {
+      throw new BrowserLocalPeerRelayError(
+        'authored proposal policy must be legacy, ignore, or admit with a durable peer',
+      );
+    }
+    if (authoredProposalPolicy === 'legacy'
+        && (typeof app.recordLocalAuthoredEnvelope !== 'function'
+          || typeof app.recordLocalPresenceEnvelope !== 'function')) {
+      throw new BrowserLocalPeerRelayError(
+        'legacy relay requires Rust authored and presence echo boundaries',
       );
     }
     if (typeof fetchImpl !== 'function') {
@@ -59,6 +81,8 @@ export class BrowserLocalPeerRelay {
       throw new BrowserLocalPeerRelayError('status observer must be callable');
     }
     this.app = app;
+    this.durablePeer = durablePeer;
+    this.authoredProposalPolicy = authoredProposalPolicy;
     this.fetchImpl = fetchImpl;
     this.nowSeconds = nowSeconds;
     this.pollIntervalMs = pollIntervalMs;
@@ -68,6 +92,7 @@ export class BrowserLocalPeerRelay {
     this.onStatus = onStatus;
     this.outbound = [];
     this.pendingOutbound = null;
+    this.outboundReservations = 0;
     this.abortController = null;
     this.loopPromise = null;
     this.stopping = false;
@@ -118,11 +143,18 @@ export class BrowserLocalPeerRelay {
   snapshot() {
     return Object.freeze({
       ...this.status,
-      queuedFrames: this.outbound.length + (this.pendingOutbound ? 1 : 0),
+      queuedFrames: this.outbound.length
+        + (this.pendingOutbound ? 1 : 0)
+        + this.outboundReservations,
     });
   }
 
   sendAppliedAuthoredEnvelope(envelopeJson) {
+    if (this.authoredProposalPolicy !== 'legacy') {
+      throw new BrowserLocalPeerRelayError(
+        'already-applied authored envelopes belong only to the legacy direct lane',
+      );
+    }
     validateJsonText(envelopeJson, 'local authored envelope');
     this.reserveOutbound();
     // Rust validates and records the already-applied envelope before the
@@ -141,7 +173,7 @@ export class BrowserLocalPeerRelay {
     validateJsonText(envelopeJson, 'local presence envelope');
     this.reserveOutbound();
     try {
-      this.app.recordLocalPresenceEnvelope(envelopeJson);
+      (this.durablePeer ?? this.app).recordLocalPresenceEnvelope(envelopeJson);
     } catch (error) {
       throw new BrowserLocalPeerRelayError(
         `Rust rejected the local presence envelope: ${errorMessage(error)}`,
@@ -151,10 +183,29 @@ export class BrowserLocalPeerRelay {
   }
 
   reserveOutbound() {
-    const occupied = this.outbound.length + (this.pendingOutbound ? 1 : 0);
+    const occupied = this.outbound.length
+      + (this.pendingOutbound ? 1 : 0)
+      + this.outboundReservations;
     if (occupied >= this.outboundCapacity) {
       throw new BrowserLocalPeerRelayError('browser relay outbound queue is full');
     }
+  }
+
+  acquireOutboundReservation() {
+    this.reserveOutbound();
+    this.outboundReservations += 1;
+  }
+
+  releaseOutboundReservation() {
+    if (this.outboundReservations < 1) {
+      throw new BrowserLocalPeerRelayError('browser relay has no outbound reservation');
+    }
+    this.outboundReservations -= 1;
+  }
+
+  enqueueReserved(frameJson) {
+    this.releaseOutboundReservation();
+    return this.enqueue(frameJson);
   }
 
   enqueue(frameJson) {
@@ -216,10 +267,10 @@ export class BrowserLocalPeerRelay {
       `/v1/frames?after=${requestedAfter}&limit=${this.pollLimit}`,
       null,
     );
-    return this.acceptBatch(response, requestedAfter);
+    return await this.acceptBatch(response, requestedAfter);
   }
 
-  acceptBatch(batch, requestedAfter) {
+  async acceptBatch(batch, requestedAfter) {
     if (!batch || typeof batch !== 'object' || Array.isArray(batch)) {
       throw new BrowserLocalPeerRelayError('relay poll response must be an object');
     }
@@ -307,10 +358,7 @@ export class BrowserLocalPeerRelay {
     for (const delivery of deliveries) {
       let receipt;
       try {
-        receipt = this.app.receiveLocalPeerEnvelope(
-          this.nowSeconds(),
-          delivery.frameJson,
-        );
+        receipt = await this.deliverFrame(delivery.frameJson);
       } catch (error) {
         // Do not advance past a semantic frame Rust rejected. Re-polling the
         // same cursor is noisy but cannot silently discard later authored work.
@@ -343,6 +391,87 @@ export class BrowserLocalPeerRelay {
     }
     this.setStatus({ cursor: nextCursor.toString() });
     return batch.hasMore || nextCursor < latest;
+  }
+
+  async deliverFrame(frameJson) {
+    let frame;
+    try {
+      frame = JSON.parse(frameJson);
+    } catch (error) {
+      throw new BrowserLocalPeerRelayError(
+        `relay delivery frame is invalid JSON: ${errorMessage(error)}`,
+      );
+    }
+    if (!frame || typeof frame !== 'object' || Array.isArray(frame)
+        || typeof frame.lane !== 'string') {
+      throw new BrowserLocalPeerRelayError('relay delivery frame has no lane');
+    }
+
+    if (frame.lane === 'authored_record') {
+      if (!this.durablePeer) {
+        this.degraded = true;
+        return {
+          lane: 'authored_record',
+          disposition: 'ignored_unsupported',
+        };
+      }
+      const durable = await this.durablePeer.receiveReplicaRecordFrame(frameJson);
+      return {
+        lane: 'authored_record',
+        disposition: durable?.durableDisposition === 'applied'
+          ? 'applied'
+          : durable?.durableDisposition ?? 'ignored',
+        durable,
+      };
+    }
+
+    if (frame.lane === 'authored') {
+      if (this.authoredProposalPolicy === 'ignore') {
+        return {
+          lane: 'authored',
+          disposition: 'ignored_not_admission_authority',
+        };
+      }
+      if (this.authoredProposalPolicy === 'legacy') {
+        return await this.app.receiveLocalPeerEnvelope(this.nowSeconds(), frameJson);
+      }
+
+      // Reserve announce capacity before the durable write. Exactly one
+      // explicitly selected admission authority may promote raw proposals.
+      this.acquireOutboundReservation();
+      let reservationHeld = true;
+      try {
+        const admitted = await this.durablePeer.receiveLocalPeerEnvelope(
+          this.nowSeconds(),
+          frameJson,
+        );
+        const carrierFrameJson = admitted?.replicaRecordFrameJson;
+        if (typeof carrierFrameJson === 'string' && carrierFrameJson.length > 0) {
+          const completion = this.enqueueReserved(carrierFrameJson);
+          reservationHeld = false;
+          void completion.catch(error => {
+            this.setStatus({ state: 'error', lastError: errorMessage(error) });
+          });
+        }
+        return {
+          ...(admitted?.peer ?? {}),
+          durableDisposition: admitted?.durableDisposition ?? 'none',
+          appProjectionFault: admitted?.appProjectionFault ?? null,
+        };
+      } finally {
+        if (reservationHeld) this.releaseOutboundReservation();
+      }
+    }
+
+    if (frame.lane === 'presence') {
+      const delivered = await (this.durablePeer ?? this.app).receiveLocalPeerEnvelope(
+        this.nowSeconds(),
+        frameJson,
+      );
+      return delivered?.peer ?? delivered;
+    }
+
+    throw new BrowserLocalPeerRelayError(`unknown relay lane ${JSON.stringify(frame.lane)}`);
   }
 
   async requestJson(method, path, body) {
