@@ -54,6 +54,16 @@ pub struct PortablePbrTextureAtlas {
     mip_placement_records: wgpu::Buffer,
 }
 
+/// Exact storage-buffer payload consumed by `patch_pbr_portable.wgsl` and the
+/// browser atlas mip generator. Building this independently of a device keeps
+/// descriptor/placement ABI validation available even when a WebGPU adapter
+/// is unavailable or deliberately left alone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PortablePbrAtlasRecords {
+    texture_descriptors: Vec<[u32; 8]>,
+    mip_placements: Vec<[u32; 4]>,
+}
+
 /// Allocation and filtering facts for one retained PBR texture table. These
 /// values deliberately describe the resources that were actually created,
 /// rather than inferring capabilities from authored image descriptors.
@@ -819,6 +829,7 @@ fn create_portable_pbr_texture_atlas(
         },
     )
     .map_err(|error| LodWebGpuError::Payload(error.to_string()))?;
+    let records = portable_pbr_atlas_records(descriptors, &plan)?;
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("quilting portable PBR texture atlas"),
         size: wgpu::Extent3d {
@@ -843,58 +854,16 @@ fn create_portable_pbr_texture_atlas(
         array_layer_count: Some(plan.layer_count),
         ..Default::default()
     });
-    let mut descriptor_records = vec![[0u32; 8]; descriptors.len().max(1)];
-    let placement_record_count = descriptors
-        .len()
-        .checked_mul(plan.mip_level_count as usize)
-        .ok_or_else(|| {
-            LodWebGpuError::Payload("portable PBR mip placement count overflowed usize".into())
-        })?;
-    let mut mip_placement_records = vec![[0u32; 4]; placement_record_count.max(1)];
-    for (slot, (record, descriptor)) in descriptor_records.iter_mut().zip(descriptors).enumerate() {
-        let Some(descriptor) = descriptor else {
-            continue;
-        };
-        let slot_u32 = u32::try_from(slot).map_err(|_| {
-            LodWebGpuError::Payload("portable PBR texture slot exceeded u32".into())
-        })?;
-        let mip_level_count = texture_mip_level_count(descriptor.width, descriptor.height);
-        let placement_offset = slot
-            .checked_mul(plan.mip_level_count as usize)
-            .and_then(|offset| u32::try_from(offset).ok())
-            .ok_or_else(|| {
-                LodWebGpuError::Payload("portable PBR mip placement offset exceeded u32".into())
-            })?;
-        *record = [
-            descriptor.width,
-            descriptor.height,
-            portable_wrap_mode(descriptor.wrap_s),
-            portable_wrap_mode(descriptor.wrap_t),
-            mip_level_count,
-            placement_offset,
-            1,
-            0,
-        ];
-        for mip_level in 0..mip_level_count {
-            let placement = plan.mip_placements[mip_level as usize][slot].ok_or_else(|| {
-                LodWebGpuError::Payload(format!(
-                    "portable PBR texture slot {slot} mip {mip_level} has no placement",
-                ))
-            })?;
-            mip_placement_records[placement_offset as usize + mip_level as usize] =
-                [placement.origin[0], placement.origin[1], placement.layer, slot_u32];
-        }
-    }
     let descriptor_records = buffer_init_or_zero(
         device,
         "quilting portable PBR texture descriptor records",
-        bytemuck::cast_slice(&descriptor_records),
+        bytemuck::cast_slice(&records.texture_descriptors),
         wgpu::BufferUsages::STORAGE,
     );
     let mip_placement_records = buffer_init_or_zero(
         device,
         "quilting portable PBR mip placement records",
-        bytemuck::cast_slice(&mip_placement_records),
+        bytemuck::cast_slice(&records.mip_placements),
         wgpu::BufferUsages::STORAGE,
     );
     let mip_level_count = plan.mip_level_count;
@@ -906,6 +875,142 @@ fn create_portable_pbr_texture_atlas(
         descriptor_records,
         mip_placement_records,
     })
+}
+
+fn portable_pbr_atlas_records(
+    descriptors: &[Option<TextureAssetDescriptor>],
+    plan: &PortableTextureAtlasPlan,
+) -> Result<PortablePbrAtlasRecords, LodWebGpuError> {
+    let plan_mip_count = usize::try_from(plan.mip_level_count).map_err(|_| {
+        LodWebGpuError::Payload("portable PBR atlas mip count exceeded usize".into())
+    })?;
+    if plan.placements.len() != descriptors.len()
+        || plan.mip_placements.len() != plan_mip_count
+        || plan
+            .mip_placements
+            .iter()
+            .any(|placements| placements.len() != descriptors.len())
+    {
+        return Err(LodWebGpuError::Payload(
+            "portable PBR atlas plan does not match its descriptor table".into(),
+        ));
+    }
+    let placement_record_count =
+        descriptors
+            .len()
+            .checked_mul(plan_mip_count)
+            .ok_or_else(|| {
+                LodWebGpuError::Payload("portable PBR mip placement count overflowed usize".into())
+            })?;
+    let mut records = PortablePbrAtlasRecords {
+        texture_descriptors: vec![[0u32; 8]; descriptors.len().max(1)],
+        mip_placements: vec![[0u32; 4]; placement_record_count.max(1)],
+    };
+
+    for (slot, descriptor) in descriptors.iter().enumerate() {
+        let Some(descriptor) = descriptor else {
+            if plan.placements[slot].is_some()
+                || plan
+                    .mip_placements
+                    .iter()
+                    .any(|placements| placements[slot].is_some())
+            {
+                return Err(LodWebGpuError::Payload(format!(
+                    "portable PBR empty texture slot {slot} has an atlas placement",
+                )));
+            }
+            continue;
+        };
+        descriptor
+            .validate()
+            .map_err(|error| LodWebGpuError::Payload(format!("PBR texture {slot}: {error}")))?;
+        let slot_u32 = u32::try_from(slot).map_err(|_| {
+            LodWebGpuError::Payload("portable PBR texture slot exceeded u32".into())
+        })?;
+        let mip_level_count = texture_mip_level_count(descriptor.width, descriptor.height);
+        if mip_level_count > plan.mip_level_count {
+            return Err(LodWebGpuError::Payload(format!(
+                "portable PBR texture slot {slot} needs {mip_level_count} mips, but its atlas has {}",
+                plan.mip_level_count,
+            )));
+        }
+        let placement_offset_usize = slot.checked_mul(plan_mip_count).ok_or_else(|| {
+            LodWebGpuError::Payload("portable PBR mip placement offset overflowed usize".into())
+        })?;
+        let placement_offset = u32::try_from(placement_offset_usize).map_err(|_| {
+            LodWebGpuError::Payload("portable PBR mip placement offset exceeded u32".into())
+        })?;
+        records.texture_descriptors[slot] = [
+            descriptor.width,
+            descriptor.height,
+            portable_wrap_mode(descriptor.wrap_s),
+            portable_wrap_mode(descriptor.wrap_t),
+            mip_level_count,
+            placement_offset,
+            1,
+            0,
+        ];
+
+        for mip_level in 0..plan.mip_level_count {
+            let placement = plan.mip_placements[mip_level as usize][slot];
+            if mip_level >= mip_level_count {
+                if placement.is_some() {
+                    return Err(LodWebGpuError::Payload(format!(
+                        "portable PBR texture slot {slot} has an out-of-chain mip {mip_level}",
+                    )));
+                }
+                continue;
+            }
+            let placement = placement.ok_or_else(|| {
+                LodWebGpuError::Payload(format!(
+                    "portable PBR texture slot {slot} mip {mip_level} has no placement",
+                ))
+            })?;
+            let expected_extent = [
+                (descriptor.width >> mip_level).max(1),
+                (descriptor.height >> mip_level).max(1),
+            ];
+            let atlas_extent = [
+                (plan.extent[0] >> mip_level).max(1),
+                (plan.extent[1] >> mip_level).max(1),
+            ];
+            let placement_end = [
+                placement.origin[0].checked_add(placement.extent[0]),
+                placement.origin[1].checked_add(placement.extent[1]),
+            ];
+            if placement.extent != expected_extent
+                || placement.layer >= plan.layer_count
+                || placement_end[0].is_none_or(|end| end > atlas_extent[0])
+                || placement_end[1].is_none_or(|end| end > atlas_extent[1])
+            {
+                return Err(LodWebGpuError::Payload(format!(
+                    "portable PBR texture slot {slot} mip {mip_level} has an invalid atlas placement",
+                )));
+            }
+            records.mip_placements[placement_offset_usize + mip_level as usize] = [
+                placement.origin[0],
+                placement.origin[1],
+                placement.layer,
+                slot_u32,
+            ];
+        }
+        let base = plan.placements[slot].ok_or_else(|| {
+            LodWebGpuError::Payload(format!(
+                "portable PBR texture slot {slot} has no base atlas placement",
+            ))
+        })?;
+        let mip_zero = plan.mip_placements[0][slot]
+            .expect("validated occupied texture has a mip-zero placement");
+        if base.descriptor != *descriptor
+            || base.origin != mip_zero.origin
+            || base.layer != mip_zero.layer
+        {
+            return Err(LodWebGpuError::Payload(format!(
+                "portable PBR texture slot {slot} base placement disagrees with mip zero",
+            )));
+        }
+    }
+    Ok(records)
 }
 
 const PBR_MIPMAP_SHADER: &str = r#"
@@ -1682,5 +1787,120 @@ mod tests {
             .expect("PBR mipmap shader compiles");
         quilting_shaders::compile_shader(PBR_ATLAS_MIPMAP_SHADER, Default::default())
             .expect("direct-atlas PBR mipmap shader compiles");
+    }
+
+    #[test]
+    fn portable_records_preserve_sparse_slots_and_independent_mips() {
+        let descriptors = [
+            Some(TextureAssetDescriptor {
+                width: 8,
+                height: 4,
+                wrap_s: TextureWrapMode::Repeat,
+                wrap_t: TextureWrapMode::ClampToEdge,
+            }),
+            None,
+            Some(TextureAssetDescriptor {
+                width: 2,
+                height: 8,
+                wrap_s: TextureWrapMode::MirroredRepeat,
+                wrap_t: TextureWrapMode::Repeat,
+            }),
+        ];
+        let plan = PortableTextureAtlasPlan::build(
+            &descriptors,
+            PortableTextureAtlasLimits {
+                maximum_dimension: 8,
+                maximum_layers: 3,
+            },
+        )
+        .unwrap();
+        let records = portable_pbr_atlas_records(&descriptors, &plan).unwrap();
+
+        assert_eq!(plan.mip_level_count, 4);
+        assert_eq!(records.texture_descriptors.len(), 3);
+        assert_eq!(records.mip_placements.len(), 12);
+        assert_eq!(records.texture_descriptors[0], [8, 4, 2, 0, 4, 0, 1, 0]);
+        assert_eq!(records.texture_descriptors[1], [0; 8]);
+        assert_eq!(records.texture_descriptors[2], [2, 8, 1, 2, 4, 8, 1, 0]);
+        assert_eq!(&records.mip_placements[4..8], &[[0; 4]; 4]);
+        for (slot, descriptor) in descriptors.iter().enumerate() {
+            let Some(descriptor) = descriptor else {
+                continue;
+            };
+            let offset = slot * plan.mip_level_count as usize;
+            for mip_level in 0..texture_mip_level_count(descriptor.width, descriptor.height) {
+                let placement = plan.mip_placements[mip_level as usize][slot].unwrap();
+                assert_eq!(
+                    records.mip_placements[offset + mip_level as usize],
+                    [
+                        placement.origin[0],
+                        placement.origin[1],
+                        placement.layer,
+                        slot as u32,
+                    ],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn chess_scale_records_address_every_layer_and_mip_exactly() {
+        let descriptor = TextureAssetDescriptor {
+            width: 4096,
+            height: 4096,
+            wrap_s: TextureWrapMode::Repeat,
+            wrap_t: TextureWrapMode::Repeat,
+        };
+        let descriptors = vec![Some(descriptor); 9];
+        let plan = PortableTextureAtlasPlan::build(
+            &descriptors,
+            PortableTextureAtlasLimits {
+                maximum_dimension: 4096,
+                maximum_layers: 256,
+            },
+        )
+        .unwrap();
+        let records = portable_pbr_atlas_records(&descriptors, &plan).unwrap();
+
+        assert_eq!(plan.extent, [4096, 4096]);
+        assert_eq!(plan.layer_count, 9);
+        assert_eq!(plan.mip_level_count, 13);
+        assert_eq!(records.texture_descriptors.len(), 9);
+        assert_eq!(records.mip_placements.len(), 9 * 13);
+        for slot in 0..9usize {
+            let offset = slot * 13;
+            assert_eq!(
+                records.texture_descriptors[slot],
+                [4096, 4096, 2, 2, 13, offset as u32, 1, 0],
+            );
+            for mip_level in 0..13usize {
+                assert_eq!(
+                    records.mip_placements[offset + mip_level],
+                    [0, 0, slot as u32, slot as u32],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn portable_records_reject_a_plan_with_a_missing_occupied_placement() {
+        let descriptors = [Some(TextureAssetDescriptor {
+            width: 8,
+            height: 8,
+            wrap_s: TextureWrapMode::Repeat,
+            wrap_t: TextureWrapMode::Repeat,
+        })];
+        let mut plan = PortableTextureAtlasPlan::build(
+            &descriptors,
+            PortableTextureAtlasLimits {
+                maximum_dimension: 8,
+                maximum_layers: 1,
+            },
+        )
+        .unwrap();
+        plan.mip_placements[2][0] = None;
+
+        let error = portable_pbr_atlas_records(&descriptors, &plan).unwrap_err();
+        assert!(error.to_string().contains("slot 0 mip 2 has no placement"));
     }
 }

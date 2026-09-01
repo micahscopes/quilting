@@ -87,6 +87,24 @@ sampling are the next diagnostic boundary; the result is recorded as a blocker,
 not relaxed into the image tolerance. Further live diagnosis paused when a
 separate project began intensive WebGPU testing against the shared browser.
 
+### CPU-only atlas-record narrowing
+
+While the shared GPU remained busy, atlas record construction was extracted
+from device allocation into a pure validated step. Its tests reproduce the
+chess table exactly: nine stable texture slots, nine 4096 × 4096 array layers,
+13 logical mips per slot, and 117 placement records. Every descriptor offset,
+mip count, layer, slot witness, extent, and atlas bound agrees with the WGSL
+storage-buffer ABI. Sparse and nonuniform tables are covered separately, and a
+missing occupied placement is rejected before any device resource is created.
+
+This evidence rules out CPU atlas planning and record packing as the source of
+the black regions. It does not claim image parity. The remaining boundary is
+now narrower and necessarily live: external-image publication into mip zero,
+the browser-only scratch mip chain, and manual WGSL sampling/lighting of the
+published texels. Those checks remain deferred until they cannot interfere with
+the other WebGPU workload; the nine-texture atlas itself retains roughly
+768 MiB, so speculative live retries would be particularly unfriendly here.
+
 ## Decisions
 
 - `quilting-core` owns the incumbent opaque clear color; WebGL2, WebGPU,
