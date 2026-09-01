@@ -1,11 +1,11 @@
 [package]
-name = "hyperscope-hhhs-shadow"
+name = "hyperscope-hhhs"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Optional AppStore-to-HHHS authored-state parity observer for Hyperscope"
+description = "AppStore and durable HHHS session integration for Hyperscope"
 
 [dependencies]
 hhhs.workspace = true

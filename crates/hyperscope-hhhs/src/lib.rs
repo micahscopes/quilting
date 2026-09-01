@@ -1,11 +1,17 @@
-//! Optional behavior shadow between [`hyperscope_app::AppStore`] authored
-//! revisions and [`hyperscape_hhhs`] durable authored history.
+//! Application integration between [`hyperscope_app::AppStore`] and
+//! [`hyperscape_hhhs`] durable authored history.
 //!
-//! [`AuthoredHhhsShadow::dispatch`] always commits the AppStore first. HHHS is
-//! only a diagnostic observer in this checkpoint: an HHHS failure is returned
-//! inside [`AuthoredShadowDispatch`] and never rejects or rolls back AppStore.
-//! The default [`MemoryDurability`] host is process-local and is not browser
-//! persistence.
+//! [`DurableAuthoredSession`] is the normal authority boundary: authored
+//! intent is persisted before the rebuildable AppStore projection advances;
+//! presence remains ephemeral; inbound replica records materialize from
+//! canonical HHHS history rather than arrival order. The default
+//! [`MemoryDurability`] host is process-local and is not browser persistence.
+//!
+//! The older [`AuthoredHhhsShadow`] remains as an explicitly diagnostic
+//! AppStore-first observer for multi-command experiments. An HHHS failure from
+//! that legacy path never rejects or rolls back AppStore and may leave a
+//! durable prefix. New integrations should not mistake it for the authority
+//! path merely because both types remain in this crate.
 //!
 //! Portable HHHS archives recover authored scene history. A separate
 //! [`AuthoredShadowCheckpoint`] binds the source-local projection cursor to an
@@ -17,8 +23,9 @@
 //! [`DurableProject::admit`] persists one envelope at a time. A failure can
 //! therefore leave a durable prefix. The observer reports that prefix, becomes
 //! poisoned, and deliberately has no retry API: replaying the whole revision
-//! would create duplicate HHHS entries. Promoting this path to application
-//! authority requires an atomic or resumable/idempotent batch protocol first.
+//! would create duplicate HHHS entries. Extending the authority path to
+//! multi-command revisions requires an atomic or resumable/idempotent batch
+//! protocol first.
 //!
 //! [`DurableAuthoredCoordinator`] is the narrow authority path for the common
 //! one-envelope revision. It atomically persists that envelope and a
@@ -37,8 +44,8 @@
 //! AppStore. Other AppStore event kinds may still be dispatched normally. A
 //! directly dispatched authored revision changes the AppStore baseline without
 //! HHHS; the next coordinated dispatch detects that drift, skips mirroring, and
-//! poisons the observer. Authored writers must therefore be serialized around
-//! this diagnostic boundary.
+//! poisons the coordinator. Authored writers must therefore be serialized
+//! around this authority boundary.
 
 #![forbid(unsafe_code)]
 

@@ -362,7 +362,7 @@ At the reviewed and adopted revision:
 
 - the downstream `hyperscape-hhhs` suite passes 28 tests after exclusive-host
   migration and read-only reactive restoration;
-- the downstream `hyperscope-hhhs-shadow` suite passes 25 tests after strict
+- the downstream `hyperscope-hhhs` suite passes 25 tests after strict
   fence/reopen migration and the Blender v0.2 conformal-frame restart proof;
 - the downstream `hyperscope-web` durable-history suite passes 9 native tests;
 - `hyperscope-web` and the `quilting-wasm` Leptos/durable-history composition

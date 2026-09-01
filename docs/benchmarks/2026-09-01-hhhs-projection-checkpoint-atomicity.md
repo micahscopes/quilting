@@ -4,7 +4,7 @@ Date: 2026-09-01
 
 ## Why this seam exists
 
-`hyperscope-hhhs-shadow` currently applies an authored revision to `AppStore`
+`hyperscope-hhhs` (then named `hyperscope-hhhs-shadow`) applies an authored revision to `AppStore`
 before mirroring its commands into HHHS. That is useful as a diagnostic shadow,
 but it is not an authority boundary: persistence may fail after the visible
 projection has already changed.
@@ -31,7 +31,7 @@ successful retry, and exact restart recovery.
 
 ## Durable-first application projection
 
-`hyperscope-hhhs-shadow::DurableAuthoredCoordinator` now consumes this seam for
+`hyperscope-hhhs::DurableAuthoredCoordinator` now consumes this seam for
 the common one-envelope browser/Blender revision:
 
 1. Verify that the complete AppStore authored projection matches the durable

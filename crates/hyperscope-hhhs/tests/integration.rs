@@ -12,7 +12,7 @@ use hyperscape_protocol::{
 use hyperscope_app::{
     AppStore, AuthoredRevision, CommitDisposition, LocalPeerDisposition, LocalPeerIngress,
 };
-use hyperscope_hhhs_shadow::{
+use hyperscope_hhhs::{
     AuthoredHhhsShadow, AuthoredShadowCheckpoint, AuthoredShadowError, AuthoredShadowInitError,
     AuthoredShadowObservation, DurableAuthoredCoordinator, DurableAuthoredDispatchError,
     DurableAuthoredInitError, DurableAuthoredObservation, DurableAuthoredRestoreError,

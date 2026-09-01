@@ -17,7 +17,7 @@ durable-history = [
     "dep:hhhs",
     "dep:hhhs-replica",
     "dep:hyperscape-hhhs",
-    "dep:hyperscope-hhhs-shadow",
+    "dep:hyperscope-hhhs",
     "dep:hyperscope-web",
     "dep:wasm-bindgen-futures",
     "hyperscope-web/durable-history",
@@ -40,7 +40,7 @@ hyperscape = { version = "0.1.0", path = "../hyperscape" }
 hyperscape-hhhs = { version = "0.1.0", path = "../hyperscape-hhhs", optional = true }
 hyperscape-protocol = { version = "0.1.0", path = "../hyperscape-protocol" }
 hyperscope-app = { version = "0.1.0", path = "../hyperscope-app" }
-hyperscope-hhhs-shadow = { version = "0.1.0", path = "../hyperscope-hhhs-shadow", optional = true }
+hyperscope-hhhs = { version = "0.1.0", path = "../hyperscope-hhhs", optional = true }
 hyperscope-web = { version = "0.1.0", path = "../hyperscope-web", optional = true }
 quilting-remesh = { version = "0.1.0", path = "../quilting-remesh" }
 quilting-round-index = { version = "0.1.0", path = "../quilting-round-index" }

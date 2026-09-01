@@ -1,7 +1,7 @@
 # Hyperscope authored-source checkpoint 0.1
 
 HHHS project history and a source replay cursor have different authority.
-`ProjectArchive` contains portable authored scene history. The shadow's
+`ProjectArchive` contains portable authored scene history. The local source's
 `projection_revision` is local ingest/echo-suppression state for one Blender or
 application projection source, so it is not admitted as an authored HHHS
 command and is not copied into a sneakernet project archive.
@@ -44,7 +44,7 @@ encoding. The digest detects corruption; it is not an authority signature.
 
 ## Atomic-persistence gate
 
-The pinned HHHS 0.4.4 API provides authority-neutral local co-transaction
+The pinned HHHS 0.4.5 candidate provides authority-neutral local co-transaction
 attachments, including open-authority preparation, for one admitted entry.
 `DurableAuthoredCoordinator` uses that seam to persist a one-envelope authored
 admission and the receiver-local source cursor atomically before publishing its
@@ -68,10 +68,10 @@ HHHS. This role split prevents several browsers from independently opening the
 same Blender proposal into redundant concurrent records.
 
 A separate atomicity question remains: one source `AuthoredRevision` may carry
-several commands while the diagnostic shadow currently admits one HHHS entry
+several commands while the diagnostic shadow admits one HHHS entry
 per command. Attaching the cursor to the final entry would not prevent a
 durable prefix if an earlier entry succeeded and a later one failed. Before
-this coordinator becomes application authority, choose and test one bounded
+extending the authority path to that shape, choose and test one bounded
 application-revision payload, a generic prepared batch, or an equivalent
 resumable design. Until that lands, the authoritative coordinator deliberately
 accepts exactly one command per revision; the older diagnostic shadow retains

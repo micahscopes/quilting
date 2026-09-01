@@ -1876,7 +1876,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "hyperscope-hhhs-shadow"
+name = "hyperscope-hhhs"
 version = "0.1.0"
 dependencies = [
  "futures",
@@ -1904,7 +1904,7 @@ dependencies = [
  "hyperscape-hhhs",
  "hyperscape-protocol",
  "hyperscope-app",
- "hyperscope-hhhs-shadow",
+ "hyperscope-hhhs",
  "indexed_db_futures",
  "js-sys",
  "leptos",
@@ -3097,7 +3097,7 @@ dependencies = [
  "hyperscape-hhhs",
  "hyperscape-protocol",
  "hyperscope-app",
- "hyperscope-hhhs-shadow",
+ "hyperscope-hhhs",
  "hyperscope-web",
  "js-sys",
  "quilting-core",

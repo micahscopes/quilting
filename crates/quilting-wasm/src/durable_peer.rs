@@ -13,7 +13,7 @@ use hyperscope_app::{
     AppStore, AuthoredProposalRole, AuthoredSessionCompletion, AuthoredSessionEffect,
     AuthoredSessionIntent, AuthoredSessionOpenOutcome, AuthoredSessionStatus, CommitDisposition,
 };
-use hyperscope_hhhs_shadow::{
+use hyperscope_hhhs::{
     DurableAuthoredObservation, DurableAuthoredSession, DurableCarrierDispatch,
     DurableCarrierObservation, DurableLocalPeerDispatch,
 };

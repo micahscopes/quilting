@@ -24,7 +24,7 @@ The downstream integration proof establishes:
 Verification:
 
 - `cargo test -p hyperscape-hhhs`: 28 tests passed;
-- `cargo test -p hyperscope-hhhs-shadow`: 25 tests passed;
+- `cargo test -p hyperscope-hhhs`: 25 tests passed;
 - `cargo test -p hyperscope-web --features durable-history`: 9 tests passed;
 - downstream-only strict Clippy passed;
 - `hyperscope-web` with `csr,durable-history` and `quilting-wasm` with

@@ -46,7 +46,7 @@ durable-history = [
     "dep:hhhs-web-browser",
     "dep:hyperscape-hhhs",
     "dep:hyperscope-app",
-    "dep:hyperscope-hhhs-shadow",
+    "dep:hyperscope-hhhs",
     "dep:futures",
     "dep:indexed_db_futures",
     "dep:js-sys",
@@ -67,7 +67,7 @@ hhhs-replica = { workspace = true, optional = true }
 hhhs-store = { workspace = true, optional = true }
 hhhs-web-browser = { workspace = true, optional = true }
 hyperscape-hhhs = { version = "0.1.0", path = "../hyperscape-hhhs", optional = true }
-hyperscope-hhhs-shadow = { version = "0.1.0", path = "../hyperscope-hhhs-shadow", optional = true }
+hyperscope-hhhs = { version = "0.1.0", path = "../hyperscope-hhhs", optional = true }
 hyperscape-protocol = { version = "0.1.0", path = "../hyperscape-protocol", optional = true }
 hyperscape = { version = "0.1.0", path = "../hyperscape", optional = true }
 hyperscope-app = { version = "0.1.0", path = "../hyperscope-app", optional = true }

@@ -23,7 +23,7 @@ use hyperscape_hhhs::DurableProject;
 #[cfg(any(target_arch = "wasm32", test))]
 use hyperscape_hhhs::ProjectId;
 use hyperscope_app::{AppCommit, AppStore};
-use hyperscope_hhhs_shadow::{DurableAuthoredSession, DurableAuthoredSessionInitError};
+use hyperscope_hhhs::{DurableAuthoredSession, DurableAuthoredSessionInitError};
 #[cfg(any(target_arch = "wasm32", test))]
 use std::collections::BTreeMap;
 
