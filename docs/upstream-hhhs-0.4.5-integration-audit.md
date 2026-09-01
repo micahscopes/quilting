@@ -90,6 +90,15 @@ Requested behavior:
 Window-local reversible prediction remains the correct immediate-feedback
 path. This request bounds its later confirmation/correction path.
 
+The dedicated-worker close barrier also needs one explicit law. The current
+server posts the correlated `Closed` reply before flushing deferred unsolicited
+events. The window-side `close()` terminates the worker as soon as it observes
+`Closed`, so later messages in that final flush can be lost even though the
+in-process oracle returns reply and events together. Either a Close handler
+must be unable to emit events, or accepted final events must cross an
+acknowledged barrier before `Closed` becomes observable. Add browser parity
+coverage proving that `Closed` is genuinely terminal.
+
 ## P1: high-value integration requests
 
 ### Reusable asynchronous durability test sink
