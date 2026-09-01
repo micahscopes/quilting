@@ -622,7 +622,9 @@ pub struct FocusPostprocessPacket {
 /// Background authorship can later promote this value into scene/frame state;
 /// until then, keeping the incumbent color here prevents WebGL2, WebGPU, focus
 /// composition, and parity targets from silently inventing different policy.
-pub const DEFAULT_RENDER_CLEAR_COLOR: [f32; 4] = [0.2, 0.2, 0.3, 1.0];
+/// Every channel is also an exact RGBA8 code point; a half-code value such as
+/// `0.3 * 255 = 76.5` may be quantized differently by WebGL2 and WebGPU.
+pub const DEFAULT_RENDER_CLEAR_COLOR: [f32; 4] = [0.2, 0.2, 77.0 / 255.0, 1.0];
 
 impl FocusPostprocessPacket {
     pub fn validate(self) -> Result<Self, RenderContractError> {
@@ -2019,6 +2021,12 @@ mod tests {
     const IDENTITY_MOBIUS: [f32; 16] = [
         1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
     ];
+
+    #[test]
+    fn default_clear_is_exactly_quantized_in_rgba8() {
+        let codes = DEFAULT_RENDER_CLEAR_COLOR.map(|channel| channel * 255.0);
+        assert_eq!(codes, [51.0, 51.0, 77.0, 255.0]);
+    }
 
     #[test]
     fn timed_pose_identity_includes_continuity_epoch() {

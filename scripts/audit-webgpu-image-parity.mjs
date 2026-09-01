@@ -201,6 +201,14 @@ try {
       && current.residency?.sceneInstances > 0
       && current.animationPlaying === false);
   const before = await waitForQuiescentPresentation();
+  const preexistingWebGlError = await evaluate(
+    `document.getElementById('cv')?.getContext('webgl2')?.getError() ?? -1`,
+  );
+  assert.equal(
+    preexistingWebGlError,
+    0,
+    `incumbent WebGL context was already poisoned before frame evidence: 0x${preexistingWebGlError.toString(16)}`,
+  );
   const requested = await evaluate(
     'globalThis.__hyperscopeGraphicsBackend.requestFrameEvidence()',
   );
@@ -211,7 +219,15 @@ try {
   // WebGPU candidate before either readback is staged. Queue order makes one
   // comparison call sufficient once the submission counter advances.
   const report = await evaluate(
-    'globalThis.__hyperscopeGraphicsBackend.compareFrameEvidence()',
+    `(async () => {
+      try {
+        return await globalThis.__hyperscopeGraphicsBackend.compareFrameEvidence();
+      } catch (error) {
+        const message = error?.message || String(error);
+        const stack = error?.stack ? String.fromCharCode(10) + error.stack : '';
+        throw new Error('backend frame comparison failed: ' + message + stack);
+      }
+    })()`,
   );
   const rgbAbsoluteError = report.image.absoluteChannelError
     .slice(0, 3)
@@ -251,7 +267,7 @@ assert.ok(audit.report.workloadMismatch == null
   'WebGL2 and WebGPU submitted different logical work');
 assert.deepEqual(audit.report.viewport, audit.before.residency.presentationViewport);
 assert.ok(audit.report.clearColor.every((value, index) =>
-  Math.abs(value - [0.2, 0.2, 0.3, 1][index]) <= 1e-6),
+  Math.abs(value - [0.2, 0.2, 77 / 255, 1][index]) <= 1e-6),
   'backend evidence reported a noncanonical clear color');
 assert.deepEqual(audit.before.residency.renderClearColor, audit.report.clearColor);
 assert.equal(audit.before.residency.presentationAlphaMode, 'Opaque');

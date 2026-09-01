@@ -29,6 +29,7 @@ triangles, lines, and draw-sequence hashes.
 | Scene | WebGL2 covered px | WebGPU covered px | coverage mismatch | RGB mean error | RGB pixels with delta > 16 |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | paused horse, normals | 13,755 | 13,756 | 1 ppm | 5 ppm | 5 ppm |
+| paused horse, PBR | 14,089 | 13,756 | 660 ppm | 285 ppm | 1,551 ppm |
 | inverted paused horse, PBR | 191,479 | 191,091 | 769 ppm | 1,198 ppm | 1,339 ppm |
 | inverted paused horse, spheroidal focus | 240,893 | 241,129 | 1,019 ppm | 729 ppm | 0 ppm |
 
@@ -37,10 +38,31 @@ and focus cases remain below 0.14% of pixels with a large RGB delta. This rules
 out a backend-wide vertical flip and provides a regression gate that would
 reject one by orders of magnitude.
 
+### Exact clear quantization
+
+The first ordinary-PBR comparison exposed a smaller version of the reported
+background difference. The shared blue clear value was `0.3`, exactly halfway
+between RGBA8 codes 76 and 77. WebGL2 selected 76 while WebGPU selected 77, so
+976,363 ppm of pixels differed even though nearly all of that difference was
+one blue code. The canonical value is now the exact code point `77 / 255`.
+The same scene subsequently measured 4,317 ppm mismatched pixels and 285 ppm
+mean RGB error; empty background pixels agree exactly.
+
+### Same-context classifier GL state
+
+Repeated PBR evidence also found an intermittent stale `GL_INVALID_OPERATION`
+before readback. A call-level isolated-Chromium trace localized it to the first
+`drawArrays(POINTS)` in `LodCompute::compute_lods`. Optional joint and morph
+sampler slots skipped `bindTexture` when their texture was absent, so a slot
+could retain the pass-one render target and form an invalid framebuffer
+feedback loop. The classifier now owns every sampler slot explicitly, binding
+`None` for absent pose textures. One traced startup and three fresh untraced
+startups retained no GL error after the fix.
+
 ## Decisions
 
 - `quilting-core` owns the incumbent opaque clear color; WebGL2, WebGPU,
-  focus composition, and evidence targets consume that one policy.
+  focus composition, and evidence targets consume that one RGBA8-exact policy.
 - WebGPU explicitly prefers an opaque surface alpha mode when the adapter
   supports it, with a deterministic supported-mode fallback.
 - Image evidence waits for a quiet logical submission. Before this fence, the
@@ -55,6 +77,8 @@ reject one by orders of magnitude.
 
 ```sh
 node scripts/smoke-shared-render-clear.mjs
+HYPERSCOPE_WEBGL_ERROR_URL='http://127.0.0.1:8888/?gfx=webgpu&lodimpl=rust' \
+  node scripts/audit-webgl-error-state.mjs
 node scripts/audit-webgpu-image-parity.mjs
 ```
 

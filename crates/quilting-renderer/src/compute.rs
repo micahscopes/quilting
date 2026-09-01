@@ -3214,9 +3214,11 @@ impl LodCompute {
                 let mut unit = 0u32;
                 let bind_tex = |gl: &glow::Context, unit: &mut u32, tex: Option<glow::Texture>, loc: &Option<glow::UniformLocation>| {
                     gl.active_texture(glow::TEXTURE0 + *unit);
-                    if let Some(t) = tex {
-                        gl.bind_texture(glow::TEXTURE_2D, Some(t));
-                    }
+                    // Every sampler slot owns its binding, including absent
+                    // optional pose textures. Retaining an unrelated texture
+                    // here can alias the pass-one render target and make the
+                    // draw an invalid framebuffer feedback loop.
+                    gl.bind_texture(glow::TEXTURE_2D, tex);
                     if let Some(ref l) = loc {
                         gl.uniform_1_i32(Some(l), *unit as i32);
                     }

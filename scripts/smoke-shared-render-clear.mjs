@@ -17,7 +17,7 @@ const adaptive = read('crates/quilting-webgpu/src/adaptive_overlay.rs');
 const resident = read('crates/quilting-webgpu/src/resident_roots.rs');
 
 assert.ok(
-  core.includes('DEFAULT_RENDER_CLEAR_COLOR: [f32; 4] = [0.2, 0.2, 0.3, 1.0]'),
+  core.includes('DEFAULT_RENDER_CLEAR_COLOR: [f32; 4] = [0.2, 0.2, 77.0 / 255.0, 1.0]'),
   'quilting-core does not own the canonical render clear',
 );
 for (const [name, source, required] of [
