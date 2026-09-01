@@ -11,7 +11,9 @@ use hyperscope_app::AppStore;
 use hyperscope_hhhs_shadow::{
     DurableAuthoredObservation, DurableAuthoredSession, DurableLocalPeerDispatch,
 };
-use hyperscope_web::durable_history::{open_durable_authored_session, IndexedDbDurability};
+use hyperscope_web::durable_history::{
+    import_durable_authored_session, open_durable_authored_session, IndexedDbDurability,
+};
 use serde::Serialize;
 use std::cell::{Cell, RefCell};
 use std::fmt::Display;
@@ -51,6 +53,28 @@ impl HyperscopeAppShadow {
 
         let store = self.store_clone();
         let opened = open_durable_authored_session(project_id, &store)
+            .await
+            .map_err(js_error)?;
+        let restored_projection_on_open = opened.restored_projection().is_some();
+        let (session, _) = opened.into_parts();
+        Ok(HyperscopeDurablePeer {
+            store,
+            session: RefCell::new(Some(session)),
+            restored_projection_on_open,
+            writer_lease: writer_reservation.commit(),
+        })
+    }
+
+    /// Validate portable authored history, persist it to IndexedDB, adopt its
+    /// receiver-local cursor, and return the sole durable peer for this app.
+    #[wasm_bindgen(js_name = importDurableAuthoredPeer)]
+    pub async fn import_durable_authored_peer(
+        &self,
+        archive_bytes: js_sys::Uint8Array,
+    ) -> Result<HyperscopeDurablePeer, JsValue> {
+        let writer_reservation = WriterLeaseReservation::acquire(self.durable_peer_lease())?;
+        let store = self.store_clone();
+        let opened = import_durable_authored_session(&archive_bytes.to_vec(), &store)
             .await
             .map_err(js_error)?;
         let restored_projection_on_open = opened.restored_projection().is_some();
@@ -274,6 +298,11 @@ fn js_error(error: impl Display) -> JsValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hyperscape_hhhs::DurableProject;
+    use hyperscape_protocol::{
+        AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, MessageHeader, MessageId,
+        PeerId, CURRENT_PROTOCOL_VERSION,
+    };
     use wasm_bindgen_test::*;
 
     wasm_bindgen_test_configure!(run_in_browser);
@@ -307,5 +336,63 @@ mod tests {
 
         let reopened = app.open_durable_authored_peer(&project_id).await.unwrap();
         assert_eq!(reopened.session.borrow().as_ref().unwrap().history_len(), 0);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn imported_peer_restarts_through_the_strict_open_path() {
+        let time = js_sys::Date::now() as u128;
+        let random = (js_sys::Math::random() * u64::MAX as f64) as u128;
+        let project_id = ProjectId::from_u128(((time + 1) << 64) | (random + 1)).unwrap();
+        let mut source = DurableProject::new(project_id).unwrap();
+        source
+            .admit(&AuthoredEnvelope {
+                header: MessageHeader {
+                    version: CURRENT_PROTOCOL_VERSION,
+                    message_id: MessageId::from_u128(0xd001).unwrap(),
+                    sender: PeerId::from_u128(0xd002).unwrap(),
+                    sequence: 1,
+                },
+                command: AuthoredCommand::UpsertAsset {
+                    asset: AssetDescriptor {
+                        id: AssetId::from_u128(0xd003).unwrap(),
+                        uri: "portable.glb".into(),
+                        media_type: Some("model/gltf-binary".into()),
+                        content_digest: None,
+                    },
+                },
+            })
+            .await
+            .unwrap();
+        let archive = source.export_archive().unwrap();
+        let app = HyperscopeAppShadow::new();
+
+        let imported = app
+            .import_durable_authored_peer(js_sys::Uint8Array::from(archive.as_slice()))
+            .await
+            .unwrap();
+        assert_eq!(
+            imported
+                .session
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .observed_projection_revision(),
+            Some(0)
+        );
+        drop(imported);
+
+        let reopened = app
+            .open_durable_authored_peer(&project_id.as_uuid().to_string())
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .session
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .observed_projection_revision(),
+            Some(0)
+        );
     }
 }
