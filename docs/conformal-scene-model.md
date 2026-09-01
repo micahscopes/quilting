@@ -138,10 +138,13 @@ deterministically by default; `mr_setHyperscapeCameraNode` switches views.
 
 An entity binding and conformal frame may each carry a typed `stable_id`: a
 non-nil UUID unique in its identity domain. Hyperscape installs entity identity
-as `StableEntityId` and provides UUID-to-entity lookup while retaining glTF
-node and frame array indices only as container/runtime handles. Blender,
-presentation cues, and future HHHS operations should store these typed UUIDs
-rather than Bevy entity values, draw-batch indices, or glTF array positions.
+as `StableEntityId` and retains the validated conformal-frame bijection in
+`ConformalFrameIdentities`. Runtime/editor adapters resolve a durable
+`ConformalFrameId` to the current dense `FrameId` only at admission, and
+diagnostics project the stable ID back out. glTF node and frame array indices
+remain container/runtime handles. Blender, presentation cues, and HHHS
+operations should store these typed UUIDs rather than Bevy entity values,
+draw-batch indices, or glTF array positions.
 
 The diagnostic snapshot exposes the complete `packets` array as well as the
 legacy first-packet fields. For Hyperscape assets, mesh control points remain

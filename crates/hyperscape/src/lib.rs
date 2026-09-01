@@ -8,7 +8,7 @@
 use bevy_app::{App, Plugin, Update};
 use bevy_ecs::prelude::*;
 use bevy_time::{Time, Virtual};
-use hyperscape_protocol::{EntityId, WireError};
+use hyperscape_protocol::{ConformalFrameId, EntityId, WireError};
 use quilting_core::{
     AnchorState, ConformalFrameForest, FrameId, OpenRoundSide, RoundSideOrientation,
     RoundWallRelation, RoundWallSet, WallId,
@@ -92,6 +92,50 @@ pub use surface_frame_pin::{
 pub struct ConformalScene {
     pub frames: ConformalFrameForest,
     pub walls: RoundWallSet,
+}
+
+/// Durable authored identities for the dense conformal-frame handles in the
+/// evaluated scene.
+///
+/// [`FrameId`] is intentionally a compact runtime index. Blender, glTF,
+/// presentation, and replicated authoring surfaces must retain
+/// [`ConformalFrameId`] instead, then resolve it through this resource at the
+/// admission boundary. Legacy assets may leave individual entries unnamed.
+#[derive(Resource, Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConformalFrameIdentities {
+    stable_by_runtime: Vec<Option<ConformalFrameId>>,
+    runtime_by_stable: BTreeMap<ConformalFrameId, FrameId>,
+}
+
+impl ConformalFrameIdentities {
+    pub(crate) fn from_validated(
+        stable_by_runtime: Vec<Option<ConformalFrameId>>,
+        runtime_by_stable: BTreeMap<ConformalFrameId, FrameId>,
+    ) -> Self {
+        Self {
+            stable_by_runtime,
+            runtime_by_stable,
+        }
+    }
+
+    /// Resolve durable authored identity to the current dense runtime handle.
+    pub fn frame_id(&self, stable_id: ConformalFrameId) -> Option<FrameId> {
+        self.runtime_by_stable.get(&stable_id).copied()
+    }
+
+    /// Resolve a dense runtime handle back to durable authored identity.
+    pub fn stable_id(&self, frame: FrameId) -> Option<ConformalFrameId> {
+        self.stable_by_runtime.get(frame.0).copied().flatten()
+    }
+
+    /// One slot per evaluated runtime frame, including legacy unnamed frames.
+    pub fn frame_count(&self) -> usize {
+        self.stable_by_runtime.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.stable_by_runtime.is_empty()
+    }
 }
 
 /// An entity's point coordinates are expressed in this conformal frame.
@@ -404,6 +448,7 @@ impl Plugin for HyperscapePlugin {
         // to a native wall clock and is equally valid in native and wasm apps.
         app.init_resource::<Time<Virtual>>()
             .init_resource::<ConformalScene>()
+            .init_resource::<ConformalFrameIdentities>()
             .init_resource::<FrameReparentRequests>()
             .init_resource::<AnchorFlipRequests>()
             .init_resource::<ContactState>()

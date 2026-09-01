@@ -2,12 +2,12 @@
 
 use crate::{
     ActiveAnchor, ChamberAggregateState, ChamberKey, ChamberSide, ChamberSignature, ConformalPath,
-    ConformalPathTimeline, ConformalScene, ContactRecord, ContactState, CrossFrameTarget,
-    EntityFrame, EuclideanCoordinates, EuclideanModelMatrix, LocalCoordinates, PathKeyframe,
-    PathTransition, ProjectionCamera, RenderSubject, StableEntityId, TrackedCoordinates,
-    SurfaceAddress, SurfaceAttachment, SurfaceFramePin, SurfaceFramePinBinding,
-    SurfaceFramePinSamples, SurfaceFramePinSet, SurfaceSample, TransformHistory,
-    TransformHistorySample,
+    ConformalFrameIdentities, ConformalPathTimeline, ConformalScene, ContactRecord, ContactState,
+    CrossFrameTarget, EntityFrame, EuclideanCoordinates, EuclideanModelMatrix, LocalCoordinates,
+    PathKeyframe, PathTransition, ProjectionCamera, RenderSubject, StableEntityId,
+    TrackedCoordinates, SurfaceAddress, SurfaceAttachment, SurfaceFramePin,
+    SurfaceFramePinBinding, SurfaceFramePinSamples, SurfaceFramePinSet, SurfaceSample,
+    TransformHistory, TransformHistorySample,
 };
 use bevy_app::App;
 use bevy_ecs::prelude::*;
@@ -196,6 +196,10 @@ pub fn spawn_hyperscape_asset(
         }
     }
 
+    world.insert_resource(ConformalFrameIdentities::from_validated(
+        runtime.frame_stable_ids,
+        runtime.frames_by_stable_id,
+    ));
     world.insert_resource(ConformalScene {
         frames: runtime.frames,
         walls: runtime.walls,
@@ -258,6 +262,7 @@ impl Error for SurfaceFramePinSampleCountError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameDiagnostic {
     pub frame: usize,
+    pub stable_id: Option<hyperscape_protocol::ConformalFrameId>,
     pub name: String,
     pub parent: Option<usize>,
     pub generator_count: usize,
@@ -369,6 +374,28 @@ impl HyperscapeGltfRuntime {
             .map(|stable| stable.0)
     }
 
+    /// Resolve a durable authored frame ID to the current dense runtime
+    /// handle. The handle is valid only for this admitted scene revision.
+    pub fn frame_by_stable_id(
+        &self,
+        stable_id: hyperscape_protocol::ConformalFrameId,
+    ) -> Option<quilting_core::FrameId> {
+        self.app
+            .world()
+            .resource::<ConformalFrameIdentities>()
+            .frame_id(stable_id)
+    }
+
+    pub fn stable_id_for_frame(
+        &self,
+        frame: quilting_core::FrameId,
+    ) -> Option<hyperscape_protocol::ConformalFrameId> {
+        self.app
+            .world()
+            .resource::<ConformalFrameIdentities>()
+            .stable_id(frame)
+    }
+
     pub fn surface_frame_pin_requests(&self) -> Vec<GltfSurfaceFramePinRequest> {
         self.app
             .world()
@@ -452,6 +479,7 @@ impl HyperscapeGltfRuntime {
     pub fn diagnostic_snapshot(&self) -> RuntimeDiagnosticSnapshot {
         let world = self.app.world();
         let scene = world.resource::<ConformalScene>();
+        let frame_identities = world.resource::<ConformalFrameIdentities>();
         let contacts = world.resource::<ContactState>();
         let aggregates = world.resource::<ChamberAggregateState>();
         let history = world.resource::<TransformHistory>();
@@ -464,6 +492,7 @@ impl HyperscapeGltfRuntime {
             .enumerate()
             .map(|(frame, authored)| FrameDiagnostic {
                 frame,
+                stable_id: frame_identities.stable_id(quilting_core::FrameId(frame)),
                 name: authored.name.clone(),
                 parent: authored.parent.map(|parent| parent.0),
                 generator_count: authored.local_to_parent.generators.len(),
@@ -770,6 +799,21 @@ mod tests {
 
         let mut world = World::new();
         spawn_hyperscape_asset(&mut world, &nodes, &asset).unwrap();
+        let frame_id = ConformalFrameId::from_u128(42).unwrap();
+        let frame_identities = world.resource::<ConformalFrameIdentities>();
+        assert_eq!(frame_identities.frame_count(), asset.payload.frames.len());
+        assert_eq!(
+            frame_identities.frame_id(frame_id),
+            Some(quilting_core::FrameId(1))
+        );
+        assert_eq!(
+            frame_identities.stable_id(quilting_core::FrameId(1)),
+            Some(frame_id)
+        );
+        assert_eq!(
+            frame_identities.stable_id(quilting_core::FrameId(99)),
+            None
+        );
         let pins = world.resource::<SurfaceFramePinSet>();
         assert_eq!(pins.0.len(), 1);
         assert_eq!(pins.0[0].frame, quilting_core::FrameId(1));
@@ -779,6 +823,14 @@ mod tests {
         assert_eq!(pins.0[0].pin.local_offset.orientation_sign(), -1);
 
         let mut runtime = HyperscapeGltfRuntime::new(&nodes, &asset).unwrap();
+        assert_eq!(
+            runtime.frame_by_stable_id(frame_id),
+            Some(quilting_core::FrameId(1))
+        );
+        assert_eq!(
+            runtime.stable_id_for_frame(quilting_core::FrameId(1)),
+            Some(frame_id)
+        );
         let requests = runtime.surface_frame_pin_requests();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].pin_index, 0);
@@ -801,6 +853,10 @@ mod tests {
             }])
             .unwrap();
         runtime.tick(Duration::ZERO);
+        assert_eq!(
+            runtime.diagnostic_snapshot().frames[1].stable_id,
+            Some(frame_id)
+        );
         assert_eq!(
             runtime
                 .app()
