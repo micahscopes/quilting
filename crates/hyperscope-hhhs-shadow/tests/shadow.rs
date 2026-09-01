@@ -4,9 +4,10 @@ use hhhs_replica::AsyncTransactionSink;
 use hhhs_store::{StorageRecoveryState, StorageTransaction};
 use hyperscape_hhhs::{AdapterError, DurableProject, MemoryDurability, ProjectId};
 use hyperscape_protocol::{
-    AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId, EphemeralPresence,
-    LocalPeerEnvelope, MessageHeader, MessageId, PeerId, PresenceEnvelope, ProtocolVersion,
-    WireTransform, CURRENT_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION,
+    AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, ConformalFrameId, EntityId,
+    EphemeralPresence, LocalPeerEnvelope, MessageHeader, MessageId, PeerId, PresenceEnvelope,
+    ProtocolVersion, WireConformalGenerator, WireTransform, CURRENT_PROTOCOL_VERSION,
+    LEGACY_PROTOCOL_VERSION,
 };
 use hyperscope_app::{
     AppStore, AuthoredRevision, CommitDisposition, LocalPeerDisposition, LocalPeerIngress,
@@ -76,6 +77,87 @@ fn remove(sequence: u64, entity: u128) -> AuthoredEnvelope {
             entity: EntityId::from_u128(entity).unwrap(),
         },
     )
+}
+
+#[test]
+fn blender_v02_conformal_frame_survives_durable_admission_and_restart() {
+    const BLENDER_FRAME_JSON: &str =
+        include_str!("../../hyperscape-protocol/fixtures/authored-set-conformal-frame-v0.2.json");
+
+    let project_id = project(0x2420);
+    let frame = ConformalFrameId::from_u128(4).unwrap();
+    let first: AuthoredEnvelope = serde_json::from_str(BLENDER_FRAME_JSON).unwrap();
+    first.validate().unwrap();
+    let first_word = match &first.command {
+        AuthoredCommand::SetConformalFrameTransform {
+            frame: actual,
+            generators,
+        } => {
+            assert_eq!(*actual, frame);
+            generators.clone()
+        }
+        command => panic!("fixture carried the wrong command: {command:?}"),
+    };
+
+    let store = AppStore::default();
+    let mut session = DurableAuthoredSession::new(project_id).unwrap();
+    let admitted = block_on(session.accept_local_peer(
+        &store,
+        LocalPeerEnvelope::Authored(first.clone()),
+        1.0,
+    ))
+    .unwrap();
+    assert_eq!(admitted.peer.disposition, LocalPeerDisposition::Applied);
+    assert_eq!(admitted.peer.projection_revision, Some(0));
+    assert!(admitted.durable.is_some());
+    assert_eq!(session.history_len(), 1);
+    assert_eq!(
+        session.project_state().unwrap().conformal_frame_transforms[&frame],
+        first_word
+    );
+    assert_eq!(store.authored_scene_snapshot().conformal_frames.len(), 1);
+    assert_eq!(
+        store.authored_scene_snapshot().conformal_frames[0].generators,
+        first_word
+    );
+
+    // Blender publishes a complete ordered generator word. A later edit must
+    // atomically replace that word rather than append deltas to it.
+    let replacement_word = vec![
+        WireConformalGenerator::Translation {
+            offset: [-3.0, 2.0, 1.0],
+        },
+        WireConformalGenerator::UniformScale { factor: 0.5 },
+    ];
+    let mut replacement = first;
+    replacement.header.message_id = MessageId::from_u128(5).unwrap();
+    replacement.header.sequence = 4;
+    replacement.command = AuthoredCommand::SetConformalFrameTransform {
+        frame,
+        generators: replacement_word.clone(),
+    };
+    let replaced =
+        block_on(session.accept_local_peer(&store, LocalPeerEnvelope::Authored(replacement), 2.0))
+            .unwrap();
+    assert_eq!(replaced.peer.disposition, LocalPeerDisposition::Applied);
+    assert_eq!(replaced.peer.projection_revision, Some(1));
+    assert_eq!(session.history_len(), 2);
+    assert_eq!(
+        session.project_state().unwrap().conformal_frame_transforms[&frame],
+        replacement_word
+    );
+
+    let durable_bytes = session.durable_bytes();
+    let recovered = DurableAuthoredSession::recover(project_id, durable_bytes.clone()).unwrap();
+    let recovered_store = AppStore::default();
+    let restore = recovered.restore_store(&recovered_store).unwrap().unwrap();
+    assert_eq!(restore.disposition, CommitDisposition::Applied);
+    assert_eq!(recovered.history_len(), 2);
+    assert_eq!(recovered.durable_bytes(), durable_bytes);
+    assert_eq!(
+        recovered_store.authored_scene_snapshot().conformal_frames[0].generators,
+        replacement_word
+    );
 }
 
 #[test]
