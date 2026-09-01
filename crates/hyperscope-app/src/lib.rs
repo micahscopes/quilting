@@ -5743,6 +5743,40 @@ mod tests {
     }
 
     #[test]
+    fn exact_pick_activation_is_one_input_and_one_frame_transaction() {
+        let store = AppStore::default();
+        let hit = interaction_hit(selection_identity());
+        let (sequence, commit) = store
+            .dispatch_semantic(SemanticAction::Interact(
+                InteractionAction::ActivatePrimary(hit),
+            ))
+            .unwrap();
+        assert_eq!(sequence, 0);
+        assert!(!commit.published_ui);
+
+        let pending = store.frame_snapshot();
+        assert_eq!(pending.interaction.hovered, None);
+        assert_eq!(pending.interaction.selected, None);
+
+        store
+            .dispatch(AppEvent::Frame(FrameTick {
+                elapsed_seconds: 0.0,
+                delta_seconds: 0.0,
+            }))
+            .unwrap();
+
+        let committed = store.frame_snapshot();
+        assert_eq!(committed.interaction.hovered, Some(hit));
+        assert_eq!(committed.interaction.active, None);
+        assert_eq!(committed.interaction.last_applied_sequence, Some(sequence));
+        assert_eq!(committed.interaction.selected, Some(hit.identity));
+        assert_eq!(committed.selected_focus.unwrap().identity, hit.identity);
+        assert_eq!(committed.focus.anchor.unwrap().source_pivot, hit.source_pivot);
+        assert_eq!(committed.pending_navigation_actions, 0);
+        assert_eq!(committed.last_applied_navigation_sequence, Some(0));
+    }
+
+    #[test]
     fn focus_sphere_edit_preserves_anchor_or_replaces_detached_geometry_atomically() {
         let store = AppStore::default();
         let detached = FocusSphere::new([1.0, -2.0, 0.5], 2.5).unwrap();

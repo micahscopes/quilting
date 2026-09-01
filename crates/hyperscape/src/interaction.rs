@@ -767,6 +767,10 @@ pub enum InteractionAction {
     /// Accept a nearby hit only when it lies within the scale-aware focus
     /// reach. Game proximity queries use this instead of weakening ray picks.
     SetProximityHover(Option<InteractionHit>),
+    /// Atomically activate one exact resolved hit. This is the semantic form
+    /// of an instantaneous click from an asynchronous picker: it cannot expose
+    /// a half-applied hover/press/release sequence between application frames.
+    ActivatePrimary(InteractionHit),
     PressPrimary,
     ReleasePrimary,
     CancelPrimary,
@@ -992,6 +996,16 @@ fn apply_interaction_action(
                 Some(_) | None => None,
             };
             None
+        }
+        InteractionAction::ActivatePrimary(hit) => {
+            hit.validate()?;
+            state.hovered = Some(hit);
+            state.active = None;
+            Some(InteractionActivation {
+                sequence: scheduled.sequence,
+                at_seconds: scheduled.at_seconds,
+                hit,
+            })
         }
         InteractionAction::PressPrimary => {
             state.active = state.hovered;
@@ -1482,6 +1496,27 @@ mod tests {
         assert!(controller.advance_to(0.0, &focus).unwrap().is_empty());
         assert_eq!(controller.state.active, None);
         assert_eq!(controller.state.hovered.unwrap().identity, identity(1, 3));
+    }
+
+    #[test]
+    fn exact_primary_activation_is_one_atomic_semantic_action() {
+        let mut controller = InteractionController::default();
+        let selected = hit(1, 2, 100.0);
+        let sequence = controller
+            .push(InteractionAction::ActivatePrimary(selected))
+            .unwrap();
+        let activations = controller
+            .advance_to(0.0, &FocusNavigation::default())
+            .unwrap();
+
+        assert_eq!(sequence, 0);
+        assert_eq!(activations.len(), 1);
+        assert_eq!(activations[0].sequence, sequence);
+        assert_eq!(activations[0].hit, selected);
+        assert_eq!(controller.state.hovered, Some(selected));
+        assert_eq!(controller.state.active, None);
+        assert_eq!(controller.state.revision, 1);
+        assert_eq!(controller.state.last_applied_sequence, Some(sequence));
     }
 
     #[test]

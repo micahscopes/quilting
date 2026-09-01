@@ -643,6 +643,9 @@ pub enum ReplayInteractionAction {
     SetProximityHover {
         hit: Option<ReplayInteractionHit>,
     },
+    ActivatePrimary {
+        hit: ReplayInteractionHit,
+    },
     PressPrimary,
     ReleasePrimary,
     CancelPrimary,
@@ -659,6 +662,9 @@ impl TryFrom<ReplayInteractionAction> for InteractionAction {
             ReplayInteractionAction::SetProximityHover { hit } => Ok(
                 Self::SetProximityHover(hit.map(InteractionHit::try_from).transpose()?),
             ),
+            ReplayInteractionAction::ActivatePrimary { hit } => {
+                Ok(Self::ActivatePrimary(hit.try_into()?))
+            }
             ReplayInteractionAction::PressPrimary => Ok(Self::PressPrimary),
             ReplayInteractionAction::ReleasePrimary => Ok(Self::ReleasePrimary),
             ReplayInteractionAction::CancelPrimary => Ok(Self::CancelPrimary),
