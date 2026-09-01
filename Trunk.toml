@@ -12,6 +12,7 @@ watch = [
     "spacemouse.mjs",
     "hyperscope_focus.mjs",
     "local_peer_browser.mjs",
+    "local_peer_session.mjs",
     "asset_effect_host.mjs",
     "horse.glb",
     "ant.glb",
