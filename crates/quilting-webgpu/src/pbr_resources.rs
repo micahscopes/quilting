@@ -20,6 +20,8 @@ pub(crate) const PBR_EMISSIVE_TEXTURE_BIT: u32 = 1 << 3;
 pub(crate) const PBR_OCCLUSION_TEXTURE_BIT: u32 = 1 << 4;
 pub(crate) const PBR_TRANSMISSION_TEXTURE_BIT: u32 = 1 << 5;
 pub(crate) const PBR_TEXTURE_CHANNELS: usize = 6;
+const PBR_TEXTURE_MIP_LEVEL_COUNT: u32 = 1;
+const PORTABLE_PBR_ATLAS_USES_MANUAL_BILINEAR_FILTERING: bool = true;
 
 pub(crate) struct PbrTextureResource {
     pub(crate) texture: wgpu::Texture,
@@ -42,9 +44,27 @@ pub struct PbrTextureTable {
 /// material-batched path and the portable atlas can be compared exactly.
 pub struct PortablePbrTextureAtlas {
     plan: PortableTextureAtlasPlan,
+    mip_level_count: u32,
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     descriptor_records: wgpu::Buffer,
+}
+
+/// Allocation and filtering facts for one retained PBR texture table. These
+/// values deliberately describe the resources that were actually created,
+/// rather than inferring capabilities from authored image descriptors.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PbrTextureTableDiagnostics {
+    pub texture_slots: usize,
+    pub occupied_images: usize,
+    pub individual_mip_level_count: u32,
+    pub portable_atlas_extent: [u32; 2],
+    pub portable_atlas_layers: u32,
+    pub portable_atlas_source_texels: u64,
+    pub portable_atlas_allocated_texels: u64,
+    pub portable_atlas_utilization_millionths: u32,
+    pub portable_atlas_mip_level_count: u32,
+    pub portable_atlas_uses_manual_bilinear_filtering: bool,
 }
 
 pub(crate) struct PbrPortableAtlasBindings {
@@ -137,6 +157,15 @@ impl PbrTextureTable {
         &self.portable_atlas.plan
     }
 
+    pub fn diagnostics(&self) -> PbrTextureTableDiagnostics {
+        pbr_texture_table_diagnostics(
+            self.len(),
+            self.occupied_len(),
+            &self.portable_atlas.plan,
+            self.portable_atlas.mip_level_count,
+        )
+    }
+
     fn resource(&self, index: u32) -> Option<&PbrTextureResource> {
         usize::try_from(index)
             .ok()
@@ -154,6 +183,27 @@ impl PbrTextureTable {
 
     pub fn sampler(&self, index: u32) -> Option<&wgpu::Sampler> {
         self.resource(index).map(|resource| &resource.sampler)
+    }
+}
+
+fn pbr_texture_table_diagnostics(
+    texture_slots: usize,
+    occupied_images: usize,
+    plan: &PortableTextureAtlasPlan,
+    portable_atlas_mip_level_count: u32,
+) -> PbrTextureTableDiagnostics {
+    PbrTextureTableDiagnostics {
+        texture_slots,
+        occupied_images,
+        individual_mip_level_count: PBR_TEXTURE_MIP_LEVEL_COUNT,
+        portable_atlas_extent: plan.extent,
+        portable_atlas_layers: plan.layer_count,
+        portable_atlas_source_texels: plan.source_texels,
+        portable_atlas_allocated_texels: plan.allocated_texels,
+        portable_atlas_utilization_millionths: plan.utilization_millionths(),
+        portable_atlas_mip_level_count,
+        portable_atlas_uses_manual_bilinear_filtering:
+            PORTABLE_PBR_ATLAS_USES_MANUAL_BILINEAR_FILTERING,
     }
 }
 
@@ -859,7 +909,7 @@ fn create_portable_pbr_texture_atlas(
             height: plan.extent[1],
             depth_or_array_layers: plan.layer_count,
         },
-        mip_level_count: 1,
+        mip_level_count: PBR_TEXTURE_MIP_LEVEL_COUNT,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
@@ -899,6 +949,7 @@ fn create_portable_pbr_texture_atlas(
     );
     Ok(PortablePbrTextureAtlas {
         plan,
+        mip_level_count: PBR_TEXTURE_MIP_LEVEL_COUNT,
         texture,
         view,
         descriptor_records,
@@ -1012,7 +1063,7 @@ fn create_texture_resource(
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("quilting PBR texture asset"),
         size: texture_extent(descriptor),
-        mip_level_count: 1,
+        mip_level_count: PBR_TEXTURE_MIP_LEVEL_COUNT,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
@@ -1084,5 +1135,43 @@ fn address_mode(mode: TextureWrapMode) -> wgpu::AddressMode {
         TextureWrapMode::ClampToEdge => wgpu::AddressMode::ClampToEdge,
         TextureWrapMode::MirroredRepeat => wgpu::AddressMode::MirrorRepeat,
         TextureWrapMode::Repeat => wgpu::AddressMode::Repeat,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diagnostics_report_the_created_base_mip_atlas_contract() {
+        let descriptors = [
+            Some(TextureAssetDescriptor {
+                width: 8,
+                height: 4,
+                wrap_s: TextureWrapMode::Repeat,
+                wrap_t: TextureWrapMode::ClampToEdge,
+            }),
+            None,
+        ];
+        let plan = PortableTextureAtlasPlan::build(
+            &descriptors,
+            PortableTextureAtlasLimits {
+                maximum_dimension: 16,
+                maximum_layers: 2,
+            },
+        )
+        .unwrap();
+        let diagnostics = pbr_texture_table_diagnostics(2, 1, &plan, 1);
+
+        assert_eq!(diagnostics.texture_slots, 2);
+        assert_eq!(diagnostics.occupied_images, 1);
+        assert_eq!(diagnostics.individual_mip_level_count, 1);
+        assert_eq!(diagnostics.portable_atlas_extent, [8, 8]);
+        assert_eq!(diagnostics.portable_atlas_layers, 1);
+        assert_eq!(diagnostics.portable_atlas_source_texels, 32);
+        assert_eq!(diagnostics.portable_atlas_allocated_texels, 64);
+        assert_eq!(diagnostics.portable_atlas_utilization_millionths, 500_000);
+        assert_eq!(diagnostics.portable_atlas_mip_level_count, 1);
+        assert!(diagnostics.portable_atlas_uses_manual_bilinear_filtering);
     }
 }

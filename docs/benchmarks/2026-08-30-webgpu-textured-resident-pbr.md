@@ -79,6 +79,13 @@ in-place update, including sparse texture-table slots, and proves the
 multi-material raster result. Exact WASM compilation and live Chrome promotion
 remain separate gates.
 
+The retained table now reports the allocation actually created: individual and
+portable mip counts, atlas extent and layers, occupied/source/allocated texels,
+packing utilization, and whether the portable shader uses manual bilinear
+filtering. This makes the present base-mip-only contract explicit in browser
+diagnostics. In particular, a fully resident texture table can no longer be
+mistaken for evidence that minification matches the incumbent WebGL mip chain.
+
 ## Selected-face overlay
 
 An ordinary selected face no longer invalidates an otherwise supported WebGPU

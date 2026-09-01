@@ -243,6 +243,14 @@ pub(crate) struct WebGpuBackendDiagnostics {
     textures_ready: bool,
     texture_slots: usize,
     texture_images: usize,
+    pbr_texture_mip_levels: u32,
+    pbr_portable_atlas_extent: [u32; 2],
+    pbr_portable_atlas_layers: u32,
+    pbr_portable_atlas_source_texels: u64,
+    pbr_portable_atlas_allocated_texels: u64,
+    pbr_portable_atlas_utilization_millionths: u32,
+    pbr_portable_atlas_mip_levels: u32,
+    pbr_portable_atlas_manual_bilinear: bool,
     environment_ready: bool,
     environment_prefiltered_size: u32,
     environment_prefiltered_mips: u32,
@@ -427,6 +435,11 @@ impl WebGpuBackend {
             .as_ref()
             .and_then(PatchRenderScene::pbr_texture_residency)
             .unwrap_or_default();
+        let pbr_texture_table = self
+            .textures
+            .as_ref()
+            .map(PbrTextureTable::diagnostics)
+            .unwrap_or_default();
         WebGpuBackendDiagnostics {
             state: if self.state.is_empty() {
                 "disabled"
@@ -446,11 +459,18 @@ impl WebGpuBackend {
                 .as_ref()
                 .map_or(0, PackedPatchAtlas::vertex_count),
             textures_ready: self.textures.is_some(),
-            texture_slots: self.textures.as_ref().map_or(0, PbrTextureTable::len),
-            texture_images: self
-                .textures
-                .as_ref()
-                .map_or(0, PbrTextureTable::occupied_len),
+            texture_slots: pbr_texture_table.texture_slots,
+            texture_images: pbr_texture_table.occupied_images,
+            pbr_texture_mip_levels: pbr_texture_table.individual_mip_level_count,
+            pbr_portable_atlas_extent: pbr_texture_table.portable_atlas_extent,
+            pbr_portable_atlas_layers: pbr_texture_table.portable_atlas_layers,
+            pbr_portable_atlas_source_texels: pbr_texture_table.portable_atlas_source_texels,
+            pbr_portable_atlas_allocated_texels: pbr_texture_table.portable_atlas_allocated_texels,
+            pbr_portable_atlas_utilization_millionths: pbr_texture_table
+                .portable_atlas_utilization_millionths,
+            pbr_portable_atlas_mip_levels: pbr_texture_table.portable_atlas_mip_level_count,
+            pbr_portable_atlas_manual_bilinear: pbr_texture_table
+                .portable_atlas_uses_manual_bilinear_filtering,
             environment_ready: self.environment.is_some(),
             environment_prefiltered_size: self.environment.as_ref().map_or(0, |environment| {
                 environment.descriptor().prefiltered_face_size
@@ -3055,6 +3075,14 @@ mod tests {
     fn presentation_health_starts_unadmitted_and_is_explicitly_serialized() {
         let diagnostics = serde_json::to_value(WebGpuBackend::default().diagnostics()).unwrap();
         assert_eq!(diagnostics["presentationFrameAdmitted"], false);
+        assert_eq!(diagnostics["pbrTextureMipLevels"], 0);
+        assert_eq!(
+            diagnostics["pbrPortableAtlasExtent"],
+            serde_json::json!([0, 0])
+        );
+        assert_eq!(diagnostics["pbrPortableAtlasLayers"], 0);
+        assert_eq!(diagnostics["pbrPortableAtlasMipLevels"], 0);
+        assert_eq!(diagnostics["pbrPortableAtlasManualBilinear"], false);
     }
 
     #[test]

@@ -29,7 +29,8 @@ pub use focus_postprocess::{
 };
 pub use pbr_environment::{PbrEnvironmentBindings, PbrEnvironmentMap};
 pub use pbr_resources::{
-    PbrMaterialTextureBindings, PbrMaterialTextureResidency, PbrTextureTable, PbrTextureTableUpdate,
+    PbrMaterialTextureBindings, PbrMaterialTextureResidency, PbrTextureTable,
+    PbrTextureTableDiagnostics, PbrTextureTableUpdate,
 };
 pub use picking::{
     PatchPickEncoding, PatchPickPipeline, PatchPickRequest, PatchPickSample, PatchPickTarget,
