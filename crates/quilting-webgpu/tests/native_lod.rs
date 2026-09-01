@@ -500,6 +500,19 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
                 .unwrap(),
             initial_a,
         );
+        let source_mip = classifier
+            .read_pbr_texture_mip_rgba8_for_diagnostics(&texture_table, 0, 1)
+            .await
+            .unwrap();
+        assert_eq!(source_mip.len(), 4);
+        assert_eq!(
+            classifier
+                .read_pbr_portable_atlas_mip_rgba8_for_diagnostics(&texture_table, 0, 1)
+                .await
+                .unwrap(),
+            source_mip,
+            "independently packed atlas mip must preserve the generated source mip",
+        );
 
         let sparse_assets = [Some(initial_assets[0]), None, Some(initial_assets[1])];
         let sparse_table = classifier

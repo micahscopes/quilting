@@ -79,12 +79,51 @@ in-place update, including sparse texture-table slots, and proves the
 multi-material raster result. Exact WASM compilation and live Chrome promotion
 remain separate gates.
 
-The retained table now reports the allocation actually created: individual and
+The retained table reports the allocation actually created: individual and
 portable mip counts, atlas extent and layers, occupied/source/allocated texels,
-packing utilization, and whether the portable shader uses manual bilinear
-filtering. This makes the present base-mip-only contract explicit in browser
-diagnostics. In particular, a fully resident texture table can no longer be
-mistaken for evidence that minification matches the incumbent WebGL mip chain.
+packing utilization, and the portable shader's manual filtering modes. This
+first exposed that a fully resident table was still base-mip-only and therefore
+was not evidence of minification parity with WebGL.
+
+## Mip-safe minification cut — 2026-09-01
+
+The static chess scene admitted an exact 94,626-instance resident-root workload
+but measured 31,840 mean-RGB ppm from the incumbent image. Its nine authored
+images are each 4096x4096. WebGL generated complete mip chains and selected them
+with trilinear filtering; both WebGPU texture representations retained only
+base mip zero. This is a concrete filtering-contract mismatch even though a
+fresh live image gate is still required to prove how much of that scene's error
+it explains.
+
+The upload path now builds one box-filtered mip chain per source image. Every
+mip rectangle is packed independently into the corresponding level of the
+portable array atlas, so unrelated images cannot bleed together and long,
+non-power-of-two images do not require power-of-two alignment padding. The
+portable PBR shader computes the texture footprint from fragment derivatives,
+performs exact wrap-aware bilinear reads within each logical mip rectangle, and
+blends adjacent levels. The material-batched path uses the same generated
+source mip chains through its ordinary hardware sampler.
+
+Atlas planning evaluates every viable power-of-two page extent and selects the
+lowest complete-mip allocation. For the chess-shaped case—nine 4096x4096
+images under an 8192 device limit—it chooses nine exact 4096 layers rather than
+three wasteful 8192 layers: 150,994,944 base texels and 201,326,589 texels over
+the complete chains, both at 100% packing utilization. Diagnostics expose both
+base and full-chain allocation so future context-loss investigations can
+separate filtering correctness from residency pressure.
+
+That asset still retains the same 201,326,589 texels in the individual-texture
+path during backend cutover, for 402,653,178 RGBA8 texels total: 1,610,612,712
+bytes (about 1.50 GiB) before driver overhead. The diagnostic contract reports
+this combined figure explicitly. Consolidating prepared/adaptive PBR onto the
+portable table, then retiring the duplicate individual representation where
+safe, is therefore a required residency optimization rather than cosmetic
+cleanup.
+
+The pure atlas, mip shader, resident-root shader, and WASM browser-target gates
+pass without acquiring a GPU. Native raster/readback and live Chrome chess
+parity remain deliberately pending while another project is exercising the
+shared WebGPU device.
 
 ## Selected-face overlay
 

@@ -1479,8 +1479,8 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
                 .iter()
                 .filter(|(_, variable)| variable.binding.is_some())
                 .count(),
-            16,
-            "nine resident bindings, three portable texture bindings, and four environment bindings",
+            17,
+            "nine resident bindings, four portable texture bindings, and four environment bindings",
         );
         let entries = module
             .entry_points
@@ -1544,6 +1544,7 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             ("ResidentDrawDomainRecord", 16),
             ("PbrPortableTextureRecord", 32),
             ("PbrPortableMaterialTextures", 32),
+            ("PbrPortableMipPlacement", 16),
         ] {
             let (handle, _) = module
                 .types

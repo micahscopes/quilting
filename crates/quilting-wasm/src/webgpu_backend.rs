@@ -243,14 +243,22 @@ pub(crate) struct WebGpuBackendDiagnostics {
     textures_ready: bool,
     texture_slots: usize,
     texture_images: usize,
+    pbr_texture_min_mip_levels: u32,
     pbr_texture_mip_levels: u32,
+    pbr_texture_allocated_mip_texels: u64,
     pbr_portable_atlas_extent: [u32; 2],
     pbr_portable_atlas_layers: u32,
     pbr_portable_atlas_source_texels: u64,
     pbr_portable_atlas_allocated_texels: u64,
     pbr_portable_atlas_utilization_millionths: u32,
+    pbr_portable_atlas_source_mip_texels: u64,
+    pbr_portable_atlas_allocated_mip_texels: u64,
+    pbr_portable_atlas_mip_utilization_millionths: u32,
     pbr_portable_atlas_mip_levels: u32,
     pbr_portable_atlas_manual_bilinear: bool,
+    pbr_portable_atlas_manual_trilinear: bool,
+    pbr_texture_total_allocated_mip_texels: u64,
+    pbr_texture_total_allocated_bytes: u64,
     environment_ready: bool,
     environment_prefiltered_size: u32,
     environment_prefiltered_mips: u32,
@@ -461,16 +469,29 @@ impl WebGpuBackend {
             textures_ready: self.textures.is_some(),
             texture_slots: pbr_texture_table.texture_slots,
             texture_images: pbr_texture_table.occupied_images,
-            pbr_texture_mip_levels: pbr_texture_table.individual_mip_level_count,
+            pbr_texture_min_mip_levels: pbr_texture_table.individual_min_mip_level_count,
+            pbr_texture_mip_levels: pbr_texture_table.individual_max_mip_level_count,
+            pbr_texture_allocated_mip_texels: pbr_texture_table
+                .individual_allocated_mip_texels,
             pbr_portable_atlas_extent: pbr_texture_table.portable_atlas_extent,
             pbr_portable_atlas_layers: pbr_texture_table.portable_atlas_layers,
             pbr_portable_atlas_source_texels: pbr_texture_table.portable_atlas_source_texels,
             pbr_portable_atlas_allocated_texels: pbr_texture_table.portable_atlas_allocated_texels,
             pbr_portable_atlas_utilization_millionths: pbr_texture_table
                 .portable_atlas_utilization_millionths,
+            pbr_portable_atlas_source_mip_texels: pbr_texture_table
+                .portable_atlas_source_mip_texels,
+            pbr_portable_atlas_allocated_mip_texels: pbr_texture_table
+                .portable_atlas_allocated_mip_texels,
+            pbr_portable_atlas_mip_utilization_millionths: pbr_texture_table
+                .portable_atlas_mip_utilization_millionths,
             pbr_portable_atlas_mip_levels: pbr_texture_table.portable_atlas_mip_level_count,
             pbr_portable_atlas_manual_bilinear: pbr_texture_table
                 .portable_atlas_uses_manual_bilinear_filtering,
+            pbr_portable_atlas_manual_trilinear: pbr_texture_table
+                .portable_atlas_uses_manual_trilinear_filtering,
+            pbr_texture_total_allocated_mip_texels: pbr_texture_table.total_allocated_mip_texels,
+            pbr_texture_total_allocated_bytes: pbr_texture_table.total_allocated_bytes,
             environment_ready: self.environment.is_some(),
             environment_prefiltered_size: self.environment.as_ref().map_or(0, |environment| {
                 environment.descriptor().prefiltered_face_size
@@ -3075,7 +3096,9 @@ mod tests {
     fn presentation_health_starts_unadmitted_and_is_explicitly_serialized() {
         let diagnostics = serde_json::to_value(WebGpuBackend::default().diagnostics()).unwrap();
         assert_eq!(diagnostics["presentationFrameAdmitted"], false);
+        assert_eq!(diagnostics["pbrTextureMinMipLevels"], 0);
         assert_eq!(diagnostics["pbrTextureMipLevels"], 0);
+        assert_eq!(diagnostics["pbrTextureAllocatedMipTexels"], 0);
         assert_eq!(
             diagnostics["pbrPortableAtlasExtent"],
             serde_json::json!([0, 0])
@@ -3083,6 +3106,9 @@ mod tests {
         assert_eq!(diagnostics["pbrPortableAtlasLayers"], 0);
         assert_eq!(diagnostics["pbrPortableAtlasMipLevels"], 0);
         assert_eq!(diagnostics["pbrPortableAtlasManualBilinear"], false);
+        assert_eq!(diagnostics["pbrPortableAtlasManualTrilinear"], false);
+        assert_eq!(diagnostics["pbrTextureTotalAllocatedMipTexels"], 0);
+        assert_eq!(diagnostics["pbrTextureTotalAllocatedBytes"], 0);
     }
 
     #[test]

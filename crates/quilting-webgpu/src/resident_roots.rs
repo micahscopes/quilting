@@ -304,6 +304,7 @@ pub fn resident_root_pipeline_descriptors(
             },
             buffer_binding(1, fragment, false, 32, false),
             buffer_binding(2, fragment, false, 32, false),
+            buffer_binding(3, fragment, false, 16, false),
         ],
     )?;
     let environment_bindings = pbr_environment_bindings(2)?;

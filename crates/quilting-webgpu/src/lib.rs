@@ -37,8 +37,8 @@ pub use picking::{
     ResidentRootPickPipeline, StagedPatchPickReadback,
 };
 pub use portable_texture_atlas::{
-    PortableTextureAtlasLimits, PortableTextureAtlasPlacement, PortableTextureAtlasPlan,
-    PortableTextureAtlasPlanError,
+    texture_mip_level_count, PortableTextureAtlasLimits, PortableTextureAtlasMipPlacement,
+    PortableTextureAtlasPlacement, PortableTextureAtlasPlan, PortableTextureAtlasPlanError,
 };
 pub use prepared_patch_pipeline::{
     prepared_patch_pipeline_descriptors, PreparedPatchPipelineDescriptorError,

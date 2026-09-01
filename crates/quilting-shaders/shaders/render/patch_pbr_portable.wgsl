@@ -4,10 +4,15 @@
 #import quilting::render::patch_pbr_lighting::{pbr_rotated_uv, shade_sampled_patch_pbr}
 
 struct PbrPortableTextureRecord {
-    // xy = atlas origin, zw = exact source dimensions.
-    origin_size: vec4<u32>,
-    // x = array layer, y/z = S/T wrap mode, w = resident.
-    layer_wrap_resident: vec4<u32>,
+    // xy = exact source dimensions, zw = S/T wrap mode.
+    size_wrap: vec4<u32>,
+    // x = mip count, y = placement offset, z = resident, w = reserved.
+    mips_offset_resident: vec4<u32>,
+}
+
+struct PbrPortableMipPlacement {
+    // xy = independently packed origin, z = array layer, w = resident.
+    origin_layer_resident: vec4<u32>,
 }
 
 struct PbrPortableMaterialTextures {
@@ -20,6 +25,7 @@ struct PbrPortableMaterialTextures {
 @group(1) @binding(0) var pbr_portable_atlas: texture_2d_array<f32>;
 @group(1) @binding(1) var<storage, read> pbr_portable_textures: array<PbrPortableTextureRecord>;
 @group(1) @binding(2) var<storage, read> pbr_portable_materials: array<PbrPortableMaterialTextures>;
+@group(1) @binding(3) var<storage, read> pbr_portable_mip_placements: array<PbrPortableMipPlacement>;
 
 const PBR_BASE_COLOR_TEXTURE_BIT: u32 = 1u << 0u;
 const PBR_METALLIC_ROUGHNESS_TEXTURE_BIT: u32 = 1u << 1u;
@@ -47,17 +53,57 @@ fn pbr_wrap_texel(value: i32, size: u32, mode: u32) -> u32 {
 
 fn pbr_load_portable_texel(
     record: PbrPortableTextureRecord,
+    placement: PbrPortableMipPlacement,
     coordinate: vec2<i32>,
+    mip_level: u32,
 ) -> vec4<f32> {
+    let mip_size = max(record.size_wrap.xy >> vec2<u32>(mip_level), vec2<u32>(1u));
     let local = vec2<u32>(
-        pbr_wrap_texel(coordinate.x, record.origin_size.z, record.layer_wrap_resident.y),
-        pbr_wrap_texel(coordinate.y, record.origin_size.w, record.layer_wrap_resident.z),
+        pbr_wrap_texel(coordinate.x, mip_size.x, record.size_wrap.z),
+        pbr_wrap_texel(coordinate.y, mip_size.y, record.size_wrap.w),
     );
     return textureLoad(
         pbr_portable_atlas,
-        vec2<i32>(record.origin_size.xy + local),
-        i32(record.layer_wrap_resident.x),
-        0,
+        vec2<i32>(placement.origin_layer_resident.xy + local),
+        i32(placement.origin_layer_resident.z),
+        i32(mip_level),
+    );
+}
+
+fn pbr_sample_portable_mip(
+    record: PbrPortableTextureRecord,
+    uv: vec2<f32>,
+    mip_level: u32,
+) -> vec4<f32> {
+    let placement_index = record.mips_offset_resident.y + mip_level;
+    let placement = pbr_portable_mip_placements[placement_index];
+    let mip_size = max(record.size_wrap.xy >> vec2<u32>(mip_level), vec2<u32>(1u));
+    let texel = uv * vec2<f32>(mip_size) - vec2<f32>(0.5);
+    let lower = vec2<i32>(floor(texel));
+    let blend = fract(texel);
+    let lower_left = pbr_load_portable_texel(record, placement, lower, mip_level);
+    let lower_right = pbr_load_portable_texel(
+        record,
+        placement,
+        lower + vec2<i32>(1, 0),
+        mip_level,
+    );
+    let upper_left = pbr_load_portable_texel(
+        record,
+        placement,
+        lower + vec2<i32>(0, 1),
+        mip_level,
+    );
+    let upper_right = pbr_load_portable_texel(
+        record,
+        placement,
+        lower + vec2<i32>(1, 1),
+        mip_level,
+    );
+    return mix(
+        mix(lower_left, lower_right, blend.x),
+        mix(upper_left, upper_right, blend.x),
+        blend.y,
     );
 }
 
@@ -70,24 +116,28 @@ fn pbr_sample_portable_texture(
         return fallback;
     }
     let record = pbr_portable_textures[slot];
-    if record.layer_wrap_resident.w == 0u
-        || record.origin_size.z == 0u
-        || record.origin_size.w == 0u
+    if record.mips_offset_resident.z == 0u
+        || record.mips_offset_resident.x == 0u
+        || record.size_wrap.x == 0u
+        || record.size_wrap.y == 0u
     {
         return fallback;
     }
-    let texel = uv * vec2<f32>(record.origin_size.zw) - vec2<f32>(0.5);
-    let lower = vec2<i32>(floor(texel));
-    let blend = fract(texel);
-    let lower_left = pbr_load_portable_texel(record, lower);
-    let lower_right = pbr_load_portable_texel(record, lower + vec2<i32>(1, 0));
-    let upper_left = pbr_load_portable_texel(record, lower + vec2<i32>(0, 1));
-    let upper_right = pbr_load_portable_texel(record, lower + vec2<i32>(1, 1));
-    return mix(
-        mix(lower_left, lower_right, blend.x),
-        mix(upper_left, upper_right, blend.x),
-        blend.y,
-    );
+    let placement_end = record.mips_offset_resident.y + record.mips_offset_resident.x;
+    if placement_end > arrayLength(&pbr_portable_mip_placements) {
+        return fallback;
+    }
+    let scaled_uv = uv * vec2<f32>(record.size_wrap.xy);
+    let derivative_x = dpdx(scaled_uv);
+    let derivative_y = dpdy(scaled_uv);
+    let footprint = max(length(derivative_x), length(derivative_y));
+    let maximum_lod = f32(record.mips_offset_resident.x - 1u);
+    let lod = clamp(log2(max(footprint, 1.0)), 0.0, maximum_lod);
+    let lower_mip = u32(floor(lod));
+    let upper_mip = min(lower_mip + 1u, record.mips_offset_resident.x - 1u);
+    let lower_sample = pbr_sample_portable_mip(record, uv, lower_mip);
+    let upper_sample = pbr_sample_portable_mip(record, uv, upper_mip);
+    return mix(lower_sample, upper_sample, fract(lod));
 }
 
 fn shade_portable_patch_pbr(
