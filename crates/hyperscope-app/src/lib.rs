@@ -17,6 +17,8 @@ mod peer;
 mod patch_lab;
 mod presentation_animation;
 mod settings;
+#[cfg(feature = "wire")]
+mod settings_wire;
 
 #[cfg(feature = "replay")]
 pub use replay::*;
@@ -28,6 +30,8 @@ pub use peer::*;
 pub use patch_lab::*;
 pub use presentation_animation::*;
 pub use settings::*;
+#[cfg(feature = "wire")]
+pub use settings_wire::*;
 
 use futures_signals::signal::{Mutable, MutableSignalCloned};
 use futures_signals::signal_vec::{MutableSignalVec, MutableVec};

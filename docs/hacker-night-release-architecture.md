@@ -252,6 +252,14 @@ The first application boundary is now explicit:
   defaults and clamps run only for explicit JavaScript authority or a recorded
   Rust startup fallback. A missing typed projection fails over visibly rather
   than being mistaken for successful Rust authority.
+  The browser wire schema is also application-owned: enabling the narrow
+  `hyperscope-app/wire` feature exposes the exact serialized route result,
+  atomic startup packet, and control registry without making serde part of the
+  default native application. `quilting-wasm::route_shadow` only decodes URL
+  pairs and serializes that application projection. It does not duplicate
+  route DTOs, defaults, or conversion policy. Focused projections remain in
+  the wire result as parity oracles, but only the atomic startup packet grants
+  startup authority.
   `ControlSpec` now exposes reusable numeric-domain metadata—minimum, maximum,
   integrality, and preferred view step—rather than burying those constraints
   in route-specific validators. It also carries closed choice vocabularies for

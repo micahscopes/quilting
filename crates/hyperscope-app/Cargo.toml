@@ -9,7 +9,8 @@ description = "Rust-authoritative application reducer and FRP read models for Hy
 
 [features]
 default = []
-replay = ["dep:serde", "dep:serde_json", "uuid/serde"]
+wire = ["dep:serde"]
+replay = ["wire", "dep:serde_json", "uuid/serde"]
 
 [dependencies]
 futures-signals = { version = "0.3.34", default-features = false }

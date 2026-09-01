@@ -39,7 +39,7 @@ quilting-gltf = { version = "0.1.0", path = "../quilting-gltf" }
 hyperscape = { version = "0.1.0", path = "../hyperscape" }
 hyperscape-hhhs = { version = "0.1.0", path = "../hyperscape-hhhs", optional = true }
 hyperscape-protocol = { version = "0.1.0", path = "../hyperscape-protocol" }
-hyperscope-app = { version = "0.1.0", path = "../hyperscope-app" }
+hyperscope-app = { version = "0.1.0", path = "../hyperscope-app", features = ["wire"] }
 hyperscope-hhhs = { version = "0.1.0", path = "../hyperscope-hhhs", optional = true }
 hyperscope-web = { version = "0.1.0", path = "../hyperscope-web", optional = true }
 quilting-remesh = { version = "0.1.0", path = "../quilting-remesh" }
