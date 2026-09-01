@@ -88,10 +88,10 @@ use quilting_renderer::compute::{
     pack_wgsl_source_visibility_words, pack_wgsl_visibility_compaction_scene_words,
     prepare_lod_atlas_lookup, prepare_lod_model, reconcile_and_pack_wgsl_lod_pass2,
     reconcile_and_pack_wgsl_resident_lods, wgsl_resident_geometry_bucket_oracle_words_with_domains,
-    wgsl_resident_root_topology_oracle_words, LodAtlasLookup, LodDispatchState, LodModelData,
-    PreparedLodModel, WgslAdaptiveOverlayPreparationSceneWords, WgslLodDispatchMetrics,
-    WgslLodSubjectLayout, WgslPatchPreparationSceneWords, WgslResidentRootPreparationSceneWords,
-    WgslVisibilityCompactionSceneWords,
+    wgsl_resident_root_topology_oracle_words, validate_lod_classification_prefix, LodAtlasLookup,
+    LodDispatchState, LodModelData, PreparedLodModel, WgslAdaptiveOverlayPreparationSceneWords,
+    WgslLodDispatchMetrics, WgslLodSubjectLayout, WgslPatchPreparationSceneWords,
+    WgslResidentRootPreparationSceneWords, WgslVisibilityCompactionSceneWords,
 };
 use std::borrow::Cow;
 use std::cell::Cell;
@@ -8095,11 +8095,35 @@ impl LodClassifierDevice {
         pose: LodPose<'_>,
         pose_upload: PoseUploadPolicy,
     ) -> Result<(), LodWebGpuError> {
+        self.write_lod_classification_state_for_prefix(
+            model,
+            dispatch,
+            metrics,
+            pose,
+            pose_upload,
+            model.prepared.residency.num_faces,
+        )
+    }
+
+    fn write_lod_classification_state_for_prefix(
+        &self,
+        model: &LodClassifierModel,
+        dispatch: &LodDispatchState,
+        metrics: WgslLodDispatchMetrics,
+        pose: LodPose<'_>,
+        pose_upload: PoseUploadPolicy,
+        classified_faces: usize,
+    ) -> Result<(), LodWebGpuError> {
         if pose_upload.should_publish_dynamic() {
             self.write_dynamic_pose(model, pose, metrics.num_joints)?;
         }
-        let uniform_words = pack_wgsl_lod_dispatch_words(&model.prepared, dispatch, metrics)
-            .map_err(LodWebGpuError::Payload)?;
+        let uniform_words = pack_wgsl_lod_dispatch_words(
+            &model.prepared,
+            dispatch,
+            metrics,
+            classified_faces,
+        )
+        .map_err(LodWebGpuError::Payload)?;
         let mut lod_state = model.lod_state.lock().map_err(|_| {
             LodWebGpuError::Payload("LOD state staging lock was poisoned".to_string())
         })?;
@@ -8143,10 +8167,25 @@ impl LodClassifierDevice {
         model: &'model mut LodClassifierModel,
         encoder: &mut wgpu::CommandEncoder,
     ) -> Result<DeviceLodClassification<'model>, LodWebGpuError> {
+        let classified_faces = model.prepared.residency.num_faces;
+        self.encode_lod_classification_prefix(model, classified_faces, encoder)
+    }
+
+    fn encode_lod_classification_prefix<'model>(
+        &self,
+        model: &'model mut LodClassifierModel,
+        classified_faces: usize,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<DeviceLodClassification<'model>, LodWebGpuError> {
+        validate_lod_classification_prefix(&model.prepared, classified_faces)
+            .map_err(LodWebGpuError::Payload)?;
         let epoch = model.classification_epoch.checked_add(1).ok_or_else(|| {
             LodWebGpuError::Payload("LOD classification epoch overflowed".to_string())
         })?;
-        let groups = (model.prepared.residency.num_faces as u32).div_ceil(LOD_WORKGROUP_SIZE);
+        let face_count = u32::try_from(classified_faces).map_err(|_| {
+            LodWebGpuError::Payload("LOD classification prefix exceeds u32".to_string())
+        })?;
+        let groups = face_count.div_ceil(LOD_WORKGROUP_SIZE);
         if groups != 0 {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("quilting LOD pass one"),
@@ -8167,7 +8206,6 @@ impl LodClassifierDevice {
         }
         model.classification_epoch = epoch;
         model.resident_epoch.set(None);
-        let face_count = model.prepared.residency.num_faces as u32;
         Ok(DeviceLodClassification {
             model: &*model,
             face_count,
@@ -8319,6 +8357,61 @@ impl LodClassifierDevice {
                 label: Some("quilting classified resident LOD graph"),
             });
         let classification = self.encode_lod_classification(model, &mut encoder)?;
+        let resident =
+            self.encode_resident_lod_reconciliation(&classification, grading, &mut encoder);
+        self.queue.submit([encoder.finish()]);
+        Ok(resident)
+    }
+
+    /// Refresh one topology-closed source prefix while retaining the suffix
+    /// from a previously reconciled complete epoch. This is the composed-scene
+    /// animation fast path: a camera or scene edit must still classify the
+    /// complete model, but primary-only pose changes need not revisit static
+    /// secondary assets.
+    #[allow(clippy::too_many_arguments)]
+    pub fn refresh_resident_lod_prefix_on_device<'model>(
+        &self,
+        model: &'model mut LodClassifierModel,
+        dispatch: &LodDispatchState,
+        metrics: WgslLodDispatchMetrics,
+        pose: LodPose<'_>,
+        pose_upload: PoseUploadPolicy,
+        grading: FaceLodGrading,
+        classified_faces: usize,
+    ) -> Result<DeviceResidentLod<'model>, LodWebGpuError> {
+        let resident_faces = model.prepared.residency.num_faces;
+        if classified_faces >= resident_faces {
+            return Err(LodWebGpuError::Payload(
+                "partial LOD refresh must leave a resident suffix".to_string(),
+            ));
+        }
+        validate_lod_classification_prefix(&model.prepared, classified_faces)
+            .map_err(LodWebGpuError::Payload)?;
+        let Some((_, resident_grading)) = model.resident_epoch.get() else {
+            return Err(LodWebGpuError::Payload(
+                "partial LOD refresh requires a complete resident baseline".to_string(),
+            ));
+        };
+        if resident_grading != grading {
+            return Err(LodWebGpuError::Payload(
+                "partial LOD refresh cannot change resident grading".to_string(),
+            ));
+        }
+        self.write_lod_classification_state_for_prefix(
+            model,
+            dispatch,
+            metrics,
+            pose,
+            pose_upload,
+            classified_faces,
+        )?;
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quilting partial classified resident LOD graph"),
+            });
+        let classification =
+            self.encode_lod_classification_prefix(model, classified_faces, &mut encoder)?;
         let resident =
             self.encode_resident_lod_reconciliation(&classification, grading, &mut encoder);
         self.queue.submit([encoder.finish()]);

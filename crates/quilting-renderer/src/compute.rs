@@ -483,6 +483,43 @@ pub fn prepare_lod_model(model: LodModelData) -> Result<PreparedLodModel, String
     })
 }
 
+/// Validate that a source-ordered face prefix is a complete union of LOD
+/// topology domains. A partial device refresh may retain the suffix only when
+/// no shared-edge negotiation crosses the prefix boundary.
+pub fn validate_lod_classification_prefix(
+    prepared: &PreparedLodModel,
+    classified_faces: usize,
+) -> Result<(), String> {
+    let resident_faces = prepared.residency.num_faces;
+    if classified_faces == 0 || classified_faces > resident_faces {
+        return Err("LOD classification prefix is outside resident faces".to_string());
+    }
+    let expected_adjacency = resident_faces
+        .checked_mul(3)
+        .and_then(|edges| edges.checked_mul(4))
+        .ok_or_else(|| "LOD adjacency shape overflowed".to_string())?;
+    if prepared.adjacency.len() != expected_adjacency {
+        return Err("LOD adjacency does not match resident faces".to_string());
+    }
+    for (edge, record) in prepared.adjacency.chunks_exact(4).enumerate() {
+        let neighbor = record[0];
+        if neighbor < 0.0 {
+            continue;
+        }
+        if !neighbor.is_finite()
+            || neighbor.fract() != 0.0
+            || neighbor as usize >= resident_faces
+        {
+            return Err("LOD adjacency contains an invalid neighbor".to_string());
+        }
+        let face = edge / 3;
+        if (face < classified_faces) != ((neighbor as usize) < classified_faces) {
+            return Err("LOD classification prefix crosses a topology domain".to_string());
+        }
+    }
+    Ok(())
+}
+
 fn lod_mesh_radius(positions: &[f32], faces: &[[u32; 3]]) -> Result<f64, String> {
     let num_vertices = positions.len() / 3;
     let mut used = vec![false; num_vertices];
@@ -1809,6 +1846,7 @@ pub fn pack_wgsl_lod_dispatch_words(
     prepared: &PreparedLodModel,
     dispatch: &LodDispatchState,
     metrics: WgslLodDispatchMetrics,
+    classified_faces: usize,
 ) -> Result<[u32; 68], String> {
     let float_inputs = dispatch
         .baseline_mobius
@@ -1836,6 +1874,7 @@ pub fn pack_wgsl_lod_dispatch_words(
         return Err("LOD dispatch cannot be represented by the WGSL ABI".to_string());
     }
 
+    validate_lod_classification_prefix(prepared, classified_faces)?;
     let mut words = [0u32; 68];
     for (destination, value) in words[..16].iter_mut().zip(dispatch.baseline_mobius) {
         *destination = value.to_bits();
@@ -1859,7 +1898,7 @@ pub fn pack_wgsl_lod_dispatch_words(
     words[59] = metrics.max_lod.to_bits();
     words[60] = metrics.viewport[0].to_bits();
     words[61] = metrics.viewport[1].to_bits();
-    words[64] = u32::try_from(prepared.residency.num_faces)
+    words[64] = u32::try_from(classified_faces)
         .map_err(|_| "LOD face count exceeds the WGSL ABI".to_string())?;
     words[65] = prepared.residency.num_vertices;
     words[66] = metrics.num_joints;
@@ -4338,6 +4377,7 @@ mod tests {
                 viewport: [1920.0, 1080.0],
                 num_joints: 14,
             },
+            prepared.residency.num_faces,
         )
         .unwrap();
         assert_eq!(std::mem::size_of_val(&uniform), 272);
@@ -4912,6 +4952,51 @@ mod tests {
         let (positions, faces) = coincident_square();
         let adjacency = build_scoped_lod_adjacency(&positions, &faces, &[0, 1]).unwrap();
         assert_eq!(adjacent_edges(&adjacency), 0);
+    }
+
+    #[test]
+    fn classification_prefix_must_end_at_a_topology_boundary() {
+        let (positions, faces) = coincident_square();
+        let model = |face_nodes| LodModelData {
+            positions: positions.iter().flatten().map(|&value| value as f32).collect(),
+            faces: faces.clone(),
+            joint_indices: vec![[0; 4]; positions.len()],
+            joint_weights: vec![[0.0; 4]; positions.len()],
+            morph_deltas: Vec::new(),
+            num_morph_targets: 0,
+            face_nodes,
+        };
+        let connected = prepare_lod_model(model(vec![0, 0])).unwrap();
+        assert!(validate_lod_classification_prefix(&connected, 1)
+            .unwrap_err()
+            .contains("crosses a topology domain"));
+
+        let separated = prepare_lod_model(model(vec![0, 1])).unwrap();
+        validate_lod_classification_prefix(&separated, 1).unwrap();
+        validate_lod_classification_prefix(&separated, 2).unwrap();
+        let dispatch = prepare_lod_dispatch_state(
+            &[],
+            &separated.residency,
+            1,
+            IDENTITY_MOBIUS,
+        );
+        let words = pack_wgsl_lod_dispatch_words(
+            &separated,
+            &dispatch,
+            WgslLodDispatchMetrics {
+                view_projection: IDENTITY,
+                density: 1.0,
+                pixel_floor: 16.0,
+                max_lod: 64.0,
+                viewport: [800.0, 600.0],
+                num_joints: 0,
+            },
+            1,
+        )
+        .unwrap();
+        assert_eq!(words[64], 1, "the shader must not visit the retained suffix");
+        assert!(validate_lod_classification_prefix(&separated, 0).is_err());
+        assert!(validate_lod_classification_prefix(&separated, 3).is_err());
     }
 
     #[test]

@@ -104,6 +104,8 @@ struct WebGpuBackend {
     resident_pose_initializations: u64,
     resident_pose_reuses: u64,
     device_lod_dispatches: u64,
+    device_lod_full_dispatches: u64,
+    device_lod_prefix_dispatches: u64,
     device_lod_frames: u64,
     resident_root_scene_uploads: u64,
     resident_root_scene_reuses: u64,
@@ -116,6 +118,7 @@ struct WebGpuBackend {
     pick_submissions: u64,
     pick_failures: u64,
     last_device_lod_epoch: Option<u64>,
+    last_device_lod_classified_faces: usize,
     last_frame_revision: u64,
     last_source_render_call: u64,
     last_indirect_draw_calls: u32,
@@ -320,6 +323,9 @@ pub(crate) struct WebGpuBackendDiagnostics {
     resident_pose_reuses: u64,
     resident_pose_uniforms_ready: bool,
     device_lod_dispatches: u64,
+    device_lod_full_dispatches: u64,
+    device_lod_prefix_dispatches: u64,
+    last_device_lod_classified_faces: usize,
     device_lod_frames: u64,
     resident_root_pipeline_ready: bool,
     resident_root_scene_ready: bool,
@@ -574,6 +580,9 @@ impl WebGpuBackend {
             resident_pose_reuses: self.resident_pose_reuses,
             resident_pose_uniforms_ready: self.resident_pose_uniforms_ready,
             device_lod_dispatches: self.device_lod_dispatches,
+            device_lod_full_dispatches: self.device_lod_full_dispatches,
+            device_lod_prefix_dispatches: self.device_lod_prefix_dispatches,
+            last_device_lod_classified_faces: self.last_device_lod_classified_faces,
             device_lod_frames: self.device_lod_frames,
             resident_root_pipeline_ready: self.resident_root_pipeline.is_some(),
             resident_root_scene_ready: self.resident_roots.is_some(),
@@ -869,6 +878,7 @@ pub(crate) async fn initialize() -> Result<WebGpuBackendDiagnostics, String> {
                     backend.last_presentation_style = None;
                     backend.frame_evidence = None;
                     backend.last_device_lod_epoch = None;
+                    backend.last_device_lod_classified_faces = 0;
                     backend.last_frame_used_resident_roots = false;
                     backend.last_face_visibility_bits.clear();
                     backend.next_face_visibility_bits.clear();
@@ -1006,6 +1016,7 @@ pub(crate) async fn initialize_presentation(
         backend.last_presentation_style = None;
         backend.frame_evidence = None;
         backend.last_device_lod_epoch = None;
+        backend.last_device_lod_classified_faces = 0;
         backend.last_frame_used_resident_roots = false;
         backend.last_face_visibility_bits.clear();
         backend.next_face_visibility_bits.clear();
@@ -1304,6 +1315,7 @@ pub(crate) fn replace_atlas(
                 backend.last_presentation_input = None;
                 backend.presentation_frame_admitted = false;
                 backend.last_device_lod_epoch = None;
+                backend.last_device_lod_classified_faces = 0;
                 backend.last_face_visibility_bits.clear();
                 backend.next_face_visibility_bits.clear();
                 backend.next_morph_weights.clear();
@@ -1356,6 +1368,7 @@ pub(crate) fn replace_model(
                 backend.last_presentation_input = None;
                 backend.presentation_frame_admitted = false;
                 backend.last_device_lod_epoch = None;
+                backend.last_device_lod_classified_faces = 0;
                 backend.last_face_visibility_bits.clear();
                 backend.next_face_visibility_bits.clear();
                 backend.next_morph_weights.clear();
@@ -1379,6 +1392,7 @@ pub(crate) fn dispatch_lod(
     pose_identity: RenderPoseIdentity,
     legacy_mobius: [f32; 16],
     packed_subjects: &[f32],
+    classified_faces: usize,
     density: f32,
     pixel_floor: f32,
     max_lod: f32,
@@ -1402,10 +1416,14 @@ pub(crate) fn dispatch_lod(
             .model_source
             .as_ref()
             .ok_or_else(|| "WebGPU LOD dispatch requires immutable model source".to_string())?;
+        let resident_faces = source.residency.num_faces;
+        if classified_faces == 0 || classified_faces > resident_faces {
+            return Err("WebGPU LOD classification prefix is outside resident faces".to_string());
+        }
         let dispatch = prepare_lod_dispatch_state(
             packed_subjects,
             &source.residency,
-            source.residency.num_faces,
+            classified_faces,
             legacy_mobius,
         );
         let metrics = WgslLodDispatchMetrics {
@@ -1434,9 +1452,9 @@ pub(crate) fn dispatch_lod(
             let model = model
                 .as_mut()
                 .ok_or_else(|| "ready WebGPU backend has no model".to_string())?;
-            device.invalidate_resident_lod(model);
-            let resident = device
-                .classify_and_reconcile_on_device(
+            let resident = if classified_faces == resident_faces {
+                device.invalidate_resident_lod(model);
+                device.classify_and_reconcile_on_device(
                     model,
                     &dispatch,
                     metrics,
@@ -1447,7 +1465,21 @@ pub(crate) fn dispatch_lod(
                     pose_upload,
                     grading,
                 )
-                .map_err(|error| error.to_string())?;
+            } else {
+                device.refresh_resident_lod_prefix_on_device(
+                    model,
+                    &dispatch,
+                    metrics,
+                    LodPose {
+                        joint_matrices,
+                        morph_weights,
+                    },
+                    pose_upload,
+                    grading,
+                    classified_faces,
+                )
+            }
+            .map_err(|error| error.to_string())?;
             Ok::<_, String>(resident.classification_epoch())
         })();
         let epoch = match epoch_result {
@@ -1458,6 +1490,14 @@ pub(crate) fn dispatch_lod(
             }
         };
         backend.device_lod_dispatches = backend.device_lod_dispatches.saturating_add(1);
+        backend.last_device_lod_classified_faces = classified_faces;
+        if classified_faces == resident_faces {
+            backend.device_lod_full_dispatches =
+                backend.device_lod_full_dispatches.saturating_add(1);
+        } else {
+            backend.device_lod_prefix_dispatches =
+                backend.device_lod_prefix_dispatches.saturating_add(1);
+        }
         if pose_upload == PoseUploadPolicy::Publish {
             backend.classifier_pose_uploads = backend.classifier_pose_uploads.saturating_add(1);
         } else {
@@ -1469,19 +1509,6 @@ pub(crate) fn dispatch_lod(
         backend.last_error = None;
         Ok(true)
     })
-}
-
-/// Retire only the camera/pose-dependent device LOD epoch. This exposes the
-/// CPU visibility adapter again without disturbing immutable WebGPU residency.
-pub(crate) fn invalidate_lod() {
-    BACKEND.with(|slot| {
-        let mut backend = slot.borrow_mut();
-        if let (Some(device), Some(model)) = (backend.device.as_ref(), backend.model.as_ref()) {
-            device.invalidate_resident_lod(model);
-        }
-        backend.last_device_lod_epoch = None;
-        backend.last_frame_input = None;
-    });
 }
 
 pub(crate) fn needs_scene(source_revision: u64, scene: &ValidatedRenderScene) -> bool {

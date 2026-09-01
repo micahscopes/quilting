@@ -98,6 +98,7 @@ fn webgpu_lod_reason_name(reason: WebGpuLodAuthorityReason) -> &'static str {
     match reason {
         WebGpuLodAuthorityReason::PresentationObserved => "presentation-observed",
         WebGpuLodAuthorityReason::DeviceEpochAccepted => "device-epoch-accepted",
+        WebGpuLodAuthorityReason::DevicePrefixAccepted => "device-prefix-accepted",
         WebGpuLodAuthorityReason::PresentationRetired => "presentation-retired",
         WebGpuLodAuthorityReason::DeviceDispatchRejected => "device-dispatch-rejected",
         WebGpuLodAuthorityReason::IncumbentRecovered => "incumbent-recovered",

@@ -7,6 +7,14 @@ import { fileURLToPath } from 'node:url';
 
 const repository = dirname(dirname(fileURLToPath(import.meta.url)));
 const source = readFileSync(join(repository, 'hyperscope.html'), 'utf8');
+const appAuthority = readFileSync(
+  join(repository, 'crates/hyperscope-app/src/lod_authority.rs'),
+  'utf8',
+);
+const wasmBackend = readFileSync(
+  join(repository, 'crates/quilting-wasm/src/webgpu_backend.rs'),
+  'utf8',
+);
 
 for (const required of [
   'globalThis.__hyperscopeWebGpuLodAuthority = webGpuLodAuthorityDiagnostics',
@@ -32,9 +40,20 @@ for (const required of [
   'WEBGPU_LOD_INCUMBENT_REQUIRED',
   'recordWebGpuLodAuthorityParity(',
   'webGpuLodAuthorityDiagnostics.mismatches.length > 16',
+  'const deviceCompleteSceneRequired = deviceRecoveryEligible',
+  '(!webGpuLodAuthorityDiagnostics.active || !primaryOnly)',
 ]) {
   assert.ok(source.includes(required), `device LOD authority is missing ${required}`);
 }
+
+assert.ok(appAuthority.includes('WebGpuLodAuthorityReason::DevicePrefixAccepted'),
+  'Rust authority must distinguish an accepted prefix refresh');
+assert.ok(appAuthority.includes('complete_scene_required\n                || (self.presentation_authoritative && !self.active)'),
+  'Rust authority must require a complete epoch only for activation or an explicit dirty scene');
+assert.ok(wasmBackend.includes('.refresh_resident_lod_prefix_on_device('),
+  'the WASM backend must keep a device-resident suffix for primary-prefix refreshes');
+assert.ok(wasmBackend.includes('device_lod_prefix_dispatches'),
+  'the WASM diagnostics must expose measured prefix dispatches');
 
 const recomputeStart = source.indexOf('async function recomputeLods()');
 const recomputeEnd = source.indexOf('\nasync function loadModel(', recomputeStart);
@@ -51,7 +70,13 @@ assert.ok(
   'the selected device authority must exit before incumbent readiness or readback work',
 );
 assert.ok(recompute.includes('deviceFullScene\n            ? authoredLodStates'),
-  'the visible device authority must classify the complete composed scene');
+  'a complete device epoch must classify the composed scene');
+assert.ok(recompute.includes(': (primaryOnly ? presentationComposition.primaryLodStates : authoredLodStates)'),
+  'an active animation-only epoch must upload only the primary subject prefix');
+assert.ok(recompute.includes('deviceFullScene ? 0 : (primaryOnly ? currentPrimaryFaceCount : 0)'),
+  'the device dispatch must bound an animation-only classification to primary faces');
+assert.ok(recompute.includes('if (deviceFullScene) {\n          webGpuLodAuthorityDiagnostics.fullSceneDispatches += 1;'),
+  'full-scene diagnostics must count the resolved dispatch scope, not mere eligibility');
 assert.ok(recompute.includes("completeIncumbentLodRecovery(\n          !!wt.full_snapshot,\n          'worker-publication'"),
   'worker rollback must report whether its publication is a full snapshot');
 assert.ok(

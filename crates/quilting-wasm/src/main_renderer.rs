@@ -7781,10 +7781,9 @@ fn validated_lod_dispatch_payload(
     Ok((legacy_mobius, view_projection_matrix))
 }
 
-/// Dispatch one complete current-view classifier epoch directly on WebGPU.
-/// Partial primary-asset refreshes retire the device epoch until the composed
-/// scene is classified coherently; the incumbent worker remains the rollback
-/// authority throughout this migration boundary.
+/// Dispatch one current-view classifier epoch directly on WebGPU. A zero face
+/// limit replaces the complete resident scene; a nonzero, topology-closed
+/// primary prefix refreshes an existing complete device epoch in place.
 #[cfg(feature = "webgpu-backend")]
 #[allow(clippy::too_many_arguments)]
 #[wasm_bindgen(js_name = "mr_dispatchWebGpuLod")]
@@ -7811,10 +7810,6 @@ pub fn mr_dispatch_webgpu_lod(
         vp_matrix,
         [vp_width, vp_height],
     )?;
-    if face_limit != 0 {
-        crate::webgpu_backend::invalidate_lod();
-        return Ok(false);
-    }
     STATE.with(|state| {
         let state = state.borrow();
         let state = state
@@ -7825,6 +7820,17 @@ pub fn mr_dispatch_webgpu_lod(
             .as_ref()
             .ok_or_else(|| JsValue::from_str("renderer LOD atlas is not resident"))?
             .max_lod;
+        let resident_faces = state
+            .same_context_lod
+            .as_ref()
+            .map(|lod| lod.residency.num_faces)
+            .ok_or_else(|| JsValue::from_str("renderer LOD model is not resident"))?;
+        let classified_faces = if face_limit == 0 {
+            resident_faces
+        } else {
+            usize::try_from(face_limit)
+                .map_err(|_| JsValue::from_str("WebGPU LOD face limit exceeds usize"))?
+        };
         if animated {
             state
                 .surface_runtime
@@ -7844,6 +7850,7 @@ pub fn mr_dispatch_webgpu_lod(
             current_render_pose_identity(state),
             legacy_mobius,
             subject_states,
+            classified_faces,
             density,
             min_px,
             max_lod,

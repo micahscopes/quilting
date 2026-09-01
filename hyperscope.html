@@ -12005,18 +12005,20 @@ async function recomputeLods() {
     if (WEBGPU_SHADOW_ENABLED) {
       let rustBeginFlags = null;
       try {
-        // Once the visible WebGPU surface is proven, keep the complete scene
-        // coherent on that device. A primary-only dispatch would deliberately
-        // invalidate the device epoch and force the incumbent readback path.
+        // Initial activation plus camera/scene changes require a complete
+        // device epoch. Once active, an animation-only request may refresh the
+        // topology-closed primary prefix while retaining static secondaries.
+        const deviceCompleteSceneRequired = deviceRecoveryEligible
+          && (!webGpuLodAuthorityDiagnostics.active || !primaryOnly);
         const browserBeginFlags = browserWebGpuLodAuthorityFlags(
-          (deviceRecoveryEligible ? WEBGPU_LOD_COMPLETE_SCENE : 0)
+          (deviceCompleteSceneRequired ? WEBGPU_LOD_COMPLETE_SCENE : 0)
           | (browserRetiredBeforeDispatch ? WEBGPU_LOD_INCUMBENT_REQUIRED : 0),
         );
         rustBeginFlags = callRustWebGpuLodAuthority(
           'beginWebGpuLodDispatch',
           'device-dispatch-begin',
           deviceAuthorityEligible,
-          deviceRecoveryEligible,
+          deviceCompleteSceneRequired,
         );
         recordWebGpuLodAuthorityParity(
           'device-dispatch-begin',
@@ -12037,7 +12039,7 @@ async function recomputeLods() {
           deviceRecoveryEligible,
         );
         webGpuLodAuthorityDiagnostics.dispatches += 1;
-        if (deviceRecoveryEligible) {
+        if (deviceFullScene) {
           webGpuLodAuthorityDiagnostics.fullSceneDispatches += 1;
         }
         const deviceLodDispatched = quiltingWasmBackend.mr_dispatchWebGpuLod(
@@ -12061,10 +12063,11 @@ async function recomputeLods() {
           ? 'resident' : (primaryOnly ? 'partial-fallback' : 'awaiting-residency');
         graphicsBackendDiagnostics.deviceLodError = null;
         let browserCompletionExtra = 0;
-        if (deviceLodDispatched && deviceAuthorityEligible) {
+        if (deviceLodDispatched && deviceAuthorityEligible
+            && (webGpuLodAuthorityDiagnostics.active || deviceFullScene)) {
           activateWebGpuLodAuthority();
         } else if (!deviceLodDispatched
-            && retireWebGpuLodAuthority('WebGPU rejected the complete device LOD dispatch')) {
+            && retireWebGpuLodAuthority('WebGPU rejected the current device LOD dispatch')) {
           browserCompletionExtra |= WEBGPU_LOD_INCUMBENT_REQUIRED;
         }
         const browserCompletionFlags = browserWebGpuLodAuthorityFlags(

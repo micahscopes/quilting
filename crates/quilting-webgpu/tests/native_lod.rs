@@ -2069,6 +2069,90 @@ fn native_classifier_matches_cpu_oracles_and_pass_one_invariants() {
         .await;
         assert_eq!(subject_culled, culled);
 
+        let prefix_model = prepare_lod_model(LodModelData {
+            positions: vec![
+                -0.9, -0.4, 0.0, -0.1, -0.4, 0.0, -0.5, 0.4, 0.0,
+                 0.1, -0.4, 0.0,  0.9, -0.4, 0.0,  0.5, 0.4, 0.0,
+            ],
+            faces: vec![[0, 1, 2], [3, 4, 5]],
+            joint_indices: vec![[0; 4]; 6],
+            joint_weights: vec![[0.0; 4]; 6],
+            morph_deltas: Vec::new(),
+            num_morph_targets: 0,
+            face_nodes: vec![10, 20],
+        })
+        .unwrap();
+        let mut prefix_resident = classifier.upload_model(prefix_model, &atlas).unwrap();
+        let missing_baseline = classifier
+            .refresh_resident_lod_prefix_on_device(
+                &mut prefix_resident,
+                &identity_dispatch(),
+                metrics(&atlas, 1.0, 0),
+                LodPose::default(),
+                PoseUploadPolicy::Publish,
+                FaceLodGrading::TwoToOne,
+                1,
+            );
+        let missing_baseline = match missing_baseline {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("partial refresh unexpectedly accepted without a baseline"),
+        };
+        assert!(missing_baseline
+            .contains("complete resident baseline"));
+        {
+            let baseline = classifier
+                .classify_and_reconcile_on_device(
+                    &mut prefix_resident,
+                    &identity_dispatch(),
+                    metrics(&atlas, 1.0, 0),
+                    LodPose::default(),
+                    PoseUploadPolicy::Publish,
+                    FaceLodGrading::TwoToOne,
+                )
+                .unwrap();
+            let words = classifier
+                .read_resident_lod_for_diagnostics(&baseline)
+                .await
+                .unwrap();
+            assert_eq!(words.len(), 2);
+            assert!(unpack_lod_classification_fields(words[0]).unwrap().visible());
+            assert!(unpack_lod_classification_fields(words[1]).unwrap().visible());
+        }
+        let mut hide_primary = identity_dispatch();
+        hide_primary.subjects.push(LodSubjectState {
+            node: 10,
+            mobius: identity_mobius(),
+            model: translation_matrix(100.0, 0.0, 0.0),
+            pole: [0.0; 4],
+            mobius_power: 0.0,
+            c_norm_sq: 0.0,
+            has_pole: 0.0,
+        });
+        {
+            let refreshed = classifier
+                .refresh_resident_lod_prefix_on_device(
+                    &mut prefix_resident,
+                    &hide_primary,
+                    metrics(&atlas, 1.0, 0),
+                    LodPose::default(),
+                    PoseUploadPolicy::Publish,
+                    FaceLodGrading::TwoToOne,
+                    1,
+                )
+                .unwrap();
+            assert_eq!(refreshed.face_count(), 1);
+        }
+        let retained = classifier
+            .latest_resident_lod(&prefix_resident)
+            .expect("partial refresh retains a complete resident epoch");
+        let words = classifier
+            .read_resident_lod_for_diagnostics(&retained)
+            .await
+            .unwrap();
+        assert_eq!(words.len(), 2);
+        assert!(!unpack_lod_classification_fields(words[0]).unwrap().visible());
+        assert!(unpack_lod_classification_fields(words[1]).unwrap().visible());
+
         let morphed_triangle = || {
             prepare_lod_model(LodModelData {
                 positions: vec![99.5, -0.5, 0.0, 100.5, -0.5, 0.0, 100.0, 0.5, 0.0],

@@ -21,6 +21,7 @@ pub enum WebGpuLodAuthorityPhase {
 pub enum WebGpuLodAuthorityReason {
     PresentationObserved,
     DeviceEpochAccepted,
+    DevicePrefixAccepted,
     PresentationRetired,
     DeviceDispatchRejected,
     IncumbentRecovered,
@@ -215,10 +216,11 @@ impl WebGpuLodAuthority {
         Ok(self.transition(disposition, None))
     }
 
-    /// Begin one device dispatch. `complete_scene_required` lets an adapter
-    /// prewarm a complete recovery epoch while WebGL is temporarily visible;
-    /// completion still cannot activate device authority until presentation
-    /// is independently observed as authoritative.
+    /// Begin one device dispatch. Initial activation and explicit scene/view
+    /// changes require a complete epoch. Once a complete epoch is active, the
+    /// adapter may refresh a topology-closed animated prefix without retiring
+    /// the retained suffix. Completion still cannot activate device authority
+    /// until presentation is independently observed as authoritative.
     pub fn begin_dispatch(
         &mut self,
         complete_scene_required: bool,
@@ -234,7 +236,8 @@ impl WebGpuLodAuthority {
         self.next_dispatch_token = token.checked_add(1);
         let dispatch = WebGpuLodDispatch {
             token,
-            complete_scene: self.presentation_authoritative || complete_scene_required,
+            complete_scene: complete_scene_required
+                || (self.presentation_authoritative && !self.active),
         };
         self.pending_dispatch = Some(PendingWebGpuLodDispatch {
             dispatch,
@@ -279,6 +282,11 @@ impl WebGpuLodAuthority {
             self.phase = WebGpuLodAuthorityPhase::DeviceResident;
             self.incumbent_reset_pending = true;
             self.last_reason = Some(WebGpuLodAuthorityReason::DeviceEpochAccepted);
+            return Ok(self.transition(WebGpuLodAuthorityDisposition::DeviceAuthority, None));
+        }
+        if accepted && self.active && self.presentation_authoritative {
+            self.phase = WebGpuLodAuthorityPhase::DeviceResident;
+            self.last_reason = Some(WebGpuLodAuthorityReason::DevicePrefixAccepted);
             return Ok(self.transition(WebGpuLodAuthorityDisposition::DeviceAuthority, None));
         }
         if !accepted && self.active {
@@ -450,6 +458,31 @@ mod tests {
         );
         assert!(!rejected.snapshot.active);
         assert_eq!(rejected.snapshot.fallback_transitions, 1);
+    }
+
+    #[test]
+    fn active_device_accepts_a_partial_refresh_without_reactivation() {
+        let mut authority = WebGpuLodAuthority::default();
+        authority.observe_presentation(true).unwrap();
+        let initial = begin(&mut authority);
+        assert!(initial.complete_scene);
+        authority.complete_dispatch(initial.token, true).unwrap();
+
+        let refresh = begin(&mut authority);
+        assert!(!refresh.complete_scene);
+        let completed = authority.complete_dispatch(refresh.token, true).unwrap();
+        assert_eq!(
+            completed.disposition,
+            WebGpuLodAuthorityDisposition::DeviceAuthority
+        );
+        assert!(completed.snapshot.active);
+        assert_eq!(completed.snapshot.activations, 1);
+        assert_eq!(completed.snapshot.dispatches, 2);
+        assert_eq!(completed.snapshot.full_scene_dispatches, 1);
+        assert_eq!(
+            completed.snapshot.last_reason,
+            Some(WebGpuLodAuthorityReason::DevicePrefixAccepted)
+        );
     }
 
     #[test]
