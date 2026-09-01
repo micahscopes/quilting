@@ -11,6 +11,8 @@
 mod replay;
 mod animation_pose;
 mod authored_session;
+#[cfg(feature = "wire")]
+mod app_wire;
 mod backend_presentation;
 mod lod_authority;
 mod peer;
@@ -24,6 +26,8 @@ mod settings_wire;
 pub use replay::*;
 pub use animation_pose::*;
 pub use authored_session::*;
+#[cfg(feature = "wire")]
+pub use app_wire::*;
 pub use backend_presentation::*;
 pub use lod_authority::*;
 pub use peer::*;

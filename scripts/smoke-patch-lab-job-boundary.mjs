@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 const repository = dirname(dirname(fileURLToPath(import.meta.url)));
 const read = path => readFileSync(join(repository, path), 'utf8');
 const app = read('crates/hyperscope-app/src/lib.rs');
+const appWire = read('crates/hyperscope-app/src/app_wire.rs');
 const patchLab = read('crates/hyperscope-app/src/patch_lab.rs');
 const patchLabWeb = read('crates/hyperscope-web/src/patch_lab.rs');
 const renderWeb = read('crates/hyperscope-web/src/render_controls.rs');
@@ -20,8 +21,9 @@ for (const required of [
   'pub fn set_patch_lab_session(',
   'pub fn complete_patch_lab(',
   'let effects = PatchLabEffects::from_commit(&commit);',
+  'pub fn patch_lab_effects_wire(effects: &PatchLabEffects)',
 ]) {
-  assert.ok(app.includes(required) || patchLab.includes(required),
+  assert.ok(app.includes(required) || patchLab.includes(required) || appWire.includes(required),
     `application Patch Lab job port is missing ${required}`);
 }
 
@@ -45,7 +47,7 @@ for (const required of [
   '#[wasm_bindgen(js_name = finishPatchLabLod)]',
   '#[wasm_bindgen(js_name = finishPatchLabLodFailed)]',
   '#[wasm_bindgen(js_name = drainPatchLabEffects)]',
-  'patch_lab_effects: shadow_patch_lab_effects(&patch_lab_effects)',
+  'patch_lab_effects: patch_lab_effects_wire(&patch_lab_effects)',
   'self.store.complete_patch_lab(completion).map_err(js_error)',
 ]) {
   assert.ok(adapter.includes(required), `WASM Patch Lab job port is missing ${required}`);

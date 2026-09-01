@@ -69,6 +69,12 @@ The first application boundary is now explicit:
   preceding revision. Effect-producing and presentation future inputs are
   rejected until a real application event scheduler exists rather than being
   executed at the wrong time.
+  With the optional `wire` feature, the application also owns the exact
+  JavaScript-safe commit and effect projection. Revisions, job IDs, and request
+  IDs that may exceed JavaScript's integer range serialize as decimal strings;
+  tagged asset, animation, Patch Lab, and authored-session effects are derived
+  from the same exhaustive `AppEffect` match. The WASM facade drains or embeds
+  these application wire values without maintaining another effect protocol.
 - The application adapter feeds real startup, IndexedDB, drag/drop,
   authored-demo, and presentation asset acquisition plus presentation load/cue
   intent into that reducer. `appshadow=1` explicitly enables the observer when

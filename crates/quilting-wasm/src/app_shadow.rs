@@ -21,22 +21,22 @@ use hyperscape_protocol::{
     RequestId, WireConformalGenerator, CURRENT_PROTOCOL_VERSION,
 };
 use hyperscope_app::{
-    reconcile_primary_scene_asset_identity, session_node_identity, AnimationAction,
-    AnimationClipCompletionDispatch,
+    app_effects_wire, patch_lab_effects_wire, reconcile_primary_scene_asset_identity,
+    session_node_identity, AnimationAction, AnimationClipCompletionDispatch,
     AnimationClipDescriptor, AnimationClipJobEffect, AnimationClipSelectionCompletion,
     AnimationClipSelectionOutcome, AnimationClipSelectionReadModel, AnimationClock,
     AnimationPoseRequestDisposition, AnimationPoseScheduler, AnimationPoseStamp, AppCommit,
-    AppEffect, AppEvent, AppFrameSnapshot, AppStore, AssetFetchJob, AssetJobIdentity,
+    AppCommitWire, AppEffect, AppEvent, AppFrameSnapshot, AppStore, AssetFetchJob, AssetJobIdentity,
     AssetLoadCompletion, AssetLoadCompletionDispatch, AssetLoadOutcome, AssetLoadRequest,
-    AssetLoadScope, AssetMetadata, AssetReadModel, AssetStatus, AuthoredProposalRole,
-    AuthoredRevision, AuthoredSessionEffect, AuthoringLeaseStatus, CommitDisposition,
+    AssetLoadScope, AssetMetadata, AssetReadModel, AssetStatus, AuthoredRevision,
+    AuthoringLeaseStatus,
     FocusDiagnosticView, FocusPostprocessMode, FocusPostprocessSettings, FrameTick,
     GraphicsPresentationDecision,
     InstalledPrimarySceneReadModel, LocalAuthoringLeaseController, LocalPeerDisposition,
     LocalPeerIngress, LocalPeerLane, LocalPeerReceipt, LocalPresenceAuthoringReadModel,
     NavigationSettings,
     NavigationSettingsSynchronizationDisposition, NavigationSynchronization, PatchLabCompletion,
-    PatchLabCompletionDispatch, PatchLabControls, PatchLabEffect, PatchLabEffects,
+    PatchLabCompletionDispatch, PatchLabControls, PatchLabEffectWire, PatchLabEffects,
     PatchLabFailure, PatchLabField, PatchLabGeometryCompletion, PatchLabGeometryOutcome,
     PatchLabHistogramBin, PatchLabLodCompletion, PatchLabLodOutcome, PatchLabLodSummary,
     PatchLabReadModel, PatchLabSessionDispatch, PatchLabSessionIntent, PatchLabShape,
@@ -44,8 +44,7 @@ use hyperscope_app::{
     PresentationAnimationResidencyDispatch, PrimarySceneInstallCompletion,
     PrimarySceneAssetIdentity, PrimarySceneAssetIdentityProvenance,
     PrimarySceneInstallCompletionDispatch, PrimarySceneInstallMetadata, PrimarySceneInstallOutcome,
-    RenderSettings,
-    RenderSettingsSynchronizationDisposition, SemanticAction, Timed,
+    RenderSettings, RenderSettingsSynchronizationDisposition, SemanticAction, Timed,
     WebGpuLodAuthority, WebGpuLodAuthorityDisposition, WebGpuLodAuthorityPhase,
     WebGpuLodAuthorityReason, WebGpuLodAuthoritySnapshot, WebGpuPresentationEvidence,
 };
@@ -1383,7 +1382,7 @@ impl HyperscopeAppShadow {
     #[wasm_bindgen(js_name = drainAdapterEffects)]
     pub fn drain_adapter_effects(&self) -> Result<JsValue, JsValue> {
         let effects = std::mem::take(&mut *self.pending_adapter_effects.borrow_mut());
-        let effects = effects.iter().map(shadow_effect).collect::<Vec<_>>();
+        let effects = app_effects_wire(&effects);
         to_js(&effects)
     }
 
@@ -1400,7 +1399,7 @@ impl HyperscopeAppShadow {
                 "quiet frame queue contains a non-Patch-Lab adapter effect",
             ));
         }
-        to_js(&shadow_patch_lab_effects(&patch_lab_effects))
+        to_js(&patch_lab_effects_wire(&patch_lab_effects))
     }
 
     #[wasm_bindgen(js_name = pendingAdapterEffectCount)]
@@ -2925,7 +2924,7 @@ impl HyperscopeAppShadow {
             },
             sequence: synchronization.sequence.map(|sequence| sequence.to_string()),
             commit: synchronization.commit.as_ref().map(shadow_commit),
-            patch_lab_effects: shadow_patch_lab_effects(&patch_lab_effects),
+            patch_lab_effects: patch_lab_effects_wire(&patch_lab_effects),
             matches_input,
             render: synchronization.snapshot.into(),
         })
@@ -4070,25 +4069,16 @@ fn decode_animation_clips(value: &str) -> Result<Vec<AnimationClipDescriptor>, J
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ShadowCommit {
-    revision: String,
-    disposition: &'static str,
-    published_ui: bool,
-    effects: Vec<ShadowEffect>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 struct ShadowDirectSemanticReceipt {
     sequence: String,
-    commit: ShadowCommit,
+    commit: AppCommitWire,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ShadowAssetLoadRequest {
     sequence: String,
-    commit: ShadowCommit,
+    commit: AppCommitWire,
     fetch: ShadowAssetFetchJob,
     load_cancellations: Vec<ShadowAssetJobIdentity>,
     install_cancellations: Vec<ShadowAssetJobIdentity>,
@@ -4097,7 +4087,7 @@ struct ShadowAssetLoadRequest {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ShadowAssetLoadCompletion {
-    commit: ShadowCommit,
+    commit: AppCommitWire,
     install: Option<ShadowAssetJobIdentity>,
     asset: Option<ShadowAsset>,
 }
@@ -4172,7 +4162,7 @@ struct ShadowLocalPeerReceipt {
     lane: &'static str,
     disposition: &'static str,
     projection_revision: Option<String>,
-    commit: Option<ShadowCommit>,
+    commit: Option<AppCommitWire>,
 }
 
 #[derive(Serialize)]
@@ -4282,109 +4272,20 @@ struct SessionNodeIdentity {
 }
 
 #[derive(Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ShadowEffect {
-    FetchAsset {
-        request_id: String,
-        asset_id: String,
-        uri: String,
-    },
-    CancelAssetLoad {
-        request_id: String,
-        asset_id: String,
-    },
-    InstallPrimaryScene {
-        request_id: String,
-        asset_id: String,
-    },
-    CancelPrimarySceneInstall {
-        request_id: String,
-        asset_id: String,
-    },
-    SelectAnimationClip {
-        job_id: String,
-        scene_request_id: String,
-        asset_id: String,
-        clip_index: u32,
-    },
-    CancelAnimationClipSelection {
-        job_id: String,
-        scene_request_id: String,
-        asset_id: String,
-        clip_index: u32,
-    },
-    PatchLab {
-        effect: ShadowPatchLabEffect,
-    },
-    OpenAuthoredSession {
-        job_id: String,
-        project_id: String,
-        proposal_role: &'static str,
-    },
-    CancelAuthoredSessionOpen {
-        job_id: String,
-        project_id: String,
-    },
-    CloseAuthoredSession {
-        project_id: String,
-    },
-}
-
-#[derive(Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ShadowPatchLabEffect {
-    BuildGeometry {
-        job_id: String,
-        shape: &'static str,
-        grid: u8,
-        bend_percent: u8,
-    },
-    CancelGeometry {
-        job_id: String,
-    },
-    DiscardGeometry {
-        geometry_job_id: String,
-    },
-    EvaluateLod {
-        job_id: String,
-        geometry_job_id: String,
-        field: &'static str,
-        phase_microradians: u32,
-        min_exponent: u8,
-        max_exponent: u8,
-        manual_edge_exponents: [u8; 3],
-        atlas_exponent: u8,
-        max_face_edge_ratio: u8,
-    },
-    CancelLod {
-        job_id: String,
-        geometry_job_id: String,
-    },
-}
-
-#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ShadowPatchLabSessionDispatch {
     sequence: String,
-    commit: ShadowCommit,
+    commit: AppCommitWire,
     patch_lab: ShadowPatchLabReadModel,
-    effects: Vec<ShadowPatchLabEffect>,
+    effects: Vec<PatchLabEffectWire>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ShadowPatchLabCompletionDispatch {
-    commit: ShadowCommit,
+    commit: AppCommitWire,
     patch_lab: ShadowPatchLabReadModel,
-    effects: Vec<ShadowPatchLabEffect>,
-}
-
-fn shadow_patch_lab_effects(effects: &PatchLabEffects) -> Vec<ShadowPatchLabEffect> {
-    effects
-        .as_slice()
-        .iter()
-        .map(shadow_patch_lab_effect)
-        .collect()
+    effects: Vec<PatchLabEffectWire>,
 }
 
 fn patch_lab_session_to_js(dispatch: PatchLabSessionDispatch) -> Result<JsValue, JsValue> {
@@ -4392,7 +4293,7 @@ fn patch_lab_session_to_js(dispatch: PatchLabSessionDispatch) -> Result<JsValue,
         sequence: dispatch.sequence.to_string(),
         commit: shadow_commit(&dispatch.commit),
         patch_lab: dispatch.state.into(),
-        effects: shadow_patch_lab_effects(&dispatch.effects),
+        effects: patch_lab_effects_wire(&dispatch.effects),
     })
 }
 
@@ -4400,7 +4301,7 @@ fn patch_lab_completion_to_js(dispatch: PatchLabCompletionDispatch) -> Result<Js
     to_js(&ShadowPatchLabCompletionDispatch {
         commit: shadow_commit(&dispatch.commit),
         patch_lab: dispatch.state.into(),
-        effects: shadow_patch_lab_effects(&dispatch.effects),
+        effects: patch_lab_effects_wire(&dispatch.effects),
     })
 }
 
@@ -4689,7 +4590,7 @@ impl From<AnimationClipSelectionReadModel> for ShadowAnimationClipSelection {
 #[serde(rename_all = "camelCase")]
 struct ShadowAnimationClipRequest {
     sequence: String,
-    commit: ShadowCommit,
+    commit: AppCommitWire,
     requested_index: u32,
     selection: Option<ShadowAnimationClipJobEffect>,
     cancellations: Vec<ShadowAnimationClipJobEffect>,
@@ -4700,7 +4601,7 @@ struct ShadowAnimationClipRequest {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ShadowAnimationClipCompletionDispatch {
-    commit: ShadowCommit,
+    commit: AppCommitWire,
     selection: ShadowAnimationClipSelection,
 }
 
@@ -4716,7 +4617,7 @@ fn animation_clip_completion_to_js(
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ShadowPrimarySceneInstallCompletionDispatch {
-    commit: ShadowCommit,
+    commit: AppCommitWire,
     clip_cancellations: Vec<ShadowAnimationClipJobEffect>,
     installed_scene: Option<ShadowInstalledPrimaryScene>,
     clip_state: ShadowAnimationClipSelection,
@@ -4741,7 +4642,7 @@ fn primary_scene_install_completion_to_js(
 #[serde(rename_all = "camelCase")]
 struct ShadowPresentationDispatch {
     sequence: String,
-    commit: ShadowCommit,
+    commit: AppCommitWire,
     active: Option<PresentationSnapshot>,
     selection: Option<ShadowAnimationClipJobEffect>,
     cancellations: Vec<ShadowAnimationClipJobEffect>,
@@ -4750,7 +4651,7 @@ struct ShadowPresentationDispatch {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ShadowPresentationAnimationResidencyDispatch {
-    commit: ShadowCommit,
+    commit: AppCommitWire,
     residency: Option<ShadowPresentationAnimationResidency>,
     active: Option<PresentationSnapshot>,
     selection: Option<ShadowAnimationClipJobEffect>,
@@ -4837,7 +4738,7 @@ struct ShadowPendingAnimationClip {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ShadowRenderSettingsReceipt {
-    commit: ShadowCommit,
+    commit: AppCommitWire,
     render: ShadowRenderSettings,
 }
 
@@ -4846,8 +4747,8 @@ struct ShadowRenderSettingsReceipt {
 struct ShadowRenderSettingsSynchronizationReceipt {
     disposition: &'static str,
     sequence: Option<String>,
-    commit: Option<ShadowCommit>,
-    patch_lab_effects: Vec<ShadowPatchLabEffect>,
+    commit: Option<AppCommitWire>,
+    patch_lab_effects: Vec<PatchLabEffectWire>,
     matches_input: bool,
     render: ShadowRenderSettings,
 }
@@ -4917,7 +4818,7 @@ struct ShadowFocusPostprocessInput {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ShadowNavigationSettingsReceipt {
-    commit: ShadowCommit,
+    commit: AppCommitWire,
     navigation: ShadowNavigationSettings,
 }
 
@@ -4926,7 +4827,7 @@ struct ShadowNavigationSettingsReceipt {
 struct ShadowNavigationSettingsSynchronizationReceipt {
     disposition: &'static str,
     sequence: Option<String>,
-    commit: Option<ShadowCommit>,
+    commit: Option<AppCommitWire>,
     matches_input: bool,
     navigation: ShadowNavigationSettings,
 }
@@ -5025,7 +4926,7 @@ impl From<hyperscope_app::AppRenderSnapshot> for ShadowRenderSettings {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ShadowAnimationPlaybackReceipt {
-    commit: ShadowCommit,
+    commit: AppCommitWire,
     playing: bool,
     time_seconds: f64,
     speed: f64,
@@ -5035,7 +4936,7 @@ struct ShadowAnimationPlaybackReceipt {
 #[serde(rename_all = "camelCase")]
 struct ShadowDirectAnimationPlaybackReceipt {
     sequence: String,
-    commit: ShadowCommit,
+    commit: AppCommitWire,
     playing: bool,
     time_seconds: f64,
     speed: f64,
@@ -5541,139 +5442,8 @@ fn commit_to_js(commit: &AppCommit) -> Result<JsValue, JsValue> {
     to_js(&shadow_commit(commit))
 }
 
-fn shadow_commit(commit: &AppCommit) -> ShadowCommit {
-    let effects = commit.effects.iter().map(shadow_effect).collect();
-    ShadowCommit {
-        revision: commit.revision.to_string(),
-        disposition: match commit.disposition {
-            CommitDisposition::Applied => "applied",
-            CommitDisposition::IgnoredStale => "ignored_stale",
-        },
-        published_ui: commit.published_ui,
-        effects,
-    }
-}
-
-fn shadow_effect(effect: &AppEffect) -> ShadowEffect {
-    match effect {
-        AppEffect::FetchAsset { request_id, asset } => ShadowEffect::FetchAsset {
-            request_id: request_id.to_string(),
-            asset_id: asset.id.to_string(),
-            uri: asset.uri.clone(),
-        },
-        AppEffect::CancelAssetLoad {
-            request_id,
-            asset_id,
-        } => ShadowEffect::CancelAssetLoad {
-            request_id: request_id.to_string(),
-            asset_id: asset_id.to_string(),
-        },
-        AppEffect::InstallPrimaryScene {
-            request_id,
-            asset_id,
-        } => ShadowEffect::InstallPrimaryScene {
-            request_id: request_id.to_string(),
-            asset_id: asset_id.to_string(),
-        },
-        AppEffect::CancelPrimarySceneInstall {
-            request_id,
-            asset_id,
-        } => ShadowEffect::CancelPrimarySceneInstall {
-            request_id: request_id.to_string(),
-            asset_id: asset_id.to_string(),
-        },
-        AppEffect::SelectAnimationClip {
-            job_id,
-            scene_request_id,
-            asset_id,
-            clip_index,
-        } => ShadowEffect::SelectAnimationClip {
-            job_id: job_id.to_string(),
-            scene_request_id: scene_request_id.to_string(),
-            asset_id: asset_id.to_string(),
-            clip_index: *clip_index,
-        },
-        AppEffect::CancelAnimationClipSelection {
-            job_id,
-            scene_request_id,
-            asset_id,
-            clip_index,
-        } => ShadowEffect::CancelAnimationClipSelection {
-            job_id: job_id.to_string(),
-            scene_request_id: scene_request_id.to_string(),
-            asset_id: asset_id.to_string(),
-            clip_index: *clip_index,
-        },
-        AppEffect::PatchLab(effect) => ShadowEffect::PatchLab {
-            effect: shadow_patch_lab_effect(effect),
-        },
-        AppEffect::AuthoredSession(effect) => match effect {
-            AuthoredSessionEffect::Open { job_id, intent } => {
-                ShadowEffect::OpenAuthoredSession {
-                    job_id: job_id.to_string(),
-                    project_id: intent.project_id.to_string(),
-                    proposal_role: match intent.proposal_role {
-                        AuthoredProposalRole::Replica => "replica",
-                        AuthoredProposalRole::AdmissionAuthority => "admission_authority",
-                    },
-                }
-            }
-            AuthoredSessionEffect::CancelOpen { job_id, project_id } => {
-                ShadowEffect::CancelAuthoredSessionOpen {
-                    job_id: job_id.to_string(),
-                    project_id: project_id.to_string(),
-                }
-            }
-            AuthoredSessionEffect::Close { project_id } => {
-                ShadowEffect::CloseAuthoredSession {
-                    project_id: project_id.to_string(),
-                }
-            }
-        },
-    }
-}
-
-fn shadow_patch_lab_effect(effect: &PatchLabEffect) -> ShadowPatchLabEffect {
-    match effect {
-        PatchLabEffect::BuildGeometry { job_id, geometry } => {
-            ShadowPatchLabEffect::BuildGeometry {
-                job_id: job_id.to_string(),
-                shape: geometry.shape.wire_name(),
-                grid: geometry.grid,
-                bend_percent: geometry.bend_percent,
-            }
-        }
-        PatchLabEffect::CancelGeometry { job_id } => ShadowPatchLabEffect::CancelGeometry {
-            job_id: job_id.to_string(),
-        },
-        PatchLabEffect::DiscardGeometry { geometry_job_id } => {
-            ShadowPatchLabEffect::DiscardGeometry {
-                geometry_job_id: geometry_job_id.to_string(),
-            }
-        }
-        PatchLabEffect::EvaluateLod {
-            job_id,
-            geometry_job_id,
-            parameters,
-        } => ShadowPatchLabEffect::EvaluateLod {
-            job_id: job_id.to_string(),
-            geometry_job_id: geometry_job_id.to_string(),
-            field: parameters.field.wire_name(),
-            phase_microradians: parameters.phase_microradians,
-            min_exponent: parameters.min_exponent,
-            max_exponent: parameters.max_exponent,
-            manual_edge_exponents: parameters.manual_edge_exponents,
-            atlas_exponent: parameters.atlas_exponent,
-            max_face_edge_ratio: parameters.max_face_edge_ratio,
-        },
-        PatchLabEffect::CancelLod {
-            job_id,
-            geometry_job_id,
-        } => ShadowPatchLabEffect::CancelLod {
-            job_id: job_id.to_string(),
-            geometry_job_id: geometry_job_id.to_string(),
-        },
-    }
+fn shadow_commit(commit: &AppCommit) -> AppCommitWire {
+    commit.into()
 }
 
 pub(crate) fn peer_receipt_to_js(receipt: &LocalPeerReceipt) -> Result<JsValue, JsValue> {
