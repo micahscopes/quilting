@@ -194,6 +194,21 @@ DOM, Blender, executor, or application-state dependency. They must preserve
 the exact sequence/generation reset law rather than converting a gap into an
 ordinary delta.
 
+The exclusive durable host also needs a safe source for those adapters.
+`DurableReplicaHost::preparation()` can register a growth callback and
+`DurableReplicaHost::snapshot()` can read, but the borrowed preparation facade
+cannot become the non-publishing handle a polled stream needs. The old
+Hyperscope path fed a cloned `Arc<MemoryStorage>` to
+`hhhs_reactive::stream_view`; retaining that storage clone is now correctly
+rejected as an aliased writer.
+
+Please provide either a host-issued cloneable read-only Replica view or a
+host-owned reactive adapter. Such a view may expose snapshot, growth epoch,
+and subscription/DAG reads, but must be structurally unable to prepare,
+publish, import, repair, or access durability. Issuing it after the durable
+host claims ownership must not weaken writer exclusion or require downstreams
+to put the writer behind a broad shared mutable lock.
+
 ## P2: papercuts worth resolving before the public API settles
 
 - The `*_with` suffix names different attachment phases and closure shapes for
