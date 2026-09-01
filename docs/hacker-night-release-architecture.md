@@ -298,6 +298,11 @@ The first application boundary is now explicit:
   emits the scoped fetch effect. Rust converts clip `-1` to absence and
   nonnegative integral clips to `u32`; the browser's old `parseInt` remains
   only in the explicit fallback lane.
+  Environment and matcap names cross together as one typed
+  `RouteRendererAssetSettings` packet. They remain platform resources: the
+  browser still fetches, caches, decodes, cancels, and uploads them, while Rust
+  prevents an admitted route from falling back to two independent browser
+  default decisions.
   Camera/conformal-transform state, SpaceMouse policy, and surface-walk policy
   additionally leave Rust as one typed `RouteNavigationSettings` value.
   Centiseconds and percentages become semantic seconds and fractions before

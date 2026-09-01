@@ -376,6 +376,16 @@ pub struct RoutePrimaryAssetSettings {
     pub playing: bool,
 }
 
+/// Renderer resource names selected at startup. Fetching, caching, decoding,
+/// and GPU upload remain platform-adapter work; Rust owns validation and the
+/// atomic route projection so the two names cannot regain independent browser
+/// default policy after route admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteRendererAssetSettings {
+    pub environment: String,
+    pub matcap: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteTransformKind {
     Identity,
@@ -888,6 +898,27 @@ impl HyperscopeRoute {
         })
     }
 
+    /// Resolve environment and matcap resource names without performing any
+    /// platform I/O or admitting renderer handles into application state.
+    pub fn renderer_asset_settings(&self) -> Result<RouteRendererAssetSettings, &'static str> {
+        let environment = self
+            .value("env")
+            .filter(|value| hyperscope_control_spec("env").is_some_and(|spec| spec.accepts(value)))
+            .ok_or("route environment asset is invalid")?
+            .to_owned();
+        let matcap = self
+            .value("matcap")
+            .filter(|value| {
+                hyperscope_control_spec("matcap").is_some_and(|spec| spec.accepts(value))
+            })
+            .ok_or("route matcap asset is invalid")?
+            .to_owned();
+        Ok(RouteRendererAssetSettings {
+            environment,
+            matcap,
+        })
+    }
+
     /// Resolve the complete educational Patch Lab session carried by a URL.
     ///
     /// This is deliberately a typed application intent rather than a bag of
@@ -1242,6 +1273,38 @@ mod tests {
             let route = HyperscopeRoute::from_pairs([(key, value)]);
             assert!(!route.diagnostics().is_empty(), "{key}={value}");
             assert!(route.primary_asset_settings().is_err(), "{key}={value}");
+        }
+    }
+
+    #[test]
+    fn renderer_asset_route_keeps_platform_resources_in_one_typed_packet() {
+        assert_eq!(
+            HyperscopeRoute::default()
+                .renderer_asset_settings()
+                .unwrap(),
+            RouteRendererAssetSettings {
+                environment: "rosendal_plains_1_1k".to_owned(),
+                matcap: "citric-acid".to_owned(),
+            },
+        );
+
+        let explicit = HyperscopeRoute::from_pairs([
+            ("env", "rogland_clear_night_2k"),
+            ("matcap", "soft-studio"),
+        ]);
+        assert!(explicit.diagnostics().is_empty());
+        assert_eq!(
+            explicit.renderer_asset_settings().unwrap(),
+            RouteRendererAssetSettings {
+                environment: "rogland_clear_night_2k".to_owned(),
+                matcap: "soft-studio".to_owned(),
+            },
+        );
+
+        for key in ["env", "matcap"] {
+            let invalid = HyperscopeRoute::from_pairs([(key, "")]);
+            assert!(!invalid.diagnostics().is_empty(), "{key}");
+            assert!(invalid.renderer_asset_settings().is_err(), "{key}");
         }
     }
 

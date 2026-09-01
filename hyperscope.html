@@ -11296,6 +11296,7 @@ applyParams = function(
   validatedNavigationSettings = null,
   validatedPatchLabSession = null,
   validatedPrimaryAssetSettings = null,
+  validatedRendererAssetSettings = null,
 ) {
   const finite = (value, fallback, minimum, maximum) => {
     const parsed = Number(value);
@@ -11335,8 +11336,10 @@ applyParams = function(
     params.fuzzy === '1',
     params.fmode || '0',
   );
-  envMap.set(params.env || 'rosendal_plains_1_1k');
-  matcap.set(params.matcap || 'citric-acid');
+  envMap.set(validatedRendererAssetSettings?.environment
+    ?? params.env ?? 'rosendal_plains_1_1k');
+  matcap.set(validatedRendererAssetSettings?.matcap
+    ?? params.matcap ?? 'citric-acid');
   if (validatedRenderSettings) {
     lod.res.set(validatedRenderSettings.resolutionLevel);
     lod.density.set(validatedRenderSettings.density);
@@ -15035,6 +15038,7 @@ let initNavigationSettings = null;
 let initPatchLabSession = null;
 let initPresentationSettings = null;
 let initPrimaryAssetSettings = null;
+let initRendererAssetSettings = null;
 currentGlb = initParams.glb;
 let initialPatchLabShape = patchLabShape(initParams.lab);
 // Set camera early (not WASM-dependent)
@@ -15084,7 +15088,8 @@ phase('wasm', [], async () => {
           && startupRoute.navigationSettings
           && startupRoute.patchLabSession
           && startupRoute.presentationSettings
-          && startupRoute.primaryAssetSettings) {
+          && startupRoute.primaryAssetSettings
+          && startupRoute.rendererAssetSettings) {
         initParams = readParams(
           new URLSearchParams(startupRoute.resolvedPairs),
           new URLSearchParams(startupRoute.pairs),
@@ -15097,6 +15102,7 @@ phase('wasm', [], async () => {
         initPatchLabSession = startupRoute.patchLabSession;
         initPresentationSettings = startupRoute.presentationSettings;
         initPrimaryAssetSettings = startupRoute.primaryAssetSettings;
+        initRendererAssetSettings = startupRoute.rendererAssetSettings;
         if (initPresentationSettings.enabled !== RUST_PRESENTATION_ENABLED) {
           throw new Error('Rust presentation route disagrees with the pre-WASM bootstrap');
         }
@@ -15177,6 +15183,7 @@ phase('wasm', [], async () => {
     initNavigationSettings,
     initPatchLabSession,
     initPrimaryAssetSettings,
+    initRendererAssetSettings,
   ); // Set signal values first
   if (RUST_RENDER_SETTINGS_IMPLEMENTATION !== 'js'
       && initRustRouteAdmitted

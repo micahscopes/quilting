@@ -14,6 +14,7 @@ struct RouteShadowResult {
     patch_lab_session: Option<RoutePatchLabSession>,
     presentation_settings: Option<RoutePresentationSettings>,
     primary_asset_settings: Option<RoutePrimaryAssetSettings>,
+    renderer_asset_settings: Option<RouteRendererAssetSettings>,
     #[serde(skip_serializing_if = "Option::is_none")]
     selection: Option<RouteSelection>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -96,6 +97,13 @@ struct RoutePrimaryAssetSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     animation_clip: Option<u32>,
     playing: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RouteRendererAssetSettings {
+    environment: String,
+    matcap: String,
 }
 
 #[derive(Serialize)]
@@ -268,6 +276,14 @@ pub fn canonicalize_hyperscope_route(pairs: JsValue) -> Result<JsValue, JsValue>
                 animation_clip: settings.animation_clip,
                 playing: settings.playing,
             });
+    let renderer_asset_settings =
+        route
+            .renderer_asset_settings()
+            .ok()
+            .map(|settings| RouteRendererAssetSettings {
+                environment: settings.environment,
+                matcap: settings.matcap,
+            });
     let navigation_settings =
         route
             .navigation_settings()
@@ -323,6 +339,7 @@ pub fn canonicalize_hyperscope_route(pairs: JsValue) -> Result<JsValue, JsValue>
         patch_lab_session,
         presentation_settings,
         primary_asset_settings,
+        renderer_asset_settings,
         selection,
         animation_clock,
     })
