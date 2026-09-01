@@ -99,6 +99,8 @@ def validate_payload(
         raise HyperscapeCodecError("node count must be a nonnegative integer")
     if not isinstance(payload, Mapping) or payload.get("version") != VERSION:
         raise HyperscapeCodecError(f"payload version must be {VERSION!r}")
+    if "asset_id" in payload:
+        _stable_uuid(payload["asset_id"], "asset_id")
     frames = payload.get("frames", [])
     walls = payload.get("walls", [])
     anchors = payload.get("anchors", [])

@@ -43,6 +43,7 @@ assert "FINISHED" in result, result
 
 payload, bindings = codec.extract_asset(destination.read_bytes())
 assert payload is not None
+assert payload["asset_id"] == "a0000000-0000-4000-8000-000000000002"
 assert len(payload["frames"]) == 3
 assert len(payload["walls"]) == 4
 assert len(payload["anchors"]) == 2
@@ -79,6 +80,7 @@ blender_hyperscape.register()
 result = getattr(bpy.ops.hyperscape, "import")(filepath=str(destination))
 assert "FINISHED" in result, result
 settings = bpy.context.scene.hyperscape
+assert settings.asset_id == "a0000000-0000-4000-8000-000000000002"
 assert len(settings.frames) == 3
 assert len(settings.walls) == 4
 assert len(settings.anchors) == 2

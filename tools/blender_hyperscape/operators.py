@@ -177,6 +177,8 @@ def build_asset(
         "paths": paths,
         "constraints": constraints,
     }
+    if settings.asset_id.strip():
+        payload["asset_id"] = settings.asset_id.strip()
     bindings: dict[int, dict[str, Any]] = {}
     for obj in bpy.context.scene.objects:
         binding = obj.hyperscape
@@ -204,6 +206,7 @@ def _clear_collection(collection) -> None:
 
 
 def load_asset(settings, payload: dict[str, Any], bindings, node_objects: dict[int, bpy.types.Object]) -> None:
+    settings.asset_id = payload.get("asset_id", "")
     for collection in (settings.frames, settings.walls, settings.anchors, settings.paths, settings.constraints):
         _clear_collection(collection)
     for authored in payload.get("frames", []):
@@ -825,6 +828,17 @@ class HYPERSCAPE_OT_generate_stable_id(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class HYPERSCAPE_OT_generate_asset_stable_id(bpy.types.Operator):
+    bl_idname = "hyperscape.generate_asset_stable_id"
+    bl_label = "Generate Stable Asset ID"
+    bl_description = "Assign a new durable UUID to the authored asset"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        context.scene.hyperscape.asset_id = str(uuid.uuid4())
+        return {"FINISHED"}
+
+
 class HYPERSCAPE_OT_generate_frame_stable_id(bpy.types.Operator):
     bl_idname = "hyperscape.generate_frame_stable_id"
     bl_label = "Generate Stable Conformal Frame ID"
@@ -890,6 +904,7 @@ CLASSES = (
     HYPERSCAPE_OT_reparent_frame,
     HYPERSCAPE_OT_refresh_guides,
     HYPERSCAPE_OT_sync_guides,
+    HYPERSCAPE_OT_generate_asset_stable_id,
     HYPERSCAPE_OT_generate_stable_id,
     HYPERSCAPE_OT_generate_frame_stable_id,
     HYPERSCAPE_OT_export,

@@ -183,6 +183,10 @@ class HyperscapeObjectBinding(bpy.types.PropertyGroup):
 
 
 class HyperscapeSceneSettings(bpy.types.PropertyGroup):
+    asset_id: StringProperty(
+        name="Stable Asset ID",
+        description="Durable UUID shared by Blender, glTF, Hyperscape, and authored edits",
+    )
     frames: CollectionProperty(type=HyperscapeFrame)
     active_frame: IntProperty(default=0, min=0)
     frame_reparent_target: IntProperty(name="New Parent", default=-1, min=-1)

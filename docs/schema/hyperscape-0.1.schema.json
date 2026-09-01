@@ -7,6 +7,11 @@
   "required": ["version"],
   "properties": {
     "version": { "const": "0.1" },
+    "asset_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Optional durable authored asset identity; required for collaborative entity addressing."
+    },
     "frames": {
       "type": "array",
       "items": { "$ref": "#/$defs/frame" },

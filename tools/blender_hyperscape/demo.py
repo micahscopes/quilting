@@ -57,6 +57,7 @@ def _add_cube(collection, name, location, scale, material):
 def create_demo_scene(context) -> None:
     scene = context.scene
     settings = scene.hyperscape
+    settings.asset_id = "a0000000-0000-4000-8000-000000000002"
     collection = _demo_collection(scene)
     for values in (settings.frames, settings.walls, settings.anchors, settings.paths, settings.constraints):
         _clear_collection(values)

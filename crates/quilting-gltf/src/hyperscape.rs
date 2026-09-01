@@ -4,7 +4,7 @@
 //! registered vendor extension can reuse it, but version 0.1 does not claim a
 //! reserved Khronos or multi-vendor prefix.
 
-use hyperscape_protocol::{ConformalFrameId, EntityId, SurfaceFrameOrientation};
+use hyperscape_protocol::{AssetId, ConformalFrameId, EntityId, SurfaceFrameOrientation};
 use quilting_core::{
     AnchorState, ConformalFrameForest, ConformalGenerator, ConformalTransformChain, FrameId,
     RoundWall, RoundWallGeometry, RoundWallSet, WallId,
@@ -24,6 +24,10 @@ const GLB_JSON_CHUNK: u32 = 0x4e4f_534a;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HyperscapePayload {
     pub version: String,
+    /// Durable identity of this authored asset. Legacy 0.1 payloads may omit
+    /// it; collaborative authoring requires it before addressing entities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_id: Option<AssetId>,
     #[serde(default)]
     pub frames: Vec<HyperscapeFrame>,
     #[serde(default)]
@@ -40,6 +44,7 @@ impl Default for HyperscapePayload {
     fn default() -> Self {
         Self {
             version: HYPERSCAPE_INTERCHANGE_VERSION.into(),
+            asset_id: None,
             frames: Vec::new(),
             walls: Vec::new(),
             anchors: Vec::new(),
@@ -190,6 +195,11 @@ impl HyperscapeAsset {
                 "unsupported version {:?}; expected {:?}",
                 self.payload.version, HYPERSCAPE_INTERCHANGE_VERSION
             )));
+        }
+        if let Some(asset_id) = self.payload.asset_id {
+            asset_id
+                .validate()
+                .map_err(|error| validation(format!("asset_id: {error}")))?;
         }
         let mut nodes_by_stable_id = BTreeMap::new();
         for (node, binding) in self.node_bindings.iter().enumerate() {
@@ -764,6 +774,7 @@ mod tests {
         HyperscapeAsset {
             payload: HyperscapePayload {
                 version: HYPERSCAPE_INTERCHANGE_VERSION.into(),
+                asset_id: Some(AssetId::from_u128(3).unwrap()),
                 frames: vec![
                     HyperscapeFrame {
                         stable_id: Some(ConformalFrameId::from_u128(10).unwrap()),
@@ -953,9 +964,31 @@ mod tests {
         assert!(duplicate.validate().is_err());
 
         let mut nil = sample_asset();
-        nil.node_bindings[0].as_mut().unwrap().stable_id = Some(
-            serde_json::from_value(Value::String(Uuid::nil().to_string())).unwrap(),
+        nil.node_bindings[0].as_mut().unwrap().stable_id =
+            Some(serde_json::from_value(Value::String(Uuid::nil().to_string())).unwrap());
+        assert!(nil.validate().is_err());
+    }
+
+    #[test]
+    fn asset_identity_is_optional_stable_and_non_nil() {
+        let asset = sample_asset();
+        let encoded = serde_json::to_value(&asset.payload).unwrap();
+        assert_eq!(
+            encoded["asset_id"],
+            AssetId::from_u128(3).unwrap().to_string()
         );
+
+        let mut legacy = asset.clone();
+        legacy.payload.asset_id = None;
+        legacy.validate().unwrap();
+        assert!(serde_json::to_value(&legacy.payload)
+            .unwrap()
+            .get("asset_id")
+            .is_none());
+
+        let mut nil = asset;
+        nil.payload.asset_id =
+            Some(serde_json::from_value(Value::String(Uuid::nil().to_string())).unwrap());
         assert!(nil.validate().is_err());
     }
 
@@ -1098,6 +1131,10 @@ mod tests {
         assert_eq!(parsed.document.nodes().count(), 3);
         let asset = extract_asset(&parsed.document).unwrap().unwrap();
         let runtime = asset.validate().unwrap();
+        assert_eq!(
+            asset.payload.asset_id,
+            Some(AssetId::from_u128(0xaaaa_aaaa_aaaa_4aaa_8aaa_aaaa_aaaa_aaaa).unwrap())
+        );
         assert_eq!(runtime.frames.frames().len(), 2);
         assert_eq!(runtime.walls.walls().len(), 2);
         assert_eq!(asset.payload.paths.len(), 1);
@@ -1107,5 +1144,4 @@ mod tests {
         assert_eq!(nodes.len(), 3);
         assert_eq!(graph_asset.unwrap(), asset);
     }
-
 }

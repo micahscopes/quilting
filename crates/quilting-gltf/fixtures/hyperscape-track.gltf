@@ -46,6 +46,7 @@
   "extras": {
     "hyperscape": {
       "version": "0.1",
+      "asset_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       "frames": [
         {
           "name": "world",

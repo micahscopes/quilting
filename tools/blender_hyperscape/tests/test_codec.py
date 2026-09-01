@@ -56,6 +56,24 @@ def sample_payload(path_node: int = 0) -> dict:
 
 
 class CodecTests(unittest.TestCase):
+    def test_asset_identity_is_optional_preserved_and_non_nil(self) -> None:
+        payload = sample_payload()
+        codec.validate_payload(payload, 1)
+
+        asset_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        payload["asset_id"] = asset_id
+        encoded = codec.inject_asset(
+            json.dumps({"asset": {"version": "2.0"}, "nodes": [{}]}).encode(),
+            payload,
+            {0: {"frame": 0, "path": 0}},
+        )
+        recovered, _ = codec.extract_asset(encoded)
+        self.assertEqual(recovered["asset_id"], asset_id)
+
+        payload["asset_id"] = "00000000-0000-0000-0000-000000000000"
+        with self.assertRaisesRegex(codec.HyperscapeCodecError, "must not be nil"):
+            codec.validate_payload(payload, 1)
+
     def test_json_roundtrip_preserves_fallback_and_unrelated_extras(self) -> None:
         document = {
             "asset": {"version": "2.0"},

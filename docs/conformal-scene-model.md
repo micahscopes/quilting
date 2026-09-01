@@ -222,6 +222,7 @@ Root shape:
   "extras": {
     "hyperscape": {
       "version": "0.1",
+      "asset_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       "frames": [
         {
           "stable_id": "44444444-4444-4444-8444-444444444444",
@@ -255,6 +256,12 @@ Root shape:
   }
 }
 ```
+
+`asset_id` is an optional durable UUID so existing v0.1 files remain valid.
+Collaborative authoring requires it because entity identity is scoped to its
+source asset. The embedded ID is interchange identity; a loader must reconcile
+it explicitly with any runtime request key rather than silently conflating the
+two.
 
 A surface pin is an authored constraint edge. It addresses a stable source
 entity plus an entity-local triangulated source face and barycentric material
