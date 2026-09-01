@@ -48,6 +48,13 @@ being approximated. Camera, selection, and animation time use the ephemeral
 presence lane. Timeline evaluation refreshes presence but is not converted
 into a stream of authored transforms.
 
+Selected bound objects also publish asset-scoped advisory authoring leases.
+Lease IDs remain stable while selected, refresh with presence, and are omitted
+on deselection; TTL expiry is the disconnect/crash fallback. If a live remote
+peer claims the same entity, Blender retains the local dirty edit and reports
+the contention instead of publishing it. Incoming authored edits are still
+admitted: leases coordinate editors but are neither capabilities nor ACLs.
+
 Remote browser presence is projected into a transient 3D View overlay: a
 camera glyph, focus/inversion sphere, and wire bounds around uniquely bound
 selected entities. Hyperscope publishes its rendered camera in the output
@@ -136,6 +143,12 @@ panel and retain it across exports; import restores the same UUID. This is the
 durable identity used by Blender/Hyperscape edit sync and presentation
 selection, while glTF node indices remain container-local handles.
 
+The scene may likewise carry a **Stable Asset ID**. Generate it once in the
+Hyperscape scene panel and retain it across exports. Collaborative entity
+addresses are the pair `(asset ID, entity ID)` so composed assets cannot alias
+one another; legacy files without an asset ID remain loadable but cannot make
+scoped lease claims.
+
 Generator lists are displayed in application order. Sphere reflection at its
 center is a pole and preview evaluation reports it instead of fabricating a
 finite position. Frame reparent and object re-anchor actions preserve the
@@ -177,9 +190,10 @@ blender --background --factory-startup --python-exit-code 1 \
 ```
 
 The live-sync integration check proves local edit publication, authored and
-presence echo suppression, remote transform application, ephemeral presence
-expiry and overlay cleanup, timeline isolation, explicit shear rejection, and
-the absence of overlay-created datablocks against a fake transport:
+presence echo suppression, remote transform application, advisory lease
+refresh/contention/release gating, ephemeral presence expiry and overlay
+cleanup, timeline isolation, explicit shear rejection, and the absence of
+overlay-created datablocks against a fake transport:
 
 ```sh
 blender --background --factory-startup --python-exit-code 1 \

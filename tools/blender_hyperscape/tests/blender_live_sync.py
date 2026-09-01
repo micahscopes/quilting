@@ -58,6 +58,7 @@ obj = bpy.context.object
 obj.name = "Live Cube"
 obj.hyperscape.enabled = True
 obj.hyperscape.stable_id = "10000000-0000-4000-8000-000000000001"
+bpy.context.scene.hyperscape.asset_id = "10000000-0000-4000-8000-000000000002"
 
 transport = FakeTransport()
 runtime = live_sync.BlenderLiveSync()
@@ -90,7 +91,12 @@ runtime.mark_object_updated(obj)
 runtime.tick(bpy.context.scene, 10.0)
 local = authored_frames(transport)[-1]
 local_presence = presence_frames(transport)[-1]
+assert [frame["lane"] for frame in transport.sent[:2]] == ["presence", "authored"]
 assert local["envelope"]["command"]["transform"]["translation"] == [1.0, 2.0, 3.0]
+assert local_presence["envelope"]["presence"]["authoring_leases"][0]["target"] == {
+    "asset": bpy.context.scene.hyperscape.asset_id,
+    "entity": obj.hyperscape.stable_id,
+}
 
 # A relay echo must not overwrite a newer local edit that has not yet been sent.
 obj.location = (2.0, 2.0, 3.0)
@@ -132,6 +138,15 @@ remote_presence = protocol.presence_envelope(
     sequence=2,
     ttl_millis=1500,
     selection=[obj.hyperscape.stable_id],
+    authoring_leases=[
+        {
+            "lease_id": "30000000-0000-4000-8000-000000000004",
+            "target": {
+                "asset": bpy.context.scene.hyperscape.asset_id,
+                "entity": obj.hyperscape.stable_id,
+            },
+        }
+    ],
 )
 transport.incoming.append(
     relay.RelayDelivery(
@@ -164,10 +179,28 @@ assert datablocks_before_overlay == (
     len(bpy.data.collections),
 )
 assert tuple(round(value, 6) for value in obj.matrix_world.translation) == (4.0, 5.0, 6.0)
+obj.location = (8.0, 5.0, 6.0)
+bpy.context.view_layer.update()
+runtime.mark_object_updated(obj)
+before_contended = len(authored_frames(transport))
+runtime.tick(bpy.context.scene, 10.5)
+assert len(authored_frames(transport)) == before_contended
+assert runtime.status().lease_claims == 1
+assert runtime.status().lease_contentions == 1
+assert runtime.status().authored_blocked == 1
 runtime.tick(bpy.context.scene, 12.0)
 assert runtime.status().remote_peers == 0
+assert len(authored_frames(transport)) == before_contended + 1
+assert runtime.status().lease_contentions == 0
+assert runtime.status().authored_blocked == 0
 presence_overlay.update(bpy.context.scene, runtime.remote_presence())
 assert presence_overlay.status().peers == 0
+
+# Deselection publishes a complete presence snapshot with the claim omitted.
+obj.select_set(False)
+runtime.tick(bpy.context.scene, 12.1)
+assert runtime.status().lease_claims == 0
+assert "authoring_leases" not in presence_frames(transport)[-1]["envelope"]["presence"]
 
 # Timeline evaluation updates the observed pose but never authors each frame.
 obj.location = (7.0, 8.0, 9.0)

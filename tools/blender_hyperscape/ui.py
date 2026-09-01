@@ -113,6 +113,13 @@ class HYPERSCAPE_PT_live_sync(bpy.types.Panel):
                 f"{status.authored_ignored} ignored"
             )
         )
+        layout.label(
+            text=(
+                f"Leases: {status.lease_claims} claimed · "
+                f"{status.lease_contentions} contended · "
+                f"{status.authored_blocked} edits held"
+            )
+        )
         if status.transport is not None:
             layout.label(
                 text=(

@@ -21,7 +21,7 @@ from bpy.app.handlers import persistent
 from bpy.props import StringProperty
 from mathutils import Matrix, Quaternion, Vector
 
-from . import presence_overlay, protocol, relay
+from . import authoring_leases, presence_overlay, protocol, relay
 
 
 TIMER_INTERVAL_SECONDS = 0.05
@@ -46,6 +46,9 @@ class BlenderLiveSyncStatus:
     authored_sent: int
     authored_applied: int
     authored_ignored: int
+    lease_claims: int
+    lease_contentions: int
+    authored_blocked: int
     transport: relay.RelayStatus | None
 
 
@@ -61,6 +64,11 @@ class BlenderLiveSync:
         self._next_sequence = 0
         self._authored = protocol.AuthoredInbox()
         self._presence = protocol.PresenceInbox()
+        self._leases = authoring_leases.AuthoringLeaseController()
+        self._lease_claims: tuple[dict[str, Any], ...] = ()
+        self._lease_contentions: dict[
+            str, tuple[authoring_leases.LeaseHolder, ...]
+        ] = {}
         self._remote_presence: list[Mapping[str, Any]] = []
         self._observed_matrices: dict[str, tuple[float, ...]] = {}
         self._dirty_entities: set[str] = set()
@@ -71,6 +79,7 @@ class BlenderLiveSync:
         self._authored_sent = 0
         self._authored_applied = 0
         self._authored_ignored = 0
+        self._authored_blocked = 0
         self._detail: str | None = None
 
     @property
@@ -95,6 +104,9 @@ class BlenderLiveSync:
         self._next_sequence = min(time.time_ns(), protocol.MAX_U64)
         self._authored = protocol.AuthoredInbox()
         self._presence = protocol.PresenceInbox()
+        self._leases.clear()
+        self._lease_claims = ()
+        self._lease_contentions = {}
         self._remote_presence = []
         self._dirty_entities.clear()
         self._frame_changed = False
@@ -103,6 +115,7 @@ class BlenderLiveSync:
         self._authored_sent = 0
         self._authored_applied = 0
         self._authored_ignored = 0
+        self._authored_blocked = 0
         self._detail = None
         self._refresh_observed(scene)
         try:
@@ -126,7 +139,11 @@ class BlenderLiveSync:
         self._scene_pointer = None
         self._peer_id = None
         self._remote_presence = []
+        self._leases.clear()
+        self._lease_claims = ()
+        self._lease_contentions = {}
         self._dirty_entities.clear()
+        self._authored_blocked = 0
         self._detail = None
 
     def mark_object_updated(self, obj: bpy.types.Object) -> None:
@@ -165,21 +182,47 @@ class BlenderLiveSync:
             self._detail = f"{invalid} bound object(s) have invalid stable IDs"
 
         self._admit_deliveries(objects, now)
-        if self._frame_changed:
-            # Timeline evaluation belongs in ephemeral animation presence, not
-            # a flood of durable transform edits.
-            self._refresh_observed(scene, objects)
-            self._dirty_entities.clear()
-            self._frame_changed = False
-        else:
-            self._publish_dirty(objects)
-        self._publish_presence(scene, objects, now)
+        selection = _selected_entities(scene, objects)
+        asset_id = self._authoring_asset_id(scene)
+        self._lease_claims = self._leases.synchronize(asset_id, selection)
+        self._publish_presence(
+            scene,
+            selection,
+            self._lease_claims,
+            now,
+        )
         self._remote_presence = [
             envelope
             for envelope in self._presence.live(now)
             if _stable_id(envelope["header"]["sender"], "presence sender")
             != self._peer_id
         ]
+        remote_holders = (
+            authoring_leases.remote_holders(
+                self._remote_presence,
+                asset_id,
+                exclude_peer=self._peer_id,
+            )
+            if asset_id is not None
+            else {}
+        )
+        local_targets = {
+            claim["target"]["entity"] for claim in self._lease_claims
+        }
+        self._lease_contentions = {
+            entity: holders
+            for entity, holders in remote_holders.items()
+            if entity in local_targets
+        }
+        if self._frame_changed:
+            # Timeline evaluation belongs in ephemeral animation presence, not
+            # a flood of durable transform edits.
+            self._refresh_observed(scene, objects)
+            self._dirty_entities.clear()
+            self._authored_blocked = 0
+            self._frame_changed = False
+        else:
+            self._publish_dirty(objects, set(remote_holders))
 
     def status(self) -> BlenderLiveSyncStatus:
         transport_status = self._transport.status() if self._transport else None
@@ -193,6 +236,9 @@ class BlenderLiveSync:
             authored_sent=self._authored_sent,
             authored_applied=self._authored_applied,
             authored_ignored=self._authored_ignored,
+            lease_claims=len(self._lease_claims),
+            lease_contentions=len(self._lease_contentions),
+            authored_blocked=self._authored_blocked,
             transport=transport_status,
         )
 
@@ -248,21 +294,30 @@ class BlenderLiveSync:
             self._dirty_entities.discard(entity)
             self._authored_applied += 1
 
-    def _publish_dirty(self, objects: Mapping[str, bpy.types.Object]) -> None:
+    def _publish_dirty(
+        self,
+        objects: Mapping[str, bpy.types.Object],
+        blocked_entities: set[str],
+    ) -> None:
         assert self._transport is not None
         assert self._peer_id is not None
         pending = sorted(self._dirty_entities)
-        self._dirty_entities.clear()
+        self._authored_blocked = len(set(pending) & blocked_entities)
         for entity in pending:
+            if entity in blocked_entities:
+                continue
             obj = objects.get(entity)
             if obj is None:
+                self._dirty_entities.discard(entity)
                 continue
             try:
                 signature, transform = _wire_transform(obj)
             except BlenderLiveSyncError as error:
                 self._detail = str(error)
+                self._dirty_entities.discard(entity)
                 continue
             if self._observed_matrices.get(entity) == signature:
+                self._dirty_entities.discard(entity)
                 continue
             envelope = protocol.set_transform_envelope(
                 message_id=str(uuid.uuid4()),
@@ -276,39 +331,35 @@ class BlenderLiveSync:
             try:
                 self._transport.send(protocol.local_peer_frame("authored", envelope))
             except relay.RelayTransportError:
-                self._dirty_entities.add(entity)
                 raise
             # The network worker may enqueue an echo immediately, but semantic
             # admission cannot drain it until this main-thread call completes.
             self._authored.record_local(envelope)
             self._observed_matrices[entity] = signature
+            self._dirty_entities.discard(entity)
             self._authored_sent += 1
 
     def _publish_presence(
         self,
         scene: bpy.types.Scene,
-        objects: Mapping[str, bpy.types.Object],
+        selection: list[str],
+        lease_claims: tuple[dict[str, Any], ...],
         now_seconds: float,
     ) -> None:
         assert self._transport is not None
         assert self._peer_id is not None
         camera = _camera_presence(scene.camera) if scene.camera is not None else None
-        view_layer = (
-            bpy.context.view_layer
-            if bpy.context.scene == scene
-            else scene.view_layers[0]
-        )
-        selection = sorted(
-            entity
-            for entity, obj in objects.items()
-            if obj.select_get(view_layer=view_layer)
-        )
         fps = scene.render.fps / scene.render.fps_base
         animation_seconds = max(
             0.0,
             (scene.frame_current_final - scene.frame_start) / fps,
         )
-        signature = _presence_signature(camera, selection, animation_seconds)
+        signature = _presence_signature(
+            camera,
+            selection,
+            lease_claims,
+            animation_seconds,
+        )
         if (
             signature == self._last_presence_signature
             and now_seconds - self._last_presence_sent_seconds
@@ -322,6 +373,7 @@ class BlenderLiveSync:
             ttl_millis=PRESENCE_TTL_MILLIS,
             camera=camera,
             selection=selection,
+            authoring_leases=lease_claims,
             animation_seconds=animation_seconds,
         )
         self._transport.send(protocol.local_peer_frame("presence", envelope))
@@ -330,6 +382,24 @@ class BlenderLiveSync:
         self._presence.record_local(envelope)
         self._last_presence_signature = signature
         self._last_presence_sent_seconds = now_seconds
+
+    def _authoring_asset_id(self, scene: bpy.types.Scene) -> str | None:
+        settings = getattr(scene, "hyperscape", None)
+        value = getattr(settings, "asset_id", "").strip()
+        if not value:
+            self._append_detail("Stable asset ID is required for authoring leases")
+            return None
+        try:
+            return authoring_leases.normalize_stable_id(value, "authoring asset ID")
+        except authoring_leases.AuthoringLeaseError as error:
+            self._append_detail(str(error))
+            return None
+
+    def _append_detail(self, detail: str) -> None:
+        if self._detail is None:
+            self._detail = detail
+        elif detail not in self._detail:
+            self._detail = f"{self._detail}; {detail}"
 
     def _refresh_observed(
         self,
@@ -404,6 +474,22 @@ def _entity_objects(
     return objects, duplicates, invalid
 
 
+def _selected_entities(
+    scene: bpy.types.Scene,
+    objects: Mapping[str, bpy.types.Object],
+) -> list[str]:
+    view_layer = (
+        bpy.context.view_layer
+        if bpy.context.scene == scene
+        else scene.view_layers[0]
+    )
+    return sorted(
+        entity
+        for entity, obj in objects.items()
+        if obj.select_get(view_layer=view_layer)
+    )
+
+
 def _matrix_signature(matrix: Matrix) -> tuple[float, ...]:
     return tuple(
         round(float(component), MATRIX_QUANTIZATION_DIGITS)
@@ -466,6 +552,7 @@ def _camera_presence(camera: bpy.types.Object) -> dict[str, list[float]]:
 def _presence_signature(
     camera: Mapping[str, Any] | None,
     selection: list[str],
+    authoring_lease_claims: tuple[dict[str, Any], ...],
     animation_seconds: float,
 ) -> tuple[Any, ...]:
     camera_values: tuple[float, ...] = ()
@@ -478,6 +565,14 @@ def _presence_signature(
     return (
         camera_values,
         tuple(selection),
+        tuple(
+            (
+                claim["lease_id"],
+                claim["target"]["asset"],
+                claim["target"]["entity"],
+            )
+            for claim in authoring_lease_claims
+        ),
         round(animation_seconds, MATRIX_QUANTIZATION_DIGITS),
     )
 

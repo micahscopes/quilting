@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import bpy
 
-from . import demo, live_sync, operators, properties, ui
+from . import authoring_leases, demo, live_sync, operators, properties, ui
 
 
 bl_info = {
