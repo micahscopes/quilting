@@ -706,6 +706,10 @@ pub enum AppEvent {
     /// Restore one canonical materialized projection into an empty authored
     /// lane. Durable history remains owned by the external authority.
     AuthoredProjectionRestored(AuthoredProjectionSnapshot),
+    /// Advance the rebuildable authored lane to a canonical materialization
+    /// produced by external authority. This replaces projection content
+    /// without inventing arrival-ordered authored commands.
+    AuthoredProjectionSynchronized(AuthoredProjectionSnapshot),
     AuthoredRevision(AuthoredRevision),
 }
 
@@ -1749,6 +1753,20 @@ impl AppState {
         }
     }
 
+    fn install_authored_projection(&mut self, snapshot: AuthoredProjectionSnapshot) {
+        self.authored_assets = snapshot
+            .assets
+            .into_iter()
+            .map(|asset| (asset.id, asset))
+            .collect();
+        self.authored_entities = snapshot
+            .entities
+            .into_iter()
+            .map(|entity| (entity.entity, entity.transform))
+            .collect();
+        self.authored_projection_revision = Some(snapshot.projection_revision);
+    }
+
     pub fn reduce(&mut self, event: AppEvent) -> Result<AppCommit, ReduceError> {
         let direct_input_sequence = match &event {
             AppEvent::Input(Timed {
@@ -2284,17 +2302,19 @@ impl AppState {
                 {
                     return Err(ReduceError::AuthoredProjectionAlreadyInitialized);
                 }
-                self.authored_assets = snapshot
-                    .assets
-                    .into_iter()
-                    .map(|asset| (asset.id, asset))
-                    .collect();
-                self.authored_entities = snapshot
-                    .entities
-                    .into_iter()
-                    .map(|entity| (entity.entity, entity.transform))
-                    .collect();
-                self.authored_projection_revision = Some(snapshot.projection_revision);
+                self.install_authored_projection(snapshot);
+            }
+            AppEvent::AuthoredProjectionSynchronized(snapshot) => {
+                snapshot.validate()?;
+                if let Some(current) = self.authored_projection_revision {
+                    if snapshot.projection_revision <= current {
+                        return Err(ReduceError::AuthoredProjectionRevisionNotAdvanced {
+                            current,
+                            requested: snapshot.projection_revision,
+                        });
+                    }
+                }
+                self.install_authored_projection(snapshot);
             }
             AppEvent::AuthoredRevision(revision) => {
                 for command in &revision.commands {
@@ -3026,6 +3046,36 @@ impl AppStore {
             }
             state
                 .reduce(AppEvent::AuthoredRevision(revision))
+                .map_err(AuthoredProjectionDispatchError::Reduce)?
+        };
+        if commit.published_ui {
+            self.flush_read_models();
+        }
+        Ok(commit)
+    }
+
+    /// Install a canonical externally materialized authored projection only
+    /// while the caller's durable baseline remains current.
+    ///
+    /// The reducer owns the replacement and requires a strictly newer
+    /// projection revision. The compare fence closes an AppStore bypass race
+    /// without holding a synchronous lock across external persistence.
+    pub fn synchronize_authored_projection_if_current(
+        &self,
+        expected: Option<u64>,
+        snapshot: AuthoredProjectionSnapshot,
+    ) -> Result<AppCommit, AuthoredProjectionDispatchError> {
+        let commit = {
+            let mut state = self.lock_state();
+            let actual = state.authored_projection_revision;
+            if actual != expected {
+                return Err(AuthoredProjectionDispatchError::BaselineChanged {
+                    expected,
+                    actual,
+                });
+            }
+            state
+                .reduce(AppEvent::AuthoredProjectionSynchronized(snapshot))
                 .map_err(AuthoredProjectionDispatchError::Reduce)?
         };
         if commit.published_ui {
@@ -3978,6 +4028,7 @@ pub enum ReduceError {
     NoInstalledPrimaryScene,
     UnknownAnimationClip(u32),
     AuthoredProjectionAlreadyInitialized,
+    AuthoredProjectionRevisionNotAdvanced { current: u64, requested: u64 },
     NonCanonicalAuthoredProjection(&'static str),
     Wire(String),
     UnknownAsset(AssetId),
@@ -4057,6 +4108,10 @@ impl fmt::Display for ReduceError {
             }
             Self::AuthoredProjectionAlreadyInitialized => formatter
                 .write_str("authored projection restoration requires an empty authored lane"),
+            Self::AuthoredProjectionRevisionNotAdvanced { current, requested } => write!(
+                formatter,
+                "authored projection synchronization revision {requested} does not advance {current}",
+            ),
             Self::NonCanonicalAuthoredProjection(collection) => write!(
                 formatter,
                 "authored projection {collection} must be strictly key-sorted and unique",
@@ -7503,6 +7558,86 @@ mod tests {
         );
         assert_eq!(store.summary_snapshot(), restored_summary);
         assert_eq!(store.authored_scene_snapshot(), restored_scene);
+    }
+
+    #[test]
+    fn canonical_authored_projection_synchronization_is_fenced_and_replacing() {
+        let store = AppStore::default();
+        let first_asset = asset(0xc1, "first.glb");
+        let second_asset = asset(0xc2, "second.glb");
+        let first_entity = EntityId::from_u128(0xc3).unwrap();
+        let second_entity = EntityId::from_u128(0xc4).unwrap();
+        let initialized = AuthoredProjectionSnapshot {
+            projection_revision: 0,
+            assets: vec![first_asset.clone()],
+            entities: vec![AuthoredEntityReadModel {
+                entity: first_entity,
+                transform: transform(1.0),
+            }],
+        };
+        let first = store
+            .synchronize_authored_projection_if_current(None, initialized)
+            .unwrap();
+        assert_eq!(first.disposition, CommitDisposition::Applied);
+
+        let replacement = AuthoredProjectionSnapshot {
+            projection_revision: 1,
+            assets: vec![second_asset.clone()],
+            entities: vec![AuthoredEntityReadModel {
+                entity: second_entity,
+                transform: transform(2.0),
+            }],
+        };
+        let synchronized = store
+            .synchronize_authored_projection_if_current(Some(0), replacement.clone())
+            .unwrap();
+        assert_eq!(synchronized.disposition, CommitDisposition::Applied);
+        assert_eq!(
+            store.authored_scene_snapshot(),
+            AuthoredSceneReadModel {
+                projection_revision: Some(1),
+                assets: vec![second_asset],
+                entities: replacement.entities.clone(),
+            }
+        );
+
+        let settled = store.authored_scene_snapshot();
+        assert_eq!(
+            store
+                .synchronize_authored_projection_if_current(Some(0), replacement.clone())
+                .unwrap_err(),
+            AuthoredProjectionDispatchError::BaselineChanged {
+                expected: Some(0),
+                actual: Some(1),
+            }
+        );
+        assert_eq!(store.authored_scene_snapshot(), settled);
+
+        assert_eq!(
+            store
+                .synchronize_authored_projection_if_current(Some(1), replacement)
+                .unwrap_err(),
+            AuthoredProjectionDispatchError::Reduce(
+                ReduceError::AuthoredProjectionRevisionNotAdvanced {
+                    current: 1,
+                    requested: 1,
+                }
+            )
+        );
+        assert_eq!(store.authored_scene_snapshot(), settled);
+
+        let noncanonical = AuthoredProjectionSnapshot {
+            projection_revision: 2,
+            assets: vec![first_asset, asset(0xc0, "out-of-order.glb")],
+            entities: Vec::new(),
+        };
+        assert!(matches!(
+            store.synchronize_authored_projection_if_current(Some(1), noncanonical),
+            Err(AuthoredProjectionDispatchError::Reduce(
+                ReduceError::NonCanonicalAuthoredProjection("assets")
+            ))
+        ));
+        assert_eq!(store.authored_scene_snapshot(), settled);
     }
 
     #[test]

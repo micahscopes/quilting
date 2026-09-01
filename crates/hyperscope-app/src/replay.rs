@@ -29,7 +29,8 @@ use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
 
-pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.27";
+pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.28";
+pub const LEGACY_APP_REPLAY_VERSION_0_27: &str = "hyperscope-app-replay/0.27";
 pub const LEGACY_APP_REPLAY_VERSION_0_26: &str = "hyperscope-app-replay/0.26";
 pub const LEGACY_APP_REPLAY_VERSION_0_25: &str = "hyperscope-app-replay/0.25";
 pub const LEGACY_APP_REPLAY_VERSION_0_24: &str = "hyperscope-app-replay/0.24";
@@ -80,6 +81,7 @@ enum ReplaySchema {
     V0_25,
     V0_26,
     V0_27,
+    V0_28,
 }
 pub const APP_REPLAY_FINGERPRINT_ALGORITHM: &str = "fnv1a-128-json";
 const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
@@ -184,6 +186,9 @@ pub enum AppReplayEvent {
         commands: Vec<AuthoredEnvelope>,
     },
     RestoreAuthoredProjection {
+        snapshot: AuthoredProjectionSnapshot,
+    },
+    SynchronizeAuthoredProjection {
         snapshot: AuthoredProjectionSnapshot,
     },
     Frame {
@@ -1365,7 +1370,8 @@ pub fn run_app_replay(script: &AppReplayScript) -> Result<AppReplayTrace, AppRep
         LEGACY_APP_REPLAY_VERSION_0_24 => ReplaySchema::V0_24,
         LEGACY_APP_REPLAY_VERSION_0_25 => ReplaySchema::V0_25,
         LEGACY_APP_REPLAY_VERSION_0_26 => ReplaySchema::V0_26,
-        APP_REPLAY_VERSION => ReplaySchema::V0_27,
+        LEGACY_APP_REPLAY_VERSION_0_27 => ReplaySchema::V0_27,
+        APP_REPLAY_VERSION => ReplaySchema::V0_28,
         _ => return Err(AppReplayError::UnsupportedVersion(script.version.clone())),
     };
     let store = AppStore::default();
@@ -1483,6 +1489,7 @@ fn replay_event(
                     | ReplaySchema::V0_25
                     | ReplaySchema::V0_26
                     | ReplaySchema::V0_27
+                    | ReplaySchema::V0_28
             ) {
                 let pending_install = commit.effects.iter().find_map(|effect| match effect {
                     AppEffect::InstallPrimaryScene {
@@ -1548,6 +1555,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_25
                     | ReplaySchema::V0_26
                     | ReplaySchema::V0_27
+                    | ReplaySchema::V0_28
             ) {
                 return Err(
                     "presentation animation residency requires app replay 0.22".to_owned(),
@@ -1584,7 +1592,10 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
         } => {
             if !matches!(
                 schema,
-                ReplaySchema::V0_25 | ReplaySchema::V0_26 | ReplaySchema::V0_27
+                ReplaySchema::V0_25
+                    | ReplaySchema::V0_26
+                    | ReplaySchema::V0_27
+                    | ReplaySchema::V0_28
             ) {
                 return Err("interaction actions require app replay 0.25".to_owned());
             }
@@ -1627,6 +1638,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_25
                     | ReplaySchema::V0_26
                     | ReplaySchema::V0_27
+                    | ReplaySchema::V0_28
             ) {
                 return Err("animation playback actions require app replay 0.11".to_owned());
             }
@@ -1643,6 +1655,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_25
                     | ReplaySchema::V0_26
                     | ReplaySchema::V0_27
+                    | ReplaySchema::V0_28
             )
                 && matches!(
                     action,
@@ -1662,6 +1675,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_25
                     | ReplaySchema::V0_26
                     | ReplaySchema::V0_27
+                    | ReplaySchema::V0_28
             )
                 && matches!(action, ReplayAnimationAction::SelectClip { .. })
             {
@@ -1690,6 +1704,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_25
                     | ReplaySchema::V0_26
                     | ReplaySchema::V0_27
+                    | ReplaySchema::V0_28
             ) {
                 return Err("render settings actions require app replay 0.18".to_owned());
             }
@@ -1699,12 +1714,16 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_25
                     | ReplaySchema::V0_26
                     | ReplaySchema::V0_27
+                    | ReplaySchema::V0_28
             )
                 && settings.focus_postprocess != crate::FocusPostprocessSettings::default()
             {
                 return Err("focus postprocess settings require app replay 0.24".to_owned());
             }
-            if !matches!(schema, ReplaySchema::V0_26 | ReplaySchema::V0_27)
+            if !matches!(
+                schema,
+                ReplaySchema::V0_26 | ReplaySchema::V0_27 | ReplaySchema::V0_28
+            )
                 && settings.focus_postprocess.diagnostic_view
                     != crate::FocusDiagnosticView::Composite
             {
@@ -1728,6 +1747,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_25
                     | ReplaySchema::V0_26
                     | ReplaySchema::V0_27
+                    | ReplaySchema::V0_28
             ) {
                 return Err("navigation settings actions require app replay 0.23".to_owned());
             }
@@ -1768,7 +1788,8 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_24
                     | ReplaySchema::V0_25
                     | ReplaySchema::V0_26
-                    | ReplaySchema::V0_27 => (*scope).into(),
+                    | ReplaySchema::V0_27
+                    | ReplaySchema::V0_28 => (*scope).into(),
                     _ if *scope == ReplayAssetLoadScope::Asset => AssetLoadScope::Asset,
                     _ => {
                         return Err(
@@ -1813,6 +1834,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_25
                     | ReplaySchema::V0_26
                     | ReplaySchema::V0_27
+                    | ReplaySchema::V0_28
             ) {
                 return Err("asset provenance requires app replay 0.12".to_owned());
             }
@@ -1839,6 +1861,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_25
                     | ReplaySchema::V0_26
                     | ReplaySchema::V0_27
+                    | ReplaySchema::V0_28
             ) {
                 return Err("primary scene installation requires app replay 0.20".to_owned());
             }
@@ -1866,6 +1889,7 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                     | ReplaySchema::V0_25
                     | ReplaySchema::V0_26
                     | ReplaySchema::V0_27
+                    | ReplaySchema::V0_28
             ) {
                 return Err("animation clip selection requires app replay 0.21".to_owned());
             }
@@ -1894,10 +1918,18 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
             commands: commands.clone(),
         })),
         AppReplayEvent::RestoreAuthoredProjection { snapshot } => {
-            if schema != ReplaySchema::V0_27 {
+            if !matches!(schema, ReplaySchema::V0_27 | ReplaySchema::V0_28) {
                 return Err("authored projection restoration requires app replay 0.27".to_owned());
             }
             Ok(AppEvent::AuthoredProjectionRestored(snapshot.clone()))
+        }
+        AppReplayEvent::SynchronizeAuthoredProjection { snapshot } => {
+            if schema != ReplaySchema::V0_28 {
+                return Err(
+                    "authored projection synchronization requires app replay 0.28".to_owned(),
+                );
+            }
+            Ok(AppEvent::AuthoredProjectionSynchronized(snapshot.clone()))
         }
         AppReplayEvent::Frame {
             elapsed_seconds,
@@ -1930,6 +1962,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_25
             | ReplaySchema::V0_26
             | ReplaySchema::V0_27
+            | ReplaySchema::V0_28
     )
         && matches!(action, ReplayNavigationAction::ApplyCameraIntent { .. })
     {
@@ -1951,6 +1984,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_25
             | ReplaySchema::V0_26
             | ReplaySchema::V0_27
+            | ReplaySchema::V0_28
     )
         && matches!(action, ReplayNavigationAction::ApplyTurntableIntent { .. })
     {
@@ -1971,6 +2005,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_25
             | ReplaySchema::V0_26
             | ReplaySchema::V0_27
+            | ReplaySchema::V0_28
     )
         && matches!(action, ReplayNavigationAction::ReframeSelection { .. })
     {
@@ -1990,6 +2025,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_25
             | ReplaySchema::V0_26
             | ReplaySchema::V0_27
+            | ReplaySchema::V0_28
     )
         && matches!(action, ReplayNavigationAction::AimAtSelection { .. })
     {
@@ -2024,6 +2060,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_25
             | ReplaySchema::V0_26
             | ReplaySchema::V0_27
+            | ReplaySchema::V0_28
     ) && matches!(
         action,
         ReplayNavigationAction::RefitFocusAndToggleInversion { .. }
@@ -2065,6 +2102,7 @@ fn navigation_action_for_replay_version(
             | ReplaySchema::V0_25
             | ReplaySchema::V0_26
             | ReplaySchema::V0_27
+            | ReplaySchema::V0_28
     ) && matches!(
         action,
         ReplayNavigationAction::AnchorFocus { asset_id: None, .. }
@@ -2846,6 +2884,68 @@ mod tests {
         assert!(legacy.records[0].state.authored_entities.is_empty());
     }
 
+    #[test]
+    fn replay_0_28_synchronizes_canonical_projection_without_reinterpreting_0_27() {
+        let restored_asset = AssetDescriptor {
+            id: AssetId::from_u128(0x2801).unwrap(),
+            uri: "restored.glb".into(),
+            media_type: Some("model/gltf-binary".into()),
+            content_digest: Some([0x28; 32]),
+        };
+        let synchronized_asset = AssetDescriptor {
+            id: AssetId::from_u128(0x2802).unwrap(),
+            uri: "synchronized.glb".into(),
+            media_type: Some("model/gltf-binary".into()),
+            content_digest: Some([0x29; 32]),
+        };
+        let restored = AppReplayEvent::RestoreAuthoredProjection {
+            snapshot: AuthoredProjectionSnapshot {
+                projection_revision: 4,
+                assets: vec![restored_asset.clone()],
+                entities: Vec::new(),
+            },
+        };
+        let synchronized = AppReplayEvent::SynchronizeAuthoredProjection {
+            snapshot: AuthoredProjectionSnapshot {
+                projection_revision: 5,
+                assets: vec![synchronized_asset.clone()],
+                entities: Vec::new(),
+            },
+        };
+
+        let current = run_app_replay(&AppReplayScript::new(vec![
+            restored.clone(),
+            synchronized.clone(),
+        ]))
+        .unwrap();
+        assert!(current.records.iter().all(|record| matches!(
+            record.outcome,
+            AppReplayOutcome::Committed { .. }
+        )));
+        assert_eq!(current.records[1].state.authored_projection_revision, Some(5));
+        assert_eq!(
+            current.records[1].state.authored_assets,
+            vec![synchronized_asset]
+        );
+
+        let legacy = run_app_replay(&AppReplayScript {
+            version: LEGACY_APP_REPLAY_VERSION_0_27.to_owned(),
+            events: vec![restored, synchronized],
+        })
+        .unwrap();
+        assert!(matches!(
+            legacy.records[0].outcome,
+            AppReplayOutcome::Committed { .. }
+        ));
+        assert!(matches!(
+            &legacy.records[1].outcome,
+            AppReplayOutcome::Rejected { error }
+                if error.contains("requires app replay 0.28")
+        ));
+        assert_eq!(legacy.records[1].state.authored_projection_revision, Some(4));
+        assert_eq!(legacy.records[1].state.authored_assets, vec![restored_asset]);
+    }
+
     fn committed_effects(record: &AppReplayRecord) -> &[AppReplayEffect] {
         match &record.outcome {
             AppReplayOutcome::Committed { effects, .. } => effects,
@@ -2960,6 +3060,7 @@ mod tests {
             },
             AppEvent::RemotePresence(_) => "remote_presence",
             AppEvent::AuthoredProjectionRestored(_) => "authored_projection_restored",
+            AppEvent::AuthoredProjectionSynchronized(_) => "authored_projection_synchronized",
             AppEvent::AuthoredRevision(_) => "authored_revision",
         }
     }
@@ -3037,6 +3138,13 @@ mod tests {
                     entities: Vec::new(),
                 },
             },
+            AppReplayEvent::SynchronizeAuthoredProjection {
+                snapshot: AuthoredProjectionSnapshot {
+                    projection_revision: 1,
+                    assets: Vec::new(),
+                    entities: Vec::new(),
+                },
+            },
         ];
         let covered = presentation
             .events
@@ -3044,7 +3152,7 @@ mod tests {
             .chain(navigation.events.iter())
             .chain(orchestration.events.iter())
             .chain(current_events.iter())
-            .filter_map(|event| replay_app_event(event, ReplaySchema::V0_27).ok())
+            .filter_map(|event| replay_app_event(event, ReplaySchema::V0_28).ok())
             .map(|event| authoritative_app_event_name(&event))
             .collect::<std::collections::BTreeSet<_>>();
         let authored_covered = orchestration
@@ -3062,6 +3170,7 @@ mod tests {
             std::collections::BTreeSet::from([
                 "authored_revision",
                 "authored_projection_restored",
+                "authored_projection_synchronized",
                 "animate",
                 "cancel_asset",
                 "effect_completed_animation_clip_selection",
