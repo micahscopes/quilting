@@ -31,6 +31,11 @@ The names describe layers, not competing applications:
 Hyperscape uses Bevy ECS without depending on Bevy's renderer. WebGL2 and
 WebGPU consume the same extracted logical view and render-command data.
 
+The optional Fe/GA shader-specialization investigation is bounded in
+[`fe-webgl-ga-prototype.md`](fe-webgl-ga-prototype.md). It feeds Quilting's
+existing immutable shader descriptors and cannot become a second scene,
+renderer, or resource authority.
+
 ### HHHS release boundary
 
 The exact HHHS `v0.4.4` dependency is pinned to its immutable release tag.
