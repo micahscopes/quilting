@@ -261,6 +261,56 @@ fn authored_entry_and_local_checkpoint_commit_and_restart_atomically() {
 }
 
 #[test]
+fn checkpoint_only_transition_is_durable_atomic_and_history_neutral() {
+    let project_id = project(0x3004);
+    let key = ProjectionKey::new("hyperscope/import-cursor", 1).unwrap();
+    let checkpoint_bytes = 7_u64.to_le_bytes().to_vec();
+    let mut host = DurableProject::new(project_id).unwrap();
+    block_on(host.admit(&set(1, entity_id(0x3004), 4.0))).unwrap();
+    let before_state = host.state().unwrap();
+    let before_history_len = host.history_len();
+    let before_failure_log = host.durability().bytes().to_vec();
+    host.durability_mut().fail_next_persist();
+
+    let error = block_on(host.persist_projection_checkpoint(key.clone(), checkpoint_bytes.clone()))
+        .unwrap_err();
+    assert!(matches!(error, AdapterError::Repair(_)));
+    assert!(host.projection_checkpoint(&key).is_none());
+    assert_eq!(host.history_len(), before_history_len);
+    assert_eq!(host.state().unwrap(), before_state);
+    assert_eq!(host.durability().bytes(), before_failure_log);
+
+    let checkpoint =
+        block_on(host.persist_projection_checkpoint(key.clone(), checkpoint_bytes.clone()))
+            .unwrap();
+    assert!(checkpoint.is_intact());
+    assert_eq!(checkpoint.bytes(), checkpoint_bytes);
+    assert_eq!(
+        checkpoint.history_root.as_bytes(),
+        &before_state.history_root
+    );
+    assert_eq!(host.projection_checkpoint(&key), Some(checkpoint.clone()));
+    assert_eq!(host.history_len(), before_history_len);
+    assert_eq!(host.state().unwrap(), before_state);
+
+    let durable_log = host.durability().bytes().to_vec();
+    let exact =
+        block_on(host.persist_projection_checkpoint(key.clone(), checkpoint_bytes)).unwrap();
+    assert_eq!(exact, checkpoint);
+    assert_eq!(host.durability().bytes(), durable_log);
+
+    let recovered = DurableProject::recover(project_id, durable_log).unwrap();
+    assert_eq!(recovered.projection_checkpoint(&key), Some(checkpoint));
+    assert_eq!(recovered.history_len(), before_history_len);
+    assert_eq!(recovered.state().unwrap(), before_state);
+
+    let archive = host.export_archive().unwrap();
+    let imported = block_on(DurableProject::import_archive(&archive)).unwrap();
+    assert!(imported.projection_checkpoint(&key).is_none());
+    assert_eq!(imported.state().unwrap(), before_state);
+}
+
+#[test]
 fn recovery_preserves_history_and_materialized_roots() {
     let project = project(4);
     let mut original = DurableProject::new(project).unwrap();

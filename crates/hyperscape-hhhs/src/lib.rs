@@ -14,11 +14,11 @@ use hhhs::{DagRead, DagSnapshot, Digest, EntryHash, LazyReach, Position, Reach};
 use hhhs_reactive::{signal_vec_view, stream_view, Revision};
 use hhhs_replica::{
     AdmissionPolicy, AdmittedAuthority, AsyncTransactionSink, AuthorityInput, DurableReplicaHost,
-    Replica, ReplicaRecord, ReplicaWireError, MAX_REPLICA_RECORD_BYTES,
+    Replica, ReplicaRecord, ReplicaRepairError, ReplicaWireError, MAX_REPLICA_RECORD_BYTES,
 };
 use hhhs_store::{
     append_storage_transaction_log, decode_storage_transaction_log, empty_storage_transaction_log,
-    history_root, MemoryStorage, ReplicaStorage, StorageError, StorageTransaction,
+    history_anchor, history_root, MemoryStorage, ReplicaStorage, StorageError, StorageTransaction,
 };
 pub use hhhs_store::{ProjectionCheckpoint, ProjectionKey};
 use hhhs_sync::{Refusal, RepairHost};
@@ -992,6 +992,40 @@ impl<D> DurableProject<D>
 where
     D: AsyncTransactionSink,
 {
+    /// Persist one receiver-local projection checkpoint at the exact current
+    /// public-history horizon without adding an authored entry.
+    ///
+    /// This is intended for explicit local lifecycle transitions such as
+    /// adopting a validated portable archive. External durability completes
+    /// before the in-memory replica publishes the checkpoint. An exact retry
+    /// at the same history/bytes horizon performs no write.
+    pub async fn persist_projection_checkpoint(
+        &mut self,
+        key: ProjectionKey,
+        bytes: Vec<u8>,
+    ) -> Result<ProjectionCheckpoint, AdapterError> {
+        let before = self.storage.storage_snapshot();
+        let anchor = history_anchor(&before.history);
+        let checkpoint = ProjectionCheckpoint::new(key, anchor.at, anchor.root, bytes)?;
+        if before.checkpoint(&checkpoint.key) == Some(&checkpoint) {
+            return Ok(checkpoint);
+        }
+
+        let mut transaction = StorageTransaction::new();
+        transaction
+            .expect_sequence(before.sequence)
+            .save_checkpoint(checkpoint.clone());
+        self.host
+            .durability_mut()
+            .persist(&transaction)
+            .await
+            .map_err(|error| {
+                AdapterError::Repair(ReplicaRepairError::ExternalDurability(error.to_string()))
+            })?;
+        self.storage.commit(transaction)?;
+        Ok(checkpoint)
+    }
+
     /// Re-admit a complete portable archive into this durability sink.
     ///
     /// Exact retries and resuming a prefix already present locally are safe.
