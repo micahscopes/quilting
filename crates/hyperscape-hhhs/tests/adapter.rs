@@ -6,8 +6,9 @@ use hhhs::{DagSnapshot, Digest, ReachIndex};
 use hhhs_store::decode_storage_transaction_log;
 use hyperscape_hhhs::{
     decode_authored, encode_authored, AdapterError, ApplyRecordWithCheckpointReport,
-    DurableProject, MemoryDurability, ProjectArchive, ProjectId, ProjectionKey, RecordRefusal,
-    StateRow, MAX_AUTHORED_PAYLOAD_BYTES, MAX_PROJECT_ARCHIVE_RECORDS, PAYLOAD_DOMAIN,
+    AuthoredRecordFrame, DurableProject, MemoryDurability, ProjectArchive, ProjectId,
+    ProjectionKey, RecordFrameError, RecordRefusal, StateRow, AUTHORED_RECORD_FRAME_LANE,
+    MAX_AUTHORED_PAYLOAD_BYTES, MAX_PROJECT_ARCHIVE_RECORDS, PAYLOAD_DOMAIN,
     PROJECT_ARCHIVE_DOMAIN,
 };
 use hyperscape_protocol::{
@@ -127,6 +128,66 @@ fn frozen_asset_options_round_trip_when_absent() {
 
     let bytes = encode_authored(project, &authored).unwrap();
     assert_eq!(decode_authored(project, &bytes).unwrap(), authored);
+}
+
+#[test]
+fn authored_record_frame_round_trips_without_granting_transport_authority() {
+    let project_id = project(0xaacc);
+    let authored = upsert(5, asset_id(0xbbcc), "models/carrier.glb");
+    let mut source = DurableProject::new(project_id).unwrap();
+    let record = block_on(source.admit(&authored)).unwrap();
+    let frame = AuthoredRecordFrame::new(project_id, record.clone()).unwrap();
+
+    let json = frame.encode_json().unwrap();
+    assert_eq!(json, frame.encode_json().unwrap());
+    assert!(json.contains(&format!(r#""lane":"{AUTHORED_RECORD_FRAME_LANE}""#)));
+    assert!(!json.contains('='), "carrier base64url must be unpadded");
+    let decoded = AuthoredRecordFrame::decode_json(&json).unwrap();
+    assert_eq!(decoded.project_id(), project_id);
+    assert_eq!(decoded.record(), &record);
+    assert_eq!(
+        decode_authored(project_id, &decoded.into_record().entry().payload).unwrap(),
+        authored
+    );
+}
+
+#[test]
+fn authored_record_frame_rechecks_schema_project_and_record_payload() {
+    let project_id = project(0xaacd);
+    let mut source = DurableProject::new(project_id).unwrap();
+    let record = block_on(source.admit(&set(6, entity_id(0xbbcd), 3.0))).unwrap();
+    assert!(matches!(
+        AuthoredRecordFrame::new(project(0xaace), record.clone()),
+        Err(RecordFrameError::Adapter(AdapterError::WrongProject { .. }))
+    ));
+
+    let json = AuthoredRecordFrame::new(project_id, record)
+        .unwrap()
+        .encode_json()
+        .unwrap();
+    let mut wire: serde_json::Value = serde_json::from_str(&json).unwrap();
+    wire["lane"] = serde_json::json!("authored");
+    assert!(matches!(
+        AuthoredRecordFrame::decode_json(&serde_json::to_string(&wire).unwrap()),
+        Err(RecordFrameError::WrongLane(_))
+    ));
+
+    wire["lane"] = serde_json::json!(AUTHORED_RECORD_FRAME_LANE);
+    wire["version"]["major"] = serde_json::json!(99);
+    assert!(matches!(
+        AuthoredRecordFrame::decode_json(&serde_json::to_string(&wire).unwrap()),
+        Err(RecordFrameError::WrongVersion(ProtocolVersion {
+            major: 99,
+            minor: 1,
+        }))
+    ));
+
+    wire["version"]["major"] = serde_json::json!(0);
+    wire["unexpected"] = serde_json::json!(true);
+    assert!(matches!(
+        AuthoredRecordFrame::decode_json(&serde_json::to_string(&wire).unwrap()),
+        Err(RecordFrameError::Json(_))
+    ));
 }
 
 #[test]

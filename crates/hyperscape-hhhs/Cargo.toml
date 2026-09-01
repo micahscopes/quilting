@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Durable HHHS authored-operation adapter for Hyperscape protocol 0.1"
 
 [dependencies]
+base64 = "0.22"
 bincode = "=1.3.3"
 futures = "0.3"
 futures-signals = "0.3"
@@ -18,6 +19,7 @@ hhhs-store.workspace = true
 hhhs-sync.workspace = true
 hyperscape-protocol = { version = "0.1.0", path = "../hyperscape-protocol" }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
 uuid = "1"
 

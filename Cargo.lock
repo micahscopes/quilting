@@ -1816,6 +1816,7 @@ dependencies = [
 name = "hyperscape-hhhs"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bincode",
  "futures",
  "futures-signals",
@@ -1826,6 +1827,7 @@ dependencies = [
  "hhhs-sync",
  "hyperscape-protocol",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "uuid",
 ]

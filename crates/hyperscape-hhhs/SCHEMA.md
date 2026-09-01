@@ -40,6 +40,31 @@ Recovery replays only a locally trusted transaction log produced by the durable
 sink. Untrusted peer records always enter through normal HHHS repair and the
 application admission policy.
 
+## Live authored-record carrier 0.1
+
+`AuthoredRecordFrame` is the small live-transport wrapper around one public
+`ReplicaRecord`. Its canonical compact JSON contains exactly:
+
+- `lane: "authored_record"`;
+- `version: {"major":0,"minor":1}`;
+- the hyphenated `project_id` UUID;
+- canonical unpadded URL-safe base64 in `record_base64`.
+
+Unknown fields, an incorrect lane/version, nil or mismatched projects,
+non-canonical base64url, oversized framing, invalid replica-record bytes, and
+records whose authored payload belongs to another project are rejected. Relay
+delivery grants no authority: the decoded record still enters ordinary HHHS
+admission, causal-predecessor checking, and application policy.
+
+This frame is deliberately distinct from the direct-demo `authored` envelope
+and ephemeral `presence` lanes. A raw authored envelope is a proposal that
+exactly one selected admission authority may turn into an HHHS record. Having
+every receiving browser independently open the same proposal would create
+distinct concurrent records and unnecessary durable history. Once admitted,
+the resulting `authored_record` frame is safe for every replica to consume,
+deduplicate, defer pending predecessors, and repair. Presence never converts
+to either durable form.
+
 ## Portable project archive 0.1
 
 `ProjectArchive` is the offline/sneakernet boundary. It is intentionally not an

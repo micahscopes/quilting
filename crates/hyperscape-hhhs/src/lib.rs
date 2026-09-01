@@ -8,6 +8,8 @@
 #![forbid(unsafe_code)]
 
 use bincode::Options;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use futures::Stream;
 use futures_signals::signal_vec::SignalVec;
 use hhhs::{DagRead, DagSnapshot, Digest, EntryHash, LazyReach, Position, Reach, SlicedDag};
@@ -50,6 +52,13 @@ pub const PROJECT_ARCHIVE_VERSION: ProtocolVersion = ProtocolVersion { major: 0,
 pub const MAX_PROJECT_ARCHIVE_BYTES: usize = 512 * 1024 * 1024;
 /// Defensive bound on the number of records declared by one archive.
 pub const MAX_PROJECT_ARCHIVE_RECORDS: usize = 1_000_000;
+/// Frozen JSON carrier schema for one public authored replica record.
+pub const AUTHORED_RECORD_FRAME_VERSION: ProtocolVersion =
+    ProtocolVersion { major: 0, minor: 1 };
+pub const AUTHORED_RECORD_FRAME_LANE: &str = "authored_record";
+/// Defensive bound including base64url expansion and JSON framing.
+pub const MAX_AUTHORED_RECORD_FRAME_JSON_BYTES: usize =
+    MAX_REPLICA_RECORD_BYTES.div_ceil(3) * 4 + 512;
 const ARCHIVE_CHECKSUM_BYTES: usize = 32;
 const ARCHIVE_FIXED_BODY_BYTES: usize = 4 + 16 + 8 + 32 + 32;
 const MIN_PROJECT_ARCHIVE_BYTES: usize =
@@ -75,6 +84,117 @@ impl ProjectId {
     pub fn as_uuid(self) -> Uuid {
         self.0
     }
+}
+
+/// Transport-neutral announcement of one already-authorized HHHS record.
+///
+/// This is distinct from a raw authored envelope proposal and from ephemeral
+/// presence. Relays may carry the JSON opaquely; receivers must still run the
+/// decoded [`ReplicaRecord`] through normal HHHS admission. The project field
+/// is routing metadata and is rechecked against the record's authored payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthoredRecordFrame {
+    project_id: ProjectId,
+    record: ReplicaRecord,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthoredRecordFrameWire {
+    lane: String,
+    version: ProtocolVersion,
+    project_id: Uuid,
+    record_base64: String,
+}
+
+impl AuthoredRecordFrame {
+    pub fn new(project_id: ProjectId, record: ReplicaRecord) -> Result<Self, RecordFrameError> {
+        decode_authored(project_id, &record.entry().payload)?;
+        Ok(Self { project_id, record })
+    }
+
+    pub fn project_id(&self) -> ProjectId {
+        self.project_id
+    }
+
+    pub fn record(&self) -> &ReplicaRecord {
+        &self.record
+    }
+
+    pub fn into_record(self) -> ReplicaRecord {
+        self.record
+    }
+
+    pub fn encode_json(&self) -> Result<String, RecordFrameError> {
+        let record = self.record.encode();
+        let wire = AuthoredRecordFrameWire {
+            lane: AUTHORED_RECORD_FRAME_LANE.to_owned(),
+            version: AUTHORED_RECORD_FRAME_VERSION,
+            project_id: self.project_id.as_uuid(),
+            record_base64: URL_SAFE_NO_PAD.encode(record),
+        };
+        let json = serde_json::to_string(&wire)?;
+        if json.len() > MAX_AUTHORED_RECORD_FRAME_JSON_BYTES {
+            return Err(RecordFrameError::FrameTooLarge {
+                actual: json.len(),
+                max: MAX_AUTHORED_RECORD_FRAME_JSON_BYTES,
+            });
+        }
+        Ok(json)
+    }
+
+    pub fn decode_json(json: &str) -> Result<Self, RecordFrameError> {
+        if json.len() > MAX_AUTHORED_RECORD_FRAME_JSON_BYTES {
+            return Err(RecordFrameError::FrameTooLarge {
+                actual: json.len(),
+                max: MAX_AUTHORED_RECORD_FRAME_JSON_BYTES,
+            });
+        }
+        let wire: AuthoredRecordFrameWire = serde_json::from_str(json)?;
+        if wire.lane != AUTHORED_RECORD_FRAME_LANE {
+            return Err(RecordFrameError::WrongLane(wire.lane));
+        }
+        if wire.version != AUTHORED_RECORD_FRAME_VERSION {
+            return Err(RecordFrameError::WrongVersion(wire.version));
+        }
+        let project_id = ProjectId::new(wire.project_id)?;
+        let bytes = URL_SAFE_NO_PAD
+            .decode(wire.record_base64.as_bytes())
+            .map_err(|_| RecordFrameError::InvalidBase64)?;
+        if URL_SAFE_NO_PAD.encode(&bytes) != wire.record_base64 {
+            return Err(RecordFrameError::NonCanonicalBase64);
+        }
+        if bytes.len() > MAX_REPLICA_RECORD_BYTES {
+            return Err(RecordFrameError::RecordTooLarge {
+                actual: bytes.len(),
+                max: MAX_REPLICA_RECORD_BYTES,
+            });
+        }
+        let record = ReplicaRecord::decode(&bytes)?;
+        Self::new(project_id, record)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RecordFrameError {
+    #[error("authored record frame is invalid JSON: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("authored record frame lane {0:?} is unsupported")]
+    WrongLane(String),
+    #[error("authored record frame version {0:?} is unsupported")]
+    WrongVersion(ProtocolVersion),
+    #[error("authored record frame uses invalid base64url")]
+    InvalidBase64,
+    #[error("authored record frame base64url is not canonical unpadded encoding")]
+    NonCanonicalBase64,
+    #[error("authored record is {actual} bytes, exceeding the {max}-byte limit")]
+    RecordTooLarge { actual: usize, max: usize },
+    #[error("authored record frame is {actual} bytes, exceeding the {max}-byte limit")]
+    FrameTooLarge { actual: usize, max: usize },
+    #[error(transparent)]
+    Record(#[from] ReplicaWireError),
+    #[error(transparent)]
+    Adapter(#[from] AdapterError),
 }
 
 #[derive(Debug, thiserror::Error)]
