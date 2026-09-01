@@ -14,6 +14,8 @@ crate-type = ["cdylib", "rlib"]
 default = ["console_error_panic_hook"]
 leptos-ui = ["dep:hyperscope-web", "hyperscope-web/csr"]
 durable-history = [
+    "dep:hhhs",
+    "dep:hhhs-replica",
     "dep:hyperscape-hhhs",
     "dep:hyperscope-hhhs-shadow",
     "dep:hyperscope-web",
@@ -27,6 +29,8 @@ webgpu-backend = [
 ]
 
 [dependencies]
+hhhs = { workspace = true, optional = true }
+hhhs-replica = { workspace = true, optional = true }
 quilting-core = { version = "0.1.0", path = "../quilting-core" }
 quilting-mesh = { version = "0.1.0", path = "../quilting-mesh" }
 quilting-shaders = { version = "0.1.0", path = "../quilting-shaders" }

@@ -3067,6 +3067,8 @@ dependencies = [
  "fuzzy-vision",
  "getrandom 0.2.17",
  "glow 0.16.0",
+ "hhhs",
+ "hhhs-replica",
  "hyperscape",
  "hyperscape-hhhs",
  "hyperscape-protocol",

@@ -5,18 +5,21 @@
 //! single-writer lease, and exposes carrier-ready replica-record bytes.
 
 use crate::app_shadow::{peer_receipt_to_js, HyperscopeAppShadow};
+use hhhs::EntryHash;
+use hhhs_replica::ReplicaRecord;
 use hyperscape_hhhs::ProjectId;
 use hyperscape_protocol::{LocalPeerEnvelope, PresenceEnvelope};
 use hyperscope_app::AppStore;
 use hyperscope_hhhs_shadow::{
-    DurableAuthoredObservation, DurableAuthoredSession, DurableLocalPeerDispatch,
+    DurableAuthoredObservation, DurableAuthoredSession, DurableCarrierDispatch,
+    DurableCarrierObservation, DurableLocalPeerDispatch,
 };
 use hyperscope_web::durable_history::{
     import_durable_authored_session, open_durable_authored_session, IndexedDbDurability,
 };
 use serde::Serialize;
 use std::cell::{Cell, RefCell};
-use std::fmt::Display;
+use std::fmt::{Display, Write as _};
 use std::rc::Rc;
 use uuid::Uuid;
 use wasm_bindgen::prelude::*;
@@ -130,6 +133,26 @@ impl HyperscopeDurablePeer {
             .await
             .map_err(js_error)?;
         durable_dispatch_to_js(&dispatch, session.session().history_len())
+    }
+
+    /// Persist one encoded HHHS carrier record and atomically advance the
+    /// receiver-local projection cursor. The returned disposition exposes
+    /// missing causal predecessors for transport repair without interpreting
+    /// remote commands in arrival order.
+    #[wasm_bindgen(js_name = receiveReplicaRecord)]
+    pub async fn receive_replica_record(
+        &self,
+        replica_record: js_sys::Uint8Array,
+    ) -> Result<JsValue, JsValue> {
+        let record = ReplicaRecord::decode(&replica_record.to_vec())
+            .map_err(|error| js_error(format!("replica record is invalid: {error}")))?;
+        let mut session = DurableSessionLease::take(&self.session)?;
+        let dispatch = session
+            .session_mut()
+            .accept_replica_record(&self.store, record)
+            .await
+            .map_err(js_error)?;
+        carrier_dispatch_to_js(&dispatch)
     }
 
     /// Remember an outbound local presence echo without admitting presence to
@@ -283,6 +306,108 @@ fn durable_dispatch_to_js(
     Ok(object.into())
 }
 
+fn carrier_dispatch_to_js(dispatch: &DurableCarrierDispatch) -> Result<JsValue, JsValue> {
+    let object = js_sys::Object::new();
+    let (disposition, entry, projection_revision, history_len, missing, refusal) =
+        match &dispatch.durable {
+            DurableCarrierObservation::Applied {
+                projection_revision,
+                entry,
+                history_len,
+            } => (
+                "applied",
+                entry,
+                Some(*projection_revision),
+                *history_len,
+                &[][..],
+                None,
+            ),
+            DurableCarrierObservation::AlreadyPresent { entry, history_len } => (
+                "already_present",
+                entry,
+                None,
+                *history_len,
+                &[][..],
+                None,
+            ),
+            DurableCarrierObservation::Deferred {
+                entry,
+                missing,
+                history_len,
+            } => (
+                "deferred",
+                entry,
+                None,
+                *history_len,
+                missing.as_slice(),
+                None,
+            ),
+            DurableCarrierObservation::Refused {
+                entry,
+                reason,
+                history_len,
+            } => (
+                "refused",
+                entry,
+                None,
+                *history_len,
+                &[][..],
+                Some(match reason {
+                    hyperscape_hhhs::RecordRefusal::HashMismatch => "hash_mismatch",
+                    hyperscape_hhhs::RecordRefusal::Unauthorized => "unauthorized",
+                }),
+            ),
+        };
+    set_property(
+        &object,
+        "durableDisposition",
+        &JsValue::from_str(disposition),
+    )?;
+    set_property(
+        &object,
+        "entryHash",
+        &JsValue::from_str(&entry_hash_hex(entry)),
+    )?;
+    set_property(
+        &object,
+        "projectionRevision",
+        &projection_revision
+            .map(|revision| JsValue::from_str(&revision.to_string()))
+            .unwrap_or(JsValue::NULL),
+    )?;
+    set_property(
+        &object,
+        "historyLen",
+        &JsValue::from_str(&history_len.to_string()),
+    )?;
+    let missing_hashes = js_sys::Array::new();
+    for hash in missing {
+        missing_hashes.push(&JsValue::from_str(&entry_hash_hex(hash)));
+    }
+    set_property(&object, "missingEntryHashes", missing_hashes.as_ref())?;
+    set_property(
+        &object,
+        "refusal",
+        &refusal.map(JsValue::from_str).unwrap_or(JsValue::NULL),
+    )?;
+    let app_projection_fault = dispatch
+        .app
+        .as_ref()
+        .and_then(|result| result.as_ref().err())
+        .map(|fault| JsValue::from_str(&fault.reason))
+        .unwrap_or(JsValue::NULL);
+    set_property(&object, "appProjectionFault", &app_projection_fault)?;
+    Ok(object.into())
+}
+
+fn entry_hash_hex(hash: &EntryHash) -> String {
+    let mut encoded = String::with_capacity(hash.as_bytes().len() * 2);
+    for byte in hash.as_bytes() {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
+}
+
 fn set_property(object: &js_sys::Object, name: &str, value: &JsValue) -> Result<(), JsValue> {
     let written = js_sys::Reflect::set(object.as_ref(), &JsValue::from_str(name), value)?;
     if !written {
@@ -388,6 +513,78 @@ mod tests {
         assert_eq!(
             reopened
                 .session
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .observed_projection_revision(),
+            Some(0)
+        );
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn durable_peer_consumes_encoded_carrier_records_idempotently() {
+        let time = js_sys::Date::now() as u128;
+        let random = (js_sys::Math::random() * u64::MAX as f64) as u128;
+        let project_id = ProjectId::from_u128(((time + 1) << 64) | (random + 1)).unwrap();
+        let mut source = DurableProject::new(project_id).unwrap();
+        let record = source
+            .admit(&AuthoredEnvelope {
+                header: MessageHeader {
+                    version: CURRENT_PROTOCOL_VERSION,
+                    message_id: MessageId::from_u128(0xe001).unwrap(),
+                    sender: PeerId::from_u128(0xe002).unwrap(),
+                    sequence: 1,
+                },
+                command: AuthoredCommand::UpsertAsset {
+                    asset: AssetDescriptor {
+                        id: AssetId::from_u128(0xe003).unwrap(),
+                        uri: "carrier.glb".into(),
+                        media_type: Some("model/gltf-binary".into()),
+                        content_digest: None,
+                    },
+                },
+            })
+            .await
+            .unwrap();
+        let encoded = record.encode();
+        let app = HyperscopeAppShadow::new();
+        let peer = app
+            .open_durable_authored_peer(&project_id.as_uuid().to_string())
+            .await
+            .unwrap();
+
+        let applied = peer
+            .receive_replica_record(js_sys::Uint8Array::from(encoded.as_slice()))
+            .await
+            .unwrap();
+        assert_eq!(
+            js_sys::Reflect::get(&applied, &JsValue::from_str("durableDisposition"))
+                .unwrap()
+                .as_string()
+                .as_deref(),
+            Some("applied")
+        );
+        assert_eq!(
+            js_sys::Reflect::get(&applied, &JsValue::from_str("projectionRevision"))
+                .unwrap()
+                .as_string()
+                .as_deref(),
+            Some("0")
+        );
+
+        let duplicate = peer
+            .receive_replica_record(js_sys::Uint8Array::from(encoded.as_slice()))
+            .await
+            .unwrap();
+        assert_eq!(
+            js_sys::Reflect::get(&duplicate, &JsValue::from_str("durableDisposition"))
+                .unwrap()
+                .as_string()
+                .as_deref(),
+            Some("already_present")
+        );
+        assert_eq!(
+            peer.session
                 .borrow()
                 .as_ref()
                 .unwrap()
