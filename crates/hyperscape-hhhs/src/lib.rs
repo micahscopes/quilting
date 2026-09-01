@@ -1337,6 +1337,29 @@ where
         Self::with_replayed_sink(project_id, durability, transactions, None)
     }
 
+    /// Recover a project from an already validated in-memory store paired with
+    /// this exact local durability sink.
+    ///
+    /// # Trust boundary
+    ///
+    /// `storage` must have been reconstructed from locally trusted storage
+    /// owned by `durability`. Every public history entry is still decoded and
+    /// checked against `project_id`, but the transactions are not replayed into
+    /// a second `MemoryStorage`. Network, imported, or otherwise untrusted
+    /// records must enter through [`DurableProject::apply_records`].
+    ///
+    /// The sink and store must describe the same transaction history. This
+    /// constructor cannot prove that relationship generically; browser hosts
+    /// satisfy it by accepting both values atomically from HHHS's streamed
+    /// IndexedDB recovery constructor.
+    pub fn recover_trusted_storage_with_sink(
+        project_id: ProjectId,
+        durability: D,
+        storage: MemoryStorage,
+    ) -> Result<Self, AdapterError> {
+        Self::with_recovered_storage(project_id, durability, storage, None)
+    }
+
     fn with_replayed_sink(
         project_id: ProjectId,
         durability: D,
@@ -1348,12 +1371,25 @@ where
             .map_err(|_| AdapterError::NilProjectId)?;
         let storage = MemoryStorage::new();
         for transaction in &transactions {
-            for entry in transaction.entries() {
-                decode_authored(project_id, &entry.payload)?;
-            }
             storage.commit(transaction.clone())?;
         }
-        let published_history_len = storage.snapshot().len();
+        Self::with_recovered_storage(project_id, durability, storage, memory_durability)
+    }
+
+    fn with_recovered_storage(
+        project_id: ProjectId,
+        durability: D,
+        storage: MemoryStorage,
+        memory_durability: Option<MemoryDurabilityControl>,
+    ) -> Result<Self, AdapterError> {
+        project_id
+            .validate()
+            .map_err(|_| AdapterError::NilProjectId)?;
+        let snapshot = storage.snapshot();
+        for entry in snapshot.entries_topo() {
+            decode_authored(project_id, &entry.payload)?;
+        }
+        let published_history_len = snapshot.len();
         let replica = Replica::builder(
             storage,
             AuthoredPolicy { project_id },

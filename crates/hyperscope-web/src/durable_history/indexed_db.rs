@@ -36,8 +36,15 @@ fn log_options() -> IndexedDbLogOptions {
 async fn load_legacy_transactions(
     project_id: ProjectId,
 ) -> Result<Vec<StorageTransaction>, DurableHistoryError> {
+    let store_name = TRANSACTION_STORE.to_owned();
     let db = Database::open(DATABASE_NAME)
         .with_version(DATABASE_VERSION)
+        .with_on_upgrade_needed(move |_event, db| {
+            if !db.object_store_names().any(|name| name == store_name) {
+                db.create_object_store(store_name.clone()).build()?;
+            }
+            Ok(())
+        })
         .await
         .map_err(indexed_db_error)?;
     let (lower, upper) = project_key_bounds(project_id);
@@ -103,13 +110,21 @@ fn normalize_legacy_transactions(
     Ok(retained)
 }
 
+#[cfg(test)]
 async fn open_project_log(
     project_id: ProjectId,
+) -> Result<IndexedDbDurability, DurableHistoryError> {
+    let legacy = normalize_legacy_transactions(load_legacy_transactions(project_id).await?)?;
+    open_project_log_with_legacy(project_id, legacy).await
+}
+
+async fn open_project_log_with_legacy(
+    project_id: ProjectId,
+    legacy: Vec<StorageTransaction>,
 ) -> Result<IndexedDbDurability, DurableHistoryError> {
     let mut log = IndexedDbReplicaLog::open(log_id(project_id), log_options())
         .await
         .map_err(indexed_db_error)?;
-    let legacy = normalize_legacy_transactions(load_legacy_transactions(project_id).await?)?;
     if legacy.is_empty() {
         return Ok(log);
     }
@@ -143,14 +158,31 @@ async fn open_project_log(
     Ok(log)
 }
 
+async fn open_project_storage(
+    project_id: ProjectId,
+) -> Result<(IndexedDbDurability, MemoryStorage), DurableHistoryError> {
+    let legacy = normalize_legacy_transactions(load_legacy_transactions(project_id).await?)?;
+    if legacy.is_empty() {
+        return IndexedDbReplicaLog::open_with_memory_storage(log_id(project_id), log_options())
+            .await
+            .map_err(indexed_db_error);
+    }
+
+    // Legacy migration needs the inspection-friendly journal so the two
+    // durable representations can be compared byte for byte before either is
+    // trusted. This path disappears after the legacy rows are retired.
+    let log = open_project_log_with_legacy(project_id, legacy).await?;
+    let storage = log.recover_memory_storage().map_err(indexed_db_error)?;
+    Ok((log, storage))
+}
+
 /// Open and recover a browser-durable project without attaching it to current
 /// application, UI, or rendering behavior.
 pub async fn open_durable_project(
     project_id: ProjectId,
 ) -> Result<DurableProject<IndexedDbDurability>, DurableHistoryError> {
-    let durability = open_project_log(project_id).await?;
-    let transactions = durability.recovered_transactions();
-    DurableProject::recover_trusted_transactions_with_sink(project_id, durability, transactions)
+    let (durability, storage) = open_project_storage(project_id).await?;
+    DurableProject::recover_trusted_storage_with_sink(project_id, durability, storage)
         .map_err(|error| DurableHistoryError::ProjectRecovery(error.to_string()))
 }
 
@@ -345,7 +377,12 @@ mod tests {
         let before = project.state().unwrap();
         drop(project);
 
-        let recovered = open_durable_project(project_id).await.unwrap();
+        let (durability, storage) = open_project_storage(project_id).await.unwrap();
+        assert!(!durability.retains_decoded_transactions());
+        assert!(durability.transactions().is_empty());
+        let recovered =
+            DurableProject::recover_trusted_storage_with_sink(project_id, durability, storage)
+                .unwrap();
         assert_eq!(recovered.state().unwrap(), before);
     }
 

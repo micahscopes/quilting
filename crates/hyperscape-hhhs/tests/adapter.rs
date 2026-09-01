@@ -1,6 +1,6 @@
 use futures::{executor::block_on, FutureExt, StreamExt};
 use hhhs::{DagSnapshot, Digest, ReachIndex};
-use hhhs_store::decode_storage_transaction_log;
+use hhhs_store::{decode_storage_transaction_log, MemoryStorage};
 use hyperscape_hhhs::{
     decode_authored, encode_authored, AdapterError, ApplyRecordWithCheckpointReport,
     AuthoredRecordFrame, DurableProject, MemoryDurability, ProjectArchive, ProjectId,
@@ -997,4 +997,51 @@ fn trusted_transaction_recovery_keeps_the_sink_and_replay_in_lockstep() {
         .unwrap()
         .entity_transforms
         .contains_key(&entity));
+}
+
+#[test]
+fn trusted_storage_recovery_reuses_the_exact_store_without_changing_state() {
+    let project = project(14);
+    let entity = entity_id(11);
+    let mut original = DurableProject::new(project).unwrap();
+    block_on(original.admit(&set(1, entity, 2.0))).unwrap();
+    block_on(original.admit(&set(2, entity, 9.0))).unwrap();
+    let original_state = original.state().unwrap();
+    let durable_bytes = original.durable_bytes();
+    let transactions = decode_storage_transaction_log(&durable_bytes).unwrap();
+    let storage = MemoryStorage::from_transactions(transactions).unwrap();
+    let durability = MemoryDurability::from_bytes(durable_bytes).unwrap();
+    let durability_control = durability.control();
+
+    let mut recovered =
+        DurableProject::recover_trusted_storage_with_sink(project, durability, storage).unwrap();
+    assert_eq!(recovered.state().unwrap(), original_state);
+
+    block_on(recovered.admit(&remove(3, entity))).unwrap();
+    let restarted = DurableProject::recover(project, durability_control.bytes()).unwrap();
+    assert_eq!(restarted.history_len(), 3);
+    assert!(!restarted
+        .state()
+        .unwrap()
+        .entity_transforms
+        .contains_key(&entity));
+}
+
+#[test]
+fn trusted_storage_recovery_still_refuses_foreign_project_payloads() {
+    let source_project = project(15);
+    let expected_project = project(16);
+    let mut original = DurableProject::new(source_project).unwrap();
+    block_on(original.admit(&set(1, entity_id(12), 3.0))).unwrap();
+    let durable_bytes = original.durable_bytes();
+    let transactions = decode_storage_transaction_log(&durable_bytes).unwrap();
+    let storage = MemoryStorage::from_transactions(transactions).unwrap();
+    let durability = MemoryDurability::from_bytes(durable_bytes).unwrap();
+
+    assert!(DurableProject::recover_trusted_storage_with_sink(
+        expected_project,
+        durability,
+        storage,
+    )
+    .is_err());
 }

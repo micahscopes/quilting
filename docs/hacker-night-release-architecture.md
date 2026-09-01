@@ -39,7 +39,7 @@ renderer, or resource authority.
 ### HHHS release boundary
 
 The complete HHHS dependency graph is pinned to the gated `0.4.5` candidate
-`7575510b7f8d95588c39cc4d0f22bd77a1979760`, not the older immutable `0.4.4`
+`87cdecf5ab3ef39084f931c5fad5cf424a26576d`, not the older immutable `0.4.4`
 tag. HHHS provides the browser journal/worker placement, local co-transaction,
 read-only reactive observation, and executable session-oracle seams, but
 Hyperscope does not imitate or automatically adopt them inside its renderer.
