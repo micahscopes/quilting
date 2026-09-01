@@ -270,7 +270,7 @@ pub fn resident_root_pipeline_descriptors(
 ) -> Result<Vec<functional::RenderPipelineDescriptor>, functional::RenderPipelineDescriptorError> {
     use crate::functional_pipeline::{
         alpha_blending, buffer_binding, depth_state, pbr_environment_bindings,
-        position_vertex_buffer,
+        portable_pbr_texture_bindings, position_vertex_buffer,
     };
 
     let vertex = functional::ShaderVisibility::VERTEX;
@@ -290,23 +290,7 @@ pub fn resident_root_pipeline_descriptors(
             buffer_binding(8, fragment, false, PATCH_PBR_MATERIAL_BYTES, false),
         ],
     )?;
-    let portable_atlas_bindings = functional::BindGroupLayoutDescriptor::new(
-        1,
-        vec![
-            functional::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: fragment,
-                kind: functional::BindingKind::Texture {
-                    sample_kind: functional::TextureSampleKind::FloatUnfilterable,
-                    view_dimension: functional::TextureViewDimension::D2Array,
-                    multisampled: false,
-                },
-            },
-            buffer_binding(1, fragment, false, 32, false),
-            buffer_binding(2, fragment, false, 32, false),
-            buffer_binding(3, fragment, false, 16, false),
-        ],
-    )?;
+    let portable_atlas_bindings = portable_pbr_texture_bindings(1)?;
     let environment_bindings = pbr_environment_bindings(2)?;
     let diagnostic_layout = functional::PipelineLayoutDescriptor::new(vec![root_bindings.clone()])?;
     let pbr_layout = functional::PipelineLayoutDescriptor::new(vec![
@@ -521,7 +505,7 @@ pub struct ResidentRootRenderBindings {
     pub(super) global_frame: Arc<PatchRenderGlobalResidency>,
     render_domains: wgpu::Buffer,
     _materials: wgpu::Buffer,
-    portable_material_textures: Option<pbr_resources::PbrPortableAtlasBindings>,
+    portable_material_textures: Option<PbrMaterialTextureBindings>,
     pbr_environment: Option<PbrEnvironmentBindings>,
     pbr_scene_supported: bool,
     render_domain_table: Mutex<RetainedFrameTable>,
@@ -555,7 +539,7 @@ impl ResidentRootRenderBindings {
     pub fn pbr_texture_residency(&self) -> Option<&[PbrMaterialTextureResidency]> {
         self.portable_material_textures
             .as_ref()
-            .map(pbr_resources::PbrPortableAtlasBindings::residency)
+            .map(PbrMaterialTextureBindings::residency)
     }
 
     pub fn pbr_environment_bindings(&self) -> Option<&PbrEnvironmentBindings> {

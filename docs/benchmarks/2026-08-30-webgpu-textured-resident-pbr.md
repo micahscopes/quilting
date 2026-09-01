@@ -101,8 +101,10 @@ portable array atlas, so unrelated images cannot bleed together and long,
 non-power-of-two images do not require power-of-two alignment padding. The
 portable PBR shader computes the texture footprint from fragment derivatives,
 performs exact wrap-aware bilinear reads within each logical mip rectangle, and
-blends adjacent levels. The material-batched path uses the same generated
-source mip chains through its ordinary hardware sampler.
+blends adjacent levels. Prepared/adaptive material batches and resident roots
+now invoke that same portable sampler and bind the same four-resource atlas
+table; the former twelve-binding individual texture/sampler layout and its
+per-material placeholder bind groups have been removed.
 
 Atlas planning evaluates every viable power-of-two page extent and selects the
 lowest complete-mip allocation. For the chess-shaped case—nine 4096x4096
@@ -112,13 +114,13 @@ the complete chains, both at 100% packing utilization. Diagnostics expose both
 base and full-chain allocation so future context-loss investigations can
 separate filtering correctness from residency pressure.
 
-That asset still retains the same 201,326,589 texels in the individual-texture
-path during backend cutover, for 402,653,178 RGBA8 texels total: 1,610,612,712
-bytes (about 1.50 GiB) before driver overhead. The diagnostic contract reports
-this combined figure explicitly. Consolidating prepared/adaptive PBR onto the
-portable table, then retiring the duplicate individual representation where
-safe, is therefore a required residency optimization rather than cosmetic
-cleanup.
+That asset still retains the same 201,326,589 texels in temporary/diagnostic
+individual textures during this intermediate cut, for 402,653,178 RGBA8 texels
+total: 1,610,612,712 bytes (about 1.50 GiB) before driver overhead. The
+diagnostic contract reports this combined figure explicitly. No render path
+now needs that duplicate family; retiring it from browser residency while
+preserving upload-time mip generation and native conformance is the remaining
+resource cut.
 
 The pure atlas, mip shader, resident-root shader, and WASM browser-target gates
 pass without acquiring a GPU. Native raster/readback and live Chrome chess

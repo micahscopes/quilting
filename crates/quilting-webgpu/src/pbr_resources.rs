@@ -19,7 +19,6 @@ pub(crate) const PBR_NORMAL_TEXTURE_BIT: u32 = 1 << 2;
 pub(crate) const PBR_EMISSIVE_TEXTURE_BIT: u32 = 1 << 3;
 pub(crate) const PBR_OCCLUSION_TEXTURE_BIT: u32 = 1 << 4;
 pub(crate) const PBR_TRANSMISSION_TEXTURE_BIT: u32 = 1 << 5;
-pub(crate) const PBR_TEXTURE_CHANNELS: usize = 6;
 const PORTABLE_PBR_ATLAS_USES_MANUAL_BILINEAR_FILTERING: bool = true;
 const PORTABLE_PBR_ATLAS_USES_MANUAL_TRILINEAR_FILTERING: bool = true;
 
@@ -41,8 +40,9 @@ pub struct PbrTextureTable {
 }
 
 /// Baseline-WebGPU representation for non-uniform material texture access.
-/// Individual resources remain resident during cutover so the established
-/// material-batched path and the portable atlas can be compared exactly.
+/// Both prepared/adaptive batches and direct resident roots sample this table;
+/// individual source textures currently remain only as mip-publication inputs
+/// and conformance evidence while browser residency is consolidated.
 pub struct PortablePbrTextureAtlas {
     plan: PortableTextureAtlasPlan,
     mip_level_count: u32,
@@ -77,15 +77,22 @@ pub struct PbrTextureTableDiagnostics {
     pub total_allocated_bytes: u64,
 }
 
-pub(crate) struct PbrPortableAtlasBindings {
+/// One scene-wide portable atlas bind group plus exact material residency.
+/// Prepared/adaptive and resident-root rendering share this representation.
+pub struct PbrMaterialTextureBindings {
+    material_count: u32,
     pub(crate) bind_group: wgpu::BindGroup,
     residency: Vec<PbrMaterialTextureResidency>,
     _fallback_atlas: Option<PortablePbrTextureAtlas>,
     _material_texture_records: wgpu::Buffer,
 }
 
-impl PbrPortableAtlasBindings {
-    pub(crate) fn residency(&self) -> &[PbrMaterialTextureResidency] {
+impl PbrMaterialTextureBindings {
+    pub fn material_count(&self) -> u32 {
+        self.material_count
+    }
+
+    pub fn residency(&self) -> &[PbrMaterialTextureResidency] {
         &self.residency
     }
 }
@@ -110,39 +117,6 @@ impl PbrMaterialTextureResidency {
 
     pub fn unresolved_mask(self) -> u32 {
         self.referenced_mask & !self.resident_mask
-    }
-}
-
-struct PbrPlaceholderResources {
-    white: PbrTextureResource,
-    black: PbrTextureResource,
-    flat_normal: PbrTextureResource,
-}
-
-/// One bind group per stable material-table slot. WebGPU's baseline limits do
-/// not promise dynamically indexed sampled-texture arrays, while extracted
-/// render batches are already grouped by material, so selecting one small bind
-/// group per indirect draw is both portable and congruent with the scene ABI.
-pub struct PbrMaterialTextureBindings {
-    material_count: u32,
-    residency: Vec<PbrMaterialTextureResidency>,
-    bind_groups: Vec<wgpu::BindGroup>,
-    _placeholders: PbrPlaceholderResources,
-}
-
-impl PbrMaterialTextureBindings {
-    pub fn material_count(&self) -> u32 {
-        self.material_count
-    }
-
-    pub fn residency(&self) -> &[PbrMaterialTextureResidency] {
-        &self.residency
-    }
-
-    pub(crate) fn bind_group(&self, material_slot: u32) -> Option<&wgpu::BindGroup> {
-        usize::try_from(material_slot)
-            .ok()
-            .and_then(|slot| self.bind_groups.get(slot))
     }
 }
 
@@ -255,7 +229,7 @@ impl LodClassifierDevice {
         layout: &wgpu::BindGroupLayout,
         materials: &[PbrMaterial],
         textures: Option<&PbrTextureTable>,
-    ) -> Result<PbrPortableAtlasBindings, LodWebGpuError> {
+    ) -> Result<PbrMaterialTextureBindings, LodWebGpuError> {
         let fallback_atlas = textures
             .is_none()
             .then(|| create_portable_pbr_texture_atlas(&self.device, &[]))
@@ -266,6 +240,9 @@ impl LodClassifierDevice {
             .expect("resident texture table or fallback atlas exists");
         let default_material = PbrMaterial::default();
         let material_count = materials.len().max(1);
+        let material_count_u32 = u32::try_from(material_count).map_err(|_| {
+            LodWebGpuError::Payload("PBR material texture binding count exceeds u32".to_string())
+        })?;
         let mut residency = Vec::with_capacity(material_count);
         let mut material_records = Vec::with_capacity(material_count);
         for material_slot in 0..material_count {
@@ -305,7 +282,8 @@ impl LodClassifierDevice {
                 crate::bind(3, &atlas.mip_placement_records),
             ],
         });
-        Ok(PbrPortableAtlasBindings {
+        Ok(PbrMaterialTextureBindings {
+            material_count: material_count_u32,
             bind_group,
             residency,
             _fallback_atlas: fallback_atlas,
@@ -313,10 +291,9 @@ impl LodClassifierDevice {
         })
     }
 
-    /// Resolve every stable material slot to one portable sampled-texture bind
-    /// group. Missing authored channels and unavailable decoded slots receive
-    /// channel-correct placeholders; residency diagnostics retain the
-    /// distinction so asset mismatches cannot become invisible.
+    /// Resolve every stable material slot through one scene-wide portable
+    /// sampled-texture atlas. Missing authored channels use shader constants;
+    /// residency diagnostics retain unavailable decoded references exactly.
     pub fn create_pbr_material_texture_bindings(
         &self,
         pipeline: &PatchRenderPipeline,
@@ -336,104 +313,7 @@ impl LodClassifierDevice {
                     "PBR texture bindings require the PBR render pipeline".to_string(),
                 )
             })?;
-        self.create_pbr_material_texture_bindings_for_layout(layout, materials, textures)
-    }
-
-    pub(crate) fn create_pbr_material_texture_bindings_for_layout(
-        &self,
-        layout: &wgpu::BindGroupLayout,
-        materials: &[PbrMaterial],
-        textures: Option<&PbrTextureTable>,
-    ) -> Result<PbrMaterialTextureBindings, LodWebGpuError> {
-        let material_count = materials.len().max(1);
-        let material_count_u32 = u32::try_from(material_count).map_err(|_| {
-            LodWebGpuError::Payload("PBR material texture binding count exceeds u32".to_string())
-        })?;
-        for material in materials {
-            material
-                .validate()
-                .map_err(|error| LodWebGpuError::Payload(error.to_string()))?;
-        }
-
-        let placeholders = create_placeholder_resources(&self.device, &self.queue)?;
-        let default_material = PbrMaterial::default();
-        let mut residency = Vec::with_capacity(material_count);
-        let mut bind_groups = Vec::with_capacity(material_count);
-        for material_slot in 0..material_count {
-            let material = materials.get(material_slot).unwrap_or(&default_material);
-            let channels = [
-                resolve_material_texture(
-                    textures,
-                    material.textures.base_color,
-                    TextureInterpretation::LegacyPow22,
-                    &placeholders.white,
-                ),
-                resolve_material_texture(
-                    textures,
-                    material.textures.metallic_roughness,
-                    TextureInterpretation::Linear,
-                    &placeholders.white,
-                ),
-                resolve_material_texture(
-                    textures,
-                    material.textures.normal,
-                    TextureInterpretation::Linear,
-                    &placeholders.flat_normal,
-                ),
-                resolve_material_texture(
-                    textures,
-                    material.textures.emissive,
-                    TextureInterpretation::LegacyPow22,
-                    &placeholders.black,
-                ),
-                resolve_material_texture(
-                    textures,
-                    material.textures.occlusion,
-                    TextureInterpretation::Linear,
-                    &placeholders.white,
-                ),
-                resolve_material_texture(
-                    textures,
-                    material.textures.transmission,
-                    TextureInterpretation::Linear,
-                    &placeholders.white,
-                ),
-            ];
-            let resident_mask = channels
-                .iter()
-                .enumerate()
-                .fold(0u32, |mask, (channel, resolved)| {
-                    mask | (u32::from(resolved.resident) << channel)
-                });
-            residency.push(PbrMaterialTextureResidency {
-                referenced_mask: pbr_texture_reference_mask(material.textures),
-                resident_mask,
-            });
-
-            let mut entries = Vec::with_capacity(PBR_TEXTURE_CHANNELS * 2);
-            for (channel, resolved) in channels.iter().enumerate() {
-                let texture_binding = u32::try_from(channel * 2).expect("six channels fit u32");
-                entries.push(wgpu::BindGroupEntry {
-                    binding: texture_binding,
-                    resource: wgpu::BindingResource::TextureView(resolved.view),
-                });
-                entries.push(wgpu::BindGroupEntry {
-                    binding: texture_binding + 1,
-                    resource: wgpu::BindingResource::Sampler(resolved.sampler),
-                });
-            }
-            bind_groups.push(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("quilting PBR material textures"),
-                layout,
-                entries: &entries,
-            }));
-        }
-        Ok(PbrMaterialTextureBindings {
-            material_count: material_count_u32,
-            residency,
-            bind_groups,
-            _placeholders: placeholders,
-        })
+        self.create_pbr_portable_atlas_bindings_for_layout(layout, materials, textures)
     }
 
     /// Construct a complete replacement table before returning it to the
@@ -732,33 +612,6 @@ impl LodClassifierDevice {
     }
 }
 
-pub(crate) fn create_pbr_texture_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-    let mut entries = Vec::with_capacity(PBR_TEXTURE_CHANNELS * 2);
-    for channel in 0..PBR_TEXTURE_CHANNELS {
-        let texture_binding = u32::try_from(channel * 2).expect("six channels fit u32");
-        entries.push(wgpu::BindGroupLayoutEntry {
-            binding: texture_binding,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: None,
-        });
-        entries.push(wgpu::BindGroupLayoutEntry {
-            binding: texture_binding + 1,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-            count: None,
-        });
-    }
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("quilting PBR material texture bindings"),
-        entries: &entries,
-    })
-}
-
 pub(crate) fn create_pbr_portable_atlas_bind_group_layout(
     device: &wgpu::Device,
 ) -> wgpu::BindGroupLayout {
@@ -809,39 +662,6 @@ pub(crate) fn create_pbr_portable_atlas_bind_group_layout(
     })
 }
 
-#[derive(Clone, Copy)]
-enum TextureInterpretation {
-    Linear,
-    /// Bind raw UNORM so shared WGSL can reproduce the incumbent's historical
-    /// `pow(2.2)` transfer on both APIs.
-    LegacyPow22,
-}
-
-struct ResolvedMaterialTexture<'a> {
-    view: &'a wgpu::TextureView,
-    sampler: &'a wgpu::Sampler,
-    resident: bool,
-}
-
-fn resolve_material_texture<'a>(
-    table: Option<&'a PbrTextureTable>,
-    index: Option<u32>,
-    interpretation: TextureInterpretation,
-    placeholder: &'a PbrTextureResource,
-) -> ResolvedMaterialTexture<'a> {
-    let resident_resource = index.and_then(|index| table.and_then(|table| table.resource(index)));
-    let resident = resident_resource.is_some();
-    let resource = resident_resource.unwrap_or(placeholder);
-    let view = match interpretation {
-        TextureInterpretation::Linear | TextureInterpretation::LegacyPow22 => &resource.linear_view,
-    };
-    ResolvedMaterialTexture {
-        view,
-        sampler: &resource.sampler,
-        resident,
-    }
-}
-
 pub(crate) fn pbr_texture_reference_mask(textures: PbrTextureReferences) -> u32 {
     [
         (textures.base_color, PBR_BASE_COLOR_TEXTURE_BIT),
@@ -882,35 +702,6 @@ fn portable_material_residency(
         referenced_mask: pbr_texture_reference_mask(material.textures),
         resident_mask,
     }
-}
-
-fn create_placeholder_resources(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-) -> Result<PbrPlaceholderResources, LodWebGpuError> {
-    Ok(PbrPlaceholderResources {
-        white: create_placeholder_resource(device, queue, [255, 255, 255, 255])?,
-        black: create_placeholder_resource(device, queue, [0, 0, 0, 255])?,
-        flat_normal: create_placeholder_resource(device, queue, [128, 128, 255, 255])?,
-    })
-}
-
-fn create_placeholder_resource(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    rgba: [u8; 4],
-) -> Result<PbrTextureResource, LodWebGpuError> {
-    let descriptor = TextureAssetDescriptor {
-        width: 1,
-        height: 1,
-        wrap_s: TextureWrapMode::ClampToEdge,
-        wrap_t: TextureWrapMode::ClampToEdge,
-    };
-    let resource = create_texture_resource(device, descriptor);
-    let asset = Rgba8TextureAsset::new(descriptor, &rgba)
-        .map_err(|error| LodWebGpuError::Payload(error.to_string()))?;
-    write_texture_asset(queue, &resource, asset)?;
-    Ok(resource)
 }
 
 fn validate_texture_assets(

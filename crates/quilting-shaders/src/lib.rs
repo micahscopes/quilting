@@ -1322,8 +1322,8 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
                 .iter()
                 .filter(|(_, variable)| variable.binding.is_some())
                 .count(),
-            21,
-            "the unsampled transmission texture pair is absent from shader reflection",
+            15,
+            "seven prepared bindings, four portable texture bindings, and four environment bindings",
         );
         let mut layouter = naga::proc::Layouter::default();
         layouter
@@ -1335,6 +1335,9 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             ("PatchPbrMaterial", 160),
             ("PbrEnvironmentUniform", 16),
             ("DrawBatchIndex", 16),
+            ("PbrPortableTextureRecord", 32),
+            ("PbrPortableMaterialTextures", 32),
+            ("PbrPortableMipPlacement", 16),
         ] {
             let (handle, _) = module
                 .types

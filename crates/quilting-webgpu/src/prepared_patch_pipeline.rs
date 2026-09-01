@@ -5,9 +5,9 @@
 //! values shared with the renderer's other functional pipeline families.
 
 use crate::functional_pipeline::{
-    alpha_blending, buffer_binding, depth_state, pbr_environment_bindings, position_vertex_buffer,
+    alpha_blending, buffer_binding, depth_state, pbr_environment_bindings,
+    portable_pbr_texture_bindings, position_vertex_buffer,
 };
-use crate::pbr_resources::PBR_TEXTURE_CHANNELS;
 use crate::{
     DRAW_BATCH_INDEX_BYTES, PACKED_RECORD_BYTES, PATCH_PBR_MATERIAL_BYTES,
     PATCH_RENDER_DOMAIN_BYTES, PATCH_RENDER_GLOBAL_BYTES, PREPARED_PATCH_RECORD_BYTES,
@@ -189,30 +189,6 @@ fn prepared_bindings(
     )?)
 }
 
-fn pbr_texture_bindings(
-) -> Result<functional::BindGroupLayoutDescriptor, PreparedPatchPipelineDescriptorError> {
-    let fragment = functional::ShaderVisibility::FRAGMENT;
-    let mut entries = Vec::with_capacity(PBR_TEXTURE_CHANNELS * 2);
-    for channel in 0..PBR_TEXTURE_CHANNELS {
-        let texture_binding = u32::try_from(channel * 2).expect("six channels fit u32");
-        entries.push(functional::BindGroupLayoutEntry {
-            binding: texture_binding,
-            visibility: fragment,
-            kind: functional::BindingKind::Texture {
-                sample_kind: functional::TextureSampleKind::FloatFilterable,
-                view_dimension: functional::TextureViewDimension::D2,
-                multisampled: false,
-            },
-        });
-        entries.push(functional::BindGroupLayoutEntry {
-            binding: texture_binding + 1,
-            visibility: fragment,
-            kind: functional::BindingKind::Sampler(functional::SamplerBindingKind::Filtering),
-        });
-    }
-    Ok(functional::BindGroupLayoutDescriptor::new(1, entries)?)
-}
-
 /// Describe exactly the prepared/adaptive patch pipeline family requested by
 /// one render target. Triangle passes contribute counter-clockwise then
 /// clockwise descriptors. The line pass contributes one descriptor because
@@ -231,7 +207,7 @@ pub fn prepared_patch_pipeline_descriptors(
         functional::PipelineLayoutDescriptor::new(vec![prepared_bindings.clone()])?;
     let pbr_layout = functional::PipelineLayoutDescriptor::new(vec![
         prepared_bindings,
-        pbr_texture_bindings()?,
+        portable_pbr_texture_bindings(1)?,
         pbr_environment_bindings(2)?,
     ])?;
     let shader = |stage, entry_point| {
@@ -387,7 +363,7 @@ mod tests {
 
         let pbr = &descriptors[0];
         assert_eq!(pbr.layout().groups().len(), 3);
-        assert_eq!(pbr.layout().groups()[1].entries().len(), 12);
+        assert_eq!(pbr.layout().groups()[1].entries().len(), 4);
         let root_entries = pbr.layout().groups()[0].entries();
         assert_eq!(root_entries.len(), 7);
         assert_eq!(root_entries[0].binding, 0);

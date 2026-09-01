@@ -4525,8 +4525,9 @@ impl LodClassifierDevice {
                         });
                 (
                     bind_group_layout,
-                    uses_pbr_family
-                        .then(|| pbr_resources::create_pbr_texture_bind_group_layout(&self.device)),
+                    uses_pbr_family.then(|| {
+                        pbr_resources::create_pbr_portable_atlas_bind_group_layout(&self.device)
+                    }),
                     uses_pbr_family.then(|| {
                         pbr_environment::create_pbr_environment_bind_group_layout(&self.device)
                     }),
@@ -8948,21 +8949,20 @@ impl PatchRenderPipeline {
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bindings.bind_group, &[dynamic_offset]);
         if self.uses_pbr_bindings() {
-            let material_textures = bindings
-                .material_textures
-                .as_ref()
-                .ok_or_else(|| {
-                    LodWebGpuError::Payload(
-                        "PBR material texture bindings are not resident".to_string(),
-                    )
-                })?
-                .bind_group(material_slot)
-                .ok_or_else(|| {
-                    LodWebGpuError::Payload(format!(
-                        "PBR material texture slot {material_slot} is not resident",
-                    ))
-                })?;
-            pass.set_bind_group(1, material_textures, &[]);
+            let material_textures = bindings.material_textures.as_ref().ok_or_else(|| {
+                LodWebGpuError::Payload(
+                    "PBR material texture bindings are not resident".to_string(),
+                )
+            })?;
+            // The portable atlas is scene-wide, but retain the incumbent
+            // material-slot validation at the draw boundary. The shader uses
+            // the same slot through the retained domain record.
+            if material_slot >= material_textures.material_count() {
+                return Err(LodWebGpuError::Payload(format!(
+                    "PBR material texture slot {material_slot} is not resident",
+                )));
+            }
+            pass.set_bind_group(1, &material_textures.bind_group, &[]);
             let environment = bindings.pbr_environment.as_ref().ok_or_else(|| {
                 LodWebGpuError::Payload("PBR environment bindings are not resident".to_string())
             })?;

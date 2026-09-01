@@ -65,6 +65,29 @@ pub(crate) fn pbr_environment_bindings(
     )
 }
 
+pub(crate) fn portable_pbr_texture_bindings(
+    group: u32,
+) -> Result<functional::BindGroupLayoutDescriptor, functional::RenderPipelineDescriptorError> {
+    let fragment = functional::ShaderVisibility::FRAGMENT;
+    functional::BindGroupLayoutDescriptor::new(
+        group,
+        vec![
+            functional::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: fragment,
+                kind: functional::BindingKind::Texture {
+                    sample_kind: functional::TextureSampleKind::FloatUnfilterable,
+                    view_dimension: functional::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+            },
+            buffer_binding(1, fragment, false, 32, false),
+            buffer_binding(2, fragment, false, 32, false),
+            buffer_binding(3, fragment, false, 16, false),
+        ],
+    )
+}
+
 pub(crate) fn position_vertex_buffer(
 ) -> Result<functional::VertexBufferLayoutDescriptor, functional::RenderPipelineDescriptorError> {
     functional::VertexBufferLayoutDescriptor::new(
@@ -134,6 +157,9 @@ mod tests {
         let environment = pbr_environment_bindings(2).unwrap();
         assert_eq!(environment.group(), 2);
         assert_eq!(environment.entries().len(), 4);
+        let textures = portable_pbr_texture_bindings(1).unwrap();
+        assert_eq!(textures.group(), 1);
+        assert_eq!(textures.entries().len(), 4);
         let vertex = position_vertex_buffer().unwrap();
         assert_eq!(vertex.slot(), 0);
         assert_eq!(vertex.stride(), 12);

@@ -958,12 +958,14 @@ subset with shared Rust BRDF code, alpha masking, unlit and double-sided
 semantics, selection tint, tone mapping, and fade. The expanded record preserves
 normal scale, occlusion strength, base/normal UV transforms, transmission and
 volume factors, and a compact authored-texture mask. Decoded glTF images remain
-in a sparse index-preserving device table with linear and sRGB views. Baseline
-per-material bind groups resolve base color, metallic/roughness, normal,
-emissive, occlusion, and transmission channels without sampled-texture arrays;
-white, black, and flat-normal 1x1 resources give every unavailable slot a
-channel-correct fallback. Browser `ImageBitmap` handles copy directly into that
-table before closure, without canvas readback or a texture-sized WASM copy.
+in a sparse index-preserving device table. A paged `texture_2d_array` atlas and
+stable material/placement records resolve base color, metallic/roughness,
+normal, emissive, occlusion, and transmission channels without optional
+sampled-texture-array features. Missing channels use shader constants while
+referenced-but-unavailable slots remain visible in residency diagnostics.
+Prepared/adaptive batches and resident roots now share this exact binding and
+sampling contract. Browser `ImageBitmap` handles copy directly into device
+storage before closure, without canvas readback or a texture-sized WASM copy.
 
 Image-based lighting now has the same rollback-safe boundary. A validated
 backend-neutral asset describes one complete power-of-two RGBA32F prefiltered

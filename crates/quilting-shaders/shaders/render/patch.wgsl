@@ -1,5 +1,5 @@
 #import quilting::render::patch_vertex::{PatchPbrMaterial, PatchRenderDomain, PatchRenderGlobal, PatchVertexOutput, evaluate_prepared_patch_vertex, patch_focus_raw_field, pull_patch_wire_overlay_forward, shade_patch_highlight, shade_patch_lod, shade_patch_matcap, shade_patch_normals, shade_patch_stretch, shade_patch_wire}
-#import quilting::render::patch_pbr::shade_textured_patch_pbr
+#import quilting::render::patch_pbr_portable::shade_portable_patch_pbr
 #import quilting::surface::patch_prepare::PreparedPatchRecord
 #import quilting::compute::visibility_compaction_types::CompactedBatchRangeRecord
 
@@ -104,10 +104,11 @@ fn render_patch_pbr(
 ) -> @location(0) vec4<f32> {
     let material_index = u32(max(domains[draw_batch.batch_index].modes.x, 0));
     let material = pbr_materials[material_index];
-    return shade_textured_patch_pbr(
+    return shade_portable_patch_pbr(
         front_facing,
         input,
         material,
+        material_index,
         global_frame[0].modes.z,
     );
 }
@@ -127,7 +128,13 @@ fn render_patch_pbr_focus(
     let material_index = u32(max(domain.modes.x, 0));
     let material = pbr_materials[material_index];
     return PatchPbrFocusOutput(
-        shade_textured_patch_pbr(front_facing, input, material, global.modes.z),
+        shade_portable_patch_pbr(
+            front_facing,
+            input,
+            material,
+            material_index,
+            global.modes.z,
+        ),
         patch_focus_raw_field(input, global),
     );
 }
