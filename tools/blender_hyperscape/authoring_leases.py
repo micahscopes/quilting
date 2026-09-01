@@ -22,7 +22,7 @@ class AuthoringLeaseError(ValueError):
 
 def normalize_stable_id(value: Any, context: str) -> str:
     try:
-        parsed = uuid.UUID(value)
+        parsed = value if isinstance(value, uuid.UUID) else uuid.UUID(value)
     except (AttributeError, TypeError, ValueError) as error:
         raise AuthoringLeaseError(f"{context} must be a UUID") from error
     if parsed.int == 0:

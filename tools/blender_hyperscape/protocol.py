@@ -1,9 +1,9 @@
 """Dependency-free Hyperscape live-edit protocol codec for Blender.
 
 This module does not choose sockets, WebRTC, IPC, or HHHS. It validates the
-same v0.1 JSON fixtures as ``hyperscape-protocol`` and provides the two small
-pieces every Blender transport needs: sender-local presence ordering/TTL and
-bounded echo suppression for locally originated authored messages.
+same versioned JSON fixtures as ``hyperscape-protocol`` and provides the two
+small pieces every Blender transport needs: sender-local presence ordering/TTL
+and bounded echo suppression for locally originated authored messages.
 """
 
 from __future__ import annotations
@@ -18,9 +18,14 @@ import uuid
 from typing import Any, Mapping, Sequence
 
 
-PROTOCOL_VERSION = {"major": 0, "minor": 1}
+LEGACY_PROTOCOL_VERSION = {"major": 0, "minor": 1}
+CURRENT_PROTOCOL_VERSION = {"major": 0, "minor": 2}
+# New Blender-authored traffic uses the current Rust protocol. Decoders remain
+# explicitly compatible with the frozen v0.1 fixtures and histories.
+PROTOCOL_VERSION = CURRENT_PROTOCOL_VERSION
 MAX_PRESENCE_TTL_MILLIS = 60_000
 MAX_AUTHORING_LEASES_PER_PRESENCE = 256
+MAX_CONFORMAL_GENERATORS_PER_FRAME = 256
 MAX_U64 = (1 << 64) - 1
 AUTHORED_RECORD_FRAME_LANE = "authored_record"
 AUTHORED_RECORD_FRAME_VERSION = {"major": 0, "minor": 1}
@@ -62,7 +67,7 @@ def _finite_number(value: Any, context: str) -> float:
     return result
 
 
-def _protocol_version(value: Any) -> None:
+def _protocol_version(value: Any) -> dict[str, int]:
     if not isinstance(value, Mapping):
         raise HyperscapeProtocolError("protocol version must be an object")
     major = value.get("major")
@@ -72,9 +77,11 @@ def _protocol_version(value: Any) -> None:
         or not isinstance(major, int)
         or isinstance(minor, bool)
         or not isinstance(minor, int)
-        or {"major": major, "minor": minor} != PROTOCOL_VERSION
+        or {"major": major, "minor": minor}
+        not in (LEGACY_PROTOCOL_VERSION, CURRENT_PROTOCOL_VERSION)
     ):
         raise HyperscapeProtocolError("unsupported protocol version")
+    return {"major": major, "minor": minor}
 
 
 def _header(value: Any) -> Mapping[str, Any]:
@@ -95,6 +102,10 @@ def _header(value: Any) -> Mapping[str, Any]:
     return value
 
 
+def _outgoing_version(value: Mapping[str, Any] | None) -> dict[str, int]:
+    return _protocol_version(CURRENT_PROTOCOL_VERSION if value is None else value)
+
+
 def _transform(value: Any) -> None:
     if not isinstance(value, Mapping):
         raise HyperscapeProtocolError("entity transform must be an object")
@@ -105,6 +116,69 @@ def _transform(value: Any) -> None:
         raise HyperscapeProtocolError("rotation must be nonzero")
     if any(component == 0.0 for component in scale):
         raise HyperscapeProtocolError("scale must be nonzero")
+
+
+def _conformal_generators(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise HyperscapeProtocolError("conformal generators must be an array")
+    if len(value) > MAX_CONFORMAL_GENERATORS_PER_FRAME:
+        raise HyperscapeProtocolError("conformal frame has too many generators")
+    result: list[dict[str, Any]] = []
+    for index, generator in enumerate(value):
+        context = f"conformal generator {index}"
+        if not isinstance(generator, Mapping):
+            raise HyperscapeProtocolError(f"{context} must be an object")
+        kind = generator.get("type")
+        if kind == "translation":
+            result.append(
+                {
+                    "type": kind,
+                    "offset": _finite_vector(
+                        generator.get("offset"), 3, f"{context} offset"
+                    ),
+                }
+            )
+        elif kind == "rotation":
+            quaternion = _finite_vector(
+                generator.get("quaternion_wxyz"), 4, f"{context} quaternion"
+            )
+            if sum(component * component for component in quaternion) <= 1.0e-24:
+                raise HyperscapeProtocolError(
+                    f"{context} quaternion must be nonzero"
+                )
+            result.append(
+                {
+                    "type": kind,
+                    "quaternion_wxyz": quaternion,
+                }
+            )
+        elif kind == "uniform_scale":
+            factor = _finite_number(generator.get("factor"), f"{context} factor")
+            if factor == 0.0:
+                raise HyperscapeProtocolError(f"{context} factor must be nonzero")
+            result.append({"type": kind, "factor": factor})
+        elif kind == "sphere_reflection":
+            radius = _finite_number(generator.get("radius"), f"{context} radius")
+            if radius <= 0.0:
+                raise HyperscapeProtocolError(f"{context} radius must be positive")
+            result.append(
+                {
+                    "type": kind,
+                    "center": _finite_vector(
+                        generator.get("center"), 3, f"{context} center"
+                    ),
+                    "radius": radius,
+                }
+            )
+        else:
+            raise HyperscapeProtocolError(f"unknown {context} type {kind!r}")
+    return result
+
+
+def conformal_generator_word(value: Any) -> list[dict[str, Any]]:
+    """Validate and detach one complete local-to-parent generator word."""
+
+    return _conformal_generators(value)
 
 
 def _asset(value: Any) -> None:
@@ -152,7 +226,7 @@ def _authoring_lease(value: Any, context: str) -> dict[str, Any]:
 def validate_authored_envelope(envelope: Any) -> None:
     if not isinstance(envelope, Mapping):
         raise HyperscapeProtocolError("authored envelope must be an object")
-    _header(envelope.get("header"))
+    header = _header(envelope.get("header"))
     command = envelope.get("command")
     if not isinstance(command, Mapping):
         raise HyperscapeProtocolError("authored command must be an object")
@@ -162,6 +236,13 @@ def validate_authored_envelope(envelope: Any) -> None:
     elif kind == "set_entity_transform":
         _uuid(command.get("entity"), "entity ID")
         _transform(command.get("transform"))
+    elif kind == "set_conformal_frame_transform":
+        if _protocol_version(header.get("version")) == LEGACY_PROTOCOL_VERSION:
+            raise HyperscapeProtocolError(
+                "set_conformal_frame_transform requires protocol 0.2 or newer"
+            )
+        _uuid(command.get("frame"), "conformal frame ID")
+        _conformal_generators(command.get("generators"))
     elif kind == "remove_entity":
         _uuid(command.get("entity"), "entity ID")
     else:
@@ -324,10 +405,11 @@ def set_transform_envelope(
     translation: Sequence[float],
     rotation_wxyz: Sequence[float],
     scale: Sequence[float],
+    version: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     envelope = {
         "header": {
-            "version": dict(PROTOCOL_VERSION),
+            "version": _outgoing_version(version),
             "message_id": _uuid(message_id, "message ID"),
             "sender": _uuid(sender, "sender ID"),
             "sequence": sequence,
@@ -346,6 +428,32 @@ def set_transform_envelope(
     return envelope
 
 
+def set_conformal_frame_transform_envelope(
+    *,
+    message_id: str,
+    sender: str,
+    sequence: int,
+    frame: str,
+    generators: Sequence[Mapping[str, Any]],
+    version: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    envelope = {
+        "header": {
+            "version": _outgoing_version(version),
+            "message_id": _uuid(message_id, "message ID"),
+            "sender": _uuid(sender, "sender ID"),
+            "sequence": sequence,
+        },
+        "command": {
+            "type": "set_conformal_frame_transform",
+            "frame": _uuid(frame, "conformal frame ID"),
+            "generators": _conformal_generators(generators),
+        },
+    }
+    validate_authored_envelope(envelope)
+    return envelope
+
+
 def presence_envelope(
     *,
     message_id: str,
@@ -358,6 +466,7 @@ def presence_envelope(
     focus: Mapping[str, Any] | None = None,
     active_cue: str | None = None,
     animation_seconds: float | None = None,
+    version: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     presence: dict[str, Any] = {
         "ttl_millis": ttl_millis,
@@ -386,7 +495,7 @@ def presence_envelope(
         presence["animation_seconds"] = animation_seconds
     envelope = {
         "header": {
-            "version": dict(PROTOCOL_VERSION),
+            "version": _outgoing_version(version),
             "message_id": _uuid(message_id, "message ID"),
             "sender": _uuid(sender, "sender ID"),
             "sequence": sequence,

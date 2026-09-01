@@ -103,6 +103,7 @@ class HYPERSCAPE_PT_live_sync(bpy.types.Panel):
         layout.label(
             text=(
                 f"{status.bound_entities} entities · "
+                f"{status.bound_frames} frames · "
                 f"{status.remote_peers} remote peers"
             )
         )

@@ -36,6 +36,20 @@ def remote_presence(
 
 
 class AuthoringLeaseTests(unittest.TestCase):
+    def test_default_uuid_factory_produces_a_valid_claim(self) -> None:
+        controller = authoring_leases.AuthoringLeaseController()
+        claims = controller.synchronize(
+            "10000000-0000-4000-8000-000000000001",
+            ["10000000-0000-4000-8000-000000000002"],
+        )
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(
+            authoring_leases.normalize_stable_id(
+                claims[0]["lease_id"], "lease ID"
+            ),
+            claims[0]["lease_id"],
+        )
+
     def controller(self) -> authoring_leases.AuthoringLeaseController:
         lease_ids = iter(
             f"40000000-0000-4000-8000-{value:012d}" for value in range(1, 16)

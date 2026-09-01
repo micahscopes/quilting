@@ -31,8 +31,52 @@ class ProtocolTests(unittest.TestCase):
             translation=[1, 2, 3],
             rotation_wxyz=[1, 0, 0, 0],
             scale=[1, 1, 1],
+            version=protocol.LEGACY_PROTOCOL_VERSION,
         )
         self.assertEqual(constructed, envelope)
+
+    def test_rust_conformal_frame_fixture_roundtrips_canonically(self) -> None:
+        text, envelope = self.fixture("authored-set-conformal-frame-v0.2.json")
+        protocol.validate_authored_envelope(envelope)
+        self.assertEqual(protocol.canonical_json(envelope), text)
+        constructed = protocol.set_conformal_frame_transform_envelope(
+            message_id="00000000-0000-0000-0000-000000000001",
+            sender="00000000-0000-0000-0000-000000000002",
+            sequence=3,
+            frame="00000000-0000-0000-0000-000000000004",
+            generators=envelope["command"]["generators"],
+        )
+        self.assertEqual(constructed, envelope)
+
+        with self.assertRaisesRegex(
+            protocol.HyperscapeProtocolError, "requires protocol 0.2"
+        ):
+            protocol.set_conformal_frame_transform_envelope(
+                message_id="00000000-0000-0000-0000-000000000001",
+                sender="00000000-0000-0000-0000-000000000002",
+                sequence=3,
+                frame="00000000-0000-0000-0000-000000000004",
+                generators=[],
+                version=protocol.LEGACY_PROTOCOL_VERSION,
+            )
+
+        invalid = json.loads(json.dumps(envelope))
+        invalid["command"]["generators"] = [
+            {"type": "uniform_scale", "factor": 0.0}
+        ]
+        with self.assertRaisesRegex(
+            protocol.HyperscapeProtocolError, "factor must be nonzero"
+        ):
+            protocol.validate_authored_envelope(invalid)
+
+        oversized = json.loads(json.dumps(envelope))
+        oversized["command"]["generators"] = [
+            {"type": "translation", "offset": [0.0, 0.0, 0.0]}
+        ] * (protocol.MAX_CONFORMAL_GENERATORS_PER_FRAME + 1)
+        with self.assertRaisesRegex(
+            protocol.HyperscapeProtocolError, "too many generators"
+        ):
+            protocol.validate_authored_envelope(oversized)
 
     def test_presence_is_sender_ordered_and_expires_from_local_receipt(self) -> None:
         text, envelope = self.fixture("presence-camera-v0.1.json")
@@ -56,7 +100,7 @@ class ProtocolTests(unittest.TestCase):
 
     def test_invalid_version_nil_ids_and_nonfinite_values_are_rejected(self) -> None:
         _, authored = self.fixture("authored-set-transform-v0.1.json")
-        authored["header"]["version"]["minor"] = 2
+        authored["header"]["version"]["minor"] = 3
         with self.assertRaisesRegex(protocol.HyperscapeProtocolError, "version"):
             protocol.validate_authored_envelope(authored)
 
@@ -199,6 +243,7 @@ class ProtocolTests(unittest.TestCase):
             },
             selection=["00000000-0000-0000-0000-000000000005"],
             animation_seconds=2,
+            version=protocol.LEGACY_PROTOCOL_VERSION,
         )
         self.assertEqual(constructed, fixture)
 
@@ -220,6 +265,7 @@ class ProtocolTests(unittest.TestCase):
                     },
                 }
             ],
+            version=protocol.LEGACY_PROTOCOL_VERSION,
         )
         self.assertEqual(constructed, fixture)
 

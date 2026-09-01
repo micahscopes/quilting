@@ -42,6 +42,7 @@ class BlenderLiveSyncStatus:
     detail: str | None
     peer_id: str | None
     bound_entities: int
+    bound_frames: int
     remote_peers: int
     authored_sent: int
     authored_applied: int
@@ -71,11 +72,13 @@ class BlenderLiveSync:
         ] = {}
         self._remote_presence: list[Mapping[str, Any]] = []
         self._observed_matrices: dict[str, tuple[float, ...]] = {}
+        self._observed_frame_words: dict[str, tuple[Any, ...]] = {}
         self._dirty_entities: set[str] = set()
         self._frame_changed = False
         self._last_presence_signature: tuple[Any, ...] | None = None
         self._last_presence_sent_seconds = -math.inf
         self._bound_entities = 0
+        self._bound_frames = 0
         self._authored_sent = 0
         self._authored_applied = 0
         self._authored_ignored = 0
@@ -108,6 +111,7 @@ class BlenderLiveSync:
         self._lease_claims = ()
         self._lease_contentions = {}
         self._remote_presence = []
+        self._observed_frame_words.clear()
         self._dirty_entities.clear()
         self._frame_changed = False
         self._last_presence_signature = None
@@ -172,16 +176,27 @@ class BlenderLiveSync:
 
         self._detail = None
         objects, duplicates, invalid = _entity_objects(scene)
+        frames, duplicate_frames, invalid_frames = _conformal_frames(scene)
         self._bound_entities = len(objects)
+        self._bound_frames = len(frames)
         if duplicates:
-            self._detail = (
+            self._append_detail(
                 "Duplicate stable entity IDs are excluded: "
                 + ", ".join(sorted(duplicates))
             )
-        elif invalid:
-            self._detail = f"{invalid} bound object(s) have invalid stable IDs"
+        if invalid:
+            self._append_detail(f"{invalid} bound object(s) have invalid stable IDs")
+        if duplicate_frames:
+            self._append_detail(
+                "Duplicate stable conformal frame IDs are excluded: "
+                + ", ".join(sorted(duplicate_frames))
+            )
+        if invalid_frames:
+            self._append_detail(
+                f"{invalid_frames} conformal frame(s) lack a valid stable ID"
+            )
 
-        self._admit_deliveries(objects, now)
+        self._admit_deliveries(objects, frames, now)
         selection = _selected_entities(scene, objects)
         asset_id = self._authoring_asset_id(scene)
         self._lease_claims = self._leases.synchronize(asset_id, selection)
@@ -217,12 +232,13 @@ class BlenderLiveSync:
         if self._frame_changed:
             # Timeline evaluation belongs in ephemeral animation presence, not
             # a flood of durable transform edits.
-            self._refresh_observed(scene, objects)
+            self._refresh_observed(scene, objects, frames)
             self._dirty_entities.clear()
             self._authored_blocked = 0
             self._frame_changed = False
         else:
             self._publish_dirty(objects, set(remote_holders))
+            self._publish_dirty_frames(frames)
 
     def status(self) -> BlenderLiveSyncStatus:
         transport_status = self._transport.status() if self._transport else None
@@ -232,6 +248,7 @@ class BlenderLiveSync:
             detail=self._detail,
             peer_id=self._peer_id,
             bound_entities=self._bound_entities,
+            bound_frames=self._bound_frames,
             remote_peers=len(self._remote_presence),
             authored_sent=self._authored_sent,
             authored_applied=self._authored_applied,
@@ -257,6 +274,7 @@ class BlenderLiveSync:
     def _admit_deliveries(
         self,
         objects: Mapping[str, bpy.types.Object],
+        frames: Mapping[str, Any],
         now_seconds: float,
     ) -> None:
         assert self._transport is not None
@@ -277,27 +295,58 @@ class BlenderLiveSync:
                 self._authored_ignored += 1
                 continue
             command = envelope["command"]
-            if command["type"] != "set_entity_transform":
+            if command["type"] == "set_entity_transform":
+                entity = _stable_id(command["entity"], "authored entity ID")
+                obj = objects.get(entity)
+                if obj is None:
+                    self._detail = f"No unique bound Blender object for entity {entity}"
+                    self._authored_ignored += 1
+                    continue
+                try:
+                    _apply_wire_transform(obj, command["transform"])
+                except (RuntimeError, TypeError, ValueError) as error:
+                    self._detail = f"Could not apply transform to {obj.name!r}: {error}"
+                    self._authored_ignored += 1
+                    continue
+                self._observed_matrices[entity] = _matrix_signature(obj.matrix_world)
+                self._dirty_entities.discard(entity)
+                self._authored_applied += 1
+                continue
+            if command["type"] == "set_conformal_frame_transform":
+                frame_id = _stable_id(command["frame"], "authored conformal frame ID")
+                frame = frames.get(frame_id)
+                if frame is None:
+                    self._detail = (
+                        f"No unique bound Blender conformal frame for {frame_id}"
+                    )
+                    self._authored_ignored += 1
+                    continue
+                try:
+                    generators = _apply_wire_conformal_word(
+                        frame, command["generators"]
+                    )
+                except (
+                    BlenderLiveSyncError,
+                    RuntimeError,
+                    TypeError,
+                    ValueError,
+                ) as error:
+                    self._detail = (
+                        f"Could not apply conformal frame {frame_id}: {error}"
+                    )
+                    self._authored_ignored += 1
+                    continue
+                self._observed_frame_words[frame_id] = _conformal_word_signature(
+                    generators
+                )
+                self._authored_applied += 1
+                continue
+            else:
                 self._detail = (
                     f"Blender direct sync does not apply {command['type']!r} commands"
                 )
                 self._authored_ignored += 1
                 continue
-            entity = _stable_id(command["entity"], "authored entity ID")
-            obj = objects.get(entity)
-            if obj is None:
-                self._detail = f"No unique bound Blender object for entity {entity}"
-                self._authored_ignored += 1
-                continue
-            try:
-                _apply_wire_transform(obj, command["transform"])
-            except (RuntimeError, TypeError, ValueError) as error:
-                self._detail = f"Could not apply transform to {obj.name!r}: {error}"
-                self._authored_ignored += 1
-                continue
-            self._observed_matrices[entity] = _matrix_signature(obj.matrix_world)
-            self._dirty_entities.discard(entity)
-            self._authored_applied += 1
 
     def _publish_dirty(
         self,
@@ -388,6 +437,34 @@ class BlenderLiveSync:
         self._last_presence_signature = signature
         self._last_presence_sent_seconds = now_seconds
 
+    def _publish_dirty_frames(self, frames: Mapping[str, Any]) -> None:
+        assert self._transport is not None
+        assert self._peer_id is not None
+        for frame_id, frame in sorted(frames.items()):
+            try:
+                signature, generators = _wire_conformal_word(frame)
+            except BlenderLiveSyncError as error:
+                self._append_detail(str(error))
+                continue
+            if self._observed_frame_words.get(frame_id) == signature:
+                continue
+            envelope = protocol.set_conformal_frame_transform_envelope(
+                message_id=str(uuid.uuid4()),
+                sender=self._peer_id,
+                sequence=self._sequence(),
+                frame=frame_id,
+                generators=generators,
+            )
+            self._transport.send(protocol.local_peer_frame("authored", envelope))
+            self._authored.record_local(envelope)
+            self._observed_frame_words[frame_id] = signature
+            self._authored_sent += 1
+        self._observed_frame_words = {
+            frame_id: signature
+            for frame_id, signature in self._observed_frame_words.items()
+            if frame_id in frames
+        }
+
     def _authoring_asset_id(self, scene: bpy.types.Scene) -> str | None:
         settings = getattr(scene, "hyperscape", None)
         value = getattr(settings, "asset_id", "").strip()
@@ -410,6 +487,7 @@ class BlenderLiveSync:
         self,
         scene: bpy.types.Scene,
         objects: Mapping[str, bpy.types.Object] | None = None,
+        frames: Mapping[str, Any] | None = None,
     ) -> None:
         if objects is None:
             objects, duplicates, invalid = _entity_objects(scene)
@@ -420,6 +498,20 @@ class BlenderLiveSync:
             entity: _matrix_signature(obj.matrix_world)
             for entity, obj in objects.items()
         }
+        if frames is None:
+            frames, duplicates, invalid = _conformal_frames(scene)
+            self._bound_frames = len(frames)
+            if duplicates or invalid:
+                self._append_detail("Some conformal frames are excluded from live sync")
+        observed_frame_words: dict[str, tuple[Any, ...]] = {}
+        for frame_id, frame in frames.items():
+            try:
+                signature, _generators = _wire_conformal_word(frame)
+            except BlenderLiveSyncError as error:
+                self._append_detail(str(error))
+                continue
+            observed_frame_words[frame_id] = signature
+        self._observed_frame_words = observed_frame_words
 
     def _sequence(self) -> int:
         if self._next_sequence > protocol.MAX_U64:
@@ -477,6 +569,119 @@ def _entity_objects(
         elif entity not in duplicates:
             objects[entity] = obj
     return objects, duplicates, invalid
+
+
+def _conformal_frames(
+    scene: bpy.types.Scene,
+) -> tuple[dict[str, Any], set[str], int]:
+    settings = getattr(scene, "hyperscape", None)
+    if settings is None:
+        return {}, set(), 0
+    frames: dict[str, Any] = {}
+    duplicates: set[str] = set()
+    invalid = 0
+    for frame in settings.frames:
+        try:
+            frame_id = _stable_id(
+                frame.stable_id.strip(), "stable conformal frame ID"
+            )
+        except BlenderLiveSyncError:
+            invalid += 1
+            continue
+        if frame_id in frames:
+            duplicates.add(frame_id)
+            del frames[frame_id]
+        elif frame_id not in duplicates:
+            frames[frame_id] = frame
+    return frames, duplicates, invalid
+
+
+def _generator_property_value(generator: Any) -> dict[str, Any]:
+    if generator.kind == "TRANSLATION":
+        return {"type": "translation", "offset": list(generator.offset)}
+    if generator.kind == "ROTATION":
+        return {
+            "type": "rotation",
+            "quaternion_wxyz": list(generator.quaternion_wxyz),
+        }
+    if generator.kind == "UNIFORM_SCALE":
+        return {"type": "uniform_scale", "factor": generator.factor}
+    if generator.kind == "SPHERE_REFLECTION":
+        return {
+            "type": "sphere_reflection",
+            "center": list(generator.center),
+            "radius": generator.radius,
+        }
+    raise BlenderLiveSyncError(
+        f"conformal generator has unknown Blender kind {generator.kind!r}"
+    )
+
+
+def _conformal_word_signature(
+    generators: list[dict[str, Any]],
+) -> tuple[Any, ...]:
+    signature = []
+    for generator in generators:
+        kind = generator["type"]
+        if kind == "translation":
+            values = generator["offset"]
+        elif kind == "rotation":
+            values = generator["quaternion_wxyz"]
+        elif kind == "uniform_scale":
+            values = [generator["factor"]]
+        else:
+            values = [*generator["center"], generator["radius"]]
+        signature.append(
+            (
+                kind,
+                *(round(float(value), MATRIX_QUANTIZATION_DIGITS) for value in values),
+            )
+        )
+    return tuple(signature)
+
+
+def _wire_conformal_word(
+    frame: Any,
+) -> tuple[tuple[Any, ...], list[dict[str, Any]]]:
+    try:
+        generators = protocol.conformal_generator_word(
+            [_generator_property_value(generator) for generator in frame.generators]
+        )
+    except protocol.HyperscapeProtocolError as error:
+        raise BlenderLiveSyncError(
+            f"conformal frame {frame.name!r} cannot be encoded: {error}"
+        ) from error
+    return _conformal_word_signature(generators), generators
+
+
+def _apply_wire_conformal_word(
+    frame: Any,
+    generators: Any,
+) -> list[dict[str, Any]]:
+    try:
+        normalized = protocol.conformal_generator_word(generators)
+    except protocol.HyperscapeProtocolError as error:
+        raise BlenderLiveSyncError(str(error)) from error
+    while len(frame.generators):
+        frame.generators.remove(len(frame.generators) - 1)
+    for encoded in normalized:
+        generator = frame.generators.add()
+        kind = encoded["type"]
+        generator.kind = kind.upper()
+        if kind == "translation":
+            generator.offset = encoded["offset"]
+        elif kind == "rotation":
+            generator.quaternion_wxyz = encoded["quaternion_wxyz"]
+        elif kind == "uniform_scale":
+            generator.factor = encoded["factor"]
+        else:
+            generator.center = encoded["center"]
+            generator.radius = encoded["radius"]
+    frame.active_generator = min(
+        frame.active_generator,
+        max(len(frame.generators) - 1, 0),
+    )
+    return normalized
 
 
 def _selected_entities(

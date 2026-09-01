@@ -59,6 +59,12 @@ obj.name = "Live Cube"
 obj.hyperscape.enabled = True
 obj.hyperscape.stable_id = "10000000-0000-4000-8000-000000000001"
 bpy.context.scene.hyperscape.asset_id = "10000000-0000-4000-8000-000000000002"
+frame = bpy.context.scene.hyperscape.frames.add()
+frame.name = "Live Frame"
+frame.stable_id = "10000000-0000-4000-8000-000000000003"
+generator = frame.generators.add()
+generator.kind = "UNIFORM_SCALE"
+generator.factor = 1.0
 
 transport = FakeTransport()
 runtime = live_sync.BlenderLiveSync()
@@ -97,6 +103,27 @@ assert local_presence["envelope"]["presence"]["authoring_leases"][0]["target"] =
     "asset": bpy.context.scene.hyperscape.asset_id,
     "entity": obj.hyperscape.stable_id,
 }
+assert runtime.status().bound_frames == 1
+
+# A complete conformal generator word is one atomic authored edit. The relay
+# echo is consumed before polling can mistake it for a remote overwrite, while
+# a newer local word remains publishable.
+generator.factor = 2.0
+runtime.tick(bpy.context.scene, 10.01)
+local_frame = authored_frames(transport)[-1]
+assert local_frame["envelope"]["header"]["version"] == {"major": 0, "minor": 2}
+assert local_frame["envelope"]["command"] == {
+    "type": "set_conformal_frame_transform",
+    "frame": frame.stable_id,
+    "generators": [{"type": "uniform_scale", "factor": 2.0}],
+}
+generator.factor = 3.0
+transport.incoming.append(relay.RelayDelivery(cursor=1, frame=local_frame))
+runtime.tick(bpy.context.scene, 10.02)
+assert generator.factor == 3.0
+assert authored_frames(transport)[-1]["envelope"]["command"]["generators"] == [
+    {"type": "uniform_scale", "factor": 3.0}
+]
 
 # A relay echo must not overwrite a newer local edit that has not yet been sent.
 obj.location = (2.0, 2.0, 3.0)
@@ -129,7 +156,38 @@ runtime.mark_object_updated(obj)
 runtime.tick(bpy.context.scene, 10.3)
 assert len(authored_frames(transport)) == before_remote_send_count
 assert runtime.status().authored_applied == 1
-assert runtime.status().authored_ignored == 1
+assert runtime.status().authored_ignored == 2
+
+remote_frame = protocol.set_conformal_frame_transform_envelope(
+    message_id="30000000-0000-4000-8000-000000000005",
+    sender="30000000-0000-4000-8000-000000000002",
+    sequence=2,
+    frame=frame.stable_id,
+    generators=[
+        {"type": "translation", "offset": [1.0, 2.0, 3.0]},
+        {
+            "type": "sphere_reflection",
+            "center": [0.0, 0.0, 0.0],
+            "radius": 4.0,
+        },
+    ],
+)
+transport.incoming.append(
+    relay.RelayDelivery(
+        cursor=4,
+        frame=protocol.local_peer_frame("authored", remote_frame),
+    )
+)
+before_remote_frame_send = len(authored_frames(transport))
+runtime.tick(bpy.context.scene, 10.31)
+assert [item.kind for item in frame.generators] == [
+    "TRANSLATION",
+    "SPHERE_REFLECTION",
+]
+assert tuple(frame.generators[0].offset) == (1.0, 2.0, 3.0)
+assert frame.generators[1].radius == 4.0
+runtime.tick(bpy.context.scene, 10.32)
+assert len(authored_frames(transport)) == before_remote_frame_send
 
 # Remote presence remains ephemeral and never mutates the Blender object.
 remote_presence = protocol.presence_envelope(
@@ -204,6 +262,7 @@ assert "authoring_leases" not in presence_frames(transport)[-1]["envelope"]["pre
 
 # Timeline evaluation updates the observed pose but never authors each frame.
 obj.location = (7.0, 8.0, 9.0)
+frame.generators[0].offset = (8.0, 9.0, 10.0)
 bpy.context.view_layer.update()
 runtime.mark_object_updated(obj)
 runtime.note_frame_change()

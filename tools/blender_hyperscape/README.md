@@ -17,12 +17,14 @@ The **Hyperscape** tab in the 3D View sidebar provides:
 - cross-frame tracking and projection-camera constraints; and
 - `.gltf`/`.glb` import/export that preserves ordinary glTF fallback content.
 
-The dependency-free `protocol.py` module also validates the same checked-in
-v0.1 authored/presence JSON fixtures as Rust. It supplies sender-local presence
-ordering with receipt-relative TTL and bounded duplicate, stale, and echo
-suppression for both lanes. The optional local relay remains a delivery-only
-adapter; HHHS can still wrap only authored envelopes without receiving
-viewport presence.
+The dependency-free `protocol.py` module validates both the frozen v0.1
+authored/presence fixtures and the current v0.2 conformal-frame fixture from
+Rust. New Blender traffic uses v0.2; old v0.1 traffic remains readable, while
+the v0.2-only frame command is rejected under a legacy header. The module
+supplies sender-local presence ordering with receipt-relative TTL and bounded
+duplicate, stale, and echo suppression for both lanes. The optional local
+relay remains a delivery-only adapter; HHHS can still wrap only authored
+envelopes without receiving viewport presence.
 
 For local bridge development, start the disabled-by-default relay and copy its
 printed bearer token into the browser and Blender adapters:
@@ -41,12 +43,15 @@ and the active transport; it is not stored in the `.blend` or add-on
 preferences.
 
 The network worker only fills bounded queues. A Blender application timer
-validates and applies absolute ordinary-world TRS transforms on Blender's main
-thread. Bound objects are matched exclusively by their stable entity UUID;
-duplicates, invalid IDs, zero scale, and world shear are excluded instead of
-being approximated. Camera, selection, and animation time use the ephemeral
-presence lane. Timeline evaluation refreshes presence but is not converted
-into a stream of authored transforms.
+validates and applies absolute ordinary-world TRS transforms and complete
+local-to-parent conformal generator words on Blender's main thread. Bound
+objects and frames are matched exclusively by their stable UUIDs; duplicates,
+invalid IDs, zero scale, invalid generators, and world shear are excluded
+instead of being approximated. Frame edits replace one complete ordered word,
+so peers never observe a half-edited generator list. Camera, selection, and
+animation time use the ephemeral presence lane. Timeline evaluation refreshes
+the observed entity poses and frame words but is not converted into a stream
+of authored edits.
 
 Selected bound objects also publish asset-scoped advisory authoring leases.
 Lease IDs remain stable while selected, refresh with presence, and are omitted
@@ -189,11 +194,12 @@ blender --background --factory-startup --python-exit-code 1 \
   /tmp/hyperscape-roundtrip.glb
 ```
 
-The live-sync integration check proves local edit publication, authored and
-presence echo suppression, remote transform application, advisory lease
-refresh/contention/release gating, ephemeral presence expiry and overlay
-cleanup, timeline isolation, explicit shear rejection, and the absence of
-overlay-created datablocks against a fake transport:
+The live-sync integration check proves local entity and conformal-word
+publication, authored and presence echo suppression, remote transform/word
+application, advisory lease refresh/contention/release gating, ephemeral
+presence expiry and overlay cleanup, timeline isolation, explicit shear
+rejection, and the absence of overlay-created datablocks against a fake
+transport:
 
 ```sh
 blender --background --factory-startup --python-exit-code 1 \
