@@ -2138,3 +2138,42 @@ leaves from the captured pose; pausing performs one 984-leaf rest-pose refit,
 then the comparison count remains stable. Playback intent is application state,
 while the browser adapter's resident deforming-pose capability gates animation
 work.
+
+## Device-resident pixel-floor evidence
+
+On 2026-09-01, an apparent WebGPU wire/LOD color regression was reduced to a
+topology-oracle error in the image audit. With the 16-pixel default, the live
+WebGPU classifier selected exponent 0 on all three edges of 873 of the horse's
+984 already-dense source patches. The remaining 111 faces had only one or two
+exponent-1 edges. The dormant WebGL evidence scene still
+held its topology-rich one-pixel-floor batches and reported 212,844 intended
+wire segments. Comparing those images therefore compared different meshes;
+the fixed dark-blue WebGPU wire was the correct visualization of its mostly
+LOD-1 resident field, not a lost fragment varying.
+
+An explicit diagnostic-only staged readback now exposes the exact packed
+resident epoch without changing the ordinary no-readback presentation path.
+`scripts/audit-webgpu-image-parity.mjs` records that epoch and defaults to a
+one-pixel floor when its purpose is raster/shader parity. Under the shared
+topology, standalone wire measured 214 ppm mean RGB error, zero coverage drift,
+and 2,057 ppm of pixels over a 16-code delta. LOD heatmap shading measured 163
+ppm mean RGB error, 3 ppm coverage drift, and 1,880 ppm over the same threshold.
+This confirms the edge/vertex density interpolation and matcap-blended LOD
+fragment path are shared; it does not claim identical topology at other
+screen-space floors.
+
+`scripts/audit-webgpu-lod-floor.mjs` then changed only the live pixel floor on
+one fixed 984-face horse view and read each completed resident epoch:
+
+| Pixel floor | Maximum exponent | Sum of physical-edge subdivisions |
+| ---: | ---: | ---: |
+| 1 | 5 | 19,320 |
+| 16 | 1 | 3,128 |
+| 64 | 0 | 2,952 |
+
+Every physical face edge was componentwise non-increasing as the floor rose;
+all 984 faces remained visible, all three epochs presented without a frame
+failure, and the browser console retained zero errors. This is direct evidence
+that the WebGPU screen-space floor acts as a tessellation cap and accounts for
+the density of authored patches rather than continuing to draw the incumbent's
+stale high-density batches.

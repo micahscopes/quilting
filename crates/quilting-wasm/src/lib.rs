@@ -76,6 +76,21 @@ pub fn mr_webgpu_backend_diagnostics() -> JsValue {
     serde_wasm_bindgen::to_value(&webgpu_backend::diagnostics()).unwrap_or(JsValue::NULL)
 }
 
+/// Explicit diagnostic-only readback of the latest reconciled WebGPU LOD
+/// words. Presentation itself remains wholly device-resident.
+#[cfg(feature = "webgpu-backend")]
+#[wasm_bindgen(js_name = "mr_readWebGpuResidentLod")]
+pub async fn mr_read_webgpu_resident_lod() -> Result<JsValue, JsValue> {
+    let staged = webgpu_backend::stage_resident_lod_readback()
+        .map_err(|error| JsValue::from_str(&error))?;
+    let words = staged
+        .read()
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    serde_wasm_bindgen::to_value(&words)
+        .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
 /// Opt-in asynchronous query against the latest coherent prepared-patch
 /// WebGPU frame. The result still carries the interaction-target epoch and a
 /// transient packed node; application code must join it through the current

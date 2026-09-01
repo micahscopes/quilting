@@ -28,10 +28,18 @@ const originalPage = targetsBefore.find(target => target.type === 'page'
   && target.url.includes(`:${pagePort}/`));
 const route = new URL(process.env.HYPERSCOPE_BACKEND_EVIDENCE_URL
   || `http://127.0.0.1:${pagePort}/`);
+if (!route.searchParams.has('glb') && !route.searchParams.has('presentation')) {
+  route.searchParams.set('glb', 'horse.glb');
+}
 route.searchParams.set('_backend_evidence', String(Date.now()));
 route.searchParams.set('gfx', 'webgpu');
 route.searchParams.set('mode', requiredStyle);
 route.searchParams.set('animate', '0');
+// Image parity isolates raster/shader behavior by forcing the topology-rich
+// screen-cap setting used by the incumbent retained scene. Callers testing a
+// different attenuation floor must opt in through the evidence URL; the
+// resident readback below then records the actual device-selected topology.
+if (!route.searchParams.has('minpx')) route.searchParams.set('minpx', '1');
 if (focusPolicy === 'off') route.searchParams.set('fuzzy', '0');
 route.searchParams.set('lodimpl', 'rust');
 
@@ -229,6 +237,27 @@ try {
       }
     })()`,
   );
+  const residentLod = await evaluate(`(async () => {
+    const wasm = await import('./pkg/quilting_wasm.js');
+    const words = Array.from(await wasm.mr_readWebGpuResidentLod());
+    const distribution = {};
+    let visibleFaces = 0;
+    let maxExponent = 0;
+    for (const packed of words) {
+      const exponents = [packed & 15, (packed >>> 4) & 15, (packed >>> 8) & 15];
+      const key = exponents.join('/');
+      distribution[key] = (distribution[key] || 0) + 1;
+      visibleFaces += (packed & (1 << 15)) !== 0 ? 1 : 0;
+      maxExponent = Math.max(maxExponent, ...exponents);
+    }
+    return {
+      faces: words.length,
+      visibleFaces,
+      maxExponent,
+      distribution,
+      firstWords: words.slice(0, 8),
+    };
+  })()`);
   const rgbAbsoluteError = report.image.absoluteChannelError
     .slice(0, 3)
     .reduce((sum, value) => sum + Number(value), 0);
@@ -243,6 +272,7 @@ try {
     before,
     completed,
     report,
+    residentLod,
     parity: {
       rgbMeanAbsoluteErrorMillionths,
       rgbPixelsOver16Millionths,

@@ -899,6 +899,16 @@ pub struct StagedOffscreenImageReadback {
     byte_len: u64,
 }
 
+/// One explicit copy of the latest reconciled LOD words. This exists only for
+/// parity/debugging gates: ordinary presentation binds the resident buffer
+/// directly and never maps it through the CPU.
+pub struct StagedResidentLodReadback {
+    #[cfg(not(target_arch = "wasm32"))]
+    device: wgpu::Device,
+    buffer: wgpu::Buffer,
+    byte_len: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OffscreenRgba8Image {
     pub size: [u32; 2],
@@ -943,6 +953,32 @@ impl StagedOffscreenImageReadback {
             bytes_per_row: self.bytes_per_row,
             bytes,
         })
+    }
+}
+
+impl StagedResidentLodReadback {
+    pub async fn read(self) -> Result<Vec<u32>, LodWebGpuError> {
+        if self.byte_len == 0 {
+            return Ok(Vec::new());
+        }
+        let slice = self.buffer.slice(..self.byte_len);
+        let (sender, receiver) = oneshot::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|error| LodWebGpuError::Poll(error.to_string()))?;
+        receiver
+            .await
+            .map_err(|_| LodWebGpuError::Mapping("map callback was canceled".to_string()))?
+            .map_err(|error| LodWebGpuError::Mapping(error.to_string()))?;
+        let view = slice.get_mapped_range();
+        let packed = bytemuck::cast_slice::<u8, u32>(&view).to_vec();
+        drop(view);
+        self.buffer.unmap();
+        Ok(packed)
     }
 }
 
@@ -8450,35 +8486,47 @@ impl LodClassifierDevice {
         self.readback_words(&readback, readback_bytes).await
     }
 
+    /// Stage an explicit diagnostic readback of reconciled resident topology.
+    pub fn stage_resident_lod_readback(
+        &self,
+        output: &DeviceResidentLod<'_>,
+    ) -> StagedResidentLodReadback {
+        let readback_bytes = u64::from(output.face_count) * PACKED_RECORD_BYTES;
+        let readback = gpu_buffer(
+            &self.device,
+            "LOD resident staged diagnostic readback",
+            readback_bytes.max(PACKED_RECORD_BYTES),
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        if readback_bytes != 0 {
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("quilting resident LOD staged diagnostic copy"),
+                });
+            encoder.copy_buffer_to_buffer(
+                output.packed_records_buffer(),
+                0,
+                &readback,
+                0,
+                readback_bytes,
+            );
+            self.queue.submit([encoder.finish()]);
+        }
+        StagedResidentLodReadback {
+            #[cfg(not(target_arch = "wasm32"))]
+            device: self.device.clone(),
+            buffer: readback,
+            byte_len: readback_bytes,
+        }
+    }
+
     /// Explicit full diagnostic readback of reconciled resident topology.
     pub async fn read_resident_lod_for_diagnostics(
         &self,
         output: &DeviceResidentLod<'_>,
     ) -> Result<Vec<u32>, LodWebGpuError> {
-        let readback_bytes = u64::from(output.face_count) * PACKED_RECORD_BYTES;
-        if readback_bytes == 0 {
-            return Ok(Vec::new());
-        }
-        let readback = gpu_buffer(
-            &self.device,
-            "LOD resident temporary diagnostic readback",
-            readback_bytes,
-            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        );
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("quilting resident LOD diagnostic copy"),
-            });
-        encoder.copy_buffer_to_buffer(
-            output.packed_records_buffer(),
-            0,
-            &readback,
-            0,
-            readback_bytes,
-        );
-        self.queue.submit([encoder.finish()]);
-        self.readback_words(&readback, readback_bytes).await
+        self.stage_resident_lod_readback(output).read().await
     }
 
     /// Diagnostic compatibility wrapper around [`Self::classify_on_device`].

@@ -2989,6 +2989,28 @@ pub(crate) fn diagnostics() -> WebGpuBackendDiagnostics {
     BACKEND.with(|slot| slot.borrow().diagnostics())
 }
 
+/// Stage an explicit readback of the latest device-resident LOD epoch. The
+/// returned handle owns its resources so no thread-local backend borrow lives
+/// across the asynchronous map. Ordinary rendering never calls this path.
+pub(crate) fn stage_resident_lod_readback(
+) -> Result<quilting_webgpu::StagedResidentLodReadback, String> {
+    BACKEND.with(|slot| {
+        let backend = slot.borrow();
+        let device = backend
+            .device
+            .as_ref()
+            .ok_or_else(|| "WebGPU resident LOD diagnostics require a device".to_string())?;
+        let model = backend
+            .model
+            .as_ref()
+            .ok_or_else(|| "WebGPU resident LOD diagnostics require a model".to_string())?;
+        let resident = device.latest_resident_lod(model).ok_or_else(|| {
+            "WebGPU resident LOD diagnostics require a completed epoch".to_string()
+        })?;
+        Ok(device.stage_resident_lod_readback(&resident))
+    })
+}
+
 fn texture_asset_descriptor(
     index: usize,
     width: u32,
