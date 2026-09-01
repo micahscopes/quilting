@@ -116,13 +116,17 @@ separate filtering correctness from residency pressure.
 
 Native conformance retains the same 201,326,589 texels in individual source
 textures, for 402,653,178 RGBA8 texels total: 1,610,612,712 bytes (about 1.50
-GiB) before driver overhead. Browser upload now drops those sources immediately
-after mip/atlas publication because no browser render path consumes them. Its
-steady chess table is therefore 201,326,589 atlas texels, or 805,306,356 bytes
-(about 768 MiB), before driver overhead. Diagnostics distinguish authored
-images from retained individual images and derive total bytes from allocations
-that actually survive publication. Upload-time peak residency remains a
-separate optimization and live context-loss gate.
+GiB) before driver overhead. Browser upload no longer creates those sources:
+each `ImageBitmap` copies directly into its packed mip-zero rectangle and one
+reusable half-size scratch target box-filters all lower levels back into the
+atlas. Its steady chess table is therefore 201,326,589 atlas texels, or
+805,306,356 bytes (about 768 MiB), before driver overhead. The 2048-square
+scratch target adds 4,194,304 transient texels, bounding the explicit upload
+allocation at 205,520,893 texels, or 822,083,572 bytes (about 784 MiB), instead
+of about 1.50 GiB. Diagnostics distinguish authored images from retained
+individual images and report the direct-upload strategy, scratch allocation,
+estimated upload peak, and allocations that actually survive publication.
+Live context-loss validation remains pending.
 
 The pure atlas, mip shader, resident-root shader, and WASM browser-target gates
 pass without acquiring a GPU. Native raster/readback and live Chrome chess

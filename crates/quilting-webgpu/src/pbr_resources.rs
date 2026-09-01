@@ -37,12 +37,14 @@ pub struct PbrTextureTable {
     descriptors: Vec<Option<TextureAssetDescriptor>>,
     resources: Vec<Option<PbrTextureResource>>,
     portable_atlas: PortablePbrTextureAtlas,
+    direct_atlas_upload: bool,
+    upload_scratch_mip_texels: u64,
 }
 
 /// Baseline-WebGPU representation for non-uniform material texture access.
 /// Both prepared/adaptive batches and direct resident roots sample this table;
-/// individual source textures currently remain only as mip-publication inputs
-/// and conformance evidence while browser residency is consolidated.
+/// native byte-upload tables retain individual sources for in-place updates
+/// and conformance, while browser ImageBitmaps publish directly into it.
 pub struct PortablePbrTextureAtlas {
     plan: PortableTextureAtlasPlan,
     mip_level_count: u32,
@@ -74,6 +76,10 @@ pub struct PbrTextureTableDiagnostics {
     pub portable_atlas_mip_level_count: u32,
     pub portable_atlas_uses_manual_bilinear_filtering: bool,
     pub portable_atlas_uses_manual_trilinear_filtering: bool,
+    pub direct_atlas_upload: bool,
+    pub upload_scratch_mip_texels: u64,
+    pub estimated_upload_peak_mip_texels: u64,
+    pub estimated_upload_peak_bytes: u64,
     pub total_allocated_mip_texels: u64,
     pub total_allocated_bytes: u64,
 }
@@ -167,6 +173,8 @@ impl PbrTextureTable {
             individual_min_mip_level_count,
             individual_max_mip_level_count,
             individual_allocated_mip_texels,
+            self.direct_atlas_upload,
+            self.upload_scratch_mip_texels,
             &self.portable_atlas.plan,
             self.portable_atlas.mip_level_count,
         )
@@ -199,9 +207,19 @@ fn pbr_texture_table_diagnostics(
     individual_min_mip_level_count: u32,
     individual_max_mip_level_count: u32,
     individual_allocated_mip_texels: u64,
+    direct_atlas_upload: bool,
+    upload_scratch_mip_texels: u64,
     plan: &PortableTextureAtlasPlan,
     portable_atlas_mip_level_count: u32,
 ) -> PbrTextureTableDiagnostics {
+    let total_allocated_mip_texels = individual_allocated_mip_texels
+        .saturating_add(plan.allocated_mip_texels);
+    let estimated_upload_peak_mip_texels = if direct_atlas_upload {
+        plan.allocated_mip_texels
+            .saturating_add(upload_scratch_mip_texels)
+    } else {
+        total_allocated_mip_texels
+    };
     PbrTextureTableDiagnostics {
         texture_slots,
         occupied_images,
@@ -222,11 +240,12 @@ fn pbr_texture_table_diagnostics(
             PORTABLE_PBR_ATLAS_USES_MANUAL_BILINEAR_FILTERING,
         portable_atlas_uses_manual_trilinear_filtering:
             PORTABLE_PBR_ATLAS_USES_MANUAL_TRILINEAR_FILTERING,
-        total_allocated_mip_texels: individual_allocated_mip_texels
-            .saturating_add(plan.allocated_mip_texels),
-        total_allocated_bytes: individual_allocated_mip_texels
-            .saturating_add(plan.allocated_mip_texels)
-            .saturating_mul(4),
+        direct_atlas_upload,
+        upload_scratch_mip_texels,
+        estimated_upload_peak_mip_texels,
+        estimated_upload_peak_bytes: estimated_upload_peak_mip_texels.saturating_mul(4),
+        total_allocated_mip_texels,
+        total_allocated_bytes: total_allocated_mip_texels.saturating_mul(4),
     }
 }
 
@@ -370,6 +389,8 @@ impl LodClassifierDevice {
             descriptors,
             resources,
             portable_atlas,
+            direct_atlas_upload: false,
+            upload_scratch_mip_texels: 0,
         })
     }
 
@@ -386,38 +407,20 @@ impl LodClassifierDevice {
             .iter()
             .map(|asset| asset.as_ref().map(|(descriptor, _)| *descriptor))
             .collect::<Vec<_>>();
-        let resources = descriptors
-            .iter()
-            .map(|descriptor| {
-                descriptor.map(|descriptor| create_texture_resource(&self.device, descriptor))
-            })
-            .collect::<Vec<_>>();
         let portable_atlas = create_portable_pbr_texture_atlas(&self.device, &descriptors)?;
-        for (resource, asset) in resources.iter().zip(assets) {
-            if let (Some(resource), Some((descriptor, bitmap))) = (resource.as_ref(), asset) {
-                self.queue.copy_external_image_to_texture(
-                    &wgpu::CopyExternalImageSourceInfo {
-                        source: wgpu::ExternalImageSource::ImageBitmap(bitmap.clone()),
-                        origin: wgpu::Origin2d::ZERO,
-                        flip_y: false,
-                    },
-                    wgpu::CopyExternalImageDestInfo {
-                        texture: &resource.texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                        color_space: wgpu::PredefinedColorSpace::Srgb,
-                        premultiplied_alpha: false,
-                    },
-                    texture_extent(*descriptor),
-                );
-            }
-        }
-        publish_pbr_texture_mips_and_atlas(&self.device, &self.queue, &resources, &portable_atlas)?;
+        let upload_scratch_mip_texels =
+            pbr_atlas_mipmap_scratch_plan(&descriptors).map_or(0, |scratch| scratch.texels);
+        publish_pbr_image_bitmaps_directly_to_atlas(
+            &self.device,
+            &self.queue,
+            assets,
+            &descriptors,
+            &portable_atlas,
+        )?;
         // Every browser render path samples the portable atlas. Source
-        // textures exist only long enough to receive ImageBitmaps and produce
-        // the atlas mip chain; dropping them here halves steady large-scene
-        // image residency without changing stable texture-slot identity.
+        // texture slots remain intentionally empty: ImageBitmaps publish base
+        // rectangles directly and one reusable half-size scratch chain builds
+        // lower mips without a duplicate per-image texture family.
         let resources = std::iter::repeat_with(|| None)
             .take(descriptors.len())
             .collect();
@@ -425,6 +428,8 @@ impl LodClassifierDevice {
             descriptors,
             resources,
             portable_atlas,
+            direct_atlas_upload: true,
+            upload_scratch_mip_texels,
         })
     }
 
@@ -827,7 +832,8 @@ fn create_portable_pbr_texture_atlas(
         format: wgpu::TextureFormat::Rgba8Unorm,
         usage: wgpu::TextureUsages::COPY_DST
             | wgpu::TextureUsages::COPY_SRC
-            | wgpu::TextureUsages::TEXTURE_BINDING,
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor {
@@ -849,6 +855,9 @@ fn create_portable_pbr_texture_atlas(
         let Some(descriptor) = descriptor else {
             continue;
         };
+        let slot_u32 = u32::try_from(slot).map_err(|_| {
+            LodWebGpuError::Payload("portable PBR texture slot exceeded u32".into())
+        })?;
         let mip_level_count = texture_mip_level_count(descriptor.width, descriptor.height);
         let placement_offset = slot
             .checked_mul(plan.mip_level_count as usize)
@@ -873,7 +882,7 @@ fn create_portable_pbr_texture_atlas(
                 ))
             })?;
             mip_placement_records[placement_offset as usize + mip_level as usize] =
-                [placement.origin[0], placement.origin[1], placement.layer, 1];
+                [placement.origin[0], placement.origin[1], placement.layer, slot_u32];
         }
     }
     let descriptor_records = buffer_init_or_zero(
@@ -920,6 +929,64 @@ fn pbr_mip_fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4
     let b = textureLoad(pbr_mip_source, min(source + vec2<i32>(1, 0), maximum), 0);
     let c = textureLoad(pbr_mip_source, min(source + vec2<i32>(0, 1), maximum), 0);
     let d = textureLoad(pbr_mip_source, min(source + vec2<i32>(1, 1), maximum), 0);
+    return (a + b + c + d) * 0.25;
+}
+"#;
+
+#[cfg(any(target_arch = "wasm32", test))]
+const PBR_ATLAS_MIPMAP_SHADER: &str = r#"
+struct PbrAtlasTextureRecord {
+    size_wrap: vec4<u32>,
+    mips_offset_resident: vec4<u32>,
+}
+
+struct PbrAtlasMipPlacement {
+    // xy = packed origin, z = layer selected by the source view, w = slot.
+    origin_layer_slot: vec4<u32>,
+}
+
+@group(0) @binding(0) var pbr_atlas_mip_source: texture_2d<f32>;
+@group(0) @binding(1) var<storage, read> pbr_atlas_textures: array<PbrAtlasTextureRecord>;
+@group(0) @binding(2) var<storage, read> pbr_atlas_placements: array<PbrAtlasMipPlacement>;
+
+struct PbrAtlasMipVertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) @interpolate(flat) placement_index: u32,
+}
+
+@vertex
+fn pbr_atlas_mip_vertex(
+    @builtin(vertex_index) vertex_index: u32,
+    @builtin(instance_index) placement_index: u32,
+) -> PbrAtlasMipVertexOutput {
+    let positions = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>(3.0, -1.0),
+        vec2<f32>(-1.0, 3.0),
+    );
+    return PbrAtlasMipVertexOutput(
+        vec4<f32>(positions[vertex_index], 0.0, 1.0),
+        placement_index,
+    );
+}
+
+@fragment
+fn pbr_atlas_mip_fragment(input: PbrAtlasMipVertexOutput) -> @location(0) vec4<f32> {
+    let placement = pbr_atlas_placements[input.placement_index];
+    let descriptor = pbr_atlas_textures[placement.origin_layer_slot.w];
+    let mip_level = input.placement_index - descriptor.mips_offset_resident.y;
+    let source_placement = pbr_atlas_placements[input.placement_index - 1u];
+    let source_size = max(
+        descriptor.size_wrap.xy >> vec2<u32>(mip_level - 1u),
+        vec2<u32>(1u),
+    );
+    let source_origin = vec2<i32>(source_placement.origin_layer_slot.xy);
+    let maximum = source_origin + vec2<i32>(source_size) - vec2<i32>(1);
+    let source = source_origin + vec2<i32>(input.position.xy) * 2;
+    let a = textureLoad(pbr_atlas_mip_source, min(source, maximum), 0);
+    let b = textureLoad(pbr_atlas_mip_source, min(source + vec2<i32>(1, 0), maximum), 0);
+    let c = textureLoad(pbr_atlas_mip_source, min(source + vec2<i32>(0, 1), maximum), 0);
+    let d = textureLoad(pbr_atlas_mip_source, min(source + vec2<i32>(1, 1), maximum), 0);
     return (a + b + c + d) * 0.25;
 }
 "#;
@@ -1038,6 +1105,321 @@ impl PbrMipmapGenerator {
             pass.draw(0..3, 0..1);
         }
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+struct PbrAtlasMipmapGenerator {
+    bind_group_layout: wgpu::BindGroupLayout,
+    pipeline: wgpu::RenderPipeline,
+    scratch: wgpu::Texture,
+    scratch_view: wgpu::TextureView,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PbrAtlasMipmapScratchPlan {
+    extent: [u32; 2],
+    texels: u64,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn pbr_atlas_mipmap_scratch_plan(
+    descriptors: &[Option<TextureAssetDescriptor>],
+) -> Option<PbrAtlasMipmapScratchPlan> {
+    let maximum_mip_count = descriptors
+        .iter()
+        .flatten()
+        .map(|descriptor| texture_mip_level_count(descriptor.width, descriptor.height))
+        .max()
+        .unwrap_or(1);
+    if maximum_mip_count <= 1 {
+        return None;
+    }
+    let width = descriptors
+        .iter()
+        .flatten()
+        .map(|descriptor| (descriptor.width >> 1).max(1))
+        .max()
+        .unwrap_or(1);
+    let height = descriptors
+        .iter()
+        .flatten()
+        .map(|descriptor| (descriptor.height >> 1).max(1))
+        .max()
+        .unwrap_or(1);
+    Some(PbrAtlasMipmapScratchPlan {
+        extent: [width, height],
+        texels: u64::from(width).saturating_mul(u64::from(height)),
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+impl PbrAtlasMipmapGenerator {
+    fn new(
+        device: &wgpu::Device,
+        descriptors: &[Option<TextureAssetDescriptor>],
+    ) -> Option<Self> {
+        let scratch = pbr_atlas_mipmap_scratch_plan(descriptors)?;
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("quilting direct-atlas PBR mip source layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(32),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(16),
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("quilting direct-atlas PBR mip pipeline layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("quilting direct-atlas PBR mip shader"),
+            source: wgpu::ShaderSource::Wgsl(PBR_ATLAS_MIPMAP_SHADER.into()),
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("quilting direct-atlas PBR mip pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("pbr_atlas_mip_vertex"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("pbr_atlas_mip_fragment"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let scratch = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("quilting direct-atlas PBR mip scratch"),
+            size: wgpu::Extent3d {
+                width: scratch.extent[0],
+                height: scratch.extent[1],
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let scratch_view = scratch.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("quilting direct-atlas PBR mip scratch view"),
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            ..Default::default()
+        });
+        Some(Self {
+            bind_group_layout,
+            pipeline,
+            scratch,
+            scratch_view,
+        })
+    }
+
+    fn encode_texture_mips(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        atlas: &PortablePbrTextureAtlas,
+        slot: usize,
+        descriptor: TextureAssetDescriptor,
+    ) -> Result<(), LodWebGpuError> {
+        let descriptor_record = atlas
+            .plan
+            .mip_level_count
+            .checked_mul(u32::try_from(slot).map_err(|_| {
+                LodWebGpuError::Payload("portable PBR texture slot exceeded u32".into())
+            })?)
+            .ok_or_else(|| {
+                LodWebGpuError::Payload("portable PBR mip placement offset exceeded u32".into())
+            })?;
+        let mip_level_count = texture_mip_level_count(descriptor.width, descriptor.height);
+        for mip_level in 1..mip_level_count {
+            let source_placement = atlas.plan.mip_placements[mip_level as usize - 1][slot]
+                .ok_or_else(|| {
+                    LodWebGpuError::Payload(format!(
+                        "portable PBR texture slot {slot} mip {} has no source placement",
+                        mip_level - 1,
+                    ))
+                })?;
+            let destination_placement = atlas.plan.mip_placements[mip_level as usize][slot]
+                .ok_or_else(|| {
+                    LodWebGpuError::Payload(format!(
+                        "portable PBR texture slot {slot} mip {mip_level} has no target placement",
+                    ))
+                })?;
+            let placement_index = descriptor_record.checked_add(mip_level).ok_or_else(|| {
+                LodWebGpuError::Payload("portable PBR mip placement index exceeded u32".into())
+            })?;
+            let source_view = atlas.texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("quilting direct-atlas PBR mip source view"),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_mip_level: mip_level - 1,
+                mip_level_count: Some(1),
+                base_array_layer: source_placement.layer,
+                array_layer_count: Some(1),
+                ..Default::default()
+            });
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("quilting direct-atlas PBR mip bindings"),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&source_view),
+                    },
+                    crate::bind(1, &atlas.descriptor_records),
+                    crate::bind(2, &atlas.mip_placement_records),
+                ],
+            });
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("quilting direct-atlas PBR mip pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.scratch_view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.set_viewport(
+                    0.0,
+                    0.0,
+                    destination_placement.extent[0] as f32,
+                    destination_placement.extent[1] as f32,
+                    0.0,
+                    1.0,
+                );
+                pass.draw(0..3, placement_index..placement_index + 1);
+            }
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.scratch,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &atlas.texture,
+                    mip_level,
+                    origin: wgpu::Origin3d {
+                        x: destination_placement.origin[0],
+                        y: destination_placement.origin[1],
+                        z: destination_placement.layer,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: destination_placement.extent[0],
+                    height: destination_placement.extent[1],
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn publish_pbr_image_bitmaps_directly_to_atlas(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    assets: &[Option<(TextureAssetDescriptor, web_sys::ImageBitmap)>],
+    descriptors: &[Option<TextureAssetDescriptor>],
+    atlas: &PortablePbrTextureAtlas,
+) -> Result<(), LodWebGpuError> {
+    for (slot, asset) in assets.iter().enumerate() {
+        let Some((descriptor, bitmap)) = asset else {
+            continue;
+        };
+        let placement = atlas.plan.placements[slot].ok_or_else(|| {
+            LodWebGpuError::Payload(format!(
+                "portable PBR texture slot {slot} has no base publication target",
+            ))
+        })?;
+        queue.copy_external_image_to_texture(
+            &wgpu::CopyExternalImageSourceInfo {
+                source: wgpu::ExternalImageSource::ImageBitmap(bitmap.clone()),
+                origin: wgpu::Origin2d::ZERO,
+                flip_y: false,
+            },
+            wgpu::CopyExternalImageDestInfo {
+                texture: &atlas.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: placement.origin[0],
+                    y: placement.origin[1],
+                    z: placement.layer,
+                },
+                aspect: wgpu::TextureAspect::All,
+                color_space: wgpu::PredefinedColorSpace::Srgb,
+                premultiplied_alpha: false,
+            },
+            texture_extent(*descriptor),
+        );
+    }
+    let Some(generator) = PbrAtlasMipmapGenerator::new(device, descriptors) else {
+        return Ok(());
+    };
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("quilting direct-atlas PBR mip publication"),
+    });
+    for (slot, asset) in assets.iter().enumerate() {
+        if let Some((descriptor, _)) = asset {
+            generator.encode_texture_mips(device, &mut encoder, atlas, slot, *descriptor)?;
+        }
+    }
+    queue.submit(Some(encoder.finish()));
+    Ok(())
 }
 
 fn publish_pbr_texture_mips_and_atlas(
@@ -1240,7 +1622,8 @@ mod tests {
             },
         )
         .unwrap();
-        let diagnostics = pbr_texture_table_diagnostics(2, 1, 1, 4, 4, 43, &plan, 4);
+        let diagnostics =
+            pbr_texture_table_diagnostics(2, 1, 1, 4, 4, 43, false, 0, &plan, 4);
 
         assert_eq!(diagnostics.texture_slots, 2);
         assert_eq!(diagnostics.occupied_images, 1);
@@ -1262,15 +1645,42 @@ mod tests {
         assert_eq!(diagnostics.portable_atlas_mip_level_count, 4);
         assert!(diagnostics.portable_atlas_uses_manual_bilinear_filtering);
         assert!(diagnostics.portable_atlas_uses_manual_trilinear_filtering);
+        assert!(!diagnostics.direct_atlas_upload);
+        assert_eq!(diagnostics.upload_scratch_mip_texels, 0);
+        assert_eq!(diagnostics.estimated_upload_peak_mip_texels, 128);
+        assert_eq!(diagnostics.estimated_upload_peak_bytes, 512);
         assert_eq!(diagnostics.total_allocated_mip_texels, 128);
         assert_eq!(diagnostics.total_allocated_bytes, 512);
 
-        let atlas_only = pbr_texture_table_diagnostics(2, 1, 0, 0, 0, 0, &plan, 4);
+        let scratch = pbr_atlas_mipmap_scratch_plan(&descriptors).unwrap();
+        assert_eq!(scratch.extent, [4, 2]);
+        assert_eq!(scratch.texels, 8);
+        let atlas_only =
+            pbr_texture_table_diagnostics(2, 1, 0, 0, 0, 0, true, 8, &plan, 4);
         assert_eq!(atlas_only.individual_retained_images, 0);
         assert_eq!(atlas_only.individual_allocated_mip_texels, 0);
+        assert!(atlas_only.direct_atlas_upload);
+        assert_eq!(atlas_only.upload_scratch_mip_texels, 8);
+        assert_eq!(atlas_only.estimated_upload_peak_mip_texels, 93);
+        assert_eq!(atlas_only.estimated_upload_peak_bytes, 372);
         assert_eq!(atlas_only.total_allocated_mip_texels, 85);
         assert_eq!(atlas_only.total_allocated_bytes, 340);
+
+        let chess_descriptors = vec![
+            Some(TextureAssetDescriptor {
+                width: 4096,
+                height: 4096,
+                wrap_s: TextureWrapMode::Repeat,
+                wrap_t: TextureWrapMode::Repeat,
+            });
+            9
+        ];
+        let chess_scratch = pbr_atlas_mipmap_scratch_plan(&chess_descriptors).unwrap();
+        assert_eq!(chess_scratch.extent, [2048, 2048]);
+        assert_eq!(chess_scratch.texels, 4_194_304);
         quilting_shaders::compile_shader(PBR_MIPMAP_SHADER, Default::default())
             .expect("PBR mipmap shader compiles");
+        quilting_shaders::compile_shader(PBR_ATLAS_MIPMAP_SHADER, Default::default())
+            .expect("direct-atlas PBR mipmap shader compiles");
     }
 }

@@ -11,8 +11,8 @@ struct PbrPortableTextureRecord {
 }
 
 struct PbrPortableMipPlacement {
-    // xy = independently packed origin, z = array layer, w = resident.
-    origin_layer_resident: vec4<u32>,
+    // xy = independently packed origin, z = array layer, w = stable slot.
+    origin_layer_slot: vec4<u32>,
 }
 
 struct PbrPortableMaterialTextures {
@@ -64,8 +64,8 @@ fn pbr_load_portable_texel(
     );
     return textureLoad(
         pbr_portable_atlas,
-        vec2<i32>(placement.origin_layer_resident.xy + local),
-        i32(placement.origin_layer_resident.z),
+        vec2<i32>(placement.origin_layer_slot.xy + local),
+        i32(placement.origin_layer_slot.z),
         i32(mip_level),
     );
 }

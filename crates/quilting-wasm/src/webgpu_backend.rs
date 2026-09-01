@@ -258,6 +258,10 @@ pub(crate) struct WebGpuBackendDiagnostics {
     pbr_portable_atlas_mip_levels: u32,
     pbr_portable_atlas_manual_bilinear: bool,
     pbr_portable_atlas_manual_trilinear: bool,
+    pbr_texture_direct_atlas_upload: bool,
+    pbr_texture_upload_scratch_mip_texels: u64,
+    pbr_texture_estimated_upload_peak_mip_texels: u64,
+    pbr_texture_estimated_upload_peak_bytes: u64,
     pbr_texture_total_allocated_mip_texels: u64,
     pbr_texture_total_allocated_bytes: u64,
     environment_ready: bool,
@@ -493,6 +497,13 @@ impl WebGpuBackend {
                 .portable_atlas_uses_manual_bilinear_filtering,
             pbr_portable_atlas_manual_trilinear: pbr_texture_table
                 .portable_atlas_uses_manual_trilinear_filtering,
+            pbr_texture_direct_atlas_upload: pbr_texture_table.direct_atlas_upload,
+            pbr_texture_upload_scratch_mip_texels: pbr_texture_table
+                .upload_scratch_mip_texels,
+            pbr_texture_estimated_upload_peak_mip_texels: pbr_texture_table
+                .estimated_upload_peak_mip_texels,
+            pbr_texture_estimated_upload_peak_bytes: pbr_texture_table
+                .estimated_upload_peak_bytes,
             pbr_texture_total_allocated_mip_texels: pbr_texture_table.total_allocated_mip_texels,
             pbr_texture_total_allocated_bytes: pbr_texture_table.total_allocated_bytes,
             environment_ready: self.environment.is_some(),
@@ -3111,6 +3122,10 @@ mod tests {
         assert_eq!(diagnostics["pbrPortableAtlasMipLevels"], 0);
         assert_eq!(diagnostics["pbrPortableAtlasManualBilinear"], false);
         assert_eq!(diagnostics["pbrPortableAtlasManualTrilinear"], false);
+        assert_eq!(diagnostics["pbrTextureDirectAtlasUpload"], false);
+        assert_eq!(diagnostics["pbrTextureUploadScratchMipTexels"], 0);
+        assert_eq!(diagnostics["pbrTextureEstimatedUploadPeakMipTexels"], 0);
+        assert_eq!(diagnostics["pbrTextureEstimatedUploadPeakBytes"], 0);
         assert_eq!(diagnostics["pbrTextureTotalAllocatedMipTexels"], 0);
         assert_eq!(diagnostics["pbrTextureTotalAllocatedBytes"], 0);
     }
