@@ -39,7 +39,7 @@ use hyperscope_app::{
     PatchLabCompletionDispatch, PatchLabControls, PatchLabEffectWire, PatchLabEffects,
     PatchLabFailure, PatchLabField, PatchLabGeometryCompletion, PatchLabGeometryOutcome,
     PatchLabHistogramBin, PatchLabLodCompletion, PatchLabLodOutcome, PatchLabLodSummary,
-    PatchLabReadModel, PatchLabSessionDispatch, PatchLabSessionIntent, PatchLabShape,
+    PatchLabReadModelWire, PatchLabSessionDispatch, PatchLabSessionIntent, PatchLabShape,
     PresentationAction, PresentationAnimationResidencyBinding,
     PresentationAnimationResidencyDispatch, PrimarySceneInstallCompletion,
     PrimarySceneAssetIdentity, PrimarySceneAssetIdentityProvenance,
@@ -3217,9 +3217,7 @@ impl HyperscopeAppShadow {
     /// internals or renderer-owned buffers.
     #[wasm_bindgen(js_name = patchLabSnapshot)]
     pub fn patch_lab_snapshot(&self) -> Result<JsValue, JsValue> {
-        to_js(&ShadowPatchLabReadModel::from(
-            self.store.patch_lab_snapshot(),
-        ))
+        to_js(&PatchLabReadModelWire::from(self.store.patch_lab_snapshot()))
     }
 
     /// Write `[playing, unwrapped_time_seconds, speed]` without allocating a
@@ -4028,15 +4026,6 @@ impl From<ShadowPatchLabHistogramBin> for PatchLabHistogramBin {
     }
 }
 
-impl From<PatchLabHistogramBin> for ShadowPatchLabHistogramBin {
-    fn from(bin: PatchLabHistogramBin) -> Self {
-        Self {
-            edge_subdivisions: bin.edge_subdivisions,
-            face_count: bin.face_count,
-        }
-    }
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ShadowAnimationClipInput {
@@ -4276,7 +4265,7 @@ struct SessionNodeIdentity {
 struct ShadowPatchLabSessionDispatch {
     sequence: String,
     commit: AppCommitWire,
-    patch_lab: ShadowPatchLabReadModel,
+    patch_lab: PatchLabReadModelWire,
     effects: Vec<PatchLabEffectWire>,
 }
 
@@ -4284,7 +4273,7 @@ struct ShadowPatchLabSessionDispatch {
 #[serde(rename_all = "camelCase")]
 struct ShadowPatchLabCompletionDispatch {
     commit: AppCommitWire,
-    patch_lab: ShadowPatchLabReadModel,
+    patch_lab: PatchLabReadModelWire,
     effects: Vec<PatchLabEffectWire>,
 }
 
@@ -4314,7 +4303,7 @@ struct ShadowSnapshot {
     animation_speed: f64,
     navigation_settings: ShadowNavigationSettings,
     render_settings: ShadowRenderSettings,
-    patch_lab: ShadowPatchLabReadModel,
+    patch_lab: PatchLabReadModelWire,
     assets: Vec<ShadowAsset>,
     loading_assets: usize,
     loading_primary_scene_asset: Option<String>,
@@ -4330,138 +4319,6 @@ struct ShadowSnapshot {
     authored_conformal_frames: Vec<ShadowAuthoredConformalFrame>,
     diagnostics: Vec<ShadowDiagnostic>,
     presentation: Option<ShadowPresentation>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ShadowPatchLabReadModel {
-    active: bool,
-    controls: ShadowPatchLabControls,
-    pending_geometry_job: Option<String>,
-    installed_geometry: Option<ShadowPatchLabGeometryReadModel>,
-    pending_lod_job: Option<String>,
-    lod_dirty: bool,
-    latest_lod: Option<ShadowPatchLabLodSummary>,
-    last_error: Option<ShadowPatchLabFailure>,
-}
-
-impl From<PatchLabReadModel> for ShadowPatchLabReadModel {
-    fn from(model: PatchLabReadModel) -> Self {
-        Self {
-            active: model.active,
-            controls: model.controls.into(),
-            pending_geometry_job: model.pending_geometry_job.map(|job| job.to_string()),
-            installed_geometry: model.installed_geometry.map(Into::into),
-            pending_lod_job: model.pending_lod_job.map(|job| job.to_string()),
-            lod_dirty: model.lod_dirty,
-            latest_lod: model.latest_lod.map(Into::into),
-            last_error: model.last_error.map(Into::into),
-        }
-    }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ShadowPatchLabControls {
-    shape: &'static str,
-    field: &'static str,
-    manual_edge_exponents: [u8; 3],
-    min_exponent: u8,
-    max_exponent: u8,
-    phase_microradians: u32,
-    phase_radians: f64,
-    bend_percent: u8,
-    grid: u8,
-    animate: bool,
-}
-
-impl From<PatchLabControls> for ShadowPatchLabControls {
-    fn from(controls: PatchLabControls) -> Self {
-        Self {
-            shape: controls.shape.wire_name(),
-            field: controls.field.wire_name(),
-            manual_edge_exponents: controls.manual_edge_exponents,
-            min_exponent: controls.min_exponent,
-            max_exponent: controls.max_exponent,
-            phase_microradians: controls.phase_microradians,
-            phase_radians: controls.phase_radians(),
-            bend_percent: controls.bend_percent,
-            grid: controls.grid,
-            animate: controls.animate,
-        }
-    }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ShadowPatchLabGeometryReadModel {
-    job_id: String,
-    shape: &'static str,
-    grid: u8,
-    bend_percent: u8,
-    vertex_count: u32,
-    face_count: u32,
-}
-
-impl From<hyperscope_app::PatchLabGeometryReadModel> for ShadowPatchLabGeometryReadModel {
-    fn from(model: hyperscope_app::PatchLabGeometryReadModel) -> Self {
-        Self {
-            job_id: model.job_id.to_string(),
-            shape: model.geometry.shape.wire_name(),
-            grid: model.geometry.grid,
-            bend_percent: model.geometry.bend_percent,
-            vertex_count: model.vertex_count,
-            face_count: model.face_count,
-        }
-    }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ShadowPatchLabLodSummary {
-    requested_first_face: Option<[u32; 3]>,
-    resident_first_face: Option<[u32; 3]>,
-    promoted_faces: u32,
-    promoted_edges: u32,
-    shared_edges: u32,
-    shared_edge_mismatches: u32,
-    max_face_edge_ratio: u32,
-    rendered_triangles: u64,
-    histogram: Vec<ShadowPatchLabHistogramBin>,
-}
-
-impl From<PatchLabLodSummary> for ShadowPatchLabLodSummary {
-    fn from(summary: PatchLabLodSummary) -> Self {
-        Self {
-            requested_first_face: summary.requested_first_face,
-            resident_first_face: summary.resident_first_face,
-            promoted_faces: summary.promoted_faces,
-            promoted_edges: summary.promoted_edges,
-            shared_edges: summary.shared_edges,
-            shared_edge_mismatches: summary.shared_edge_mismatches,
-            max_face_edge_ratio: summary.max_face_edge_ratio,
-            rendered_triangles: summary.rendered_triangles,
-            histogram: summary.histogram.into_iter().map(Into::into).collect(),
-        }
-    }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ShadowPatchLabFailure {
-    code: String,
-    message: String,
-    retryable: bool,
-}
-
-impl From<PatchLabFailure> for ShadowPatchLabFailure {
-    fn from(failure: PatchLabFailure) -> Self {
-        Self {
-            code: failure.code,
-            message: failure.message,
-            retryable: failure.retryable,
-        }
-    }
 }
 
 #[derive(Serialize)]

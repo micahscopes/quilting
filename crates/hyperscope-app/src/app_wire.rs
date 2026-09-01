@@ -8,8 +8,157 @@ use serde::Serialize;
 
 use crate::{
     AppCommit, AppEffect, AuthoredProposalRole, AuthoredSessionEffect, CommitDisposition,
-    PatchLabEffect, PatchLabEffects,
+    PatchLabControls, PatchLabEffect, PatchLabEffects, PatchLabFailure, PatchLabGeometryReadModel,
+    PatchLabHistogramBin, PatchLabLodSummary, PatchLabReadModel,
 };
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatchLabControlsWire {
+    shape: &'static str,
+    field: &'static str,
+    manual_edge_exponents: [u8; 3],
+    min_exponent: u8,
+    max_exponent: u8,
+    phase_microradians: u32,
+    phase_radians: f64,
+    bend_percent: u8,
+    grid: u8,
+    animate: bool,
+}
+
+impl From<PatchLabControls> for PatchLabControlsWire {
+    fn from(controls: PatchLabControls) -> Self {
+        Self {
+            shape: controls.shape.wire_name(),
+            field: controls.field.wire_name(),
+            manual_edge_exponents: controls.manual_edge_exponents,
+            min_exponent: controls.min_exponent,
+            max_exponent: controls.max_exponent,
+            phase_microradians: controls.phase_microradians,
+            phase_radians: controls.phase_radians(),
+            bend_percent: controls.bend_percent,
+            grid: controls.grid,
+            animate: controls.animate,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatchLabReadModelWire {
+    active: bool,
+    controls: PatchLabControlsWire,
+    pending_geometry_job: Option<String>,
+    installed_geometry: Option<PatchLabGeometryReadModelWire>,
+    pending_lod_job: Option<String>,
+    lod_dirty: bool,
+    latest_lod: Option<PatchLabLodSummaryWire>,
+    last_error: Option<PatchLabFailureWire>,
+}
+
+impl From<PatchLabReadModel> for PatchLabReadModelWire {
+    fn from(model: PatchLabReadModel) -> Self {
+        Self {
+            active: model.active,
+            controls: model.controls.into(),
+            pending_geometry_job: model.pending_geometry_job.map(|job| job.to_string()),
+            installed_geometry: model.installed_geometry.map(Into::into),
+            pending_lod_job: model.pending_lod_job.map(|job| job.to_string()),
+            lod_dirty: model.lod_dirty,
+            latest_lod: model.latest_lod.map(Into::into),
+            last_error: model.last_error.map(Into::into),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PatchLabGeometryReadModelWire {
+    job_id: String,
+    shape: &'static str,
+    grid: u8,
+    bend_percent: u8,
+    vertex_count: u32,
+    face_count: u32,
+}
+
+impl From<PatchLabGeometryReadModel> for PatchLabGeometryReadModelWire {
+    fn from(model: PatchLabGeometryReadModel) -> Self {
+        Self {
+            job_id: model.job_id.to_string(),
+            shape: model.geometry.shape.wire_name(),
+            grid: model.geometry.grid,
+            bend_percent: model.geometry.bend_percent,
+            vertex_count: model.vertex_count,
+            face_count: model.face_count,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PatchLabLodSummaryWire {
+    requested_first_face: Option<[u32; 3]>,
+    resident_first_face: Option<[u32; 3]>,
+    promoted_faces: u32,
+    promoted_edges: u32,
+    shared_edges: u32,
+    shared_edge_mismatches: u32,
+    max_face_edge_ratio: u32,
+    rendered_triangles: u64,
+    histogram: Vec<PatchLabHistogramBinWire>,
+}
+
+impl From<PatchLabLodSummary> for PatchLabLodSummaryWire {
+    fn from(summary: PatchLabLodSummary) -> Self {
+        Self {
+            requested_first_face: summary.requested_first_face,
+            resident_first_face: summary.resident_first_face,
+            promoted_faces: summary.promoted_faces,
+            promoted_edges: summary.promoted_edges,
+            shared_edges: summary.shared_edges,
+            shared_edge_mismatches: summary.shared_edge_mismatches,
+            max_face_edge_ratio: summary.max_face_edge_ratio,
+            rendered_triangles: summary.rendered_triangles,
+            histogram: summary.histogram.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PatchLabHistogramBinWire {
+    edge_subdivisions: [u32; 3],
+    face_count: u32,
+}
+
+impl From<PatchLabHistogramBin> for PatchLabHistogramBinWire {
+    fn from(bin: PatchLabHistogramBin) -> Self {
+        Self {
+            edge_subdivisions: bin.edge_subdivisions,
+            face_count: bin.face_count,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PatchLabFailureWire {
+    code: String,
+    message: String,
+    retryable: bool,
+}
+
+impl From<PatchLabFailure> for PatchLabFailureWire {
+    fn from(failure: PatchLabFailure) -> Self {
+        Self {
+            code: failure.code,
+            message: failure.message,
+            retryable: failure.retryable,
+        }
+    }
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -244,7 +393,7 @@ pub fn patch_lab_effects_wire(effects: &PatchLabEffects) -> Vec<PatchLabEffectWi
 #[cfg(all(test, feature = "replay"))]
 mod tests {
     use super::*;
-    use crate::{PatchLabField, PatchLabLodParameters};
+    use crate::{PatchLabField, PatchLabGeometryKey, PatchLabLodParameters, PatchLabShape};
     use serde_json::json;
 
     #[test]
@@ -290,6 +439,59 @@ mod tests {
                     }
                 }]
             })
+        );
+    }
+
+    #[test]
+    fn patch_lab_read_model_reuses_controls_and_string_job_identity() {
+        let controls = PatchLabControls {
+            phase_microradians: 500_000,
+            animate: true,
+            ..PatchLabControls::default()
+        };
+        let model = PatchLabReadModel {
+            active: true,
+            controls,
+            pending_geometry_job: Some(u64::MAX),
+            installed_geometry: Some(PatchLabGeometryReadModel {
+                job_id: 9,
+                geometry: PatchLabGeometryKey {
+                    shape: PatchLabShape::Triangle,
+                    grid: 1,
+                    bend_percent: 55,
+                },
+                vertex_count: 3,
+                face_count: 1,
+            }),
+            pending_lod_job: Some(u64::MAX - 1),
+            lod_dirty: true,
+            latest_lod: Some(PatchLabLodSummary {
+                requested_first_face: Some([2, 4, 8]),
+                resident_first_face: Some([4, 4, 8]),
+                promoted_faces: 1,
+                promoted_edges: 1,
+                shared_edges: 3,
+                shared_edge_mismatches: 0,
+                max_face_edge_ratio: 2,
+                rendered_triangles: 96,
+                histogram: vec![PatchLabHistogramBin {
+                    edge_subdivisions: [4, 4, 8],
+                    face_count: 1,
+                }],
+            }),
+            last_error: None,
+        };
+
+        let expected_controls = serde_json::to_value(PatchLabControlsWire::from(controls)).unwrap();
+        let value = serde_json::to_value(PatchLabReadModelWire::from(model)).unwrap();
+        assert_eq!(value["controls"], expected_controls);
+        assert_eq!(value["pendingGeometryJob"], json!(u64::MAX.to_string()));
+        assert_eq!(value["pendingLodJob"], json!((u64::MAX - 1).to_string()));
+        assert_eq!(value["installedGeometry"]["shape"], json!("triangle"));
+        assert_eq!(value["latestLod"]["renderedTriangles"], json!(96));
+        assert_eq!(
+            value["latestLod"]["histogram"][0]["edgeSubdivisions"],
+            json!([4, 4, 8])
         );
     }
 }

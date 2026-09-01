@@ -7,7 +7,7 @@
 use serde::Serialize;
 
 use crate::{
-    FocusPostprocessSettings, HyperscopeRoute, PatchLabControls, PatchLabSessionIntent,
+    FocusPostprocessSettings, HyperscopeRoute, PatchLabControlsWire, PatchLabSessionIntent,
     RenderSettings, RouteAnimationClock, RouteNavigationSettings, RoutePresentationSettings,
     RoutePrimaryAssetSettings, RouteRendererAssetSettings, HYPERSCOPE_CONTROL_SPECS,
 };
@@ -120,7 +120,7 @@ struct RouteAnimationClockWire {
 #[serde(rename_all = "camelCase")]
 struct RoutePatchLabWireSession {
     active: bool,
-    controls: RoutePatchLabWireControls,
+    controls: PatchLabControlsWire,
 }
 
 #[derive(Serialize)]
@@ -145,21 +145,6 @@ struct RoutePrimaryAssetWireSettings {
 struct RouteRendererAssetWireSettings {
     environment: String,
     matcap: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RoutePatchLabWireControls {
-    shape: &'static str,
-    field: &'static str,
-    manual_edge_exponents: [u8; 3],
-    min_exponent: u8,
-    max_exponent: u8,
-    phase_microradians: u32,
-    phase_radians: f64,
-    bend_percent: u8,
-    grid: u8,
-    animate: bool,
 }
 
 #[derive(Serialize)]
@@ -351,23 +336,6 @@ impl From<PatchLabSessionIntent> for RoutePatchLabWireSession {
         Self {
             active: session.active,
             controls: session.controls.into(),
-        }
-    }
-}
-
-impl From<PatchLabControls> for RoutePatchLabWireControls {
-    fn from(controls: PatchLabControls) -> Self {
-        Self {
-            shape: controls.shape.wire_name(),
-            field: controls.field.wire_name(),
-            manual_edge_exponents: controls.manual_edge_exponents,
-            min_exponent: controls.min_exponent,
-            max_exponent: controls.max_exponent,
-            phase_microradians: controls.phase_microradians,
-            phase_radians: controls.phase_radians(),
-            bend_percent: controls.bend_percent,
-            grid: controls.grid,
-            animate: controls.animate,
         }
     }
 }

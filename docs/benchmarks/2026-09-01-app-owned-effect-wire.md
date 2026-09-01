@@ -10,7 +10,7 @@ but no longer interprets commit dispositions, authored proposal roles, asset
 jobs, animation jobs, or Patch Lab jobs.
 
 This moved a central exhaustive policy match out of the platform facade. The
-facade decreased from 5,865 to 5,636 lines; the new 295-line application module
+facade decreased from 5,865 to 5,635 lines; the new 295-line application module
 contains the retained schema and its oracle. As with the route wire migration,
 the objective is single ownership and exhaustiveness rather than minimizing the
 schema's necessary representation.

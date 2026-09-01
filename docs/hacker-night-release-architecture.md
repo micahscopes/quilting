@@ -75,6 +75,10 @@ The first application boundary is now explicit:
   tagged asset, animation, Patch Lab, and authored-session effects are derived
   from the same exhaustive `AppEffect` match. The WASM facade drains or embeds
   these application wire values without maintaining another effect protocol.
+  The same feature projects one `PatchLabControlsWire` into both route startup
+  and live `PatchLabReadModelWire`, so phase units, field names, requested edge
+  exponents, pending job identity, resident summaries, and failures cannot
+  diverge between initialization and later reducer commits.
 - The application adapter feeds real startup, IndexedDB, drag/drop,
   authored-demo, and presentation asset acquisition plus presentation load/cue
   intent into that reducer. `appshadow=1` explicitly enables the observer when
