@@ -542,6 +542,56 @@ pub struct AuthoredRevision {
     pub commands: Vec<AuthoredEnvelope>,
 }
 
+/// Canonical materialized authored state restored from an external authority
+/// such as HHHS after process restart.
+///
+/// This is not an authored command batch. It installs a rebuildable projection
+/// into an otherwise empty authored lane without inventing sender identity,
+/// message order, removals, or causal history.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "replay", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "replay", serde(rename_all = "camelCase"))]
+pub struct AuthoredProjectionSnapshot {
+    pub projection_revision: u64,
+    pub assets: Vec<AssetDescriptor>,
+    pub entities: Vec<AuthoredEntityReadModel>,
+}
+
+impl AuthoredProjectionSnapshot {
+    pub fn validate(&self) -> Result<(), ReduceError> {
+        for asset in &self.assets {
+            asset
+                .validate()
+                .map_err(|error| ReduceError::Wire(error.to_string()))?;
+        }
+        if !self
+            .assets
+            .windows(2)
+            .all(|pair| pair[0].id < pair[1].id)
+        {
+            return Err(ReduceError::NonCanonicalAuthoredProjection("assets"));
+        }
+        for entity in &self.entities {
+            entity
+                .entity
+                .validate()
+                .map_err(|error| ReduceError::Wire(error.to_string()))?;
+            entity
+                .transform
+                .validate()
+                .map_err(|error| ReduceError::Wire(error.to_string()))?;
+        }
+        if !self
+            .entities
+            .windows(2)
+            .all(|pair| pair[0].entity < pair[1].entity)
+        {
+            return Err(ReduceError::NonCanonicalAuthoredProjection("entities"));
+        }
+        Ok(())
+    }
+}
+
 /// Failure to compare-and-dispatch one authored projection revision.
 ///
 /// The baseline check and reducer step share the same store lock. This lets a
@@ -653,6 +703,9 @@ pub enum AppEvent {
     Frame(FrameTick),
     EffectCompleted(EffectCompletion),
     RemotePresence(ReceivedPresence),
+    /// Restore one canonical materialized projection into an empty authored
+    /// lane. Durable history remains owned by the external authority.
+    AuthoredProjectionRestored(AuthoredProjectionSnapshot),
     AuthoredRevision(AuthoredRevision),
 }
 
@@ -1474,6 +1527,8 @@ pub struct AuthoringLeaseReadModel {
 /// transform and removal commands only, so presence in this collection means
 /// the latest accepted authored revision retains a transform for the entity.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "replay", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "replay", serde(rename_all = "camelCase"))]
 pub struct AuthoredEntityReadModel {
     pub entity: EntityId,
     pub transform: WireTransform,
@@ -2220,6 +2275,26 @@ impl AppState {
                     );
                 }
                 publish_ui = false;
+            }
+            AppEvent::AuthoredProjectionRestored(snapshot) => {
+                snapshot.validate()?;
+                if self.authored_projection_revision.is_some()
+                    || !self.authored_assets.is_empty()
+                    || !self.authored_entities.is_empty()
+                {
+                    return Err(ReduceError::AuthoredProjectionAlreadyInitialized);
+                }
+                self.authored_assets = snapshot
+                    .assets
+                    .into_iter()
+                    .map(|asset| (asset.id, asset))
+                    .collect();
+                self.authored_entities = snapshot
+                    .entities
+                    .into_iter()
+                    .map(|entity| (entity.entity, entity.transform))
+                    .collect();
+                self.authored_projection_revision = Some(snapshot.projection_revision);
             }
             AppEvent::AuthoredRevision(revision) => {
                 for command in &revision.commands {
@@ -3902,6 +3977,8 @@ pub enum ReduceError {
     UnknownPresentationAnimationAsset(AssetId),
     NoInstalledPrimaryScene,
     UnknownAnimationClip(u32),
+    AuthoredProjectionAlreadyInitialized,
+    NonCanonicalAuthoredProjection(&'static str),
     Wire(String),
     UnknownAsset(AssetId),
 }
@@ -3978,6 +4055,12 @@ impl fmt::Display for ReduceError {
             Self::UnknownAnimationClip(index) => {
                 write!(formatter, "installed primary scene has no animation clip {index}")
             }
+            Self::AuthoredProjectionAlreadyInitialized => formatter
+                .write_str("authored projection restoration requires an empty authored lane"),
+            Self::NonCanonicalAuthoredProjection(collection) => write!(
+                formatter,
+                "authored projection {collection} must be strictly key-sorted and unique",
+            ),
             Self::Wire(message) => write!(formatter, "wire value failed validation: {message}"),
             Self::UnknownAsset(asset) => write!(formatter, "unknown asset {asset}"),
         }
@@ -7348,6 +7431,78 @@ mod tests {
             .unwrap();
         assert_eq!(stale.disposition, CommitDisposition::IgnoredStale);
         assert_eq!(store.authored_scene_snapshot().entities[0].entity, entity_a);
+    }
+
+    #[test]
+    fn authored_projection_restore_is_canonical_atomic_and_one_shot() {
+        let store = AppStore::default();
+        let asset_a = asset(0xa1, "a.glb");
+        let asset_b = asset(0xb1, "b.glb");
+        let entity_a = EntityId::from_u128(0xa2).unwrap();
+        let entity_b = EntityId::from_u128(0xb2).unwrap();
+        let snapshot = AuthoredProjectionSnapshot {
+            projection_revision: 41,
+            assets: vec![asset_a.clone(), asset_b.clone()],
+            entities: vec![
+                AuthoredEntityReadModel {
+                    entity: entity_a,
+                    transform: transform(1.0),
+                },
+                AuthoredEntityReadModel {
+                    entity: entity_b,
+                    transform: transform(2.0),
+                },
+            ],
+        };
+
+        let before = store.summary_snapshot();
+        let mut noncanonical = snapshot.clone();
+        noncanonical.assets.reverse();
+        assert_eq!(
+            store
+                .dispatch(AppEvent::AuthoredProjectionRestored(noncanonical))
+                .unwrap_err(),
+            ReduceError::NonCanonicalAuthoredProjection("assets")
+        );
+        assert_eq!(store.summary_snapshot(), before);
+        assert_eq!(
+            store.authored_scene_snapshot(),
+            AuthoredSceneReadModel {
+                projection_revision: None,
+                assets: Vec::new(),
+                entities: Vec::new(),
+            }
+        );
+
+        let restored = store
+            .dispatch(AppEvent::AuthoredProjectionRestored(snapshot.clone()))
+            .unwrap();
+        assert_eq!(restored.disposition, CommitDisposition::Applied);
+        assert_eq!(
+            store.authored_scene_snapshot(),
+            AuthoredSceneReadModel {
+                projection_revision: Some(41),
+                assets: snapshot.assets,
+                entities: snapshot.entities,
+            }
+        );
+
+        let restored_scene = store.authored_scene_snapshot();
+        let restored_summary = store.summary_snapshot();
+        assert_eq!(
+            store
+                .dispatch(AppEvent::AuthoredProjectionRestored(
+                    AuthoredProjectionSnapshot {
+                        projection_revision: 42,
+                        assets: Vec::new(),
+                        entities: Vec::new(),
+                    },
+                ))
+                .unwrap_err(),
+            ReduceError::AuthoredProjectionAlreadyInitialized
+        );
+        assert_eq!(store.summary_snapshot(), restored_summary);
+        assert_eq!(store.authored_scene_snapshot(), restored_scene);
     }
 
     #[test]
