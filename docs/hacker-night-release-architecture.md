@@ -53,11 +53,12 @@ durable authored-state seam.
 
 The first application boundary is now explicit:
 
-- `hyperscape-protocol` owns version `0.1` wire headers, validated stable IDs,
-  asset descriptors, ordinary authored transform commands, and a distinct
-  TTL-bounded presence envelope. Only `AuthoredEnvelope` is eligible for a
-  future HHHS admission adapter; camera, selection, focus, cue, and animation
-  presence have no conversion into the durable lane.
+- `hyperscape-protocol` owns exact version `0.1` and `0.2` wire headers,
+  validated stable IDs, asset descriptors, ordinary authored transform
+  commands, atomic stable conformal-frame generator-word replacement, and a
+  distinct TTL-bounded presence envelope. Only `AuthoredEnvelope` is eligible
+  for HHHS admission; camera, selection, focus, cue, and animation presence
+  have no conversion into the durable lane.
 - `hyperscope-app` owns `AppEvent -> AppCommit + AppEffect`, deterministic
   navigation scheduling, asset job generations, stale completion rejection,
   presentation loading/cue actions, local presence expiry, diagnostics, and
@@ -339,9 +340,9 @@ The first application boundary is now explicit:
   authored checkpoint as a decimal-text `u64` projection revision plus the
   canonical protocol JSON command array shared with Blender. This avoids
   JavaScript integer truncation, validates the whole batch before mutation,
-  and exposes the key-sorted authored asset/entity projection in its bounded
-  snapshot. It still chooses no socket and has no renderer authority; those
-  remain separate extraction and transport cutovers.
+  and exposes the key-sorted authored asset/entity/conformal-frame projection
+  in its bounded snapshot. It still chooses no socket and has no renderer
+  authority; those remain separate extraction and transport cutovers.
 - `hyperscape::extract_packed_scene` now owns the first renderer-independent
   durable-edit join. A protocol-v0.1 entity transform is an absolute ordinary
   TRS in its source asset's world chart: it replaces that node's flattened
@@ -350,6 +351,22 @@ The first application boundary is now explicit:
   instance one asset and receive the same edit; one entity UUID crossing asset
   boundaries is rejected because the current command carries no asset ID.
   Unmatched valid edits remain explicit so a later-resident asset can converge.
+- Protocol 0.2's conformal edit replaces one existing stable frame's complete
+  local-to-parent generator word. Parent topology remains glTF-owned, and
+  surface-pinned frames reject direct overrides because the constraint owns
+  their active edge. The application and HHHS materialize the word as one
+  register value; `HyperscapeGltfRuntime` resolves stable-to-dense identity,
+  stages a whole batch on a cloned forest, and publishes only after every edit
+  validates. Replay 0.30 fences the semantic addition from 0.29 traces. This is
+  the first durable Blender/presentation control over conformal structure, not
+  a second frame authority.
+- The application WASM snapshot carries that complete key-sorted frame
+  projection to a generated renderer entry point. The browser only serializes
+  and memoizes delivery by runtime generation plus projection revision; it does
+  not decode generators or resolve identities. An empty projection restores
+  the resident GLB baseline, so omitted state cannot leave a prior override
+  alive. `scripts/smoke-authored-conformal-frame-projection.mjs` freezes this
+  ownership boundary without starting a browser or GPU context.
 - Generated WASM exposes that join through the application facade, consuming
   the app's active cue and accepted authored projection rather than a
   socket-local or browser-semantic cache. The browser supplies only stable

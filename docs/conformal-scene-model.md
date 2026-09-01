@@ -146,6 +146,36 @@ remain container/runtime handles. Blender, presentation cues, and HHHS
 operations should store these typed UUIDs rather than Bevy entity values,
 draw-batch indices, or glTF array positions.
 
+### Durable frame-word authoring
+
+Hyperscape protocol 0.2 adds one deliberately narrow conformal edit:
+`SetConformalFrameTransform` replaces an existing stable frame's complete
+ordered `local_to_parent` generator word. The command does not create or remove
+frames and does not change parent topology, so independently materialized HHHS
+registers cannot introduce a forest cycle. Frame creation, naming, parenting,
+and deletion remain asset/glTF authoring operations for this slice.
+
+The complete word is one atomic register value, not a sequence of per-generator
+mutations. HHHS resolves concurrent writes by its ordinary causal-register
+rule; `hyperscope-app` publishes key-sorted frame read models under the same
+projection revision fence as assets and entity transforms. Replay schema 0.30
+records the new state and explicitly refuses to reinterpret it as schema 0.29.
+
+Runtime application resolves `ConformalFrameId` through
+`ConformalFrameIdentities`, validates and stages every requested word on a
+cloned forest, and publishes only after the entire batch succeeds. Unknown IDs,
+invalid generators, and frames whose active edge is owned by a surface pin
+reject the batch without partial mutation. A future pin-edit command may alter
+the constraint's `local_offset`; silently replacing a pinned frame's derived
+edge would create competing authorities and is therefore forbidden.
+
+The generated WASM bridge accepts that complete key-sorted projection without
+reconstructing conformal semantics in JavaScript. Each newly resident
+Hyperscape runtime receives the current projection once; later projection
+revisions are memoized at the adapter boundary. Applying an empty projection is
+meaningful: it restores every frame to the generator words admitted from the
+GLB, preventing stale overrides from surviving a session or scene change.
+
 The diagnostic snapshot exposes the complete `packets` array as well as the
 legacy first-packet fields. For Hyperscape assets, mesh control points remain
 in authored coordinates: the packet's ordinary affine model and inverse-

@@ -1,0 +1,47 @@
+{
+  "header": {
+    "version": {
+      "major": 0,
+      "minor": 2
+    },
+    "message_id": "00000000-0000-0000-0000-000000000001",
+    "sender": "00000000-0000-0000-0000-000000000002",
+    "sequence": 3
+  },
+  "command": {
+    "type": "set_conformal_frame_transform",
+    "frame": "00000000-0000-0000-0000-000000000004",
+    "generators": [
+      {
+        "type": "translation",
+        "offset": [
+          1.0,
+          2.0,
+          3.0
+        ]
+      },
+      {
+        "type": "rotation",
+        "quaternion_wxyz": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "type": "uniform_scale",
+        "factor": 2.0
+      },
+      {
+        "type": "sphere_reflection",
+        "center": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "radius": 4.0
+      }
+    ]
+  }
+}

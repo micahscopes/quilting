@@ -49,14 +49,14 @@ use hyperscape_hhhs::{
     MemoryDurability, ProjectId, ProjectState, ProjectionKey, RecordRefusal,
 };
 use hyperscape_protocol::{
-    AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId, LocalPeerEnvelope,
-    PresenceEnvelope, WireTransform,
+    AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, ConformalFrameId, EntityId,
+    LocalPeerEnvelope, PresenceEnvelope, WireConformalGenerator, WireTransform,
 };
 use hyperscope_app::{
-    AppCommit, AppEvent, AppStore, AuthoredEntityReadModel, AuthoredProjectionDispatchError,
-    AuthoredProjectionSnapshot, AuthoredRevision, AuthoredSceneReadModel, CommitDisposition,
-    LocalAuthoredPreparation, LocalPeerIngress, LocalPeerIngressError, LocalPeerReceipt, ReduceError,
-    DEFAULT_LOCAL_PEER_MESSAGE_MEMORY,
+    AppCommit, AppEvent, AppStore, AuthoredConformalFrameReadModel, AuthoredEntityReadModel,
+    AuthoredProjectionDispatchError, AuthoredProjectionSnapshot, AuthoredRevision,
+    AuthoredSceneReadModel, CommitDisposition, LocalAuthoredPreparation, LocalPeerIngress,
+    LocalPeerIngressError, LocalPeerReceipt, ReduceError, DEFAULT_LOCAL_PEER_MESSAGE_MEMORY,
 };
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -373,6 +373,7 @@ pub struct AuthoredShadowDispatch {
 struct SequentialProjection {
     assets: BTreeMap<AssetId, AssetDescriptor>,
     entity_transforms: BTreeMap<EntityId, WireTransform>,
+    conformal_frame_transforms: BTreeMap<ConformalFrameId, Vec<WireConformalGenerator>>,
 }
 
 impl SequentialProjection {
@@ -380,6 +381,7 @@ impl SequentialProjection {
         Self {
             assets: state.assets.clone(),
             entity_transforms: state.entity_transforms.clone(),
+            conformal_frame_transforms: state.conformal_frame_transforms.clone(),
         }
     }
 
@@ -394,11 +396,17 @@ impl SequentialProjection {
             AuthoredCommand::RemoveEntity { entity } => {
                 self.entity_transforms.remove(entity);
             }
+            AuthoredCommand::SetConformalFrameTransform { frame, generators } => {
+                self.conformal_frame_transforms
+                    .insert(*frame, generators.clone());
+            }
         }
     }
 
     fn matches(&self, state: &ProjectState) -> bool {
-        self.assets == state.assets && self.entity_transforms == state.entity_transforms
+        self.assets == state.assets
+            && self.entity_transforms == state.entity_transforms
+            && self.conformal_frame_transforms == state.conformal_frame_transforms
     }
 
     fn matches_app(&self, scene: &AuthoredSceneReadModel) -> bool {
@@ -411,6 +419,10 @@ impl SequentialProjection {
             && scene.entities.iter().all(|entity| {
                 self.entity_transforms.get(&entity.entity) == Some(&entity.transform)
             })
+            && scene.conformal_frames.len() == self.conformal_frame_transforms.len()
+            && scene.conformal_frames.iter().all(|frame| {
+                self.conformal_frame_transforms.get(&frame.frame) == Some(&frame.generators)
+            })
     }
 
     fn snapshot(&self, projection_revision: u64) -> AuthoredProjectionSnapshot {
@@ -421,6 +433,14 @@ impl SequentialProjection {
                 .entity_transforms
                 .iter()
                 .map(|(&entity, &transform)| AuthoredEntityReadModel { entity, transform })
+                .collect(),
+            conformal_frames: self
+                .conformal_frame_transforms
+                .iter()
+                .map(|(&frame, generators)| AuthoredConformalFrameReadModel {
+                    frame,
+                    generators: generators.clone(),
+                })
                 .collect(),
         }
     }

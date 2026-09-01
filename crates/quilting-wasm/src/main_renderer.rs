@@ -81,7 +81,8 @@ use hyperscape::{
     CameraBasis, CameraRig, ChamberSide, ContactClassification, FocusSphere, PerspectiveLens,
     SphereReflectionState, SurfaceSample, SurfaceWalkControls, SurfaceWalkInput,
 };
-use serde::Serialize;
+use hyperscape_protocol::{ConformalFrameId, WireConformalGenerator};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
@@ -2140,6 +2141,13 @@ struct BrowserHyperscapeRuntime {
     last_surface_pin_sample: Option<SurfaceFramePinSampleKey>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AuthoredConformalFrameInput {
+    frame_id: ConformalFrameId,
+    generators: Vec<WireConformalGenerator>,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ResolvedSurfaceFramePinRequest {
     authored: GltfSurfaceFramePinRequest,
@@ -3626,6 +3634,54 @@ pub fn mr_load_hyperscape(data: &[u8]) -> bool {
         })
     });
     true
+}
+
+/// Apply one complete materialized authored conformal-frame projection to the
+/// resident Hyperscape runtime. The JSON array is stable-ID keyed and replacing:
+/// each item contains `frameId` plus its complete generator word. A duplicate,
+/// unknown, invalid, or surface-pin-owned frame leaves the runtime unchanged.
+#[wasm_bindgen(js_name = "mr_applyAuthoredConformalFrames")]
+pub fn mr_apply_authored_conformal_frames(frames_json: &str) -> bool {
+    let frames = match serde_json::from_str::<Vec<AuthoredConformalFrameInput>>(frames_json) {
+        Ok(frames) => frames,
+        Err(error) => {
+            web_sys::console::warn_1(
+                &format!("authored conformal frames: invalid JSON: {error}").into(),
+            );
+            return false;
+        }
+    };
+    let mut transforms = BTreeMap::new();
+    for frame in frames {
+        if transforms
+            .insert(frame.frame_id, frame.generators)
+            .is_some()
+        {
+            web_sys::console::warn_1(
+                &format!("authored conformal frames: duplicate ID {}", frame.frame_id).into(),
+            );
+            return false;
+        }
+    }
+    HYPERSCAPE_RUNTIME.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(browser) = slot.as_mut() else {
+            web_sys::console::warn_1(
+                &"authored conformal frames: no resident Hyperscape runtime".into(),
+            );
+            return false;
+        };
+        if let Err(error) = browser
+            .runtime
+            .apply_authored_conformal_frame_transforms(&transforms)
+        {
+            web_sys::console::warn_1(&format!("authored conformal frames: {error}").into());
+            return false;
+        }
+        apply_hyperscape_packets(&browser.runtime.packets_by_node());
+        browser.last_surface_pin_sample = None;
+        true
+    })
 }
 
 /// Select which authored projection-camera node supplies subject-relative

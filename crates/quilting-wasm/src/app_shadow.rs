@@ -18,7 +18,7 @@ use hyperscape::InteractionPickAuthorityDisposition;
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredEnvelope, CameraPresence, EntityId, EphemeralPresence,
     FocusPresence, LocalPeerEnvelope, MessageHeader, MessageId, PeerId, PresenceEnvelope,
-    RequestId, CURRENT_PROTOCOL_VERSION,
+    RequestId, WireConformalGenerator, CURRENT_PROTOCOL_VERSION,
 };
 use hyperscope_app::{
     reconcile_primary_scene_asset_identity, session_node_identity, AnimationAction,
@@ -3656,6 +3656,14 @@ impl HyperscopeAppShadow {
                     scale: entity.transform.scale,
                 })
                 .collect(),
+            authored_conformal_frames: authored
+                .conformal_frames
+                .into_iter()
+                .map(|frame| ShadowAuthoredConformalFrame {
+                    frame_id: frame.frame.to_string(),
+                    generators: frame.generators,
+                })
+                .collect(),
             diagnostics,
             presentation,
         })
@@ -4418,6 +4426,7 @@ struct ShadowSnapshot {
     authored_projection_revision: Option<String>,
     authored_assets: Vec<ShadowAuthoredAsset>,
     authored_entities: Vec<ShadowAuthoredEntity>,
+    authored_conformal_frames: Vec<ShadowAuthoredConformalFrame>,
     diagnostics: Vec<ShadowDiagnostic>,
     presentation: Option<ShadowPresentation>,
 }
@@ -5048,6 +5057,13 @@ struct ShadowAuthoredEntity {
     translation: [f64; 3],
     rotation_wxyz: [f64; 4],
     scale: [f64; 3],
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowAuthoredConformalFrame {
+    frame_id: String,
+    generators: Vec<WireConformalGenerator>,
 }
 
 #[derive(Deserialize)]

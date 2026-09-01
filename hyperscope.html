@@ -447,7 +447,8 @@ import init, {
   hyperscopeControlSpecs,
   mr_init, mr_resize, mr_render, mr_setRenderMode, mr_setMatcapStyle, mr_setMobius,
   mr_runtimeTimingDiagnostics, mr_resetRuntimeTimingDiagnostics,
-  mr_loadHyperscape, mr_tickHyperscape, mr_setHyperscapeCameraNode,
+  mr_loadHyperscape, mr_applyAuthoredConformalFrames,
+  mr_tickHyperscape, mr_setHyperscapeCameraNode,
   mr_setInstanceData, mr_setFaceMaterials, mr_setFaceNodes, mr_buildBatches, mr_updateBatches, mr_setFuzzy, mr_setFuzzyDebug,
   mr_acceptLodDeltaSequence,
   mr_uploadComposedLodModel,
@@ -3348,17 +3349,65 @@ const rustSceneExtractionDiagnostics = {
   fallbackWrites: 0,
   lastAppRevision: null,
   lastAuthoredProjectionRevision: null,
+  conformalFrameRuntimeGeneration: 0,
+  conformalFrameProjectionAttempts: 0,
+  conformalFrameProjectionApplies: 0,
+  conformalFrameProjectionFrames: 0,
+  lastConformalFrameProjectionRevision: null,
+  lastConformalFrameProjectionError: null,
   lastCue: null,
   unmatchedAuthoredEntities: [],
   lastError: null,
   lastDispatchSource: null,
 };
 globalThis.__hyperscopeSceneExtraction = rustSceneExtractionDiagnostics;
+let authoredConformalFrameRendererReady = false;
+let authoredConformalFrameRuntimeGeneration = 0;
+let appliedAuthoredConformalFrameProjectionKey = null;
 
 function recordSceneExtractionMismatch(detail) {
   const mismatches = rustSceneExtractionDiagnostics.mismatches;
   if (mismatches.length === 64) mismatches.shift();
   mismatches.push({ ...detail, atMs: performance.now() });
+}
+
+function applyRustAuthoredConformalFrameProjection(snapshot) {
+  // This is deliberately a delivery adapter only. Rust materializes, validates,
+  // and key-sorts the complete projection; the renderer resolves stable frame
+  // IDs and atomically stages the corresponding generator words.
+  if (!authoredConformalFrameRendererReady || !hyperscapeActive || !snapshot) return false;
+  const frames = Array.isArray(snapshot.authoredConformalFrames)
+    ? snapshot.authoredConformalFrames : [];
+  const serialized = JSON.stringify(frames);
+  const revision = snapshot.authoredProjectionRevision ?? null;
+  const key = `${authoredConformalFrameRuntimeGeneration}:${revision ?? 'none'}:${serialized}`;
+  if (key === appliedAuthoredConformalFrameProjectionKey) return true;
+  rustSceneExtractionDiagnostics.conformalFrameProjectionAttempts += 1;
+  try {
+    if (!mr_applyAuthoredConformalFrames(serialized)) {
+      throw new Error('renderer rejected the authored conformal-frame projection');
+    }
+    appliedAuthoredConformalFrameProjectionKey = key;
+    rustSceneExtractionDiagnostics.conformalFrameProjectionApplies += 1;
+    rustSceneExtractionDiagnostics.conformalFrameProjectionFrames = frames.length;
+    rustSceneExtractionDiagnostics.lastConformalFrameProjectionRevision = revision;
+    rustSceneExtractionDiagnostics.lastConformalFrameProjectionError = null;
+    authoredLodPending = true;
+    authoredLodReasons.add('authored-conformal-frame');
+    debouncedLodRecompute();
+    return true;
+  } catch (error) {
+    const message = error?.message || String(error);
+    rustSceneExtractionDiagnostics.lastConformalFrameProjectionError = message;
+    recordSceneExtractionMismatch({
+      code: 'authored_conformal_frame_projection',
+      message,
+      projectionRevision: revision,
+      frameCount: frames.length,
+    });
+    console.warn('Authored conformal-frame projection failed:', error);
+    return false;
+  }
 }
 
 function matrixMaximumAbsoluteError(left, right) {
@@ -6095,6 +6144,7 @@ function refreshAppShadowSnapshot() {
   }
   const snapshot = rustAppShadow.snapshot();
   rustAppShadowDiagnostics.snapshot = snapshot;
+  applyRustAuthoredConformalFrameProjection(snapshot);
   ensureRustAnimationControlView();
   ensureRustAnimationTimelineView();
   ensureRustAnimationClipControlView();
@@ -10090,6 +10140,8 @@ let authoredLodSkipped = 0;
 let lastSceneDiagnosticRenderAt = 0;
 
 function activateHyperscape(buffer) {
+  authoredConformalFrameRendererReady = false;
+  appliedAuthoredConformalFrameProjectionKey = null;
   if (!(buffer instanceof ArrayBuffer) || buffer.byteLength === 0) {
     hyperscapeActive = false;
     authoredCamera = null;
@@ -10102,6 +10154,12 @@ function activateHyperscape(buffer) {
     return false;
   }
   hyperscapeActive = mr_loadHyperscape(new Uint8Array(buffer));
+  if (hyperscapeActive) {
+    authoredConformalFrameRendererReady = true;
+    authoredConformalFrameRuntimeGeneration += 1;
+    rustSceneExtractionDiagnostics.conformalFrameRuntimeGeneration =
+      authoredConformalFrameRuntimeGeneration;
+  }
   authoredCamera = null;
   authoredLodStates = [];
   lastChamberEpoch = -1;
@@ -10111,6 +10169,9 @@ function activateHyperscape(buffer) {
   $('hyperscape-diagnostics').textContent = hyperscapeActive
     ? 'Hyperscape: authored ECS scene active'
     : 'Hyperscape: no authored scene';
+  if (hyperscapeActive) {
+    applyRustAuthoredConformalFrameProjection(rustAppShadowDiagnostics.snapshot);
+  }
   return hyperscapeActive;
 }
 
@@ -10278,6 +10339,8 @@ effect(() => {
   if (!wasmOk.get()) return;
   if (hyperscapeActive) {
     hyperscapeActive = false;
+    authoredConformalFrameRendererReady = false;
+    appliedAuthoredConformalFrameProjectionKey = null;
     authoredCamera = null;
     authoredLodStates = [];
     authoredLodPending = false;
@@ -10936,6 +10999,8 @@ function beginPatchLabPlatformGeometry(shape, { preserveView = false } = {}) {
   rebaseAnimationPoseContinuity({ resetClock: true });
   clearRendererAnimationState();
   hyperscapeActive = false;
+  authoredConformalFrameRendererReady = false;
+  appliedAuthoredConformalFrameProjectionKey = null;
   authoredCamera = null;
   authoredLodStates = [];
   presentationComposition.ready = false;

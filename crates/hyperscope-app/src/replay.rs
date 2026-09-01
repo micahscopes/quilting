@@ -22,15 +22,17 @@ use hyperscape::{
     SphereReflectionState, SurfaceAnchorTarget, TransitionEasing, TurntableFrame,
 };
 use hyperscape_protocol::{
-    AssetDescriptor, AssetEntityId, AssetId, AuthoredEnvelope, EntityId, EphemeralPresence, PeerId,
-    PresenceEnvelope, ProjectId, RequestId, WireTransform,
+    AssetDescriptor, AssetEntityId, AssetId, AuthoredCommand, AuthoredEnvelope, ConformalFrameId,
+    EntityId, EphemeralPresence, PeerId, PresenceEnvelope, ProjectId, RequestId,
+    WireConformalGenerator, WireTransform,
 };
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
 
-pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.29";
+pub const APP_REPLAY_VERSION: &str = "hyperscope-app-replay/0.30";
+pub const LEGACY_APP_REPLAY_VERSION_0_29: &str = "hyperscope-app-replay/0.29";
 pub const LEGACY_APP_REPLAY_VERSION_0_28: &str = "hyperscope-app-replay/0.28";
 pub const LEGACY_APP_REPLAY_VERSION_0_27: &str = "hyperscope-app-replay/0.27";
 pub const LEGACY_APP_REPLAY_VERSION_0_26: &str = "hyperscope-app-replay/0.26";
@@ -85,16 +87,17 @@ enum ReplaySchema {
     V0_27,
     V0_28,
     V0_29,
+    V0_30,
 }
 
 impl ReplaySchema {
-    /// Schema 0.29 adds authored-session events without changing any older
-    /// event semantics. Reuse the 0.28 compatibility gates for that shared
-    /// surface instead of duplicating the latest variant through every
-    /// historical feature list.
+    /// Schemas after 0.28 add authored-session and conformal-frame semantics
+    /// without changing the older event surface. Reuse the 0.28 compatibility
+    /// gates for shared events instead of duplicating every latest variant
+    /// through the historical feature lists.
     fn compatibility_baseline(self) -> Self {
         match self {
-            Self::V0_29 => Self::V0_28,
+            Self::V0_29 | Self::V0_30 => Self::V0_28,
             schema => schema,
         }
     }
@@ -1146,6 +1149,8 @@ pub struct AppReplayState {
     pub assets: Vec<AppReplayAssetState>,
     pub authored_assets: Vec<AssetDescriptor>,
     pub authored_entities: Vec<AppReplayAuthoredEntityState>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authored_conformal_frames: Vec<AppReplayAuthoredConformalFrameState>,
     pub presence: Vec<AppReplayPresenceState>,
     pub diagnostics: Vec<AppReplayDiagnosticState>,
     pub reflection: ReplayReflection,
@@ -1193,6 +1198,13 @@ impl From<PresentationAnimationResidencyBinding>
 pub struct AppReplayAuthoredEntityState {
     pub entity: EntityId,
     pub transform: WireTransform,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppReplayAuthoredConformalFrameState {
+    pub frame: ConformalFrameId,
+    pub generators: Vec<WireConformalGenerator>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1406,7 +1418,8 @@ pub fn run_app_replay(script: &AppReplayScript) -> Result<AppReplayTrace, AppRep
         LEGACY_APP_REPLAY_VERSION_0_26 => ReplaySchema::V0_26,
         LEGACY_APP_REPLAY_VERSION_0_27 => ReplaySchema::V0_27,
         LEGACY_APP_REPLAY_VERSION_0_28 => ReplaySchema::V0_28,
-        APP_REPLAY_VERSION => ReplaySchema::V0_29,
+        LEGACY_APP_REPLAY_VERSION_0_29 => ReplaySchema::V0_29,
+        APP_REPLAY_VERSION => ReplaySchema::V0_30,
         _ => return Err(AppReplayError::UnsupportedVersion(script.version.clone())),
     };
     let store = AppStore::default();
@@ -1578,7 +1591,8 @@ fn replay_event(
 }
 
 fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppEvent, String> {
-    let supports_authored_sessions = schema == ReplaySchema::V0_29;
+    let supports_authored_sessions = matches!(schema, ReplaySchema::V0_29 | ReplaySchema::V0_30);
+    let supports_conformal_frames = schema == ReplaySchema::V0_30;
     let schema = schema.compatibility_baseline();
     match event {
         AppReplayEvent::LoadPresentation { presentation } => {
@@ -1981,13 +1995,28 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
         AppReplayEvent::ApplyAuthoredRevision {
             projection_revision,
             commands,
-        } => Ok(AppEvent::AuthoredRevision(AuthoredRevision {
-            projection_revision: *projection_revision,
-            commands: commands.clone(),
-        })),
+        } => {
+            if !supports_conformal_frames
+                && commands.iter().any(|envelope| {
+                    matches!(
+                        envelope.command,
+                        AuthoredCommand::SetConformalFrameTransform { .. }
+                    )
+                })
+            {
+                return Err("authored conformal frames require app replay 0.30".to_owned());
+            }
+            Ok(AppEvent::AuthoredRevision(AuthoredRevision {
+                projection_revision: *projection_revision,
+                commands: commands.clone(),
+            }))
+        }
         AppReplayEvent::RestoreAuthoredProjection { snapshot } => {
             if !matches!(schema, ReplaySchema::V0_27 | ReplaySchema::V0_28) {
                 return Err("authored projection restoration requires app replay 0.27".to_owned());
+            }
+            if !supports_conformal_frames && !snapshot.conformal_frames.is_empty() {
+                return Err("authored conformal frames require app replay 0.30".to_owned());
             }
             Ok(AppEvent::AuthoredProjectionRestored(snapshot.clone()))
         }
@@ -1996,6 +2025,9 @@ fn replay_app_event(event: &AppReplayEvent, schema: ReplaySchema) -> Result<AppE
                 return Err(
                     "authored projection synchronization requires app replay 0.28".to_owned(),
                 );
+            }
+            if !supports_conformal_frames && !snapshot.conformal_frames.is_empty() {
+                return Err("authored conformal frames require app replay 0.30".to_owned());
             }
             Ok(AppEvent::AuthoredProjectionSynchronized(snapshot.clone()))
         }
@@ -2330,6 +2362,14 @@ fn replay_state(store: &AppStore) -> AppReplayState {
                 transform: entity.transform,
             })
             .collect(),
+        authored_conformal_frames: authored
+            .conformal_frames
+            .into_iter()
+            .map(|frame| AppReplayAuthoredConformalFrameState {
+                frame: frame.frame,
+                generators: frame.generators,
+            })
+            .collect(),
         presence: state
             .presence_read_models()
             .into_iter()
@@ -2443,7 +2483,7 @@ impl Error for AppReplayError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hyperscape_protocol::AuthoredCommand;
+    use hyperscape_protocol::{MessageHeader, MessageId, CURRENT_PROTOCOL_VERSION};
 
     const FIXTURE: &str = hyperscape::HACKER_NIGHT_PRESENTATION_JSON;
     const GOLDEN: &str = include_str!("../fixtures/hacker-night.replay.fingerprint");
@@ -2499,6 +2539,10 @@ mod tests {
         assert_eq!(left.assets, right.assets);
         assert_eq!(left.authored_assets, right.authored_assets);
         assert_eq!(left.authored_entities, right.authored_entities);
+        assert_eq!(
+            left.authored_conformal_frames,
+            right.authored_conformal_frames
+        );
         assert_eq!(left.presence, right.presence);
         assert_eq!(left.diagnostics, right.diagnostics);
         assert_eq!(left.reflection, right.reflection);
@@ -2922,6 +2966,7 @@ mod tests {
                         scale: [1.0; 3],
                     },
                 }],
+                conformal_frames: Vec::new(),
             },
         };
         let current_script = AppReplayScript::new(vec![event.clone()]);
@@ -2976,6 +3021,7 @@ mod tests {
                 projection_revision: 4,
                 assets: vec![restored_asset.clone()],
                 entities: Vec::new(),
+                conformal_frames: Vec::new(),
             },
         };
         let synchronized = AppReplayEvent::SynchronizeAuthoredProjection {
@@ -2983,6 +3029,7 @@ mod tests {
                 projection_revision: 5,
                 assets: vec![synchronized_asset.clone()],
                 entities: Vec::new(),
+                conformal_frames: Vec::new(),
             },
         };
 
@@ -3146,6 +3193,7 @@ mod tests {
         match command {
             AuthoredCommand::UpsertAsset { .. } => "upsert_asset",
             AuthoredCommand::SetEntityTransform { .. } => "set_entity_transform",
+            AuthoredCommand::SetConformalFrameTransform { .. } => "set_conformal_frame_transform",
             AuthoredCommand::RemoveEntity { .. } => "remove_entity",
         }
     }
@@ -3213,6 +3261,7 @@ mod tests {
                     projection_revision: 0,
                     assets: Vec::new(),
                     entities: Vec::new(),
+                    conformal_frames: Vec::new(),
                 },
             },
             AppReplayEvent::SynchronizeAuthoredProjection {
@@ -3220,6 +3269,7 @@ mod tests {
                     projection_revision: 1,
                     assets: Vec::new(),
                     entities: Vec::new(),
+                    conformal_frames: Vec::new(),
                 },
             },
             AppReplayEvent::SetAuthoredSession {
@@ -3246,7 +3296,7 @@ mod tests {
             .chain(navigation.events.iter())
             .chain(orchestration.events.iter())
             .chain(current_events.iter())
-            .filter_map(|event| replay_app_event(event, ReplaySchema::V0_29).ok())
+            .filter_map(|event| replay_app_event(event, ReplaySchema::V0_30).ok())
             .map(|event| authoritative_app_event_name(&event))
             .collect::<std::collections::BTreeSet<_>>();
         let authored_covered = orchestration
@@ -3296,7 +3346,7 @@ mod tests {
     }
 
     #[test]
-    fn authored_session_lifecycle_roundtrips_only_in_schema_0_29() {
+    fn authored_session_lifecycle_roundtrips_from_schema_0_29_onward() {
         let project_id = ProjectId::from_u128(0xd1).unwrap();
         let intent = AuthoredSessionIntent {
             project_id,
@@ -3354,6 +3404,75 @@ mod tests {
             .records
             .iter()
             .all(|record| record.state.authored_session.is_disabled()));
+    }
+
+    #[test]
+    fn replay_0_30_records_conformal_frame_words_without_reinterpreting_0_29() {
+        let frame = ConformalFrameId::from_u128(0x3001).unwrap();
+        let generators = vec![
+            WireConformalGenerator::translation([1.0, 2.0, 3.0]),
+            WireConformalGenerator::sphere_reflection([0.0, 1.0, 0.0], 4.0),
+        ];
+        let command_event = AppReplayEvent::ApplyAuthoredRevision {
+            projection_revision: 1,
+            commands: vec![AuthoredEnvelope {
+                header: MessageHeader {
+                    version: CURRENT_PROTOCOL_VERSION,
+                    message_id: MessageId::from_u128(0x3002).unwrap(),
+                    sender: PeerId::from_u128(0x3003).unwrap(),
+                    sequence: 1,
+                },
+                command: AuthoredCommand::SetConformalFrameTransform {
+                    frame,
+                    generators: generators.clone(),
+                },
+            }],
+        };
+        let synchronize_event = AppReplayEvent::SynchronizeAuthoredProjection {
+            snapshot: AuthoredProjectionSnapshot {
+                projection_revision: 2,
+                assets: Vec::new(),
+                entities: Vec::new(),
+                conformal_frames: vec![crate::AuthoredConformalFrameReadModel {
+                    frame,
+                    generators: generators.clone(),
+                }],
+            },
+        };
+        let script = AppReplayScript::new(vec![command_event.clone(), synchronize_event.clone()]);
+        let encoded = serde_json::to_string(&script).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AppReplayScript>(&encoded).unwrap(),
+            script
+        );
+
+        let trace = run_app_replay(&script).unwrap();
+        assert!(trace
+            .records
+            .iter()
+            .all(|record| matches!(record.outcome, AppReplayOutcome::Committed { .. })));
+        assert_eq!(
+            trace.records[1].state.authored_conformal_frames,
+            vec![AppReplayAuthoredConformalFrameState {
+                frame,
+                generators: generators.clone(),
+            }]
+        );
+
+        let legacy = run_app_replay(&AppReplayScript {
+            version: LEGACY_APP_REPLAY_VERSION_0_29.to_owned(),
+            events: vec![command_event, synchronize_event],
+        })
+        .unwrap();
+        assert!(legacy.records.iter().all(|record| matches!(
+            &record.outcome,
+            AppReplayOutcome::Rejected { error }
+                if error.contains("require app replay 0.30")
+        )));
+        assert!(legacy
+            .records
+            .iter()
+            .all(|record| record.state.authored_conformal_frames.is_empty()));
     }
 
     #[test]

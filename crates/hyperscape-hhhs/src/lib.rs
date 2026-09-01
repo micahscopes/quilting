@@ -1,4 +1,4 @@
-//! Durable, causal replication for Hyperscape's protocol-v0.1 authored lane.
+//! Durable, causal replication for Hyperscape's versioned authored lane.
 //!
 //! This crate intentionally has no dependency on `hyperscope-app`,
 //! `quilting-wasm`, browser APIs, cameras, frame clocks, renderer state, or GPU
@@ -25,26 +25,30 @@ use hhhs_store::{
 };
 pub use hhhs_store::{ProjectionCheckpoint, ProjectionKey};
 use hhhs_sync::{Refusal, RepairHost};
-use hyperscape_protocol::{
-    AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId, MessageHeader,
-    ProtocolVersion, WireTransform, CURRENT_PROTOCOL_VERSION,
-};
 pub use hyperscape_protocol::ProjectId;
+use hyperscape_protocol::{
+    AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, ConformalFrameId, EntityId,
+    MessageHeader, ProtocolVersion, WireConformalGenerator, WireTransform,
+    CURRENT_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use uuid::Uuid;
 
 /// Frozen application-domain prefix for durable payload schema 0.1.
-pub const PAYLOAD_DOMAIN: &[u8] = b"hyperscape authored operation v0.1\0";
-/// The only payload schema admitted by this crate.
-pub const PAYLOAD_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 1 };
+pub const LEGACY_PAYLOAD_DOMAIN: &[u8] = b"hyperscape authored operation v0.1\0";
+/// Current application-domain prefix for durable payload schema 0.2.
+pub const PAYLOAD_DOMAIN: &[u8] = b"hyperscape authored operation v0.2\0";
+pub const LEGACY_PAYLOAD_VERSION: ProtocolVersion = LEGACY_PROTOCOL_VERSION;
+pub const PAYLOAD_VERSION: ProtocolVersion = CURRENT_PROTOCOL_VERSION;
 /// Strict upper bound for the complete application payload inside one HHHS
 /// entry. This is substantially below HHHS's transport ceiling on purpose.
 pub const MAX_AUTHORED_PAYLOAD_BYTES: usize = 1024 * 1024;
 const PAYLOAD_HEADER_BYTES: usize = PAYLOAD_DOMAIN.len() + 2 + 2 + 2 + 2 + 16;
 const MAX_AUTHORED_BODY_BYTES: u64 = (MAX_AUTHORED_PAYLOAD_BYTES - PAYLOAD_HEADER_BYTES) as u64;
-const STATE_ROOT_DOMAIN: &[u8] = b"hyperscape materialized project state v0.1";
+const LEGACY_STATE_ROOT_DOMAIN: &[u8] = b"hyperscape materialized project state v0.1";
+const STATE_ROOT_DOMAIN: &[u8] = b"hyperscape materialized project state v0.2";
 /// Frozen domain prefix for a portable, authority-rechecked project archive.
 pub const PROJECT_ARCHIVE_DOMAIN: &[u8] = b"hyperscape hhhs project archive v0.1\0";
 /// The only project archive schema understood by this crate.
@@ -257,19 +261,93 @@ fn payload_codec() -> impl Options {
         .reject_trailing_bytes()
 }
 
+fn encode_frozen_body(value: &impl Serialize) -> Result<Vec<u8>, AdapterError> {
+    let body_len = canonical_codec()
+        .serialized_size(value)
+        .map_err(|_| AdapterError::MalformedPayload)? as usize;
+    let total_len =
+        PAYLOAD_HEADER_BYTES
+            .checked_add(body_len)
+            .ok_or(AdapterError::PayloadTooLarge {
+                actual: usize::MAX,
+                max: MAX_AUTHORED_PAYLOAD_BYTES,
+            })?;
+    if total_len > MAX_AUTHORED_PAYLOAD_BYTES {
+        return Err(AdapterError::PayloadTooLarge {
+            actual: total_len,
+            max: MAX_AUTHORED_PAYLOAD_BYTES,
+        });
+    }
+    payload_codec()
+        .serialize(value)
+        .map_err(|_| AdapterError::MalformedPayload)
+}
+
 /// Codec-only mirror. The protocol enum is deliberately JSON-tagged, while a
 /// durable binary schema needs an explicit, frozen discriminant layout.
 #[derive(Serialize, Deserialize)]
-struct FrozenEnvelope {
+struct FrozenEnvelopeV01 {
     header: MessageHeader,
-    command: FrozenCommand,
+    command: FrozenCommandV01,
 }
 
 #[derive(Serialize, Deserialize)]
-enum FrozenCommand {
+enum FrozenCommandV01 {
     UpsertAsset(FrozenAssetDescriptor),
     SetEntityTransform(EntityId, WireTransform),
     RemoveEntity(EntityId),
+}
+
+#[derive(Serialize, Deserialize)]
+struct FrozenEnvelopeV02 {
+    header: MessageHeader,
+    command: FrozenCommandV02,
+}
+
+#[derive(Serialize, Deserialize)]
+enum FrozenCommandV02 {
+    UpsertAsset(FrozenAssetDescriptor),
+    SetEntityTransform(EntityId, WireTransform),
+    RemoveEntity(EntityId),
+    SetConformalFrameTransform(ConformalFrameId, Vec<FrozenConformalGenerator>),
+}
+
+/// Positional-codec mirror of Quilting's JSON-tagged generator enum. Variant
+/// order is frozen independently of serde's self-describing JSON tags.
+#[derive(Serialize, Deserialize)]
+enum FrozenConformalGenerator {
+    Translation([f64; 3]),
+    Rotation([f64; 4]),
+    UniformScale(f64),
+    SphereReflection([f64; 3], f64),
+}
+
+impl From<&WireConformalGenerator> for FrozenConformalGenerator {
+    fn from(generator: &WireConformalGenerator) -> Self {
+        match *generator {
+            WireConformalGenerator::Translation { offset } => Self::Translation(offset),
+            WireConformalGenerator::Rotation { quaternion_wxyz } => Self::Rotation(quaternion_wxyz),
+            WireConformalGenerator::UniformScale { factor } => Self::UniformScale(factor),
+            WireConformalGenerator::SphereReflection { center, radius } => {
+                Self::SphereReflection(center, radius)
+            }
+        }
+    }
+}
+
+impl From<FrozenConformalGenerator> for WireConformalGenerator {
+    fn from(generator: FrozenConformalGenerator) -> Self {
+        match generator {
+            FrozenConformalGenerator::Translation(offset) => Self::Translation { offset },
+            FrozenConformalGenerator::Rotation(quaternion_wxyz) => {
+                Self::Rotation { quaternion_wxyz }
+            }
+            FrozenConformalGenerator::UniformScale(factor) => Self::UniformScale { factor },
+            FrozenConformalGenerator::SphereReflection(center, radius) => {
+                Self::SphereReflection { center, radius }
+            }
+        }
+    }
 }
 
 /// Binary-schema mirror without the protocol type's JSON-only
@@ -305,14 +383,37 @@ impl From<FrozenAssetDescriptor> for AssetDescriptor {
     }
 }
 
-impl From<&AuthoredEnvelope> for FrozenEnvelope {
-    fn from(envelope: &AuthoredEnvelope) -> Self {
+impl TryFrom<&AuthoredEnvelope> for FrozenEnvelopeV01 {
+    type Error = AdapterError;
+
+    fn try_from(envelope: &AuthoredEnvelope) -> Result<Self, Self::Error> {
         let command = match &envelope.command {
-            AuthoredCommand::UpsertAsset { asset } => FrozenCommand::UpsertAsset(asset.into()),
+            AuthoredCommand::UpsertAsset { asset } => FrozenCommandV01::UpsertAsset(asset.into()),
             AuthoredCommand::SetEntityTransform { entity, transform } => {
-                FrozenCommand::SetEntityTransform(*entity, *transform)
+                FrozenCommandV01::SetEntityTransform(*entity, *transform)
             }
-            AuthoredCommand::RemoveEntity { entity } => FrozenCommand::RemoveEntity(*entity),
+            AuthoredCommand::RemoveEntity { entity } => FrozenCommandV01::RemoveEntity(*entity),
+            AuthoredCommand::SetConformalFrameTransform { .. } => {
+                return Err(AdapterError::WrongProtocolVersion(envelope.header.version));
+            }
+        };
+        Ok(Self {
+            header: envelope.header,
+            command,
+        })
+    }
+}
+
+impl From<FrozenEnvelopeV01> for AuthoredEnvelope {
+    fn from(envelope: FrozenEnvelopeV01) -> Self {
+        let command = match envelope.command {
+            FrozenCommandV01::UpsertAsset(asset) => AuthoredCommand::UpsertAsset {
+                asset: asset.into(),
+            },
+            FrozenCommandV01::SetEntityTransform(entity, transform) => {
+                AuthoredCommand::SetEntityTransform { entity, transform }
+            }
+            FrozenCommandV01::RemoveEntity(entity) => AuthoredCommand::RemoveEntity { entity },
         };
         Self {
             header: envelope.header,
@@ -321,16 +422,44 @@ impl From<&AuthoredEnvelope> for FrozenEnvelope {
     }
 }
 
-impl From<FrozenEnvelope> for AuthoredEnvelope {
-    fn from(envelope: FrozenEnvelope) -> Self {
+impl From<&AuthoredEnvelope> for FrozenEnvelopeV02 {
+    fn from(envelope: &AuthoredEnvelope) -> Self {
+        let command = match &envelope.command {
+            AuthoredCommand::UpsertAsset { asset } => FrozenCommandV02::UpsertAsset(asset.into()),
+            AuthoredCommand::SetEntityTransform { entity, transform } => {
+                FrozenCommandV02::SetEntityTransform(*entity, *transform)
+            }
+            AuthoredCommand::RemoveEntity { entity } => FrozenCommandV02::RemoveEntity(*entity),
+            AuthoredCommand::SetConformalFrameTransform { frame, generators } => {
+                FrozenCommandV02::SetConformalFrameTransform(
+                    *frame,
+                    generators.iter().map(Into::into).collect(),
+                )
+            }
+        };
+        Self {
+            header: envelope.header,
+            command,
+        }
+    }
+}
+
+impl From<FrozenEnvelopeV02> for AuthoredEnvelope {
+    fn from(envelope: FrozenEnvelopeV02) -> Self {
         let command = match envelope.command {
-            FrozenCommand::UpsertAsset(asset) => AuthoredCommand::UpsertAsset {
+            FrozenCommandV02::UpsertAsset(asset) => AuthoredCommand::UpsertAsset {
                 asset: asset.into(),
             },
-            FrozenCommand::SetEntityTransform(entity, transform) => {
+            FrozenCommandV02::SetEntityTransform(entity, transform) => {
                 AuthoredCommand::SetEntityTransform { entity, transform }
             }
-            FrozenCommand::RemoveEntity(entity) => AuthoredCommand::RemoveEntity { entity },
+            FrozenCommandV02::RemoveEntity(entity) => AuthoredCommand::RemoveEntity { entity },
+            FrozenCommandV02::SetConformalFrameTransform(frame, generators) => {
+                AuthoredCommand::SetConformalFrameTransform {
+                    frame,
+                    generators: generators.into_iter().map(Into::into).collect(),
+                }
+            }
         };
         Self {
             header: envelope.header,
@@ -348,34 +477,25 @@ pub fn encode_authored(
     envelope
         .validate()
         .map_err(|error| AdapterError::InvalidEnvelope(error.to_string()))?;
-    let frozen = FrozenEnvelope::from(envelope);
-    let body_len = bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .with_little_endian()
-        .serialized_size(&frozen)
-        .map_err(|_| AdapterError::MalformedPayload)? as usize;
-    let total_len =
-        PAYLOAD_HEADER_BYTES
-            .checked_add(body_len)
-            .ok_or(AdapterError::PayloadTooLarge {
-                actual: usize::MAX,
-                max: MAX_AUTHORED_PAYLOAD_BYTES,
-            })?;
-    if total_len > MAX_AUTHORED_PAYLOAD_BYTES {
-        return Err(AdapterError::PayloadTooLarge {
-            actual: total_len,
-            max: MAX_AUTHORED_PAYLOAD_BYTES,
-        });
-    }
-    let body = payload_codec()
-        .serialize(&frozen)
-        .map_err(|_| AdapterError::MalformedPayload)?;
+    let (domain, payload_version, body) = match envelope.header.version {
+        LEGACY_PROTOCOL_VERSION => (
+            LEGACY_PAYLOAD_DOMAIN,
+            LEGACY_PAYLOAD_VERSION,
+            encode_frozen_body(&FrozenEnvelopeV01::try_from(envelope)?)?,
+        ),
+        CURRENT_PROTOCOL_VERSION => (
+            PAYLOAD_DOMAIN,
+            PAYLOAD_VERSION,
+            encode_frozen_body(&FrozenEnvelopeV02::from(envelope))?,
+        ),
+        version => return Err(AdapterError::WrongProtocolVersion(version)),
+    };
     let mut bytes = Vec::with_capacity(PAYLOAD_HEADER_BYTES + body.len());
-    bytes.extend_from_slice(PAYLOAD_DOMAIN);
-    bytes.extend_from_slice(&PAYLOAD_VERSION.major.to_le_bytes());
-    bytes.extend_from_slice(&PAYLOAD_VERSION.minor.to_le_bytes());
-    bytes.extend_from_slice(&CURRENT_PROTOCOL_VERSION.major.to_le_bytes());
-    bytes.extend_from_slice(&CURRENT_PROTOCOL_VERSION.minor.to_le_bytes());
+    bytes.extend_from_slice(domain);
+    bytes.extend_from_slice(&payload_version.major.to_le_bytes());
+    bytes.extend_from_slice(&payload_version.minor.to_le_bytes());
+    bytes.extend_from_slice(&envelope.header.version.major.to_le_bytes());
+    bytes.extend_from_slice(&envelope.header.version.minor.to_le_bytes());
     bytes.extend_from_slice(project_id.as_uuid().as_bytes());
     bytes.extend_from_slice(&body);
     Ok(bytes)
@@ -395,16 +515,21 @@ pub fn decode_authored(
     if bytes.len() < PAYLOAD_HEADER_BYTES {
         return Err(AdapterError::MalformedPayload);
     }
-    if &bytes[..PAYLOAD_DOMAIN.len()] != PAYLOAD_DOMAIN {
+    let domain = &bytes[..PAYLOAD_DOMAIN.len()];
+    let expected_version = if domain == PAYLOAD_DOMAIN {
+        PAYLOAD_VERSION
+    } else if domain == LEGACY_PAYLOAD_DOMAIN {
+        LEGACY_PAYLOAD_VERSION
+    } else {
         return Err(AdapterError::WrongDomain);
-    }
+    };
     let mut cursor = PAYLOAD_DOMAIN.len();
     let payload_version = read_version(bytes, &mut cursor)?;
-    if payload_version != PAYLOAD_VERSION {
+    if payload_version != expected_version {
         return Err(AdapterError::WrongPayloadVersion(payload_version));
     }
     let protocol_version = read_version(bytes, &mut cursor)?;
-    if protocol_version != CURRENT_PROTOCOL_VERSION {
+    if protocol_version != expected_version {
         return Err(AdapterError::WrongProtocolVersion(protocol_version));
     }
     let project_bytes: [u8; 16] = bytes
@@ -420,10 +545,19 @@ pub fn decode_authored(
             actual: actual_project,
         });
     }
-    let envelope: FrozenEnvelope = payload_codec()
-        .deserialize(&bytes[cursor..])
-        .map_err(|_| AdapterError::MalformedPayload)?;
-    let envelope = AuthoredEnvelope::from(envelope);
+    let envelope = if protocol_version == LEGACY_PROTOCOL_VERSION {
+        AuthoredEnvelope::from(
+            payload_codec()
+                .deserialize::<FrozenEnvelopeV01>(&bytes[cursor..])
+                .map_err(|_| AdapterError::MalformedPayload)?,
+        )
+    } else {
+        AuthoredEnvelope::from(
+            payload_codec()
+                .deserialize::<FrozenEnvelopeV02>(&bytes[cursor..])
+                .map_err(|_| AdapterError::MalformedPayload)?,
+        )
+    };
     envelope
         .validate()
         .map_err(|error| AdapterError::InvalidEnvelope(error.to_string()))?;
@@ -714,12 +848,17 @@ pub enum StateRow {
         entity: EntityId,
         transform: WireTransform,
     },
+    ConformalFrameTransform {
+        frame: ConformalFrameId,
+        generators: Vec<WireConformalGenerator>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StateKey {
     Asset(AssetId),
     Entity(EntityId),
+    ConformalFrame(ConformalFrameId),
 }
 
 /// Deterministic authored state at one immutable HHHS horizon.
@@ -728,6 +867,7 @@ pub struct ProjectState {
     pub project_id: ProjectId,
     pub assets: BTreeMap<AssetId, AssetDescriptor>,
     pub entity_transforms: BTreeMap<EntityId, WireTransform>,
+    pub conformal_frame_transforms: BTreeMap<ConformalFrameId, Vec<WireConformalGenerator>>,
     pub history_root: [u8; 32],
     pub state_root: [u8; 32],
 }
@@ -746,6 +886,19 @@ impl ProjectState {
                     },
                 )
             }))
+            .chain(
+                self.conformal_frame_transforms
+                    .iter()
+                    .map(|(frame, generators)| {
+                        (
+                            StateKey::ConformalFrame(*frame),
+                            StateRow::ConformalFrameTransform {
+                                frame: *frame,
+                                generators: generators.clone(),
+                            },
+                        )
+                    }),
+            )
             .collect()
     }
 }
@@ -769,9 +922,12 @@ pub fn materialize_project(
     let mut values = BTreeMap::<EntryHash, AuthoredCommand>::new();
     let mut asset_candidates = BTreeMap::<AssetId, BTreeSet<EntryHash>>::new();
     let mut entity_candidates = BTreeMap::<EntityId, BTreeSet<EntryHash>>::new();
+    let mut frame_candidates = BTreeMap::<ConformalFrameId, BTreeSet<EntryHash>>::new();
+    let mut uses_protocol_v02 = false;
 
     for entry in history.entries_topo() {
         let envelope = decode_authored(project_id, &entry.payload)?;
+        uses_protocol_v02 |= envelope.header.version == CURRENT_PROTOCOL_VERSION;
         let hash = entry.hash();
         match &envelope.command {
             AuthoredCommand::UpsertAsset { asset } => {
@@ -780,6 +936,9 @@ pub fn materialize_project(
             AuthoredCommand::SetEntityTransform { entity, .. }
             | AuthoredCommand::RemoveEntity { entity } => {
                 entity_candidates.entry(*entity).or_default().insert(hash);
+            }
+            AuthoredCommand::SetConformalFrameTransform { frame, .. } => {
+                frame_candidates.entry(*frame).or_default().insert(hash);
             }
         }
         values.insert(hash, envelope.command);
@@ -813,12 +972,32 @@ pub fn materialize_project(
         }
     }
 
+    let mut conformal_frame_transforms = BTreeMap::new();
+    for (frame, candidates) in frame_candidates {
+        let winner = reach
+            .resolve(&candidates)
+            .expect("a nonempty register has a causal maximum");
+        let Some(AuthoredCommand::SetConformalFrameTransform { generators, .. }) =
+            values.get(&winner)
+        else {
+            unreachable!("conformal-frame registers contain only frame writes")
+        };
+        conformal_frame_transforms.insert(frame, generators.clone());
+    }
+
     let history_digest = history_root(history);
-    let state_root = state_root(project_id, &assets, &entity_transforms)?;
+    let state_root = state_root(
+        project_id,
+        &assets,
+        &entity_transforms,
+        &conformal_frame_transforms,
+        uses_protocol_v02,
+    )?;
     Ok(ProjectState {
         project_id,
         assets,
         entity_transforms,
+        conformal_frame_transforms,
         history_root: *history_digest.as_bytes(),
         state_root,
     })
@@ -828,19 +1007,36 @@ fn state_root(
     project_id: ProjectId,
     assets: &BTreeMap<AssetId, AssetDescriptor>,
     entities: &BTreeMap<EntityId, WireTransform>,
+    frames: &BTreeMap<ConformalFrameId, Vec<WireConformalGenerator>>,
+    uses_protocol_v02: bool,
 ) -> Result<[u8; 32], AdapterError> {
-    let canonical = canonical_codec()
-        .serialize(&(project_id.as_uuid(), assets, entities))
-        .map_err(|_| AdapterError::MalformedPayload)?;
-    let mut bytes = Vec::with_capacity(STATE_ROOT_DOMAIN.len() + canonical.len());
-    bytes.extend_from_slice(STATE_ROOT_DOMAIN);
+    let (domain, canonical) = if uses_protocol_v02 {
+        (
+            STATE_ROOT_DOMAIN,
+            canonical_codec()
+                .serialize(&(project_id.as_uuid(), assets, entities, frames))
+                .map_err(|_| AdapterError::MalformedPayload)?,
+        )
+    } else {
+        (
+            LEGACY_STATE_ROOT_DOMAIN,
+            canonical_codec()
+                .serialize(&(project_id.as_uuid(), assets, entities))
+                .map_err(|_| AdapterError::MalformedPayload)?,
+        )
+    };
+    let mut bytes = Vec::with_capacity(domain.len() + canonical.len());
+    bytes.extend_from_slice(domain);
     bytes.extend_from_slice(&canonical);
     Ok(*Digest::of(&bytes).as_bytes())
 }
 
 fn namespace(project_id: ProjectId) -> Digest {
-    let mut bytes = Vec::with_capacity(PAYLOAD_DOMAIN.len() + 16);
-    bytes.extend_from_slice(PAYLOAD_DOMAIN);
+    // Replica identity is stable across authored payload-schema revisions.
+    // The original 0.1 domain is therefore a permanent namespace salt, not a
+    // claim that every entry body uses schema 0.1.
+    let mut bytes = Vec::with_capacity(LEGACY_PAYLOAD_DOMAIN.len() + 16);
+    bytes.extend_from_slice(LEGACY_PAYLOAD_DOMAIN);
     bytes.extend_from_slice(project_id.as_uuid().as_bytes());
     Digest::of(&bytes)
 }

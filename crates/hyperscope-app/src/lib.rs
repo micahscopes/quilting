@@ -41,8 +41,8 @@ use hyperscape::{
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetEntityId, AssetId, AuthoredCommand, AuthoredEnvelope, CameraPresence,
-    EntityId, EphemeralPresence, FocusPresence, LeaseId, MessageId, PeerId, PresenceEnvelope,
-    RequestId, WireError, WireTransform,
+    ConformalFrameId, EntityId, EphemeralPresence, FocusPresence, LeaseId, MessageId, PeerId,
+    PresenceEnvelope, RequestId, WireConformalGenerator, WireError, WireTransform,
 };
 pub use quilting_core::render::FocusPostprocessMode;
 pub use quilting_gltf::GltfAssetMetadata as AssetMetadata;
@@ -558,6 +558,11 @@ pub struct AuthoredProjectionSnapshot {
     pub projection_revision: u64,
     pub assets: Vec<AssetDescriptor>,
     pub entities: Vec<AuthoredEntityReadModel>,
+    #[cfg_attr(
+        feature = "replay",
+        serde(default, skip_serializing_if = "Vec::is_empty")
+    )]
+    pub conformal_frames: Vec<AuthoredConformalFrameReadModel>,
 }
 
 impl AuthoredProjectionSnapshot {
@@ -590,6 +595,23 @@ impl AuthoredProjectionSnapshot {
             .all(|pair| pair[0].entity < pair[1].entity)
         {
             return Err(ReduceError::NonCanonicalAuthoredProjection("entities"));
+        }
+        for frame in &self.conformal_frames {
+            AuthoredCommand::SetConformalFrameTransform {
+                frame: frame.frame,
+                generators: frame.generators.clone(),
+            }
+            .validate()
+            .map_err(|error| ReduceError::Wire(error.to_string()))?;
+        }
+        if !self
+            .conformal_frames
+            .windows(2)
+            .all(|pair| pair[0].frame < pair[1].frame)
+        {
+            return Err(ReduceError::NonCanonicalAuthoredProjection(
+                "conformal_frames",
+            ));
         }
         Ok(())
     }
@@ -1199,6 +1221,7 @@ pub struct AppSummary {
     pub active_peers: usize,
     pub authored_assets: usize,
     pub authored_entities: usize,
+    pub authored_conformal_frames: usize,
     pub diagnostics: usize,
     pub presentation_loaded: bool,
     pub active_cue: Option<Uuid>,
@@ -1562,6 +1585,16 @@ pub struct AuthoredEntityReadModel {
     pub transform: WireTransform,
 }
 
+/// One complete, atomic local-to-parent generator word for a durable authored
+/// conformal frame. Parent topology remains in the admitted asset.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "replay", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "replay", serde(rename_all = "camelCase"))]
+pub struct AuthoredConformalFrameReadModel {
+    pub frame: ConformalFrameId,
+    pub generators: Vec<WireConformalGenerator>,
+}
+
 /// Deterministic low-rate projection of the materialized authored command
 /// lane. Assets and entities are key-sorted; the projection revision is the
 /// upstream atomic checkpoint fence, distinct from the local app revision.
@@ -1570,6 +1603,7 @@ pub struct AuthoredSceneReadModel {
     pub projection_revision: Option<u64>,
     pub assets: Vec<AssetDescriptor>,
     pub entities: Vec<AuthoredEntityReadModel>,
+    pub conformal_frames: Vec<AuthoredConformalFrameReadModel>,
 }
 
 #[derive(Debug, Clone)]
@@ -1622,6 +1656,7 @@ pub struct AppState {
     authored_projection_revision: Option<u64>,
     authored_assets: BTreeMap<AssetId, AssetDescriptor>,
     authored_entities: BTreeMap<EntityId, WireTransform>,
+    authored_conformal_frames: BTreeMap<ConformalFrameId, Vec<WireConformalGenerator>>,
     diagnostics: VecDeque<DiagnosticReadModel>,
 }
 
@@ -1657,6 +1692,7 @@ impl Default for AppState {
             authored_projection_revision: None,
             authored_assets: BTreeMap::new(),
             authored_entities: BTreeMap::new(),
+            authored_conformal_frames: BTreeMap::new(),
             diagnostics: VecDeque::new(),
         }
     }
@@ -1789,6 +1825,11 @@ impl AppState {
             .entities
             .into_iter()
             .map(|entity| (entity.entity, entity.transform))
+            .collect();
+        self.authored_conformal_frames = snapshot
+            .conformal_frames
+            .into_iter()
+            .map(|frame| (frame.frame, frame.generators))
             .collect();
         self.authored_projection_revision = Some(snapshot.projection_revision);
     }
@@ -2358,6 +2399,7 @@ impl AppState {
                 if self.authored_projection_revision.is_some()
                     || !self.authored_assets.is_empty()
                     || !self.authored_entities.is_empty()
+                    || !self.authored_conformal_frames.is_empty()
                 {
                     return Err(ReduceError::AuthoredProjectionAlreadyInitialized);
                 }
@@ -2396,6 +2438,7 @@ impl AppState {
                 } else {
                     let mut authored_assets = self.authored_assets.clone();
                     let mut authored_entities = self.authored_entities.clone();
+                    let mut authored_conformal_frames = self.authored_conformal_frames.clone();
                     for envelope in &revision.commands {
                         match &envelope.command {
                             AuthoredCommand::UpsertAsset { asset } => {
@@ -2407,10 +2450,14 @@ impl AppState {
                             AuthoredCommand::RemoveEntity { entity } => {
                                 authored_entities.remove(entity);
                             }
+                            AuthoredCommand::SetConformalFrameTransform { frame, generators } => {
+                                authored_conformal_frames.insert(*frame, generators.clone());
+                            }
                         }
                     }
                     self.authored_assets = authored_assets;
                     self.authored_entities = authored_entities;
+                    self.authored_conformal_frames = authored_conformal_frames;
                     self.authored_projection_revision = Some(revision.projection_revision);
                 }
             }
@@ -2736,6 +2783,7 @@ impl AppState {
             active_peers: self.presence.len(),
             authored_assets: self.authored_assets.len(),
             authored_entities: self.authored_entities.len(),
+            authored_conformal_frames: self.authored_conformal_frames.len(),
             diagnostics: self.diagnostics.len(),
             presentation_loaded: self.presentation.is_some(),
             active_cue: self
@@ -3010,6 +3058,14 @@ impl AppState {
                 .iter()
                 .map(|(&entity, &transform)| AuthoredEntityReadModel { entity, transform })
                 .collect(),
+            conformal_frames: self
+                .authored_conformal_frames
+                .iter()
+                .map(|(&frame, generators)| AuthoredConformalFrameReadModel {
+                    frame,
+                    generators: generators.clone(),
+                })
+                .collect(),
         }
     }
 
@@ -3039,6 +3095,7 @@ pub struct AppStore {
     authored_session: Mutable<AuthoredSessionReadModel>,
     authored_assets: MutableVec<AssetDescriptor>,
     authored_entities: MutableVec<AuthoredEntityReadModel>,
+    authored_conformal_frames: MutableVec<AuthoredConformalFrameReadModel>,
     diagnostics: MutableVec<DiagnosticReadModel>,
     presentation: Mutable<Option<PresentationReadModel>>,
 }
@@ -3080,6 +3137,7 @@ impl AppStore {
             authored_session: Mutable::new(authored_session),
             authored_assets: MutableVec::new_with_values(authored.assets),
             authored_entities: MutableVec::new_with_values(authored.entities),
+            authored_conformal_frames: MutableVec::new_with_values(authored.conformal_frames),
             diagnostics: MutableVec::new_with_values(diagnostics),
             presentation: Mutable::new(presentation),
         }
@@ -3847,6 +3905,9 @@ impl AppStore {
         self.authored_entities
             .lock_mut()
             .replace_cloned(authored.entities);
+        self.authored_conformal_frames
+            .lock_mut()
+            .replace_cloned(authored.conformal_frames);
         self.diagnostics.lock_mut().replace_cloned(diagnostics);
         self.presentation.set_neq(presentation);
         self.animation.set_neq(animation);
@@ -4110,6 +4171,12 @@ impl AppStore {
 
     pub fn authored_entity_signal_vec(&self) -> MutableSignalVec<AuthoredEntityReadModel> {
         self.authored_entities.signal_vec_cloned()
+    }
+
+    pub fn authored_conformal_frame_signal_vec(
+        &self,
+    ) -> MutableSignalVec<AuthoredConformalFrameReadModel> {
+        self.authored_conformal_frames.signal_vec_cloned()
     }
 
     pub fn diagnostic_signal_vec(&self) -> MutableSignalVec<DiagnosticReadModel> {
@@ -7621,6 +7688,66 @@ mod tests {
     }
 
     #[test]
+    fn authored_frame_words_are_atomic_sorted_and_projected_through_frp_state() {
+        let store = AppStore::default();
+        let frame_a = ConformalFrameId::from_u128(0x9401).unwrap();
+        let frame_b = ConformalFrameId::from_u128(0x9402).unwrap();
+        let word_a = vec![WireConformalGenerator::translation([1.0, 2.0, 3.0])];
+        let word_b = vec![
+            WireConformalGenerator::sphere_reflection([0.0; 3], 2.0),
+            WireConformalGenerator::uniform_scale(-1.0),
+        ];
+
+        store
+            .dispatch(AppEvent::AuthoredRevision(AuthoredRevision {
+                projection_revision: 9,
+                commands: vec![
+                    authored(
+                        1,
+                        AuthoredCommand::SetConformalFrameTransform {
+                            frame: frame_b,
+                            generators: word_b.clone(),
+                        },
+                    ),
+                    authored(
+                        2,
+                        AuthoredCommand::SetConformalFrameTransform {
+                            frame: frame_a,
+                            generators: word_a.clone(),
+                        },
+                    ),
+                ],
+            }))
+            .unwrap();
+        let scene = store.authored_scene_snapshot();
+        assert_eq!(
+            scene
+                .conformal_frames
+                .iter()
+                .map(|frame| frame.frame)
+                .collect::<Vec<_>>(),
+            vec![frame_a, frame_b]
+        );
+        assert_eq!(scene.conformal_frames[0].generators, word_a);
+        assert_eq!(scene.conformal_frames[1].generators, word_b);
+        assert_eq!(store.summary_snapshot().authored_conformal_frames, 2);
+
+        let before = store.authored_scene_snapshot();
+        let invalid = store.dispatch(AppEvent::AuthoredRevision(AuthoredRevision {
+            projection_revision: 10,
+            commands: vec![authored(
+                3,
+                AuthoredCommand::SetConformalFrameTransform {
+                    frame: frame_a,
+                    generators: vec![WireConformalGenerator::uniform_scale(0.0)],
+                },
+            )],
+        }));
+        assert!(matches!(invalid, Err(ReduceError::Wire(_))));
+        assert_eq!(store.authored_scene_snapshot(), before);
+    }
+
+    #[test]
     fn authored_projection_restore_is_canonical_atomic_and_one_shot() {
         let store = AppStore::default();
         let asset_a = asset(0xa1, "a.glb");
@@ -7640,6 +7767,7 @@ mod tests {
                     transform: transform(2.0),
                 },
             ],
+            conformal_frames: Vec::new(),
         };
 
         let before = store.summary_snapshot();
@@ -7658,6 +7786,7 @@ mod tests {
                 projection_revision: None,
                 assets: Vec::new(),
                 entities: Vec::new(),
+                conformal_frames: Vec::new(),
             }
         );
 
@@ -7671,6 +7800,7 @@ mod tests {
                 projection_revision: Some(41),
                 assets: snapshot.assets,
                 entities: snapshot.entities,
+                conformal_frames: snapshot.conformal_frames,
             }
         );
 
@@ -7683,6 +7813,7 @@ mod tests {
                         projection_revision: 42,
                         assets: Vec::new(),
                         entities: Vec::new(),
+                        conformal_frames: Vec::new(),
                     },
                 ))
                 .unwrap_err(),
@@ -7706,6 +7837,7 @@ mod tests {
                 entity: first_entity,
                 transform: transform(1.0),
             }],
+            conformal_frames: Vec::new(),
         };
         let first = store
             .synchronize_authored_projection_if_current(None, initialized)
@@ -7719,6 +7851,7 @@ mod tests {
                 entity: second_entity,
                 transform: transform(2.0),
             }],
+            conformal_frames: Vec::new(),
         };
         let synchronized = store
             .synchronize_authored_projection_if_current(Some(0), replacement.clone())
@@ -7730,6 +7863,7 @@ mod tests {
                 projection_revision: Some(1),
                 assets: vec![second_asset],
                 entities: replacement.entities.clone(),
+                conformal_frames: replacement.conformal_frames.clone(),
             }
         );
 
@@ -7762,6 +7896,7 @@ mod tests {
             projection_revision: 2,
             assets: vec![first_asset, asset(0xc0, "out-of-order.glb")],
             entities: Vec::new(),
+            conformal_frames: Vec::new(),
         };
         assert!(matches!(
             store.synchronize_authored_projection_if_current(Some(1), noncanonical),

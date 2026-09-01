@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Durable HHHS authored-operation adapter for Hyperscape protocol 0.1"
+description = "Versioned durable HHHS authored-operation adapter for Hyperscape"
 
 [dependencies]
 base64 = "0.22"

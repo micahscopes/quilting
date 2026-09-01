@@ -12,6 +12,7 @@ use crate::{
 use bevy_app::App;
 use bevy_ecs::prelude::*;
 use bevy_time::{Time, Virtual};
+use quilting_core::{ConformalGenerator, ConformalTransformChain};
 use quilting_gltf::hyperscape::{HyperscapeConstraint, HyperscapeGltfError};
 use quilting_gltf::scene::Transform;
 use quilting_gltf::GltfScene;
@@ -215,6 +216,7 @@ pub struct HyperscapeGltfRuntime {
     entities: Vec<Entity>,
     node_names: Vec<Option<String>>,
     stable_nodes: BTreeMap<uuid::Uuid, usize>,
+    authored_base_frames: quilting_core::ConformalFrameForest,
 }
 
 /// One extracted renderer packet with stable ordinary glTF identities for
@@ -327,6 +329,11 @@ impl HyperscapeGltfRuntime {
         app.add_plugins(crate::HyperscapePlugin)
             .insert_resource(Time::<Virtual>::from_max_delta(Duration::MAX));
         let entities = spawn_hyperscape_asset(app.world_mut(), nodes, asset)?;
+        let authored_base_frames = app
+            .world()
+            .resource::<ConformalScene>()
+            .frames
+            .clone();
         // Resolve the authored scene once at deterministic time zero.
         app.update();
         let node_names = nodes.iter().map(|node| node.name.clone()).collect();
@@ -344,6 +351,7 @@ impl HyperscapeGltfRuntime {
             entities,
             node_names,
             stable_nodes,
+            authored_base_frames,
         })
     }
 
@@ -612,6 +620,64 @@ impl HyperscapeGltfRuntime {
         }
     }
 
+    /// Atomically apply the materialized authored generator words for this
+    /// loaded asset. Durable IDs are resolved only at this admission boundary;
+    /// one unknown, invalid, or constraint-driven frame publishes no change.
+    pub fn apply_authored_conformal_frame_transforms(
+        &mut self,
+        transforms: &BTreeMap<
+            hyperscape_protocol::ConformalFrameId,
+            Vec<hyperscape_protocol::WireConformalGenerator>,
+        >,
+    ) -> Result<(), AuthoredConformalFrameError> {
+        let identities = self
+            .app
+            .world()
+            .resource::<ConformalFrameIdentities>()
+            .clone();
+        let pinned = self
+            .app
+            .world()
+            .resource::<SurfaceFramePinSet>()
+            .0
+            .iter()
+            .map(|binding| binding.frame.0)
+            .collect::<BTreeSet<_>>();
+        let mut staged = self.authored_base_frames.clone();
+
+        for (&stable_id, generators) in transforms {
+            let frame = identities
+                .frame_id(stable_id)
+                .ok_or(AuthoredConformalFrameError::UnknownFrame(stable_id))?;
+            if pinned.contains(&frame.0) {
+                return Err(AuthoredConformalFrameError::SurfacePinned(stable_id));
+            }
+            let generators = generators
+                .iter()
+                .copied()
+                .map(runtime_conformal_generator)
+                .collect();
+            let chain = ConformalTransformChain::new(generators).map_err(|error| {
+                AuthoredConformalFrameError::InvalidTransform {
+                    frame: stable_id,
+                    message: error.to_string(),
+                }
+            })?;
+            staged.set_local_to_parent(frame, chain).map_err(|error| {
+                AuthoredConformalFrameError::InvalidTransform {
+                    frame: stable_id,
+                    message: error.to_string(),
+                }
+            })?;
+        }
+        staged
+            .validate()
+            .map_err(|error| AuthoredConformalFrameError::InvalidForest(error.to_string()))?;
+        self.app.world_mut().resource_mut::<ConformalScene>().frames = staged;
+        self.app.update();
+        Ok(())
+    }
+
     pub fn app(&self) -> &App {
         &self.app
     }
@@ -620,6 +686,67 @@ impl HyperscapeGltfRuntime {
         &mut self.app
     }
 }
+
+fn runtime_conformal_generator(
+    generator: hyperscape_protocol::WireConformalGenerator,
+) -> ConformalGenerator {
+    match generator {
+        hyperscape_protocol::WireConformalGenerator::Translation { offset } => {
+            ConformalGenerator::Translation { offset }
+        }
+        hyperscape_protocol::WireConformalGenerator::Rotation { quaternion_wxyz } => {
+            ConformalGenerator::Rotation { quaternion_wxyz }
+        }
+        hyperscape_protocol::WireConformalGenerator::UniformScale { factor } => {
+            ConformalGenerator::UniformScale { factor }
+        }
+        hyperscape_protocol::WireConformalGenerator::SphereReflection { center, radius } => {
+            ConformalGenerator::SphereReflection { center, radius }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthoredConformalFrameError {
+    UnknownFrame(hyperscape_protocol::ConformalFrameId),
+    SurfacePinned(hyperscape_protocol::ConformalFrameId),
+    InvalidTransform {
+        frame: hyperscape_protocol::ConformalFrameId,
+        message: String,
+    },
+    InvalidForest(String),
+}
+
+impl fmt::Display for AuthoredConformalFrameError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownFrame(frame) => {
+                write!(
+                    formatter,
+                    "authored conformal frame {frame} is not resident"
+                )
+            }
+            Self::SurfacePinned(frame) => write!(
+                formatter,
+                "authored conformal frame {frame} is driven by a surface-pin constraint"
+            ),
+            Self::InvalidTransform { frame, message } => {
+                write!(
+                    formatter,
+                    "authored conformal frame {frame} is invalid: {message}"
+                )
+            }
+            Self::InvalidForest(message) => {
+                write!(
+                    formatter,
+                    "authored conformal frame forest is invalid: {message}"
+                )
+            }
+        }
+    }
+}
+
+impl Error for AuthoredConformalFrameError {}
 
 fn node_origin(transform: &Transform) -> [f64; 3] {
     let matrix = transform.to_matrix();
@@ -666,7 +793,7 @@ mod tests {
     use super::*;
     use crate::{HyperscapePlugin, HyperscopeExtraction, SurfaceFrameOrientation};
     use bevy_app::App;
-    use hyperscape_protocol::{ConformalFrameId, EntityId};
+    use hyperscape_protocol::{ConformalFrameId, EntityId, WireConformalGenerator};
     use quilting_core::ConformalGenerator;
 
     #[test]
@@ -779,6 +906,78 @@ mod tests {
     }
 
     #[test]
+    fn authored_frame_words_resolve_stable_ids_and_publish_atomically() {
+        let (nodes, asset) =
+            quilting_gltf::load_hyperscape_graph(quilting_gltf::HYPERSCAPE_TRACK_GLTF).unwrap();
+        let mut asset = asset.unwrap();
+        let stable = ConformalFrameId::from_u128(0x4200).unwrap();
+        asset.payload.frames[1].stable_id = Some(stable);
+        let mut runtime = HyperscapeGltfRuntime::new(&nodes, &asset).unwrap();
+        let original = runtime
+            .app()
+            .world()
+            .resource::<ConformalScene>()
+            .frames
+            .clone();
+
+        let replacement = vec![
+            WireConformalGenerator::uniform_scale(2.0),
+            WireConformalGenerator::translation([3.0, 4.0, 5.0]),
+        ];
+        runtime
+            .apply_authored_conformal_frame_transforms(&BTreeMap::from([(
+                stable,
+                replacement.clone(),
+            )]))
+            .unwrap();
+        assert_eq!(
+            runtime
+                .app()
+                .world()
+                .resource::<ConformalScene>()
+                .frames
+                .frame(quilting_core::FrameId(1))
+                .unwrap()
+                .local_to_parent
+                .generators,
+            replacement
+                .iter()
+                .copied()
+                .map(runtime_conformal_generator)
+                .collect::<Vec<_>>()
+        );
+
+        let retained = runtime
+            .app()
+            .world()
+            .resource::<ConformalScene>()
+            .frames
+            .clone();
+        let unknown = ConformalFrameId::from_u128(0x4201).unwrap();
+        assert_eq!(
+            runtime.apply_authored_conformal_frame_transforms(&BTreeMap::from([
+                (stable, vec![WireConformalGenerator::uniform_scale(7.0)]),
+                (unknown, vec![WireConformalGenerator::translation([1.0; 3])]),
+            ])),
+            Err(AuthoredConformalFrameError::UnknownFrame(unknown))
+        );
+        assert_eq!(
+            runtime.app().world().resource::<ConformalScene>().frames,
+            retained,
+            "a later invalid override must not publish an earlier staged edit"
+        );
+
+        runtime
+            .apply_authored_conformal_frame_transforms(&BTreeMap::new())
+            .unwrap();
+        assert_eq!(
+            runtime.app().world().resource::<ConformalScene>().frames,
+            original,
+            "a complete empty materialization resets prior overrides to the asset baseline"
+        );
+    }
+
+    #[test]
     fn gltf_surface_pin_imports_as_a_typed_constraint_edge() {
         let (nodes, asset) =
             quilting_gltf::load_hyperscape_graph(quilting_gltf::HYPERSCAPE_TRACK_GLTF).unwrap();
@@ -830,6 +1029,13 @@ mod tests {
         assert_eq!(
             runtime.stable_id_for_frame(quilting_core::FrameId(1)),
             Some(frame_id)
+        );
+        assert_eq!(
+            runtime.apply_authored_conformal_frame_transforms(&BTreeMap::from([(
+                frame_id,
+                vec![WireConformalGenerator::uniform_scale(2.0)],
+            )])),
+            Err(AuthoredConformalFrameError::SurfacePinned(frame_id))
         );
         let requests = runtime.surface_frame_pin_requests();
         assert_eq!(requests.len(), 1);

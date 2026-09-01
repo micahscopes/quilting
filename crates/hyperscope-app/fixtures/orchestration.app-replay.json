@@ -159,7 +159,7 @@
       "type": "receive_presence",
       "envelope": {
         "header": {
-          "version": { "major": 0, "minor": 2 },
+          "version": { "major": 0, "minor": 3 },
           "message_id": "c0000000-0000-4000-8000-000000000004",
           "sender": "d0000000-0000-4000-8000-000000000001",
           "sequence": 3

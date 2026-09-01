@@ -12,9 +12,11 @@ use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
 
-pub const CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 1 };
+pub const LEGACY_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 1 };
+pub const CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 2 };
 pub const MAX_PRESENCE_TTL_MILLIS: u32 = 60_000;
 pub const MAX_AUTHORING_LEASES_PER_PRESENCE: usize = 256;
+pub const MAX_CONFORMAL_GENERATORS_PER_FRAME: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolVersion {
@@ -24,7 +26,7 @@ pub struct ProtocolVersion {
 
 impl ProtocolVersion {
     pub fn ensure_supported(self) -> Result<(), WireError> {
-        if self == CURRENT_PROTOCOL_VERSION {
+        if matches!(self, LEGACY_PROTOCOL_VERSION | CURRENT_PROTOCOL_VERSION) {
             Ok(())
         } else {
             Err(WireError::UnsupportedVersion(self))
@@ -210,6 +212,70 @@ impl WireTransform {
     }
 }
 
+/// Wire representation of one authorable conformal operation.
+///
+/// This deliberately mirrors Quilting's semantic generator vocabulary without
+/// depending on the tessellation crate. Runtime adapters perform the explicit
+/// conversion at the geometry boundary. Quaternion arrays use `(w, x, y, z)`;
+/// a containing word is stored in application order, element zero first.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WireConformalGenerator {
+    Translation { offset: [f64; 3] },
+    Rotation { quaternion_wxyz: [f64; 4] },
+    UniformScale { factor: f64 },
+    SphereReflection { center: [f64; 3], radius: f64 },
+}
+
+impl WireConformalGenerator {
+    pub fn translation(offset: [f64; 3]) -> Self {
+        Self::Translation { offset }
+    }
+
+    pub fn rotation(quaternion_wxyz: [f64; 4]) -> Self {
+        Self::Rotation { quaternion_wxyz }
+    }
+
+    pub fn uniform_scale(factor: f64) -> Self {
+        Self::UniformScale { factor }
+    }
+
+    pub fn sphere_reflection(center: [f64; 3], radius: f64) -> Self {
+        Self::SphereReflection { center, radius }
+    }
+
+    pub fn validate(self) -> Result<(), WireError> {
+        match self {
+            Self::Translation { offset } if !finite3(offset) => Err(WireError::InvalidValue(
+                "conformal translation must be finite",
+            )),
+            Self::Rotation { quaternion_wxyz }
+                if !finite4(quaternion_wxyz)
+                    || quaternion_wxyz
+                        .into_iter()
+                        .map(|component| component * component)
+                        .sum::<f64>()
+                        <= 1.0e-24 =>
+            {
+                Err(WireError::InvalidValue(
+                    "conformal rotation must be finite and nonzero",
+                ))
+            }
+            Self::UniformScale { factor } if !factor.is_finite() || factor == 0.0 => Err(
+                WireError::InvalidValue("conformal scale must be finite and nonzero"),
+            ),
+            Self::SphereReflection { center, radius }
+                if !finite3(center) || !radius.is_finite() || radius <= 0.0 =>
+            {
+                Err(WireError::InvalidValue(
+                    "conformal sphere must have a finite center and positive radius",
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AuthoredCommand {
@@ -225,6 +291,14 @@ pub enum AuthoredCommand {
         /// source asset chart.
         transform: WireTransform,
     },
+    /// Atomically replace the complete local-to-parent generator word of one
+    /// already-authored conformal frame. Parent topology remains an asset
+    /// operation so this command cannot introduce a frame-graph cycle.
+    SetConformalFrameTransform {
+        frame: ConformalFrameId,
+        /// Application order: element zero acts first.
+        generators: Vec<WireConformalGenerator>,
+    },
     RemoveEntity {
         entity: EntityId,
     },
@@ -238,8 +312,33 @@ impl AuthoredCommand {
                 entity.validate()?;
                 transform.validate()
             }
+            Self::SetConformalFrameTransform { frame, generators } => {
+                frame.validate()?;
+                if generators.len() > MAX_CONFORMAL_GENERATORS_PER_FRAME {
+                    return Err(WireError::InvalidValue(
+                        "conformal frame has too many generators",
+                    ));
+                }
+                for generator in generators {
+                    generator.validate()?;
+                }
+                Ok(())
+            }
             Self::RemoveEntity { entity } => entity.validate(),
         }
+    }
+
+    fn validate_for_version(&self, version: ProtocolVersion) -> Result<(), WireError> {
+        self.validate()?;
+        if matches!(self, Self::SetConformalFrameTransform { .. })
+            && version == LEGACY_PROTOCOL_VERSION
+        {
+            return Err(WireError::CommandRequiresVersion {
+                command: "set_conformal_frame_transform",
+                minimum: CURRENT_PROTOCOL_VERSION,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -253,7 +352,7 @@ pub struct AuthoredEnvelope {
 impl AuthoredEnvelope {
     pub fn validate(&self) -> Result<(), WireError> {
         self.header.validate()?;
-        self.command.validate()
+        self.command.validate_for_version(self.header.version)
     }
 }
 
@@ -420,6 +519,10 @@ pub enum WireError {
     UnsupportedVersion(ProtocolVersion),
     NilId(&'static str),
     InvalidValue(&'static str),
+    CommandRequiresVersion {
+        command: &'static str,
+        minimum: ProtocolVersion,
+    },
 }
 
 impl fmt::Display for WireError {
@@ -432,6 +535,11 @@ impl fmt::Display for WireError {
             ),
             Self::NilId(label) => write!(formatter, "{label} ID must not be nil"),
             Self::InvalidValue(message) => formatter.write_str(message),
+            Self::CommandRequiresVersion { command, minimum } => write!(
+                formatter,
+                "authored command {command} requires protocol {}.{} or newer",
+                minimum.major, minimum.minor
+            ),
         }
     }
 }
@@ -469,6 +577,8 @@ mod tests {
 
     const AUTHORED_FIXTURE: &str =
         include_str!("../fixtures/authored-set-transform-v0.1.json");
+    const CONFORMAL_FRAME_FIXTURE: &str =
+        include_str!("../fixtures/authored-set-conformal-frame-v0.2.json");
     const PRESENCE_FIXTURE: &str =
         include_str!("../fixtures/presence-camera-v0.1.json");
     const AUTHORING_LEASE_FIXTURE: &str =
@@ -510,6 +620,61 @@ mod tests {
         assert_eq!(
             format!("{}\n", serde_json::to_string_pretty(&envelope).unwrap()),
             AUTHORED_FIXTURE
+        );
+    }
+
+    #[test]
+    fn conformal_frame_word_is_atomic_versioned_and_bounded() {
+        let envelope: AuthoredEnvelope = serde_json::from_str(CONFORMAL_FRAME_FIXTURE).unwrap();
+        envelope.validate().unwrap();
+        assert_eq!(
+            format!("{}\n", serde_json::to_string_pretty(&envelope).unwrap()),
+            CONFORMAL_FRAME_FIXTURE
+        );
+        let AuthoredCommand::SetConformalFrameTransform { frame, generators } = &envelope.command
+        else {
+            panic!("fixture must contain a conformal-frame transform")
+        };
+        assert_eq!(*frame, ConformalFrameId::from_u128(4).unwrap());
+        assert_eq!(generators.len(), 4);
+
+        let mut legacy = envelope.clone();
+        legacy.header.version = LEGACY_PROTOCOL_VERSION;
+        assert_eq!(
+            legacy.validate(),
+            Err(WireError::CommandRequiresVersion {
+                command: "set_conformal_frame_transform",
+                minimum: CURRENT_PROTOCOL_VERSION,
+            })
+        );
+
+        let mut invalid = envelope.clone();
+        let AuthoredCommand::SetConformalFrameTransform { generators, .. } = &mut invalid.command
+        else {
+            unreachable!()
+        };
+        *generators = vec![WireConformalGenerator::uniform_scale(0.0)];
+        assert_eq!(
+            invalid.validate(),
+            Err(WireError::InvalidValue(
+                "conformal scale must be finite and nonzero"
+            ))
+        );
+
+        let mut oversized = envelope;
+        let AuthoredCommand::SetConformalFrameTransform { generators, .. } = &mut oversized.command
+        else {
+            unreachable!()
+        };
+        generators.resize(
+            MAX_CONFORMAL_GENERATORS_PER_FRAME + 1,
+            WireConformalGenerator::translation([0.0; 3]),
+        );
+        assert_eq!(
+            oversized.validate(),
+            Err(WireError::InvalidValue(
+                "conformal frame has too many generators"
+            ))
         );
     }
 
@@ -612,14 +777,14 @@ mod tests {
     fn future_or_nil_wire_identity_is_rejected_after_deserialization() {
         let nil = Uuid::nil().to_string();
         let encoded = format!(
-            r#"{{"header":{{"version":{{"major":0,"minor":2}},"message_id":"{nil}","sender":"{nil}","sequence":0}},"command":{{"type":"remove_entity","entity":"{nil}"}}}}"#
+            r#"{{"header":{{"version":{{"major":0,"minor":3}},"message_id":"{nil}","sender":"{nil}","sequence":0}},"command":{{"type":"remove_entity","entity":"{nil}"}}}}"#
         );
         let envelope: AuthoredEnvelope = serde_json::from_str(&encoded).unwrap();
         assert_eq!(
             envelope.validate(),
             Err(WireError::UnsupportedVersion(ProtocolVersion {
                 major: 0,
-                minor: 2
+                minor: 3
             }))
         );
         let mut envelope = envelope;

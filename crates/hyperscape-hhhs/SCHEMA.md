@@ -1,13 +1,19 @@
-# Hyperscape HHHS authored payload 0.1
+# Hyperscape HHHS authored payloads 0.1 and 0.2
 
-This crate admits only `hyperscape-protocol` 0.1 `AuthoredEnvelope` values:
-`UpsertAsset`, `SetEntityTransform`, and `RemoveEntity`.
+This crate admits exact, frozen `hyperscape-protocol` 0.1 and 0.2
+`AuthoredEnvelope` values. Protocol 0.1 contains `UpsertAsset`,
+`SetEntityTransform`, and `RemoveEntity`. Protocol 0.2 retains those commands
+and adds `SetConformalFrameTransform`, an atomic replacement of one stable
+frame's complete local-to-parent generator word.
 
-The HHHS entry payload is frozen as:
+Every HHHS entry payload is frozen as:
 
-1. the exact bytes `hyperscape authored operation v0.1\0`;
-2. payload-schema major and minor as two little-endian `u16` values (`0, 1`);
-3. protocol major and minor as two little-endian `u16` values (`0, 1`);
+1. the exact bytes `hyperscape authored operation v0.1\0` or
+   `hyperscape authored operation v0.2\0`;
+2. the matching payload-schema major and minor as two little-endian `u16`
+   values (`0, 1` or `0, 2`);
+3. the matching protocol major and minor as two little-endian `u16` values
+   (`0, 1` or `0, 2`);
 4. the stable project UUID as 16 network-order UUID bytes;
 5. a bincode 1.3.3 body using fixed-width, little-endian integers and rejecting
    trailing bytes.
@@ -16,7 +22,7 @@ The complete payload is capped at the public `MAX_AUTHORED_PAYLOAD_BYTES`
 (1 MiB), and the bincode decoder carries a matching body limit before it sees
 untrusted record bytes.
 
-The binary body uses a private untagged enum with frozen variant order:
+The 0.1 binary body uses a private untagged enum with frozen variant order:
 
 0. `UpsertAsset(FrozenAssetDescriptor)`, whose fields are `id`, `uri`,
    `media_type`, and `content_digest`; both option discriminants are always
@@ -24,12 +30,29 @@ The binary body uses a private untagged enum with frozen variant order:
 1. `SetEntityTransform(EntityId, WireTransform)`
 2. `RemoveEntity(EntityId)`
 
-`tests/adapter.rs::frozen_payload_round_trips_deterministically` pins a golden
-BLAKE3 digest for the complete encoding of a representative value.
+The 0.2 binary body freezes the same first three variants and appends:
+
+3. `SetConformalFrameTransform(ConformalFrameId,
+   Vec<FrozenConformalGenerator>)`
+
+The positional generator enum has its own frozen variant order, independent of
+the protocol's self-describing JSON tags:
+
+0. `Translation([f64; 3])`
+1. `Rotation([f64; 4])`, in quaternion `wxyz` order
+2. `UniformScale(f64)`
+3. `SphereReflection([f64; 3], f64)`
+
+The protocol caps one frame word at 256 validated generators. Payload encoding
+selects the schema from the envelope's protocol version; decoding accepts only
+the exact matching domain, payload version, and embedded protocol version.
+Tests pin independent BLAKE3 goldens for representative 0.1 and 0.2 payloads.
 
 The project ID and schema coordinates are inside the content-addressed HHHS
 payload. Admission rejects a mismatched project, domain, payload version,
-protocol version, malformed body, or invalid protocol value.
+protocol version, malformed body, or invalid protocol value. Replica namespace
+derivation permanently retains the original 0.1 domain salt, so a payload
+upgrade does not split one project's causal history.
 
 Sender authentication, message-ID uniqueness, and sender-local sequence-policy
 enforcement are deliberately deferred. HHHS entry identity and causality—not a
@@ -120,3 +143,9 @@ The archive contains authored scene history, stable IDs, asset URIs, and asset
 content digests. It does not embed GLB bytes, ephemeral camera/selection state,
 render resources, routes, or local storage metadata. GLB transport therefore
 remains an orthogonal content-addressed bundle concern.
+
+For histories containing only 0.1 payloads, materialized state roots retain the
+exact 0.1 domain and `(project, assets, entities)` encoding. Once a history
+contains a 0.2 entry, its root uses the 0.2 domain and includes the key-sorted
+conformal-frame register map. This preserves exact old archive verification
+while ensuring frame edits are committed by the current state root.

@@ -7,7 +7,7 @@ use hyperscape_hhhs::{DurableProject, MemoryDurability, ProjectId};
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId, EphemeralPresence,
     LocalPeerEnvelope, MessageHeader, MessageId, PeerId, PresenceEnvelope, ProtocolVersion,
-    WireTransform, CURRENT_PROTOCOL_VERSION,
+    WireTransform, CURRENT_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION,
 };
 use hyperscope_app::{
     AppStore, AuthoredRevision, CommitDisposition, LocalPeerDisposition, LocalPeerIngress,
@@ -255,11 +255,15 @@ fn checkpoint_restart_aligns_a_fresh_store_and_continues_the_projection() {
 fn source_checkpoint_codec_is_deterministic_and_rejects_corruption() {
     let source_store = AppStore::default();
     let mut source = AuthoredHhhsShadow::new(project(0x2201)).unwrap();
+    let mut legacy_asset = asset(1, 0xa);
+    legacy_asset.header.version = LEGACY_PROTOCOL_VERSION;
+    let mut legacy_transform = transform(2, 0xe, 3.0);
+    legacy_transform.header.version = LEGACY_PROTOCOL_VERSION;
     block_on(source.dispatch(
         &source_store,
         AuthoredRevision {
             projection_revision: 17,
-            commands: vec![asset(1, 0xa), transform(2, 0xe, 3.0)],
+            commands: vec![legacy_asset, legacy_transform],
         },
     ))
     .unwrap();
@@ -276,6 +280,22 @@ fn source_checkpoint_codec_is_deterministic_and_rejects_corruption() {
         Digest::of(&first).to_hex(),
         "85bd8ee953285a0004a544b4ee62a0327e5fee47f97db372a0a5556a5526fd7d",
         "this golden freezes the complete v0.1 source-checkpoint encoding"
+    );
+
+    let current_store = AppStore::default();
+    let mut current_source = AuthoredHhhsShadow::new(project(0x2201)).unwrap();
+    block_on(current_source.dispatch(
+        &current_store,
+        AuthoredRevision {
+            projection_revision: 17,
+            commands: vec![asset(1, 0xa), transform(2, 0xe, 3.0)],
+        },
+    ))
+    .unwrap();
+    assert_eq!(
+        Digest::of(&current_source.checkpoint().unwrap().encode()).to_hex(),
+        "13722147617f30ccf98f69c67df01737ad668ace31c011e29b913b2501e7bd25",
+        "the unchanged checkpoint codec also binds a current protocol-v0.2 horizon"
     );
 
     let mut wrong_version = first.clone();

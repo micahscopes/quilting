@@ -8,12 +8,13 @@ use hyperscape_hhhs::{
     decode_authored, encode_authored, AdapterError, ApplyRecordWithCheckpointReport,
     AuthoredRecordFrame, DurableProject, MemoryDurability, ProjectArchive, ProjectId,
     ProjectionKey, RecordFrameError, RecordRefusal, StateRow, AUTHORED_RECORD_FRAME_LANE,
-    MAX_AUTHORED_PAYLOAD_BYTES, MAX_PROJECT_ARCHIVE_RECORDS, PAYLOAD_DOMAIN,
+    LEGACY_PAYLOAD_DOMAIN, MAX_AUTHORED_PAYLOAD_BYTES, MAX_PROJECT_ARCHIVE_RECORDS, PAYLOAD_DOMAIN,
     PROJECT_ARCHIVE_DOMAIN,
 };
 use hyperscape_protocol::{
-    AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId, MessageHeader,
-    MessageId, PeerId, ProtocolVersion, WireTransform, CURRENT_PROTOCOL_VERSION,
+    AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, ConformalFrameId, EntityId,
+    MessageHeader, MessageId, PeerId, ProtocolVersion, WireConformalGenerator, WireTransform,
+    CURRENT_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION,
 };
 use std::collections::BTreeSet;
 
@@ -30,15 +31,43 @@ fn entity_id(value: u128) -> EntityId {
 }
 
 fn envelope(sequence: u64, command: AuthoredCommand) -> AuthoredEnvelope {
+    envelope_version(CURRENT_PROTOCOL_VERSION, sequence, command)
+}
+
+fn envelope_version(
+    version: ProtocolVersion,
+    sequence: u64,
+    command: AuthoredCommand,
+) -> AuthoredEnvelope {
     AuthoredEnvelope {
         header: MessageHeader {
-            version: CURRENT_PROTOCOL_VERSION,
+            version,
             message_id: MessageId::from_u128(0x1000 + u128::from(sequence)).unwrap(),
             sender: PeerId::from_u128(0x2000).unwrap(),
             sequence,
         },
         command,
     }
+}
+
+fn frame_id(value: u128) -> ConformalFrameId {
+    ConformalFrameId::from_u128(value).unwrap()
+}
+
+fn set_frame(
+    sequence: u64,
+    frame: ConformalFrameId,
+    generators: Vec<WireConformalGenerator>,
+) -> AuthoredEnvelope {
+    envelope(
+        sequence,
+        AuthoredCommand::SetConformalFrameTransform { frame, generators },
+    )
+}
+
+fn legacy(mut envelope: AuthoredEnvelope) -> AuthoredEnvelope {
+    envelope.header.version = LEGACY_PROTOCOL_VERSION;
+    envelope
 }
 
 fn transform(x: f64) -> WireTransform {
@@ -97,18 +126,82 @@ fn resign_archive(bytes: &mut [u8]) {
 #[test]
 fn frozen_payload_round_trips_deterministically() {
     let project = project(0xaaaa);
-    let authored = upsert(3, asset_id(0xbbbb), "models/cube.glb");
+    let authored = envelope_version(
+        LEGACY_PROTOCOL_VERSION,
+        3,
+        AuthoredCommand::UpsertAsset {
+            asset: AssetDescriptor {
+                id: asset_id(0xbbbb),
+                uri: "models/cube.glb".into(),
+                media_type: Some("model/gltf-binary".into()),
+                content_digest: Some([7; 32]),
+            },
+        },
+    );
     let first = encode_authored(project, &authored).unwrap();
     let second = encode_authored(project, &authored).unwrap();
 
     assert_eq!(first, second);
-    assert_eq!(&first[..PAYLOAD_DOMAIN.len()], PAYLOAD_DOMAIN);
+    assert_eq!(&first[..LEGACY_PAYLOAD_DOMAIN.len()], LEGACY_PAYLOAD_DOMAIN);
     assert_eq!(decode_authored(project, &first).unwrap(), authored);
     assert_eq!(
         Digest::of(&first).to_hex(),
         "ea8e5200857a3e116a20841028d026df030d3afae4ba87feead460b3adb3af90",
         "this golden digest freezes the complete v0.1 payload encoding"
     );
+}
+
+#[test]
+fn current_payload_freezes_one_atomic_conformal_frame_word() {
+    let project = project(0xaaac);
+    let authored = set_frame(
+        5,
+        frame_id(0xbbbd),
+        vec![
+            WireConformalGenerator::sphere_reflection([1.0, 2.0, 3.0], 4.0),
+            WireConformalGenerator::uniform_scale(-2.0),
+        ],
+    );
+    let bytes = encode_authored(project, &authored).unwrap();
+    assert_eq!(&bytes[..PAYLOAD_DOMAIN.len()], PAYLOAD_DOMAIN);
+    assert_eq!(decode_authored(project, &bytes).unwrap(), authored);
+    assert_eq!(
+        Digest::of(&bytes).to_hex(),
+        "e56d59444414258fdc90a269b938546e0a6fc7d983d76c8ebc211a41d41de3bc",
+        "this golden digest freezes the complete v0.2 payload encoding"
+    );
+}
+
+#[test]
+fn conformal_frame_register_survives_durable_restart_and_portable_archive() {
+    let project_id = project(0xaaad);
+    let frame = frame_id(0xbbbe);
+    let first_word = vec![WireConformalGenerator::translation([1.0, 0.0, 0.0])];
+    let second_word = vec![
+        WireConformalGenerator::sphere_reflection([0.0, 1.0, 0.0], 3.0),
+        WireConformalGenerator::uniform_scale(-2.0),
+    ];
+    let mut project = DurableProject::new(project_id).unwrap();
+    block_on(project.admit(&set_frame(1, frame, first_word))).unwrap();
+    block_on(project.admit(&set_frame(2, frame, second_word.clone()))).unwrap();
+
+    let state = project.state().unwrap();
+    assert_eq!(
+        state.conformal_frame_transforms.get(&frame),
+        Some(&second_word)
+    );
+    assert!(matches!(
+        state.rows().get(&hyperscape_hhhs::StateKey::ConformalFrame(frame)),
+        Some(StateRow::ConformalFrameTransform { generators, .. })
+            if generators == &second_word
+    ));
+
+    let durable =
+        DurableProject::recover(project_id, project.durability().bytes().to_vec()).unwrap();
+    assert_eq!(durable.state().unwrap(), state);
+    let archive = project.export_archive().unwrap();
+    let imported = block_on(DurableProject::import_archive(&archive)).unwrap();
+    assert_eq!(imported.state().unwrap(), state);
 }
 
 #[test]
@@ -214,7 +307,7 @@ fn wrong_project_domain_and_versions_are_rejected() {
         decode_authored(expected, &wrong_payload_version),
         Err(AdapterError::WrongPayloadVersion(ProtocolVersion {
             major: 99,
-            minor: 1
+            minor: 2
         }))
     ));
 
@@ -226,7 +319,7 @@ fn wrong_project_domain_and_versions_are_rejected() {
         decode_authored(expected, &wrong_protocol_version),
         Err(AdapterError::WrongProtocolVersion(ProtocolVersion {
             major: 99,
-            minor: 1
+            minor: 2
         }))
     ));
 }
@@ -538,9 +631,32 @@ fn portable_archive_round_trips_deterministically_through_admission() {
     assert_ne!(imported.durability().bytes(), first);
     assert_eq!(
         Digest::of(&first).to_hex(),
-        "282e486c7469a765455e8e41872af98176fcc8d2396be6de82bfb4aaf4af0c52",
-        "this golden digest freezes the complete v0.1 archive encoding"
+        "0c0d9ae6663790989951a31623889a55decebfb016f49d41698192ab3697e7af",
+        "this golden freezes the v0.1 archive container with v0.2 authored records"
     );
+}
+
+#[test]
+fn legacy_v01_records_retain_the_exact_portable_archive_encoding() {
+    let project = project(0x4004);
+    let mut original = DurableProject::new(project).unwrap();
+    block_on(original.admit(&legacy(upsert(1, asset_id(1), "scene.glb")))).unwrap();
+    block_on(original.admit(&legacy(set(2, entity_id(2), 7.0)))).unwrap();
+    block_on(original.admit(&legacy(set(3, entity_id(3), 11.0)))).unwrap();
+
+    let archive = original.export_archive().unwrap();
+    assert_eq!(
+        Digest::of(&archive).to_hex(),
+        "282e486c7469a765455e8e41872af98176fcc8d2396be6de82bfb4aaf4af0c52",
+        "protocol 0.2 support must not rewrite the frozen v0.1 archive"
+    );
+    let imported = block_on(DurableProject::import_archive(&archive)).unwrap();
+    assert_eq!(imported.state().unwrap(), original.state().unwrap());
+    assert!(imported
+        .state()
+        .unwrap()
+        .conformal_frame_transforms
+        .is_empty());
 }
 
 #[test]
