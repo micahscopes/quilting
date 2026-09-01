@@ -16,8 +16,8 @@ use hyperscope_hhhs_shadow::{
     AuthoredHhhsShadow, AuthoredShadowCheckpoint, AuthoredShadowError, AuthoredShadowInitError,
     AuthoredShadowObservation, DurableAuthoredCoordinator, DurableAuthoredDispatchError,
     DurableAuthoredInitError, DurableAuthoredObservation, DurableAuthoredRestoreError,
-    DurableAuthoredSession, DurableAuthoredSessionInitError, DurableLocalPeerError,
-    AUTHORED_SHADOW_CHECKPOINT_DOMAIN,
+    DurableAuthoredSession, DurableAuthoredSessionInitError, DurableCarrierError,
+    DurableCarrierObservation, DurableLocalPeerError, AUTHORED_SHADOW_CHECKPOINT_DOMAIN,
 };
 
 fn project(value: u128) -> ProjectId {
@@ -567,6 +567,129 @@ fn durable_session_restart_rejects_replayed_peer_history_without_writes() {
 }
 
 #[test]
+fn concurrent_carrier_records_converge_independent_of_arrival_order() {
+    let project_id = project(0x2414);
+    let mut source_a = DurableProject::new(project_id).unwrap();
+    let mut source_b = DurableProject::new(project_id).unwrap();
+    let record_a = block_on(source_a.admit(&asset(1, 0xa))).unwrap();
+    let record_b = block_on(source_b.admit(&asset(2, 0xb))).unwrap();
+
+    let left_store = AppStore::default();
+    let mut left = DurableAuthoredSession::new(project_id).unwrap();
+    let left_first = block_on(left.accept_replica_record(&left_store, record_a.clone())).unwrap();
+    let left_second = block_on(left.accept_replica_record(&left_store, record_b.clone())).unwrap();
+    assert!(matches!(
+        left_first.durable,
+        DurableCarrierObservation::Applied {
+            projection_revision: 0,
+            history_len: 1,
+            ..
+        }
+    ));
+    assert!(matches!(
+        left_second.durable,
+        DurableCarrierObservation::Applied {
+            projection_revision: 1,
+            history_len: 2,
+            ..
+        }
+    ));
+
+    let right_store = AppStore::default();
+    let mut right = DurableAuthoredSession::new(project_id).unwrap();
+    block_on(right.accept_replica_record(&right_store, record_b)).unwrap();
+    block_on(right.accept_replica_record(&right_store, record_a)).unwrap();
+
+    assert_eq!(left.project_state().unwrap(), right.project_state().unwrap());
+    assert_eq!(
+        left_store.authored_scene_snapshot(),
+        right_store.authored_scene_snapshot()
+    );
+    assert_eq!(left_store.authored_scene_snapshot().assets.len(), 2);
+}
+
+#[test]
+fn carrier_defers_children_and_duplicates_are_exact_zero_write_noops() {
+    let project_id = project(0x2415);
+    let mut source = DurableProject::new(project_id).unwrap();
+    let parent = block_on(source.admit(&asset(1, 0xa))).unwrap();
+    let child = block_on(source.admit(&asset(2, 0xb))).unwrap();
+
+    let store = AppStore::default();
+    let mut target = DurableAuthoredSession::new(project_id).unwrap();
+    let before_deferred = target.durability().bytes().to_vec();
+    let deferred = block_on(target.accept_replica_record(&store, child.clone())).unwrap();
+    assert!(matches!(
+        deferred.durable,
+        DurableCarrierObservation::Deferred {
+            history_len: 0,
+            ref missing,
+            ..
+        } if missing == &[parent.entry_hash()]
+    ));
+    assert_eq!(deferred.app, None);
+    assert_eq!(target.durability().bytes(), before_deferred);
+    assert_eq!(store.authored_scene_snapshot().projection_revision, None);
+
+    block_on(target.accept_replica_record(&store, parent.clone())).unwrap();
+    block_on(target.accept_replica_record(&store, child)).unwrap();
+    assert_eq!(target.history_len(), 2);
+    assert_eq!(target.observed_projection_revision(), Some(1));
+    let settled_store = store.summary_snapshot();
+    let settled_log = target.durability().bytes().to_vec();
+
+    let duplicate = block_on(target.accept_replica_record(&store, parent)).unwrap();
+    assert!(matches!(
+        duplicate.durable,
+        DurableCarrierObservation::AlreadyPresent { history_len: 2, .. }
+    ));
+    assert_eq!(duplicate.app, None);
+    assert_eq!(target.observed_projection_revision(), Some(1));
+    assert_eq!(target.durability().bytes(), settled_log);
+    assert_eq!(store.summary_snapshot(), settled_store);
+}
+
+#[test]
+fn carrier_persistence_failure_is_atomic_and_retry_survives_restart() {
+    let project_id = project(0x2416);
+    let mut source = DurableProject::new(project_id).unwrap();
+    let record = block_on(source.admit(&asset(1, 0xa))).unwrap();
+    let store = AppStore::default();
+    let mut target = DurableAuthoredSession::new(project_id).unwrap();
+    let before_store = store.summary_snapshot();
+    let before_log = target.durability().bytes().to_vec();
+    target.durability_mut().fail_next_persist();
+
+    assert!(block_on(target.accept_replica_record(&store, record.clone())).is_err());
+    assert_eq!(target.history_len(), 0);
+    assert_eq!(target.observed_projection_revision(), None);
+    assert_eq!(target.durability().bytes(), before_log);
+    assert_eq!(store.summary_snapshot(), before_store);
+
+    let applied = block_on(target.accept_replica_record(&store, record.clone())).unwrap();
+    assert!(matches!(
+        applied.durable,
+        DurableCarrierObservation::Applied {
+            projection_revision: 0,
+            history_len: 1,
+            ..
+        }
+    ));
+    let durable_bytes = target.durability().bytes().to_vec();
+    let mut recovered = DurableAuthoredSession::recover(project_id, durable_bytes.clone()).unwrap();
+    let recovered_store = AppStore::default();
+    recovered.restore_store(&recovered_store).unwrap().unwrap();
+    let before_duplicate = recovered_store.summary_snapshot();
+    let duplicate = block_on(recovered.accept_replica_record(&recovered_store, record)).unwrap();
+    assert!(matches!(
+        duplicate.durable,
+        DurableCarrierObservation::AlreadyPresent { history_len: 1, .. }
+    ));
+    assert_eq!(recovered.durability().bytes(), durable_bytes);
+    assert_eq!(recovered_store.summary_snapshot(), before_duplicate);
+}
+
+#[test]
 fn explicit_archive_adoption_bootstraps_a_fresh_local_cursor_once() {
     let project_id = project(0x2412);
     let first = asset(1, 0xa);
@@ -828,6 +951,63 @@ impl AsyncTransactionSink for BypassOnPersist {
         }
         self.inner.persist(transaction).await
     }
+}
+
+#[test]
+fn inbound_carrier_survives_an_appstore_bypass_as_recoverable_authority() {
+    let project_id = project(0x2417);
+    let mut source = DurableProject::new(project_id).unwrap();
+    let record = block_on(source.admit(&asset(1, 0xa))).unwrap();
+    let store = AppStore::default();
+    let durable_project = DurableProject::with_sink(
+        project_id,
+        BypassOnPersist {
+            store: store.clone(),
+            inner: MemoryDurability::default(),
+            bypass: Some(AuthoredRevision {
+                projection_revision: 99,
+                commands: vec![asset(99, 0xb)],
+            }),
+        },
+    )
+    .unwrap();
+    let mut target = DurableAuthoredSession::from_project(durable_project).unwrap();
+
+    let report = block_on(target.accept_replica_record(&store, record.clone())).unwrap();
+    assert!(matches!(
+        report.app,
+        Some(Err(ref fault))
+            if fault.projection_revision == 0
+                && fault.history_len == 1
+                && fault.reason.contains("baseline changed")
+    ));
+    assert!(matches!(
+        report.durable,
+        DurableCarrierObservation::Applied {
+            projection_revision: 0,
+            history_len: 1,
+            ..
+        }
+    ));
+    assert_eq!(target.observed_projection_revision(), Some(0));
+    assert_eq!(store.authored_scene_snapshot().projection_revision, Some(99));
+    let settled_log = target.durability().inner.bytes().to_vec();
+
+    assert!(matches!(
+        block_on(target.accept_replica_record(&store, record)),
+        Err(DurableCarrierError::Poisoned { .. })
+    ));
+    assert_eq!(target.durability().inner.bytes(), settled_log);
+
+    let recovered = DurableAuthoredSession::recover(project_id, settled_log).unwrap();
+    let recovered_store = AppStore::default();
+    recovered.restore_store(&recovered_store).unwrap().unwrap();
+    assert_eq!(recovered_store.authored_scene_snapshot().projection_revision, Some(0));
+    assert!(recovered_store
+        .authored_scene_snapshot()
+        .assets
+        .iter()
+        .any(|asset| asset.id == AssetId::from_u128(0xa).unwrap()));
 }
 
 #[test]

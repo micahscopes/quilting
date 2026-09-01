@@ -28,9 +28,10 @@
 //! restart, [`DurableAuthoredCoordinator::restore_store`] installs canonical
 //! HHHS materialization into a fresh AppStore without fabricating commands.
 //!
-//! This crate accepts only [`AuthoredRevision`]. Camera motion, frame clocks,
-//! presence, selection, animation, renderer state, and GPU resources are not
-//! representable at this boundary.
+//! This crate accepts local [`AuthoredRevision`] values and typed inbound
+//! [`ReplicaRecord`] values. Camera motion, frame clocks, presence, selection,
+//! animation, renderer state, and GPU resources are not representable at this
+//! durable authored boundary.
 //!
 //! The coordinator must be the exclusive path for authored revisions on its
 //! AppStore. Other AppStore event kinds may still be dispatched normally. A
@@ -44,7 +45,8 @@
 use hhhs::{Digest, EntryHash};
 use hhhs_replica::{AsyncTransactionSink, ReplicaRecord};
 use hyperscape_hhhs::{
-    AdapterError, DurableProject, MemoryDurability, ProjectId, ProjectState, ProjectionKey,
+    decode_authored, AdapterError, ApplyRecordWithCheckpointReport, DurableProject,
+    MemoryDurability, ProjectId, ProjectState, ProjectionKey, RecordRefusal,
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId, LocalPeerEnvelope,
@@ -535,6 +537,43 @@ pub struct DurableLocalPeerDispatch {
     pub durable: Option<DurableAuthoredDispatch>,
 }
 
+/// Durable outcome of offering one typed HHHS record from a carrier.
+///
+/// Only `Applied` advances the receiver-local projection cursor. Duplicate,
+/// deferred, and refused records leave both the cursor and AppStore unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DurableCarrierObservation {
+    Applied {
+        projection_revision: u64,
+        entry: EntryHash,
+        history_len: usize,
+    },
+    AlreadyPresent {
+        entry: EntryHash,
+        history_len: usize,
+    },
+    Deferred {
+        entry: EntryHash,
+        missing: Vec<EntryHash>,
+        history_len: usize,
+    },
+    Refused {
+        entry: EntryHash,
+        reason: RecordRefusal,
+        history_len: usize,
+    },
+}
+
+/// One carrier admission with its independent rebuildable-projection result.
+/// `app` is present only when a newly durable record required projection
+/// synchronization. An applied carrier record remains committed even if that
+/// synchronization detects a concurrent AppStore bypass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableCarrierDispatch {
+    pub app: Option<Result<AppCommit, DurableAuthoredFault>>,
+    pub durable: DurableCarrierObservation,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DurableLocalPeerError {
     #[error(transparent)]
@@ -543,6 +582,33 @@ pub enum DurableLocalPeerError {
     ProjectionRevisionOverflow,
     #[error(transparent)]
     Durable(#[from] DurableAuthoredDispatchError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DurableCarrierError {
+    #[error("inbound carrier projection revision overflow")]
+    ProjectionRevisionOverflow,
+    #[error(
+        "AppStore authored projection revision {actual:?} does not match durable cursor {expected:?}"
+    )]
+    StoreProjectionRevision {
+        expected: Option<u64>,
+        actual: Option<u64>,
+    },
+    #[error("AppStore authored projection content does not match durable history")]
+    StoreProjectionContent,
+    #[error(transparent)]
+    Peer(#[from] LocalPeerIngressError),
+    #[error(transparent)]
+    Adapter(#[from] AdapterError),
+    #[error(
+        "durable authored coordinator is poisoned by projection {}; skipped carrier entry {skipped_entry:?}",
+        original.projection_revision
+    )]
+    Poisoned {
+        original: DurableAuthoredFault,
+        skipped_entry: EntryHash,
+    },
 }
 
 /// Failure to construct the single-writer authored session from its durable
@@ -746,6 +812,18 @@ where
             )
             .await
     }
+
+    /// Consume one typed record from a carrier through the same durable
+    /// single-writer boundary as local authoring.
+    pub async fn accept_replica_record(
+        &mut self,
+        store: &AppStore,
+        record: ReplicaRecord,
+    ) -> Result<DurableCarrierDispatch, DurableCarrierError> {
+        self.coordinator
+            .accept_replica_record(&mut self.ingress, store, record)
+            .await
+    }
 }
 
 impl DurableAuthoredCoordinator<MemoryDurability> {
@@ -879,6 +957,151 @@ impl<D> DurableAuthoredCoordinator<D>
 where
     D: AsyncTransactionSink,
 {
+    /// Persist one carrier record and the receiver-local cursor atomically,
+    /// then replace the AppStore authored read model with canonical HHHS
+    /// materialization. Remote commands are never replayed in arrival order.
+    pub async fn accept_replica_record(
+        &mut self,
+        ingress: &mut LocalPeerIngress,
+        store: &AppStore,
+        record: ReplicaRecord,
+    ) -> Result<DurableCarrierDispatch, DurableCarrierError> {
+        let entry = record.entry_hash();
+        let envelope = decode_authored(self.project_id(), &record.entry().payload)?;
+        if let Some(original) = &self.fault {
+            return Err(DurableCarrierError::Poisoned {
+                original: original.clone(),
+                skipped_entry: entry,
+            });
+        }
+
+        let app_baseline = store.authored_scene_snapshot();
+        if app_baseline.projection_revision != self.observed_projection_revision {
+            return Err(DurableCarrierError::StoreProjectionRevision {
+                expected: self.observed_projection_revision,
+                actual: app_baseline.projection_revision,
+            });
+        }
+        if !self.expected.matches_app(&app_baseline) {
+            return Err(DurableCarrierError::StoreProjectionContent);
+        }
+
+        let projection_revision = self
+            .observed_projection_revision
+            .map_or(Some(0), |revision| revision.checked_add(1))
+            .ok_or(DurableCarrierError::ProjectionRevisionOverflow)?;
+        let admission = self
+            .project
+            .apply_record_with_projection_checkpoint(
+                record,
+                durable_authored_cursor_key(),
+                projection_revision.to_le_bytes().to_vec(),
+            )
+            .await?;
+
+        match admission {
+            ApplyRecordWithCheckpointReport::AlreadyPresent { entry } => {
+                ingress.observe_durable_authored(&envelope)?;
+                Ok(DurableCarrierDispatch {
+                    app: None,
+                    durable: DurableCarrierObservation::AlreadyPresent {
+                        entry,
+                        history_len: self.project.history_len(),
+                    },
+                })
+            }
+            ApplyRecordWithCheckpointReport::Deferred { entry, missing } => {
+                Ok(DurableCarrierDispatch {
+                    app: None,
+                    durable: DurableCarrierObservation::Deferred {
+                        entry,
+                        missing,
+                        history_len: self.project.history_len(),
+                    },
+                })
+            }
+            ApplyRecordWithCheckpointReport::Refused { entry, reason } => {
+                Ok(DurableCarrierDispatch {
+                    app: None,
+                    durable: DurableCarrierObservation::Refused {
+                        entry,
+                        reason,
+                        history_len: self.project.history_len(),
+                    },
+                })
+            }
+            ApplyRecordWithCheckpointReport::Applied { entry } => {
+                ingress.observe_durable_authored(&envelope)?;
+                self.observed_projection_revision = Some(projection_revision);
+                let state = match self.project.state() {
+                    Ok(state) => state,
+                    Err(error) => {
+                        return Ok(self.faulted_carrier_dispatch(
+                            projection_revision,
+                            entry,
+                            error.to_string(),
+                        ));
+                    }
+                };
+                self.expected = SequentialProjection::from_state(&state);
+
+                let cursor = self
+                    .project
+                    .projection_checkpoint(&durable_authored_cursor_key());
+                let cursor_matches = cursor.is_some_and(|cursor| {
+                    cursor.is_intact()
+                        && cursor.history_root.as_bytes() == &state.history_root
+                        && cursor.bytes() == projection_revision.to_le_bytes()
+                });
+                if !cursor_matches {
+                    return Ok(self.faulted_carrier_dispatch(
+                        projection_revision,
+                        entry,
+                        "receiver-local source cursor did not commit at the inbound history horizon"
+                            .into(),
+                    ));
+                }
+
+                let app = match store.synchronize_authored_projection_if_current(
+                    app_baseline.projection_revision,
+                    self.expected.snapshot(projection_revision),
+                ) {
+                    Ok(app) => app,
+                    Err(error) => {
+                        return Ok(self.faulted_carrier_dispatch(
+                            projection_revision,
+                            entry,
+                            error.to_string(),
+                        ));
+                    }
+                };
+                if app.disposition != CommitDisposition::Applied {
+                    return Ok(self.faulted_carrier_dispatch(
+                        projection_revision,
+                        entry,
+                        "AppStore ignored a projection already committed to HHHS".into(),
+                    ));
+                }
+                if !self.expected.matches_app(&store.authored_scene_snapshot()) {
+                    return Ok(self.faulted_carrier_dispatch(
+                        projection_revision,
+                        entry,
+                        "AppStore projection diverged after inbound carrier admission".into(),
+                    ));
+                }
+
+                Ok(DurableCarrierDispatch {
+                    app: Some(Ok(app)),
+                    durable: DurableCarrierObservation::Applied {
+                        projection_revision,
+                        entry,
+                        history_len: self.project.history_len(),
+                    },
+                })
+            }
+        }
+    }
+
     /// Admit one local Blender/browser peer frame without making ephemeral
     /// presence durable.
     ///
@@ -1093,6 +1316,29 @@ where
             },
         }
     }
+
+    fn faulted_carrier_dispatch(
+        &mut self,
+        projection_revision: u64,
+        entry: EntryHash,
+        reason: String,
+    ) -> DurableCarrierDispatch {
+        let fault = DurableAuthoredFault {
+            projection_revision,
+            durable_entry: entry,
+            history_len: self.project.history_len(),
+            reason,
+        };
+        self.fault = Some(fault.clone());
+        DurableCarrierDispatch {
+            app: Some(Err(fault)),
+            durable: DurableCarrierObservation::Applied {
+                projection_revision,
+                entry,
+                history_len: self.project.history_len(),
+            },
+        }
+    }
 }
 
 /// Explicit, opt-in coordinator for authored-revision behavior shadowing.
@@ -1100,8 +1346,8 @@ where
 /// Commands are mirrored in their `AuthoredRevision::commands` vector order;
 /// sender sequence numbers are metadata, not a sorting authority. Each local
 /// admission consequently observes the preceding command in that vector.
-/// Concurrent peer history belongs at `DurableProject::apply_records`, outside
-/// this local AppStore observer.
+/// Concurrent peer history belongs at [`DurableAuthoredSession::accept_replica_record`],
+/// outside this local arrival-ordered diagnostic observer.
 pub struct AuthoredHhhsShadow<D = MemoryDurability> {
     project: DurableProject<D>,
     expected: SequentialProjection,
