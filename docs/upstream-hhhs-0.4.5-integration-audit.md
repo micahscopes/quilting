@@ -2,7 +2,10 @@
 
 Date: 2026-09-01
 
-Reviewed candidate: `hhhs-rs` `2bfba3662cfb175b9700393acc38ee09c507ccc4`
+Reviewed candidate through: `hhhs-rs`
+`e68402fe3efe6a22212c804f84c038ee3838d499`
+
+Initial audit baseline: `2bfba3662cfb175b9700393acc38ee09c507ccc4`
 
 Status: integration audit, not a release qualification or an HHHS design
 specification. This document names behavior Hyperscope needs and leaves the
@@ -25,13 +28,25 @@ storage handles, direct sink access, or application-specific causal retry
 machinery. The strict host encapsulation is valuable and should not be
 weakened to ease that migration.
 
-The audit did reveal several generic composition gaps. The first two affect
-correctness or bounded operation for the intended browser/session vertical;
-the rest are ergonomic or measured-performance requests.
+The audit did reveal several generic composition gaps. Upstream resolved both
+initial P0 requests in subsequent pushed commits. The remaining requests are
+ergonomic, integration, or measured-performance work; the exclusive host's
+read-only reactive boundary remains the one issue directly on Hyperscope's
+0.4.5 migration path.
 
-## P0: correctness and bounded-operation requests
+## Resolved P0 requests
 
 ### Restricted local-only durable transactions
+
+Resolved upstream by `2ed092f` (`Persist receiver-local state through durable
+hosts`). `DurableReplicaHost::prepare_local_transaction` and
+`commit_prepared_local_transaction` retain host ownership, exact recovery-state
+validation, lease fencing, persist-before-publish ordering, and ambiguous
+failure handling without admitting a public history entry. Hyperscope should
+use this path for projection checkpoints rather than preserving its 0.4.4
+manual sink/storage commit.
+
+The original issue statement follows for rationale and acceptance history.
 
 `DurableReplicaHost` can persist and publish a prepared public admission, but
 cannot advance receiver-local evidence, secrets, projection checkpoints, or
@@ -61,6 +76,16 @@ commit, or a narrower checkpoint operation. The behavioral boundary matters
 more than the name.
 
 ### End-to-end bounded browser projection delivery
+
+Resolved upstream by `e68402f` (`Bound browser projections with guarded pull
+credits`). Protocol v5 gives each subscriber one worker-side retained payload
+slot and one explicit pull credit, isolates subscriber generations, rejects
+unsolicited/uncredited projection frames, accounts retained bytes, and covers
+stalled consumers in real Chromium. This is the bounded confirmation and
+correction path Hyperscope requested; it does not replace window-local
+reversible prediction.
+
+The original issue statement follows for rationale and acceptance history.
 
 `WorkerEventBuffer` correctly bounds in-process application events and each
 projection subscription independently. Its own documentation also correctly
@@ -98,6 +123,11 @@ in-process oracle returns reply and events together. Either a Close handler
 must be unable to emit events, or accepted final events must cross an
 acknowledged barrier before `Closed` becomes observable. Add browser parity
 coverage proving that `Closed` is genuinely terminal.
+
+Resolved upstream by `03e67df` (`Make browser worker close a terminal
+barrier`). Final accepted events cross the close exchange before the correlated
+terminal reply; once `Closed` is observed, worker termination cannot discard a
+later accepted event.
 
 ## P1: high-value integration requests
 
@@ -269,9 +299,50 @@ Pending upstream feedback, Hyperscope should:
 - keep the exact upstream revision pinned until the full dependency graph and
   wire generation migrate together.
 
+## Exact downstream adoption probe
+
+An isolated Quilting worktree at `6f84b52` was checked against the exact
+`e68402f` dependency revision without modifying the production pin. The
+resulting compile failures are deliberate 0.4.5 ownership breaks concentrated
+in `hyperscape-hhhs`, not broad ecosystem churn:
+
+- `AsyncTransactionSink` now reports writer-lease and cached exact recovery
+  state and receives the expected state on every persist;
+- `DurableReplicaHost::new` is fallible and rejects the separately retained
+  `Arc<MemoryStorage>` used by the old adapter;
+- direct `replica()`, `durability()`, and `durability_mut()` escape hatches are
+  gone in favor of host preparation, snapshot, and commit methods;
+- projection checkpoint persistence can move directly to the new restricted
+  local transaction path;
+- tests need a shared observation/failure-control handle or the upstream
+  `hhhs-testkit` durability sink instead of mutable sink access.
+
+The only unresolved architectural choice exposed by the probe is reactive
+observation. The current `state_stream` and `state_signal_vec` methods clone the
+same storage behind the durable writer. Their only current consumers are
+adapter tests, while production application FRP already observes committed
+`AppStore` read models. Hyperscope should neither keep that aliased storage nor
+invent a second mutable replica. Adopt one of these explicit outcomes:
+
+1. upstream provides a host-issued, structurally read-only reactive view or
+   host-owned adapter; or
+2. Hyperscope removes those unused durable-project reactive convenience
+   methods and keeps application FRP downstream of committed host snapshots.
+
+Until that choice is settled and the entire HHHS dependency graph moves
+together, production remains pinned to immutable `v0.4.4`. This is a migration
+containment decision, not a negative qualification of the 0.4.5 candidate.
+
 ## Audit evidence
 
 At the reviewed revision:
+
+- an isolated downstream `cargo check` against exact `e68402f` reached only the
+  ownership/API migration points enumerated above; the production worktree and
+  `v0.4.4` lock remained unchanged;
+- upstream's protocol-v5 browser projection suite passed 20/20 in real
+  Chromium after the retained-byte accounting and uncredited-frame rejection
+  regressions were added;
 
 - `cargo test -p hhhs-session --all-features --quiet`: green across the
   package's seven test/example suites (95 tests total);
