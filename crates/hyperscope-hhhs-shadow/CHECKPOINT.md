@@ -32,14 +32,19 @@ encoding. The digest detects corruption; it is not an authority signature.
   newly selected local source establishes that cursor.
 - A cursor mismatch against a non-fresh AppStore is rejected. It is never
   silently overwritten.
+- `DurableAuthoredCoordinator::recover` validates the receiver-local HHHS
+  cursor at the recovered history root. `restore_store` then installs the
+  canonical materialized asset/entity snapshot into an empty AppStore without
+  adding an HHHS entry or fabricating source envelopes. Exact parity is a
+  no-op; divergent non-empty stores are rejected.
 
 ## Atomic-persistence gate
 
-The pinned HHHS 0.4.4 API now provides authority-neutral local co-transaction
+The pinned HHHS 0.4.4 API provides authority-neutral local co-transaction
 attachments, including open-authority preparation, for one admitted entry.
-That removes the upstream API blocker for binding a source checkpoint to an
-exact entry and post-admission history horizon, but this adapter has not yet
-wired that seam.
+`DurableAuthoredCoordinator` uses that seam to persist a one-envelope authored
+admission and the receiver-local source cursor atomically before publishing its
+rebuildable AppStore projection.
 
 A separate atomicity question remains: one source `AuthoredRevision` may carry
 several commands while the diagnostic shadow currently admits one HHHS entry
@@ -47,6 +52,6 @@ per command. Attaching the cursor to the final entry would not prevent a
 durable prefix if an earlier entry succeeded and a later one failed. Before
 this coordinator becomes application authority, choose and test one bounded
 application-revision payload, a generic prepared batch, or an equivalent
-resumable design, then persist its exact-horizon checkpoint through the 0.4.4
-attachment seam. Until both pieces land, the portable codec and validation are
-ready but live browser checkpoint persistence remains deliberately gated.
+resumable design. Until that lands, the authoritative coordinator deliberately
+accepts exactly one command per revision; the older diagnostic shadow retains
+its explicit partial-prefix reporting for multi-command experiments.

@@ -24,7 +24,9 @@
 //! one-envelope revision. It atomically persists that envelope and a
 //! receiver-local source cursor before compare-and-dispatching the rebuildable
 //! AppStore projection. It deliberately rejects multi-command revisions rather
-//! than inheriting the diagnostic shadow's partial-prefix failure mode.
+//! than inheriting the diagnostic shadow's partial-prefix failure mode. After
+//! restart, [`DurableAuthoredCoordinator::restore_store`] installs canonical
+//! HHHS materialization into a fresh AppStore without fabricating commands.
 //!
 //! This crate accepts only [`AuthoredRevision`]. Camera motion, frame clocks,
 //! presence, selection, animation, renderer state, and GPU resources are not
@@ -49,9 +51,9 @@ use hyperscape_protocol::{
     WireTransform,
 };
 use hyperscope_app::{
-    AppCommit, AppEvent, AppStore, AuthoredProjectionDispatchError, AuthoredRevision,
-    AuthoredSceneReadModel, CommitDisposition, LocalAuthoredPreparation, LocalPeerIngress,
-    LocalPeerIngressError, LocalPeerReceipt, ReduceError,
+    AppCommit, AppEvent, AppStore, AuthoredEntityReadModel, AuthoredProjectionDispatchError,
+    AuthoredProjectionSnapshot, AuthoredRevision, AuthoredSceneReadModel, CommitDisposition,
+    LocalAuthoredPreparation, LocalPeerIngress, LocalPeerIngressError, LocalPeerReceipt, ReduceError,
 };
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -404,6 +406,18 @@ impl SequentialProjection {
                 self.entity_transforms.get(&entity.entity) == Some(&entity.transform)
             })
     }
+
+    fn snapshot(&self, projection_revision: u64) -> AuthoredProjectionSnapshot {
+        AuthoredProjectionSnapshot {
+            projection_revision,
+            assets: self.assets.values().cloned().collect(),
+            entities: self
+                .entity_transforms
+                .iter()
+                .map(|(&entity, &transform)| AuthoredEntityReadModel { entity, transform })
+                .collect(),
+        }
+    }
 }
 
 /// Permanent evidence that HHHS committed an authored envelope but its
@@ -462,6 +476,28 @@ pub enum DurableAuthoredDispatchError {
         original: DurableAuthoredFault,
         skipped_projection_revision: u64,
     },
+}
+
+/// Failure to align a rebuildable AppStore projection with recovered HHHS
+/// authority.
+#[derive(Debug, thiserror::Error)]
+pub enum DurableAuthoredRestoreError {
+    #[error(
+        "durable authored coordinator is poisoned by projection {}",
+        original.projection_revision
+    )]
+    Poisoned { original: DurableAuthoredFault },
+    #[error(
+        "AppStore authored projection revision {actual:?} does not match durable cursor {expected:?}"
+    )]
+    StoreProjectionRevision {
+        expected: Option<u64>,
+        actual: Option<u64>,
+    },
+    #[error("AppStore authored projection content does not match durable history")]
+    StoreProjectionContent,
+    #[error(transparent)]
+    Store(#[from] ReduceError),
 }
 
 /// Result of one durable-first authored dispatch. The record in `Applied` is
@@ -590,6 +626,61 @@ impl<D> DurableAuthoredCoordinator<D> {
 
     pub fn durability_mut(&mut self) -> &mut D {
         self.project.durability_mut()
+    }
+
+    /// Restore recovered HHHS materialization into an empty AppStore authored
+    /// lane without inventing authored commands or adding durable history.
+    ///
+    /// Exact parity is an idempotent no-op. A non-empty divergent AppStore is
+    /// rejected rather than overwritten. The reducer validates and installs
+    /// the canonical snapshot atomically under the AppStore lock.
+    pub fn restore_store(
+        &self,
+        store: &AppStore,
+    ) -> Result<Option<AppCommit>, DurableAuthoredRestoreError> {
+        if let Some(original) = &self.fault {
+            return Err(DurableAuthoredRestoreError::Poisoned {
+                original: original.clone(),
+            });
+        }
+
+        let baseline = store.authored_scene_snapshot();
+        if baseline.projection_revision == self.observed_projection_revision
+            && self.expected.matches_app(&baseline)
+        {
+            return Ok(None);
+        }
+        if baseline.projection_revision.is_some()
+            || !baseline.assets.is_empty()
+            || !baseline.entities.is_empty()
+        {
+            if baseline.projection_revision != self.observed_projection_revision {
+                return Err(DurableAuthoredRestoreError::StoreProjectionRevision {
+                    expected: self.observed_projection_revision,
+                    actual: baseline.projection_revision,
+                });
+            }
+            return Err(DurableAuthoredRestoreError::StoreProjectionContent);
+        }
+
+        let Some(projection_revision) = self.observed_projection_revision else {
+            return Err(DurableAuthoredRestoreError::StoreProjectionContent);
+        };
+        let commit = store.dispatch(AppEvent::AuthoredProjectionRestored(
+            self.expected.snapshot(projection_revision),
+        ))?;
+        let restored = store.authored_scene_snapshot();
+        if restored.projection_revision != self.observed_projection_revision {
+            return Err(DurableAuthoredRestoreError::StoreProjectionRevision {
+                expected: self.observed_projection_revision,
+                actual: restored.projection_revision,
+            });
+        }
+        if commit.disposition != CommitDisposition::Applied || !self.expected.matches_app(&restored)
+        {
+            return Err(DurableAuthoredRestoreError::StoreProjectionContent);
+        }
+        Ok(Some(commit))
     }
 }
 

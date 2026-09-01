@@ -54,15 +54,27 @@ envelope retries successfully. Completion happens only after HHHS admission.
 Presence continues through the direct ephemeral AppStore lane and produces no
 HHHS entry or checkpoint.
 
+Restart restoration now follows the same authority split. Recovery validates
+the receiver-local cursor against the current HHHS history root, derives one
+canonical key-sorted `AuthoredProjectionSnapshot` from HHHS materialization,
+and installs it through a dedicated atomic AppStore reducer event. The restore
+does not manufacture authored envelopes, sender sequences, removals, or HHHS
+history. Exact parity is an idempotent no-op; a non-empty store with either a
+different cursor or different content is rejected without overwriting it.
+
+The end-to-end coordinator test proves that restore leaves durable bytes,
+history length, and materialized HHHS state unchanged, survives a second
+idempotent call, refuses both revision and content divergence, and then accepts
+the next local-peer envelope at the succeeding projection revision.
+
 ## Deliberate non-goals
 
 This does not claim atomicity across HHHS and an in-memory UI projection.
 Instead, HHHS is the authority and AppStore is a rebuildable projection with a
 compare-and-dispatch fence. Multi-command revisions remain outside the
 authoritative path until they have an explicit batch payload/protocol. A
-recovered nonempty HHHS project also requires its AppStore scene projection to
-be restored before new ingress; cursor recovery alone intentionally does not
-invent or duplicate authored commands.
+recovered nonempty HHHS project must restore its fresh AppStore projection
+before new ingress; the coordinator now supplies that explicit restore seam.
 
 No browser, GPU device, WebGPU context, server, or Blender process was started
 for this CPU-only slice while another workload was exercising the shared GPU.

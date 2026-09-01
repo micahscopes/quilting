@@ -15,7 +15,8 @@ use hyperscope_app::{
 use hyperscope_hhhs_shadow::{
     AuthoredHhhsShadow, AuthoredShadowCheckpoint, AuthoredShadowError, AuthoredShadowInitError,
     AuthoredShadowObservation, DurableAuthoredCoordinator, DurableAuthoredDispatchError,
-    DurableAuthoredObservation, DurableLocalPeerError, AUTHORED_SHADOW_CHECKPOINT_DOMAIN,
+    DurableAuthoredObservation, DurableAuthoredRestoreError, DurableLocalPeerError,
+    AUTHORED_SHADOW_CHECKPOINT_DOMAIN,
 };
 
 fn project(value: u128) -> ProjectId {
@@ -402,6 +403,102 @@ fn durable_first_failure_publishes_nothing_and_retry_recovers_the_cursor() {
     assert_eq!(recovered.observed_projection_revision(), Some(41));
     assert_eq!(recovered.history_len(), 1);
     assert_eq!(recovered.project_state().unwrap(), coordinator.project_state().unwrap());
+}
+
+#[test]
+fn durable_recovery_restores_a_fresh_store_without_fabricating_history() {
+    let project_id = project(0x2410);
+    let source_store = AppStore::default();
+    let mut source = DurableAuthoredCoordinator::new(project_id).unwrap();
+    block_on(source.dispatch(
+        &source_store,
+        AuthoredRevision {
+            projection_revision: 7,
+            commands: vec![asset(1, 0xa)],
+        },
+    ))
+    .unwrap();
+    block_on(source.dispatch(
+        &source_store,
+        AuthoredRevision {
+            projection_revision: 8,
+            commands: vec![transform(2, 0xe, 3.0)],
+        },
+    ))
+    .unwrap();
+
+    let expected_scene = source_store.authored_scene_snapshot();
+    let durable_bytes = source.durability().bytes().to_vec();
+    let mut recovered =
+        DurableAuthoredCoordinator::recover(project_id, durable_bytes.clone()).unwrap();
+    let recovered_state = recovered.project_state().unwrap();
+    let fresh_store = AppStore::default();
+
+    let commit = recovered.restore_store(&fresh_store).unwrap().unwrap();
+    assert_eq!(commit.disposition, CommitDisposition::Applied);
+    assert_eq!(fresh_store.authored_scene_snapshot(), expected_scene);
+    assert_eq!(recovered.history_len(), 2);
+    assert_eq!(recovered.project_state().unwrap(), recovered_state);
+    assert_eq!(recovered.durability().bytes(), durable_bytes);
+
+    let before_second_restore = fresh_store.summary_snapshot();
+    assert_eq!(recovered.restore_store(&fresh_store).unwrap(), None);
+    assert_eq!(fresh_store.summary_snapshot(), before_second_restore);
+    assert_eq!(recovered.history_len(), 2);
+    assert_eq!(recovered.durability().bytes(), durable_bytes);
+
+    let mismatched_store = AppStore::default();
+    mismatched_store
+        .dispatch(hyperscope_app::AppEvent::AuthoredRevision(
+            AuthoredRevision {
+                projection_revision: 99,
+                commands: vec![asset(99, 0xb)],
+            },
+        ))
+        .unwrap();
+    let mismatched_before = mismatched_store.authored_scene_snapshot();
+    assert!(matches!(
+        recovered.restore_store(&mismatched_store),
+        Err(DurableAuthoredRestoreError::StoreProjectionRevision {
+            expected: Some(8),
+            actual: Some(99),
+        })
+    ));
+    assert_eq!(mismatched_store.authored_scene_snapshot(), mismatched_before);
+    assert_eq!(recovered.history_len(), 2);
+    assert_eq!(recovered.durability().bytes(), durable_bytes);
+
+    let divergent_store = AppStore::default();
+    divergent_store
+        .dispatch(hyperscope_app::AppEvent::AuthoredRevision(
+            AuthoredRevision {
+                projection_revision: 8,
+                commands: vec![asset(98, 0xb)],
+            },
+        ))
+        .unwrap();
+    let divergent_before = divergent_store.authored_scene_snapshot();
+    assert!(matches!(
+        recovered.restore_store(&divergent_store),
+        Err(DurableAuthoredRestoreError::StoreProjectionContent)
+    ));
+    assert_eq!(divergent_store.authored_scene_snapshot(), divergent_before);
+    assert_eq!(recovered.history_len(), 2);
+    assert_eq!(recovered.durability().bytes(), durable_bytes);
+
+    let mut ingress = LocalPeerIngress::new(8).unwrap();
+    let continued = block_on(recovered.accept_local_peer(
+        &mut ingress,
+        &fresh_store,
+        LocalPeerEnvelope::Authored(asset(3, 0xb)),
+        1.0,
+    ))
+    .unwrap();
+    assert_eq!(continued.peer.disposition, LocalPeerDisposition::Applied);
+    assert_eq!(continued.peer.projection_revision, Some(9));
+    assert!(continued.durable.is_some());
+    assert_eq!(recovered.history_len(), 3);
+    assert_eq!(fresh_store.authored_scene_snapshot().projection_revision, Some(9));
 }
 
 #[test]
