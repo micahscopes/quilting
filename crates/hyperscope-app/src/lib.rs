@@ -583,6 +583,16 @@ pub struct AppCommit {
     pub published_ui: bool,
 }
 
+/// One transactionally staged deselection integrated at the current virtual
+/// frame boundary. Interaction and navigation keep their independent sequence
+/// domains while observers see only the final coherent state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectionClearDispatch {
+    pub interaction_sequence: u64,
+    pub navigation_sequence: u64,
+    pub commit: AppCommit,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssetStatus {
     Loading {
@@ -2775,6 +2785,51 @@ impl AppStore {
             self.flush_read_models();
         }
         Ok((sequence, commit))
+    }
+
+    /// Clear transient pointer state and detach selected focus as one staged
+    /// application transaction, then integrate both at the current frame time.
+    /// The focus sphere, focus enablement, and inversion are deliberately
+    /// preserved by `DetachFocus`.
+    pub fn dispatch_selection_clear(&self) -> Result<SelectionClearDispatch, ReduceError> {
+        let dispatch = {
+            let mut state = self.lock_state();
+            let mut staged = state.clone();
+            let at_seconds = staged.frame_elapsed_seconds;
+            let interaction_sequence = staged
+                .next_direct_input_sequence
+                .ok_or(ReduceError::InputSequenceExhausted)?;
+            let interaction_commit = staged.reduce(AppEvent::Input(Timed {
+                sequence: interaction_sequence,
+                at_seconds,
+                value: SemanticAction::Interact(InteractionAction::ClearPointer),
+            }))?;
+            let navigation_sequence = staged.navigation.next_sequence();
+            let navigation_commit = staged.reduce(AppEvent::Input(Timed {
+                sequence: navigation_sequence,
+                at_seconds,
+                value: SemanticAction::Navigate(NavigationAction::DetachFocus),
+            }))?;
+            if !interaction_commit.effects.is_empty() || !navigation_commit.effects.is_empty() {
+                return Err(ReduceError::EffectContract(
+                    "selection clear queueing emitted an unexpected platform effect",
+                ));
+            }
+            let commit = staged.reduce(AppEvent::Frame(FrameTick {
+                elapsed_seconds: at_seconds,
+                delta_seconds: 0.0,
+            }))?;
+            *state = staged;
+            SelectionClearDispatch {
+                interaction_sequence,
+                navigation_sequence,
+                commit,
+            }
+        };
+        if dispatch.commit.published_ui {
+            self.flush_read_models();
+        }
+        Ok(dispatch)
     }
 
     /// Request one installed animation clip and project the reducer's exact
@@ -5774,6 +5829,50 @@ mod tests {
         assert_eq!(committed.focus.anchor.unwrap().source_pivot, hit.source_pivot);
         assert_eq!(committed.pending_navigation_actions, 0);
         assert_eq!(committed.last_applied_navigation_sequence, Some(0));
+    }
+
+    #[test]
+    fn selection_clear_is_one_coherent_interaction_navigation_transaction() {
+        let store = AppStore::default();
+        let hit = interaction_hit(selection_identity());
+        store
+            .dispatch_semantic(SemanticAction::Interact(
+                InteractionAction::ActivatePrimary(hit),
+            ))
+            .unwrap();
+        store
+            .dispatch(AppEvent::Frame(FrameTick {
+                elapsed_seconds: 0.0,
+                delta_seconds: 0.0,
+            }))
+            .unwrap();
+        apply_navigation_now(&store, NavigationAction::SetInversionEnabled(true));
+        let selected = store.frame_snapshot();
+        assert_eq!(selected.interaction.hovered, Some(hit));
+        assert_eq!(selected.interaction.selected, Some(hit.identity));
+
+        let clear = store.dispatch_selection_clear().unwrap();
+        let detached = store.frame_snapshot();
+        assert_eq!(clear.interaction_sequence, 1);
+        assert_eq!(clear.navigation_sequence, 2);
+        assert_eq!(clear.commit.revision, detached.revision);
+        assert_eq!(detached.interaction.hovered, None);
+        assert_eq!(detached.interaction.active, None);
+        assert_eq!(detached.interaction.selected, None);
+        assert_eq!(detached.selected_focus, None);
+        assert_eq!(detached.focus.sphere, selected.focus.sphere);
+        assert_eq!(detached.focus.focus_enabled, selected.focus.focus_enabled);
+        assert!(detached.focus.inversion_enabled);
+        assert_eq!(detached.reflection, selected.reflection);
+        assert_eq!(detached.pending_navigation_actions, 0);
+        assert_eq!(
+            detached.interaction.last_applied_sequence,
+            Some(clear.interaction_sequence),
+        );
+        assert_eq!(
+            detached.last_applied_navigation_sequence,
+            Some(clear.navigation_sequence),
+        );
     }
 
     #[test]

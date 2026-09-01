@@ -865,6 +865,10 @@ pub enum InteractionAction {
     /// of an instantaneous click from an asynchronous picker: it cannot expose
     /// a half-applied hover/press/release sequence between application frames.
     ActivatePrimary(InteractionHit),
+    /// Clear transient hover and pressed state. Selection/focus ownership is a
+    /// navigation concern and may be co-dispatched with this action by the
+    /// application without teaching pointer semantics about focus geometry.
+    ClearPointer,
     PressPrimary,
     ReleasePrimary,
     CancelPrimary,
@@ -1100,6 +1104,11 @@ fn apply_interaction_action(
                 at_seconds: scheduled.at_seconds,
                 hit,
             })
+        }
+        InteractionAction::ClearPointer => {
+            state.hovered = None;
+            state.active = None;
+            None
         }
         InteractionAction::PressPrimary => {
             state.active = state.hovered;
@@ -1666,6 +1675,32 @@ mod tests {
         assert_eq!(controller.state.hovered, Some(selected));
         assert_eq!(controller.state.active, None);
         assert_eq!(controller.state.revision, 1);
+        assert_eq!(controller.state.last_applied_sequence, Some(sequence));
+    }
+
+    #[test]
+    fn pointer_clear_removes_hover_and_press_without_an_activation() {
+        let mut controller = InteractionController::default();
+        let selected = hit(1, 2, 1.0);
+        controller
+            .push(InteractionAction::SetHover(Some(selected)))
+            .unwrap();
+        controller.push(InteractionAction::PressPrimary).unwrap();
+        controller
+            .advance_to(0.0, &FocusNavigation::default())
+            .unwrap();
+        assert_eq!(controller.state.hovered, Some(selected));
+        assert_eq!(controller.state.active, Some(selected));
+
+        let sequence = controller
+            .push(InteractionAction::ClearPointer)
+            .unwrap();
+        let activations = controller
+            .advance_to(0.0, &FocusNavigation::default())
+            .unwrap();
+        assert!(activations.is_empty());
+        assert_eq!(controller.state.hovered, None);
+        assert_eq!(controller.state.active, None);
         assert_eq!(controller.state.last_applied_sequence, Some(sequence));
     }
 

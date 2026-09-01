@@ -646,6 +646,7 @@ pub enum ReplayInteractionAction {
     ActivatePrimary {
         hit: ReplayInteractionHit,
     },
+    ClearPointer,
     PressPrimary,
     ReleasePrimary,
     CancelPrimary,
@@ -665,6 +666,7 @@ impl TryFrom<ReplayInteractionAction> for InteractionAction {
             ReplayInteractionAction::ActivatePrimary { hit } => {
                 Ok(Self::ActivatePrimary(hit.try_into()?))
             }
+            ReplayInteractionAction::ClearPointer => Ok(Self::ClearPointer),
             ReplayInteractionAction::PressPrimary => Ok(Self::PressPrimary),
             ReplayInteractionAction::ReleasePrimary => Ok(Self::ReleasePrimary),
             ReplayInteractionAction::CancelPrimary => Ok(Self::CancelPrimary),
