@@ -264,16 +264,23 @@ fn authored_entry_and_local_checkpoint_commit_and_restart_atomically() {
 fn recovery_preserves_history_and_materialized_roots() {
     let project = project(4);
     let mut original = DurableProject::new(project).unwrap();
-    block_on(original.admit(&upsert(1, asset_id(1), "scene.glb"))).unwrap();
-    block_on(original.admit(&set(2, entity_id(2), 7.0))).unwrap();
+    let first = upsert(1, asset_id(1), "scene.glb");
+    let second = set(2, entity_id(2), 7.0);
+    block_on(original.admit(&first)).unwrap();
+    block_on(original.admit(&second)).unwrap();
     let before = original.state().unwrap();
     let log = original.durability().bytes().to_vec();
+    assert_eq!(
+        original.authored_history().unwrap(),
+        vec![first.clone(), second.clone()]
+    );
 
     let recovered = DurableProject::recover(project, log).unwrap();
     let after = recovered.state().unwrap();
 
     assert_eq!(after, before);
     assert_eq!(recovered.history_len(), 2);
+    assert_eq!(recovered.authored_history().unwrap(), vec![first, second]);
     assert_ne!(after.history_root, [0; 32]);
     assert_ne!(after.state_root, [0; 32]);
 }

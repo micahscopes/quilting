@@ -918,6 +918,21 @@ impl<D> DurableProject<D> {
         self.storage.snapshot().len()
     }
 
+    /// Decode the complete authored lane in canonical HHHS topological order.
+    ///
+    /// This is a domain-level restart view, not a carrier/archive view: entry
+    /// hashes, authority evidence, receiver-local checkpoints, and storage
+    /// framing remain encapsulated. Every returned envelope passed the same
+    /// frozen payload validation used during admission and trusted recovery.
+    pub fn authored_history(&self) -> Result<Vec<AuthoredEnvelope>, AdapterError> {
+        self.storage
+            .snapshot()
+            .entries_topo()
+            .into_iter()
+            .map(|entry| decode_authored(self.project_id, &entry.payload))
+            .collect()
+    }
+
     /// Read one receiver-local, rebuildable projection checkpoint.
     ///
     /// Checkpoints never enter public replica records, project archives, or
