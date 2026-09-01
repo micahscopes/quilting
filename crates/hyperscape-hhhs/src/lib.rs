@@ -14,7 +14,8 @@ use hhhs::{DagRead, DagSnapshot, Digest, EntryHash, LazyReach, Position, Reach, 
 use hhhs_reactive::{signal_vec_view, stream_view, Revision};
 use hhhs_replica::{
     AdmissionPolicy, AdmittedAuthority, AsyncTransactionSink, AuthorityInput, DurableReplicaHost,
-    Replica, ReplicaRecord, ReplicaRepairError, ReplicaWireError, MAX_REPLICA_RECORD_BYTES,
+    Replica, ReplicaError, ReplicaRecord, ReplicaRepairError, ReplicaWireError,
+    MAX_REPLICA_RECORD_BYTES,
 };
 use hhhs_store::{
     append_storage_transaction_log, decode_storage_transaction_log, empty_storage_transaction_log,
@@ -814,6 +815,33 @@ pub struct ApplyRecordsReport {
     pub lifted: usize,
 }
 
+/// Stable refusal reasons for one typed inbound replica record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordRefusal {
+    HashMismatch,
+    Unauthorized,
+}
+
+/// Result of offering one typed carrier record with a receiver-local
+/// checkpoint attachment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplyRecordWithCheckpointReport {
+    Applied {
+        entry: EntryHash,
+    },
+    AlreadyPresent {
+        entry: EntryHash,
+    },
+    Deferred {
+        entry: EntryHash,
+        missing: Vec<EntryHash>,
+    },
+    Refused {
+        entry: EntryHash,
+        reason: RecordRefusal,
+    },
+}
+
 impl DurableProject<MemoryDurability> {
     pub fn new(project_id: ProjectId) -> Result<Self, AdapterError> {
         Self::with_sink(project_id, MemoryDurability::default())
@@ -1011,6 +1039,58 @@ impl<D> DurableProject<D>
 where
     D: AsyncTransactionSink,
 {
+    /// Admit one typed carrier record and a receiver-local checkpoint in the
+    /// same persist-before-publish transaction.
+    ///
+    /// A duplicate is a zero-write result and deliberately ignores the
+    /// supplied checkpoint bytes. Missing predecessors are returned for
+    /// carrier repair without changing history or local metadata. Callers can
+    /// therefore advance a projection revision only for `Applied` records and
+    /// retry safely after persistence failure.
+    pub async fn apply_record_with_projection_checkpoint(
+        &mut self,
+        record: ReplicaRecord,
+        key: ProjectionKey,
+        checkpoint_bytes: Vec<u8>,
+    ) -> Result<ApplyRecordWithCheckpointReport, AdapterError> {
+        let entry = record.entry_hash();
+        if self.storage.snapshot().contains(&entry) {
+            return Ok(ApplyRecordWithCheckpointReport::AlreadyPresent { entry });
+        }
+        let prepared = match self.host.replica().prepare(record.into_admission_request()) {
+            Ok(prepared) => prepared,
+            Err(ReplicaError::MissingPrevs(missing)) => {
+                return Ok(ApplyRecordWithCheckpointReport::Deferred { entry, missing });
+            }
+            Err(ReplicaError::BadDigest(_)) => {
+                return Ok(ApplyRecordWithCheckpointReport::Refused {
+                    entry,
+                    reason: RecordRefusal::HashMismatch,
+                });
+            }
+            Err(
+                ReplicaError::AuthorityProfileRequired
+                | ReplicaError::AuthorityProfileMismatch
+                | ReplicaError::ApplicationRejected(_)
+                | ReplicaError::Presentation(_)
+                | ReplicaError::CapabilityDenied(_)
+                | ReplicaError::InvalidTrustedRoot(_),
+            ) => {
+                return Ok(ApplyRecordWithCheckpointReport::Refused {
+                    entry,
+                    reason: RecordRefusal::Unauthorized,
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let prepared = prepared.with_local_attachments(move |view, local| {
+            local.save_checkpoint(view.checkpoint(key, checkpoint_bytes)?);
+            Ok(())
+        })?;
+        self.host.commit_prepared(prepared).await?;
+        Ok(ApplyRecordWithCheckpointReport::Applied { entry })
+    }
+
     /// Persist one receiver-local projection checkpoint at the exact current
     /// public-history horizon without adding an authored entry.
     ///

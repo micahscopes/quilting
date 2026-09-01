@@ -5,9 +5,10 @@ use futures_signals::signal_vec::{SignalVecExt, VecDiff};
 use hhhs::{DagSnapshot, Digest, ReachIndex};
 use hhhs_store::decode_storage_transaction_log;
 use hyperscape_hhhs::{
-    decode_authored, encode_authored, AdapterError, DurableProject, MemoryDurability,
-    ProjectArchive, ProjectId, ProjectionKey, StateRow, MAX_AUTHORED_PAYLOAD_BYTES,
-    MAX_PROJECT_ARCHIVE_RECORDS, PAYLOAD_DOMAIN, PROJECT_ARCHIVE_DOMAIN,
+    decode_authored, encode_authored, AdapterError, ApplyRecordWithCheckpointReport,
+    DurableProject, MemoryDurability, ProjectArchive, ProjectId, ProjectionKey, RecordRefusal,
+    StateRow, MAX_AUTHORED_PAYLOAD_BYTES, MAX_PROJECT_ARCHIVE_RECORDS, PAYLOAD_DOMAIN,
+    PROJECT_ARCHIVE_DOMAIN,
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId, MessageHeader,
@@ -308,6 +309,124 @@ fn checkpoint_only_transition_is_durable_atomic_and_history_neutral() {
     let imported = block_on(DurableProject::import_archive(&archive)).unwrap();
     assert!(imported.projection_checkpoint(&key).is_none());
     assert_eq!(imported.state().unwrap(), before_state);
+}
+
+#[test]
+fn carrier_record_and_local_cursor_commit_atomically_and_retry_safely() {
+    let project_id = project(0x3005);
+    let key = ProjectionKey::new("hyperscope/carrier-cursor", 1).unwrap();
+    let first_envelope = set(1, entity_id(0x3005), 5.0);
+    let second_envelope = set(2, entity_id(0x3006), 6.0);
+    let mut source = DurableProject::new(project_id).unwrap();
+    let first = block_on(source.admit(&first_envelope)).unwrap();
+    let second = block_on(source.admit(&second_envelope)).unwrap();
+    let mut target = DurableProject::new(project_id).unwrap();
+    let empty_log = target.durability().bytes().to_vec();
+
+    let deferred = block_on(target.apply_record_with_projection_checkpoint(
+        second.clone(),
+        key.clone(),
+        1_u64.to_le_bytes().to_vec(),
+    ))
+    .unwrap();
+    assert!(matches!(
+        deferred,
+        ApplyRecordWithCheckpointReport::Deferred {
+            entry,
+            ref missing,
+        } if entry == second.entry_hash() && missing == &[first.entry_hash()]
+    ));
+    assert_eq!(target.history_len(), 0);
+    assert!(target.projection_checkpoint(&key).is_none());
+    assert_eq!(target.durability().bytes(), empty_log);
+
+    target.durability_mut().fail_next_persist();
+    let failed = block_on(target.apply_record_with_projection_checkpoint(
+        first.clone(),
+        key.clone(),
+        0_u64.to_le_bytes().to_vec(),
+    ));
+    assert!(matches!(failed, Err(AdapterError::Repair(_))));
+    assert_eq!(target.history_len(), 0);
+    assert!(target.projection_checkpoint(&key).is_none());
+    assert_eq!(target.durability().bytes(), empty_log);
+
+    let applied = block_on(target.apply_record_with_projection_checkpoint(
+        first.clone(),
+        key.clone(),
+        0_u64.to_le_bytes().to_vec(),
+    ))
+    .unwrap();
+    assert_eq!(
+        applied,
+        ApplyRecordWithCheckpointReport::Applied {
+            entry: first.entry_hash()
+        }
+    );
+    let first_log = target.durability().bytes().to_vec();
+    let checkpoint = target.projection_checkpoint(&key).unwrap();
+    assert_eq!(checkpoint.bytes(), 0_u64.to_le_bytes());
+    assert_eq!(
+        checkpoint.history_root.as_bytes(),
+        &target.state().unwrap().history_root
+    );
+
+    let duplicate = block_on(target.apply_record_with_projection_checkpoint(
+        first.clone(),
+        key.clone(),
+        99_u64.to_le_bytes().to_vec(),
+    ))
+    .unwrap();
+    assert_eq!(
+        duplicate,
+        ApplyRecordWithCheckpointReport::AlreadyPresent {
+            entry: first.entry_hash()
+        }
+    );
+    assert_eq!(target.durability().bytes(), first_log);
+    assert_eq!(target.projection_checkpoint(&key).unwrap(), checkpoint);
+
+    let applied = block_on(target.apply_record_with_projection_checkpoint(
+        second.clone(),
+        key.clone(),
+        1_u64.to_le_bytes().to_vec(),
+    ))
+    .unwrap();
+    assert_eq!(
+        applied,
+        ApplyRecordWithCheckpointReport::Applied {
+            entry: second.entry_hash()
+        }
+    );
+    assert_eq!(target.history_len(), 2);
+    assert_eq!(
+        target.projection_checkpoint(&key).unwrap().bytes(),
+        1_u64.to_le_bytes()
+    );
+    let recovered =
+        DurableProject::recover(project_id, target.durability().bytes().to_vec()).unwrap();
+    assert_eq!(recovered.state().unwrap(), target.state().unwrap());
+    assert_eq!(
+        recovered.projection_checkpoint(&key),
+        target.projection_checkpoint(&key)
+    );
+
+    let mut foreign = DurableProject::new(project(0x3007)).unwrap();
+    let foreign_record = block_on(foreign.admit(&set(3, entity_id(0x3007), 7.0))).unwrap();
+    let refused = block_on(target.apply_record_with_projection_checkpoint(
+        foreign_record.clone(),
+        key,
+        2_u64.to_le_bytes().to_vec(),
+    ))
+    .unwrap();
+    assert_eq!(
+        refused,
+        ApplyRecordWithCheckpointReport::Refused {
+            entry: foreign_record.entry_hash(),
+            reason: RecordRefusal::Unauthorized,
+        }
+    );
+    assert_eq!(target.history_len(), 2);
 }
 
 #[test]
