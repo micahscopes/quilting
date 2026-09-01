@@ -416,11 +416,38 @@ export class BrowserLocalPeerRelay {
         };
       }
       const durable = await this.durablePeer.receiveReplicaRecordFrame(frameJson);
+      const disposition = durable?.durableDisposition;
+      if (disposition === 'deferred') {
+        this.degraded = true;
+        const missing = Array.isArray(durable?.missingEntryHashes)
+          ? durable.missingEntryHashes.filter(value => typeof value === 'string')
+          : [];
+        throw new BrowserLocalPeerRelayError(
+          `durable record requires causal repair${missing.length > 0
+            ? ` for ${missing.join(', ')}`
+            : ''}`,
+        );
+      }
+      if (disposition === 'refused') {
+        this.degraded = true;
+        throw new BrowserLocalPeerRelayError(
+          `durable record was refused${typeof durable?.refusal === 'string'
+            ? `: ${durable.refusal}`
+            : ''}`,
+        );
+      }
+      if (!['applied', 'already_present'].includes(disposition)) {
+        this.degraded = true;
+        throw new BrowserLocalPeerRelayError(
+          'durable record returned an unknown admission disposition',
+        );
+      }
+      if (durable?.appProjectionFault != null) this.degraded = true;
       return {
         lane: 'authored_record',
-        disposition: durable?.durableDisposition === 'applied'
+        disposition: disposition === 'applied'
           ? 'applied'
-          : durable?.durableDisposition ?? 'ignored',
+          : disposition,
         durable,
       };
     }
@@ -453,6 +480,7 @@ export class BrowserLocalPeerRelay {
             this.setStatus({ state: 'error', lastError: errorMessage(error) });
           });
         }
+        if (admitted?.appProjectionFault != null) this.degraded = true;
         return {
           ...(admitted?.peer ?? {}),
           durableDisposition: admitted?.durableDisposition ?? 'none',

@@ -267,6 +267,65 @@ test('durable proposal promotion is explicit and announces Rust-authored record 
   assert.equal(relay.snapshot().cursor, '2');
 });
 
+test('deferred or refused durable records cannot be skipped by the relay cursor', async () => {
+  for (const durable of [
+    {
+      durableDisposition: 'deferred',
+      missingEntryHashes: ['11'.repeat(32)],
+      appProjectionFault: null,
+    },
+    {
+      durableDisposition: 'refused',
+      missingEntryHashes: [],
+      refusal: 'unauthorized',
+      appProjectionFault: null,
+    },
+  ]) {
+    const peer = durablePeerOracle();
+    peer.receiveReplicaRecordFrame = async () => durable;
+    const relay = transport(appOracle(), { durablePeer: peer });
+    await assert.rejects(
+      relay.acceptBatch(batch({
+        latestCursor: '1',
+        oldestCursor: '1',
+        frames: [{ cursor: '1', frameJson: authoredRecordFrame }],
+      }), 0n),
+      durable.durableDisposition === 'deferred'
+        ? /requires causal repair/
+        : /was refused: unauthorized/,
+    );
+    assert.equal(relay.snapshot().cursor, '0');
+    assert.equal(relay.degraded, true);
+  }
+});
+
+test('durable success remains announceable when the rebuildable projection faults', async () => {
+  const peer = durablePeerOracle();
+  peer.receiveLocalPeerEnvelope = async () => ({
+    peer: { lane: 'authored', disposition: 'applied' },
+    durableDisposition: 'applied',
+    replicaRecordFrameJson: authoredRecordFrame,
+    appProjectionFault: 'AppStore baseline changed during persistence',
+  });
+  const relay = transport(appOracle(), {
+    durablePeer: peer,
+    authoredProposalPolicy: 'admit',
+  });
+  const proposal = `{"lane":"authored","envelope":${authoredEnvelope('1')}}`;
+  await relay.acceptBatch(batch({
+    latestCursor: '1',
+    oldestCursor: '1',
+    frames: [{ cursor: '1', frameJson: proposal }],
+  }), 0n);
+  assert.equal(relay.outbound[0].frameJson, authoredRecordFrame);
+  assert.equal(relay.snapshot().cursor, '1');
+  assert.equal(relay.degraded, true);
+  assert.equal(
+    relay.snapshot().lastReceipt.appProjectionFault,
+    'AppStore baseline changed during persistence',
+  );
+});
+
 test('durable replicas ignore raw proposals unless selected as admission authority', async () => {
   const durablePeer = durablePeerOracle();
   const relay = transport(appOracle(), { durablePeer });
