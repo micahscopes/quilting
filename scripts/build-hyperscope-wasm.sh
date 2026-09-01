@@ -30,9 +30,23 @@ if [[ "${HYPERSCOPE_WASM_OPT:-0}" != "1" ]]; then
 fi
 export CARGO_BUILD_JOBS="${HYPERSCOPE_BUILD_JOBS:-${CARGO_BUILD_JOBS:-2}}"
 
+wasm_features=(leptos-ui webgpu-backend)
+case "${HYPERSCOPE_DURABLE_HISTORY:-0}" in
+    0)
+        ;;
+    1)
+        wasm_features+=(durable-history)
+        ;;
+    *)
+        echo "error: HYPERSCOPE_DURABLE_HISTORY must be 0 or 1" >&2
+        exit 2
+        ;;
+esac
+wasm_feature_list="$(IFS=,; echo "${wasm_features[*]}")"
+
 exec wasm-pack build \
     --target web \
     --out-dir ../../pkg \
     "${wasm_pack_mode[@]}" \
     crates/quilting-wasm \
-    --features leptos-ui,webgpu-backend
+    --features "${wasm_feature_list}"

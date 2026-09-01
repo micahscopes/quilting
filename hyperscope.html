@@ -192,9 +192,28 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 
   <div class="section" id="local-peer-section">
     <label>Local Blender Peer (opt-in)</label>
+    <select id="local-peer-mode" aria-label="Local peer history mode">
+      <option value="legacy" selected>Direct delivery (legacy rollback)</option>
+      <option value="durable">Durable HHHS history</option>
+    </select>
     <input class="peer-input" id="local-peer-url" type="url" value="http://127.0.0.1:42117" autocomplete="off" spellcheck="false" aria-label="Local peer relay URL">
     <input class="peer-input" id="local-peer-token" type="password" value="" autocomplete="off" spellcheck="false" aria-label="Local peer bearer token" placeholder="Bearer token (never saved)">
-    <div class="btns"><button id="local-peer-connect" type="button">Connect</button></div>
+    <div id="authored-session-rust" hidden></div>
+    <div id="authored-session-browser">
+      <div id="local-peer-durable-browser-fields" hidden>
+        <label for="local-peer-project">Authored project UUID</label>
+        <input class="peer-input" id="local-peer-project" type="text" value="" autocomplete="off" spellcheck="false" aria-label="Shared authored project UUID" placeholder="Shared project UUID">
+        <label for="local-peer-role">Raw proposal role</label>
+        <select id="local-peer-role">
+          <option value="replica" selected>Replica (authorized records only)</option>
+          <option value="admission_authority">Admission authority (promote Blender proposals)</option>
+        </select>
+      </div>
+      <div class="btns">
+        <button id="local-peer-new-project" type="button" hidden>New project ID</button>
+        <button id="local-peer-connect" type="button">Connect</button>
+      </div>
+    </div>
     <div class="lab-note" id="local-peer-status">Disabled · delivery only · no persistence or repair</div>
   </div>
 
@@ -503,9 +522,11 @@ import {
   transportPointAndDirectionsAcrossSphereReflections,
 } from './hyperscope_focus.mjs?rev=rust-selection-authority-v1';
 import {
-  BrowserLocalPeerRelay,
   DEFAULT_LOCAL_PEER_RELAY_URL,
 } from './local_peer_browser.mjs?rev=durable-record-frame-v1';
+import {
+  BrowserLocalPeerSession,
+} from './local_peer_session.mjs?rev=authored-session-lifecycle-v1';
 import { BrowserAssetEffectHost } from './asset_effect_host.mjs?rev=decoded-provenance-v1';
 
 // These controls decide which adapters may exist before WASM can expose the
@@ -14484,6 +14505,8 @@ const localPeerDiagnostics = {
   lastError: null,
 };
 let localPeerRelay = null;
+let localPeerSession = null;
+let localPeerOpening = false;
 let localPeerFocusTransformKey = null;
 let localPeerLastPresenceUiAt = -Infinity;
 let localPeerPresenceSequence = 1n;
@@ -14583,7 +14606,9 @@ function applyLocalPeerAuthoredProjection() {
 
 function applyLocalPeerReceipt(receipt) {
   localPeerDiagnostics.lastReceipt = receipt ?? null;
-  if (receipt?.lane === 'authored' && receipt.disposition === 'applied') {
+  const authoredApplied = receipt?.disposition === 'applied'
+    && (receipt?.lane === 'authored' || receipt?.lane === 'authored_record');
+  if (authoredApplied || receipt?.durableDisposition === 'applied') {
     refreshAppShadowSnapshot();
     applyLocalPeerAuthoredProjection();
   }
@@ -14691,9 +14716,13 @@ function publishLocalPeerPresence(nowMs) {
 function renderLocalPeerStatus(status = localPeerDiagnostics) {
   const element = $('local-peer-status');
   const button = $('local-peer-connect');
-  if (!element || !button) return;
-  button.textContent = localPeerRelay ? 'Disconnect' : 'Connect';
-  button.classList.toggle('a', Boolean(localPeerRelay));
+  const mode = $('local-peer-mode');
+  const connected = Boolean(localPeerRelay || localPeerSession?.isConnected());
+  if (!element || !button || !mode) return;
+  button.textContent = connected ? 'Disconnect' : localPeerOpening ? 'Opening…' : 'Connect';
+  button.disabled = localPeerOpening;
+  button.classList.toggle('a', connected);
+  mode.disabled = connected || localPeerOpening;
   const delivery = `${status.receivedFrames || 0} received · `
     + `${status.appliedFrames || 0} applied · ${status.ignoredFrames || 0} ignored`;
   const continuity = `${status.gaps || 0} gaps · ${status.restarts || 0} restarts`;
@@ -14706,12 +14735,116 @@ function renderLocalPeerStatus(status = localPeerDiagnostics) {
 }
 
 function updateLocalPeerStatus(status) {
-  Object.assign(localPeerDiagnostics, status, { enabled: Boolean(localPeerRelay) });
+  Object.assign(localPeerDiagnostics, status, {
+    enabled: Boolean(localPeerRelay || localPeerSession?.isConnected()),
+  });
   renderLocalPeerStatus(localPeerDiagnostics);
 }
 
-function connectLocalPeer() {
-  if (localPeerRelay) return;
+function selectedLocalPeerMode() {
+  return $('local-peer-mode')?.value === 'durable' ? 'durable' : 'legacy';
+}
+
+function newLocalPeerProjectId() {
+  if (typeof globalThis.crypto?.randomUUID !== 'function') {
+    throw new Error('new authored projects require crypto.randomUUID()');
+  }
+  return globalThis.crypto.randomUUID();
+}
+
+function useBrowserAuthoredSessionView() {
+  const host = $('authored-session-rust');
+  const fallback = $('authored-session-browser');
+  const durableFields = $('local-peer-durable-browser-fields');
+  const newProject = $('local-peer-new-project');
+  const durable = selectedLocalPeerMode() === 'durable';
+  if (host) host.hidden = true;
+  if (fallback) fallback.hidden = false;
+  if (durableFields) durableFields.hidden = !durable;
+  if (newProject) newProject.hidden = !durable;
+}
+
+let rustAuthoredSessionViewMounted = false;
+let rustAuthoredSessionViewMountAttempted = false;
+function ensureRustAuthoredSessionView() {
+  if (selectedLocalPeerMode() !== 'durable') {
+    useBrowserAuthoredSessionView();
+    return false;
+  }
+  const host = $('authored-session-rust');
+  const fallback = $('authored-session-browser');
+  if (rustAuthoredSessionViewMounted) {
+    host.hidden = false;
+    fallback.hidden = true;
+    return true;
+  }
+  if (!wasmOk.peek()) {
+    useBrowserAuthoredSessionView();
+    return false;
+  }
+  const app = ensureRustAppShadow('authored-session');
+  if (typeof app.openDurableAuthoredPeerWithRole !== 'function') {
+    localPeerDiagnostics.state = 'durable history unavailable';
+    localPeerDiagnostics.lastError =
+      'rebuild with HYPERSCOPE_DURABLE_HISTORY=1 or use the legacy rollback';
+    useBrowserAuthoredSessionView();
+    renderLocalPeerStatus();
+    return false;
+  }
+  if (rustAuthoredSessionViewMountAttempted
+      || !host || !fallback
+      || typeof app.mountAuthoredSessionControl !== 'function') {
+    useBrowserAuthoredSessionView();
+    return false;
+  }
+  rustAuthoredSessionViewMountAttempted = true;
+  try {
+    app.mountAuthoredSessionControl(
+      host,
+      (projectId, proposalRole) => connectLocalPeer({
+        mode: 'durable',
+        projectId,
+        proposalRole,
+      }),
+      () => disconnectLocalPeer(),
+      () => newLocalPeerProjectId(),
+      error => {
+        localPeerDiagnostics.lastError = String(error);
+        localPeerDiagnostics.state = 'error';
+        renderLocalPeerStatus();
+      },
+    );
+    host.hidden = false;
+    fallback.hidden = true;
+    rustAuthoredSessionViewMounted = true;
+    return true;
+  } catch (error) {
+    localPeerDiagnostics.lastError = error?.message || String(error);
+    localPeerDiagnostics.state = 'error';
+    useBrowserAuthoredSessionView();
+    renderLocalPeerStatus();
+    return false;
+  }
+}
+
+function updateLocalPeerModeView() {
+  if (selectedLocalPeerMode() === 'durable') ensureRustAuthoredSessionView();
+  else {
+    useBrowserAuthoredSessionView();
+    if (!localPeerRelay && !localPeerOpening) {
+      localPeerDiagnostics.state = 'disabled';
+      localPeerDiagnostics.lastError = null;
+    }
+  }
+  renderLocalPeerStatus();
+}
+
+async function connectLocalPeer({
+  mode = selectedLocalPeerMode(),
+  projectId = null,
+  proposalRole = null,
+} = {}) {
+  if (localPeerRelay || localPeerSession?.isConnected() || localPeerOpening) return;
   if (!wasmOk.peek()) throw new Error('Rust/WASM is not ready yet');
   if (!localPeerBrowserPeerId) {
     if (typeof globalThis.crypto?.randomUUID !== 'function') {
@@ -14723,30 +14856,48 @@ function connectLocalPeer() {
   const token = tokenInput.value;
   tokenInput.value = '';
   const app = ensureRustAppShadow('local-peer');
-  const candidate = new BrowserLocalPeerRelay({
-    baseUrl: $('local-peer-url').value || DEFAULT_LOCAL_PEER_RELAY_URL,
-    token,
-    app,
-    // Presence expiry and AppEvent::Frame must share one monotonic epoch.
-    // performance.now() can predate a lazily-created AppStore by many seconds.
-    nowSeconds: () => app.frameElapsedSeconds(),
-    onReceipt: applyLocalPeerReceipt,
-    onStatus: updateLocalPeerStatus,
-  });
-  localPeerRelay = candidate;
-  localPeerLastPresenceUiAt = -Infinity;
-  localPeerPresenceInFlight = false;
-  localPeerLastPresenceAttemptAt = -Infinity;
-  localPeerLastPresenceSentAt = -Infinity;
-  localPeerLastPresenceSignature = null;
-  updateLocalPeerStatus(candidate.snapshot());
-  candidate.start();
+  if (!localPeerSession) {
+    localPeerSession = new BrowserLocalPeerSession({
+      app,
+      // Presence expiry and AppEvent::Frame must share one monotonic epoch.
+      // performance.now() can predate a lazily-created AppStore by many seconds.
+      nowSeconds: () => app.frameElapsedSeconds(),
+      onReceipt: applyLocalPeerReceipt,
+      onStatus: updateLocalPeerStatus,
+    });
+  }
+  const durable = mode === 'durable';
+  const selectedProject = projectId ?? $('local-peer-project')?.value ?? '';
+  const selectedRole = proposalRole ?? $('local-peer-role')?.value ?? 'replica';
+  localPeerOpening = true;
+  localPeerDiagnostics.state = durable ? 'opening durable history' : 'connecting';
+  localPeerDiagnostics.lastError = null;
+  renderLocalPeerStatus();
+  try {
+    const snapshot = await localPeerSession.connect({
+      baseUrl: $('local-peer-url').value || DEFAULT_LOCAL_PEER_RELAY_URL,
+      token,
+      mode,
+      projectId: durable ? selectedProject : null,
+      proposalRole: durable ? selectedRole : 'replica',
+    });
+    localPeerRelay = localPeerSession.relay;
+    localPeerLastPresenceUiAt = -Infinity;
+    localPeerPresenceInFlight = false;
+    localPeerLastPresenceAttemptAt = -Infinity;
+    localPeerLastPresenceSentAt = -Infinity;
+    localPeerLastPresenceSignature = null;
+    updateLocalPeerStatus(snapshot ?? localPeerRelay.snapshot());
+  } finally {
+    localPeerOpening = false;
+    renderLocalPeerStatus();
+  }
 }
 
 async function disconnectLocalPeer() {
-  const relay = localPeerRelay;
   localPeerRelay = null;
-  if (relay) await relay.stop();
+  localPeerOpening = false;
+  await localPeerSession?.disconnect();
   localPeerPresenceInFlight = false;
   localPeerLastPresenceSignature = null;
   Object.assign(localPeerDiagnostics, {
@@ -14759,29 +14910,40 @@ async function disconnectLocalPeer() {
   renderLocalPeerStatus();
 }
 
-$('local-peer-connect').addEventListener('click', async () => {
+$('local-peer-mode').addEventListener('change', updateLocalPeerModeView);
+$('local-peer-new-project').addEventListener('click', () => {
   try {
-    if (localPeerRelay) await disconnectLocalPeer();
-    else connectLocalPeer();
+    $('local-peer-project').value = newLocalPeerProjectId();
   } catch (error) {
     localPeerDiagnostics.lastError = error?.message || String(error);
     localPeerDiagnostics.state = 'error';
     renderLocalPeerStatus();
   }
 });
-window.addEventListener('beforeunload', () => { void localPeerRelay?.stop(); });
+$('local-peer-connect').addEventListener('click', async () => {
+  try {
+    if (localPeerRelay || localPeerSession?.isConnected()) await disconnectLocalPeer();
+    else await connectLocalPeer();
+  } catch (error) {
+    localPeerDiagnostics.lastError = error?.message || String(error);
+    localPeerDiagnostics.state = 'error';
+    renderLocalPeerStatus();
+  }
+});
+window.addEventListener('beforeunload', () => { void localPeerSession?.disconnect(); });
 globalThis.__hyperscopeLocalPeer = Object.freeze({
   connect: connectLocalPeer,
   disconnect: disconnectLocalPeer,
   sendAppliedAuthoredEnvelope(envelopeJson) {
-    if (!localPeerRelay) throw new Error('local peer is disconnected');
-    return localPeerRelay.sendAppliedAuthoredEnvelope(envelopeJson);
+    if (!localPeerSession) throw new Error('local peer is disconnected');
+    return localPeerSession.sendAppliedAuthoredEnvelope(envelopeJson);
   },
   sendPresenceEnvelope(envelopeJson) {
-    if (!localPeerRelay) throw new Error('local peer is disconnected');
-    return localPeerRelay.sendPresenceEnvelope(envelopeJson);
+    if (!localPeerSession) throw new Error('local peer is disconnected');
+    return localPeerSession.sendPresenceEnvelope(envelopeJson);
   },
 });
+updateLocalPeerModeView();
 
 // --- Init ---
 // Bootstrap platform flags and an inert camera preview from the raw query.
@@ -14952,6 +15114,7 @@ phase('wasm', [], async () => {
   }
   updatePatchLabControlVisibility();
   wasmOk.set(true); // THEN fire effects with correct values + WASM ready
+  updateLocalPeerModeView();
   if (RUST_APP_SHADOW_ENABLED) {
     ensureRustAppShadow('observing');
   }

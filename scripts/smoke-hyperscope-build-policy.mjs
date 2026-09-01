@@ -20,6 +20,7 @@ const cleanEnvironment = Object.fromEntries(
     'CARGO_BUILD_JOBS',
     'HYPERSCOPE_ARTIFACT_BUILD',
     'HYPERSCOPE_BUILD_JOBS',
+    'HYPERSCOPE_DURABLE_HISTORY',
     'HYPERSCOPE_WASM_OPT',
     'HYPERSCOPE_WASM_PROFILE',
   ].includes(key)),
@@ -62,6 +63,17 @@ try {
   assert.ok(ordinary.args.includes('--no-opt'));
   assert.equal(ordinary.args.includes('--dev'), false);
   assert.equal(ordinary.jobs, '2');
+  assert.equal(
+    ordinary.args[ordinary.args.indexOf('--features') + 1],
+    'leptos-ui,webgpu-backend',
+  );
+
+  const durable = run('durable', { HYPERSCOPE_DURABLE_HISTORY: '1' });
+  assert.equal(durable.status, 0, durable.stderr);
+  assert.equal(
+    durable.args[durable.args.indexOf('--features') + 1],
+    'leptos-ui,webgpu-backend,durable-history',
+  );
 
   const fast = run('fast', {
     HYPERSCOPE_WASM_PROFILE: 'dev',
@@ -92,6 +104,12 @@ try {
   const invalid = run('invalid', { HYPERSCOPE_WASM_PROFILE: 'fast-ish' });
   assert.equal(invalid.status, 2);
   assert.match(invalid.stderr, /must be release, dev, or profiling/);
+
+  const invalidDurability = run('invalid-durability', {
+    HYPERSCOPE_DURABLE_HISTORY: 'sometimes',
+  });
+  assert.equal(invalidDurability.status, 2);
+  assert.match(invalidDurability.stderr, /must be 0 or 1/);
 
   console.log('Hyperscope WASM build policy smoke passed');
 } finally {

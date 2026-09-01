@@ -106,7 +106,16 @@ export class BrowserLocalPeerSession {
       void relay.start();
       return relay.snapshot?.() ?? null;
     } catch (error) {
-      freeDurablePeer(durablePeer);
+      const activeRelay = this.relay;
+      const activePeer = this.durablePeer;
+      this.relay = null;
+      this.durablePeer = null;
+      if (activeRelay) {
+        try {
+          await activeRelay.stop();
+        } catch {}
+      }
+      freeDurablePeer(durablePeer ?? activePeer);
       throw error;
     } finally {
       if (generation === this.generation) this.opening = false;

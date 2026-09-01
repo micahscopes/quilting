@@ -43,6 +43,20 @@ is:
 node scripts/smoke-hyperscope-build-policy.mjs
 ```
 
+Durable Blender-authored history remains an explicit artifact feature. Build
+that comparison lane with:
+
+```sh
+HYPERSCOPE_DURABLE_HISTORY=1 trunk build --release
+```
+
+The sidebar still selects **Direct delivery (legacy rollback)** by default.
+Choose **Durable HHHS history**, paste or generate a shared project UUID, and
+select **Replica** unless this is the one peer intentionally allowed to promote
+raw Blender proposals. Only that one peer selects **Admission authority**. The
+relay URL and bearer token stay in runtime browser inputs; they are not copied
+into application state, the URL, or durable history.
+
 Only a final artifact whose download size is being measured should opt into
 Binaryen explicitly:
 

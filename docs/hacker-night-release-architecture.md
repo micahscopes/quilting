@@ -423,13 +423,22 @@ The first application boundary is now explicit:
   raw proposals, and `admit` selects exactly one durable proposal authority.
   Only that authority may turn a Blender `authored` envelope into an HHHS
   record; every durable replica may consume the resulting Rust-authored
-  `authored_record` frame. Async admission reserves outbound capacity before
-  persistence so a committed record cannot lose its announcement slot.
+  `authored_record` frame. `BrowserLocalPeerSession` now owns only the live
+  carrier and generated WASM peer handles: it stops the relay before freeing
+  durability, frees an opened writer if carrier construction fails, and fences
+  delayed opens so disconnect cannot resurrect a stale session. The Leptos
+  island observes the reducer-owned project/role lifecycle and supplies an
+  uncommitted draft; it never receives relay URLs, bearer credentials,
+  IndexedDB handles, or HHHS objects. The ordinary artifact and sidebar retain
+  the legacy direct lane by default. `HYPERSCOPE_DURABLE_HISTORY=1` includes the
+  optional WASM executor, after which durable mode remains an explicit UI
+  selection. Async admission reserves outbound capacity before persistence so
+  a committed record cannot lose its announcement slot.
   Generated Rust/WASM performs semantic admission and packed-scene extraction.
   The renderer receives only resolved ordinary-world node matrices, including
   the presentation layer outside an authored absolute transform, so the same
   result overrides active conformal source packets in drawing, LOD, focus
-  bounds, picking, and walking. Project/session selection and automatic repair
+  bounds, picking, and walking. Automatic repair and invitation/bootstrap
   remain separate application lifecycle work.
 - The same opt-in carrier now publishes the live browser viewport in the
   opposite direction. Until the general navigation cutover, the incumbent

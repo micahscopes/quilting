@@ -113,6 +113,25 @@ test('relay construction failure releases the opened durable writer lease', asyn
   assert.equal(value.session.isConnected(), false);
 });
 
+test('synchronous relay startup failure retires both resources', async () => {
+  const value = fixture();
+  value.relay.start = () => {
+    value.events.push('relay.start');
+    throw new Error('startup failed');
+  };
+  await assert.rejects(
+    value.session.connect({
+      baseUrl: 'http://127.0.0.1:42117',
+      token: 'runtime only',
+      mode: 'durable',
+      projectId: '00000000-0000-4000-8000-000000000042',
+    }),
+    /startup failed/,
+  );
+  assert.deepEqual(value.events.slice(-3), ['relay.start', 'relay.stop', 'peer.free']);
+  assert.equal(value.session.isConnected(), false);
+});
+
 test('a stale asynchronous open cannot resurrect a disconnected session', async () => {
   const value = fixture();
   const opening = deferred();
