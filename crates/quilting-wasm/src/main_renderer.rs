@@ -556,8 +556,8 @@ struct BackendFrameEvidenceReport {
     image: RenderImageComparison,
 }
 
-#[derive(Clone, Copy)]
-struct ResolvedSurfacePick {
+#[derive(Clone, Copy, Serialize)]
+pub(crate) struct ResolvedSurfacePick {
     face: u32,
     node: u32,
     barycentric: [f32; 3],
@@ -576,6 +576,48 @@ struct BackendPickEvidenceCapture {
     staged: crate::webgpu_backend::StagedWebGpuPick,
     staging_ms: f64,
     started_ms: f64,
+}
+
+#[cfg(feature = "webgpu-backend")]
+pub(crate) struct BackendPickAuthorityCapture {
+    source_render_call: u64,
+    webgpu_frame_revision: u64,
+    viewport: [u32; 2],
+    staged: crate::webgpu_backend::StagedWebGpuPick,
+}
+
+#[cfg(feature = "webgpu-backend")]
+impl BackendPickAuthorityCapture {
+    pub(crate) fn source_render_call(&self) -> u64 {
+        self.source_render_call
+    }
+
+    pub(crate) fn webgpu_frame_revision(&self) -> u64 {
+        self.webgpu_frame_revision
+    }
+
+    pub(crate) fn viewport(&self) -> [u32; 2] {
+        self.viewport
+    }
+
+    pub(crate) async fn read(
+        self,
+    ) -> Result<crate::webgpu_backend::WebGpuPickReadback, String> {
+        let readback = self.staged.read().await?;
+        if readback.source_render_call != self.source_render_call {
+            return Err(format!(
+                "authoritative backend pick source changed: staged {}, read {}",
+                self.source_render_call, readback.source_render_call,
+            ));
+        }
+        if readback.frame_revision != self.webgpu_frame_revision {
+            return Err(format!(
+                "authoritative backend pick frame changed: staged {}, read {}",
+                self.webgpu_frame_revision, readback.frame_revision,
+            ));
+        }
+        Ok(readback)
+    }
 }
 
 #[cfg(feature = "webgpu-backend")]
@@ -4362,8 +4404,22 @@ pub fn mr_pick(mvp: &[f32], mv: &[f32], camera_pos: &[f32], x: i32, y: i32) -> i
 /// geometry cannot produce a face/coordinate mismatch.
 fn resolve_surface_pick(state: &MainState, face: i32) -> Option<ResolvedSurfacePick> {
     let face = u32::try_from(face).ok()?;
+    resolve_surface_address(state, face, state.last_pick_barycentric?)
+}
+
+fn resolve_surface_address(
+    state: &MainState,
+    face: u32,
+    barycentric: [f32; 3],
+) -> Option<ResolvedSurfacePick> {
     let face_index = usize::try_from(face).ok()?;
-    let barycentric = state.last_pick_barycentric?;
+    if barycentric
+        .into_iter()
+        .any(|coordinate| !coordinate.is_finite() || coordinate < -1.0e-4)
+        || (barycentric.into_iter().sum::<f32>() - 1.0).abs() > 1.0e-3
+    {
+        return None;
+    }
     let node_index = *state.face_nodes.get(face_index)?;
     let node = u32::try_from(node_index).ok()?;
     let barycentric_f64 = barycentric.map(f64::from);
@@ -4395,6 +4451,35 @@ fn resolve_surface_pick(state: &MainState, face: i32) -> Option<ResolvedSurfaceP
         barycentric,
         source_position,
         output_position,
+    })
+}
+
+#[cfg(feature = "webgpu-backend")]
+pub(crate) fn resolve_backend_pick_surface(
+    hit: crate::webgpu_backend::WebGpuPickHit,
+) -> Result<ResolvedSurfacePick, String> {
+    STATE.with(|state| {
+        let state = state.borrow();
+        let state = state
+            .as_ref()
+            .ok_or_else(|| "renderer is not initialized".to_string())?;
+        let mut surface = resolve_surface_address(
+            state,
+            hit.source_face,
+            hit.source_barycentric,
+        )
+        .ok_or_else(|| "backend pick source address is no longer resident".to_string())?;
+        if surface.node != hit.packed_node {
+            return Err(format!(
+                "backend pick node {} no longer owns source face {} (current node {})",
+                hit.packed_node, hit.source_face, surface.node,
+            ));
+        }
+        // Preserve the exact source-chart point from the rendered device
+        // frame. The output point is deliberately re-evaluated from its stable
+        // face/barycentric address against the current animated pose.
+        surface.source_position = Some(hit.source_position.map(f64::from));
+        Ok(surface)
     })
 }
 
@@ -4574,6 +4659,48 @@ pub(crate) fn stage_backend_pick_evidence(
         webgl: surface,
         staged,
     }
+}
+
+/// Stage one authoritative query only when the retained WebGPU image is the
+/// current logical renderer call and viewport. Unlike the parity path above,
+/// this does not execute or mutate the incumbent WebGL picker.
+#[cfg(feature = "webgpu-backend")]
+pub(crate) fn stage_backend_pick_authority(
+    pixel: [u32; 2],
+    target_epoch: u32,
+) -> Result<BackendPickAuthorityCapture, String> {
+    let (source_render_call, viewport) = STATE.with(|slot| {
+        let state = slot.borrow();
+        let state = state
+            .as_ref()
+            .ok_or_else(|| "renderer is not initialized".to_string())?;
+        let viewport = [
+            u32::try_from(state.viewport_size.0)
+                .map_err(|_| "pick viewport width is invalid".to_string())?,
+            u32::try_from(state.viewport_size.1)
+                .map_err(|_| "pick viewport height is invalid".to_string())?,
+        ];
+        Ok::<_, String>((state.render_calls, viewport))
+    })?;
+    let staged = crate::webgpu_backend::stage_pick(pixel, target_epoch)?;
+    if staged.source_render_call() != source_render_call {
+        return Err(format!(
+            "authoritative backend pick requires renderer call {source_render_call}, but WebGPU retains {}",
+            staged.source_render_call(),
+        ));
+    }
+    if staged.viewport() != viewport {
+        return Err(format!(
+            "authoritative backend pick requires viewport {}x{}, but WebGPU retains {}x{}",
+            viewport[0], viewport[1], staged.viewport()[0], staged.viewport()[1],
+        ));
+    }
+    Ok(BackendPickAuthorityCapture {
+        source_render_call,
+        webgpu_frame_revision: staged.frame_revision(),
+        viewport,
+        staged,
+    })
 }
 
 #[cfg(feature = "webgpu-backend")]

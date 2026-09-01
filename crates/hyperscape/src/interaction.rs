@@ -334,6 +334,7 @@ pub enum InteractionPickAuthorityState {
     Idle,
     Staging,
     Reading,
+    Resolving,
     Accepted,
     StageRejected,
     StaleTargetEpoch,
@@ -449,6 +450,18 @@ impl InteractionPickAuthority {
         request: InteractionPickRequest,
         current_target_epoch: u32,
     ) -> InteractionPickAuthorityDisposition {
+        let disposition = self.observe_readback(request, current_target_epoch);
+        if disposition != InteractionPickAuthorityDisposition::Current {
+            return disposition;
+        }
+        self.accept(request)
+    }
+
+    pub fn observe_readback(
+        &mut self,
+        request: InteractionPickRequest,
+        current_target_epoch: u32,
+    ) -> InteractionPickAuthorityDisposition {
         if self.latest != Some(request) {
             self.record_stale_completion();
             return InteractionPickAuthorityDisposition::IgnoredSuperseded;
@@ -461,6 +474,18 @@ impl InteractionPickAuthority {
             self.diagnostics.state = InteractionPickAuthorityState::StaleTargetEpoch;
             self.clear_latest();
             return InteractionPickAuthorityDisposition::IgnoredStaleTargetEpoch;
+        }
+        self.diagnostics.state = InteractionPickAuthorityState::Resolving;
+        InteractionPickAuthorityDisposition::Current
+    }
+
+    pub fn accept(
+        &mut self,
+        request: InteractionPickRequest,
+    ) -> InteractionPickAuthorityDisposition {
+        if self.latest != Some(request) {
+            self.record_stale_completion();
+            return InteractionPickAuthorityDisposition::IgnoredSuperseded;
         }
         self.diagnostics.accepted = self.diagnostics.accepted.saturating_add(1);
         self.diagnostics.state = InteractionPickAuthorityState::Accepted;
@@ -1268,6 +1293,28 @@ mod tests {
         assert_eq!(rejected.state, InteractionPickAuthorityState::StageRejected);
         assert_eq!(rejected.stage_rejects, 1);
         assert_eq!(rejected.latest_request_id, None);
+    }
+
+    #[test]
+    fn pick_payload_validation_precedes_authority_acceptance() {
+        let mut authority = InteractionPickAuthority::default();
+        let request = authority.begin(6).unwrap();
+        authority.record_stage(request, None);
+        assert_eq!(
+            authority.observe_readback(request, 6),
+            InteractionPickAuthorityDisposition::Current,
+        );
+        let resolving = authority.snapshot();
+        assert_eq!(resolving.state, InteractionPickAuthorityState::Resolving);
+        assert_eq!(resolving.readbacks, 1);
+        assert_eq!(resolving.accepted, 0);
+
+        authority.record_error(request, "packed node no longer maps");
+        let rejected = authority.snapshot();
+        assert_eq!(rejected.state, InteractionPickAuthorityState::Error);
+        assert_eq!(rejected.readbacks, 1);
+        assert_eq!(rejected.accepted, 0);
+        assert_eq!(rejected.errors, 1);
     }
 
     #[test]

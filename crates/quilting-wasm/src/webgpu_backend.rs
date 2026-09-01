@@ -2969,6 +2969,7 @@ pub(crate) struct StagedWebGpuFrameEvidence {
 pub(crate) struct StagedWebGpuPick {
     frame_revision: u64,
     source_render_call: u64,
+    viewport: [u32; 2],
     readback: StagedPatchPickReadback,
 }
 
@@ -2998,6 +2999,10 @@ impl StagedWebGpuPick {
 
     pub(crate) fn source_render_call(&self) -> u64 {
         self.source_render_call
+    }
+
+    pub(crate) fn viewport(&self) -> [u32; 2] {
+        self.viewport
     }
 
     pub(crate) async fn read(self) -> Result<WebGpuPickReadback, String> {
@@ -3110,6 +3115,7 @@ pub(crate) fn stage_pick(pixel: [u32; 2], target_epoch: u32) -> Result<StagedWeb
                 Ok(StagedWebGpuPick {
                     frame_revision: backend.last_frame_revision,
                     source_render_call: backend.last_source_render_call,
+                    viewport: backend.last_viewport,
                     readback,
                 })
             }
