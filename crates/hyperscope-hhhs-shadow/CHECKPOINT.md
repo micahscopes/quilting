@@ -50,6 +50,23 @@ attachments, including open-authority preparation, for one admitted entry.
 admission and the receiver-local source cursor atomically before publishing its
 rebuildable AppStore projection.
 
+Inbound `ReplicaRecord` values use the symmetric atomic path. A new record and
+the receiver-local cursor commit in one storage transaction; a missing causal
+predecessor defers without writes, a refused record changes nothing, and an
+exact duplicate ignores the proposed cursor bytes. After a new commit, the
+AppStore reducer installs canonical HHHS materialization at the advanced local
+projection revision rather than replaying a remote command in arrival order.
+Concurrent records therefore converge in either delivery order. An AppStore
+bypass can fault only the rebuildable projection: the public record remains
+durable, announceable, and recoverable on strict restart.
+
+Live transport uses `hyperscape_hhhs::AuthoredRecordFrame`, not an invented
+JavaScript record format. Raw `authored` envelopes are proposals for exactly
+one explicitly selected admission authority. Rust-produced
+`authored_record` frames are safe for every replica; `presence` stays outside
+HHHS. This role split prevents several browsers from independently opening the
+same Blender proposal into redundant concurrent records.
+
 A separate atomicity question remains: one source `AuthoredRevision` may carry
 several commands while the diagnostic shadow currently admits one HHHS entry
 per command. Attaching the cursor to the final entry would not prevent a

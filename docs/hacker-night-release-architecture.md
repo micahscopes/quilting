@@ -383,12 +383,16 @@ The first application boundary is now explicit:
   peer object sharing the Rust `AppStore` while owning the IndexedDB-backed
   `DurableAuthoredSession`; the synchronous direct-demo methods remain intact
   as a rollback. Authored input is persisted before the result returns, and an
-  applied result includes carrier-ready encoded `ReplicaRecord` bytes as a
-  `Uint8Array`. Presence stays on the ephemeral lane. A per-application writer
-  lease rejects a second live durable peer. An RAII open reservation releases
-  that lease if IndexedDB opening is cancelled, while an RAII session lease
-  prevents reentrant calls without holding a `RefCell` borrow across writes;
-  write cancellation restores the session.
+  applied result includes both carrier-ready encoded `ReplicaRecord` bytes and
+  canonical Rust-produced `AuthoredRecordFrame` JSON. Incoming record frames
+  atomically persist the public entry with a receiver-local cursor, defer
+  missing predecessors without writes, and replace the AppStore authored read
+  model from canonical HHHS materialization rather than arrival order.
+  Presence stays on the ephemeral lane. A per-application writer lease rejects
+  a second live durable peer. An RAII open reservation releases that lease if
+  IndexedDB opening is cancelled, while an RAII session lease prevents
+  reentrant calls without holding a `RefCell` borrow across writes; write
+  cancellation restores the session.
 - Protocol v0.1 now has an additive optional `authoring_leases` presence field.
   A claim combines a stable lease UUID with an asset-scoped entity identity;
   the containing peer envelope supplies ordering and receipt-relative expiry.
@@ -407,14 +411,19 @@ The first application boundary is now explicit:
   delivery, a bounded ordered outbound queue, and restart-aware decimal
   cursors. Relay batches carry application frames as exact JSON text, so
   Blender's nanosecond-scale `u64` sequence never crosses JavaScript's lossy
-  numeric representation. Generated Rust/WASM performs semantic admission and
-  packed-scene extraction. The renderer receives only resolved ordinary-world
-  node matrices, including the presentation layer outside an authored absolute
-  transform, so the same result overrides active conformal source packets in
-  drawing, LOD, focus bounds, picking, and walking. This adapter deliberately
-  adds no browser durability or repair. The immutable HHHS v0.4.4 pin qualifies
-  the dependency boundary; adopting its worker/storage seam remains separate
-  application work.
+  numeric representation. Its role is explicit: `legacy` retains the direct
+  single-writer rollback, `ignore` makes a durable replica refuse to promote
+  raw proposals, and `admit` selects exactly one durable proposal authority.
+  Only that authority may turn a Blender `authored` envelope into an HHHS
+  record; every durable replica may consume the resulting Rust-authored
+  `authored_record` frame. Async admission reserves outbound capacity before
+  persistence so a committed record cannot lose its announcement slot.
+  Generated Rust/WASM performs semantic admission and packed-scene extraction.
+  The renderer receives only resolved ordinary-world node matrices, including
+  the presentation layer outside an authored absolute transform, so the same
+  result overrides active conformal source packets in drawing, LOD, focus
+  bounds, picking, and walking. Project/session selection and automatic repair
+  remain separate application lifecycle work.
 - The same opt-in carrier now publishes the live browser viewport in the
   opposite direction. Until the general navigation cutover, the incumbent
   browser controller supplies one semantic eye/forward/up, selection, focus,
