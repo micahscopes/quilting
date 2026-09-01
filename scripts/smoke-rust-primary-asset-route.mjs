@@ -12,6 +12,10 @@ assert.deepEqual(canonicalizeHyperscopeRoute([]).primaryAssetSettings, {
   uri: 'horse.glb',
   playing: true,
 });
+assert.deepEqual(canonicalizeHyperscopeRoute([]).startupSettings.primaryAssetSettings, {
+  uri: 'horse.glb',
+  playing: true,
+});
 
 const explicit = canonicalizeHyperscopeRoute([
   ['glb', 'local-glbs/classic_chessboard.glb'],
@@ -24,14 +28,15 @@ assert.deepEqual(explicit.primaryAssetSettings, {
   animationClip: 17,
   playing: false,
 });
+assert.deepEqual(explicit.startupSettings.primaryAssetSettings, explicit.primaryAssetSettings);
 
 const browser = readFileSync(`${repository}/hyperscope.html`, 'utf8');
 for (const required of [
-  '&& startupRoute.primaryAssetSettings',
-  'initPrimaryAssetSettings = startupRoute.primaryAssetSettings;',
-  'currentGlb = initPrimaryAssetSettings.uri;',
+  '&& startupRoute.startupSettings',
+  'initRustStartupSettings = startupRoute.startupSettings;',
+  'currentGlb = initRustStartupSettings.primaryAssetSettings.uri;',
   'validatedPrimaryAssetSettings?.playing ?? params.animate',
-  '? (initPrimaryAssetSettings?.animationClip ?? -1)',
+  '? (initRustStartupSettings.primaryAssetSettings.animationClip ?? -1)',
 ]) {
   assert.ok(browser.includes(required), `browser typed primary asset route is missing ${required}`);
 }

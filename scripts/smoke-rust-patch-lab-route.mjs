@@ -24,6 +24,7 @@ assert.deepEqual(defaults.patchLabSession, {
     animate: false,
   },
 });
+assert.deepEqual(defaults.startupSettings.patchLabSession, defaults.patchLabSession);
 
 const normalized = canonicalizeHyperscopeRoute([
   ['atlas', '5'],
@@ -53,15 +54,16 @@ assert.deepEqual(normalized.patchLabSession, {
     animate: false,
   },
 });
+assert.deepEqual(normalized.startupSettings.patchLabSession, normalized.patchLabSession);
 
 const browser = readFileSync(`${repository}/hyperscope.html`, 'utf8');
 for (const required of [
-  '&& startupRoute.patchLabSession',
-  'initPatchLabSession = startupRoute.patchLabSession;',
-  'const validatedPatchLabSession = admittedRoute?.patchLabSession ?? null;',
+  '&& startupRoute.startupSettings',
+  'initRustStartupSettings = startupRoute.startupSettings;',
+  'const validatedPatchLabSession = startupSettings?.patchLabSession ?? null;',
   '? validatedPatchLabSession?.controls : null;',
   '? patchLabWireField(routePatchLabControls.field)',
-  'applyParams(initParams, initRustStartupRoute)',
+  'applyParams(initParams, initRustStartupSettings)',
 ]) {
   assert.ok(browser.includes(required), `browser typed Patch Lab route is missing ${required}`);
 }

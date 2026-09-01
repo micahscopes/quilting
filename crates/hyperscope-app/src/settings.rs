@@ -386,6 +386,24 @@ pub struct RouteRendererAssetSettings {
     pub matcap: String,
 }
 
+/// One all-or-nothing startup projection admitted from a route.
+///
+/// The optional clock and selection remain optional application intents, but
+/// every required startup domain is resolved together. Platform adapters must
+/// not reconstruct route admission by checking a collection of independently
+/// optional projections.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RouteStartupSettings {
+    pub render_settings: RenderSettings,
+    pub navigation_settings: RouteNavigationSettings,
+    pub patch_lab_session: PatchLabSessionIntent,
+    pub presentation_settings: RoutePresentationSettings,
+    pub primary_asset_settings: RoutePrimaryAssetSettings,
+    pub renderer_asset_settings: RouteRendererAssetSettings,
+    pub selection: Option<AssetEntityId>,
+    pub animation_clock: Option<RouteAnimationClock>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteTransformKind {
     Identity,
@@ -916,6 +934,28 @@ impl HyperscopeRoute {
         Ok(RouteRendererAssetSettings {
             environment,
             matcap,
+        })
+    }
+
+    /// Resolve every startup domain as one transaction.
+    ///
+    /// Individual projection methods remain useful to focused controls and
+    /// shadow diagnostics. Startup authority is stricter: any route diagnostic
+    /// rejects the complete packet, and no adapter may install a partially
+    /// resolved camera, renderer, asset, or presentation state.
+    pub fn startup_settings(&self) -> Result<RouteStartupSettings, &'static str> {
+        if !self.diagnostics.is_empty() {
+            return Err("route contains diagnostics");
+        }
+        Ok(RouteStartupSettings {
+            render_settings: self.render_settings()?,
+            navigation_settings: self.navigation_settings()?,
+            patch_lab_session: self.patch_lab_session()?,
+            presentation_settings: self.presentation_settings()?,
+            primary_asset_settings: self.primary_asset_settings()?,
+            renderer_asset_settings: self.renderer_asset_settings()?,
+            selection: self.selected_identity()?,
+            animation_clock: self.animation_clock()?,
         })
     }
 
@@ -1920,6 +1960,70 @@ mod tests {
         let rollback_route = HyperscopeRoute::from_pairs([("routeimpl", "js")]);
         assert_eq!(rollback_route.canonical_pairs(), vec![("routeimpl", "js")]);
         assert!(rollback_route.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn startup_route_projection_is_atomic_across_required_and_optional_domains() {
+        let asset = "a0000000-0000-4000-8000-000000000001";
+        let entity = "b0000000-0000-4000-8000-000000000002";
+        let route = HyperscopeRoute::from_pairs([
+            ("glb", "scene.glb"),
+            ("env", "studio_1k"),
+            ("matcap", "clay"),
+            ("animtime", "1.25"),
+            ("selasset", asset),
+            ("selentity", entity),
+        ]);
+        let startup = route.startup_settings().unwrap();
+
+        assert_eq!(startup.render_settings, route.render_settings().unwrap());
+        assert_eq!(
+            startup.navigation_settings,
+            route.navigation_settings().unwrap()
+        );
+        assert_eq!(
+            startup.patch_lab_session,
+            route.patch_lab_session().unwrap()
+        );
+        assert_eq!(
+            startup.presentation_settings,
+            route.presentation_settings().unwrap()
+        );
+        assert_eq!(
+            startup.primary_asset_settings,
+            RoutePrimaryAssetSettings {
+                uri: "scene.glb".to_owned(),
+                animation_clip: None,
+                playing: true,
+            }
+        );
+        assert_eq!(
+            startup.renderer_asset_settings,
+            RouteRendererAssetSettings {
+                environment: "studio_1k".to_owned(),
+                matcap: "clay".to_owned(),
+            }
+        );
+        assert!(startup.selection.is_some());
+        assert_eq!(
+            startup.animation_clock,
+            Some(RouteAnimationClock {
+                time_seconds: Some(1.25),
+                speed: None,
+            })
+        );
+
+        let invalid = HyperscopeRoute::from_pairs([("unknown", "value")]);
+        assert!(!invalid.diagnostics().is_empty());
+        assert_eq!(
+            invalid.render_settings(),
+            Ok(RenderSettings::default()),
+            "focused projections may still support diagnostics and shadow comparison"
+        );
+        assert_eq!(
+            invalid.startup_settings(),
+            Err("route contains diagnostics")
+        );
     }
 
     #[test]

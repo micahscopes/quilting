@@ -4393,8 +4393,8 @@ async function initializeRustPresentation() {
     globalThis.__hyperscopePresentationJump = cueId => activateRustPresentation('jump', cueId);
     if (!ensureRustPresentationView()) $('presentation-card').classList.add('active');
     rustPresentationDiagnostics.ready = true;
-    const routeCueId = initRustRouteAdmitted
-      ? initPresentationSettings?.cueId : initParams.cue;
+    const routeCueId = initRustStartupSettings
+      ? initRustStartupSettings.presentationSettings.cueId : initParams.cue;
     const snapshot = routeCueId
       ? activateRustPresentation('jump', routeCueId)
       : activateRustPresentation('start');
@@ -11289,16 +11289,16 @@ effect(() => {
 // --- applyParams: set all signals from URL params (defined after all signals exist) ---
 applyParams = function(
   params,
-  admittedRoute = null,
+  startupSettings = null,
 ) {
-  const rustRouteAdmitted = admittedRoute !== null;
-  const validatedRenderSettings = admittedRoute?.renderSettings ?? null;
-  const validatedRouteSelection = admittedRoute?.selection ?? null;
-  const validatedRouteAnimationClock = admittedRoute?.animationClock ?? null;
-  const validatedNavigationSettings = admittedRoute?.navigationSettings ?? null;
-  const validatedPatchLabSession = admittedRoute?.patchLabSession ?? null;
-  const validatedPrimaryAssetSettings = admittedRoute?.primaryAssetSettings ?? null;
-  const validatedRendererAssetSettings = admittedRoute?.rendererAssetSettings ?? null;
+  const rustRouteAdmitted = startupSettings !== null;
+  const validatedRenderSettings = startupSettings?.renderSettings ?? null;
+  const validatedRouteSelection = startupSettings?.selection ?? null;
+  const validatedRouteAnimationClock = startupSettings?.animationClock ?? null;
+  const validatedNavigationSettings = startupSettings?.navigationSettings ?? null;
+  const validatedPatchLabSession = startupSettings?.patchLabSession ?? null;
+  const validatedPrimaryAssetSettings = startupSettings?.primaryAssetSettings ?? null;
+  const validatedRendererAssetSettings = startupSettings?.rendererAssetSettings ?? null;
   const finite = (value, fallback, minimum, maximum) => {
     const parsed = Number(value);
     if (!Number.isFinite(parsed)) return fallback;
@@ -15031,12 +15031,7 @@ updateLocalPeerModeView();
 // Bootstrap platform flags and an inert camera preview from the raw query.
 // Rust route mode re-decodes valid pairs before any application state is set.
 let initParams = readParams(initialRouteParams);
-let initRenderSettings = null;
-let initRustRouteAdmitted = false;
-let initPatchLabSession = null;
-let initPresentationSettings = null;
-let initPrimaryAssetSettings = null;
-let initRustStartupRoute = null;
+let initRustStartupSettings = null;
 currentGlb = initParams.glb;
 let initialPatchLabShape = patchLabShape(initParams.lab);
 // Set camera early (not WASM-dependent)
@@ -15081,29 +15076,19 @@ phase('wasm', [], async () => {
     rustRouteShadowDiagnostics.startupDiagnostics = startupRoute?.diagnostics || [];
     if (RUST_ROUTE_IMPLEMENTATION === 'rust') {
       if (startupRoute
-          && startupRoute.diagnostics.length === 0
-          && startupRoute.renderSettings
-          && startupRoute.navigationSettings
-          && startupRoute.patchLabSession
-          && startupRoute.presentationSettings
-          && startupRoute.primaryAssetSettings
-          && startupRoute.rendererAssetSettings) {
+          && startupRoute.startupSettings) {
         initParams = readParams(
           new URLSearchParams(startupRoute.resolvedPairs),
           new URLSearchParams(startupRoute.pairs),
         );
-        initRenderSettings = startupRoute.renderSettings;
-        initRustRouteAdmitted = true;
-        initPatchLabSession = startupRoute.patchLabSession;
-        initPresentationSettings = startupRoute.presentationSettings;
-        initPrimaryAssetSettings = startupRoute.primaryAssetSettings;
-        initRustStartupRoute = startupRoute;
-        if (initPresentationSettings.enabled !== RUST_PRESENTATION_ENABLED) {
+        initRustStartupSettings = startupRoute.startupSettings;
+        if (initRustStartupSettings.presentationSettings.enabled
+            !== RUST_PRESENTATION_ENABLED) {
           throw new Error('Rust presentation route disagrees with the pre-WASM bootstrap');
         }
-        currentGlb = initPrimaryAssetSettings.uri;
-        initialPatchLabShape = initPatchLabSession.active
-          ? initPatchLabSession.controls.shape : null;
+        currentGlb = initRustStartupSettings.primaryAssetSettings.uri;
+        initialPatchLabShape = initRustStartupSettings.patchLabSession.active
+          ? initRustStartupSettings.patchLabSession.controls.shape : null;
         rustRouteShadowDiagnostics.startupSource = 'rust';
       } else {
         rustRouteShadowDiagnostics.startupSource = 'browser-fallback';
@@ -15169,15 +15154,14 @@ phase('wasm', [], async () => {
     rendererInitMs: rendererFinished - instantiateFinished,
     sharedCompiledModule: true,
   };
-  applyParams(initParams, initRustStartupRoute); // Set signal values first
+  applyParams(initParams, initRustStartupSettings); // Set signal values first
   if (RUST_RENDER_SETTINGS_IMPLEMENTATION !== 'js'
-      && initRustRouteAdmitted
-      && initRenderSettings) {
+      && initRustStartupSettings) {
     try {
       const app = ensureRustAppShadow('render-route-startup');
       const receipt = synchronizeRustRenderSettingsPacket(
         app,
-        initRenderSettings,
+        initRustStartupSettings.renderSettings,
         'route-startup',
       );
       if (!receipt.matchesInput) {
@@ -15618,8 +15602,8 @@ phase('render', ['wasm', 'atlas', 'model'], async () => {
           if (RUST_PRESENTATION_ENABLED && rustPresentationSnapshot) {
             await applyPresentationAnimationState(rustPresentationSnapshot);
           } else {
-            const animIdx = initRustRouteAdmitted
-              ? (initPrimaryAssetSettings?.animationClip ?? -1)
+            const animIdx = initRustStartupSettings
+              ? (initRustStartupSettings.primaryAssetSettings.animationClip ?? -1)
               : parseInt(initParams.anim);
             if (animIdx >= 0 && $('anim-sel').querySelector(`option[value="${animIdx}"]`)) {
               await selectAnimationIndex(animIdx);

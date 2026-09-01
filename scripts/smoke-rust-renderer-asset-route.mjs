@@ -12,6 +12,10 @@ assert.deepEqual(canonicalizeHyperscopeRoute([]).rendererAssetSettings, {
   environment: 'rosendal_plains_1_1k',
   matcap: 'citric-acid',
 });
+assert.deepEqual(canonicalizeHyperscopeRoute([]).startupSettings.rendererAssetSettings, {
+  environment: 'rosendal_plains_1_1k',
+  matcap: 'citric-acid',
+});
 
 const explicit = canonicalizeHyperscopeRoute([
   ['env', 'rogland_clear_night_2k'],
@@ -22,20 +26,22 @@ assert.deepEqual(explicit.rendererAssetSettings, {
   environment: 'rogland_clear_night_2k',
   matcap: 'soft-studio',
 });
+assert.deepEqual(explicit.startupSettings.rendererAssetSettings, explicit.rendererAssetSettings);
 
 for (const key of ['env', 'matcap']) {
   const invalid = canonicalizeHyperscopeRoute([[key, '']]);
   assert.ok(invalid.diagnostics.some(diagnostic =>
     diagnostic.key === key && diagnostic.code === 'invalid_value'));
   assert.equal(invalid.rendererAssetSettings, undefined);
+  assert.equal(invalid.startupSettings, undefined);
 }
 
 const browser = readFileSync(`${repository}/hyperscope.html`, 'utf8');
 for (const required of [
-  '&& startupRoute.rendererAssetSettings',
-  'initRustStartupRoute = startupRoute;',
-  'applyParams(initParams, initRustStartupRoute)',
-  'const validatedRenderSettings = admittedRoute?.renderSettings ?? null;',
+  '&& startupRoute.startupSettings',
+  'initRustStartupSettings = startupRoute.startupSettings;',
+  'applyParams(initParams, initRustStartupSettings)',
+  'const validatedRenderSettings = startupSettings?.renderSettings ?? null;',
   'validatedRendererAssetSettings?.environment',
   'validatedRendererAssetSettings?.matcap',
 ]) {

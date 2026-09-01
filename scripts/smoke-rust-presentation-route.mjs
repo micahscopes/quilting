@@ -11,6 +11,9 @@ await init({ module_or_path: readFileSync(wasmPath) });
 assert.deepEqual(canonicalizeHyperscopeRoute([]).presentationSettings, {
   enabled: false,
 });
+assert.deepEqual(canonicalizeHyperscopeRoute([]).startupSettings.presentationSettings, {
+  enabled: false,
+});
 
 const cueId = 'e0000000-0000-4000-8000-000000000004';
 const linked = canonicalizeHyperscopeRoute([
@@ -22,18 +25,20 @@ assert.deepEqual(linked.presentationSettings, {
   enabled: true,
   cueId,
 });
+assert.deepEqual(linked.startupSettings.presentationSettings, linked.presentationSettings);
 
 const misleading = canonicalizeHyperscopeRoute([['cue', cueId]]);
 assert.ok(misleading.diagnostics.some(diagnostic =>
   diagnostic.key === 'presentation' && diagnostic.code === 'invalid_value'));
 assert.equal(misleading.presentationSettings, undefined);
+assert.equal(misleading.startupSettings, undefined);
 
 const browser = readFileSync(`${repository}/hyperscope.html`, 'utf8');
 for (const required of [
-  '&& startupRoute.presentationSettings',
-  'initPresentationSettings = startupRoute.presentationSettings;',
-  'initPresentationSettings.enabled !== RUST_PRESENTATION_ENABLED',
-  '? initPresentationSettings?.cueId : initParams.cue;',
+  '&& startupRoute.startupSettings',
+  'initRustStartupSettings = startupRoute.startupSettings;',
+  'initRustStartupSettings.presentationSettings.enabled',
+  '? initRustStartupSettings.presentationSettings.cueId : initParams.cue;',
   "? activateRustPresentation('jump', routeCueId)",
 ]) {
   assert.ok(browser.includes(required), `browser typed presentation route is missing ${required}`);

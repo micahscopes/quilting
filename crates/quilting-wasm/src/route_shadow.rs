@@ -9,12 +9,31 @@ struct RouteShadowResult {
     pairs: Vec<[String; 2]>,
     resolved_pairs: Vec<[String; 2]>,
     diagnostics: Vec<RouteShadowDiagnostic>,
+    startup_settings: Option<RouteStartupSettings>,
     render_settings: Option<RouteRenderSettings>,
     navigation_settings: Option<RouteNavigationSettings>,
     patch_lab_session: Option<RoutePatchLabSession>,
     presentation_settings: Option<RoutePresentationSettings>,
     primary_asset_settings: Option<RoutePrimaryAssetSettings>,
     renderer_asset_settings: Option<RouteRendererAssetSettings>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selection: Option<RouteSelection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    animation_clock: Option<RouteAnimationClock>,
+}
+
+/// Complete startup projection. Its presence is the admission fact; optional
+/// intents live inside it rather than making the browser infer atomicity from
+/// several independently optional properties.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RouteStartupSettings {
+    render_settings: RouteRenderSettings,
+    navigation_settings: RouteNavigationSettings,
+    patch_lab_session: RoutePatchLabSession,
+    presentation_settings: RoutePresentationSettings,
+    primary_asset_settings: RoutePrimaryAssetSettings,
+    renderer_asset_settings: RouteRendererAssetSettings,
     #[serde(skip_serializing_if = "Option::is_none")]
     selection: Option<RouteSelection>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -138,6 +157,58 @@ impl From<PatchLabControls> for RoutePatchLabControls {
     }
 }
 
+impl From<hyperscope_app::RenderSettings> for RouteRenderSettings {
+    fn from(settings: hyperscope_app::RenderSettings) -> Self {
+        Self {
+            style: settings.style.wire_name(),
+            resolution_level: settings.resolution_level,
+            density: settings.tessellation.density,
+            screen_attenuation: settings.tessellation.screen_attenuation,
+            min_pixels_per_subdivision: settings.tessellation.min_pixels_per_subdivision,
+            atlas_exponent: settings.atlas_exponent,
+            max_face_edge_ratio: settings.max_face_edge_ratio,
+            focus_postprocess: settings.focus_postprocess.into(),
+        }
+    }
+}
+
+impl From<hyperscope_app::PatchLabSessionIntent> for RoutePatchLabSession {
+    fn from(session: hyperscope_app::PatchLabSessionIntent) -> Self {
+        Self {
+            active: session.active,
+            controls: session.controls.into(),
+        }
+    }
+}
+
+impl From<hyperscope_app::RoutePresentationSettings> for RoutePresentationSettings {
+    fn from(settings: hyperscope_app::RoutePresentationSettings) -> Self {
+        Self {
+            enabled: settings.enabled,
+            cue_id: settings.cue_id.map(|cue_id| cue_id.to_string()),
+        }
+    }
+}
+
+impl From<hyperscope_app::RoutePrimaryAssetSettings> for RoutePrimaryAssetSettings {
+    fn from(settings: hyperscope_app::RoutePrimaryAssetSettings) -> Self {
+        Self {
+            uri: settings.uri,
+            animation_clip: settings.animation_clip,
+            playing: settings.playing,
+        }
+    }
+}
+
+impl From<hyperscope_app::RouteRendererAssetSettings> for RouteRendererAssetSettings {
+    fn from(settings: hyperscope_app::RouteRendererAssetSettings) -> Self {
+        Self {
+            environment: settings.environment,
+            matcap: settings.matcap,
+        }
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RouteNavigationSettings {
@@ -197,6 +268,51 @@ struct RouteSurfaceWalkSettings {
     near_eye_fraction: f64,
 }
 
+impl From<hyperscope_app::RouteNavigationSettings> for RouteNavigationSettings {
+    fn from(settings: hyperscope_app::RouteNavigationSettings) -> Self {
+        Self {
+            transform: RouteTransformSettings {
+                kind: settings.transform.kind.wire_name(),
+                center_controls: settings.transform.center_controls,
+                radius_control: settings.transform.radius_control,
+            },
+            camera: RouteCameraSettings {
+                zoom: settings.camera.zoom,
+                euler_radians: settings.camera.euler_radians,
+                position: settings.camera.position,
+                semantic_target_enabled: settings.camera.semantic_target_enabled,
+                vertical_fov_degrees: settings.camera.vertical_fov_degrees,
+                focus_transition_seconds: settings.camera.focus_transition_seconds,
+            },
+            space_mouse: RouteSpaceMouseSettings {
+                move_sensitivity: settings.space_mouse.move_sensitivity,
+                rotate_sensitivity: settings.space_mouse.rotate_sensitivity,
+                profile: settings.space_mouse.profile.wire_name(),
+                lock_horizon: settings.space_mouse.lock_horizon,
+                swap_yz: settings.space_mouse.swap_yz,
+                accept_background_input: settings.space_mouse.accept_background_input,
+                hyperscope_pan_invert_mask: settings.space_mouse.hyperscope_pan_invert_mask,
+                hyperscope_rotate_invert_mask: settings.space_mouse.hyperscope_rotate_invert_mask,
+                blender_pan_invert_mask: settings.space_mouse.blender_pan_invert_mask,
+                blender_rotate_invert_mask: settings.space_mouse.blender_rotate_invert_mask,
+            },
+            surface_walk: RouteSurfaceWalkSettings {
+                base_radii_per_second: settings.surface_walk.base_radii_per_second,
+                base_eye_height: settings.surface_walk.base_eye_height,
+                speed_octave_steps: settings.surface_walk.speed_octave_steps,
+                body_scale_octave_steps: settings.surface_walk.body_scale_octave_steps,
+                eye_height_octave_steps: settings.surface_walk.eye_height_octave_steps,
+                smoothing_seconds: settings.surface_walk.smoothing_seconds,
+                tangent_pull_fraction: settings.surface_walk.tangent_pull_fraction,
+                fast_multiplier: settings.surface_walk.fast_multiplier,
+                default_near: settings.surface_walk.default_near,
+                minimum_near: settings.surface_walk.minimum_near,
+                near_eye_fraction: settings.surface_walk.near_eye_fraction,
+            },
+        }
+    }
+}
+
 /// Canonicalize already-decoded browser query pairs. Percent decoding and
 /// encoding remain platform work; key identity, defaults, validation, and
 /// ordering are Rust application policy.
@@ -223,19 +339,7 @@ pub fn canonicalize_hyperscope_route(pairs: JsValue) -> Result<JsValue, JsValue>
             value: diagnostic.value.clone(),
         })
         .collect();
-    let render_settings = route
-        .render_settings()
-        .ok()
-        .map(|settings| RouteRenderSettings {
-            style: settings.style.wire_name(),
-            resolution_level: settings.resolution_level,
-            density: settings.tessellation.density,
-            screen_attenuation: settings.tessellation.screen_attenuation,
-            min_pixels_per_subdivision: settings.tessellation.min_pixels_per_subdivision,
-            atlas_exponent: settings.atlas_exponent,
-            max_face_edge_ratio: settings.max_face_edge_ratio,
-            focus_postprocess: settings.focus_postprocess.into(),
-        });
+    let render_settings = route.render_settings().ok().map(Into::into);
     let selection = route
         .selected_identity()
         .ok()
@@ -252,88 +356,36 @@ pub fn canonicalize_hyperscope_route(pairs: JsValue) -> Result<JsValue, JsValue>
             time_seconds: clock.time_seconds,
             speed: clock.speed,
         });
-    let patch_lab_session = route
-        .patch_lab_session()
-        .ok()
-        .map(|session| RoutePatchLabSession {
-            active: session.active,
-            controls: session.controls.into(),
+    let patch_lab_session = route.patch_lab_session().ok().map(Into::into);
+    let presentation_settings = route.presentation_settings().ok().map(Into::into);
+    let primary_asset_settings = route.primary_asset_settings().ok().map(Into::into);
+    let renderer_asset_settings = route.renderer_asset_settings().ok().map(Into::into);
+    let navigation_settings = route.navigation_settings().ok().map(Into::into);
+    let startup_settings = route.startup_settings().ok().map(|settings| {
+        let selection = settings.selection.map(|identity| RouteSelection {
+            asset_id: identity.asset.to_string(),
+            entity_id: identity.entity.to_string(),
         });
-    let presentation_settings =
-        route
-            .presentation_settings()
-            .ok()
-            .map(|settings| RoutePresentationSettings {
-                enabled: settings.enabled,
-                cue_id: settings.cue_id.map(|cue_id| cue_id.to_string()),
-            });
-    let primary_asset_settings =
-        route
-            .primary_asset_settings()
-            .ok()
-            .map(|settings| RoutePrimaryAssetSettings {
-                uri: settings.uri,
-                animation_clip: settings.animation_clip,
-                playing: settings.playing,
-            });
-    let renderer_asset_settings =
-        route
-            .renderer_asset_settings()
-            .ok()
-            .map(|settings| RouteRendererAssetSettings {
-                environment: settings.environment,
-                matcap: settings.matcap,
-            });
-    let navigation_settings =
-        route
-            .navigation_settings()
-            .ok()
-            .map(|settings| RouteNavigationSettings {
-                transform: RouteTransformSettings {
-                    kind: settings.transform.kind.wire_name(),
-                    center_controls: settings.transform.center_controls,
-                    radius_control: settings.transform.radius_control,
-                },
-                camera: RouteCameraSettings {
-                    zoom: settings.camera.zoom,
-                    euler_radians: settings.camera.euler_radians,
-                    position: settings.camera.position,
-                    semantic_target_enabled: settings.camera.semantic_target_enabled,
-                    vertical_fov_degrees: settings.camera.vertical_fov_degrees,
-                    focus_transition_seconds: settings.camera.focus_transition_seconds,
-                },
-                space_mouse: RouteSpaceMouseSettings {
-                    move_sensitivity: settings.space_mouse.move_sensitivity,
-                    rotate_sensitivity: settings.space_mouse.rotate_sensitivity,
-                    profile: settings.space_mouse.profile.wire_name(),
-                    lock_horizon: settings.space_mouse.lock_horizon,
-                    swap_yz: settings.space_mouse.swap_yz,
-                    accept_background_input: settings.space_mouse.accept_background_input,
-                    hyperscope_pan_invert_mask: settings.space_mouse.hyperscope_pan_invert_mask,
-                    hyperscope_rotate_invert_mask: settings
-                        .space_mouse
-                        .hyperscope_rotate_invert_mask,
-                    blender_pan_invert_mask: settings.space_mouse.blender_pan_invert_mask,
-                    blender_rotate_invert_mask: settings.space_mouse.blender_rotate_invert_mask,
-                },
-                surface_walk: RouteSurfaceWalkSettings {
-                    base_radii_per_second: settings.surface_walk.base_radii_per_second,
-                    base_eye_height: settings.surface_walk.base_eye_height,
-                    speed_octave_steps: settings.surface_walk.speed_octave_steps,
-                    body_scale_octave_steps: settings.surface_walk.body_scale_octave_steps,
-                    eye_height_octave_steps: settings.surface_walk.eye_height_octave_steps,
-                    smoothing_seconds: settings.surface_walk.smoothing_seconds,
-                    tangent_pull_fraction: settings.surface_walk.tangent_pull_fraction,
-                    fast_multiplier: settings.surface_walk.fast_multiplier,
-                    default_near: settings.surface_walk.default_near,
-                    minimum_near: settings.surface_walk.minimum_near,
-                    near_eye_fraction: settings.surface_walk.near_eye_fraction,
-                },
-            });
+        let animation_clock = settings.animation_clock.map(|clock| RouteAnimationClock {
+            time_seconds: clock.time_seconds,
+            speed: clock.speed,
+        });
+        RouteStartupSettings {
+            render_settings: settings.render_settings.into(),
+            navigation_settings: settings.navigation_settings.into(),
+            patch_lab_session: settings.patch_lab_session.into(),
+            presentation_settings: settings.presentation_settings.into(),
+            primary_asset_settings: settings.primary_asset_settings.into(),
+            renderer_asset_settings: settings.renderer_asset_settings.into(),
+            selection,
+            animation_clock,
+        }
+    });
     to_js(&RouteShadowResult {
         pairs,
         resolved_pairs,
         diagnostics,
+        startup_settings,
         render_settings,
         navigation_settings,
         patch_lab_session,

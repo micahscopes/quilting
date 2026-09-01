@@ -1376,23 +1376,14 @@ for (const startupStep of [
   'rustRouteShadowDiagnostics.specs = controlSpecs;',
   'initParams = readParams(initialRouteParams);',
   'const startupRoute = evaluateRustRoute(startupBrowserParams, false);',
-  'startupRoute.diagnostics.length === 0',
-  '&& startupRoute.renderSettings',
-  '&& startupRoute.navigationSettings',
-  '&& startupRoute.patchLabSession',
+  '&& startupRoute.startupSettings',
   'new URLSearchParams(startupRoute.resolvedPairs),',
   'new URLSearchParams(startupRoute.pairs),',
-  'initRenderSettings = startupRoute.renderSettings;',
-  'initRustRouteAdmitted = true;',
-  'initRouteSelection = startupRoute.selection ?? null;',
-  'initRouteAnimationClock = startupRoute.animationClock ?? null;',
-  'initPatchLabSession = startupRoute.patchLabSession;',
+  'initRustStartupSettings = startupRoute.startupSettings;',
   "rustRouteShadowDiagnostics.startupSource = 'browser-fallback';",
   "'missing-typed-route-settings'",
-  'initRouteSelection,',
-  'initRouteAnimationClock,',
-  'initPatchLabSession,',
-  "synchronizeRustRenderSettingsPacket(\n        app,\n        initRenderSettings,\n        'route-startup',",
+  'applyParams(initParams, initRustStartupSettings);',
+  "synchronizeRustRenderSettingsPacket(\n        app,\n        initRustStartupSettings.renderSettings,\n        'route-startup',",
   "rustRenderSettingsDiagnostics.state = 'route-committed';",
 ]) {
   assert.ok(
@@ -1407,7 +1398,7 @@ assert.ok(
 );
 assert.ok(
   startupAdapter.indexOf('new URLSearchParams(startupRoute.resolvedPairs),')
-    < startupAdapter.indexOf('initRouteSelection,'),
+    < startupAdapter.indexOf('applyParams(initParams, initRustStartupSettings);'),
   'Rust startup decoding must finish before browser state is applied',
 );
 assert.ok(
@@ -1455,7 +1446,7 @@ assert.equal(
 );
 
 const applyParamsSource = browserSource.match(
-  /applyParams = function\([\s\S]*?validatedPatchLabSession = null,[\s\S]*?\) \{([\s\S]*?)\n\};\n\n\/\/ --- IndexedDB/,
+  /applyParams = function\([\s\S]*?startupSettings = null,[\s\S]*?\) \{([\s\S]*?)\n\};\n\n\/\/ --- IndexedDB/,
 )?.[1];
 assert.ok(applyParamsSource, 'could not locate browser startup state adapter');
 for (const exactProjection of [
@@ -1497,8 +1488,10 @@ for (const exactAdmissionStep of [
   );
 }
 assert.ok(
-  browserSource.includes('const animIdx = initRustRouteAdmitted')
-    && browserSource.includes('? Number(initParams.anim)')
+  browserSource.includes('const animIdx = initRustStartupSettings')
+    && browserSource.includes(
+      '? (initRustStartupSettings.primaryAssetSettings.animationClip ?? -1)',
+    )
     && browserSource.includes(': parseInt(initParams.anim);'),
   'Rust-admitted animation indices must bypass legacy parseInt coercion',
 );

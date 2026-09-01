@@ -302,9 +302,14 @@ The first application boundary is now explicit:
   `RouteRendererAssetSettings` packet. They remain platform resources: the
   browser still fetches, caches, decodes, cancels, and uploads them, while Rust
   prevents an admitted route from falling back to two independent browser
-  default decisions. Browser startup applies the complete admitted route as
-  one object and destructures typed projections locally; it no longer accepts
-  eight separately ordered Rust route arguments.
+  default decisions. `RouteStartupSettings` now resolves render, navigation,
+  Patch Lab, presentation, primary asset, renderer resources, optional stable
+  selection, and optional animation clock as one all-or-nothing transaction.
+  Any route diagnostic suppresses that complete packet. Browser startup tests
+  one `startupSettings` property and applies that value directly; it no longer
+  infers admission by checking several independently optional projections or
+  retains separate startup variables for them. Focused per-domain projections
+  remain only for diagnostics and shadow oracles.
   Camera/conformal-transform state, SpaceMouse policy, and surface-walk policy
   additionally leave Rust as one typed `RouteNavigationSettings` value.
   Centiseconds and percentages become semantic seconds and fractions before
