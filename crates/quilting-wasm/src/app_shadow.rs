@@ -27,10 +27,9 @@ use hyperscope_app::{
     AnimationClipSelectionOutcome, AnimationClipSelectionReadModel, AnimationClock,
     AnimationPoseRequestDisposition, AnimationPoseScheduler, AnimationPoseStamp, AppCommit,
     AppCommitWire, AppEffect, AppEvent, AppFrameSnapshot, AppRenderSnapshotWire, AppStore,
-    AssetFetchJob, AssetJobIdentity, AssetLoadCompletion, AssetLoadCompletionDispatch,
-    AssetLoadOutcome, AssetLoadRequest,
-    AssetLoadScope, AssetMetadata, AssetReadModel, AssetStatus, AuthoredRevision,
-    AuthoringLeaseStatus,
+    AssetLoadCompletion, AssetLoadCompletionDispatch, AssetLoadCompletionWire, AssetLoadOutcome,
+    AssetLoadRequest, AssetLoadRequestWire, AssetLoadScope, AssetMetadata, AssetReadModelWire,
+    AssetStatus, AuthoredRevision, AuthoringLeaseStatus,
     FocusDiagnosticView, FocusPostprocessMode, FocusPostprocessSettings, FrameTick,
     GraphicsPresentationDecision,
     InstalledPrimarySceneReadModel, LocalAuthoringLeaseController, LocalPeerDisposition,
@@ -3593,7 +3592,7 @@ impl HyperscopeAppShadow {
             .store
             .asset_snapshot()
             .into_iter()
-            .map(ShadowAsset::from)
+            .map(AssetReadModelWire::from)
             .collect();
         let diagnostics = self
             .store
@@ -4064,86 +4063,12 @@ struct ShadowDirectSemanticReceipt {
     commit: AppCommitWire,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ShadowAssetLoadRequest {
-    sequence: String,
-    commit: AppCommitWire,
-    fetch: ShadowAssetFetchJob,
-    load_cancellations: Vec<ShadowAssetJobIdentity>,
-    install_cancellations: Vec<ShadowAssetJobIdentity>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ShadowAssetLoadCompletion {
-    commit: AppCommitWire,
-    install: Option<ShadowAssetJobIdentity>,
-    asset: Option<ShadowAsset>,
-}
-
 fn asset_load_request_to_js(request: AssetLoadRequest) -> Result<JsValue, JsValue> {
-    to_js(&ShadowAssetLoadRequest {
-        sequence: request.sequence.to_string(),
-        commit: shadow_commit(&request.commit),
-        fetch: ShadowAssetFetchJob::from(request.fetch),
-        load_cancellations: request
-            .load_cancellations
-            .into_iter()
-            .map(ShadowAssetJobIdentity::from)
-            .collect(),
-        install_cancellations: request
-            .install_cancellations
-            .into_iter()
-            .map(ShadowAssetJobIdentity::from)
-            .collect(),
-    })
+    to_js(&AssetLoadRequestWire::from(request))
 }
 
 fn asset_load_completion_to_js(dispatch: AssetLoadCompletionDispatch) -> Result<JsValue, JsValue> {
-    to_js(&ShadowAssetLoadCompletion {
-        commit: shadow_commit(&dispatch.commit),
-        install: dispatch.install.map(ShadowAssetJobIdentity::from),
-        asset: dispatch.asset.map(ShadowAsset::from),
-    })
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ShadowAssetFetchJob {
-    request_id: String,
-    asset_id: String,
-    uri: String,
-    media_type: Option<String>,
-    content_digest: Option<[u8; 32]>,
-}
-
-impl From<AssetFetchJob> for ShadowAssetFetchJob {
-    fn from(job: AssetFetchJob) -> Self {
-        Self {
-            request_id: job.request_id.to_string(),
-            asset_id: job.asset.id.to_string(),
-            uri: job.asset.uri,
-            media_type: job.asset.media_type,
-            content_digest: job.asset.content_digest,
-        }
-    }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ShadowAssetJobIdentity {
-    request_id: String,
-    asset_id: String,
-}
-
-impl From<AssetJobIdentity> for ShadowAssetJobIdentity {
-    fn from(job: AssetJobIdentity) -> Self {
-        Self {
-            request_id: job.request_id.to_string(),
-            asset_id: job.asset_id.to_string(),
-        }
-    }
+    to_js(&AssetLoadCompletionWire::from(dispatch))
 }
 
 #[derive(Serialize)]
@@ -4305,7 +4230,7 @@ struct ShadowSnapshot {
     navigation_settings: ShadowNavigationSettings,
     render_settings: AppRenderSnapshotWire,
     patch_lab: PatchLabReadModelWire,
-    assets: Vec<ShadowAsset>,
+    assets: Vec<AssetReadModelWire>,
     loading_assets: usize,
     loading_primary_scene_asset: Option<String>,
     loading_primary_scene_request: Option<String>,
@@ -5086,70 +5011,6 @@ struct ShadowFocusSnapshot {
     focus_coordinate: f64,
     angular_aperture: f64,
     focus_transition_remaining: Option<f64>,
-}
-
-#[derive(Serialize)]
-struct ShadowAsset {
-    id: String,
-    uri: String,
-    status: ShadowAssetStatus,
-}
-
-impl From<AssetReadModel> for ShadowAsset {
-    fn from(asset: AssetReadModel) -> Self {
-        Self {
-            id: asset.descriptor.id.to_string(),
-            uri: asset.descriptor.uri,
-            status: asset.status.into(),
-        }
-    }
-}
-
-#[derive(Serialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-enum ShadowAssetStatus {
-    Loading {
-        request_id: String,
-    },
-    Ready {
-        byte_length: usize,
-        #[serde(skip_serializing_if = "AssetMetadata::is_empty")]
-        metadata: AssetMetadata,
-    },
-    Failed {
-        code: String,
-        message: String,
-        retryable: bool,
-    },
-    Cancelled,
-}
-
-impl From<AssetStatus> for ShadowAssetStatus {
-    fn from(status: AssetStatus) -> Self {
-        match status {
-            AssetStatus::Loading { request_id } => Self::Loading {
-                request_id: request_id.to_string(),
-            },
-            AssetStatus::Ready {
-                byte_length,
-                metadata,
-                ..
-            } => Self::Ready {
-                byte_length,
-                metadata,
-            },
-            AssetStatus::Failed {
-                code,
-                message,
-                retryable,
-            } => Self::Failed {
-                code,
-                message,
-                retryable,
-            },
-            AssetStatus::Cancelled => Self::Cancelled,
-        }
-    }
 }
 
 #[derive(Serialize)]

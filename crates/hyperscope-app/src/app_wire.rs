@@ -7,11 +7,162 @@
 use serde::Serialize;
 
 use crate::{
-    AppCommit, AppEffect, AppRenderSnapshot, AuthoredProposalRole, AuthoredSessionEffect,
-    CommitDisposition, FocusPostprocessSettings, PatchLabControls, PatchLabEffect, PatchLabEffects,
-    PatchLabFailure, PatchLabGeometryReadModel, PatchLabHistogramBin, PatchLabLodSummary,
-    PatchLabReadModel, RenderSettings,
+    AppCommit, AppEffect, AppRenderSnapshot, AssetFetchJob, AssetJobIdentity,
+    AssetLoadCompletionDispatch, AssetLoadRequest, AssetReadModel, AssetStatus,
+    AuthoredProposalRole, AuthoredSessionEffect, CommitDisposition, FocusPostprocessSettings,
+    PatchLabControls, PatchLabEffect, PatchLabEffects, PatchLabFailure, PatchLabGeometryReadModel,
+    PatchLabHistogramBin, PatchLabLodSummary, PatchLabReadModel, RenderSettings,
 };
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetLoadRequestWire {
+    sequence: String,
+    commit: AppCommitWire,
+    fetch: AssetFetchJobWire,
+    load_cancellations: Vec<AssetJobIdentityWire>,
+    install_cancellations: Vec<AssetJobIdentityWire>,
+}
+
+impl From<AssetLoadRequest> for AssetLoadRequestWire {
+    fn from(request: AssetLoadRequest) -> Self {
+        Self {
+            sequence: request.sequence.to_string(),
+            commit: (&request.commit).into(),
+            fetch: request.fetch.into(),
+            load_cancellations: request
+                .load_cancellations
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            install_cancellations: request
+                .install_cancellations
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetLoadCompletionWire {
+    commit: AppCommitWire,
+    install: Option<AssetJobIdentityWire>,
+    asset: Option<AssetReadModelWire>,
+}
+
+impl From<AssetLoadCompletionDispatch> for AssetLoadCompletionWire {
+    fn from(dispatch: AssetLoadCompletionDispatch) -> Self {
+        Self {
+            commit: (&dispatch.commit).into(),
+            install: dispatch.install.map(Into::into),
+            asset: dispatch.asset.map(Into::into),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AssetFetchJobWire {
+    request_id: String,
+    asset_id: String,
+    uri: String,
+    media_type: Option<String>,
+    content_digest: Option<[u8; 32]>,
+}
+
+impl From<AssetFetchJob> for AssetFetchJobWire {
+    fn from(job: AssetFetchJob) -> Self {
+        Self {
+            request_id: job.request_id.to_string(),
+            asset_id: job.asset.id.to_string(),
+            uri: job.asset.uri,
+            media_type: job.asset.media_type,
+            content_digest: job.asset.content_digest,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AssetJobIdentityWire {
+    request_id: String,
+    asset_id: String,
+}
+
+impl From<AssetJobIdentity> for AssetJobIdentityWire {
+    fn from(job: AssetJobIdentity) -> Self {
+        Self {
+            request_id: job.request_id.to_string(),
+            asset_id: job.asset_id.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct AssetReadModelWire {
+    id: String,
+    uri: String,
+    status: AssetStatusWire,
+}
+
+impl From<AssetReadModel> for AssetReadModelWire {
+    fn from(asset: AssetReadModel) -> Self {
+        Self {
+            id: asset.descriptor.id.to_string(),
+            uri: asset.descriptor.uri,
+            status: asset.status.into(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum AssetStatusWire {
+    Loading {
+        request_id: String,
+    },
+    Ready {
+        byte_length: usize,
+        #[serde(skip_serializing_if = "crate::AssetMetadata::is_empty")]
+        metadata: crate::AssetMetadata,
+    },
+    Failed {
+        code: String,
+        message: String,
+        retryable: bool,
+    },
+    Cancelled,
+}
+
+impl From<AssetStatus> for AssetStatusWire {
+    fn from(status: AssetStatus) -> Self {
+        match status {
+            AssetStatus::Loading { request_id } => Self::Loading {
+                request_id: request_id.to_string(),
+            },
+            AssetStatus::Ready {
+                byte_length,
+                metadata,
+                ..
+            } => Self::Ready {
+                byte_length,
+                metadata,
+            },
+            AssetStatus::Failed {
+                code,
+                message,
+                retryable,
+            } => Self::Failed {
+                code,
+                message,
+                retryable,
+            },
+            AssetStatus::Cancelled => Self::Cancelled,
+        }
+    }
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -497,6 +648,7 @@ pub fn patch_lab_effects_wire(effects: &PatchLabEffects) -> Vec<PatchLabEffectWi
 mod tests {
     use super::*;
     use crate::{PatchLabField, PatchLabGeometryKey, PatchLabLodParameters, PatchLabShape};
+    use hyperscape_protocol::{AssetDescriptor, AssetId, RequestId};
     use serde_json::json;
 
     #[test]
@@ -623,5 +775,61 @@ mod tests {
         }
         assert_eq!(live["focusPostprocess"]["gaussianPasses"], json!(1));
         assert_eq!(live["focusPostprocess"]["kawasePasses"], json!(3));
+    }
+
+    #[test]
+    fn asset_job_wire_keeps_scope_identity_and_authored_credit_metadata() {
+        let request_id = RequestId::from_u128(1).unwrap();
+        let asset_id = AssetId::from_u128(2).unwrap();
+        let descriptor = AssetDescriptor {
+            id: asset_id,
+            uri: "scene.glb".to_owned(),
+            media_type: Some("model/gltf-binary".to_owned()),
+            content_digest: Some([7; 32]),
+        };
+        let request = AssetLoadRequest {
+            sequence: u64::MAX,
+            commit: AppCommit {
+                revision: 3,
+                effects: Vec::new(),
+                disposition: CommitDisposition::Applied,
+                published_ui: true,
+            },
+            fetch: AssetFetchJob {
+                request_id,
+                asset: descriptor.clone(),
+            },
+            load_cancellations: vec![AssetJobIdentity {
+                request_id,
+                asset_id,
+            }],
+            install_cancellations: Vec::new(),
+        };
+        let request = serde_json::to_value(AssetLoadRequestWire::from(request)).unwrap();
+        assert_eq!(request["sequence"], json!(u64::MAX.to_string()));
+        assert_eq!(request["fetch"]["requestId"], json!(request_id.to_string()));
+        assert_eq!(request["fetch"]["assetId"], json!(asset_id.to_string()));
+        assert_eq!(
+            request["loadCancellations"][0]["assetId"],
+            json!(asset_id.to_string())
+        );
+
+        let asset = AssetReadModel {
+            descriptor,
+            status: AssetStatus::Ready {
+                byte_length: 42,
+                content_digest: Some([7; 32]),
+                metadata: crate::AssetMetadata {
+                    author: Some("Ada".to_owned()),
+                    license: Some("CC-BY-4.0".to_owned()),
+                    ..crate::AssetMetadata::default()
+                },
+            },
+        };
+        let asset = serde_json::to_value(AssetReadModelWire::from(asset)).unwrap();
+        assert_eq!(asset["status"]["state"], json!("ready"));
+        assert_eq!(asset["status"]["byte_length"], json!(42));
+        assert_eq!(asset["status"]["metadata"]["author"], json!("Ada"));
+        assert_eq!(asset["status"]["metadata"]["license"], json!("CC-BY-4.0"));
     }
 }

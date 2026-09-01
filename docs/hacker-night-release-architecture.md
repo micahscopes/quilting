@@ -89,6 +89,11 @@ The first application boundary is now explicit:
   without changing incumbent behavior; Rust mode gives startup/drop/demo
   requests one mutually exclusive primary-scene scope while presentation
   layers retain per-asset concurrency.
+  The optional application wire layer owns those typed fetch/cancel/install
+  request and completion packets plus the asset-status read model. The browser
+  still acquires bytes and installs renderer resources, but it receives stable
+  request/asset identities, status tags, and authored credit metadata without
+  restating their serialization in the WASM facade.
   Cross-asset replacement emits cancel-then-fetch, aborts obsolete browser
   acquisition, serializes the global model worker's dynamic parse/upload lane,
   and checks the current primary request after every asynchronous upload

@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 const repository = dirname(dirname(fileURLToPath(import.meta.url)));
 const read = path => readFileSync(join(repository, path), 'utf8');
 const app = read('crates/hyperscope-app/src/lib.rs');
+const appWire = read('crates/hyperscope-app/src/app_wire.rs');
 const adapter = read('crates/quilting-wasm/src/app_shadow.rs');
 const browser = read('hyperscope.html');
 const host = read('asset_effect_host.mjs');
@@ -31,11 +32,17 @@ for (const required of [
   '#[wasm_bindgen(js_name = finishAssetLoadedWithMetadata)]',
   '#[wasm_bindgen(js_name = finishAssetFailed)]',
   '.complete_asset_load(AssetLoadCompletion {',
-  'struct ShadowAssetLoadCompletion',
-  'install: dispatch.install.map(ShadowAssetJobIdentity::from)',
-  'asset: dispatch.asset.map(ShadowAsset::from)',
+  'to_js(&AssetLoadCompletionWire::from(dispatch))',
 ]) {
   assert.ok(adapter.includes(required), `WASM asset-completion port is missing ${required}`);
+}
+for (const required of [
+  'pub struct AssetLoadCompletionWire',
+  'install: dispatch.install.map(Into::into)',
+  'asset: dispatch.asset.map(Into::into)',
+  'pub struct AssetReadModelWire',
+]) {
+  assert.ok(appWire.includes(required), `application asset wire port is missing ${required}`);
 }
 
 const completionStart = browser.indexOf('function completeAppAssetShadow(');

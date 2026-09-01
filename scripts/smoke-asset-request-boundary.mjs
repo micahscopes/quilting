@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 const repository = dirname(dirname(fileURLToPath(import.meta.url)));
 const read = path => readFileSync(join(repository, path), 'utf8');
 const app = read('crates/hyperscope-app/src/lib.rs');
+const appWire = read('crates/hyperscope-app/src/app_wire.rs');
 const adapter = read('crates/quilting-wasm/src/app_shadow.rs');
 const browser = read('hyperscope.html');
 const host = read('asset_effect_host.mjs');
@@ -39,11 +40,17 @@ for (const required of [
   '#[wasm_bindgen(js_name = requestSessionAssetLoad)]',
   '.request_asset_load(',
   '.request_session_asset_load(',
-  'ShadowAssetLoadRequest',
-  'ShadowAssetFetchJob::from(request.fetch)',
-  'ShadowAssetJobIdentity::from',
+  'to_js(&AssetLoadRequestWire::from(request))',
 ]) {
   assert.ok(adapter.includes(required), `WASM asset-request port is missing ${required}`);
+}
+for (const required of [
+  'pub struct AssetLoadRequestWire',
+  'fetch: request.fetch.into()',
+  'load_cancellations: request',
+  'install_cancellations: request',
+]) {
+  assert.ok(appWire.includes(required), `application asset wire port is missing ${required}`);
 }
 
 const requestStart = browser.indexOf('function beginAppAssetShadow(');
