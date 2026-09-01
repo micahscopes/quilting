@@ -46,6 +46,10 @@ def authored_frames(transport: FakeTransport) -> list[dict]:
     return [frame for frame in transport.sent if frame["lane"] == "authored"]
 
 
+def presence_frames(transport: FakeTransport) -> list[dict]:
+    return [frame for frame in transport.sent if frame["lane"] == "presence"]
+
+
 blender_hyperscape.register()
 bpy.ops.object.select_all(action="SELECT")
 bpy.ops.object.delete(use_global=False)
@@ -85,14 +89,17 @@ bpy.context.view_layer.update()
 runtime.mark_object_updated(obj)
 runtime.tick(bpy.context.scene, 10.0)
 local = authored_frames(transport)[-1]
+local_presence = presence_frames(transport)[-1]
 assert local["envelope"]["command"]["transform"]["translation"] == [1.0, 2.0, 3.0]
 
 # A relay echo must not overwrite a newer local edit that has not yet been sent.
 obj.location = (2.0, 2.0, 3.0)
 bpy.context.view_layer.update()
 transport.incoming.append(relay.RelayDelivery(cursor=1, frame=local))
+transport.incoming.append(relay.RelayDelivery(cursor=2, frame=local_presence))
 runtime.tick(bpy.context.scene, 10.1)
 assert tuple(round(value, 6) for value in obj.matrix_world.translation) == (2.0, 2.0, 3.0)
+assert runtime._presence.live(10.1) == []
 
 remote = protocol.set_transform_envelope(
     message_id="30000000-0000-4000-8000-000000000001",
@@ -105,7 +112,7 @@ remote = protocol.set_transform_envelope(
 )
 transport.incoming.append(
     relay.RelayDelivery(
-        cursor=2,
+        cursor=3,
         frame=protocol.local_peer_frame("authored", remote),
     )
 )
@@ -128,7 +135,7 @@ remote_presence = protocol.presence_envelope(
 )
 transport.incoming.append(
     relay.RelayDelivery(
-        cursor=3,
+        cursor=4,
         frame=protocol.local_peer_frame("presence", remote_presence),
     )
 )

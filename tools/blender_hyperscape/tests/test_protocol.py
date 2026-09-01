@@ -8,7 +8,7 @@ import unittest
 
 ADDON_DIR = Path(__file__).resolve().parents[1]
 REPOSITORY = Path(__file__).resolve().parents[3]
-FIXTURES = REPOSITORY / "fixtures" / "protocol"
+FIXTURES = REPOSITORY / "crates" / "hyperscape-protocol" / "fixtures"
 sys.path.insert(0, str(ADDON_DIR))
 
 import protocol  # noqa: E402
@@ -98,11 +98,45 @@ class ProtocolTests(unittest.TestCase):
         _, second = self.fixture("presence-camera-v0.1.json")
         first["header"]["sender"] = "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"
         second["header"]["sender"] = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        second["header"]["message_id"] = "00000000-0000-0000-0000-000000000006"
         second["header"]["sequence"] += 1
         inbox = protocol.PresenceInbox()
         self.assertTrue(inbox.accept(first, 1.0))
         self.assertTrue(inbox.accept(second, 1.1))
         self.assertEqual(inbox.live(1.2), [second])
+
+    def test_presence_inbox_matches_rust_policy(self) -> None:
+        _, first = self.fixture("presence-camera-v0.1.json")
+        inbox = protocol.PresenceInbox(capacity=4)
+        inbox.record_local(first)
+        self.assertEqual(
+            inbox.admit(first, 10.0),
+            protocol.PresenceInbox.IGNORED_ECHO,
+        )
+        self.assertEqual(
+            inbox.admit(first, 10.1),
+            protocol.PresenceInbox.IGNORED_DUPLICATE,
+        )
+        self.assertEqual(inbox.live(10.1), [])
+
+        stale = json.loads(json.dumps(first))
+        stale["header"]["message_id"] = "00000000-0000-0000-0000-000000000006"
+        stale["header"]["sequence"] -= 1
+        stale["presence"]["ttl_millis"] = protocol.MAX_PRESENCE_TTL_MILLIS
+        self.assertEqual(
+            inbox.admit(stale, 10.2),
+            protocol.PresenceInbox.IGNORED_STALE,
+        )
+
+        newer = json.loads(json.dumps(first))
+        newer["header"]["message_id"] = "00000000-0000-0000-0000-000000000007"
+        newer["header"]["sequence"] += 1
+        self.assertEqual(
+            inbox.admit(newer, 10.3),
+            protocol.PresenceInbox.APPLIED,
+        )
+        self.assertEqual(inbox.live(11.79), [newer])
+        self.assertEqual(inbox.live(11.8), [])
 
     def test_local_peer_frame_keeps_authored_and_presence_disjoint(self) -> None:
         _, authored = self.fixture("authored-set-transform-v0.1.json")

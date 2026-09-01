@@ -612,9 +612,11 @@ The first application boundary is now explicit:
   `EntityId`, so the protocol wrapper is an interchange type rather than a
   second identity authority.
 - Blender's dependency-free `protocol.py` validates and canonically roundtrips
-  the same checked-in Rust fixtures. It implements only receipt-relative
-  presence expiry/order and bounded authored-message echo suppression; it does
-  not yet select a transport or admit ephemeral state to HHHS.
+  the canonical fixtures from `hyperscape-protocol`. Its shared bounded-memory
+  primitives match Rust's duplicate, sender-sequence, and consuming local-echo
+  policy for both authored edits and receipt-relative-TTL presence. The relay
+  remains a separate delivery adapter and ephemeral state has no HHHS admission
+  path.
 
 This layer is not yet the complete browser authority. Primary asset request,
 cancellation, completion, and stale-install policy have crossed to Rust after

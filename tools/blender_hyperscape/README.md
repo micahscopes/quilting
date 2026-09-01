@@ -19,10 +19,10 @@ The **Hyperscape** tab in the 3D View sidebar provides:
 
 The dependency-free `protocol.py` module also validates the same checked-in
 v0.1 authored/presence JSON fixtures as Rust. It supplies sender-local presence
-ordering with receipt-relative TTL and bounded authored duplicate, stale, and
-echo suppression. The optional local relay remains a delivery-only adapter;
-HHHS can still wrap only authored envelopes without receiving viewport
-presence.
+ordering with receipt-relative TTL and bounded duplicate, stale, and echo
+suppression for both lanes. The optional local relay remains a delivery-only
+adapter; HHHS can still wrap only authored envelopes without receiving
+viewport presence.
 
 For local bridge development, start the disabled-by-default relay and copy its
 printed bearer token into the browser and Blender adapters:
@@ -176,10 +176,10 @@ blender --background --factory-startup --python-exit-code 1 \
   /tmp/hyperscape-roundtrip.glb
 ```
 
-The live-sync integration check proves local edit publication, echo
-suppression, remote transform application, ephemeral presence expiry and
-overlay cleanup, timeline isolation, explicit shear rejection, and the
-absence of overlay-created datablocks against a fake transport:
+The live-sync integration check proves local edit publication, authored and
+presence echo suppression, remote transform application, ephemeral presence
+expiry and overlay cleanup, timeline isolation, explicit shear rejection, and
+the absence of overlay-created datablocks against a fake transport:
 
 ```sh
 blender --background --factory-startup --python-exit-code 1 \

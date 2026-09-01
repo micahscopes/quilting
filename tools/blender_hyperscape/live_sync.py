@@ -219,7 +219,7 @@ class BlenderLiveSync:
             lane = frame["lane"]
             envelope = frame["envelope"]
             if lane == "presence":
-                self._presence.accept(envelope, now_seconds)
+                self._presence.admit(envelope, now_seconds)
                 continue
             disposition = self._authored.accept(envelope)
             if disposition != protocol.AuthoredInbox.APPLIED:
@@ -325,6 +325,9 @@ class BlenderLiveSync:
             animation_seconds=animation_seconds,
         )
         self._transport.send(protocol.local_peer_frame("presence", envelope))
+        # As with authored edits, the transport worker cannot be drained on
+        # Blender's main thread until this publication has recorded its echo.
+        self._presence.record_local(envelope)
         self._last_presence_signature = signature
         self._last_presence_sent_seconds = now_seconds
 

@@ -301,13 +301,87 @@ def presence_envelope(
     return envelope
 
 
+def _require_positive_capacity(capacity: Any, context: str) -> int:
+    if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity <= 0:
+        raise HyperscapeProtocolError(f"{context} capacity must be positive")
+    return capacity
+
+
+class _BoundedMessageMemory:
+    """Python equivalent of ``hyperscope_app::BoundedMessageMemory``."""
+
+    def __init__(self, capacity: int, context: str) -> None:
+        self._capacity = _require_positive_capacity(capacity, context)
+        self._ordered: deque[str] = deque()
+        self._known: set[str] = set()
+
+    def contains(self, message_id: str) -> bool:
+        return _uuid(message_id, "message ID") in self._known
+
+    def insert(self, message_id: str) -> None:
+        message_id = _uuid(message_id, "message ID")
+        if message_id in self._known:
+            return
+        if len(self._ordered) == self._capacity:
+            self._known.remove(self._ordered.popleft())
+        self._ordered.append(message_id)
+        self._known.add(message_id)
+
+    def remove(self, message_id: str) -> bool:
+        message_id = _uuid(message_id, "message ID")
+        if message_id not in self._known:
+            return False
+        self._known.remove(message_id)
+        self._ordered.remove(message_id)
+        return True
+
+
+class _BoundedSenderSequences:
+    """Bounded latest-sequence memory with UUID-normalized sender keys."""
+
+    def __init__(self, capacity: int, context: str) -> None:
+        self._capacity = _require_positive_capacity(capacity, context)
+        self._ordered: deque[str] = deque()
+        self._latest: dict[str, int] = {}
+
+    def is_stale(self, sender: str, sequence: int) -> bool:
+        sender = _uuid(sender, "sender ID")
+        return self._latest.get(sender, -1) >= sequence
+
+    def observe(self, sender: str, sequence: int) -> None:
+        sender = _uuid(sender, "sender ID")
+        if sender in self._latest:
+            self._latest[sender] = max(self._latest[sender], sequence)
+            return
+        if len(self._ordered) == self._capacity:
+            del self._latest[self._ordered.popleft()]
+        self._ordered.append(sender)
+        self._latest[sender] = sequence
+
+
 class PresenceInbox:
-    """Latest sender-local presence with receipt-relative expiration."""
+    """Match Rust's bounded presence duplicate, stale, echo, and TTL policy."""
 
-    def __init__(self) -> None:
+    APPLIED = "applied"
+    IGNORED_DUPLICATE = "ignored_duplicate"
+    IGNORED_STALE = "ignored_stale"
+    IGNORED_ECHO = "ignored_echo"
+
+    def __init__(self, capacity: int = 4096) -> None:
         self._records: dict[str, tuple[int, float, Mapping[str, Any]]] = {}
+        self._seen = _BoundedMessageMemory(capacity, "presence inbox")
+        self._local_echoes = _BoundedMessageMemory(capacity, "presence inbox")
+        self._sender_sequences = _BoundedSenderSequences(
+            capacity, "presence inbox"
+        )
 
-    def accept(self, envelope: Mapping[str, Any], received_at_seconds: float) -> bool:
+    def record_local(self, envelope: Mapping[str, Any]) -> None:
+        validate_presence_envelope(envelope)
+        header = envelope["header"]
+        self._local_echoes.insert(header["message_id"])
+        self._sender_sequences.observe(header["sender"], header["sequence"])
+
+    def admit(self, envelope: Mapping[str, Any], received_at_seconds: float) -> str:
         validate_presence_envelope(envelope)
         received_at_seconds = _finite_number(
             received_at_seconds, "presence receipt time"
@@ -317,14 +391,28 @@ class PresenceInbox:
                 "presence receipt time must be finite and nonnegative"
             )
         header = envelope["header"]
+        message_id = _uuid(header["message_id"], "message ID")
         sender = _uuid(header["sender"], "sender ID")
         sequence = int(header["sequence"])
-        current = self._records.get(sender)
-        if current is not None and current[0] >= sequence:
-            return False
+        if self._local_echoes.remove(message_id):
+            self._seen.insert(message_id)
+            self._sender_sequences.observe(sender, sequence)
+            return self.IGNORED_ECHO
+        if self._seen.contains(message_id):
+            return self.IGNORED_DUPLICATE
+        if self._sender_sequences.is_stale(sender, sequence):
+            self._seen.insert(message_id)
+            return self.IGNORED_STALE
         expiry = received_at_seconds + int(envelope["presence"]["ttl_millis"]) / 1000.0
         self._records[sender] = (sequence, expiry, envelope)
-        return True
+        self._seen.insert(message_id)
+        self._sender_sequences.observe(sender, sequence)
+        return self.APPLIED
+
+    def accept(self, envelope: Mapping[str, Any], received_at_seconds: float) -> bool:
+        """Compatibility predicate; use :meth:`admit` for exact disposition."""
+
+        return self.admit(envelope, received_at_seconds) == self.APPLIED
 
     def live(self, now_seconds: float) -> list[Mapping[str, Any]]:
         now_seconds = _finite_number(now_seconds, "presence time")
@@ -342,32 +430,13 @@ class AuthoredEchoGuard:
     """Bounded message-ID memory for transport echo suppression."""
 
     def __init__(self, capacity: int = 1024) -> None:
-        if (
-            isinstance(capacity, bool)
-            or not isinstance(capacity, int)
-            or capacity <= 0
-        ):
-            raise HyperscapeProtocolError("echo guard capacity must be positive")
-        self._capacity = capacity
-        self._ordered: deque[str] = deque()
-        self._known: set[str] = set()
+        self._messages = _BoundedMessageMemory(capacity, "echo guard")
 
     def record_local(self, message_id: str) -> None:
-        message_id = _uuid(message_id, "message ID")
-        if message_id in self._known:
-            return
-        if len(self._ordered) == self._capacity:
-            self._known.remove(self._ordered.popleft())
-        self._ordered.append(message_id)
-        self._known.add(message_id)
+        self._messages.insert(message_id)
 
     def consume_echo(self, message_id: str) -> bool:
-        message_id = _uuid(message_id, "message ID")
-        if message_id not in self._known:
-            return False
-        self._known.remove(message_id)
-        self._ordered.remove(message_id)
-        return True
+        return self._messages.remove(message_id)
 
 
 class AuthoredInbox:
@@ -379,24 +448,15 @@ class AuthoredInbox:
     IGNORED_ECHO = "ignored_echo"
 
     def __init__(self, capacity: int = 4096) -> None:
-        if (
-            isinstance(capacity, bool)
-            or not isinstance(capacity, int)
-            or capacity <= 0
-        ):
-            raise HyperscapeProtocolError("authored inbox capacity must be positive")
-        self._capacity = capacity
-        self._seen_ordered: deque[str] = deque()
-        self._seen: set[str] = set()
-        self._sender_ordered: deque[str] = deque()
-        self._sender_sequences: dict[str, int] = {}
+        self._seen = _BoundedMessageMemory(capacity, "authored inbox")
+        self._sender_sequences = _BoundedSenderSequences(capacity, "authored inbox")
         self._echoes = AuthoredEchoGuard(capacity)
 
     def record_local(self, envelope: Mapping[str, Any]) -> None:
         validate_authored_envelope(envelope)
         header = envelope["header"]
         self._echoes.record_local(header["message_id"])
-        self._observe_sender(header["sender"], header["sequence"])
+        self._sender_sequences.observe(header["sender"], header["sequence"])
 
     def accept(self, envelope: Mapping[str, Any]) -> str:
         validate_authored_envelope(envelope)
@@ -405,38 +465,17 @@ class AuthoredInbox:
         sender = _uuid(header["sender"], "sender ID")
         sequence = int(header["sequence"])
         if self._echoes.consume_echo(message_id):
-            self._remember(message_id)
-            self._observe_sender(sender, sequence)
+            self._seen.insert(message_id)
+            self._sender_sequences.observe(sender, sequence)
             return self.IGNORED_ECHO
-        if message_id in self._seen:
+        if self._seen.contains(message_id):
             return self.IGNORED_DUPLICATE
-        if self._sender_sequences.get(sender, -1) >= sequence:
-            self._remember(message_id)
+        if self._sender_sequences.is_stale(sender, sequence):
+            self._seen.insert(message_id)
             return self.IGNORED_STALE
-        self._remember(message_id)
-        self._observe_sender(sender, sequence)
+        self._seen.insert(message_id)
+        self._sender_sequences.observe(sender, sequence)
         return self.APPLIED
-
-    def _remember(self, message_id: str) -> None:
-        if message_id in self._seen:
-            return
-        if len(self._seen_ordered) == self._capacity:
-            self._seen.remove(self._seen_ordered.popleft())
-        self._seen_ordered.append(message_id)
-        self._seen.add(message_id)
-
-    def _observe_sender(self, sender: str, sequence: int) -> None:
-        sender = _uuid(sender, "sender ID")
-        if sender in self._sender_sequences:
-            self._sender_sequences[sender] = max(
-                self._sender_sequences[sender], sequence
-            )
-            return
-        if len(self._sender_ordered) == self._capacity:
-            expired = self._sender_ordered.popleft()
-            del self._sender_sequences[expired]
-        self._sender_ordered.append(sender)
-        self._sender_sequences[sender] = sequence
 
 
 def _length(vector: Sequence[float]) -> float:

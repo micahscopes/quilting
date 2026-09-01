@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlparse
 
 ADDON_DIR = Path(__file__).resolve().parents[1]
 REPOSITORY = Path(__file__).resolve().parents[3]
-FIXTURES = REPOSITORY / "fixtures" / "protocol"
+FIXTURES = REPOSITORY / "crates" / "hyperscape-protocol" / "fixtures"
 sys.path.insert(0, str(ADDON_DIR))
 
 import protocol  # noqa: E402
