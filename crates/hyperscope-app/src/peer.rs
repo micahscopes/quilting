@@ -101,6 +101,55 @@ pub struct LocalPeerReceipt {
     pub commit: Option<AppCommit>,
 }
 
+/// Result of checking authored deduplication, echo, and sender-sequence policy
+/// before an application or durable-history write begins.
+pub enum LocalAuthoredPreparation<'a> {
+    Immediate(LocalPeerReceipt),
+    Pending(PendingLocalAuthored<'a>),
+}
+
+/// Exclusive authored-ingress reservation.
+///
+/// The mutable ingress borrow remains held across an asynchronous durability
+/// write. Dropping this value without completing it records nothing, so a
+/// failed write can be retried with the same envelope.
+pub struct PendingLocalAuthored<'a> {
+    ingress: &'a mut LocalPeerIngress,
+    envelope: AuthoredEnvelope,
+}
+
+impl PendingLocalAuthored<'_> {
+    pub fn envelope(&self) -> &AuthoredEnvelope {
+        &self.envelope
+    }
+
+    /// Record an envelope only after the caller's authoritative admission has
+    /// succeeded. `commit` may be absent when durable history succeeded but a
+    /// rebuildable AppStore projection must be repaired.
+    pub fn complete(
+        self,
+        projection_revision: u64,
+        commit: Option<AppCommit>,
+    ) -> LocalPeerReceipt {
+        let header = self.envelope.header;
+        self.ingress
+            .seen_authored
+            .insert(header.message_id);
+        self.ingress
+            .authored_sender_sequences
+            .observe(header.sender, header.sequence);
+        let disposition = commit
+            .as_ref()
+            .map_or(LocalPeerDisposition::Applied, commit_disposition);
+        LocalPeerReceipt {
+            lane: LocalPeerLane::Authored,
+            disposition,
+            projection_revision: Some(projection_revision),
+            commit,
+        }
+    }
+}
+
 /// Admission policy shared by any local WebSocket, HTTP, IPC, or test adapter.
 ///
 /// A transport decodes one [`LocalPeerEnvelope`], then calls [`Self::accept`].
@@ -169,6 +218,61 @@ impl LocalPeerIngress {
         Ok(())
     }
 
+    /// Check authored ingress policy and reserve this single-writer ingress
+    /// until the returned pending value is completed or dropped.
+    pub fn prepare_authored(
+        &mut self,
+        envelope: AuthoredEnvelope,
+    ) -> Result<LocalAuthoredPreparation<'_>, LocalPeerIngressError> {
+        envelope
+            .validate()
+            .map_err(|error| LocalPeerIngressError::InvalidEnvelope(error.to_string()))?;
+        Ok(self.prepare_validated_authored(envelope))
+    }
+
+    fn prepare_validated_authored(
+        &mut self,
+        envelope: AuthoredEnvelope,
+    ) -> LocalAuthoredPreparation<'_> {
+        let header = envelope.header;
+        let message_id = header.message_id;
+        if self.local_authored_echoes.remove(message_id) {
+            self.seen_authored.insert(message_id);
+            self.authored_sender_sequences
+                .observe(header.sender, header.sequence);
+            return LocalAuthoredPreparation::Immediate(LocalPeerReceipt {
+                lane: LocalPeerLane::Authored,
+                disposition: LocalPeerDisposition::IgnoredEcho,
+                projection_revision: None,
+                commit: None,
+            });
+        }
+        if self.seen_authored.contains(message_id) {
+            return LocalAuthoredPreparation::Immediate(LocalPeerReceipt {
+                lane: LocalPeerLane::Authored,
+                disposition: LocalPeerDisposition::IgnoredDuplicate,
+                projection_revision: None,
+                commit: None,
+            });
+        }
+        if self
+            .authored_sender_sequences
+            .is_stale(header.sender, header.sequence)
+        {
+            self.seen_authored.insert(message_id);
+            return LocalAuthoredPreparation::Immediate(LocalPeerReceipt {
+                lane: LocalPeerLane::Authored,
+                disposition: LocalPeerDisposition::IgnoredStale,
+                projection_revision: None,
+                commit: None,
+            });
+        }
+        LocalAuthoredPreparation::Pending(PendingLocalAuthored {
+            ingress: self,
+            envelope,
+        })
+    }
+
     pub fn accept(
         &mut self,
         store: &AppStore,
@@ -180,39 +284,10 @@ impl LocalPeerIngress {
             .map_err(|error| LocalPeerIngressError::InvalidEnvelope(error.to_string()))?;
         match envelope {
             LocalPeerEnvelope::Authored(envelope) => {
-                let header = envelope.header;
-                let message_id = header.message_id;
-                if self.local_authored_echoes.remove(message_id) {
-                    self.seen_authored.insert(message_id);
-                    self.authored_sender_sequences
-                        .observe(header.sender, header.sequence);
-                    return Ok(LocalPeerReceipt {
-                        lane: LocalPeerLane::Authored,
-                        disposition: LocalPeerDisposition::IgnoredEcho,
-                        projection_revision: None,
-                        commit: None,
-                    });
-                }
-                if self.seen_authored.contains(message_id) {
-                    return Ok(LocalPeerReceipt {
-                        lane: LocalPeerLane::Authored,
-                        disposition: LocalPeerDisposition::IgnoredDuplicate,
-                        projection_revision: None,
-                        commit: None,
-                    });
-                }
-                if self
-                    .authored_sender_sequences
-                    .is_stale(header.sender, header.sequence)
-                {
-                    self.seen_authored.insert(message_id);
-                    return Ok(LocalPeerReceipt {
-                        lane: LocalPeerLane::Authored,
-                        disposition: LocalPeerDisposition::IgnoredStale,
-                        projection_revision: None,
-                        commit: None,
-                    });
-                }
+                let pending = match self.prepare_validated_authored(envelope) {
+                    LocalAuthoredPreparation::Immediate(receipt) => return Ok(receipt),
+                    LocalAuthoredPreparation::Pending(pending) => pending,
+                };
                 let projection_revision = store
                     .authored_scene_snapshot()
                     .projection_revision
@@ -224,19 +299,10 @@ impl LocalPeerIngress {
                 let commit = store
                     .dispatch(AppEvent::AuthoredRevision(AuthoredRevision {
                         projection_revision,
-                        commands: vec![envelope],
+                        commands: vec![pending.envelope().clone()],
                     }))
                     .map_err(|error| LocalPeerIngressError::Application(error.to_string()))?;
-                self.seen_authored.insert(message_id);
-                self.authored_sender_sequences
-                    .observe(header.sender, header.sequence);
-                let disposition = commit_disposition(&commit);
-                Ok(LocalPeerReceipt {
-                    lane: LocalPeerLane::Authored,
-                    disposition,
-                    projection_revision: Some(projection_revision),
-                    commit: Some(commit),
-                })
+                Ok(pending.complete(projection_revision, Some(commit)))
             }
             LocalPeerEnvelope::Presence(envelope) => {
                 let header = envelope.header;
@@ -615,6 +681,43 @@ mod tests {
                 .disposition,
             LocalPeerDisposition::Applied,
         );
+    }
+
+    #[test]
+    fn pending_authored_reservation_records_only_after_completion() {
+        let mut ingress = LocalPeerIngress::new(2).unwrap();
+        let envelope = authored(
+            31,
+            AuthoredCommand::SetEntityTransform {
+                entity: EntityId::from_u128(0x3131).unwrap(),
+                transform: transform(3.0),
+            },
+        );
+
+        let pending = match ingress.prepare_authored(envelope.clone()).unwrap() {
+            LocalAuthoredPreparation::Pending(pending) => pending,
+            LocalAuthoredPreparation::Immediate(receipt) => {
+                panic!("new envelope was unexpectedly ignored: {receipt:?}")
+            }
+        };
+        drop(pending);
+
+        let pending = match ingress.prepare_authored(envelope.clone()).unwrap() {
+            LocalAuthoredPreparation::Pending(pending) => pending,
+            LocalAuthoredPreparation::Immediate(receipt) => {
+                panic!("dropped reservation poisoned retry: {receipt:?}")
+            }
+        };
+        let receipt = pending.complete(7, None);
+        assert_eq!(receipt.disposition, LocalPeerDisposition::Applied);
+        assert_eq!(receipt.projection_revision, Some(7));
+        assert_eq!(receipt.commit, None);
+
+        let duplicate = match ingress.prepare_authored(envelope).unwrap() {
+            LocalAuthoredPreparation::Immediate(receipt) => receipt,
+            LocalAuthoredPreparation::Pending(_) => panic!("completed envelope was not recorded"),
+        };
+        assert_eq!(duplicate.disposition, LocalPeerDisposition::IgnoredDuplicate);
     }
 
     #[test]
