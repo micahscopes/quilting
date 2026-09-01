@@ -1318,6 +1318,15 @@ pub struct PeerPresenceReadModel {
     pub presence: EphemeralPresence,
 }
 
+/// One atomic local presence sample plus the asset scope that the protocol's
+/// entity-only selection list cannot carry. A session adapter uses these
+/// targets to retain advisory lease IDs without reconstructing selection.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalPresenceAuthoringReadModel {
+    pub presence: EphemeralPresence,
+    pub authoring_targets: Vec<AssetEntityId>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AuthoringLeaseHolder {
     pub peer: PeerId,
@@ -2587,14 +2596,27 @@ impl AppState {
         &self,
         ttl_millis: u32,
     ) -> Result<EphemeralPresence, WireError> {
+        Ok(self
+            .local_presence_authoring_snapshot(ttl_millis)?
+            .presence)
+    }
+
+    fn local_presence_authoring_snapshot(
+        &self,
+        ttl_millis: u32,
+    ) -> Result<LocalPresenceAuthoringReadModel, WireError> {
         let camera = self.navigation.camera;
         let basis = camera.basis();
-        let selection = self
+        let authoring_targets = self
             .navigation
             .focus
             .anchor
-            .map(|anchor| vec![anchor.identity.entity])
+            .map(|anchor| vec![anchor.identity])
             .unwrap_or_default();
+        let selection: Vec<EntityId> = authoring_targets
+            .iter()
+            .map(|target| target.entity)
+            .collect();
         let focus = &self.navigation.focus;
         let include_focus = focus.focus_enabled || focus.inversion_enabled || !selection.is_empty();
         let active_cue = self
@@ -2629,7 +2651,10 @@ impl AppState {
             animation_seconds: Some(animation_seconds),
         };
         presence.validate()?;
-        Ok(presence)
+        Ok(LocalPresenceAuthoringReadModel {
+            presence,
+            authoring_targets,
+        })
     }
 
     fn asset_read_models(&self) -> Vec<AssetReadModel> {
@@ -3570,6 +3595,16 @@ impl AppStore {
         ttl_millis: u32,
     ) -> Result<EphemeralPresence, WireError> {
         self.lock_state().local_presence_snapshot(ttl_millis)
+    }
+
+    /// Sample presence and its asset-scoped lease desire under one state lock.
+    /// The result is ephemeral and does not allocate an application revision.
+    pub fn local_presence_authoring_snapshot(
+        &self,
+        ttl_millis: u32,
+    ) -> Result<LocalPresenceAuthoringReadModel, WireError> {
+        self.lock_state()
+            .local_presence_authoring_snapshot(ttl_millis)
     }
 
     /// Resolve the active cue against resident renderer nodes without
@@ -6770,9 +6805,10 @@ mod tests {
 
         let selected = selection_identity();
         apply_navigation_now(&store, selected_focus_action([0.25, 0.0, 0.0]));
-        let selected_presence = store.local_presence_snapshot(1_500).unwrap();
-        assert_eq!(selected_presence.selection, vec![selected.entity]);
-        assert!(selected_presence.focus.is_some());
+        let selected_presence = store.local_presence_authoring_snapshot(1_500).unwrap();
+        assert_eq!(selected_presence.presence.selection, vec![selected.entity]);
+        assert_eq!(selected_presence.authoring_targets, vec![selected]);
+        assert!(selected_presence.presence.focus.is_some());
 
         store
             .dispatch_navigation(NavigationAction::SetInversionEnabled(true))

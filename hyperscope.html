@@ -14554,13 +14554,16 @@ function applyLocalPeerReceipt(receipt) {
   }
 }
 
-function localPeerPresenceSample() {
-  const rustAuthoritative = RUST_NAVIGATION_IMPLEMENTATION === 'rust'
+function localPeerPresenceUsesRustAuthority() {
+  return RUST_NAVIGATION_IMPLEMENTATION === 'rust'
     && RUST_SELECTION_IMPLEMENTATION === 'rust'
     && ANIMATION_CLOCK_IMPLEMENTATION === 'rust'
     && ANIMATION_CLIP_IMPLEMENTATION === 'rust'
     && (!RUST_PRESENTATION_ENABLED || RUST_PRESENTATION_IMPLEMENTATION === 'rust');
-  if (rustAuthoritative && rustAppShadow) {
+}
+
+function localPeerPresenceSample() {
+  if (localPeerPresenceUsesRustAuthority() && rustAppShadow) {
     return rustAppShadow.localPresenceSample(LOCAL_PEER_PRESENCE_TTL_MS);
   }
   const navigation = manualNavigationState();
@@ -14571,6 +14574,7 @@ function localPeerPresenceSample() {
     forward: navigation.forward,
     up: navigation.up,
     selection,
+    authoringTargets: [],
     includeFocus: navigation.focusEnabled
       || navigation.inversionEnabled
       || selection.length > 0,
@@ -14598,22 +14602,30 @@ function publishLocalPeerPresence(nowMs) {
   localPeerLastPresenceAttemptAt = nowMs;
   try {
     const sequence = localPeerPresenceSequence.toString();
-    const envelope = encodeLocalPresenceEnvelope(
-      crypto.randomUUID(),
-      localPeerBrowserPeerId,
-      sequence,
-      LOCAL_PEER_PRESENCE_TTL_MS,
-      new Float64Array(sample.eye),
-      new Float64Array(sample.forward),
-      new Float64Array(sample.up),
-      JSON.stringify(sample.selection),
-      sample.includeFocus,
-      new Float64Array(sample.focusCenter),
-      sample.focusRadius,
-      sample.inversionEnabled,
-      sample.activeCue,
-      sample.animationSeconds,
-    );
+    const messageId = crypto.randomUUID();
+    const envelope = localPeerPresenceUsesRustAuthority()
+      ? rustAppShadow.encodeAuthoritativeLocalPresenceEnvelope(
+        messageId,
+        localPeerBrowserPeerId,
+        sequence,
+        LOCAL_PEER_PRESENCE_TTL_MS,
+      )
+      : encodeLocalPresenceEnvelope(
+        messageId,
+        localPeerBrowserPeerId,
+        sequence,
+        LOCAL_PEER_PRESENCE_TTL_MS,
+        new Float64Array(sample.eye),
+        new Float64Array(sample.forward),
+        new Float64Array(sample.up),
+        JSON.stringify(sample.selection),
+        sample.includeFocus,
+        new Float64Array(sample.focusCenter),
+        sample.focusRadius,
+        sample.inversionEnabled,
+        sample.activeCue,
+        sample.animationSeconds,
+      );
     const completion = localPeerRelay.sendPresenceEnvelope(envelope);
     localPeerPresenceSequence += 1n;
     localPeerPresenceInFlight = true;

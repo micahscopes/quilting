@@ -7,13 +7,77 @@
 
 use crate::{AppCommit, AppEvent, AppStore, AuthoredRevision, CommitDisposition, ReceivedPresence};
 use hyperscape_protocol::{
-    AuthoredEnvelope, LocalPeerEnvelope, MessageId, PeerId, PresenceEnvelope,
+    AssetEntityId, AuthoredEnvelope, AuthoringLeaseClaim, LeaseId, LocalPeerEnvelope, MessageId,
+    PeerId, PresenceEnvelope, WireError, MAX_AUTHORING_LEASES_PER_PRESENCE,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 
 pub const DEFAULT_LOCAL_PEER_MESSAGE_MEMORY: usize = 4_096;
+
+/// Process-local lease identity retained across low-rate presence refreshes.
+/// Selection desire comes from application state; the platform supplies only
+/// peer/message identity and transports the resulting envelope.
+#[derive(Debug, Default)]
+pub struct LocalAuthoringLeaseController {
+    owner: Option<PeerId>,
+    claims: BTreeMap<AssetEntityId, LeaseId>,
+}
+
+impl LocalAuthoringLeaseController {
+    pub fn synchronize(
+        &mut self,
+        owner: PeerId,
+        targets: impl IntoIterator<Item = AssetEntityId>,
+        acquisition_seed: MessageId,
+    ) -> Result<Vec<AuthoringLeaseClaim>, WireError> {
+        owner.validate()?;
+        acquisition_seed.validate()?;
+        let targets = targets.into_iter().collect::<BTreeSet<_>>();
+        if targets.len() > MAX_AUTHORING_LEASES_PER_PRESENCE {
+            return Err(WireError::InvalidValue(
+                "local presence has too many authoring lease targets",
+            ));
+        }
+        for target in &targets {
+            target.validate()?;
+        }
+        if self.owner != Some(owner) {
+            self.owner = Some(owner);
+            self.claims.clear();
+        }
+        self.claims.retain(|target, _| targets.contains(target));
+        let mut used = self.claims.values().copied().collect::<BTreeSet<_>>();
+        let mut candidate = acquisition_seed.as_uuid().as_u128();
+        for target in targets {
+            if self.claims.contains_key(&target) {
+                continue;
+            }
+            let lease_id = loop {
+                if candidate == 0 {
+                    candidate = 1;
+                }
+                let lease_id = LeaseId::from_u128(candidate)?;
+                candidate = candidate.wrapping_add(1);
+                if used.insert(lease_id) {
+                    break lease_id;
+                }
+            };
+            self.claims.insert(target, lease_id);
+        }
+        Ok(self
+            .claims
+            .iter()
+            .map(|(&target, &lease_id)| AuthoringLeaseClaim { lease_id, target })
+            .collect())
+    }
+
+    pub fn clear(&mut self) {
+        self.owner = None;
+        self.claims.clear();
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalPeerLane {
@@ -352,7 +416,7 @@ mod tests {
     use super::*;
     use crate::{AppEvent, AppStore, FrameTick};
     use hyperscape_protocol::{
-        AuthoredCommand, EntityId, EphemeralPresence, MessageHeader, PresenceEnvelope,
+        AssetId, AuthoredCommand, EntityId, EphemeralPresence, MessageHeader, PresenceEnvelope,
         WireTransform, CURRENT_PROTOCOL_VERSION,
     };
 
@@ -681,6 +745,104 @@ mod tests {
             LocalPeerDisposition::IgnoredStale,
         );
         assert!(store.presence_snapshot().is_empty());
+    }
+
+    #[test]
+    fn local_authoring_claims_refresh_release_and_change_with_owner() {
+        let mut leases = LocalAuthoringLeaseController::default();
+        let first_owner = PeerId::from_u128(200).unwrap();
+        let second_owner = PeerId::from_u128(201).unwrap();
+        let first_target = AssetEntityId::new(
+            AssetId::from_u128(202).unwrap(),
+            EntityId::from_u128(203).unwrap(),
+        )
+        .unwrap();
+        let second_target = AssetEntityId::new(
+            AssetId::from_u128(202).unwrap(),
+            EntityId::from_u128(204).unwrap(),
+        )
+        .unwrap();
+
+        let first = leases
+            .synchronize(
+                first_owner,
+                [second_target, first_target],
+                MessageId::from_u128(205).unwrap(),
+            )
+            .unwrap();
+        let refreshed = leases
+            .synchronize(
+                first_owner,
+                [first_target, second_target],
+                MessageId::from_u128(206).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(refreshed, first);
+        assert_eq!(first[0].target, first_target);
+        assert_eq!(first[1].target, second_target);
+
+        let retained = leases
+            .synchronize(
+                first_owner,
+                [second_target],
+                MessageId::from_u128(207).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(retained, vec![first[1]]);
+        let reacquired = leases
+            .synchronize(
+                first_owner,
+                [first_target, second_target],
+                MessageId::from_u128(208).unwrap(),
+            )
+            .unwrap();
+        assert_ne!(reacquired[0].lease_id, first[0].lease_id);
+        assert_eq!(reacquired[1], first[1]);
+
+        assert!(leases
+            .synchronize(
+                first_owner,
+                [],
+                MessageId::from_u128(209).unwrap(),
+            )
+            .unwrap()
+            .is_empty());
+        let new_owner = leases
+            .synchronize(
+                second_owner,
+                [second_target],
+                MessageId::from_u128(210).unwrap(),
+            )
+            .unwrap();
+        assert_ne!(new_owner[0].lease_id, first[1].lease_id);
+
+        let excessive = (1..=MAX_AUTHORING_LEASES_PER_PRESENCE + 1).map(|value| {
+            AssetEntityId::new(
+                AssetId::from_u128(211).unwrap(),
+                EntityId::from_u128(value as u128).unwrap(),
+            )
+            .unwrap()
+        });
+        assert_eq!(
+            leases.synchronize(
+                second_owner,
+                excessive,
+                MessageId::from_u128(212).unwrap(),
+            ),
+            Err(WireError::InvalidValue(
+                "local presence has too many authoring lease targets"
+            )),
+        );
+        assert_eq!(
+            leases
+                .synchronize(
+                    second_owner,
+                    [second_target],
+                    MessageId::from_u128(213).unwrap(),
+                )
+                .unwrap(),
+            new_owner,
+        );
     }
 
     #[test]

@@ -25,13 +25,13 @@ use hyperscope_app::{
     AnimationPoseRequestDisposition, AnimationPoseScheduler, AnimationPoseStamp, AppCommit,
     AppEffect, AppEvent, AppFrameSnapshot, AppStore, AssetFetchJob, AssetJobIdentity,
     AssetLoadCompletion, AssetLoadCompletionDispatch, AssetLoadOutcome, AssetLoadRequest,
-    AssetLoadScope, AssetMetadata, AssetReadModel, AssetStatus, AuthoredRevision, CommitDisposition,
-    AuthoringLeaseStatus,
+    AssetLoadScope, AssetMetadata, AssetReadModel, AssetStatus, AuthoredRevision,
+    AuthoringLeaseStatus, CommitDisposition,
     FocusDiagnosticView, FocusPostprocessMode, FocusPostprocessSettings, FrameTick,
     GraphicsPresentationDecision,
-    InstalledPrimarySceneReadModel,
-    LocalPeerDisposition, LocalPeerIngress, LocalPeerLane,
-    LocalPeerReceipt, NavigationSettings,
+    InstalledPrimarySceneReadModel, LocalAuthoringLeaseController, LocalPeerDisposition,
+    LocalPeerIngress, LocalPeerLane, LocalPeerReceipt, LocalPresenceAuthoringReadModel,
+    NavigationSettings,
     NavigationSettingsSynchronizationDisposition, NavigationSynchronization, PatchLabCompletion,
     PatchLabCompletionDispatch, PatchLabControls, PatchLabEffect, PatchLabEffects,
     PatchLabFailure, PatchLabField, PatchLabGeometryCompletion, PatchLabGeometryOutcome,
@@ -314,6 +314,7 @@ pub struct HyperscopeAppShadow {
     /// state; adapters report only presentation/dispatch/recovery evidence.
     webgpu_lod_authority: RefCell<WebGpuLodAuthority>,
     peer_ingress: RefCell<LocalPeerIngress>,
+    local_authoring_leases: RefCell<LocalAuthoringLeaseController>,
     animation_pose_scheduler: RefCell<AnimationPoseScheduler>,
     /// Renderer residency joins transient packed-node handles to stable
     /// semantic identity without making either JavaScript or AppState own the
@@ -344,6 +345,7 @@ impl HyperscopeAppShadow {
             store: AppStore::default(),
             webgpu_lod_authority: RefCell::new(WebGpuLodAuthority::default()),
             peer_ingress: RefCell::new(LocalPeerIngress::default()),
+            local_authoring_leases: RefCell::new(LocalAuthoringLeaseController::default()),
             animation_pose_scheduler: RefCell::new(AnimationPoseScheduler::default()),
             interaction_targets: RefCell::new(InteractionTargetTable::default()),
             backend_pick_evidence: RefCell::new(InteractionPickEvidenceObserver::default()),
@@ -1234,9 +1236,52 @@ impl HyperscopeAppShadow {
     pub fn local_presence_sample(&self, ttl_millis: u32) -> Result<JsValue, JsValue> {
         let presence = self
             .store
-            .local_presence_snapshot(ttl_millis)
+            .local_presence_authoring_snapshot(ttl_millis)
             .map_err(js_error)?;
         to_js(&ShadowLocalPresenceSample::from(presence))
+    }
+
+    /// Encode the Rust-authoritative local presence sample and retain advisory
+    /// lease IDs across refreshes. The platform supplies only sender/message
+    /// ordering and delivers the validated JSON on the presence lane.
+    #[wasm_bindgen(js_name = encodeAuthoritativeLocalPresenceEnvelope)]
+    pub fn encode_authoritative_local_presence_envelope(
+        &self,
+        message_id: &str,
+        sender: &str,
+        sequence: &str,
+        ttl_millis: u32,
+    ) -> Result<String, JsValue> {
+        let message_id = MessageId::new(parse_uuid(message_id, "presence message ID")?)
+            .map_err(js_error)?;
+        let sender = PeerId::new(parse_uuid(sender, "presence sender ID")?)
+            .map_err(js_error)?;
+        let sequence = sequence.parse::<u64>().map_err(|error| {
+            js_error(format!("presence sequence is invalid decimal u64: {error}"))
+        })?;
+        let sample = self
+            .store
+            .local_presence_authoring_snapshot(ttl_millis)
+            .map_err(js_error)?;
+        let mut presence = sample.presence;
+        presence.authoring_leases = self
+            .local_authoring_leases
+            .try_borrow_mut()
+            .map_err(|_| JsValue::from_str("local authoring leases are already active"))?
+            .synchronize(sender, sample.authoring_targets, message_id)
+            .map_err(js_error)?;
+        let envelope = PresenceEnvelope {
+            header: MessageHeader {
+                version: CURRENT_PROTOCOL_VERSION,
+                message_id,
+                sender,
+                sequence,
+            },
+            presence,
+        };
+        envelope.validate().map_err(js_error)?;
+        serde_json::to_string(&envelope)
+            .map_err(|error| js_error(format!("presence envelope could not be encoded: {error}")))
     }
 
     /// Resolve stable primary/secondary presentation identity before the
@@ -4091,6 +4136,7 @@ struct ShadowLocalPresenceSample {
     forward: [f64; 3],
     up: [f64; 3],
     selection: Vec<String>,
+    authoring_targets: Vec<ShadowPresenceAuthoringTarget>,
     include_focus: bool,
     focus_center: [f64; 3],
     focus_radius: f64,
@@ -4099,8 +4145,16 @@ struct ShadowLocalPresenceSample {
     animation_seconds: f64,
 }
 
-impl From<EphemeralPresence> for ShadowLocalPresenceSample {
-    fn from(presence: EphemeralPresence) -> Self {
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowPresenceAuthoringTarget {
+    asset_id: String,
+    entity_id: String,
+}
+
+impl From<LocalPresenceAuthoringReadModel> for ShadowLocalPresenceSample {
+    fn from(sample: LocalPresenceAuthoringReadModel) -> Self {
+        let presence = sample.presence;
         let camera = presence
             .camera
             .expect("local application presence always carries a camera");
@@ -4113,6 +4167,14 @@ impl From<EphemeralPresence> for ShadowLocalPresenceSample {
                 .selection
                 .into_iter()
                 .map(|entity| entity.to_string())
+                .collect(),
+            authoring_targets: sample
+                .authoring_targets
+                .into_iter()
+                .map(|target| ShadowPresenceAuthoringTarget {
+                    asset_id: target.asset.to_string(),
+                    entity_id: target.entity.to_string(),
+                })
                 .collect(),
             include_focus: focus.is_some(),
             focus_center: focus.map_or([0.0; 3], |focus| focus.center),
