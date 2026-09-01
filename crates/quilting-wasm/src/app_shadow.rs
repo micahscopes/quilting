@@ -643,6 +643,15 @@ impl HyperscopeAppShadow {
         hyperscope_web::navigation_status::mount_navigation_status(parent, self.store.clone());
     }
 
+    /// Mount the read-only stable selection projection. Transient platform
+    /// notices remain a browser concern, but selected identity, source bound,
+    /// pivot, and exact face come only from committed AppStore state.
+    #[cfg(feature = "leptos-ui")]
+    #[wasm_bindgen(js_name = mountInteractionStatus)]
+    pub fn mount_interaction_status(&self, parent: web_sys::HtmlElement) {
+        hyperscope_web::interaction_status::mount_interaction_status(parent, self.store.clone());
+    }
+
     /// Mount the explicit Rust-authority navigation preference controls over
     /// the committed low-rate AppStore projection. The callback receives only
     /// the complete committed packet needed by the browser adapters.

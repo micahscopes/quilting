@@ -72,6 +72,7 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
 .asset-credit-footer{position:fixed;left:50%;bottom:12px;z-index:9;display:flex;gap:6px;max-width:min(720px,calc(100vw - 32px));padding:4px 8px;transform:translateX(-50%);border:1px solid rgba(139,148,158,.24);border-radius:5px;background:rgba(13,17,23,.72);backdrop-filter:blur(5px);color:#b1bac4;font-size:10px;line-height:1.3;letter-spacing:.01em;pointer-events:none}
 .asset-credit-footer:empty{display:none}
 .asset-credit-footer span+span::before{content:' / ';color:#6e7681}
+.interaction-status,.interaction-notice{color:#8b949e;font-size:9px;line-height:1.4;margin-top:5px}
 .lab-note{font-size:9px;line-height:1.4;color:#6e7681;margin-top:5px}
 .lab-stats{font:9px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;color:#8b949e;margin-top:6px;white-space:normal}
 .lab-stats .ok{color:#3fb950}.lab-stats .promoted{color:#d29922}.lab-stats .val{color:#58a6ff}
@@ -146,7 +147,8 @@ select{width:100%;padding:5px;font-family:inherit;font-size:11px;background:#212
       <div class="sr"><span style="font-size:10px;color:#8b949e;width:30px">Z</span><input type="range" id="mz" min="-30" max="30" step="0.1" value="0"><span class="v" id="mz-v">0.00</span></div>
       <div class="sr"><span style="font-size:10px;color:#8b949e;width:30px">R</span><input type="range" id="mr" min="0.11" max="50" step="0.01" value="20"><span class="v" id="mr-v">2.00</span></div>
     </div>
-    <div id="selection-status" style="color:#8b949e;font-size:9px;margin-top:5px">No object selected</div>
+    <div id="interaction-status-rust" hidden></div>
+    <div id="selection-status" class="interaction-notice" role="status" aria-live="polite">No object selected</div>
     <div id="navigation-controls-rust" hidden></div>
     <div id="navigation-controls-browser">
       <label style="margin-top:5px">Focus/navigation transition</label>
@@ -4441,6 +4443,8 @@ let rustAnimationClipControlMountAttempted = false;
 let rustAnimationClipControlMounted = false;
 let rustNavigationStatusMountAttempted = false;
 let rustNavigationStatusMounted = false;
+let rustInteractionStatusMountAttempted = false;
+let rustInteractionStatusMounted = false;
 let rustPatchLabViewMountAttempted = false;
 let rustPatchLabViewMounted = false;
 const rustAppShadowAssetIds = new Map();
@@ -4473,6 +4477,9 @@ const rustAppShadowDiagnostics = {
   navigationStatusAuthority: 'unmounted',
   navigationStatusMountAttempts: 0,
   navigationStatusMountErrors: 0,
+  interactionStatusAuthority: 'browser-fallback',
+  interactionStatusMountAttempts: 0,
+  interactionStatusMountErrors: 0,
   cameraLensControlAuthority: 'browser-fallback',
   cameraLensControlMountAttempts: 0,
   cameraLensControlMountErrors: 0,
@@ -5758,6 +5765,29 @@ function ensureRustNavigationStatusView() {
   }
 }
 
+function ensureRustInteractionStatusView() {
+  if (rustInteractionStatusMounted) return true;
+  if (RUST_SELECTION_IMPLEMENTATION !== 'rust'
+      || rustInteractionStatusMountAttempted || !rustAppShadow) return false;
+  rustInteractionStatusMountAttempted = true;
+  rustAppShadowDiagnostics.interactionStatusMountAttempts += 1;
+  const host = $('interaction-status-rust');
+  if (!host || typeof rustAppShadow.mountInteractionStatus !== 'function') return false;
+  try {
+    rustAppShadow.mountInteractionStatus(host);
+    host.hidden = false;
+    rustInteractionStatusMounted = true;
+    rustAppShadowDiagnostics.interactionStatusAuthority = 'hyperscope-web';
+    selectionLabel();
+    return true;
+  } catch (error) {
+    host.hidden = true;
+    rustAppShadowDiagnostics.interactionStatusMountErrors += 1;
+    recordAppShadowMismatch('interaction_status_mount', error?.message || String(error));
+    return false;
+  }
+}
+
 function useBrowserCameraLensControl() {
   const host = $('camera-fov-rust');
   const fallback = $('camera-fov-browser');
@@ -6046,6 +6076,7 @@ function refreshAppShadowSnapshot() {
   ensureRustAnimationClipControlView();
   ensureRustNavigationSettingsView();
   ensureRustNavigationStatusView();
+  ensureRustInteractionStatusView();
   ensureRustCameraLensControl();
   ensureRustPatchLabView();
   if (!ensureRustAssetCreditsView()) renderAssetCredits(snapshot);
@@ -8384,10 +8415,17 @@ function detachSurfaceWalk(message = 'Surface walk detached') {
 function selectionLabel(message = '') {
   const status = $('selection-status');
   if (message) {
+    status.hidden = false;
     status.textContent = message;
+  } else if (rustInteractionStatusMounted
+      && RUST_SELECTION_IMPLEMENTATION === 'rust') {
+    status.textContent = '';
+    status.hidden = true;
   } else if (selectedObject) {
+    status.hidden = false;
     status.textContent = `Selected node ${selectedObject.node} · source radius ${selectedObject.bound.radius.toFixed(3)}`;
   } else {
+    status.hidden = false;
     status.textContent = 'No object selected';
   }
 }

@@ -32,6 +32,9 @@ pub mod durable_history;
 #[cfg(feature = "local-peer-relay")]
 pub mod local_peer_relay;
 
+#[cfg(feature = "interaction-status")]
+pub mod interaction_status;
+
 #[cfg(feature = "navigation-status")]
 pub mod navigation_status;
 
