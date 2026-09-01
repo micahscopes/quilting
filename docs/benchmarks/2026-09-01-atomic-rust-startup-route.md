@@ -24,8 +24,8 @@ Verification:
 - Development WASM built with `HYPERSCOPE_WASM_OPT=0`.
 - Typed renderer-resource, primary-asset, presentation, and Patch Lab route
   smokes passed against the generated WASM.
-- The broad historical route smoke passed the new startup-route assertions and
-  then stopped at its pre-existing stale interaction-source assertion for
-  `pickSurfaceAtCanvasPixel`; that unrelated assertion was not weakened.
+- The broad historical route smoke passed after its stale synchronous-pick
+  source assertion was updated to require the current awaited pick result,
+  retained activation request, and exact surface payload path.
 
 No browser, renderer, GPU context, server, or user-owned process was started.
