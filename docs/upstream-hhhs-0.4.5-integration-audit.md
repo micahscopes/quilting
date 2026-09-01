@@ -7,9 +7,9 @@ Reviewed candidate through: `hhhs-rs`
 
 Initial audit baseline: `2bfba3662cfb175b9700393acc38ee09c507ccc4`
 
-Status: integration audit, not a release qualification or an HHHS design
-specification. This document names behavior Hyperscope needs and leaves the
-upstream API shape deliberately open.
+Status: adopted downstream candidate checkpoint, not a release qualification
+or an HHHS design specification. This document names behavior Hyperscope needs
+and leaves the remaining upstream API shape deliberately open.
 
 ## Directional conclusion
 
@@ -29,10 +29,11 @@ machinery. The strict host encapsulation is valuable and should not be
 weakened to ease that migration.
 
 The audit did reveal several generic composition gaps. Upstream resolved both
-initial P0 requests in subsequent pushed commits. The remaining requests are
-ergonomic, integration, or measured-performance work; the exclusive host's
-read-only reactive boundary remains the one issue directly on Hyperscope's
-0.4.5 migration path.
+initial P0 requests in subsequent pushed commits. Hyperscope has now adopted
+the exact `e68402f` candidate, including the exclusive host and browser log,
+while deliberately treating it as a candidate SHA rather than a release tag.
+The remaining requests are ergonomic, integration, or measured-performance
+work.
 
 ## Resolved P0 requests
 
@@ -280,31 +281,43 @@ These are not upstream requests:
   presence;
 - GPU work, frame scheduling, and mesh/LOD policy.
 
-## Downstream migration consequences
+## Downstream migration outcome
 
-Pending upstream feedback, Hyperscope should:
+At exact candidate `e68402f`, Hyperscope:
 
-- remove its separately retained `Arc<MemoryStorage>` and read through
+- removed its separately retained `Arc<MemoryStorage>` and reads through
   `DurableReplicaHost::snapshot`;
-- replace direct `host.replica()` preparation with `host.prepare*` or
-  `host.preparation()`;
-- replace custom browser IndexedDB durability with `IndexedDbReplicaLog`;
-- redesign test failure injection around a shared control handle or upstream
-  testkit sink instead of `durability_mut()`;
+- replaced direct `host.replica()` preparation with `host.prepare*` and the
+  restricted local-transaction path;
+- made host fencing observable rather than misreporting an inaccessible local
+  checkpoint as absent;
+- replaced mutable durability escape hatches with a cloneable, structurally
+  non-writing test control;
+- replaced custom browser IndexedDB durability with the Web-Lock-owned
+  `IndexedDbReplicaLog` while retaining a non-destructive importer for exact
+  legacy transaction rows;
+- removed the unused durable-project `state_stream` and `state_signal_vec`
+  conveniences. Production application FRP already observes committed
+  `AppStore` read models, so it does not require an aliased storage writer;
+- keeps the exact upstream revision pinned so the full HHHS dependency graph
+  and wire generation move together.
+
+Hyperscope still should:
+
 - not commit the 0.4.4-specific bounded carrier-record retry pool until it is
   compared against generation-2 `StepwiseRepairAttempt` and the browser
   repair path;
 - use `hhhs-session` transient samples for camera/selection/control presence,
   and durable causal events only for explicit authored intent;
-- keep the exact upstream revision pinned until the full dependency graph and
-  wire generation migrate together.
+- adopt the forthcoming consolidated candidate only after its native, WASM,
+  and API gates pass, rather than advancing through testkit-only intermediate
+  commits.
 
 ## Exact downstream adoption probe
 
-An isolated Quilting worktree at `6f84b52` was checked against the exact
-`e68402f` dependency revision without modifying the production pin. The
-resulting compile failures are deliberate 0.4.5 ownership breaks concentrated
-in `hyperscape-hhhs`, not broad ecosystem churn:
+An isolated Quilting worktree at `6f84b52` was first checked against exact
+`e68402f`. The resulting compile failures were deliberate 0.4.5 ownership
+breaks concentrated in `hyperscape-hhhs`, not broad ecosystem churn:
 
 - `AsyncTransactionSink` now reports writer-lease and cached exact recovery
   state and receives the expected state on every persist;
@@ -317,29 +330,31 @@ in `hyperscape-hhhs`, not broad ecosystem churn:
 - tests need a shared observation/failure-control handle or the upstream
   `hhhs-testkit` durability sink instead of mutable sink access.
 
-The only unresolved architectural choice exposed by the probe is reactive
-observation. The current `state_stream` and `state_signal_vec` methods clone the
-same storage behind the durable writer. Their only current consumers are
-adapter tests, while production application FRP already observes committed
-`AppStore` read models. Hyperscope should neither keep that aliased storage nor
-invent a second mutable replica. Adopt one of these explicit outcomes:
+The probe exposed one architectural choice around reactive observation. The
+old `state_stream` and `state_signal_vec` methods cloned the same storage behind
+the durable writer. Their only consumers were adapter tests, while production
+application FRP already observes committed `AppStore` read models. Hyperscope
+therefore chose the second of these outcomes:
 
 1. upstream provides a host-issued, structurally read-only reactive view or
    host-owned adapter; or
 2. Hyperscope removes those unused durable-project reactive convenience
    methods and keeps application FRP downstream of committed host snapshots.
 
-Until that choice is settled and the entire HHHS dependency graph moves
-together, production remains pinned to immutable `v0.4.4`. This is a migration
-containment decision, not a negative qualification of the 0.4.5 candidate.
+The exact dependency graph now pins `e68402f`. This is a reviewable candidate
+checkpoint, not a claim that HHHS `v0.4.5` has been released or qualified.
 
 ## Audit evidence
 
-At the reviewed revision:
+At the reviewed and adopted revision:
 
-- an isolated downstream `cargo check` against exact `e68402f` reached only the
-  ownership/API migration points enumerated above; the production worktree and
-  `v0.4.4` lock remained unchanged;
+- the downstream `hyperscape-hhhs` suite passes 27 tests after exclusive-host
+  migration;
+- the downstream `hyperscope-hhhs-shadow` suite passes 24 tests after strict
+  fence/reopen migration;
+- the downstream `hyperscope-web` durable-history suite passes 9 native tests;
+- `hyperscope-web` and the `quilting-wasm` Leptos/durable-history composition
+  both pass `wasm32-unknown-unknown` checks;
 - upstream's protocol-v5 browser projection suite passed 20/20 in real
   Chromium after the retained-byte accounting and uncredited-frame rejection
   regressions were added;

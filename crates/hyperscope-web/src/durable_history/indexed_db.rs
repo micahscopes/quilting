@@ -1,183 +1,146 @@
 use super::{
-    classify_existing_row, decode_ordered_rows, encode_transaction_row, project_key_bounds,
-    transaction_key, DurableHistoryError, ExistingRow, OriginPersistence, DATABASE_NAME,
+    decode_ordered_rows, project_key_bounds, DurableHistoryError, OriginPersistence, DATABASE_NAME,
     DATABASE_VERSION, TRANSACTION_STORE,
 };
 use futures::try_join;
 use hhhs_replica::AsyncTransactionSink;
-use hhhs_store::StorageTransaction;
+use hhhs_store::{encode_storage_transaction, MemoryStorage, ReplicaStorage, StorageTransaction};
+use hhhs_web_browser::{
+    BrowserDurabilityHint, IndexedDbLogOptions, IndexedDbReplicaLog, ReplicaLogId,
+};
 use hyperscape_hhhs::{DurableProject, ProjectId};
 use hyperscope_app::AppStore;
 use indexed_db_futures::database::Database;
 use indexed_db_futures::prelude::*;
-use indexed_db_futures::transaction::{TransactionDurability, TransactionMode, TransactionOptions};
-use indexed_db_futures::typed_array::{Uint8Array, Uint8ArraySlice};
-use wasm_bindgen::{JsCast, JsValue};
-use wasm_bindgen_futures::{spawn_local, JsFuture};
+use indexed_db_futures::typed_array::Uint8Array;
 
-/// IndexedDB sink for exactly one Hyperscape project's authored history.
-///
-/// The sink is browser-local and intentionally not `Send`. A single local
-/// actor must own it and its [`DurableProject`] from preparation through
-/// finalization; `AsyncTransactionSink` does not require its future to be
-/// `Send`. IndexedDB collision detection prevents silent overwrites, but does
-/// not make multiple tabs valid shared writers. A second writer must stop and
-/// recover after a collision; a future live integration should enforce one
-/// owner with a Web Lock or SharedWorker.
-///
-/// Writes request IndexedDB's `strict` transaction durability. That does not
-/// prevent whole-origin eviction or private-session loss; use
-/// [`origin_persistence`] or [`request_origin_persistence`] and surface their
-/// [`OriginPersistence`] result to the user.
-pub struct IndexedDbDurability {
-    db: Database,
+/// Browser durability is upstream HHHS's Web-Lock-owned IndexedDB log. This
+/// alias deliberately exposes no database handle and cannot be cloned into a
+/// second writer.
+pub type IndexedDbDurability = IndexedDbReplicaLog;
+
+fn log_id(project_id: ProjectId) -> ReplicaLogId {
+    let mut label = Vec::with_capacity(48);
+    label.extend_from_slice(b"hyperscape authored project v1\0");
+    label.extend_from_slice(project_id.as_uuid().as_bytes());
+    ReplicaLogId::derive(label)
+}
+
+fn log_options() -> IndexedDbLogOptions {
+    IndexedDbLogOptions::new(DATABASE_NAME)
+        .with_database_version(DATABASE_VERSION)
+        .with_transaction_store(TRANSACTION_STORE)
+        .with_durability(BrowserDurabilityHint::Strict)
+}
+
+async fn load_legacy_transactions(
     project_id: ProjectId,
+) -> Result<Vec<StorageTransaction>, DurableHistoryError> {
+    let db = Database::open(DATABASE_NAME)
+        .with_version(DATABASE_VERSION)
+        .await
+        .map_err(indexed_db_error)?;
+    let (lower, upper) = project_key_bounds(project_id);
+    let transaction = db
+        .transaction(TRANSACTION_STORE)
+        .build()
+        .map_err(indexed_db_error)?;
+    let store = transaction
+        .object_store(TRANSACTION_STORE)
+        .map_err(indexed_db_error)?;
+    let keys = store
+        .get_all_keys::<String>()
+        .with_query(lower.clone()..=upper.clone())
+        .primitive()
+        .map_err(indexed_db_error)?;
+    let values = store
+        .get_all::<Uint8Array>()
+        .with_query(lower..=upper)
+        .primitive()
+        .map_err(indexed_db_error)?;
+    let (keys, values) = try_join!(keys, values).map_err(indexed_db_error)?;
+    let keys: Vec<_> = keys.collect::<Result<_, _>>().map_err(indexed_db_error)?;
+    let values: Vec<_> = values.collect::<Result<_, _>>().map_err(indexed_db_error)?;
+    drop(store);
+    transaction.commit().await.map_err(indexed_db_error)?;
+    db.close();
+    if keys.len() != values.len() {
+        return Err(DurableHistoryError::IndexedDb(format!(
+            "legacy transaction key/value snapshot length mismatch: {} keys, {} values",
+            keys.len(),
+            values.len()
+        )));
+    }
+    decode_ordered_rows(
+        project_id,
+        keys.into_iter()
+            .zip(values)
+            .map(|(key, value)| (key, value.into())),
+    )
 }
 
-impl IndexedDbDurability {
-    /// Open the dedicated v1 database and recover this project's trusted local
-    /// transaction rows.
-    pub async fn open(
-        project_id: ProjectId,
-    ) -> Result<(Self, Vec<StorageTransaction>), DurableHistoryError> {
-        let db = Database::open(DATABASE_NAME)
-            .with_version(DATABASE_VERSION)
-            .with_on_upgrade_needed(|_event, db| {
-                if !db
-                    .object_store_names()
-                    .any(|name| name == TRANSACTION_STORE)
-                {
-                    db.create_object_store(TRANSACTION_STORE).build()?;
-                }
-                Ok(())
-            })
+fn normalize_legacy_transactions(
+    transactions: Vec<StorageTransaction>,
+) -> Result<Vec<StorageTransaction>, DurableHistoryError> {
+    let storage = MemoryStorage::new();
+    let mut retained = Vec::with_capacity(transactions.len());
+    let transaction_count = transactions.len();
+    for (index, transaction) in transactions.into_iter().enumerate() {
+        let before = storage.recovery_state();
+        storage
+            .commit(transaction.clone())
+            .map_err(|error| DurableHistoryError::InvalidTransaction(error.to_string()))?;
+        if storage.recovery_state() == before {
+            if index + 1 != transaction_count {
+                return Err(DurableHistoryError::InvalidTransaction(
+                    "embedded legacy no-effect transaction is not a removable tail".into(),
+                ));
+            }
+        } else {
+            retained.push(transaction);
+        }
+    }
+    Ok(retained)
+}
+
+async fn open_project_log(
+    project_id: ProjectId,
+) -> Result<IndexedDbDurability, DurableHistoryError> {
+    let mut log = IndexedDbReplicaLog::open(log_id(project_id), log_options())
+        .await
+        .map_err(indexed_db_error)?;
+    let legacy = normalize_legacy_transactions(load_legacy_transactions(project_id).await?)?;
+    if legacy.is_empty() {
+        return Ok(log);
+    }
+    if !log.transactions().is_empty() {
+        let same = log.transactions().len() == legacy.len()
+            && log.transactions().iter().zip(&legacy).all(|(left, right)| {
+                encode_storage_transaction(left) == encode_storage_transaction(right)
+            });
+        if !same {
+            return Err(DurableHistoryError::ProjectRecovery(
+                "legacy and HHHS-owned browser logs disagree".into(),
+            ));
+        }
+        return Ok(log);
+    }
+    for transaction in &legacy {
+        let before = log.recovered_state();
+        let expected = before
+            .advance(
+                transaction,
+                before
+                    .sequence()
+                    .checked_add(1)
+                    .ok_or(DurableHistoryError::SequenceOverflow)?,
+            )
+            .map_err(|error| DurableHistoryError::InvalidTransaction(error.to_string()))?;
+        AsyncTransactionSink::persist(&mut log, transaction, expected)
             .await
             .map_err(indexed_db_error)?;
-        if !db
-            .object_store_names()
-            .any(|name| name == TRANSACTION_STORE)
-        {
-            return Err(DurableHistoryError::IndexedDb(format!(
-                "{DATABASE_NAME} v{DATABASE_VERSION} lacks {TRANSACTION_STORE}"
-            )));
-        }
-        let mut version_changes = db.version_changes().map_err(indexed_db_error)?;
-        spawn_local(async move {
-            if version_changes.recv().await.is_some() {
-                version_changes.db().clone().close();
-            }
-        });
-
-        let durability = Self { db, project_id };
-        let transactions = durability.load_transactions().await?;
-        Ok((durability, transactions))
     }
-
-    async fn load_transactions(&self) -> Result<Vec<StorageTransaction>, DurableHistoryError> {
-        let (lower, upper) = project_key_bounds(self.project_id);
-        let transaction = self
-            .db
-            .transaction(TRANSACTION_STORE)
-            .build()
-            .map_err(indexed_db_error)?;
-        let store = transaction
-            .object_store(TRANSACTION_STORE)
-            .map_err(indexed_db_error)?;
-
-        // Build both requests before yielding so the IndexedDB transaction
-        // cannot become inactive between the key and value snapshots.
-        let keys = store
-            .get_all_keys::<String>()
-            .with_query(lower.clone()..=upper.clone())
-            .primitive()
-            .map_err(indexed_db_error)?;
-        let values = store
-            .get_all::<Uint8Array>()
-            .with_query(lower..=upper)
-            .primitive()
-            .map_err(indexed_db_error)?;
-        let (keys, values) = try_join!(keys, values).map_err(indexed_db_error)?;
-        let keys: Vec<_> = keys.collect::<Result<_, _>>().map_err(indexed_db_error)?;
-        let values: Vec<_> = values.collect::<Result<_, _>>().map_err(indexed_db_error)?;
-        drop(store);
-        transaction.commit().await.map_err(indexed_db_error)?;
-
-        if keys.len() != values.len() {
-            return Err(DurableHistoryError::IndexedDb(format!(
-                "transaction key/value snapshot length mismatch: {} keys, {} values",
-                keys.len(),
-                values.len()
-            )));
-        }
-        decode_ordered_rows(
-            self.project_id,
-            keys.into_iter()
-                .zip(values)
-                .map(|(key, value)| (key, value.into())),
-        )
-    }
-
-    fn strict_readwrite(
-        &self,
-    ) -> Result<indexed_db_futures::transaction::Transaction<'_>, DurableHistoryError> {
-        let mut options = TransactionOptions::new();
-        options.set_durability(TransactionDurability::Strict);
-        self.db
-            .transaction(TRANSACTION_STORE)
-            .with_mode(TransactionMode::Readwrite)
-            .with_options(options)
-            .build()
-            .map_err(indexed_db_error)
-    }
-}
-
-impl Drop for IndexedDbDurability {
-    fn drop(&mut self) {
-        // End the detached version-change listener and release this connection
-        // when the single owning project actor shuts down.
-        self.db.clone().close();
-    }
-}
-
-impl AsyncTransactionSink for IndexedDbDurability {
-    type Error = DurableHistoryError;
-
-    async fn persist(&mut self, transaction: &StorageTransaction) -> Result<(), Self::Error> {
-        let (sequence, row) = encode_transaction_row(transaction)?;
-        let key = transaction_key(self.project_id, sequence);
-        let idb_transaction = self.strict_readwrite()?;
-        let store = idb_transaction
-            .object_store(TRANSACTION_STORE)
-            .map_err(indexed_db_error)?;
-        let existing = store
-            .get::<Uint8Array, _, _>(key.clone())
-            .primitive()
-            .map_err(indexed_db_error)?
-            .await
-            .map_err(indexed_db_error)?;
-        if let Some(existing) = &existing {
-            // Refuse corrupted durable state rather than reporting it as an
-            // ordinary writer collision or overwriting it.
-            super::decode_transaction_row(existing.as_ref())?;
-        }
-
-        match classify_existing_row(sequence, existing.as_ref().map(AsRef::as_ref), &row)? {
-            ExistingRow::Insert => {
-                store
-                    .add(Uint8ArraySlice::new(&row))
-                    .with_key(key)
-                    .without_key_type()
-                    .primitive()
-                    .map_err(indexed_db_error)?
-                    .await
-                    .map_err(indexed_db_error)?;
-            }
-            ExistingRow::ExactRetry => {}
-        }
-
-        drop(store);
-        idb_transaction.commit().await.map_err(indexed_db_error)
-    }
+    Ok(log)
 }
 
 /// Open and recover a browser-durable project without attaching it to current
@@ -185,8 +148,9 @@ impl AsyncTransactionSink for IndexedDbDurability {
 pub async fn open_durable_project(
     project_id: ProjectId,
 ) -> Result<DurableProject<IndexedDbDurability>, DurableHistoryError> {
-    let (durability, transactions) = IndexedDbDurability::open(project_id).await?;
-    DurableProject::recover_trusted_transactions(project_id, durability, transactions)
+    let durability = open_project_log(project_id).await?;
+    let transactions = durability.recovered_transactions();
+    DurableProject::recover_trusted_transactions_with_sink(project_id, durability, transactions)
         .map_err(|error| DurableHistoryError::ProjectRecovery(error.to_string()))
 }
 
@@ -266,12 +230,13 @@ pub async fn import_validated_durable_authored_session(
 /// must not be presented as durable against storage pressure or private-mode
 /// teardown.
 pub async fn origin_persistence() -> Result<OriginPersistence, DurableHistoryError> {
-    call_storage_manager_bool("persisted")
+    hhhs_web_browser::origin_persistence()
         .await
+        .map_err(indexed_db_error)
         .map(|result| match result {
-            Some(true) => OriginPersistence::Persistent,
-            Some(false) => OriginPersistence::BestEffort,
-            None => OriginPersistence::Unknown,
+            hhhs_web_browser::OriginPersistence::Persistent => OriginPersistence::Persistent,
+            hhhs_web_browser::OriginPersistence::BestEffort => OriginPersistence::BestEffort,
+            hhhs_web_browser::OriginPersistence::Unknown => OriginPersistence::Unknown,
         })
 }
 
@@ -281,52 +246,13 @@ pub async fn origin_persistence() -> Result<OriginPersistence, DurableHistoryErr
 /// Browsers may deny the request without prompting. Denial is reported as
 /// `BestEffort`, not as successful durable retention.
 pub async fn request_origin_persistence() -> Result<OriginPersistence, DurableHistoryError> {
-    if origin_persistence().await? == OriginPersistence::Persistent {
-        return Ok(OriginPersistence::Persistent);
-    }
-    call_storage_manager_bool("persist")
+    hhhs_web_browser::request_origin_persistence()
         .await
+        .map_err(indexed_db_error)
         .map(|result| match result {
-            Some(true) => OriginPersistence::Persistent,
-            Some(false) => OriginPersistence::BestEffort,
-            None => OriginPersistence::Unknown,
-        })
-}
-
-async fn call_storage_manager_bool(method: &str) -> Result<Option<bool>, DurableHistoryError> {
-    let global = js_sys::global();
-    let navigator =
-        js_sys::Reflect::get(&global, &JsValue::from_str("navigator")).map_err(js_error)?;
-    if navigator.is_null() || navigator.is_undefined() {
-        return Ok(None);
-    }
-    let storage =
-        js_sys::Reflect::get(&navigator, &JsValue::from_str("storage")).map_err(js_error)?;
-    if storage.is_null() || storage.is_undefined() {
-        return Ok(None);
-    }
-    let function = js_sys::Reflect::get(&storage, &JsValue::from_str(method)).map_err(js_error)?;
-    let Some(function) = function.dyn_ref::<js_sys::Function>() else {
-        return Ok(None);
-    };
-    let promise = function
-        .call0(&storage)
-        .map_err(js_error)?
-        .dyn_into::<js_sys::Promise>()
-        .map_err(|_| {
-            DurableHistoryError::IndexedDb(format!(
-                "navigator.storage.{method}() did not return a Promise"
-            ))
-        })?;
-    JsFuture::from(promise)
-        .await
-        .map_err(js_error)?
-        .as_bool()
-        .map(Some)
-        .ok_or_else(|| {
-            DurableHistoryError::IndexedDb(format!(
-                "navigator.storage.{method}() did not resolve to a boolean"
-            ))
+            hhhs_web_browser::OriginPersistence::Persistent => OriginPersistence::Persistent,
+            hhhs_web_browser::OriginPersistence::BestEffort => OriginPersistence::BestEffort,
+            hhhs_web_browser::OriginPersistence::Unknown => OriginPersistence::Unknown,
         })
 }
 
@@ -334,15 +260,11 @@ fn indexed_db_error(error: impl std::fmt::Display) -> DurableHistoryError {
     DurableHistoryError::IndexedDb(error.to_string())
 }
 
-fn js_error(error: JsValue) -> DurableHistoryError {
-    DurableHistoryError::IndexedDb(format!("{error:?}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use hhhs::{Entry, Position};
-    use hhhs_store::encode_storage_transaction;
+    use hhhs_store::{encode_storage_transaction, StorageRecoveryState};
     use hyperscape_protocol::{
         AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId, LocalPeerEnvelope,
         MessageHeader, MessageId, PeerId, WireTransform, CURRENT_PROTOCOL_VERSION,
@@ -369,23 +291,30 @@ mod tests {
     #[wasm_bindgen_test(async)]
     async fn indexeddb_rows_are_atomic_idempotent_and_collision_safe() {
         let project_id = unique_project();
-        let (mut durability, initial) = IndexedDbDurability::open(project_id).await.unwrap();
-        assert!(initial.is_empty());
+        let mut durability = open_project_log(project_id).await.unwrap();
+        assert!(durability.transactions().is_empty());
         let first = transaction(0, b"first");
-        durability.persist(&first).await.unwrap();
-        durability.persist(&first).await.unwrap();
+        let first_state = StorageRecoveryState::default().advance(&first, 1).unwrap();
+        AsyncTransactionSink::persist(&mut durability, &first, first_state)
+            .await
+            .unwrap();
+        AsyncTransactionSink::persist(&mut durability, &first, first_state)
+            .await
+            .unwrap();
 
         let collision = transaction(0, b"different");
-        assert_eq!(
-            durability.persist(&collision).await.unwrap_err(),
-            DurableHistoryError::SequenceCollision { sequence: 0 }
-        );
+        assert!(matches!(
+            AsyncTransactionSink::persist(&mut durability, &collision, first_state)
+                .await
+                .unwrap_err(),
+            hhhs_web_browser::BrowserLogError::SequenceCollision { sequence: 0 }
+        ));
         drop(durability);
 
-        let (_durability, recovered) = IndexedDbDurability::open(project_id).await.unwrap();
-        assert_eq!(recovered.len(), 1);
+        let recovered = open_project_log(project_id).await.unwrap();
+        assert_eq!(recovered.transactions().len(), 1);
         assert_eq!(
-            encode_storage_transaction(&recovered[0]),
+            encode_storage_transaction(&recovered.transactions()[0]),
             encode_storage_transaction(&first)
         );
     }
@@ -468,14 +397,13 @@ mod tests {
         let before_replay = restored_store.summary_snapshot();
         let replay = reopened
             .session_mut()
-            .accept_local_peer(
-                &restored_store,
-                LocalPeerEnvelope::Authored(authored),
-                2.0,
-            )
+            .accept_local_peer(&restored_store, LocalPeerEnvelope::Authored(authored), 2.0)
             .await
             .unwrap();
-        assert_eq!(replay.peer.disposition, LocalPeerDisposition::IgnoredDuplicate);
+        assert_eq!(
+            replay.peer.disposition,
+            LocalPeerDisposition::IgnoredDuplicate
+        );
         assert!(replay.durable.is_none());
         assert_eq!(reopened.session().history_len(), 1);
         assert_eq!(restored_store.summary_snapshot(), before_replay);

@@ -76,11 +76,8 @@ pub const DURABLE_AUTHORED_CURSOR_NAME: &str = "hyperscope/authored-source-curso
 pub const DURABLE_AUTHORED_CURSOR_SCHEMA: u32 = 1;
 
 pub fn durable_authored_cursor_key() -> ProjectionKey {
-    ProjectionKey::new(
-        DURABLE_AUTHORED_CURSOR_NAME,
-        DURABLE_AUTHORED_CURSOR_SCHEMA,
-    )
-    .expect("the static durable authored cursor key is valid")
+    ProjectionKey::new(DURABLE_AUTHORED_CURSOR_NAME, DURABLE_AUTHORED_CURSOR_SCHEMA)
+        .expect("the static durable authored cursor key is valid")
 }
 
 /// A successful diagnostic observation after the authoritative AppStore
@@ -318,11 +315,9 @@ impl AuthoredShadowCheckpoint {
         if (major, minor) != AUTHORED_SHADOW_CHECKPOINT_VERSION {
             return Err(AuthoredShadowInitError::WrongCheckpointVersion { major, minor });
         }
-        let project_id = ProjectId::from_u128(u128::from_be_bytes(checkpoint_array(
-            bytes,
-            &mut cursor,
-        )?))
-        .map_err(|_| AuthoredShadowInitError::MalformedCheckpoint)?;
+        let project_id =
+            ProjectId::from_u128(u128::from_be_bytes(checkpoint_array(bytes, &mut cursor)?))
+                .map_err(|_| AuthoredShadowInitError::MalformedCheckpoint)?;
         let has_revision = checkpoint_array::<1>(bytes, &mut cursor)?[0];
         let raw_revision = u64::from_le_bytes(checkpoint_array(bytes, &mut cursor)?);
         let projection_revision = match (has_revision, raw_revision) {
@@ -416,9 +411,10 @@ impl SequentialProjection {
                 .iter()
                 .all(|asset| self.assets.get(&asset.id) == Some(asset))
             && scene.entities.len() == self.entity_transforms.len()
-            && scene.entities.iter().all(|entity| {
-                self.entity_transforms.get(&entity.entity) == Some(&entity.transform)
-            })
+            && scene
+                .entities
+                .iter()
+                .all(|entity| self.entity_transforms.get(&entity.entity) == Some(&entity.transform))
             && scene.conformal_frames.len() == self.conformal_frame_transforms.len()
             && scene.conformal_frames.iter().all(|frame| {
                 self.conformal_frame_transforms.get(&frame.frame) == Some(&frame.generators)
@@ -683,9 +679,20 @@ impl DurableAuthoredSession<MemoryDurability> {
     ) -> Result<Self, DurableAuthoredSessionInitError> {
         Self::from_project(DurableProject::recover(project_id, durable_bytes)?)
     }
+
+    pub fn durable_bytes(&self) -> Vec<u8> {
+        self.coordinator.durable_bytes()
+    }
+
+    pub fn fail_next_persist(&self) {
+        self.coordinator.fail_next_persist();
+    }
 }
 
-impl<D> DurableAuthoredSession<D> {
+impl<D> DurableAuthoredSession<D>
+where
+    D: AsyncTransactionSink,
+{
     pub fn from_project(
         project: DurableProject<D>,
     ) -> Result<Self, DurableAuthoredSessionInitError> {
@@ -698,8 +705,7 @@ impl<D> DurableAuthoredSession<D> {
     ) -> Result<Self, DurableAuthoredSessionInitError> {
         let authored_history = project.authored_history()?;
         let coordinator = DurableAuthoredCoordinator::from_project(project)?;
-        let ingress =
-            LocalPeerIngress::from_authored_history(message_capacity, &authored_history)?;
+        let ingress = LocalPeerIngress::from_authored_history(message_capacity, &authored_history)?;
         Ok(Self {
             coordinator,
             ingress,
@@ -724,14 +730,6 @@ impl<D> DurableAuthoredSession<D> {
 
     pub fn fault(&self) -> Option<&DurableAuthoredFault> {
         self.coordinator.fault()
-    }
-
-    pub fn durability(&self) -> &D {
-        self.coordinator.durability()
-    }
-
-    pub fn durability_mut(&mut self) -> &mut D {
-        self.coordinator.durability_mut()
     }
 
     pub fn restore_store(
@@ -776,7 +774,7 @@ where
         message_capacity: usize,
     ) -> Result<Self, DurableAuthoredSessionInitError> {
         let state = project.state()?;
-        let checkpoint = project.projection_checkpoint(&durable_authored_cursor_key());
+        let checkpoint = project.projection_checkpoint(&durable_authored_cursor_key())?;
         let adopted_revision = match (project.history_len(), checkpoint) {
             (0, None) => None,
             (0, Some(_)) => return Err(DurableAuthoredInitError::UnexpectedCursor.into()),
@@ -792,7 +790,7 @@ where
                 if checkpoint.history_root.as_bytes() == &state.history_root {
                     None
                 } else {
-                    if !project.projection_checkpoint_matches_history_prefix(&checkpoint) {
+                    if !project.projection_checkpoint_matches_history_prefix(&checkpoint)? {
                         return Err(DurableAuthoredInitError::CursorHistoryRoot.into());
                     }
                     Some(
@@ -827,12 +825,7 @@ where
         received_at_seconds: f64,
     ) -> Result<DurableLocalPeerDispatch, DurableLocalPeerError> {
         self.coordinator
-            .accept_local_peer(
-                &mut self.ingress,
-                store,
-                envelope,
-                received_at_seconds,
-            )
+            .accept_local_peer(&mut self.ingress, store, envelope, received_at_seconds)
             .await
     }
 
@@ -860,12 +853,23 @@ impl DurableAuthoredCoordinator<MemoryDurability> {
     ) -> Result<Self, DurableAuthoredInitError> {
         Self::from_project(DurableProject::recover(project_id, durable_bytes)?)
     }
+
+    pub fn durable_bytes(&self) -> Vec<u8> {
+        self.project.durable_bytes()
+    }
+
+    pub fn fail_next_persist(&self) {
+        self.project.fail_next_persist();
+    }
 }
 
-impl<D> DurableAuthoredCoordinator<D> {
+impl<D> DurableAuthoredCoordinator<D>
+where
+    D: AsyncTransactionSink,
+{
     pub fn from_project(project: DurableProject<D>) -> Result<Self, DurableAuthoredInitError> {
         let state = project.state()?;
-        let checkpoint = project.projection_checkpoint(&durable_authored_cursor_key());
+        let checkpoint = project.projection_checkpoint(&durable_authored_cursor_key())?;
         let observed_projection_revision = match (project.history_len(), checkpoint) {
             (0, None) => None,
             (0, Some(_)) => return Err(DurableAuthoredInitError::UnexpectedCursor),
@@ -910,14 +914,6 @@ impl<D> DurableAuthoredCoordinator<D> {
 
     pub fn fault(&self) -> Option<&DurableAuthoredFault> {
         self.fault.as_ref()
-    }
-
-    pub fn durability(&self) -> &D {
-        self.project.durability()
-    }
-
-    pub fn durability_mut(&mut self) -> &mut D {
-        self.project.durability_mut()
     }
 
     /// Restore recovered HHHS materialization into an empty AppStore authored
@@ -1068,9 +1064,19 @@ where
                 };
                 self.expected = SequentialProjection::from_state(&state);
 
-                let cursor = self
+                let cursor = match self
                     .project
-                    .projection_checkpoint(&durable_authored_cursor_key());
+                    .projection_checkpoint(&durable_authored_cursor_key())
+                {
+                    Ok(cursor) => cursor,
+                    Err(error) => {
+                        return Ok(self.faulted_carrier_dispatch(
+                            projection_revision,
+                            entry,
+                            error.to_string(),
+                        ));
+                    }
+                };
                 let cursor_matches = cursor.is_some_and(|cursor| {
                     cursor.is_intact()
                         && cursor.history_root.as_bytes() == &state.history_root
@@ -1262,9 +1268,19 @@ where
             ));
         }
 
-        let cursor = self
+        let cursor = match self
             .project
-            .projection_checkpoint(&durable_authored_cursor_key());
+            .projection_checkpoint(&durable_authored_cursor_key())
+        {
+            Ok(cursor) => cursor,
+            Err(error) => {
+                return Ok(self.faulted_dispatch(
+                    revision.projection_revision,
+                    record,
+                    error.to_string(),
+                ));
+            }
+        };
         let cursor_matches = cursor.is_some_and(|cursor| {
             cursor.is_intact()
                 && cursor.history_root.as_bytes() == &state.history_root
@@ -1279,10 +1295,9 @@ where
             ));
         }
 
-        let app = match store.dispatch_authored_if_current(
-            app_baseline.projection_revision,
-            revision.clone(),
-        ) {
+        let app = match store
+            .dispatch_authored_if_current(app_baseline.projection_revision, revision.clone())
+        {
             Ok(app) => app,
             Err(error) => {
                 return Ok(self.faulted_dispatch(
@@ -1393,7 +1408,10 @@ impl AuthoredHhhsShadow<MemoryDurability> {
     }
 }
 
-impl<D> AuthoredHhhsShadow<D> {
+impl<D> AuthoredHhhsShadow<D>
+where
+    D: AsyncTransactionSink,
+{
     /// Attach a newly constructed empty durable project.
     ///
     /// Recovered history must use [`Self::from_project_checkpoint`]; history

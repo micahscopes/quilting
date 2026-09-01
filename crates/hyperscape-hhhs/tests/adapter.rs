@@ -1,7 +1,4 @@
 use futures::executor::block_on;
-use futures::future::FutureExt;
-use futures::stream::{Stream, StreamExt};
-use futures_signals::signal_vec::{SignalVecExt, VecDiff};
 use hhhs::{DagSnapshot, Digest, ReachIndex};
 use hhhs_store::decode_storage_transaction_log;
 use hyperscape_hhhs::{
@@ -106,17 +103,6 @@ fn upsert(sequence: u64, asset: AssetId, uri: &str) -> AuthoredEnvelope {
     )
 }
 
-fn drain<S>(stream: &mut S) -> Vec<S::Item>
-where
-    S: Stream + Unpin,
-{
-    let mut items = Vec::new();
-    while let Some(item) = stream.next().now_or_never().flatten() {
-        items.push(item);
-    }
-    items
-}
-
 fn resign_archive(bytes: &mut [u8]) {
     let checksum_offset = bytes.len() - 32;
     let checksum = Digest::of(&bytes[..checksum_offset]);
@@ -196,8 +182,7 @@ fn conformal_frame_register_survives_durable_restart_and_portable_archive() {
             if generators == &second_word
     ));
 
-    let durable =
-        DurableProject::recover(project_id, project.durability().bytes().to_vec()).unwrap();
+    let durable = DurableProject::recover(project_id, project.durable_bytes()).unwrap();
     assert_eq!(durable.state().unwrap(), state);
     let archive = project.export_archive().unwrap();
     let imported = block_on(DurableProject::import_archive(&archive)).unwrap();
@@ -359,14 +344,16 @@ fn aggregate_state_may_exceed_the_per_message_limit() {
 #[test]
 fn persistence_failure_publishes_nothing() {
     let mut host = DurableProject::new(project(3)).unwrap();
-    let before_log = host.durability().bytes().to_vec();
-    host.durability_mut().fail_next_persist();
+    let before_log = host.durable_bytes();
+    host.fail_next_persist();
 
     let error = block_on(host.admit(&set(1, entity_id(1), 4.0))).unwrap_err();
     assert!(matches!(error, AdapterError::Repair(_)));
     assert_eq!(host.history_len(), 0);
-    assert!(host.state().unwrap().entity_transforms.is_empty());
-    assert_eq!(host.durability().bytes(), before_log);
+    assert!(matches!(host.state(), Err(AdapterError::Repair(_))));
+    assert_eq!(host.durable_bytes(), before_log);
+    let reopened = DurableProject::recover(project(3), before_log).unwrap();
+    assert!(reopened.state().unwrap().entity_transforms.is_empty());
 }
 
 #[test]
@@ -376,8 +363,8 @@ fn authored_entry_and_local_checkpoint_commit_and_restart_atomically() {
     let key = ProjectionKey::new("hyperscope/source-cursor", 1).unwrap();
     let checkpoint_bytes = b"browser revision 41".to_vec();
     let mut host = DurableProject::new(project).unwrap();
-    let before_log = host.durability().bytes().to_vec();
-    host.durability_mut().fail_next_persist();
+    let before_log = host.durable_bytes();
+    host.fail_next_persist();
 
     let error = block_on(host.admit_with_projection_checkpoint(
         &set(41, entity, 4.0),
@@ -387,8 +374,15 @@ fn authored_entry_and_local_checkpoint_commit_and_restart_atomically() {
     .unwrap_err();
     assert!(matches!(error, AdapterError::Repair(_)));
     assert_eq!(host.history_len(), 0);
-    assert!(host.projection_checkpoint(&key).is_none());
-    assert_eq!(host.durability().bytes(), before_log);
+    assert!(matches!(
+        host.projection_checkpoint(&key),
+        Err(AdapterError::Repair(_))
+    ));
+    assert_eq!(host.durable_bytes(), before_log);
+
+    // Any failed durability acknowledgement fences the owner. Reopen the
+    // exact durable placement before retrying, even for fail-before-write.
+    host = DurableProject::recover(project, before_log).unwrap();
 
     let record = block_on(host.admit_with_projection_checkpoint(
         &set(41, entity, 4.0),
@@ -396,7 +390,7 @@ fn authored_entry_and_local_checkpoint_commit_and_restart_atomically() {
         checkpoint_bytes.clone(),
     ))
     .unwrap();
-    let live = host.projection_checkpoint(&key).unwrap();
+    let live = host.projection_checkpoint(&key).unwrap().unwrap();
     let live_state = host.state().unwrap();
     assert_eq!(live.bytes(), checkpoint_bytes);
     assert_eq!(live.at.len(), 1);
@@ -404,15 +398,15 @@ fn authored_entry_and_local_checkpoint_commit_and_restart_atomically() {
     assert_eq!(live.history_root.as_bytes(), &live_state.history_root);
     assert!(live.is_intact());
 
-    let durable_bytes = host.durability().bytes().to_vec();
+    let durable_bytes = host.durable_bytes();
     let restarted = DurableProject::recover(project, durable_bytes).unwrap();
     assert_eq!(restarted.state().unwrap(), live_state);
-    assert_eq!(restarted.projection_checkpoint(&key), Some(live));
+    assert_eq!(restarted.projection_checkpoint(&key).unwrap(), Some(live));
 
     let portable = host.export_archive().unwrap();
     let imported = block_on(DurableProject::import_archive(&portable)).unwrap();
     assert_eq!(imported.state().unwrap(), live_state);
-    assert!(imported.projection_checkpoint(&key).is_none());
+    assert!(imported.projection_checkpoint(&key).unwrap().is_none());
 }
 
 #[test]
@@ -424,16 +418,22 @@ fn checkpoint_only_transition_is_durable_atomic_and_history_neutral() {
     block_on(host.admit(&set(1, entity_id(0x3004), 4.0))).unwrap();
     let before_state = host.state().unwrap();
     let before_history_len = host.history_len();
-    let before_failure_log = host.durability().bytes().to_vec();
-    host.durability_mut().fail_next_persist();
+    let before_failure_log = host.durable_bytes();
+    host.fail_next_persist();
 
     let error = block_on(host.persist_projection_checkpoint(key.clone(), checkpoint_bytes.clone()))
         .unwrap_err();
     assert!(matches!(error, AdapterError::Repair(_)));
-    assert!(host.projection_checkpoint(&key).is_none());
+    assert!(matches!(
+        host.projection_checkpoint(&key),
+        Err(AdapterError::Repair(_))
+    ));
     assert_eq!(host.history_len(), before_history_len);
+    assert!(matches!(host.state(), Err(AdapterError::Repair(_))));
+    assert_eq!(host.durable_bytes(), before_failure_log);
+
+    host = DurableProject::recover(project_id, before_failure_log).unwrap();
     assert_eq!(host.state().unwrap(), before_state);
-    assert_eq!(host.durability().bytes(), before_failure_log);
 
     let checkpoint =
         block_on(host.persist_projection_checkpoint(key.clone(), checkpoint_bytes.clone()))
@@ -444,24 +444,30 @@ fn checkpoint_only_transition_is_durable_atomic_and_history_neutral() {
         checkpoint.history_root.as_bytes(),
         &before_state.history_root
     );
-    assert_eq!(host.projection_checkpoint(&key), Some(checkpoint.clone()));
+    assert_eq!(
+        host.projection_checkpoint(&key).unwrap(),
+        Some(checkpoint.clone())
+    );
     assert_eq!(host.history_len(), before_history_len);
     assert_eq!(host.state().unwrap(), before_state);
 
-    let durable_log = host.durability().bytes().to_vec();
+    let durable_log = host.durable_bytes();
     let exact =
         block_on(host.persist_projection_checkpoint(key.clone(), checkpoint_bytes)).unwrap();
     assert_eq!(exact, checkpoint);
-    assert_eq!(host.durability().bytes(), durable_log);
+    assert_eq!(host.durable_bytes(), durable_log);
 
     let recovered = DurableProject::recover(project_id, durable_log).unwrap();
-    assert_eq!(recovered.projection_checkpoint(&key), Some(checkpoint));
+    assert_eq!(
+        recovered.projection_checkpoint(&key).unwrap(),
+        Some(checkpoint)
+    );
     assert_eq!(recovered.history_len(), before_history_len);
     assert_eq!(recovered.state().unwrap(), before_state);
 
     let archive = host.export_archive().unwrap();
     let imported = block_on(DurableProject::import_archive(&archive)).unwrap();
-    assert!(imported.projection_checkpoint(&key).is_none());
+    assert!(imported.projection_checkpoint(&key).unwrap().is_none());
     assert_eq!(imported.state().unwrap(), before_state);
 }
 
@@ -475,7 +481,7 @@ fn carrier_record_and_local_cursor_commit_atomically_and_retry_safely() {
     let first = block_on(source.admit(&first_envelope)).unwrap();
     let second = block_on(source.admit(&second_envelope)).unwrap();
     let mut target = DurableProject::new(project_id).unwrap();
-    let empty_log = target.durability().bytes().to_vec();
+    let empty_log = target.durable_bytes();
 
     let deferred = block_on(target.apply_record_with_projection_checkpoint(
         second.clone(),
@@ -491,10 +497,10 @@ fn carrier_record_and_local_cursor_commit_atomically_and_retry_safely() {
         } if entry == second.entry_hash() && missing == &[first.entry_hash()]
     ));
     assert_eq!(target.history_len(), 0);
-    assert!(target.projection_checkpoint(&key).is_none());
-    assert_eq!(target.durability().bytes(), empty_log);
+    assert!(target.projection_checkpoint(&key).unwrap().is_none());
+    assert_eq!(target.durable_bytes(), empty_log);
 
-    target.durability_mut().fail_next_persist();
+    target.fail_next_persist();
     let failed = block_on(target.apply_record_with_projection_checkpoint(
         first.clone(),
         key.clone(),
@@ -502,8 +508,13 @@ fn carrier_record_and_local_cursor_commit_atomically_and_retry_safely() {
     ));
     assert!(matches!(failed, Err(AdapterError::Repair(_))));
     assert_eq!(target.history_len(), 0);
-    assert!(target.projection_checkpoint(&key).is_none());
-    assert_eq!(target.durability().bytes(), empty_log);
+    assert!(matches!(
+        target.projection_checkpoint(&key),
+        Err(AdapterError::Repair(_))
+    ));
+    assert_eq!(target.durable_bytes(), empty_log);
+
+    target = DurableProject::recover(project_id, empty_log).unwrap();
 
     let applied = block_on(target.apply_record_with_projection_checkpoint(
         first.clone(),
@@ -517,8 +528,8 @@ fn carrier_record_and_local_cursor_commit_atomically_and_retry_safely() {
             entry: first.entry_hash()
         }
     );
-    let first_log = target.durability().bytes().to_vec();
-    let checkpoint = target.projection_checkpoint(&key).unwrap();
+    let first_log = target.durable_bytes();
+    let checkpoint = target.projection_checkpoint(&key).unwrap().unwrap();
     assert_eq!(checkpoint.bytes(), 0_u64.to_le_bytes());
     assert_eq!(
         checkpoint.history_root.as_bytes(),
@@ -537,8 +548,11 @@ fn carrier_record_and_local_cursor_commit_atomically_and_retry_safely() {
             entry: first.entry_hash()
         }
     );
-    assert_eq!(target.durability().bytes(), first_log);
-    assert_eq!(target.projection_checkpoint(&key).unwrap(), checkpoint);
+    assert_eq!(target.durable_bytes(), first_log);
+    assert_eq!(
+        target.projection_checkpoint(&key).unwrap().unwrap(),
+        checkpoint
+    );
 
     let applied = block_on(target.apply_record_with_projection_checkpoint(
         second.clone(),
@@ -554,15 +568,14 @@ fn carrier_record_and_local_cursor_commit_atomically_and_retry_safely() {
     );
     assert_eq!(target.history_len(), 2);
     assert_eq!(
-        target.projection_checkpoint(&key).unwrap().bytes(),
+        target.projection_checkpoint(&key).unwrap().unwrap().bytes(),
         1_u64.to_le_bytes()
     );
-    let recovered =
-        DurableProject::recover(project_id, target.durability().bytes().to_vec()).unwrap();
+    let recovered = DurableProject::recover(project_id, target.durable_bytes()).unwrap();
     assert_eq!(recovered.state().unwrap(), target.state().unwrap());
     assert_eq!(
-        recovered.projection_checkpoint(&key),
-        target.projection_checkpoint(&key)
+        recovered.projection_checkpoint(&key).unwrap(),
+        target.projection_checkpoint(&key).unwrap()
     );
 
     let mut foreign = DurableProject::new(project(0x3007)).unwrap();
@@ -592,7 +605,7 @@ fn recovery_preserves_history_and_materialized_roots() {
     block_on(original.admit(&first)).unwrap();
     block_on(original.admit(&second)).unwrap();
     let before = original.state().unwrap();
-    let log = original.durability().bytes().to_vec();
+    let log = original.durable_bytes();
     assert_eq!(
         original.authored_history().unwrap(),
         vec![first.clone(), second.clone()]
@@ -628,7 +641,7 @@ fn portable_archive_round_trips_deterministically_through_admission() {
     assert_eq!(imported.state().unwrap(), original.state().unwrap());
     assert_eq!(imported.history_len(), original.history_len());
     assert_eq!(imported.export_archive().unwrap(), first);
-    assert_ne!(imported.durability().bytes(), first);
+    assert_ne!(imported.durable_bytes(), first);
     assert_eq!(
         Digest::of(&first).to_hex(),
         "0c0d9ae6663790989951a31623889a55decebfb016f49d41698192ab3697e7af",
@@ -746,10 +759,10 @@ fn archive_application_resumes_a_prefix_and_exact_retries_are_write_free() {
     assert_eq!(resumed.lifted, 1);
     assert_eq!(target.state().unwrap(), origin.state().unwrap());
 
-    let durable_before_retry = target.durability().bytes().to_vec();
+    let durable_before_retry = target.durable_bytes();
     let retried = block_on(target.apply_archive(&archive)).unwrap();
     assert_eq!(retried.lifted, 0);
-    assert_eq!(target.durability().bytes(), durable_before_retry);
+    assert_eq!(target.durable_bytes(), durable_before_retry);
 }
 
 #[test]
@@ -761,20 +774,20 @@ fn archive_application_rejects_local_divergence_and_foreign_projects_before_writ
 
     let mut divergent = DurableProject::new(project_id).unwrap();
     block_on(divergent.admit(&set(2, entity_id(2), 2.0))).unwrap();
-    let divergent_before = divergent.durability().bytes().to_vec();
+    let divergent_before = divergent.durable_bytes();
     assert!(matches!(
         block_on(divergent.apply_archive(&archive)),
         Err(AdapterError::ArchiveLocalDivergence { local_only: 1 })
     ));
-    assert_eq!(divergent.durability().bytes(), divergent_before);
+    assert_eq!(divergent.durable_bytes(), divergent_before);
 
     let mut foreign = DurableProject::new(project(0x4998)).unwrap();
-    let foreign_before = foreign.durability().bytes().to_vec();
+    let foreign_before = foreign.durable_bytes();
     assert!(matches!(
         block_on(foreign.apply_archive(&archive)),
         Err(AdapterError::WrongArchiveProject { .. })
     ));
-    assert_eq!(foreign.durability().bytes(), foreign_before);
+    assert_eq!(foreign.durable_bytes(), foreign_before);
 }
 
 #[test]
@@ -907,13 +920,13 @@ fn foreign_project_records_are_refused_without_publication() {
     let mut foreign = DurableProject::new(project(10)).unwrap();
     let record = block_on(foreign.admit(&set(1, entity_id(8), 1.0))).unwrap();
     let mut local = DurableProject::new(project(11)).unwrap();
-    let before_log = local.durability().bytes().to_vec();
+    let before_log = local.durable_bytes();
 
     let report = block_on(local.apply_records(&[record])).unwrap();
     assert_eq!(report.refused.len(), 1);
     assert!(report.admitted.is_empty());
     assert_eq!(local.history_len(), 0);
-    assert_eq!(local.durability().bytes(), before_log);
+    assert_eq!(local.durable_bytes(), before_log);
 }
 
 #[test]
@@ -924,7 +937,7 @@ fn trusted_transaction_recovery_keeps_the_sink_and_replay_in_lockstep() {
     block_on(original.admit(&set(1, entity, 4.0))).unwrap();
     block_on(original.admit(&set(2, entity, 8.0))).unwrap();
     let original_state = original.state().unwrap();
-    let durable_bytes = original.durability().bytes().to_vec();
+    let durable_bytes = original.durable_bytes();
     let transactions = decode_storage_transaction_log(&durable_bytes).unwrap();
     let durability = MemoryDurability::from_bytes(durable_bytes).unwrap();
 
@@ -933,56 +946,11 @@ fn trusted_transaction_recovery_keeps_the_sink_and_replay_in_lockstep() {
     assert_eq!(recovered.state().unwrap(), original_state);
 
     block_on(recovered.admit(&remove(3, entity))).unwrap();
-    let restarted =
-        DurableProject::recover(project, recovered.durability().bytes().to_vec()).unwrap();
+    let restarted = DurableProject::recover(project, recovered.durable_bytes()).unwrap();
     assert_eq!(restarted.history_len(), 3);
     assert!(!restarted
         .state()
         .unwrap()
         .entity_transforms
         .contains_key(&entity));
-}
-
-#[test]
-fn reactive_views_start_current_coalesce_growth_and_retract_removed_rows() {
-    let project = project(8);
-    let entity = entity_id(6);
-    let asset = asset_id(6);
-    let mut host = DurableProject::new(project).unwrap();
-    let mut stream = Box::pin(host.state_stream());
-    assert!(drain(&mut stream).is_empty());
-
-    block_on(host.admit(&upsert(1, asset, "coalesced.glb"))).unwrap();
-    block_on(host.admit(&set(2, entity, 5.0))).unwrap();
-    let coalesced = drain(&mut stream);
-    assert_eq!(coalesced.len(), 1);
-    assert_eq!(coalesced[0].added.len(), 2);
-    assert!(coalesced[0].retracted.is_empty());
-
-    let mut late = Box::pin(host.state_stream());
-    let initial = drain(&mut late);
-    assert_eq!(initial.len(), 1);
-    assert_eq!(initial[0].added.len(), 2);
-
-    block_on(host.admit(&remove(3, entity))).unwrap();
-    let removed = drain(&mut stream);
-    assert_eq!(removed.len(), 1);
-    assert!(removed[0].added.is_empty());
-    assert!(matches!(
-        removed[0].retracted.as_slice(),
-        [StateRow::EntityTransform { entity: retracted, .. }] if *retracted == entity
-    ));
-
-    let signal = host.state_signal_vec();
-    let mut diffs = Box::pin(signal.to_stream());
-    let initial_diffs = drain(&mut diffs);
-    assert!(matches!(
-        initial_diffs.as_slice(),
-        [VecDiff::Replace { values }] if values.len() == 1
-    ));
-
-    block_on(host.admit(&set(4, entity, 12.0))).unwrap();
-    assert!(drain(&mut diffs)
-        .iter()
-        .any(|diff| matches!(diff, VecDiff::InsertAt { .. })));
 }

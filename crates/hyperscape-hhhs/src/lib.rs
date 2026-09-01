@@ -7,21 +7,19 @@
 
 #![forbid(unsafe_code)]
 
-use bincode::Options;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use futures::Stream;
-use futures_signals::signal_vec::SignalVec;
-use hhhs::{DagRead, DagSnapshot, Digest, EntryHash, LazyReach, Position, Reach, SlicedDag};
-use hhhs_reactive::{signal_vec_view, stream_view, Revision};
+use bincode::Options;
+use hhhs::{DagRead, DagSnapshot, Digest, EntryHash, LazyReach, Reach, SlicedDag};
 use hhhs_replica::{
     AdmissionPolicy, AdmittedAuthority, AsyncTransactionSink, AuthorityInput, DurableReplicaHost,
-    Replica, ReplicaError, ReplicaRecord, ReplicaRepairError, ReplicaWireError,
-    MAX_REPLICA_RECORD_BYTES,
+    DurableReplicaHostError, Replica, ReplicaError, ReplicaRecord, ReplicaRepairError,
+    ReplicaWireError, MAX_REPLICA_RECORD_BYTES,
 };
 use hhhs_store::{
     append_storage_transaction_log, decode_storage_transaction_log, empty_storage_transaction_log,
-    history_anchor, history_root, MemoryStorage, ReplicaStorage, StorageError, StorageTransaction,
+    history_root, MemoryStorage, ReplicaStorage, StorageError, StorageRecoveryState,
+    StorageTransaction,
 };
 pub use hhhs_store::{ProjectionCheckpoint, ProjectionKey};
 use hhhs_sync::{Refusal, RepairHost};
@@ -33,7 +31,7 @@ use hyperscape_protocol::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 /// Frozen application-domain prefix for durable payload schema 0.1.
@@ -58,8 +56,7 @@ pub const MAX_PROJECT_ARCHIVE_BYTES: usize = 512 * 1024 * 1024;
 /// Defensive bound on the number of records declared by one archive.
 pub const MAX_PROJECT_ARCHIVE_RECORDS: usize = 1_000_000;
 /// Frozen JSON carrier schema for one public authored replica record.
-pub const AUTHORED_RECORD_FRAME_VERSION: ProtocolVersion =
-    ProtocolVersion { major: 0, minor: 1 };
+pub const AUTHORED_RECORD_FRAME_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 1 };
 pub const AUTHORED_RECORD_FRAME_LANE: &str = "authored_record";
 /// Defensive bound including base64url expansion and JSON framing.
 pub const MAX_AUTHORED_RECORD_FRAME_JSON_BYTES: usize =
@@ -203,6 +200,8 @@ pub enum AdapterError {
     Replica(#[from] hhhs_replica::ReplicaError),
     #[error("replica repair failed: {0}")]
     Repair(#[from] hhhs_replica::ReplicaRepairError),
+    #[error("durable replica host initialization failed: {0}")]
+    DurableHost(#[from] DurableReplicaHostError),
     #[error("durable transaction log failed: {0}")]
     Storage(#[from] StorageError),
     #[error("project archive domain is unsupported")]
@@ -1041,52 +1040,150 @@ fn namespace(project_id: ProjectId) -> Digest {
     Digest::of(&bytes)
 }
 
-/// In-memory durable transaction log used by the behavior-disconnected host.
-/// Browser/IndexedDB storage can implement the same HHHS sink trait later.
-#[derive(Debug, Clone)]
-pub struct MemoryDurability {
+#[derive(Debug)]
+struct MemoryDurabilityState {
     bytes: Vec<u8>,
+    recovered_state: StorageRecoveryState,
     fail_next: bool,
+}
+
+/// Non-writing observation and failure-injection handle for the in-memory
+/// durability sink. Cloning this value cannot persist a transaction or advance
+/// HHHS recovery state, so it does not create a second writer around the
+/// exclusive durable host.
+#[derive(Debug, Clone)]
+pub struct MemoryDurabilityControl {
+    state: Arc<Mutex<MemoryDurabilityState>>,
+}
+
+impl MemoryDurabilityControl {
+    pub fn bytes(&self) -> Vec<u8> {
+        self.state
+            .lock()
+            .expect("memory durability lock poisoned")
+            .bytes
+            .clone()
+    }
+
+    pub fn fail_next_persist(&self) {
+        self.state
+            .lock()
+            .expect("memory durability lock poisoned")
+            .fail_next = true;
+    }
+
+    pub fn recovered_state(&self) -> StorageRecoveryState {
+        self.state
+            .lock()
+            .expect("memory durability lock poisoned")
+            .recovered_state
+    }
+}
+
+/// In-memory durable transaction log used by the behavior-disconnected host.
+/// The sink itself is deliberately not cloneable: only its non-writing
+/// [`MemoryDurabilityControl`] may be shared outside [`DurableReplicaHost`].
+#[derive(Debug)]
+pub struct MemoryDurability {
+    state: Arc<Mutex<MemoryDurabilityState>>,
 }
 
 impl Default for MemoryDurability {
     fn default() -> Self {
         Self {
-            bytes: empty_storage_transaction_log(),
-            fail_next: false,
+            state: Arc::new(Mutex::new(MemoryDurabilityState {
+                bytes: empty_storage_transaction_log(),
+                recovered_state: StorageRecoveryState::default(),
+                fail_next: false,
+            })),
         }
     }
 }
 
 impl MemoryDurability {
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, AdapterError> {
-        decode_storage_transaction_log(&bytes)?;
+        let transactions = decode_storage_transaction_log(&bytes)?;
+        let mut recovered_state = StorageRecoveryState::default();
+        for transaction in &transactions {
+            recovered_state = recovered_state.advance(
+                transaction,
+                recovered_state
+                    .sequence()
+                    .checked_add(1)
+                    .ok_or(StorageError::SequenceOverflow)?,
+            )?;
+        }
         Ok(Self {
-            bytes,
-            fail_next: false,
+            state: Arc::new(Mutex::new(MemoryDurabilityState {
+                bytes,
+                recovered_state,
+                fail_next: false,
+            })),
         })
     }
 
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
+    pub fn control(&self) -> MemoryDurabilityControl {
+        MemoryDurabilityControl {
+            state: Arc::clone(&self.state),
+        }
     }
 
-    pub fn fail_next_persist(&mut self) {
-        self.fail_next = true;
+    pub fn bytes(&self) -> Vec<u8> {
+        self.control().bytes()
+    }
+
+    pub fn fail_next_persist(&self) {
+        self.control().fail_next_persist();
     }
 }
 
 impl AsyncTransactionSink for MemoryDurability {
     type Error = String;
 
-    async fn persist(&mut self, transaction: &StorageTransaction) -> Result<(), Self::Error> {
-        if self.fail_next {
-            self.fail_next = false;
+    fn writer_lease_active(&self) -> bool {
+        true
+    }
+
+    fn recovered_state(&self) -> StorageRecoveryState {
+        self.state
+            .lock()
+            .expect("memory durability lock poisoned")
+            .recovered_state
+    }
+
+    async fn persist(
+        &mut self,
+        transaction: &StorageTransaction,
+        expected: StorageRecoveryState,
+    ) -> Result<(), Self::Error> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "memory durability lock poisoned".to_owned())?;
+        if state.fail_next {
+            state.fail_next = false;
             return Err("injected persistence failure".into());
         }
-        let next = append_storage_transaction_log(&self.bytes, transaction)
+        let actual = state
+            .recovered_state
+            .advance(
+                transaction,
+                state
+                    .recovered_state
+                    .sequence()
+                    .checked_add(1)
+                    .ok_or_else(|| "memory durability sequence overflow".to_owned())?,
+            )
             .map_err(|error| error.to_string())?;
-        self.bytes = next;
+        if actual != expected {
+            return Err(format!(
+                "memory durability recovery preview mismatch: expected {expected:?}, actual {actual:?}"
+            ));
+        }
+        let next = append_storage_transaction_log(&state.bytes, transaction)
+            .map_err(|error| error.to_string())?;
+        state.bytes = next;
+        state.recovered_state = expected;
         Ok(())
     }
 }
@@ -1097,8 +1194,9 @@ impl AsyncTransactionSink for MemoryDurability {
 /// supplied sink must be the sole writer from prepare through finalization.
 pub struct DurableProject<D = MemoryDurability> {
     project_id: ProjectId,
-    storage: Arc<MemoryStorage>,
     host: DurableReplicaHost<MemoryStorage, AuthoredPolicy, D>,
+    memory_durability: Option<MemoryDurabilityControl>,
+    published_history_len: usize,
 }
 
 /// Result of offering an unordered record batch. `deferred` names records whose
@@ -1141,16 +1239,19 @@ pub enum ApplyRecordWithCheckpointReport {
 
 impl DurableProject<MemoryDurability> {
     pub fn new(project_id: ProjectId) -> Result<Self, AdapterError> {
-        Self::with_sink(project_id, MemoryDurability::default())
+        let durability = MemoryDurability::default();
+        let control = durability.control();
+        Self::with_replayed_sink(project_id, durability, Vec::new(), Some(control))
     }
 
     /// Recover from a locally trusted log previously returned by
     /// [`MemoryDurability::bytes`]. Untrusted peer input must enter through
     /// [`DurableProject::apply_records`] so normal policy admission runs.
     pub fn recover(project_id: ProjectId, bytes: Vec<u8>) -> Result<Self, AdapterError> {
+        let transactions = decode_storage_transaction_log(&bytes)?;
         let durability = MemoryDurability::from_bytes(bytes)?;
-        let transactions = decode_storage_transaction_log(durability.bytes())?;
-        Self::with_replayed_sink(project_id, durability, transactions)
+        let control = durability.control();
+        Self::with_replayed_sink(project_id, durability, transactions, Some(control))
     }
 
     /// Import a portable archive through ordinary HHHS repair and application
@@ -1162,14 +1263,51 @@ impl DurableProject<MemoryDurability> {
         project.apply_archive(&archive).await?;
         Ok(project)
     }
+
+    /// Detached bytes from the exclusively owned in-memory durability sink.
+    pub fn durable_bytes(&self) -> Vec<u8> {
+        self.memory_durability
+            .as_ref()
+            .expect("memory durability control installed")
+            .bytes()
+    }
+
+    /// Deterministically fail the next external persistence attempt in tests.
+    pub fn fail_next_persist(&self) {
+        self.memory_durability
+            .as_ref()
+            .expect("memory durability control installed")
+            .fail_next_persist();
+    }
+
+    pub fn durability_control(&self) -> MemoryDurabilityControl {
+        self.memory_durability
+            .as_ref()
+            .expect("memory durability control installed")
+            .clone()
+    }
+
+    /// Recover an in-memory sink from the exact transactions decoded from its
+    /// own durable bytes while retaining only a non-writing control handle.
+    pub fn recover_trusted_transactions(
+        project_id: ProjectId,
+        durability: MemoryDurability,
+        transactions: Vec<StorageTransaction>,
+    ) -> Result<Self, AdapterError> {
+        let control = durability.control();
+        Self::with_replayed_sink(project_id, durability, transactions, Some(control))
+    }
 }
 
-impl<D> DurableProject<D> {
+impl<D> DurableProject<D>
+where
+    D: AsyncTransactionSink,
+{
     /// Construct an empty durable project around an application-provided sink.
     /// A browser host can supply IndexedDB here without adding any browser API
     /// to this crate.
     pub fn with_sink(project_id: ProjectId, durability: D) -> Result<Self, AdapterError> {
-        Self::with_replayed_sink(project_id, durability, Vec::new())
+        Self::with_replayed_sink(project_id, durability, Vec::new(), None)
     }
 
     /// Recover a project from storage transactions read from this exact local
@@ -1188,41 +1326,44 @@ impl<D> DurableProject<D> {
     /// order. Supplying an empty or unrelated sink would make subsequent
     /// persistence unable to recover the complete project after another
     /// restart.
-    pub fn recover_trusted_transactions(
+    pub fn recover_trusted_transactions_with_sink(
         project_id: ProjectId,
         durability: D,
         transactions: Vec<StorageTransaction>,
     ) -> Result<Self, AdapterError> {
-        Self::with_replayed_sink(project_id, durability, transactions)
+        Self::with_replayed_sink(project_id, durability, transactions, None)
     }
 
     fn with_replayed_sink(
         project_id: ProjectId,
         durability: D,
         transactions: Vec<StorageTransaction>,
+        memory_durability: Option<MemoryDurabilityControl>,
     ) -> Result<Self, AdapterError> {
         project_id
             .validate()
             .map_err(|_| AdapterError::NilProjectId)?;
-        let storage = Arc::new(MemoryStorage::new());
-        for transaction in transactions {
+        let storage = MemoryStorage::new();
+        for transaction in &transactions {
             for entry in transaction.entries() {
                 decode_authored(project_id, &entry.payload)?;
             }
-            storage.commit(transaction)?;
+            storage.commit(transaction.clone())?;
         }
+        let published_history_len = storage.snapshot().len();
         let replica = Replica::builder(
-            storage.as_ref().clone(),
+            storage,
             AuthoredPolicy { project_id },
             namespace(project_id),
         )
         .open()
         .build()?;
-        let host = DurableReplicaHost::new(replica, durability);
+        let host = DurableReplicaHost::new(replica, durability)?;
         Ok(Self {
             project_id,
-            storage,
             host,
+            memory_durability,
+            published_history_len,
         })
     }
 
@@ -1230,20 +1371,13 @@ impl<D> DurableProject<D> {
         self.project_id
     }
 
-    pub fn durability(&self) -> &D {
-        self.host.durability()
-    }
-
-    pub fn durability_mut(&mut self) -> &mut D {
-        self.host.durability_mut()
-    }
-
     pub fn state(&self) -> Result<ProjectState, AdapterError> {
-        materialize_project(self.project_id, &self.storage.snapshot())
+        let snapshot = self.host.snapshot()?;
+        materialize_project(self.project_id, &snapshot.history)
     }
 
     pub fn history_len(&self) -> usize {
-        self.storage.snapshot().len()
+        self.published_history_len
     }
 
     /// Decode the complete authored lane in canonical HHHS topological order.
@@ -1253,8 +1387,9 @@ impl<D> DurableProject<D> {
     /// framing remain encapsulated. Every returned envelope passed the same
     /// frozen payload validation used during admission and trusted recovery.
     pub fn authored_history(&self) -> Result<Vec<AuthoredEnvelope>, AdapterError> {
-        self.storage
-            .snapshot()
+        self.host
+            .snapshot()?
+            .history
             .entries_topo()
             .into_iter()
             .map(|entry| decode_authored(self.project_id, &entry.payload))
@@ -1266,8 +1401,11 @@ impl<D> DurableProject<D> {
     /// Checkpoints never enter public replica records, project archives, or
     /// repair streams. They are local acceleration/source-cursor state tied to
     /// an exact admitted history horizon.
-    pub fn projection_checkpoint(&self, key: &ProjectionKey) -> Option<ProjectionCheckpoint> {
-        self.host.replica().snapshot().checkpoint(key).cloned()
+    pub fn projection_checkpoint(
+        &self,
+        key: &ProjectionKey,
+    ) -> Result<Option<ProjectionCheckpoint>, AdapterError> {
+        Ok(self.host.snapshot()?.checkpoint(key).cloned())
     }
 
     /// Return whether a receiver-local checkpoint is intact and anchors an
@@ -1280,20 +1418,20 @@ impl<D> DurableProject<D> {
     pub fn projection_checkpoint_matches_history_prefix(
         &self,
         checkpoint: &ProjectionCheckpoint,
-    ) -> bool {
+    ) -> Result<bool, AdapterError> {
         if !checkpoint.is_intact() {
-            return false;
+            return Ok(false);
         }
-        let history = self.storage.snapshot();
-        SlicedDag::new(&history, &checkpoint.at)
-            .is_ok_and(|prefix| history_root(&prefix) == checkpoint.history_root)
+        let snapshot = self.host.snapshot()?;
+        Ok(SlicedDag::new(&snapshot.history, &checkpoint.at)
+            .is_ok_and(|prefix| history_root(&prefix) == checkpoint.history_root))
     }
 
     /// Capture the complete authored history as a deterministic portable
     /// archive value. The live durability sink and local transaction framing
     /// are deliberately excluded.
     pub fn project_archive(&self) -> Result<ProjectArchive, AdapterError> {
-        let history = self.storage.snapshot();
+        let history = self.host.snapshot()?.history;
         let state = materialize_project(self.project_id, &history)?;
         let entries = history.entries_topo();
         if entries.len() > MAX_PROJECT_ARCHIVE_RECORDS {
@@ -1319,20 +1457,6 @@ impl<D> DurableProject<D> {
     pub fn export_archive(&self) -> Result<Vec<u8>, AdapterError> {
         self.project_archive()?.encode()
     }
-
-    pub fn state_stream(&self) -> impl Stream<Item = Revision<StateRow>> + 'static {
-        stream_view(
-            Arc::clone(&self.storage),
-            trusted_state_view(self.project_id),
-        )
-    }
-
-    pub fn state_signal_vec(&self) -> impl SignalVec<Item = StateRow> + 'static {
-        signal_vec_view(
-            Arc::clone(&self.storage),
-            trusted_state_view(self.project_id),
-        )
-    }
 }
 
 impl<D> DurableProject<D>
@@ -1354,28 +1478,28 @@ where
         checkpoint_bytes: Vec<u8>,
     ) -> Result<ApplyRecordWithCheckpointReport, AdapterError> {
         let entry = record.entry_hash();
-        if self.storage.snapshot().contains(&entry) {
+        if self.host.snapshot()?.history.contains(&entry) {
             return Ok(ApplyRecordWithCheckpointReport::AlreadyPresent { entry });
         }
-        let prepared = match self.host.replica().prepare(record.into_admission_request()) {
+        let prepared = match self.host.prepare(record.into_admission_request()) {
             Ok(prepared) => prepared,
-            Err(ReplicaError::MissingPrevs(missing)) => {
+            Err(ReplicaRepairError::Replica(ReplicaError::MissingPrevs(missing))) => {
                 return Ok(ApplyRecordWithCheckpointReport::Deferred { entry, missing });
             }
-            Err(ReplicaError::BadDigest(_)) => {
+            Err(ReplicaRepairError::Replica(ReplicaError::BadDigest(_))) => {
                 return Ok(ApplyRecordWithCheckpointReport::Refused {
                     entry,
                     reason: RecordRefusal::HashMismatch,
                 });
             }
-            Err(
+            Err(ReplicaRepairError::Replica(
                 ReplicaError::AuthorityProfileRequired
                 | ReplicaError::AuthorityProfileMismatch
                 | ReplicaError::ApplicationRejected(_)
                 | ReplicaError::Presentation(_)
                 | ReplicaError::CapabilityDenied(_)
                 | ReplicaError::InvalidTrustedRoot(_),
-            ) => {
+            )) => {
                 return Ok(ApplyRecordWithCheckpointReport::Refused {
                     entry,
                     reason: RecordRefusal::Unauthorized,
@@ -1388,6 +1512,7 @@ where
             Ok(())
         })?;
         self.host.commit_prepared(prepared).await?;
+        self.published_history_len = self.host.snapshot()?.history.len();
         Ok(ApplyRecordWithCheckpointReport::Applied { entry })
     }
 
@@ -1403,25 +1528,17 @@ where
         key: ProjectionKey,
         bytes: Vec<u8>,
     ) -> Result<ProjectionCheckpoint, AdapterError> {
-        let before = self.storage.storage_snapshot();
-        let anchor = history_anchor(&before.history);
-        let checkpoint = ProjectionCheckpoint::new(key, anchor.at, anchor.root, bytes)?;
-        if before.checkpoint(&checkpoint.key) == Some(&checkpoint) {
-            return Ok(checkpoint);
-        }
-
-        let mut transaction = StorageTransaction::new();
-        transaction
-            .expect_sequence(before.sequence)
-            .save_checkpoint(checkpoint.clone());
+        let mut checkpoint = None;
+        let prepared = self.host.prepare_local_transaction(|view, local| {
+            let value = view.checkpoint(key, bytes)?;
+            local.save_checkpoint(value.clone());
+            checkpoint = Some(value);
+            Ok(())
+        })?;
         self.host
-            .durability_mut()
-            .persist(&transaction)
-            .await
-            .map_err(|error| {
-                AdapterError::Repair(ReplicaRepairError::ExternalDurability(error.to_string()))
-            })?;
-        self.storage.commit(transaction)?;
+            .commit_prepared_local_transaction(prepared)
+            .await?;
+        let checkpoint = checkpoint.expect("local checkpoint preparation produced a value");
         Ok(checkpoint)
     }
 
@@ -1446,7 +1563,9 @@ where
             .map(ReplicaRecord::entry_hash)
             .collect();
         let local_only = self
-            .storage
+            .host
+            .snapshot()?
+            .history
             .all_hashes()
             .into_iter()
             .filter(|hash| !archive_hashes.contains(hash))
@@ -1483,8 +1602,9 @@ where
         envelope: &AuthoredEnvelope,
     ) -> Result<ReplicaRecord, AdapterError> {
         let payload = encode_authored(self.project_id, envelope)?;
-        let prepared = self.host.replica().prepare_open(payload)?;
+        let prepared = self.host.prepare_open(payload)?;
         let commit = self.host.commit_prepared(prepared).await?;
+        self.published_history_len = self.host.snapshot()?.history.len();
         Ok(commit.replica_record().clone())
     }
 
@@ -1502,14 +1622,12 @@ where
         checkpoint_bytes: Vec<u8>,
     ) -> Result<ReplicaRecord, AdapterError> {
         let payload = encode_authored(self.project_id, envelope)?;
-        let prepared = self
-            .host
-            .replica()
-            .prepare_open_with(payload, move |view, local| {
-                local.save_checkpoint(view.checkpoint(key, checkpoint_bytes)?);
-                Ok(())
-            })?;
+        let prepared = self.host.prepare_open_with(payload, move |view, local| {
+            local.save_checkpoint(view.checkpoint(key, checkpoint_bytes)?);
+            Ok(())
+        })?;
         let commit = self.host.commit_prepared(prepared).await?;
+        self.published_history_len = self.host.snapshot()?.history.len();
         Ok(commit.replica_record().clone())
     }
 
@@ -1525,7 +1643,13 @@ where
             .cloned()
             .map(|record| (record.entry_hash(), record))
             .collect();
-        let mut known: BTreeSet<_> = self.storage.all_hashes().into_iter().collect();
+        let mut known: BTreeSet<_> = self
+            .host
+            .snapshot()?
+            .history
+            .all_hashes()
+            .into_iter()
+            .collect();
         let mut admitted = BTreeSet::new();
         let mut refused = Vec::new();
         let mut lifted = 0;
@@ -1543,6 +1667,7 @@ where
                 pending.remove(hash);
             }
             let report = RepairHost::apply(&mut self.host, &ready).await?;
+            self.published_history_len = self.host.snapshot()?.history.len();
             known.extend(report.admitted.iter().copied());
             admitted.extend(report.admitted);
             refused.extend(report.refused);
@@ -1557,15 +1682,5 @@ where
             deferred: pending.into_keys().collect(),
             lifted,
         })
-    }
-}
-
-fn trusted_state_view(
-    project_id: ProjectId,
-) -> impl Fn(&DagSnapshot, &Position) -> BTreeMap<StateKey, StateRow> + Clone {
-    move |history, _at| {
-        materialize_project(project_id, history)
-            .expect("DurableProject admits only validated authored payloads")
-            .rows()
     }
 }

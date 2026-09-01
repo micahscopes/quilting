@@ -1,9 +1,8 @@
 use futures::executor::block_on;
-use futures::future::ready;
 use hhhs::Digest;
 use hhhs_replica::AsyncTransactionSink;
-use hhhs_store::StorageTransaction;
-use hyperscape_hhhs::{DurableProject, MemoryDurability, ProjectId};
+use hhhs_store::{StorageRecoveryState, StorageTransaction};
+use hyperscape_hhhs::{AdapterError, DurableProject, MemoryDurability, ProjectId};
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId, EphemeralPresence,
     LocalPeerEnvelope, MessageHeader, MessageId, PeerId, PresenceEnvelope, ProtocolVersion,
@@ -378,7 +377,7 @@ fn checkpoint_and_store_mismatches_are_rejected_without_history_writes() {
 }
 
 #[test]
-fn durable_first_failure_publishes_nothing_and_retry_recovers_the_cursor() {
+fn durable_first_failure_publishes_nothing_and_reopen_recovers_the_cursor() {
     let project_id = project(0x2401);
     let store = AppStore::default();
     let mut coordinator = DurableAuthoredCoordinator::new(project_id).unwrap();
@@ -388,17 +387,19 @@ fn durable_first_failure_publishes_nothing_and_retry_recovers_the_cursor() {
     };
     let before_summary = store.summary_snapshot();
     let before_scene = store.authored_scene_snapshot();
-    let before_log = coordinator.durability().bytes().to_vec();
-    coordinator.durability_mut().fail_next_persist();
+    let before_log = coordinator.durable_bytes();
+    coordinator.fail_next_persist();
 
     let error = block_on(coordinator.dispatch(&store, revision.clone())).unwrap_err();
     assert!(matches!(error, DurableAuthoredDispatchError::Adapter(_)));
     assert_eq!(coordinator.history_len(), 0);
     assert_eq!(coordinator.observed_projection_revision(), None);
     assert!(coordinator.fault().is_none());
-    assert_eq!(coordinator.durability().bytes(), before_log);
+    assert_eq!(coordinator.durable_bytes(), before_log);
     assert_eq!(store.summary_snapshot(), before_summary);
     assert_eq!(store.authored_scene_snapshot(), before_scene);
+
+    coordinator = DurableAuthoredCoordinator::recover(project_id, before_log).unwrap();
 
     let applied = block_on(coordinator.dispatch(&store, revision)).unwrap();
     assert!(matches!(
@@ -409,21 +410,21 @@ fn durable_first_failure_publishes_nothing_and_retry_recovers_the_cursor() {
             ..
         }
     ));
-    assert_eq!(
-        applied.app.unwrap().disposition,
-        CommitDisposition::Applied
-    );
+    assert_eq!(applied.app.unwrap().disposition, CommitDisposition::Applied);
     assert_eq!(coordinator.observed_projection_revision(), Some(41));
-    assert_eq!(store.authored_scene_snapshot().projection_revision, Some(41));
+    assert_eq!(
+        store.authored_scene_snapshot().projection_revision,
+        Some(41)
+    );
 
-    let recovered = DurableAuthoredCoordinator::recover(
-        project_id,
-        coordinator.durability().bytes().to_vec(),
-    )
-    .unwrap();
+    let recovered =
+        DurableAuthoredCoordinator::recover(project_id, coordinator.durable_bytes()).unwrap();
     assert_eq!(recovered.observed_projection_revision(), Some(41));
     assert_eq!(recovered.history_len(), 1);
-    assert_eq!(recovered.project_state().unwrap(), coordinator.project_state().unwrap());
+    assert_eq!(
+        recovered.project_state().unwrap(),
+        coordinator.project_state().unwrap()
+    );
 }
 
 #[test]
@@ -449,7 +450,7 @@ fn durable_recovery_restores_a_fresh_store_without_fabricating_history() {
     .unwrap();
 
     let expected_scene = source_store.authored_scene_snapshot();
-    let durable_bytes = source.durability().bytes().to_vec();
+    let durable_bytes = source.durable_bytes();
     let mut recovered =
         DurableAuthoredCoordinator::recover(project_id, durable_bytes.clone()).unwrap();
     let recovered_state = recovered.project_state().unwrap();
@@ -460,13 +461,13 @@ fn durable_recovery_restores_a_fresh_store_without_fabricating_history() {
     assert_eq!(fresh_store.authored_scene_snapshot(), expected_scene);
     assert_eq!(recovered.history_len(), 2);
     assert_eq!(recovered.project_state().unwrap(), recovered_state);
-    assert_eq!(recovered.durability().bytes(), durable_bytes);
+    assert_eq!(recovered.durable_bytes(), durable_bytes);
 
     let before_second_restore = fresh_store.summary_snapshot();
     assert_eq!(recovered.restore_store(&fresh_store).unwrap(), None);
     assert_eq!(fresh_store.summary_snapshot(), before_second_restore);
     assert_eq!(recovered.history_len(), 2);
-    assert_eq!(recovered.durability().bytes(), durable_bytes);
+    assert_eq!(recovered.durable_bytes(), durable_bytes);
 
     let mismatched_store = AppStore::default();
     mismatched_store
@@ -485,9 +486,12 @@ fn durable_recovery_restores_a_fresh_store_without_fabricating_history() {
             actual: Some(99),
         })
     ));
-    assert_eq!(mismatched_store.authored_scene_snapshot(), mismatched_before);
+    assert_eq!(
+        mismatched_store.authored_scene_snapshot(),
+        mismatched_before
+    );
     assert_eq!(recovered.history_len(), 2);
-    assert_eq!(recovered.durability().bytes(), durable_bytes);
+    assert_eq!(recovered.durable_bytes(), durable_bytes);
 
     let divergent_store = AppStore::default();
     divergent_store
@@ -505,7 +509,7 @@ fn durable_recovery_restores_a_fresh_store_without_fabricating_history() {
     ));
     assert_eq!(divergent_store.authored_scene_snapshot(), divergent_before);
     assert_eq!(recovered.history_len(), 2);
-    assert_eq!(recovered.durability().bytes(), durable_bytes);
+    assert_eq!(recovered.durable_bytes(), durable_bytes);
 
     let mut ingress = LocalPeerIngress::new(8).unwrap();
     let continued = block_on(recovered.accept_local_peer(
@@ -519,7 +523,10 @@ fn durable_recovery_restores_a_fresh_store_without_fabricating_history() {
     assert_eq!(continued.peer.projection_revision, Some(9));
     assert!(continued.durable.is_some());
     assert_eq!(recovered.history_len(), 3);
-    assert_eq!(fresh_store.authored_scene_snapshot().projection_revision, Some(9));
+    assert_eq!(
+        fresh_store.authored_scene_snapshot().projection_revision,
+        Some(9)
+    );
 }
 
 #[test]
@@ -538,7 +545,7 @@ fn durable_session_restart_rejects_replayed_peer_history_without_writes() {
     assert_eq!(applied.peer.projection_revision, Some(0));
     assert_eq!(source.history_len(), 1);
 
-    let durable_bytes = source.durability().bytes().to_vec();
+    let durable_bytes = source.durable_bytes();
     let mut recovered = DurableAuthoredSession::recover(project_id, durable_bytes.clone()).unwrap();
     let recovered_store = AppStore::default();
     recovered.restore_store(&recovered_store).unwrap().unwrap();
@@ -551,12 +558,15 @@ fn durable_session_restart_rejects_replayed_peer_history_without_writes() {
         2.0,
     ))
     .unwrap();
-    assert_eq!(replay.peer.disposition, LocalPeerDisposition::IgnoredDuplicate);
+    assert_eq!(
+        replay.peer.disposition,
+        LocalPeerDisposition::IgnoredDuplicate
+    );
     assert!(replay.durable.is_none());
     assert_eq!(recovered_store.summary_snapshot(), before_replay);
     assert_eq!(recovered.history_len(), 1);
     assert_eq!(recovered.project_state().unwrap(), before_state);
-    assert_eq!(recovered.durability().bytes(), durable_bytes);
+    assert_eq!(recovered.durable_bytes(), durable_bytes);
 
     let stale = block_on(recovered.accept_local_peer(
         &recovered_store,
@@ -568,7 +578,7 @@ fn durable_session_restart_rejects_replayed_peer_history_without_writes() {
     assert!(stale.durable.is_none());
     assert_eq!(recovered_store.summary_snapshot(), before_replay);
     assert_eq!(recovered.history_len(), 1);
-    assert_eq!(recovered.durability().bytes(), durable_bytes);
+    assert_eq!(recovered.durable_bytes(), durable_bytes);
 
     let next = block_on(recovered.accept_local_peer(
         &recovered_store,
@@ -581,7 +591,9 @@ fn durable_session_restart_rejects_replayed_peer_history_without_writes() {
     assert!(next.durable.is_some());
     assert_eq!(recovered.history_len(), 2);
     assert_eq!(
-        recovered_store.authored_scene_snapshot().projection_revision,
+        recovered_store
+            .authored_scene_snapshot()
+            .projection_revision,
         Some(1)
     );
 }
@@ -620,7 +632,10 @@ fn concurrent_carrier_records_converge_independent_of_arrival_order() {
     block_on(right.accept_replica_record(&right_store, record_b)).unwrap();
     block_on(right.accept_replica_record(&right_store, record_a)).unwrap();
 
-    assert_eq!(left.project_state().unwrap(), right.project_state().unwrap());
+    assert_eq!(
+        left.project_state().unwrap(),
+        right.project_state().unwrap()
+    );
     assert_eq!(
         left_store.authored_scene_snapshot(),
         right_store.authored_scene_snapshot()
@@ -637,7 +652,7 @@ fn carrier_defers_children_and_duplicates_are_exact_zero_write_noops() {
 
     let store = AppStore::default();
     let mut target = DurableAuthoredSession::new(project_id).unwrap();
-    let before_deferred = target.durability().bytes().to_vec();
+    let before_deferred = target.durable_bytes();
     let deferred = block_on(target.accept_replica_record(&store, child.clone())).unwrap();
     assert!(matches!(
         deferred.durable,
@@ -648,7 +663,7 @@ fn carrier_defers_children_and_duplicates_are_exact_zero_write_noops() {
         } if missing == &[parent.entry_hash()]
     ));
     assert_eq!(deferred.app, None);
-    assert_eq!(target.durability().bytes(), before_deferred);
+    assert_eq!(target.durable_bytes(), before_deferred);
     assert_eq!(store.authored_scene_snapshot().projection_revision, None);
 
     block_on(target.accept_replica_record(&store, parent.clone())).unwrap();
@@ -656,7 +671,7 @@ fn carrier_defers_children_and_duplicates_are_exact_zero_write_noops() {
     assert_eq!(target.history_len(), 2);
     assert_eq!(target.observed_projection_revision(), Some(1));
     let settled_store = store.summary_snapshot();
-    let settled_log = target.durability().bytes().to_vec();
+    let settled_log = target.durable_bytes();
 
     let duplicate = block_on(target.accept_replica_record(&store, parent)).unwrap();
     assert!(matches!(
@@ -665,7 +680,7 @@ fn carrier_defers_children_and_duplicates_are_exact_zero_write_noops() {
     ));
     assert_eq!(duplicate.app, None);
     assert_eq!(target.observed_projection_revision(), Some(1));
-    assert_eq!(target.durability().bytes(), settled_log);
+    assert_eq!(target.durable_bytes(), settled_log);
     assert_eq!(store.summary_snapshot(), settled_store);
 }
 
@@ -677,14 +692,16 @@ fn carrier_persistence_failure_is_atomic_and_retry_survives_restart() {
     let store = AppStore::default();
     let mut target = DurableAuthoredSession::new(project_id).unwrap();
     let before_store = store.summary_snapshot();
-    let before_log = target.durability().bytes().to_vec();
-    target.durability_mut().fail_next_persist();
+    let before_log = target.durable_bytes();
+    target.fail_next_persist();
 
     assert!(block_on(target.accept_replica_record(&store, record.clone())).is_err());
     assert_eq!(target.history_len(), 0);
     assert_eq!(target.observed_projection_revision(), None);
-    assert_eq!(target.durability().bytes(), before_log);
+    assert_eq!(target.durable_bytes(), before_log);
     assert_eq!(store.summary_snapshot(), before_store);
+
+    target = DurableAuthoredSession::recover(project_id, before_log).unwrap();
 
     let applied = block_on(target.accept_replica_record(&store, record.clone())).unwrap();
     assert!(matches!(
@@ -695,7 +712,7 @@ fn carrier_persistence_failure_is_atomic_and_retry_survives_restart() {
             ..
         }
     ));
-    let durable_bytes = target.durability().bytes().to_vec();
+    let durable_bytes = target.durable_bytes();
     let mut recovered = DurableAuthoredSession::recover(project_id, durable_bytes.clone()).unwrap();
     let recovered_store = AppStore::default();
     recovered.restore_store(&recovered_store).unwrap().unwrap();
@@ -705,7 +722,7 @@ fn carrier_persistence_failure_is_atomic_and_retry_survives_restart() {
         duplicate.durable,
         DurableCarrierObservation::AlreadyPresent { history_len: 1, .. }
     ));
-    assert_eq!(recovered.durability().bytes(), durable_bytes);
+    assert_eq!(recovered.durable_bytes(), durable_bytes);
     assert_eq!(recovered_store.summary_snapshot(), before_duplicate);
 }
 
@@ -732,14 +749,14 @@ fn explicit_archive_adoption_bootstraps_a_fresh_local_cursor_once() {
     adopted.restore_store(&store).unwrap().unwrap();
     assert_eq!(store.authored_scene_snapshot().projection_revision, Some(0));
 
-    let adopted_bytes = adopted.durability().bytes().to_vec();
+    let adopted_bytes = adopted.durable_bytes();
     let recovered_project = DurableProject::recover(project_id, adopted_bytes.clone()).unwrap();
     let retried = block_on(DurableAuthoredSession::from_imported_project(
         recovered_project,
     ))
     .unwrap();
     assert_eq!(retried.observed_projection_revision(), Some(0));
-    assert_eq!(retried.durability().bytes(), adopted_bytes);
+    assert_eq!(retried.durable_bytes(), adopted_bytes);
 
     let next = block_on(adopted.accept_local_peer(
         &store,
@@ -764,7 +781,7 @@ fn archive_extension_advances_a_valid_local_prefix_cursor_once() {
         1.0,
     ))
     .unwrap();
-    let local_bytes = local.durability().bytes().to_vec();
+    let local_bytes = local.durable_bytes();
 
     let mut archive_source = DurableProject::new(project_id).unwrap();
     block_on(archive_source.admit(&first)).unwrap();
@@ -773,11 +790,11 @@ fn archive_extension_advances_a_valid_local_prefix_cursor_once() {
 
     let mut extended = DurableProject::recover(project_id, local_bytes).unwrap();
     block_on(extended.apply_archive(&archive)).unwrap();
-    let before_adoption_bytes = extended.durability().bytes().to_vec();
+    let before_adoption_bytes = extended.durable_bytes();
     let mut adopted = block_on(DurableAuthoredSession::from_imported_project(extended)).unwrap();
     assert_eq!(adopted.observed_projection_revision(), Some(1));
     assert_eq!(adopted.history_len(), 2);
-    assert_ne!(adopted.durability().bytes(), before_adoption_bytes);
+    assert_ne!(adopted.durable_bytes(), before_adoption_bytes);
 
     let store = AppStore::default();
     adopted.restore_store(&store).unwrap().unwrap();
@@ -797,7 +814,7 @@ fn durable_first_rejects_multi_command_revisions_before_either_side_changes() {
     let store = AppStore::default();
     let mut coordinator = DurableAuthoredCoordinator::new(project(0x2402)).unwrap();
     let before_summary = store.summary_snapshot();
-    let before_log = coordinator.durability().bytes().to_vec();
+    let before_log = coordinator.durable_bytes();
 
     let error = block_on(coordinator.dispatch(
         &store,
@@ -816,7 +833,7 @@ fn durable_first_rejects_multi_command_revisions_before_either_side_changes() {
         }
     ));
     assert_eq!(coordinator.history_len(), 0);
-    assert_eq!(coordinator.durability().bytes(), before_log);
+    assert_eq!(coordinator.durable_bytes(), before_log);
     assert_eq!(store.summary_snapshot(), before_summary);
     assert!(coordinator.fault().is_none());
 }
@@ -833,7 +850,7 @@ fn durable_first_stale_revision_is_a_zero_write_noop() {
         },
     ))
     .unwrap();
-    let before_log = coordinator.durability().bytes().to_vec();
+    let before_log = coordinator.durable_bytes();
 
     let stale = block_on(coordinator.dispatch(
         &store,
@@ -857,7 +874,7 @@ fn durable_first_stale_revision_is_a_zero_write_noop() {
         }
     );
     assert_eq!(coordinator.history_len(), 1);
-    assert_eq!(coordinator.durability().bytes(), before_log);
+    assert_eq!(coordinator.durable_bytes(), before_log);
     assert!(!coordinator
         .project_state()
         .unwrap()
@@ -866,12 +883,12 @@ fn durable_first_stale_revision_is_a_zero_write_noop() {
 }
 
 #[test]
-fn durable_local_peer_retry_is_not_deduplicated_after_persistence_failure() {
+fn durable_local_peer_reopen_is_not_deduplicated_after_persistence_failure() {
     let store = AppStore::default();
     let mut ingress = LocalPeerIngress::new(8).unwrap();
     let mut coordinator = DurableAuthoredCoordinator::new(project(0x2405)).unwrap();
     let envelope = asset(7, 0xa);
-    coordinator.durability_mut().fail_next_persist();
+    coordinator.fail_next_persist();
 
     let error = block_on(coordinator.accept_local_peer(
         &mut ingress,
@@ -886,6 +903,9 @@ fn durable_local_peer_retry_is_not_deduplicated_after_persistence_failure() {
     ));
     assert_eq!(coordinator.history_len(), 0);
     assert_eq!(store.authored_scene_snapshot().projection_revision, None);
+
+    coordinator =
+        DurableAuthoredCoordinator::recover(project(0x2405), coordinator.durable_bytes()).unwrap();
 
     let applied = block_on(coordinator.accept_local_peer(
         &mut ingress,
@@ -960,16 +980,25 @@ struct BypassOnPersist {
 impl AsyncTransactionSink for BypassOnPersist {
     type Error = String;
 
+    fn writer_lease_active(&self) -> bool {
+        self.inner.writer_lease_active()
+    }
+
+    fn recovered_state(&self) -> StorageRecoveryState {
+        self.inner.recovered_state()
+    }
+
     async fn persist(
         &mut self,
         transaction: &StorageTransaction,
+        expected: StorageRecoveryState,
     ) -> Result<(), Self::Error> {
         if let Some(revision) = self.bypass.take() {
             self.store
                 .dispatch(hyperscope_app::AppEvent::AuthoredRevision(revision))
                 .map_err(|error| error.to_string())?;
         }
-        self.inner.persist(transaction).await
+        self.inner.persist(transaction, expected).await
     }
 }
 
@@ -979,11 +1008,13 @@ fn inbound_carrier_survives_an_appstore_bypass_as_recoverable_authority() {
     let mut source = DurableProject::new(project_id).unwrap();
     let record = block_on(source.admit(&asset(1, 0xa))).unwrap();
     let store = AppStore::default();
+    let durability = MemoryDurability::default();
+    let durability_control = durability.control();
     let durable_project = DurableProject::with_sink(
         project_id,
         BypassOnPersist {
             store: store.clone(),
-            inner: MemoryDurability::default(),
+            inner: durability,
             bypass: Some(AuthoredRevision {
                 projection_revision: 99,
                 commands: vec![asset(99, 0xb)],
@@ -1010,19 +1041,27 @@ fn inbound_carrier_survives_an_appstore_bypass_as_recoverable_authority() {
         }
     ));
     assert_eq!(target.observed_projection_revision(), Some(0));
-    assert_eq!(store.authored_scene_snapshot().projection_revision, Some(99));
-    let settled_log = target.durability().inner.bytes().to_vec();
+    assert_eq!(
+        store.authored_scene_snapshot().projection_revision,
+        Some(99)
+    );
+    let settled_log = durability_control.bytes();
 
     assert!(matches!(
         block_on(target.accept_replica_record(&store, record)),
         Err(DurableCarrierError::Poisoned { .. })
     ));
-    assert_eq!(target.durability().inner.bytes(), settled_log);
+    assert_eq!(durability_control.bytes(), settled_log);
 
     let recovered = DurableAuthoredSession::recover(project_id, settled_log).unwrap();
     let recovered_store = AppStore::default();
     recovered.restore_store(&recovered_store).unwrap().unwrap();
-    assert_eq!(recovered_store.authored_scene_snapshot().projection_revision, Some(0));
+    assert_eq!(
+        recovered_store
+            .authored_scene_snapshot()
+            .projection_revision,
+        Some(0)
+    );
     assert!(recovered_store
         .authored_scene_snapshot()
         .assets
@@ -1072,7 +1111,10 @@ fn durable_first_detects_an_appstore_bypass_during_persistence() {
     ));
     assert_eq!(coordinator.history_len(), 1);
     assert_eq!(coordinator.observed_projection_revision(), Some(1));
-    assert_eq!(store.authored_scene_snapshot().projection_revision, Some(99));
+    assert_eq!(
+        store.authored_scene_snapshot().projection_revision,
+        Some(99)
+    );
     assert!(coordinator
         .project_state()
         .unwrap()
@@ -1167,32 +1209,47 @@ fn bypassed_authored_revision_is_detected_before_mirroring() {
 struct FailOnPersist {
     attempt: usize,
     fail_on: usize,
+    inner: MemoryDurability,
 }
 
 impl AsyncTransactionSink for FailOnPersist {
     type Error = &'static str;
 
-    fn persist(
+    fn writer_lease_active(&self) -> bool {
+        self.inner.writer_lease_active()
+    }
+
+    fn recovered_state(&self) -> StorageRecoveryState {
+        self.inner.recovered_state()
+    }
+
+    async fn persist(
         &mut self,
-        _transaction: &StorageTransaction,
-    ) -> impl std::future::Future<Output = Result<(), Self::Error>> {
+        transaction: &StorageTransaction,
+        expected: StorageRecoveryState,
+    ) -> Result<(), Self::Error> {
         self.attempt += 1;
-        ready(if self.attempt == self.fail_on {
+        if self.attempt == self.fail_on {
             Err("injected batch persistence failure")
         } else {
-            Ok(())
-        })
+            self.inner
+                .persist(transaction, expected)
+                .await
+                .map_err(|_| "inner memory durability failed")
+        }
     }
 }
 
 #[test]
 fn first_persistence_failure_does_not_deny_the_app_commit() {
     let store = AppStore::default();
+    let durability = MemoryDurability::default();
     let project = DurableProject::with_sink(
         project(4),
         FailOnPersist {
             attempt: 0,
             fail_on: 1,
+            inner: durability,
         },
     )
     .unwrap();
@@ -1224,11 +1281,15 @@ fn first_persistence_failure_does_not_deny_the_app_commit() {
 #[test]
 fn mid_revision_failure_reports_prefix_and_poison_prevents_naive_retry() {
     let store = AppStore::default();
+    let project_id = project(5);
+    let durability = MemoryDurability::default();
+    let durability_control = durability.control();
     let project = DurableProject::with_sink(
-        project(5),
+        project_id,
         FailOnPersist {
             attempt: 0,
             fail_on: 2,
+            inner: durability,
         },
     )
     .unwrap();
@@ -1259,7 +1320,12 @@ fn mid_revision_failure_reports_prefix_and_poison_prevents_naive_retry() {
         Some(1)
     );
     assert_eq!(shadow.history_len(), 1);
-    assert_eq!(shadow.project_state().unwrap().assets.len(), 1);
+    assert!(matches!(
+        shadow.project_state(),
+        Err(AdapterError::Repair(_))
+    ));
+    let recovered = DurableProject::recover(project_id, durability_control.bytes()).unwrap();
+    assert_eq!(recovered.state().unwrap().assets.len(), 1);
     assert!(matches!(
         shadow.checkpoint(),
         Err(AuthoredShadowInitError::FaultedCheckpoint(ref fault))

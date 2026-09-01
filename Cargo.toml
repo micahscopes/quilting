@@ -54,11 +54,12 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/micahscopes/quilting"
 
 [workspace.dependencies]
-hhhs = { version = "0.4.4", git = "https://gitlab.com/micahscopes/hhhs-rs", tag = "v0.4.4" }
-hhhs-reactive = { version = "0.4.4", git = "https://gitlab.com/micahscopes/hhhs-rs", tag = "v0.4.4" }
-hhhs-replica = { version = "0.4.4", git = "https://gitlab.com/micahscopes/hhhs-rs", tag = "v0.4.4" }
-hhhs-store = { version = "0.4.4", git = "https://gitlab.com/micahscopes/hhhs-rs", tag = "v0.4.4" }
-hhhs-sync = { version = "0.4.4", git = "https://gitlab.com/micahscopes/hhhs-rs", tag = "v0.4.4", features = ["driver"] }
+hhhs = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs", rev = "e68402fe3efe6a22212c804f84c038ee3838d499" }
+hhhs-reactive = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs", rev = "e68402fe3efe6a22212c804f84c038ee3838d499" }
+hhhs-replica = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs", rev = "e68402fe3efe6a22212c804f84c038ee3838d499" }
+hhhs-store = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs", rev = "e68402fe3efe6a22212c804f84c038ee3838d499" }
+hhhs-sync = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs", rev = "e68402fe3efe6a22212c804f84c038ee3838d499", features = ["driver"] }
+hhhs-web-browser = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs", rev = "e68402fe3efe6a22212c804f84c038ee3838d499" }
 
 [profile.release]
 opt-level = 2

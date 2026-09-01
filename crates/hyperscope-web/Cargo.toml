@@ -43,6 +43,7 @@ durable-history = [
     "dep:hhhs",
     "dep:hhhs-replica",
     "dep:hhhs-store",
+    "dep:hhhs-web-browser",
     "dep:hyperscape-hhhs",
     "dep:hyperscope-app",
     "dep:hyperscope-hhhs-shadow",
@@ -64,6 +65,7 @@ local-peer-relay = [
 hhhs = { workspace = true, optional = true }
 hhhs-replica = { workspace = true, optional = true }
 hhhs-store = { workspace = true, optional = true }
+hhhs-web-browser = { workspace = true, optional = true }
 hyperscape-hhhs = { version = "0.1.0", path = "../hyperscape-hhhs", optional = true }
 hyperscope-hhhs-shadow = { version = "0.1.0", path = "../hyperscope-hhhs-shadow", optional = true }
 hyperscape-protocol = { version = "0.1.0", path = "../hyperscape-protocol", optional = true }

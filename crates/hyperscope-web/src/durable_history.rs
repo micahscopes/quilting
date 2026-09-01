@@ -15,8 +15,10 @@
 #[cfg(any(target_arch = "wasm32", test))]
 use hhhs::Digest;
 use hhhs_replica::AsyncTransactionSink;
+#[cfg(test)]
+use hhhs_store::encode_storage_transaction;
 #[cfg(any(target_arch = "wasm32", test))]
-use hhhs_store::{decode_storage_transaction, encode_storage_transaction, StorageTransaction};
+use hhhs_store::{decode_storage_transaction, StorageTransaction};
 use hyperscape_hhhs::DurableProject;
 #[cfg(any(target_arch = "wasm32", test))]
 use hyperscape_hhhs::ProjectId;
@@ -142,7 +144,10 @@ impl<D> OpenedDurableAuthoredSession<D> {
 pub fn attach_durable_authored_session<D>(
     project: DurableProject<D>,
     store: &AppStore,
-) -> Result<OpenedDurableAuthoredSession<D>, DurableHistoryError> {
+) -> Result<OpenedDurableAuthoredSession<D>, DurableHistoryError>
+where
+    D: AsyncTransactionSink,
+{
     let session = DurableAuthoredSession::from_project(project).map_err(
         |error: DurableAuthoredSessionInitError| {
             DurableHistoryError::SessionInitialization(error.to_string())
@@ -175,7 +180,10 @@ where
 fn restore_opened_session<D>(
     session: DurableAuthoredSession<D>,
     store: &AppStore,
-) -> Result<OpenedDurableAuthoredSession<D>, DurableHistoryError> {
+) -> Result<OpenedDurableAuthoredSession<D>, DurableHistoryError>
+where
+    D: AsyncTransactionSink,
+{
     let restored_projection = session
         .restore_store(store)
         .map_err(|error| DurableHistoryError::ProjectionRestore(error.to_string()))?;
@@ -190,7 +198,7 @@ fn project_prefix(project_id: ProjectId) -> String {
     format!("p/{}/s/", project_id.as_uuid().simple())
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(test)]
 fn transaction_key(project_id: ProjectId, sequence: u64) -> String {
     format!("{}{sequence:016x}", project_prefix(project_id))
 }
@@ -226,7 +234,7 @@ fn row_digest(transaction_bytes: &[u8]) -> Digest {
     Digest::of(&authenticated)
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(test)]
 fn encode_transaction_row(
     transaction: &StorageTransaction,
 ) -> Result<(u64, Vec<u8>), DurableHistoryError> {
@@ -274,14 +282,14 @@ fn validate_authored_transaction_shape(
     Ok(())
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExistingRow {
     Insert,
     ExactRetry,
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(test)]
 fn classify_existing_row(
     sequence: u64,
     existing: Option<&[u8]>,
@@ -510,7 +518,7 @@ mod tests {
         ))
         .unwrap();
         let expected_scene = source_store.authored_scene_snapshot();
-        let durable_bytes = source.durability().bytes().to_vec();
+        let durable_bytes = source.durable_bytes();
         let project = DurableProject::recover(project_id, durable_bytes.clone()).unwrap();
         let restored_store = AppStore::default();
 
@@ -521,7 +529,7 @@ mod tests {
         );
         assert_eq!(restored_store.authored_scene_snapshot(), expected_scene);
         assert_eq!(opened.session().history_len(), 1);
-        assert_eq!(opened.session().durability().bytes(), durable_bytes);
+        assert_eq!(opened.session().durable_bytes(), durable_bytes);
 
         let before_replay = restored_store.summary_snapshot();
         let replay = block_on(opened.session_mut().accept_local_peer(
@@ -530,11 +538,14 @@ mod tests {
             2.0,
         ))
         .unwrap();
-        assert_eq!(replay.peer.disposition, LocalPeerDisposition::IgnoredDuplicate);
+        assert_eq!(
+            replay.peer.disposition,
+            LocalPeerDisposition::IgnoredDuplicate
+        );
         assert!(replay.durable.is_none());
         assert_eq!(restored_store.summary_snapshot(), before_replay);
         assert_eq!(opened.session().history_len(), 1);
-        assert_eq!(opened.session().durability().bytes(), durable_bytes);
+        assert_eq!(opened.session().durable_bytes(), durable_bytes);
     }
 
     #[test]
@@ -571,7 +582,7 @@ mod tests {
         );
         assert_eq!(store.authored_scene_snapshot().projection_revision, Some(0));
 
-        let durable_bytes = opened.session().durability().bytes().to_vec();
+        let durable_bytes = opened.session().durable_bytes();
         let recovered = DurableProject::recover(project_id, durable_bytes).unwrap();
         assert!(attach_durable_authored_session(recovered, &AppStore::default()).is_ok());
     }

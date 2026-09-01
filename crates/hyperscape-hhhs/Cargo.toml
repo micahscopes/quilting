@@ -10,10 +10,7 @@ description = "Versioned durable HHHS authored-operation adapter for Hyperscape"
 [dependencies]
 base64 = "0.22"
 bincode = "=1.3.3"
-futures = "0.3"
-futures-signals = "0.3"
 hhhs.workspace = true
-hhhs-reactive.workspace = true
 hhhs-replica.workspace = true
 hhhs-store.workspace = true
 hhhs-sync.workspace = true
