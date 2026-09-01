@@ -7,6 +7,7 @@ use futures::try_join;
 use hhhs_replica::AsyncTransactionSink;
 use hhhs_store::StorageTransaction;
 use hyperscape_hhhs::{DurableProject, ProjectId};
+use hyperscope_app::AppStore;
 use indexed_db_futures::database::Database;
 use indexed_db_futures::prelude::*;
 use indexed_db_futures::transaction::{TransactionDurability, TransactionMode, TransactionOptions};
@@ -189,6 +190,20 @@ pub async fn open_durable_project(
         .map_err(|error| DurableHistoryError::ProjectRecovery(error.to_string()))
 }
 
+/// Open this project's IndexedDB history, recover its paired ingress policy,
+/// and align a fresh AppStore projection before returning control to a peer
+/// transport.
+///
+/// This touches IndexedDB only. It does not initialize a renderer, canvas, or
+/// GPU device.
+pub async fn open_durable_authored_session(
+    project_id: ProjectId,
+    store: &AppStore,
+) -> Result<super::OpenedDurableAuthoredSession<IndexedDbDurability>, DurableHistoryError> {
+    let project = open_durable_project(project_id).await?;
+    super::attach_durable_authored_session(project, store)
+}
+
 /// Validate a portable project archive in memory, then idempotently persist it
 /// into this origin's dedicated authored-history database.
 ///
@@ -297,9 +312,10 @@ mod tests {
     use hhhs::{Entry, Position};
     use hhhs_store::encode_storage_transaction;
     use hyperscape_protocol::{
-        AuthoredCommand, AuthoredEnvelope, EntityId, MessageHeader, MessageId, PeerId,
-        WireTransform, CURRENT_PROTOCOL_VERSION,
+        AuthoredCommand, AuthoredEnvelope, EntityId, LocalPeerEnvelope, MessageHeader, MessageId,
+        PeerId, WireTransform, CURRENT_PROTOCOL_VERSION,
     };
+    use hyperscope_app::LocalPeerDisposition;
     use wasm_bindgen_test::*;
 
     wasm_bindgen_test_configure!(run_in_browser);
@@ -370,6 +386,67 @@ mod tests {
 
         let recovered = open_durable_project(project_id).await.unwrap();
         assert_eq!(recovered.state().unwrap(), before);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn durable_session_restores_appstore_and_rejects_recent_replay() {
+        let project_id = unique_project();
+        let entity = EntityId::from_u128(0x3111).unwrap();
+        let authored = AuthoredEnvelope {
+            header: MessageHeader {
+                version: CURRENT_PROTOCOL_VERSION,
+                message_id: MessageId::from_u128(0x3222).unwrap(),
+                sender: PeerId::from_u128(0x3333).unwrap(),
+                sequence: 7,
+            },
+            command: AuthoredCommand::SetEntityTransform {
+                entity,
+                transform: WireTransform {
+                    translation: [1.0, 2.0, 3.0],
+                    rotation_wxyz: [1.0, 0.0, 0.0, 0.0],
+                    scale: [1.0, 1.0, 1.0],
+                },
+            },
+        };
+        let source_store = AppStore::default();
+        let mut opened = open_durable_authored_session(project_id, &source_store)
+            .await
+            .unwrap();
+        assert!(opened.restored_projection().is_none());
+        let applied = opened
+            .session_mut()
+            .accept_local_peer(
+                &source_store,
+                LocalPeerEnvelope::Authored(authored.clone()),
+                1.0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(applied.peer.disposition, LocalPeerDisposition::Applied);
+        assert_eq!(opened.session().history_len(), 1);
+        let expected_scene = source_store.authored_scene_snapshot();
+        drop(opened);
+
+        let restored_store = AppStore::default();
+        let mut reopened = open_durable_authored_session(project_id, &restored_store)
+            .await
+            .unwrap();
+        assert!(reopened.restored_projection().is_some());
+        assert_eq!(restored_store.authored_scene_snapshot(), expected_scene);
+        let before_replay = restored_store.summary_snapshot();
+        let replay = reopened
+            .session_mut()
+            .accept_local_peer(
+                &restored_store,
+                LocalPeerEnvelope::Authored(authored),
+                2.0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay.peer.disposition, LocalPeerDisposition::IgnoredDuplicate);
+        assert!(replay.durable.is_none());
+        assert_eq!(reopened.session().history_len(), 1);
+        assert_eq!(restored_store.summary_snapshot(), before_replay);
     }
 
     #[wasm_bindgen_test(async)]

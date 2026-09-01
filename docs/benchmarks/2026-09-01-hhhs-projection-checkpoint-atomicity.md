@@ -75,6 +75,17 @@ stale sender sequence both return without AppStore mutation, HHHS admission,
 or IndexedDB-ready transaction bytes; the next sequence advances normally.
 Presence history and pending echo intent are intentionally not reconstructed.
 
+`hyperscope-web` now exposes the platform-neutral host attachment as well as a
+wasm-only `open_durable_authored_session` IndexedDB lifecycle. The browser
+opener recovers strict transaction rows, constructs the paired session, and
+restores the AppStore before returning it to transport code. A native host test
+proves this orchestration with exact durable bytes; the wasm feature compiles
+through `wasm32-unknown-unknown`. A wasm browser oracle covers IndexedDB write,
+drop/reopen, AppStore restoration, and replay rejection and passes strict
+compile/lint gates. No Chromium/IndexedDB runtime was launched during the
+shared WebGPU workload, so execution of that acceptance oracle remains
+explicitly pending.
+
 ## Deliberate non-goals
 
 This does not claim atomicity across HHHS and an in-memory UI projection.

@@ -1880,6 +1880,7 @@ dependencies = [
  "hyperscape-hhhs",
  "hyperscape-protocol",
  "hyperscope-app",
+ "hyperscope-hhhs-shadow",
  "indexed_db_futures",
  "js-sys",
  "leptos",

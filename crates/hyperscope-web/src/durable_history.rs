@@ -6,20 +6,31 @@
 //! atomic persist-before-publish ordering, but does not by itself protect an
 //! origin from browser eviction or private-session teardown; callers should
 //! surface [`OriginPersistence`] through the wasm status helpers.
+//!
+//! [`attach_durable_authored_session`] is the platform-neutral lifecycle seam:
+//! it pairs recovered history with restart-safe ingress memory and restores the
+//! AppStore projection before transport starts. The wasm IndexedDB adapter
+//! exposes the same sequence through `open_durable_authored_session`.
 
 #[cfg(any(target_arch = "wasm32", test))]
 use hhhs::Digest;
 #[cfg(any(target_arch = "wasm32", test))]
 use hhhs_store::{decode_storage_transaction, encode_storage_transaction, StorageTransaction};
+use hyperscape_hhhs::DurableProject;
 #[cfg(any(target_arch = "wasm32", test))]
 use hyperscape_hhhs::ProjectId;
+use hyperscope_app::{AppCommit, AppStore};
+use hyperscope_hhhs_shadow::{DurableAuthoredSession, DurableAuthoredSessionInitError};
 #[cfg(any(target_arch = "wasm32", test))]
 use std::collections::BTreeMap;
 
 #[cfg(target_arch = "wasm32")]
 mod indexed_db;
 #[cfg(target_arch = "wasm32")]
-pub use indexed_db::{import_project_archive, open_durable_project, IndexedDbDurability};
+pub use indexed_db::{
+    import_project_archive, open_durable_authored_session, open_durable_project,
+    IndexedDbDurability,
+};
 #[cfg(target_arch = "wasm32")]
 pub use indexed_db::{origin_persistence, request_origin_persistence};
 
@@ -89,6 +100,59 @@ pub enum DurableHistoryError {
     ProjectRecovery(String),
     #[error("portable project archive failed validation or admission: {0}")]
     ProjectArchive(String),
+    #[error("durable authored session initialization failed: {0}")]
+    SessionInitialization(String),
+    #[error("durable authored AppStore restoration failed: {0}")]
+    ProjectionRestore(String),
+}
+
+/// A recovered durable authority paired with the result of aligning its
+/// rebuildable AppStore projection.
+pub struct OpenedDurableAuthoredSession<D> {
+    session: DurableAuthoredSession<D>,
+    restored_projection: Option<AppCommit>,
+}
+
+impl<D> OpenedDurableAuthoredSession<D> {
+    pub fn session(&self) -> &DurableAuthoredSession<D> {
+        &self.session
+    }
+
+    pub fn session_mut(&mut self) -> &mut DurableAuthoredSession<D> {
+        &mut self.session
+    }
+
+    pub fn restored_projection(&self) -> Option<&AppCommit> {
+        self.restored_projection.as_ref()
+    }
+
+    pub fn into_parts(self) -> (DurableAuthoredSession<D>, Option<AppCommit>) {
+        (self.session, self.restored_projection)
+    }
+}
+
+/// Attach a recovered platform durability host to the restart-safe authored
+/// session and atomically align a fresh AppStore projection.
+///
+/// This function performs no browser or graphics work. Platform adapters such
+/// as IndexedDB first recover a [`DurableProject`], then delegate here so every
+/// host shares the same cursor, projection, and peer-dedup lifecycle.
+pub fn attach_durable_authored_session<D>(
+    project: DurableProject<D>,
+    store: &AppStore,
+) -> Result<OpenedDurableAuthoredSession<D>, DurableHistoryError> {
+    let session = DurableAuthoredSession::from_project(project).map_err(
+        |error: DurableAuthoredSessionInitError| {
+            DurableHistoryError::SessionInitialization(error.to_string())
+        },
+    )?;
+    let restored_projection = session
+        .restore_store(store)
+        .map_err(|error| DurableHistoryError::ProjectionRestore(error.to_string()))?;
+    Ok(OpenedDurableAuthoredSession {
+        session,
+        restored_projection,
+    })
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -240,7 +304,13 @@ fn decode_ordered_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::executor::block_on;
     use hhhs::{Entry, Position};
+    use hyperscape_protocol::{
+        AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, LocalPeerEnvelope,
+        MessageHeader, MessageId, PeerId, CURRENT_PROTOCOL_VERSION,
+    };
+    use hyperscope_app::{CommitDisposition, LocalPeerDisposition};
 
     fn project(value: u128) -> ProjectId {
         ProjectId::from_u128(value).unwrap()
@@ -353,5 +423,60 @@ mod tests {
             encode_transaction_row(&transaction(None, b"unsequenced")).unwrap_err(),
             DurableHistoryError::MissingExpectedSequence
         );
+    }
+
+    #[test]
+    fn host_attachment_restores_projection_and_recovered_peer_dedup() {
+        let project_id = project(0xdddd);
+        let envelope = AuthoredEnvelope {
+            header: MessageHeader {
+                version: CURRENT_PROTOCOL_VERSION,
+                message_id: MessageId::from_u128(0xdd01).unwrap(),
+                sender: PeerId::from_u128(0xdd02).unwrap(),
+                sequence: 7,
+            },
+            command: AuthoredCommand::UpsertAsset {
+                asset: AssetDescriptor {
+                    id: AssetId::from_u128(0xdd03).unwrap(),
+                    uri: "restored.glb".into(),
+                    media_type: Some("model/gltf-binary".into()),
+                    content_digest: None,
+                },
+            },
+        };
+        let source_store = AppStore::default();
+        let mut source = DurableAuthoredSession::new(project_id).unwrap();
+        block_on(source.accept_local_peer(
+            &source_store,
+            LocalPeerEnvelope::Authored(envelope.clone()),
+            1.0,
+        ))
+        .unwrap();
+        let expected_scene = source_store.authored_scene_snapshot();
+        let durable_bytes = source.durability().bytes().to_vec();
+        let project = DurableProject::recover(project_id, durable_bytes.clone()).unwrap();
+        let restored_store = AppStore::default();
+
+        let mut opened = attach_durable_authored_session(project, &restored_store).unwrap();
+        assert_eq!(
+            opened.restored_projection().unwrap().disposition,
+            CommitDisposition::Applied
+        );
+        assert_eq!(restored_store.authored_scene_snapshot(), expected_scene);
+        assert_eq!(opened.session().history_len(), 1);
+        assert_eq!(opened.session().durability().bytes(), durable_bytes);
+
+        let before_replay = restored_store.summary_snapshot();
+        let replay = block_on(opened.session_mut().accept_local_peer(
+            &restored_store,
+            LocalPeerEnvelope::Authored(envelope),
+            2.0,
+        ))
+        .unwrap();
+        assert_eq!(replay.peer.disposition, LocalPeerDisposition::IgnoredDuplicate);
+        assert!(replay.durable.is_none());
+        assert_eq!(restored_store.summary_snapshot(), before_replay);
+        assert_eq!(opened.session().history_len(), 1);
+        assert_eq!(opened.session().durability().bytes(), durable_bytes);
     }
 }

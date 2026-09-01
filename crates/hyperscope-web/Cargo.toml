@@ -42,6 +42,8 @@ durable-history = [
     "dep:hhhs-replica",
     "dep:hhhs-store",
     "dep:hyperscape-hhhs",
+    "dep:hyperscope-app",
+    "dep:hyperscope-hhhs-shadow",
     "dep:futures",
     "dep:indexed_db_futures",
     "dep:js-sys",
@@ -61,6 +63,7 @@ hhhs = { workspace = true, optional = true }
 hhhs-replica = { workspace = true, optional = true }
 hhhs-store = { workspace = true, optional = true }
 hyperscape-hhhs = { version = "0.1.0", path = "../hyperscape-hhhs", optional = true }
+hyperscope-hhhs-shadow = { version = "0.1.0", path = "../hyperscope-hhhs-shadow", optional = true }
 hyperscape-protocol = { version = "0.1.0", path = "../hyperscape-protocol", optional = true }
 hyperscape = { version = "0.1.0", path = "../hyperscape", optional = true }
 hyperscope-app = { version = "0.1.0", path = "../hyperscope-app", optional = true }
@@ -71,6 +74,7 @@ tiny_http = { version = "0.12", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
 
 [dev-dependencies]
+futures = { version = "0.3", features = ["executor"] }
 hyperscape = { version = "0.1.0", path = "../hyperscape" }
 hyperscape-protocol = { version = "0.1.0", path = "../hyperscape-protocol" }
 uuid = "1"
