@@ -1,4 +1,6 @@
 mod app_shadow;
+#[cfg(all(feature = "durable-history", target_arch = "wasm32"))]
+mod durable_peer;
 mod adaptive_screen;
 mod auxiliary_programs;
 pub mod main_renderer;
@@ -16,6 +18,8 @@ pub use app_shadow::{
     encode_local_presence_envelope, map_pointer_turntable_frame, map_space_mouse_camera_frame,
     HyperscopeAppShadow,
 };
+#[cfg(all(feature = "durable-history", target_arch = "wasm32"))]
+pub use durable_peer::HyperscopeDurablePeer;
 pub use route_shadow::{canonicalize_hyperscope_route, hyperscope_control_specs};
 pub use surface_walk::HyperscopeSurfaceWalk;
 

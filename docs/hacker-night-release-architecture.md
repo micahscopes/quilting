@@ -378,6 +378,17 @@ The first application boundary is now explicit:
   deliberately separate high-rate lane whose sender sequences and local
   expiries do not masquerade as the throttled UI read-model revision. These
   methods select no carrier and add no browser state authority.
+- The opt-in `quilting-wasm/durable-history` route now exposes
+  `openDurableAuthoredPeer` on the same application facade. It opens a separate
+  peer object sharing the Rust `AppStore` while owning the IndexedDB-backed
+  `DurableAuthoredSession`; the synchronous direct-demo methods remain intact
+  as a rollback. Authored input is persisted before the result returns, and an
+  applied result includes carrier-ready encoded `ReplicaRecord` bytes as a
+  `Uint8Array`. Presence stays on the ephemeral lane. A per-application writer
+  lease rejects a second live durable peer. An RAII open reservation releases
+  that lease if IndexedDB opening is cancelled, while an RAII session lease
+  prevents reentrant calls without holding a `RefCell` borrow across writes;
+  write cancellation restores the session.
 - Protocol v0.1 now has an additive optional `authoring_leases` presence field.
   A claim combines a stable lease UUID with an asset-scoped entity identity;
   the containing peer envelope supplies ordering and receipt-relative expiry.

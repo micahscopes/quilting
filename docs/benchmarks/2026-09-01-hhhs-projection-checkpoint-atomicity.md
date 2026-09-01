@@ -86,6 +86,18 @@ compile/lint gates. No Chromium/IndexedDB runtime was launched during the
 shared WebGPU workload, so execution of that acceptance oracle remains
 explicitly pending.
 
+Generated WASM now has an equally optional `durable-history` adapter rather
+than forcing this path into the synchronous demo facade. The application opens
+one `HyperscopeDurablePeer`, which shares its Rust `AppStore`, owns the recovered
+IndexedDB session, reports durable status, and returns persisted public record
+bytes for carrier announcement. The original direct peer API is unchanged for
+rollback. A writer lease prevents two peers on one application object. Its
+open reservation unwinds on error or cancellation; during writes, the session
+is moved into a second cancellation-safe RAII lease, so no `RefCell` guard
+crosses an await and cancellation cannot strand either lifecycle. The
+combined durable/Leptos/WebGPU wasm build and browser-test target compile; live
+execution remains parked with the other browser/GPU workload.
+
 ## Deliberate non-goals
 
 This does not claim atomicity across HHHS and an in-memory UI projection.

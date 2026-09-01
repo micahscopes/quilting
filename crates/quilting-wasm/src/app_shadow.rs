@@ -5,14 +5,16 @@ use crate::navigation::{
 use hyperscape::{
     extract_packed_scene, map_pointer_turntable, map_space_mouse_camera, CameraBasis, CameraRig,
     FocusSphere, InteractionAction, InteractionHit, InteractionPickActivationGate,
-    InteractionPickAuthority, InteractionPickAuthorityDisposition, InteractionPickEvidenceObserver,
-    InteractionTarget, InteractionTargetSample, InteractionTargetTable, LayerTransform,
+    InteractionPickAuthority, InteractionPickEvidenceObserver, InteractionTarget,
+    InteractionTargetSample, InteractionTargetTable, LayerTransform,
     MappedSpaceMouseFrame, NavigationAction, NavigationFrame, NavigationPreset,
     PackedAssetInstance, PackedNodeSource, PackedNodeTransformSource,
     PackedPresentationLayerBinding, PointerTurntableGesture, PointerTurntableInput, Presentation,
     PresentationAsset, PresentationSnapshot, SpaceMouseCameraInput, SpaceMouseMapping,
     SurfaceAnchorTarget, SurfaceWalkControls, TurntableFrame,
 };
+#[cfg(feature = "webgpu-backend")]
+use hyperscape::InteractionPickAuthorityDisposition;
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredEnvelope, CameraPresence, EntityId, EphemeralPresence,
     FocusPresence, LocalPeerEnvelope, MessageHeader, MessageId, PeerId, PresenceEnvelope,
@@ -312,6 +314,8 @@ pub fn encode_local_presence_envelope(
 #[wasm_bindgen]
 pub struct HyperscopeAppShadow {
     store: AppStore,
+    #[cfg(all(feature = "durable-history", target_arch = "wasm32"))]
+    durable_peer_open: std::rc::Rc<std::cell::Cell<bool>>,
     /// Process-local renderer authority. It owns no GPU handles or durable
     /// state; adapters report only presentation/dispatch/recovery evidence.
     webgpu_lod_authority: RefCell<WebGpuLodAuthority>,
@@ -339,12 +343,25 @@ pub struct HyperscopeAppShadow {
     pending_adapter_effects: RefCell<Vec<AppEffect>>,
 }
 
+impl HyperscopeAppShadow {
+    pub(crate) fn store_clone(&self) -> AppStore {
+        self.store.clone()
+    }
+
+    #[cfg(all(feature = "durable-history", target_arch = "wasm32"))]
+    pub(crate) fn durable_peer_lease(&self) -> std::rc::Rc<std::cell::Cell<bool>> {
+        std::rc::Rc::clone(&self.durable_peer_open)
+    }
+}
+
 #[wasm_bindgen]
 impl HyperscopeAppShadow {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
         Self {
             store: AppStore::default(),
+            #[cfg(all(feature = "durable-history", target_arch = "wasm32"))]
+            durable_peer_open: std::rc::Rc::new(std::cell::Cell::new(false)),
             webgpu_lod_authority: RefCell::new(WebGpuLodAuthority::default()),
             peer_ingress: RefCell::new(LocalPeerIngress::default()),
             local_authoring_leases: RefCell::new(LocalAuthoringLeaseController::default()),
@@ -2193,18 +2210,19 @@ impl HyperscopeAppShadow {
             .try_borrow()
             .map_err(|_| js_error("interaction targets are being replaced"))?
             .epoch();
-        let mut activation = self
-            .backend_pick_activation
-            .try_borrow_mut()
-            .map_err(|_| js_error("backend pick activation is already borrowed"))?;
         let request = self
             .backend_pick_authority
             .try_borrow_mut()
             .map_err(|_| js_error("backend pick authority is already borrowed"))?
             .begin(target_epoch)
             .map_err(js_error)?;
-        activation.clear();
-        drop(activation);
+        {
+            let mut activation = self
+                .backend_pick_activation
+                .try_borrow_mut()
+                .map_err(|_| js_error("backend pick activation is already borrowed"))?;
+            activation.clear();
+        }
         let capture = match crate::main_renderer::stage_backend_pick_authority(
             pixel,
             target_epoch,
@@ -5205,6 +5223,7 @@ impl From<InteractionHit> for ShadowInteractionHit {
     }
 }
 
+#[cfg(feature = "webgpu-backend")]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ShadowBackendPickAuthorityResult {
@@ -5219,6 +5238,7 @@ struct ShadowBackendPickAuthorityResult {
     surface: Option<crate::main_renderer::ResolvedSurfacePick>,
 }
 
+#[cfg(feature = "webgpu-backend")]
 fn pick_authority_disposition_name(
     disposition: InteractionPickAuthorityDisposition,
 ) -> &'static str {
@@ -5581,7 +5601,7 @@ fn shadow_patch_lab_effect(effect: &PatchLabEffect) -> ShadowPatchLabEffect {
     }
 }
 
-fn peer_receipt_to_js(receipt: &LocalPeerReceipt) -> Result<JsValue, JsValue> {
+pub(crate) fn peer_receipt_to_js(receipt: &LocalPeerReceipt) -> Result<JsValue, JsValue> {
     to_js(&ShadowLocalPeerReceipt {
         lane: match receipt.lane {
             LocalPeerLane::Authored => "authored",
