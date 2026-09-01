@@ -25,6 +25,11 @@ omission. The Python codec validates and canonically reconstructs the new Rust
 fixture at
 `crates/hyperscape-protocol/fixtures/presence-authoring-lease-v0.1.json`.
 
+`HyperscopeAppShadow::authoringLeaseSnapshot` exposes that resolved read model
+to thin browser adapters as stable asset, entity, peer, and lease strings. It
+does not expose a mutation or grant operation; adapters no longer need to infer
+coordination state by reparsing raw peer envelopes.
+
 CPU-only evidence:
 
 ```text

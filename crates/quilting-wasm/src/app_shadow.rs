@@ -26,6 +26,7 @@ use hyperscope_app::{
     AppEffect, AppEvent, AppFrameSnapshot, AppStore, AssetFetchJob, AssetJobIdentity,
     AssetLoadCompletion, AssetLoadCompletionDispatch, AssetLoadOutcome, AssetLoadRequest,
     AssetLoadScope, AssetMetadata, AssetReadModel, AssetStatus, AuthoredRevision, CommitDisposition,
+    AuthoringLeaseStatus,
     FocusDiagnosticView, FocusPostprocessMode, FocusPostprocessSettings, FrameTick,
     GraphicsPresentationDecision,
     InstalledPrimarySceneReadModel,
@@ -3295,6 +3296,37 @@ impl HyperscopeAppShadow {
         })
     }
 
+    /// Resolve advisory asset-scoped authoring claims from the currently live
+    /// presence set. This is a read-only coordination projection: it neither
+    /// grants authority nor mutates authored/HHHS state.
+    #[wasm_bindgen(js_name = authoringLeaseSnapshot)]
+    pub fn authoring_lease_snapshot(&self) -> Result<JsValue, JsValue> {
+        let leases = self
+            .store
+            .authoring_lease_snapshot()
+            .into_iter()
+            .map(|lease| {
+                let (status, holders) = match lease.status {
+                    AuthoringLeaseStatus::Held(holder) => ("held", vec![holder]),
+                    AuthoringLeaseStatus::Contended(holders) => ("contended", holders),
+                };
+                ShadowAuthoringLease {
+                    asset_id: lease.target.asset.to_string(),
+                    entity_id: lease.target.entity.to_string(),
+                    status,
+                    holders: holders
+                        .into_iter()
+                        .map(|holder| ShadowAuthoringLeaseHolder {
+                            peer_id: holder.peer.to_string(),
+                            lease_id: holder.lease_id.to_string(),
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+        to_js(&ShadowAuthoringLeaseSnapshot { leases })
+    }
+
     /// Resolve low-rate ordinary scene transforms through the same authored
     /// materialization observed by the application. The JSON input contains
     /// layer/asset/node packing metadata only; output is backend-neutral and
@@ -4028,6 +4060,28 @@ struct ShadowLocalPeerReceipt {
 struct ShadowPeerPresenceSnapshot {
     elapsed_seconds: f64,
     peers: Vec<ShadowPeerPresence>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowAuthoringLeaseSnapshot {
+    leases: Vec<ShadowAuthoringLease>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowAuthoringLease {
+    asset_id: String,
+    entity_id: String,
+    status: &'static str,
+    holders: Vec<ShadowAuthoringLeaseHolder>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowAuthoringLeaseHolder {
+    peer_id: String,
+    lease_id: String,
 }
 
 #[derive(Serialize)]
