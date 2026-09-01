@@ -228,6 +228,18 @@ pub async fn import_project_archive(
     Ok(durable)
 }
 
+/// Validate and persist a portable archive, explicitly adopt its local source
+/// cursor, and restore a fresh AppStore before returning control to transport.
+///
+/// This touches IndexedDB but does not initialize a renderer or GPU device.
+pub async fn import_durable_authored_session(
+    bytes: &[u8],
+    store: &AppStore,
+) -> Result<super::OpenedDurableAuthoredSession<IndexedDbDurability>, DurableHistoryError> {
+    let project = import_project_archive(bytes).await?;
+    super::attach_imported_durable_authored_session(project, store).await
+}
+
 /// Query whether the browser currently protects this origin from eviction.
 ///
 /// `BestEffort` and `Unknown` still allow strict, atomic IndexedDB commits, but
@@ -312,8 +324,8 @@ mod tests {
     use hhhs::{Entry, Position};
     use hhhs_store::encode_storage_transaction;
     use hyperscape_protocol::{
-        AuthoredCommand, AuthoredEnvelope, EntityId, LocalPeerEnvelope, MessageHeader, MessageId,
-        PeerId, WireTransform, CURRENT_PROTOCOL_VERSION,
+        AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId, LocalPeerEnvelope,
+        MessageHeader, MessageId, PeerId, WireTransform, CURRENT_PROTOCOL_VERSION,
     };
     use hyperscope_app::LocalPeerDisposition;
     use wasm_bindgen_test::*;
@@ -484,5 +496,45 @@ mod tests {
 
         let recovered = open_durable_project(project_id).await.unwrap();
         assert_eq!(recovered.state().unwrap(), expected);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn imported_authored_session_persists_its_local_cursor_for_strict_restart() {
+        let project_id = unique_project();
+        let authored = AuthoredEnvelope {
+            header: MessageHeader {
+                version: CURRENT_PROTOCOL_VERSION,
+                message_id: MessageId::from_u128(0x7777).unwrap(),
+                sender: PeerId::from_u128(0x8888).unwrap(),
+                sequence: 1,
+            },
+            command: AuthoredCommand::UpsertAsset {
+                asset: AssetDescriptor {
+                    id: AssetId::from_u128(0x9999).unwrap(),
+                    uri: "portable.glb".into(),
+                    media_type: Some("model/gltf-binary".into()),
+                    content_digest: None,
+                },
+            },
+        };
+        let mut source = DurableProject::new(project_id).unwrap();
+        source.admit(&authored).await.unwrap();
+        let archive = source.export_archive().unwrap();
+        let imported_store = AppStore::default();
+
+        let imported = import_durable_authored_session(&archive, &imported_store)
+            .await
+            .unwrap();
+        assert_eq!(imported.session().observed_projection_revision(), Some(0));
+        assert!(imported.restored_projection().is_some());
+        let expected_scene = imported_store.authored_scene_snapshot();
+        drop(imported);
+
+        let restarted_store = AppStore::default();
+        let restarted = open_durable_authored_session(project_id, &restarted_store)
+            .await
+            .unwrap();
+        assert_eq!(restarted.session().observed_projection_revision(), Some(0));
+        assert_eq!(restarted_store.authored_scene_snapshot(), expected_scene);
     }
 }

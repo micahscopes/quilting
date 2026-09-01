@@ -83,6 +83,14 @@ performs the complete in-memory import above, then applies that validated
 archive to the dedicated strict-durability IndexedDB sink. JavaScript only
 needs to obtain or save the opaque bytes; it does not decode project state.
 
+Portable archives omit the receiver-local authored projection cursor. An
+application that intends to continue editing must use
+`import_durable_authored_session`: after validation/admission it durably
+anchors a new local cursor, or advances a proven local prefix cursor once,
+then restores the rebuildable AppStore projection. Ordinary restart remains
+strict and never manufactures a missing or unrelated cursor. Exact re-import
+at the current history horizon performs no checkpoint write.
+
 The archive contains authored scene history, stable IDs, asset URIs, and asset
 content digests. It does not embed GLB bytes, ephemeral camera/selection state,
 render resources, routes, or local storage metadata. GLB transport therefore

@@ -14,6 +14,7 @@
 
 #[cfg(any(target_arch = "wasm32", test))]
 use hhhs::Digest;
+use hhhs_replica::AsyncTransactionSink;
 #[cfg(any(target_arch = "wasm32", test))]
 use hhhs_store::{decode_storage_transaction, encode_storage_transaction, StorageTransaction};
 use hyperscape_hhhs::DurableProject;
@@ -28,8 +29,8 @@ use std::collections::BTreeMap;
 mod indexed_db;
 #[cfg(target_arch = "wasm32")]
 pub use indexed_db::{
-    import_project_archive, open_durable_authored_session, open_durable_project,
-    IndexedDbDurability,
+    import_durable_authored_session, import_project_archive, open_durable_authored_session,
+    open_durable_project, IndexedDbDurability,
 };
 #[cfg(target_arch = "wasm32")]
 pub use indexed_db::{origin_persistence, request_origin_persistence};
@@ -146,6 +147,34 @@ pub fn attach_durable_authored_session<D>(
             DurableHistoryError::SessionInitialization(error.to_string())
         },
     )?;
+    restore_opened_session(session, store)
+}
+
+/// Attach a project returned by an explicit portable-archive import.
+///
+/// Unlike ordinary restart attachment, this may durably create or advance the
+/// receiver-local projection cursor after the imported history has validated.
+/// The public HHHS history remains unchanged. Exact re-import at the current
+/// horizon is write-free.
+pub async fn attach_imported_durable_authored_session<D>(
+    project: DurableProject<D>,
+    store: &AppStore,
+) -> Result<OpenedDurableAuthoredSession<D>, DurableHistoryError>
+where
+    D: AsyncTransactionSink,
+{
+    let session = DurableAuthoredSession::from_imported_project(project)
+        .await
+        .map_err(|error: DurableAuthoredSessionInitError| {
+            DurableHistoryError::SessionInitialization(error.to_string())
+        })?;
+    restore_opened_session(session, store)
+}
+
+fn restore_opened_session<D>(
+    session: DurableAuthoredSession<D>,
+    store: &AppStore,
+) -> Result<OpenedDurableAuthoredSession<D>, DurableHistoryError> {
     let restored_projection = session
         .restore_store(store)
         .map_err(|error| DurableHistoryError::ProjectionRestore(error.to_string()))?;
@@ -236,9 +265,9 @@ fn decode_transaction_row(row: &[u8]) -> Result<StorageTransaction, DurableHisto
 fn validate_authored_transaction_shape(
     transaction: &StorageTransaction,
 ) -> Result<(), DurableHistoryError> {
-    if transaction.entries().is_empty() {
+    if transaction.entries().is_empty() && transaction.checkpoints().is_empty() {
         return Err(DurableHistoryError::InvalidTransaction(
-            "authored-history transactions must contain an entry".into(),
+            "authored-history transactions must contain an entry or projection checkpoint".into(),
         ));
     }
     Ok(())
@@ -306,6 +335,7 @@ mod tests {
     use super::*;
     use futures::executor::block_on;
     use hhhs::{Entry, Position};
+    use hhhs_store::{ProjectionCheckpoint, ProjectionKey};
     use hyperscape_protocol::{
         AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, LocalPeerEnvelope,
         MessageHeader, MessageId, PeerId, CURRENT_PROTOCOL_VERSION,
@@ -426,6 +456,32 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_only_rows_round_trip_but_empty_transactions_are_rejected() {
+        let mut checkpoint_only = StorageTransaction::new();
+        checkpoint_only.expect_sequence(3).save_checkpoint(
+            ProjectionCheckpoint::new(
+                ProjectionKey::new("hyperscope/import-cursor", 1).unwrap(),
+                Position::default(),
+                Digest::of(b"history root"),
+                9_u64.to_le_bytes().to_vec(),
+            )
+            .unwrap(),
+        );
+        let (_, row) = encode_transaction_row(&checkpoint_only).unwrap();
+        let decoded = decode_transaction_row(&row).unwrap();
+        assert_eq!(decoded.expected_sequence(), Some(3));
+        assert!(decoded.entries().is_empty());
+        assert_eq!(decoded.checkpoints().len(), 1);
+
+        let mut empty = StorageTransaction::new();
+        empty.expect_sequence(4);
+        assert!(matches!(
+            encode_transaction_row(&empty),
+            Err(DurableHistoryError::InvalidTransaction(_))
+        ));
+    }
+
+    #[test]
     fn host_attachment_restores_projection_and_recovered_peer_dedup() {
         let project_id = project(0xdddd);
         let envelope = AuthoredEnvelope {
@@ -478,5 +534,44 @@ mod tests {
         assert_eq!(restored_store.summary_snapshot(), before_replay);
         assert_eq!(opened.session().history_len(), 1);
         assert_eq!(opened.session().durability().bytes(), durable_bytes);
+    }
+
+    #[test]
+    fn explicit_import_attachment_persists_a_cursor_and_restores_projection() {
+        let project_id = project(0xdd10);
+        let envelope = AuthoredEnvelope {
+            header: MessageHeader {
+                version: CURRENT_PROTOCOL_VERSION,
+                message_id: MessageId::from_u128(0xdd11).unwrap(),
+                sender: PeerId::from_u128(0xdd12).unwrap(),
+                sequence: 1,
+            },
+            command: AuthoredCommand::UpsertAsset {
+                asset: AssetDescriptor {
+                    id: AssetId::from_u128(0xdd13).unwrap(),
+                    uri: "imported.glb".into(),
+                    media_type: Some("model/gltf-binary".into()),
+                    content_digest: None,
+                },
+            },
+        };
+        let mut source = DurableProject::new(project_id).unwrap();
+        block_on(source.admit(&envelope)).unwrap();
+        let archive = source.export_archive().unwrap();
+        let imported = block_on(DurableProject::import_archive(&archive)).unwrap();
+        let store = AppStore::default();
+
+        let opened = block_on(attach_imported_durable_authored_session(imported, &store)).unwrap();
+        assert_eq!(opened.session().observed_projection_revision(), Some(0));
+        assert_eq!(opened.session().history_len(), 1);
+        assert_eq!(
+            opened.restored_projection().unwrap().disposition,
+            CommitDisposition::Applied
+        );
+        assert_eq!(store.authored_scene_snapshot().projection_revision, Some(0));
+
+        let durable_bytes = opened.session().durability().bytes().to_vec();
+        let recovered = DurableProject::recover(project_id, durable_bytes).unwrap();
+        assert!(attach_durable_authored_session(recovered, &AppStore::default()).is_ok());
     }
 }
