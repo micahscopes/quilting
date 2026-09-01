@@ -110,6 +110,7 @@ pub const VISIBILITY_SCATTER_DEVICE_ENTRY_POINT: &str = "scatter_visible_instanc
 pub const PATCH_PREPARE_DEVICE_ENTRY_POINT: &str = "prepare_patch_instances";
 pub const PREPARED_VISIBILITY_DEVICE_ENTRY_POINT: &str = "classify_prepared_patch_visibility";
 pub const PATCH_RENDER_DEVICE_VERTEX_ENTRY_POINT: &str = "render_patch_vertex";
+pub const PATCH_RENDER_DEVICE_WIRE_VERTEX_ENTRY_POINT: &str = "render_patch_wire_vertex";
 pub const PATCH_RENDER_DEVICE_NORMALS_ENTRY_POINT: &str = "render_patch_normals";
 pub const PATCH_RENDER_DEVICE_LOD_ENTRY_POINT: &str = "render_patch_lod";
 pub const PATCH_RENDER_DEVICE_STRETCH_ENTRY_POINT: &str = "render_patch_stretch";
@@ -124,6 +125,8 @@ pub const RESIDENT_ROOT_PICK_DEVICE_VERTEX_ENTRY_POINT: &str =
     "render_resident_root_pick_vertex";
 pub const RESIDENT_ROOT_PICK_DEVICE_FRAGMENT_ENTRY_POINT: &str = "render_resident_root_pick";
 pub const RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT: &str = "render_resident_root_vertex";
+pub const RESIDENT_ROOT_RENDER_DEVICE_WIRE_VERTEX_ENTRY_POINT: &str =
+    "render_resident_root_wire_vertex";
 pub const RESIDENT_ROOT_RENDER_DEVICE_NORMALS_ENTRY_POINT: &str = "render_resident_root_normals";
 pub const RESIDENT_ROOT_RENDER_DEVICE_LOD_ENTRY_POINT: &str = "render_resident_root_lod";
 pub const RESIDENT_ROOT_RENDER_DEVICE_MATCAP_ENTRY_POINT: &str = "render_resident_root_matcap";
@@ -1285,12 +1288,17 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
     fn compile_patch_render_device_shader() {
         let module = compile_patch_render_device_module()
             .expect("patch render device shader compiles and validates");
-        let vertex = module
-            .entry_points
-            .iter()
-            .find(|entry| entry.name == "render_patch_vertex")
-            .expect("patch render vertex entry point");
-        assert_eq!(vertex.stage, naga::ShaderStage::Vertex);
+        for name in [
+            PATCH_RENDER_DEVICE_VERTEX_ENTRY_POINT,
+            PATCH_RENDER_DEVICE_WIRE_VERTEX_ENTRY_POINT,
+        ] {
+            let vertex = module
+                .entry_points
+                .iter()
+                .find(|entry| entry.name == name)
+                .expect("patch render vertex entry point");
+            assert_eq!(vertex.stage, naga::ShaderStage::Vertex);
+        }
         for name in [
             PATCH_RENDER_DEVICE_NORMALS_ENTRY_POINT,
             PATCH_RENDER_DEVICE_LOD_ENTRY_POINT,
@@ -1350,9 +1358,13 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             .iter()
             .map(|entry| (entry.name.as_str(), entry.stage))
             .collect::<Vec<_>>();
-        assert_eq!(entries.len(), 9);
+        assert_eq!(entries.len(), 10);
         assert!(entries.contains(&(
             PATCH_RENDER_DEVICE_VERTEX_ENTRY_POINT,
+            naga::ShaderStage::Vertex,
+        )));
+        assert!(entries.contains(&(
+            PATCH_RENDER_DEVICE_WIRE_VERTEX_ENTRY_POINT,
             naga::ShaderStage::Vertex,
         )));
         assert!(entries.contains(&(
@@ -1480,6 +1492,10 @@ fn probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
             [
                 (
                     RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT,
+                    naga::ShaderStage::Vertex,
+                ),
+                (
+                    RESIDENT_ROOT_RENDER_DEVICE_WIRE_VERTEX_ENTRY_POINT,
                     naga::ShaderStage::Vertex,
                 ),
                 (

@@ -1,4 +1,4 @@
-#import quilting::render::patch_vertex::{PatchPbrMaterial, PatchRenderDomain, PatchRenderGlobal, PatchVertexOutput, evaluate_prepared_patch_vertex, patch_focus_raw_field, shade_patch_highlight, shade_patch_lod, shade_patch_matcap, shade_patch_normals, shade_patch_stretch, shade_patch_wire}
+#import quilting::render::patch_vertex::{PatchPbrMaterial, PatchRenderDomain, PatchRenderGlobal, PatchVertexOutput, evaluate_prepared_patch_vertex, patch_focus_raw_field, pull_patch_wire_overlay_forward, shade_patch_highlight, shade_patch_lod, shade_patch_matcap, shade_patch_normals, shade_patch_stretch, shade_patch_wire}
 #import quilting::render::patch_pbr_portable::shade_portable_patch_pbr
 #import quilting::surface::patch_prepare::PreparedPatchRecord
 #import quilting::compute::resident_bucket_types::{ResidentBucketRangeRecord, ResidentDrawDomainRecord}
@@ -24,10 +24,9 @@ struct ResidentRootVertexInput {
     @location(0) bary: vec3<f32>,
 }
 
-@vertex
-fn render_resident_root_vertex(
+fn evaluate_resident_root_draw_vertex(
     input: ResidentRootVertexInput,
-    @builtin(instance_index) local_instance: u32,
+    local_instance: u32,
 ) -> PatchVertexOutput {
     let range = bucket_ranges[draw_bucket.bucket_index];
     let compacted_index = range.compacted_first_face + local_instance;
@@ -47,6 +46,23 @@ fn render_resident_root_vertex(
         output.fade = 0.0;
     }
     return output;
+}
+
+@vertex
+fn render_resident_root_vertex(
+    input: ResidentRootVertexInput,
+    @builtin(instance_index) local_instance: u32,
+) -> PatchVertexOutput {
+    return evaluate_resident_root_draw_vertex(input, local_instance);
+}
+
+@vertex
+fn render_resident_root_wire_vertex(
+    input: ResidentRootVertexInput,
+    @builtin(instance_index) local_instance: u32,
+) -> PatchVertexOutput {
+    let output = evaluate_resident_root_draw_vertex(input, local_instance);
+    return pull_patch_wire_overlay_forward(output);
 }
 
 @fragment

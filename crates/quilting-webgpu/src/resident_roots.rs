@@ -160,6 +160,7 @@ enum ResidentRootPipelineKind {
 struct ResidentRootPipelinePass {
     kind: ResidentRootPipelineKind,
     label: &'static str,
+    vertex_entry_point: &'static str,
     fragment_entry_point: &'static str,
     geometry: RenderGeometry,
     depth_write: bool,
@@ -180,6 +181,7 @@ const RESIDENT_ROOT_PIPELINE_PASSES: [ResidentRootPipelinePass; 8] = [
     ResidentRootPipelinePass {
         kind: ResidentRootPipelineKind::Pbr,
         label: "quilting resident root PBR",
+        vertex_entry_point: quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT,
         fragment_entry_point: quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_PBR_ENTRY_POINT,
         geometry: RenderGeometry::Triangles,
         depth_write: true,
@@ -189,6 +191,7 @@ const RESIDENT_ROOT_PIPELINE_PASSES: [ResidentRootPipelinePass; 8] = [
     ResidentRootPipelinePass {
         kind: ResidentRootPipelineKind::PbrFocus,
         label: "quilting resident root focus PBR",
+        vertex_entry_point: quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT,
         fragment_entry_point: quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_PBR_FOCUS_ENTRY_POINT,
         geometry: RenderGeometry::Triangles,
         depth_write: true,
@@ -198,6 +201,7 @@ const RESIDENT_ROOT_PIPELINE_PASSES: [ResidentRootPipelinePass; 8] = [
     ResidentRootPipelinePass {
         kind: ResidentRootPipelineKind::Matcap,
         label: "quilting resident root matcap",
+        vertex_entry_point: quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT,
         fragment_entry_point: quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_MATCAP_ENTRY_POINT,
         geometry: RenderGeometry::Triangles,
         depth_write: true,
@@ -207,6 +211,7 @@ const RESIDENT_ROOT_PIPELINE_PASSES: [ResidentRootPipelinePass; 8] = [
     ResidentRootPipelinePass {
         kind: ResidentRootPipelineKind::Normals,
         label: "quilting resident root normals",
+        vertex_entry_point: quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT,
         fragment_entry_point: quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_NORMALS_ENTRY_POINT,
         geometry: RenderGeometry::Triangles,
         depth_write: true,
@@ -216,6 +221,7 @@ const RESIDENT_ROOT_PIPELINE_PASSES: [ResidentRootPipelinePass; 8] = [
     ResidentRootPipelinePass {
         kind: ResidentRootPipelineKind::Lod,
         label: "quilting resident root LOD",
+        vertex_entry_point: quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT,
         fragment_entry_point: quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_LOD_ENTRY_POINT,
         geometry: RenderGeometry::Triangles,
         depth_write: true,
@@ -225,6 +231,7 @@ const RESIDENT_ROOT_PIPELINE_PASSES: [ResidentRootPipelinePass; 8] = [
     ResidentRootPipelinePass {
         kind: ResidentRootPipelineKind::Stretch,
         label: "quilting resident root stretch",
+        vertex_entry_point: quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT,
         fragment_entry_point: quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_STRETCH_ENTRY_POINT,
         geometry: RenderGeometry::Triangles,
         depth_write: true,
@@ -234,6 +241,7 @@ const RESIDENT_ROOT_PIPELINE_PASSES: [ResidentRootPipelinePass; 8] = [
     ResidentRootPipelinePass {
         kind: ResidentRootPipelineKind::Wire,
         label: "quilting resident root wire",
+        vertex_entry_point: quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_WIRE_VERTEX_ENTRY_POINT,
         fragment_entry_point: quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_WIRE_ENTRY_POINT,
         geometry: RenderGeometry::Lines,
         depth_write: true,
@@ -243,6 +251,7 @@ const RESIDENT_ROOT_PIPELINE_PASSES: [ResidentRootPipelinePass; 8] = [
     ResidentRootPipelinePass {
         kind: ResidentRootPipelineKind::Highlight,
         label: "quilting resident root highlight",
+        vertex_entry_point: quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT,
         fragment_entry_point: quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT,
         geometry: RenderGeometry::Triangles,
         depth_write: false,
@@ -315,10 +324,6 @@ pub fn resident_root_pipeline_descriptors(
             Vec::new(),
         )
     };
-    let vertex_shader = shader(
-        functional::ShaderStage::Vertex,
-        quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT,
-    )?;
     let vertex_buffer = position_vertex_buffer()?;
     let alpha_blend = alpha_blending();
     let mut descriptors = Vec::with_capacity(RESIDENT_ROOT_PIPELINE_PASSES.len() * 2);
@@ -341,7 +346,10 @@ pub fn resident_root_pipeline_descriptors(
             }
             descriptors.push(functional::RenderPipelineDescriptor::new(
                 functional::GraphicsProgramDescriptor::new(
-                    vertex_shader.clone(),
+                    shader(
+                        functional::ShaderStage::Vertex,
+                        pass.vertex_entry_point,
+                    )?,
                     Some(shader(
                         functional::ShaderStage::Fragment,
                         pass.fragment_entry_point,
@@ -400,6 +408,10 @@ mod resident_pipeline_descriptor_tests {
         assert_eq!(
             RESIDENT_ROOT_PIPELINE_PASSES[6].geometry,
             RenderGeometry::Lines,
+        );
+        assert_eq!(
+            RESIDENT_ROOT_PIPELINE_PASSES[6].vertex_entry_point,
+            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_WIRE_VERTEX_ENTRY_POINT,
         );
         assert!(!RESIDENT_ROOT_PIPELINE_PASSES[7].depth_write);
         assert_eq!(RESIDENT_ROOT_PIPELINE_PASSES.len() * 2, 16);
@@ -461,6 +473,10 @@ mod resident_pipeline_descriptor_tests {
         assert_eq!(
             descriptors[12].primitive().topology,
             functional::PrimitiveTopology::LineList,
+        );
+        assert_eq!(
+            descriptors[12].program().vertex().entry_point(),
+            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_WIRE_VERTEX_ENTRY_POINT,
         );
         assert!(descriptors[12].depth_stencil().unwrap().depth_write_enabled);
         assert!(!descriptors[14].depth_stencil().unwrap().depth_write_enabled);
@@ -956,6 +972,8 @@ impl LodClassifierDevice {
                 };
                 let expected_depth_write = depth_format.map(|_| pass.depth_write);
                 if fragment.entry_point() != pass.fragment_entry_point
+                    || descriptor.program().vertex().entry_point()
+                        != pass.vertex_entry_point
                     || descriptor.primitive().topology != pass.topology()
                     || descriptor.primitive().front_face != expected_front_face
                     || descriptor
@@ -995,9 +1013,7 @@ impl LodClassifierDevice {
                     layout: Some(pipeline_layout),
                     vertex: wgpu::VertexState {
                         module: &module,
-                        entry_point: Some(
-                            quilting_shaders::RESIDENT_ROOT_RENDER_DEVICE_VERTEX_ENTRY_POINT,
-                        ),
+                        entry_point: Some(pass.vertex_entry_point),
                         compilation_options: Default::default(),
                         buffers: &[wgpu::VertexBufferLayout {
                             array_stride: 12,

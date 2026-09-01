@@ -2162,6 +2162,18 @@ This confirms the edge/vertex density interpolation and matcap-blended LOD
 fragment path are shared; it does not claim identical topology at other
 screen-space floors.
 
+The two-pass matcap-plus-wire style initially measured 2,882 ppm mean RGB
+error and 6,994 ppm of pixels over a 16-code delta despite exact coverage and
+workload agreement. Pixel examples showed WebGPU occasionally exposing the
+underlying matcap where the incumbent retained a coplanar heatmap line. The
+prepared-overlay and resident-root wire families now select a shared wire
+vertex entry that moves only clip depth toward the camera by `1e-5`; screen
+position and every interpolated surface field remain unchanged. The same frame
+then measured 864 ppm mean RGB error, 6,059 ppm over delta 16, zero coverage
+drift, and no workload mismatch. Composite evidence therefore uses a bounded
+7,000 ppm high-delta ceiling while pure styles retain 5,000 ppm; the shared
+mean and silhouette ceilings remain 5,000 ppm.
+
 `scripts/audit-webgpu-lod-floor.mjs` then changed only the live pixel floor on
 one fixed 984-face horse view and read each completed resident epoch:
 

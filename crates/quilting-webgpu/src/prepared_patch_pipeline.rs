@@ -64,6 +64,7 @@ pub(crate) enum PreparedPatchPipelineKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PreparedPatchPipelinePass {
     pub(crate) kind: PreparedPatchPipelineKind,
+    pub(crate) vertex_entry_point: &'static str,
     pub(crate) fragment_entry_point: &'static str,
     pub(crate) geometry: RenderGeometry,
     pub(crate) depth_write: bool,
@@ -133,6 +134,11 @@ fn style_pass(
     };
     Ok(PreparedPatchPipelinePass {
         kind: PreparedPatchPipelineKind::Style(style),
+        vertex_entry_point: if style == RenderStyle::Wire {
+            quilting_shaders::PATCH_RENDER_DEVICE_WIRE_VERTEX_ENTRY_POINT
+        } else {
+            quilting_shaders::PATCH_RENDER_DEVICE_VERTEX_ENTRY_POINT
+        },
         fragment_entry_point,
         geometry,
         depth_write: true,
@@ -155,6 +161,7 @@ pub(crate) fn prepared_patch_pipeline_passes(
     if include_highlight {
         passes.push(PreparedPatchPipelinePass {
             kind: PreparedPatchPipelineKind::Highlight,
+            vertex_entry_point: quilting_shaders::PATCH_RENDER_DEVICE_VERTEX_ENTRY_POINT,
             fragment_entry_point: quilting_shaders::PATCH_RENDER_DEVICE_HIGHLIGHT_ENTRY_POINT,
             geometry: RenderGeometry::Triangles,
             depth_write: false,
@@ -238,10 +245,6 @@ pub fn prepared_patch_pipeline_descriptors(
             Vec::new(),
         )
     };
-    let vertex_shader = shader(
-        functional::ShaderStage::Vertex,
-        quilting_shaders::PATCH_RENDER_DEVICE_VERTEX_ENTRY_POINT,
-    )?;
     let vertex_buffer = position_vertex_buffer()?;
     let alpha_blend = alpha_blending();
     let focus = pbr_raw_field_format.is_some();
@@ -271,7 +274,10 @@ pub fn prepared_patch_pipeline_descriptors(
             }
             descriptors.push(functional::RenderPipelineDescriptor::new(
                 functional::GraphicsProgramDescriptor::new(
-                    vertex_shader.clone(),
+                    shader(
+                        functional::ShaderStage::Vertex,
+                        pass.vertex_entry_point,
+                    )?,
                     Some(shader(
                         functional::ShaderStage::Fragment,
                         pass.fragment_entry_point,
@@ -347,6 +353,10 @@ mod tests {
         );
         assert!(passes[0].uses_pbr());
         assert_eq!(passes[5].geometry, RenderGeometry::Lines);
+        assert_eq!(
+            passes[5].vertex_entry_point,
+            quilting_shaders::PATCH_RENDER_DEVICE_WIRE_VERTEX_ENTRY_POINT,
+        );
         assert_eq!(passes[5].descriptor_count(), 1);
         assert!(!passes[6].depth_write);
         assert_eq!(
@@ -415,6 +425,10 @@ mod tests {
         assert_eq!(
             wire[0].primitive().topology,
             functional::PrimitiveTopology::LineList,
+        );
+        assert_eq!(
+            wire[0].program().vertex().entry_point(),
+            quilting_shaders::PATCH_RENDER_DEVICE_WIRE_VERTEX_ENTRY_POINT,
         );
 
         let highlights = descriptors

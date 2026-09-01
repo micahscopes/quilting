@@ -4595,6 +4595,8 @@ impl LodClassifierDevice {
                         wgpu::FrontFace::Cw => functional::FrontFace::Clockwise,
                     };
                     if fragment.entry_point() != fragment_entry_point
+                        || descriptor.program().vertex().entry_point()
+                            != pass.vertex_entry_point
                         || descriptor.primitive().topology != expected_topology
                         || descriptor.primitive().front_face != expected_front_face
                     {
@@ -4631,9 +4633,7 @@ impl LodClassifierDevice {
                         layout: Some(&pipeline_layout),
                         vertex: wgpu::VertexState {
                             module: &module,
-                            entry_point: Some(
-                                quilting_shaders::PATCH_RENDER_DEVICE_VERTEX_ENTRY_POINT,
-                            ),
+                            entry_point: Some(pass.vertex_entry_point),
                             compilation_options: Default::default(),
                             buffers: &[wgpu::VertexBufferLayout {
                                 array_stride: 12,

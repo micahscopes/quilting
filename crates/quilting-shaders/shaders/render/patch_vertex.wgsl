@@ -48,6 +48,14 @@ struct PatchVertexOutput {
     @location(14) @interpolate(flat) node_id: f32,
 }
 
+fn pull_patch_wire_overlay_forward(output_value: PatchVertexOutput) -> PatchVertexOutput {
+    var output = output_value;
+    // Ten millionths of clip depth is enough to make coplanar composition
+    // deterministic without changing screen position or interpolated fields.
+    output.clip_pos.z -= 1.0e-5 * output.clip_pos.w;
+    return output;
+}
+
 fn patch_focus_raw_field(
     input: PatchVertexOutput,
     global: PatchRenderGlobal,

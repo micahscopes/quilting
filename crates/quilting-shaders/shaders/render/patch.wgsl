@@ -1,4 +1,4 @@
-#import quilting::render::patch_vertex::{PatchPbrMaterial, PatchRenderDomain, PatchRenderGlobal, PatchVertexOutput, evaluate_prepared_patch_vertex, patch_focus_raw_field, shade_patch_highlight, shade_patch_lod, shade_patch_matcap, shade_patch_normals, shade_patch_stretch, shade_patch_wire}
+#import quilting::render::patch_vertex::{PatchPbrMaterial, PatchRenderDomain, PatchRenderGlobal, PatchVertexOutput, evaluate_prepared_patch_vertex, patch_focus_raw_field, pull_patch_wire_overlay_forward, shade_patch_highlight, shade_patch_lod, shade_patch_matcap, shade_patch_normals, shade_patch_stretch, shade_patch_wire}
 #import quilting::render::patch_pbr::shade_textured_patch_pbr
 #import quilting::surface::patch_prepare::PreparedPatchRecord
 #import quilting::compute::visibility_compaction_types::CompactedBatchRangeRecord
@@ -26,10 +26,9 @@ struct PatchVertexInput {
     @location(0) bary: vec3<f32>,
 }
 
-@vertex
-fn render_patch_vertex(
+fn evaluate_patch_draw_vertex(
     input: PatchVertexInput,
-    @builtin(instance_index) local_instance: u32,
+    local_instance: u32,
 ) -> PatchVertexOutput {
     let range = compacted_ranges[draw_batch.batch_index];
     let compacted_index = range.compacted_first_instance + local_instance;
@@ -40,6 +39,26 @@ fn render_patch_vertex(
         input.bary,
         prepared_records[source_instance],
     );
+}
+
+@vertex
+fn render_patch_vertex(
+    input: PatchVertexInput,
+    @builtin(instance_index) local_instance: u32,
+) -> PatchVertexOutput {
+    return evaluate_patch_draw_vertex(input, local_instance);
+}
+
+@vertex
+fn render_patch_wire_vertex(
+    input: PatchVertexInput,
+    @builtin(instance_index) local_instance: u32,
+) -> PatchVertexOutput {
+    let output = evaluate_patch_draw_vertex(input, local_instance);
+    // Wire is also a semantic coplanar overlay after filled matcap. Pull it a
+    // tiny, deterministic amount toward the camera so visibility does not
+    // depend on line-versus-triangle depth interpolation details.
+    return pull_patch_wire_overlay_forward(output);
 }
 
 @fragment

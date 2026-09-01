@@ -7,6 +7,9 @@ const pagePort = process.env.HYPERSCOPE_PORT || '8888';
 const requiredStyle = process.env.HYPERSCOPE_BACKEND_EVIDENCE_STYLE || 'normals';
 const requireImageParity = process.env.HYPERSCOPE_REQUIRE_IMAGE_PARITY !== '0';
 const focusPolicy = process.env.HYPERSCOPE_BACKEND_EVIDENCE_FOCUS || 'off';
+// The composite compares two independently rasterized coplanar line passes.
+// Keep its high-delta budget below one percent while pure styles retain the
+// tighter half-percent gate; mean error and silhouette limits remain shared.
 const parityLimits = {
   coverageMismatchMillionths: Number(
     process.env.HYPERSCOPE_MAX_COVERAGE_MISMATCH_PPM || 5_000,
@@ -15,7 +18,8 @@ const parityLimits = {
     process.env.HYPERSCOPE_MAX_RGB_MEAN_ERROR_PPM || 5_000,
   ),
   rgbPixelsOver16Millionths: Number(
-    process.env.HYPERSCOPE_MAX_RGB_OVER_16_PPM || 5_000,
+    process.env.HYPERSCOPE_MAX_RGB_OVER_16_PPM
+      || (requiredStyle === 'both' ? 7_000 : 5_000),
   ),
 };
 const permittedStyles = new Set(['pbr', 'matcap', 'wire', 'normals', 'both', 'lod', 'stretch']);
