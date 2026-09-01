@@ -6,8 +6,8 @@ use hhhs::{DagSnapshot, Digest, ReachIndex};
 use hhhs_store::decode_storage_transaction_log;
 use hyperscape_hhhs::{
     decode_authored, encode_authored, AdapterError, DurableProject, MemoryDurability,
-    ProjectArchive, ProjectId, StateRow, MAX_AUTHORED_PAYLOAD_BYTES, MAX_PROJECT_ARCHIVE_RECORDS,
-    PAYLOAD_DOMAIN, PROJECT_ARCHIVE_DOMAIN,
+    ProjectArchive, ProjectId, ProjectionKey, StateRow, MAX_AUTHORED_PAYLOAD_BYTES,
+    MAX_PROJECT_ARCHIVE_RECORDS, PAYLOAD_DOMAIN, PROJECT_ARCHIVE_DOMAIN,
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId, MessageHeader,
@@ -212,6 +212,52 @@ fn persistence_failure_publishes_nothing() {
     assert_eq!(host.history_len(), 0);
     assert!(host.state().unwrap().entity_transforms.is_empty());
     assert_eq!(host.durability().bytes(), before_log);
+}
+
+#[test]
+fn authored_entry_and_local_checkpoint_commit_and_restart_atomically() {
+    let project = project(0x3003);
+    let entity = entity_id(0x3003);
+    let key = ProjectionKey::new("hyperscope/source-cursor", 1).unwrap();
+    let checkpoint_bytes = b"browser revision 41".to_vec();
+    let mut host = DurableProject::new(project).unwrap();
+    let before_log = host.durability().bytes().to_vec();
+    host.durability_mut().fail_next_persist();
+
+    let error = block_on(host.admit_with_projection_checkpoint(
+        &set(41, entity, 4.0),
+        key.clone(),
+        checkpoint_bytes.clone(),
+    ))
+    .unwrap_err();
+    assert!(matches!(error, AdapterError::Repair(_)));
+    assert_eq!(host.history_len(), 0);
+    assert!(host.projection_checkpoint(&key).is_none());
+    assert_eq!(host.durability().bytes(), before_log);
+
+    let record = block_on(host.admit_with_projection_checkpoint(
+        &set(41, entity, 4.0),
+        key.clone(),
+        checkpoint_bytes.clone(),
+    ))
+    .unwrap();
+    let live = host.projection_checkpoint(&key).unwrap();
+    let live_state = host.state().unwrap();
+    assert_eq!(live.bytes(), checkpoint_bytes);
+    assert_eq!(live.at.len(), 1);
+    assert!(live.at.contains(&record.entry_hash()));
+    assert_eq!(live.history_root.as_bytes(), &live_state.history_root);
+    assert!(live.is_intact());
+
+    let durable_bytes = host.durability().bytes().to_vec();
+    let restarted = DurableProject::recover(project, durable_bytes).unwrap();
+    assert_eq!(restarted.state().unwrap(), live_state);
+    assert_eq!(restarted.projection_checkpoint(&key), Some(live));
+
+    let portable = host.export_archive().unwrap();
+    let imported = block_on(DurableProject::import_archive(&portable)).unwrap();
+    assert_eq!(imported.state().unwrap(), live_state);
+    assert!(imported.projection_checkpoint(&key).is_none());
 }
 
 #[test]

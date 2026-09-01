@@ -20,6 +20,7 @@ use hhhs_store::{
     append_storage_transaction_log, decode_storage_transaction_log, empty_storage_transaction_log,
     history_root, MemoryStorage, ReplicaStorage, StorageError, StorageTransaction,
 };
+pub use hhhs_store::{ProjectionCheckpoint, ProjectionKey};
 use hhhs_sync::{Refusal, RepairHost};
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId, MessageHeader,
@@ -917,6 +918,15 @@ impl<D> DurableProject<D> {
         self.storage.snapshot().len()
     }
 
+    /// Read one receiver-local, rebuildable projection checkpoint.
+    ///
+    /// Checkpoints never enter public replica records, project archives, or
+    /// repair streams. They are local acceleration/source-cursor state tied to
+    /// an exact admitted history horizon.
+    pub fn projection_checkpoint(&self, key: &ProjectionKey) -> Option<ProjectionCheckpoint> {
+        self.host.replica().snapshot().checkpoint(key).cloned()
+    }
+
     /// Capture the complete authored history as a deterministic portable
     /// archive value. The live durability sink and local transaction framing
     /// are deliberately excluded.
@@ -1026,6 +1036,31 @@ where
     ) -> Result<ReplicaRecord, AdapterError> {
         let payload = encode_authored(self.project_id, envelope)?;
         let prepared = self.host.replica().prepare_open(payload)?;
+        let commit = self.host.commit_prepared(prepared).await?;
+        Ok(commit.replica_record().clone())
+    }
+
+    /// Persist one authored envelope and one receiver-local projection
+    /// checkpoint in the same HHHS storage transaction.
+    ///
+    /// The checkpoint is anchored by HHHS to the staged post-entry frontier
+    /// and history root. Neither the public entry nor the local checkpoint is
+    /// published when external durability fails. The checkpoint is excluded
+    /// from public [`ReplicaRecord`] values, project archives, and repair.
+    pub async fn admit_with_projection_checkpoint(
+        &mut self,
+        envelope: &AuthoredEnvelope,
+        key: ProjectionKey,
+        checkpoint_bytes: Vec<u8>,
+    ) -> Result<ReplicaRecord, AdapterError> {
+        let payload = encode_authored(self.project_id, envelope)?;
+        let prepared = self
+            .host
+            .replica()
+            .prepare_open_with(payload, move |view, local| {
+                local.save_checkpoint(view.checkpoint(key, checkpoint_bytes)?);
+                Ok(())
+            })?;
         let commit = self.host.commit_prepared(prepared).await?;
         Ok(commit.replica_record().clone())
     }
