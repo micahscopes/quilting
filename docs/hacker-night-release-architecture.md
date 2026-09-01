@@ -38,16 +38,18 @@ renderer, or resource authority.
 
 ### HHHS release boundary
 
-The exact HHHS `v0.4.4` dependency is pinned to its immutable release tag.
-HHHS now provides the browser journal/worker placement and local co-transaction
-attachment seams, but Hyperscope does not imitate or automatically adopt them
-inside its renderer. Camera, focus, selection, animation, cue time, asset jobs,
-and peer presence remain ephemeral application state. Explicit authored edits
-may enter the durable Replica adapter only after semantic validation and a
-whole-`AuthoredRevision` atomicity decision; the opt-in local Blender relay
-remains a disposable transport with no durability or repair claim. This keeps
-the renderer independent of HHHS release cadence while leaving one deliberate
-durable authored-state seam.
+The complete HHHS dependency graph is pinned to the gated `0.4.5` candidate
+`7575510b7f8d95588c39cc4d0f22bd77a1979760`, not the older immutable `0.4.4`
+tag. HHHS provides the browser journal/worker placement, local co-transaction,
+read-only reactive observation, and executable session-oracle seams, but
+Hyperscope does not imitate or automatically adopt them inside its renderer.
+Camera, focus, selection, animation, cue time, asset jobs, and peer presence
+remain ephemeral application state. Explicit authored edits may enter the
+durable Replica adapter only after semantic validation and a whole-
+`AuthoredRevision` atomicity decision. The opt-in Blender/browser carrier is
+still transport, while `hyperscope-hhhs::DurableAuthoredSession` is the sole
+durability authority. This keeps the renderer independent of HHHS release
+cadence while leaving one deliberate durable authored-state seam.
 
 ## Rust application migration status
 
@@ -282,6 +284,14 @@ The first application boundary is now explicit:
   fallback. Patch Lab installs the admitted atlas maximum before assigning its
   exponent controls, preventing the DOM's old maximum of seven from silently
   truncating an atlas-nine link.
+  Patch Lab now leaves Rust as one normalized `PatchLabSessionIntent`: periodic
+  phase, atlas clamping, min/max reconciliation, and the non-triangle manual-
+  edge fallback are no longer reconstructed from strings in the browser.
+  Presentation activation and its optional stable cue similarly leave Rust as
+  one typed packet. A cue without `presentation=1` is diagnostic instead of a
+  plausible-looking link that the non-presentation client silently ignores;
+  the unavoidable pre-WASM worker-allocation bit is checked against the typed
+  packet before presentation startup proceeds.
   Camera/conformal-transform state, SpaceMouse policy, and surface-walk policy
   additionally leave Rust as one typed `RouteNavigationSettings` value.
   Centiseconds and percentages become semantic seconds and fractions before

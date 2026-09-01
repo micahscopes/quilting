@@ -357,6 +357,15 @@ pub struct RouteAnimationClock {
     pub speed: Option<f64>,
 }
 
+/// Startup selection for the optional presentation client. The cue remains a
+/// stable authored UUID; resolving it against a loaded presentation is an
+/// application action rather than route parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoutePresentationSettings {
+    pub enabled: bool,
+    pub cue_id: Option<uuid::Uuid>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteTransformKind {
     Identity,
@@ -531,6 +540,7 @@ impl HyperscopeRoute {
         }
         route.validate_selection_pair();
         route.validate_patch_lab_atlas();
+        route.validate_presentation_cue();
         route
     }
 
@@ -579,6 +589,17 @@ impl HyperscopeRoute {
                     value: value.clone(),
                 });
             }
+        }
+    }
+
+    fn validate_presentation_cue(&mut self) {
+        let cue_present = self.values.get("cue").is_some_and(|value| !value.is_empty());
+        if cue_present && self.value("presentation") != Some("1") {
+            self.diagnostics.push(RouteDiagnostic {
+                code: RouteDiagnosticCode::InvalidValue,
+                key: "presentation".to_owned(),
+                value: self.value("presentation").unwrap_or_default().to_owned(),
+            });
         }
     }
 
@@ -796,6 +817,31 @@ impl HyperscopeRoute {
                 speed,
             }))
         }
+    }
+
+    /// Resolve optional presentation activation and its stable cue as one
+    /// typed startup packet. A cue without an enabled presentation is rejected
+    /// rather than surviving in a URL that silently ignores it.
+    pub fn presentation_settings(&self) -> Result<RoutePresentationSettings, &'static str> {
+        let enabled = match self.value("presentation") {
+            Some("0") => false,
+            Some("1") => true,
+            _ => return Err("route presentation enable value is invalid"),
+        };
+        let cue = self.value("cue").unwrap_or_default();
+        let cue_id = if cue.is_empty() {
+            None
+        } else {
+            let cue_id = uuid::Uuid::parse_str(cue)
+                .ok()
+                .filter(|cue_id| !cue_id.is_nil())
+                .ok_or("route presentation cue is invalid")?;
+            if !enabled {
+                return Err("route presentation cue requires presentation mode");
+            }
+            Some(cue_id)
+        };
+        Ok(RoutePresentationSettings { enabled, cue_id })
     }
 
     /// Resolve the complete educational Patch Lab session carried by a URL.
@@ -1741,6 +1787,13 @@ mod tests {
         let absent = HyperscopeRoute::from_pairs([("cue", "")]);
         assert!(absent.canonical_pairs().is_empty());
         assert!(absent.diagnostics().is_empty());
+        assert_eq!(
+            absent.presentation_settings().unwrap(),
+            RoutePresentationSettings {
+                enabled: false,
+                cue_id: None,
+            },
+        );
 
         let cue = "e0000000-0000-4000-8000-000000000004";
         let linked = HyperscopeRoute::from_pairs([("presentation", "1"), ("cue", cue)]);
@@ -1749,14 +1802,26 @@ mod tests {
             vec![("presentation", "1"), ("cue", cue)]
         );
         assert!(linked.diagnostics().is_empty());
+        assert_eq!(
+            linked.presentation_settings().unwrap(),
+            RoutePresentationSettings {
+                enabled: true,
+                cue_id: Some(uuid::Uuid::parse_str(cue).unwrap()),
+            },
+        );
+
+        let disabled_cue = HyperscopeRoute::from_pairs([("cue", cue)]);
+        assert_eq!(disabled_cue.diagnostics().len(), 1);
+        assert_eq!(disabled_cue.diagnostics()[0].key, "presentation");
+        assert!(disabled_cue.presentation_settings().is_err());
 
         for invalid in ["not-a-uuid", "00000000-0000-0000-0000-000000000000"] {
             let route = HyperscopeRoute::from_pairs([("cue", invalid)]);
-            assert_eq!(route.diagnostics().len(), 1);
-            assert_eq!(
-                route.diagnostics()[0].code,
-                RouteDiagnosticCode::InvalidValue
-            );
+            assert!(route
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code == RouteDiagnosticCode::InvalidValue));
+            assert!(route.presentation_settings().is_err());
         }
     }
 }

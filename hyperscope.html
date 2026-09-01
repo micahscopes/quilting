@@ -4393,8 +4393,10 @@ async function initializeRustPresentation() {
     globalThis.__hyperscopePresentationJump = cueId => activateRustPresentation('jump', cueId);
     if (!ensureRustPresentationView()) $('presentation-card').classList.add('active');
     rustPresentationDiagnostics.ready = true;
-    const snapshot = initParams.cue
-      ? activateRustPresentation('jump', initParams.cue)
+    const routeCueId = initRustRouteAdmitted
+      ? initPresentationSettings?.cueId : initParams.cue;
+    const snapshot = routeCueId
+      ? activateRustPresentation('jump', routeCueId)
       : activateRustPresentation('start');
     if (!snapshot) {
       throw new Error(rustPresentationDiagnostics.error || 'presentation cue activation failed');
@@ -15028,6 +15030,7 @@ let initRouteSelection = null;
 let initRouteAnimationClock = null;
 let initNavigationSettings = null;
 let initPatchLabSession = null;
+let initPresentationSettings = null;
 currentGlb = initParams.glb;
 let initialPatchLabShape = patchLabShape(initParams.lab);
 // Set camera early (not WASM-dependent)
@@ -15075,7 +15078,8 @@ phase('wasm', [], async () => {
           && startupRoute.diagnostics.length === 0
           && startupRoute.renderSettings
           && startupRoute.navigationSettings
-          && startupRoute.patchLabSession) {
+          && startupRoute.patchLabSession
+          && startupRoute.presentationSettings) {
         initParams = readParams(
           new URLSearchParams(startupRoute.resolvedPairs),
           new URLSearchParams(startupRoute.pairs),
@@ -15086,6 +15090,10 @@ phase('wasm', [], async () => {
         initRouteAnimationClock = startupRoute.animationClock ?? null;
         initNavigationSettings = startupRoute.navigationSettings;
         initPatchLabSession = startupRoute.patchLabSession;
+        initPresentationSettings = startupRoute.presentationSettings;
+        if (initPresentationSettings.enabled !== RUST_PRESENTATION_ENABLED) {
+          throw new Error('Rust presentation route disagrees with the pre-WASM bootstrap');
+        }
         currentGlb = initParams.glb;
         initialPatchLabShape = initPatchLabSession.active
           ? initPatchLabSession.controls.shape : null;

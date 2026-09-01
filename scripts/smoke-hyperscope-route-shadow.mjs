@@ -1563,9 +1563,18 @@ assert.deepEqual(linkedCue.pairs, [
 ]);
 assert.deepEqual(linkedCue.diagnostics, []);
 assert.deepEqual(
-  canonicalizeHyperscopeRoute([['cue', 'not-a-uuid']]).diagnostics
+  canonicalizeHyperscopeRoute([
+    ['presentation', '1'],
+    ['cue', 'not-a-uuid'],
+  ]).diagnostics
     .map(diagnostic => diagnostic.code),
   ['invalid_value'],
+);
+assert.deepEqual(
+  canonicalizeHyperscopeRoute([['cue', cue]]).diagnostics
+    .map(diagnostic => [diagnostic.code, diagnostic.key]),
+  [['invalid_value', 'presentation']],
+  'a cue cannot remain armed in a URL that disables presentation mode',
 );
 
 console.log(JSON.stringify({

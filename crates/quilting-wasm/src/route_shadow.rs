@@ -12,6 +12,7 @@ struct RouteShadowResult {
     render_settings: Option<RouteRenderSettings>,
     navigation_settings: Option<RouteNavigationSettings>,
     patch_lab_session: Option<RoutePatchLabSession>,
+    presentation_settings: Option<RoutePresentationSettings>,
     #[serde(skip_serializing_if = "Option::is_none")]
     selection: Option<RouteSelection>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -77,6 +78,14 @@ struct RouteAnimationClock {
 struct RoutePatchLabSession {
     active: bool,
     controls: RoutePatchLabControls,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RoutePresentationSettings {
+    enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cue_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -232,6 +241,14 @@ pub fn canonicalize_hyperscope_route(pairs: JsValue) -> Result<JsValue, JsValue>
             active: session.active,
             controls: session.controls.into(),
         });
+    let presentation_settings =
+        route
+            .presentation_settings()
+            .ok()
+            .map(|settings| RoutePresentationSettings {
+                enabled: settings.enabled,
+                cue_id: settings.cue_id.map(|cue_id| cue_id.to_string()),
+            });
     let navigation_settings =
         route
             .navigation_settings()
@@ -285,6 +302,7 @@ pub fn canonicalize_hyperscope_route(pairs: JsValue) -> Result<JsValue, JsValue>
         render_settings,
         navigation_settings,
         patch_lab_session,
+        presentation_settings,
         selection,
         animation_clock,
     })
