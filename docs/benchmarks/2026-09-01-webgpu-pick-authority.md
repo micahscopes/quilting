@@ -44,13 +44,24 @@ adapter-rejected results explicitly discard the token. If activation or view
 projection fails, the existing direct Rust focus-anchor path remains the
 measured rollback.
 
+Deselecting now uses the symmetric Rust transaction. `ClearPointer` resets
+hover and pressed state while `DetachFocus` removes selection ownership; the
+AppStore stages both against a cloned state and integrates them at one current
+virtual-frame boundary. Observers therefore cannot see detached focus with an
+old activatable hover. The live sphere, focus enablement, inversion, and chart
+are preserved. The former `detachFocus` plus zero-tick adapter remains available
+when running against stale generated bindings.
+
 ## Static and CPU evidence
 
-- 19 `hyperscape::interaction` tests pass, including newest-request,
+- 20 `hyperscape::interaction` tests pass, including newest-request,
   target-epoch, resolve-before-accept, bounded token, single-use, wrong-request,
-  stale-token, and atomic activation behavior.
+  stale-token, atomic activation, and pointer-clear behavior.
 - The `hyperscope-app` exact-pick test proves one semantic input produces one
   interaction activation and one routed navigation anchor after one frame.
+- The AppStore selection-clear test proves pointer state and focus ownership
+  clear coherently while sphere geometry, focus enablement, inversion, and
+  reflection remain unchanged.
 - `quilting-wasm` checks for `wasm32-unknown-unknown` with
   `leptos-ui,webgpu-backend`.
 - 32 `hyperscope-app` route/settings tests pass.

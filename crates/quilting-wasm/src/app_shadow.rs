@@ -1663,6 +1663,25 @@ impl HyperscopeAppShadow {
         self.dispatch_navigation(NavigationAction::DetachFocus)
     }
 
+    /// Clear pointer hover/press and detach selected focus in one AppStore
+    /// transaction integrated at the current virtual frame time. The sphere,
+    /// focus enablement, and inversion remain unchanged.
+    #[wasm_bindgen(js_name = clearSelection)]
+    pub fn clear_selection(&self) -> Result<JsValue, JsValue> {
+        let mut activation = self
+            .backend_pick_activation
+            .try_borrow_mut()
+            .map_err(|_| js_error("backend pick activation is already borrowed"))?;
+        let dispatch = self.store.dispatch_selection_clear().map_err(js_error)?;
+        activation.clear();
+        drop(activation);
+        self.retain_quiet_frame_effects(dispatch.commit)?;
+        navigation_to_js(
+            self.store.frame_snapshot(),
+            self.store.navigation_diagnostics_snapshot(),
+        )
+    }
+
     #[wasm_bindgen(js_name = translateFocus)]
     pub fn translate_focus(&self, delta: &[f64]) -> Result<u64, JsValue> {
         self.dispatch_navigation(NavigationAction::TranslateFocus(vector3(

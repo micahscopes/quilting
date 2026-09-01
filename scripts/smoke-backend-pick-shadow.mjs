@@ -75,6 +75,8 @@ for (const required of [
   '#[wasm_bindgen(js_name = activateBackendPick)]',
   'InteractionAction::ActivatePrimary(hit)',
   '#[wasm_bindgen(js_name = discardBackendPickActivation)]',
+  '#[wasm_bindgen(js_name = clearSelection)]',
+  'self.store.dispatch_selection_clear()',
   '.accept(request)',
 ]) {
   assert.ok(appShadow.includes(required), `AppShadow pick authority is missing ${required}`);
@@ -145,6 +147,9 @@ for (const required of [
   'function activateSelectedObjectBackendPick(requestId, nowMs = performance.now())',
   'const navigation = rustAppShadow.activateBackendPick(requestId);',
   '? activateSelectedObjectBackendPick(backendActivationRequestId, selectedAtMs)',
+  "typeof rustAppShadow.clearSelection === 'function'",
+  'navigation = rustAppShadow.clearSelection();',
+  'interaction?.hovered != null',
   'mr_pickSurface(pickMvp, pickView, pickCameraPos, x, y)',
   'if (pick.ignored) return;',
 ]) {

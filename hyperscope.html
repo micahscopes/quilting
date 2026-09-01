@@ -4569,6 +4569,8 @@ const rustInteractionDiagnostics = {
   authorityActivations: 0,
   authorityActivationErrors: 0,
   authorityActivationFallbacks: 0,
+  authorityClears: 0,
+  authorityClearMismatches: 0,
   exactSurfacePicks: 0,
   entityOnlyPicks: 0,
   targetReplacements: 0,
@@ -8424,8 +8426,25 @@ function detachAppSelectionShadow(reason) {
     return false;
   }
   try {
-    rustAppShadow.detachFocus();
-    const navigation = rustAppShadow.tickNavigation(0);
+    let navigation;
+    if (typeof rustAppShadow.clearSelection === 'function') {
+      navigation = rustAppShadow.clearSelection();
+      const interaction = rustAppShadow.interactionSnapshot();
+      rustInteractionDiagnostics.authorityClears += 1;
+      rustInteractionDiagnostics.lastSnapshot = interaction;
+      if (interaction?.hovered != null
+          || interaction?.active != null
+          || interaction?.selected != null) {
+        rustInteractionDiagnostics.authorityClearMismatches += 1;
+        recordAppShadowMismatch(
+          'interaction_clear',
+          `Rust interaction state remained selected after ${reason}`,
+        );
+      }
+    } else {
+      rustAppShadow.detachFocus();
+      navigation = rustAppShadow.tickNavigation(0);
+    }
     rustAppShadowDiagnostics.selectionDetaches += 1;
     if (navigation.selected_focus != null) {
       rustAppShadowDiagnostics.selectionMismatches += 1;
