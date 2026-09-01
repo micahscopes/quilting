@@ -8,6 +8,8 @@ bounded echo suppression for locally originated authored messages.
 
 from __future__ import annotations
 
+import base64
+import binascii
 from collections import deque
 import json
 import math
@@ -20,6 +22,9 @@ PROTOCOL_VERSION = {"major": 0, "minor": 1}
 MAX_PRESENCE_TTL_MILLIS = 60_000
 MAX_AUTHORING_LEASES_PER_PRESENCE = 256
 MAX_U64 = (1 << 64) - 1
+AUTHORED_RECORD_FRAME_LANE = "authored_record"
+AUTHORED_RECORD_FRAME_VERSION = {"major": 0, "minor": 1}
+MAX_REPLICA_RECORD_BYTES = 65 * 1024 * 1024
 
 
 class HyperscapeProtocolError(ValueError):
@@ -237,7 +242,7 @@ def validate_presence_envelope(envelope: Any) -> None:
 
 
 def validate_local_peer_frame(frame: Any) -> None:
-    """Validate the transport wrapper without collapsing its two lanes."""
+    """Validate the transport wrapper without collapsing its three lanes."""
 
     if not isinstance(frame, Mapping):
         raise HyperscapeProtocolError("local peer frame must be an object")
@@ -246,13 +251,61 @@ def validate_local_peer_frame(frame: Any) -> None:
         validate_authored_envelope(frame.get("envelope"))
     elif lane == "presence":
         validate_presence_envelope(frame.get("envelope"))
+    elif lane == AUTHORED_RECORD_FRAME_LANE:
+        validate_authored_record_frame(frame)
     else:
         raise HyperscapeProtocolError(f"unknown local peer lane {lane!r}")
+
+
+def validate_authored_record_frame(frame: Any) -> None:
+    """Validate opaque HHHS framing; Rust still owns record admission."""
+
+    if not isinstance(frame, Mapping):
+        raise HyperscapeProtocolError("authored record frame must be an object")
+    if set(frame) != {"lane", "version", "project_id", "record_base64"}:
+        raise HyperscapeProtocolError("authored record frame fields are not canonical")
+    if frame.get("lane") != AUTHORED_RECORD_FRAME_LANE:
+        raise HyperscapeProtocolError("authored record frame lane is unsupported")
+    if frame.get("version") != AUTHORED_RECORD_FRAME_VERSION:
+        raise HyperscapeProtocolError("authored record frame version is unsupported")
+    _uuid(frame.get("project_id"), "authored record project ID")
+    encoded = frame.get("record_base64")
+    if not isinstance(encoded, str) or not encoded or "=" in encoded:
+        raise HyperscapeProtocolError(
+            "authored record must use nonempty unpadded base64url"
+        )
+    try:
+        padding = "=" * ((4 - len(encoded) % 4) % 4)
+        record = base64.b64decode(
+            encoded + padding,
+            altchars=b"-_",
+            validate=True,
+        )
+    except (ValueError, binascii.Error) as error:
+        raise HyperscapeProtocolError("authored record base64url is invalid") from error
+    canonical = base64.urlsafe_b64encode(record).decode("ascii").rstrip("=")
+    if canonical != encoded:
+        raise HyperscapeProtocolError("authored record base64url is not canonical")
+    if len(record) > MAX_REPLICA_RECORD_BYTES:
+        raise HyperscapeProtocolError("authored record exceeds the HHHS wire limit")
 
 
 def local_peer_frame(lane: str, envelope: Mapping[str, Any]) -> dict[str, Any]:
     frame = {"lane": lane, "envelope": envelope}
     validate_local_peer_frame(frame)
+    return frame
+
+
+def authored_record_frame(
+    *, project_id: str, record_base64: str
+) -> dict[str, Any]:
+    frame = {
+        "lane": AUTHORED_RECORD_FRAME_LANE,
+        "version": dict(AUTHORED_RECORD_FRAME_VERSION),
+        "project_id": _uuid(project_id, "authored record project ID"),
+        "record_base64": record_base64,
+    }
+    validate_authored_record_frame(frame)
     return frame
 
 

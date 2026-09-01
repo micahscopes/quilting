@@ -263,6 +263,11 @@ class BlenderLiveSync:
         for delivery in self._transport.drain():
             frame = delivery.frame
             lane = frame["lane"]
+            if lane == protocol.AUTHORED_RECORD_FRAME_LANE:
+                # This direct Blender adapter has no HHHS replica. The relay
+                # cursor still advances, while Rust/browser replicas consume
+                # the already-authorized record through their durable lane.
+                continue
             envelope = frame["envelope"]
             if lane == "presence":
                 self._presence.admit(envelope, now_seconds)

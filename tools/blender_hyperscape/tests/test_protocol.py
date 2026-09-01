@@ -156,6 +156,35 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(protocol.HyperscapeProtocolError, "lane"):
             protocol.local_peer_frame("durable_presence", presence)
 
+    def test_authored_record_frames_are_opaque_canonical_and_separate(self) -> None:
+        project_id = "30000000-0000-4000-8000-000000000001"
+        frame = protocol.authored_record_frame(
+            project_id=project_id,
+            record_base64="AP8Q",
+        )
+        self.assertEqual(
+            frame,
+            {
+                "lane": "authored_record",
+                "version": {"major": 0, "minor": 1},
+                "project_id": project_id,
+                "record_base64": "AP8Q",
+            },
+        )
+        protocol.validate_local_peer_frame(frame)
+
+        padded = dict(frame, record_base64="AP8Q=")
+        with self.assertRaisesRegex(protocol.HyperscapeProtocolError, "unpadded"):
+            protocol.validate_local_peer_frame(padded)
+
+        extra = dict(frame, authority=True)
+        with self.assertRaisesRegex(protocol.HyperscapeProtocolError, "fields"):
+            protocol.validate_local_peer_frame(extra)
+
+        wrong_version = dict(frame, version={"major": 0, "minor": 2})
+        with self.assertRaisesRegex(protocol.HyperscapeProtocolError, "version"):
+            protocol.validate_local_peer_frame(wrong_version)
+
     def test_presence_constructor_matches_the_checked_in_rust_fixture(self) -> None:
         _, fixture = self.fixture("presence-camera-v0.1.json")
         constructed = protocol.presence_envelope(
