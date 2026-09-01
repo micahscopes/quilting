@@ -29,6 +29,7 @@ use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId, MessageHeader,
     ProtocolVersion, WireTransform, CURRENT_PROTOCOL_VERSION,
 };
+pub use hyperscape_protocol::ProjectId;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -63,28 +64,6 @@ const ARCHIVE_CHECKSUM_BYTES: usize = 32;
 const ARCHIVE_FIXED_BODY_BYTES: usize = 4 + 16 + 8 + 32 + 32;
 const MIN_PROJECT_ARCHIVE_BYTES: usize =
     PROJECT_ARCHIVE_DOMAIN.len() + ARCHIVE_FIXED_BODY_BYTES + ARCHIVE_CHECKSUM_BYTES;
-
-/// Stable identity of one replicated Hyperscape project.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ProjectId(Uuid);
-
-impl ProjectId {
-    pub fn new(value: Uuid) -> Result<Self, AdapterError> {
-        if value.is_nil() {
-            Err(AdapterError::NilProjectId)
-        } else {
-            Ok(Self(value))
-        }
-    }
-
-    pub fn from_u128(value: u128) -> Result<Self, AdapterError> {
-        Self::new(Uuid::from_u128(value))
-    }
-
-    pub fn as_uuid(self) -> Uuid {
-        self.0
-    }
-}
 
 /// Transport-neutral announcement of one already-authorized HHHS record.
 ///
@@ -157,7 +136,8 @@ impl AuthoredRecordFrame {
         if wire.version != AUTHORED_RECORD_FRAME_VERSION {
             return Err(RecordFrameError::WrongVersion(wire.version));
         }
-        let project_id = ProjectId::new(wire.project_id)?;
+        let project_id = ProjectId::new(wire.project_id)
+            .map_err(|_| RecordFrameError::Adapter(AdapterError::NilProjectId))?;
         let bytes = URL_SAFE_NO_PAD
             .decode(wire.record_base64.as_bytes())
             .map_err(|_| RecordFrameError::InvalidBase64)?;
@@ -532,7 +512,8 @@ impl ProjectArchive {
         if version != PROJECT_ARCHIVE_VERSION {
             return Err(AdapterError::WrongArchiveVersion(version));
         }
-        let project_id = ProjectId::new(Uuid::from_bytes(reader.array::<16>()?))?;
+        let project_id = ProjectId::new(Uuid::from_bytes(reader.array::<16>()?))
+            .map_err(|_| AdapterError::NilProjectId)?;
         let record_count =
             usize::try_from(reader.u64()?).map_err(|_| AdapterError::TooManyArchiveRecords {
                 actual: usize::MAX,
@@ -1024,6 +1005,9 @@ impl<D> DurableProject<D> {
         durability: D,
         transactions: Vec<StorageTransaction>,
     ) -> Result<Self, AdapterError> {
+        project_id
+            .validate()
+            .map_err(|_| AdapterError::NilProjectId)?;
         let storage = Arc::new(MemoryStorage::new());
         for transaction in transactions {
             for entry in transaction.entries() {

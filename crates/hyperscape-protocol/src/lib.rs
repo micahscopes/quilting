@@ -72,6 +72,7 @@ macro_rules! stable_id {
 
 stable_id!(MessageId, "message");
 stable_id!(PeerId, "peer");
+stable_id!(ProjectId, "project");
 stable_id!(RequestId, "request");
 stable_id!(AssetId, "asset");
 stable_id!(EntityId, "entity");
@@ -624,6 +625,17 @@ mod tests {
         let mut envelope = envelope;
         envelope.header.version = CURRENT_PROTOCOL_VERSION;
         assert_eq!(envelope.validate(), Err(WireError::NilId("message")));
+    }
+
+    #[test]
+    fn replicated_project_identity_uses_the_shared_stable_id_contract() {
+        let project = ProjectId::from_u128(0x5050).unwrap();
+        let encoded = serde_json::to_string(&project).unwrap();
+        assert_eq!(serde_json::from_str::<ProjectId>(&encoded).unwrap(), project);
+        assert_eq!(project.to_string(), project.as_uuid().to_string());
+
+        let nil: ProjectId = serde_json::from_str(&format!("\"{}\"", Uuid::nil())).unwrap();
+        assert_eq!(nil.validate(), Err(WireError::NilId("project")));
     }
 
     #[test]

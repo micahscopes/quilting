@@ -318,8 +318,11 @@ impl AuthoredShadowCheckpoint {
         if (major, minor) != AUTHORED_SHADOW_CHECKPOINT_VERSION {
             return Err(AuthoredShadowInitError::WrongCheckpointVersion { major, minor });
         }
-        let project_id =
-            ProjectId::from_u128(u128::from_be_bytes(checkpoint_array(bytes, &mut cursor)?))?;
+        let project_id = ProjectId::from_u128(u128::from_be_bytes(checkpoint_array(
+            bytes,
+            &mut cursor,
+        )?))
+        .map_err(|_| AuthoredShadowInitError::MalformedCheckpoint)?;
         let has_revision = checkpoint_array::<1>(bytes, &mut cursor)?[0];
         let raw_revision = u64::from_le_bytes(checkpoint_array(bytes, &mut cursor)?);
         let projection_revision = match (has_revision, raw_revision) {
