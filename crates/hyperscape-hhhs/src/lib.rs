@@ -10,7 +10,7 @@
 use bincode::Options;
 use futures::Stream;
 use futures_signals::signal_vec::SignalVec;
-use hhhs::{DagRead, DagSnapshot, Digest, EntryHash, LazyReach, Position, Reach};
+use hhhs::{DagRead, DagSnapshot, Digest, EntryHash, LazyReach, Position, Reach, SlicedDag};
 use hhhs_reactive::{signal_vec_view, stream_view, Revision};
 use hhhs_replica::{
     AdmissionPolicy, AdmittedAuthority, AsyncTransactionSink, AuthorityInput, DurableReplicaHost,
@@ -940,6 +940,25 @@ impl<D> DurableProject<D> {
     /// an exact admitted history horizon.
     pub fn projection_checkpoint(&self, key: &ProjectionKey) -> Option<ProjectionCheckpoint> {
         self.host.replica().snapshot().checkpoint(key).cloned()
+    }
+
+    /// Return whether a receiver-local checkpoint is intact and anchors an
+    /// exact prefix of this project's current canonical history.
+    ///
+    /// A checkpoint at the current horizon is also a valid prefix. This does
+    /// not interpret the checkpoint bytes; it only proves their history
+    /// attachment before an application-specific import lifecycle advances
+    /// them.
+    pub fn projection_checkpoint_matches_history_prefix(
+        &self,
+        checkpoint: &ProjectionCheckpoint,
+    ) -> bool {
+        if !checkpoint.is_intact() {
+            return false;
+        }
+        let history = self.storage.snapshot();
+        SlicedDag::new(&history, &checkpoint.at)
+            .is_ok_and(|prefix| history_root(&prefix) == checkpoint.history_root)
     }
 
     /// Capture the complete authored history as a deterministic portable

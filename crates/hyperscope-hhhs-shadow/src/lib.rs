@@ -555,6 +555,8 @@ pub enum DurableAuthoredSessionInitError {
     Coordinator(#[from] DurableAuthoredInitError),
     #[error(transparent)]
     Peer(#[from] LocalPeerIngressError),
+    #[error("durable authored source cursor revision overflow during archive adoption")]
+    ProjectionRevisionOverflow,
 }
 
 /// One-envelope HHHS-authoritative ingress with an AppStore projection.
@@ -662,6 +664,68 @@ impl<D> DurableAuthoredSession<D>
 where
     D: AsyncTransactionSink,
 {
+    /// Adopt a project produced by an explicit portable-archive import.
+    ///
+    /// Portable archives intentionally omit receiver-local projection state.
+    /// A fresh non-empty import starts its local cursor at revision zero. If
+    /// importing extended a locally durable history, its prior cursor must
+    /// prove an exact history prefix and advances once. An already-current
+    /// cursor is an exact zero-write retry. Ordinary restart should continue
+    /// to use [`Self::from_project`], which never repairs cursor state.
+    pub async fn from_imported_project(
+        project: DurableProject<D>,
+    ) -> Result<Self, DurableAuthoredSessionInitError> {
+        Self::from_imported_project_with_message_capacity(
+            project,
+            DEFAULT_LOCAL_PEER_MESSAGE_MEMORY,
+        )
+        .await
+    }
+
+    pub async fn from_imported_project_with_message_capacity(
+        mut project: DurableProject<D>,
+        message_capacity: usize,
+    ) -> Result<Self, DurableAuthoredSessionInitError> {
+        let state = project.state()?;
+        let checkpoint = project.projection_checkpoint(&durable_authored_cursor_key());
+        let adopted_revision = match (project.history_len(), checkpoint) {
+            (0, None) => None,
+            (0, Some(_)) => return Err(DurableAuthoredInitError::UnexpectedCursor.into()),
+            (_, None) => Some(0),
+            (_, Some(checkpoint)) => {
+                if !checkpoint.is_intact() {
+                    return Err(DurableAuthoredInitError::CorruptCursor.into());
+                }
+                let bytes: [u8; 8] = checkpoint
+                    .bytes()
+                    .try_into()
+                    .map_err(|_| DurableAuthoredInitError::MalformedCursor)?;
+                if checkpoint.history_root.as_bytes() == &state.history_root {
+                    None
+                } else {
+                    if !project.projection_checkpoint_matches_history_prefix(&checkpoint) {
+                        return Err(DurableAuthoredInitError::CursorHistoryRoot.into());
+                    }
+                    Some(
+                        u64::from_le_bytes(bytes)
+                            .checked_add(1)
+                            .ok_or(DurableAuthoredSessionInitError::ProjectionRevisionOverflow)?,
+                    )
+                }
+            }
+        };
+
+        if let Some(revision) = adopted_revision {
+            project
+                .persist_projection_checkpoint(
+                    durable_authored_cursor_key(),
+                    revision.to_le_bytes().to_vec(),
+                )
+                .await?;
+        }
+        Self::from_project_with_message_capacity(project, message_capacity)
+    }
+
     /// Admit an authored or remote-presence peer envelope through the paired
     /// restart-safe ingress. A locally originated authored envelope should
     /// pass through this method before transport; its relay echo is then an

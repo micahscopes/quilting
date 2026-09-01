@@ -15,8 +15,9 @@ use hyperscope_app::{
 use hyperscope_hhhs_shadow::{
     AuthoredHhhsShadow, AuthoredShadowCheckpoint, AuthoredShadowError, AuthoredShadowInitError,
     AuthoredShadowObservation, DurableAuthoredCoordinator, DurableAuthoredDispatchError,
-    DurableAuthoredObservation, DurableAuthoredRestoreError, DurableAuthoredSession,
-    DurableLocalPeerError, AUTHORED_SHADOW_CHECKPOINT_DOMAIN,
+    DurableAuthoredInitError, DurableAuthoredObservation, DurableAuthoredRestoreError,
+    DurableAuthoredSession, DurableAuthoredSessionInitError, DurableLocalPeerError,
+    AUTHORED_SHADOW_CHECKPOINT_DOMAIN,
 };
 
 fn project(value: u128) -> ProjectId {
@@ -563,6 +564,89 @@ fn durable_session_restart_rejects_replayed_peer_history_without_writes() {
         recovered_store.authored_scene_snapshot().projection_revision,
         Some(1)
     );
+}
+
+#[test]
+fn explicit_archive_adoption_bootstraps_a_fresh_local_cursor_once() {
+    let project_id = project(0x2412);
+    let first = asset(1, 0xa);
+    let mut source = DurableProject::new(project_id).unwrap();
+    block_on(source.admit(&first)).unwrap();
+    let archive = source.export_archive().unwrap();
+    let imported = block_on(DurableProject::import_archive(&archive)).unwrap();
+    assert!(matches!(
+        DurableAuthoredSession::from_project(imported),
+        Err(DurableAuthoredSessionInitError::Coordinator(
+            DurableAuthoredInitError::MissingCursor
+        ))
+    ));
+
+    let imported = block_on(DurableProject::import_archive(&archive)).unwrap();
+    let mut adopted = block_on(DurableAuthoredSession::from_imported_project(imported)).unwrap();
+    assert_eq!(adopted.observed_projection_revision(), Some(0));
+    assert_eq!(adopted.history_len(), 1);
+    let store = AppStore::default();
+    adopted.restore_store(&store).unwrap().unwrap();
+    assert_eq!(store.authored_scene_snapshot().projection_revision, Some(0));
+
+    let adopted_bytes = adopted.durability().bytes().to_vec();
+    let recovered_project = DurableProject::recover(project_id, adopted_bytes.clone()).unwrap();
+    let retried = block_on(DurableAuthoredSession::from_imported_project(
+        recovered_project,
+    ))
+    .unwrap();
+    assert_eq!(retried.observed_projection_revision(), Some(0));
+    assert_eq!(retried.durability().bytes(), adopted_bytes);
+
+    let next = block_on(adopted.accept_local_peer(
+        &store,
+        LocalPeerEnvelope::Authored(asset(2, 0xb)),
+        2.0,
+    ))
+    .unwrap();
+    assert_eq!(next.peer.projection_revision, Some(1));
+    assert_eq!(adopted.history_len(), 2);
+}
+
+#[test]
+fn archive_extension_advances_a_valid_local_prefix_cursor_once() {
+    let project_id = project(0x2413);
+    let first = asset(1, 0xa);
+    let second = asset(2, 0xb);
+    let local_store = AppStore::default();
+    let mut local = DurableAuthoredSession::new(project_id).unwrap();
+    block_on(local.accept_local_peer(
+        &local_store,
+        LocalPeerEnvelope::Authored(first.clone()),
+        1.0,
+    ))
+    .unwrap();
+    let local_bytes = local.durability().bytes().to_vec();
+
+    let mut archive_source = DurableProject::new(project_id).unwrap();
+    block_on(archive_source.admit(&first)).unwrap();
+    block_on(archive_source.admit(&second)).unwrap();
+    let archive = archive_source.project_archive().unwrap();
+
+    let mut extended = DurableProject::recover(project_id, local_bytes).unwrap();
+    block_on(extended.apply_archive(&archive)).unwrap();
+    let before_adoption_bytes = extended.durability().bytes().to_vec();
+    let mut adopted = block_on(DurableAuthoredSession::from_imported_project(extended)).unwrap();
+    assert_eq!(adopted.observed_projection_revision(), Some(1));
+    assert_eq!(adopted.history_len(), 2);
+    assert_ne!(adopted.durability().bytes(), before_adoption_bytes);
+
+    let store = AppStore::default();
+    adopted.restore_store(&store).unwrap().unwrap();
+    assert_eq!(store.authored_scene_snapshot().projection_revision, Some(1));
+    assert_eq!(store.authored_scene_snapshot().assets.len(), 2);
+    let next = block_on(adopted.accept_local_peer(
+        &store,
+        LocalPeerEnvelope::Authored(asset(3, 0xc)),
+        3.0,
+    ))
+    .unwrap();
+    assert_eq!(next.peer.projection_revision, Some(2));
 }
 
 #[test]
