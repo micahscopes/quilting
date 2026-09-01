@@ -1314,7 +1314,9 @@ dependencies = [
  "futures-core",
  "futures-util",
  "gensym",
+ "log",
  "pin-project",
+ "serde",
 ]
 
 [[package]]
@@ -1707,6 +1709,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hhhs-reactive"
+version = "0.4.5"
+source = "git+https://gitlab.com/micahscopes/hhhs-rs?rev=3968ae1dd1bd5b4a86f8aaa426d955a334cf9ecb#3968ae1dd1bd5b4a86f8aaa426d955a334cf9ecb"
+dependencies = [
+ "futures",
+ "futures-signals",
+ "hhhs",
+]
+
+[[package]]
 name = "hhhs-replica"
 version = "0.4.5"
 source = "git+https://gitlab.com/micahscopes/hhhs-rs?rev=3968ae1dd1bd5b4a86f8aaa426d955a334cf9ecb#3968ae1dd1bd5b4a86f8aaa426d955a334cf9ecb"
@@ -1827,7 +1839,9 @@ dependencies = [
  "base64 0.22.1",
  "bincode",
  "futures",
+ "futures-signals",
  "hhhs",
+ "hhhs-reactive",
  "hhhs-replica",
  "hhhs-store",
  "hhhs-sync",

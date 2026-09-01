@@ -298,18 +298,19 @@ At exact candidate `3968ae1`, Hyperscope:
 - replaced custom browser IndexedDB durability with the Web-Lock-owned
   `IndexedDbReplicaLog` while retaining a non-destructive importer for exact
   legacy transaction rows;
-- removed the unused durable-project `state_stream` and `state_signal_vec`
-  conveniences. Production application FRP already observes committed
-  `AppStore` read models, so it does not require an aliased storage writer;
+- first removed the 0.4.4 durable-project `state_stream` and
+  `state_signal_vec` conveniences because they aliased the storage writer,
+  then safely restored them over `ReplicaReadHandle` at `3968ae1`;
 - keeps the exact upstream revision pinned so the full HHHS dependency graph
   and wire generation move together.
 
-The new `ReplicaReadHandle` also resolves the ownership concern recorded in
-the adoption probe below: a runtime-neutral reactive materializer can now read
-and subscribe without cloning Replica authority, its writer, or its durability
-sink. Hyperscope has not yet reintroduced the deleted convenience methods;
-that follow-up should compose the upstream read handle directly and preserve
-placement-generation reset as an explicit event.
+The new `ReplicaReadHandle` resolves the ownership concern recorded in the
+adoption probe below: a runtime-neutral reactive materializer can now read and
+subscribe without cloning Replica authority, its writer, or its durability
+sink. `DurableProject::state_stream` and `state_signal_vec` compose that handle
+directly. A failed persistence emits no growth, prevents new readers, and
+requires the application to replace the generation's streams after
+authoritative reopen.
 
 Hyperscope still should:
 
@@ -358,8 +359,8 @@ checkpoint, not a claim that HHHS `v0.4.5` has been released or qualified.
 
 At the reviewed and adopted revision:
 
-- the downstream `hyperscape-hhhs` suite passes 27 tests after exclusive-host
-  migration;
+- the downstream `hyperscape-hhhs` suite passes 28 tests after exclusive-host
+  migration and read-only reactive restoration;
 - the downstream `hyperscope-hhhs-shadow` suite passes 25 tests after strict
   fence/reopen migration and the Blender v0.2 conformal-frame restart proof;
 - the downstream `hyperscope-web` durable-history suite passes 9 native tests;

@@ -1,4 +1,4 @@
-use futures::executor::block_on;
+use futures::{executor::block_on, FutureExt, StreamExt};
 use hhhs::{DagSnapshot, Digest, ReachIndex};
 use hhhs_store::decode_storage_transaction_log;
 use hyperscape_hhhs::{
@@ -354,6 +354,50 @@ fn persistence_failure_publishes_nothing() {
     assert_eq!(host.durable_bytes(), before_log);
     let reopened = DurableProject::recover(project(3), before_log).unwrap();
     assert!(reopened.state().unwrap().entity_transforms.is_empty());
+}
+
+#[test]
+fn read_only_reactive_state_observes_commits_and_resets_after_owner_fence() {
+    let project_id = project(0x3005);
+    let first = upsert(1, asset_id(0x3005), "reactive.glb");
+    let mut host = DurableProject::new(project_id).unwrap();
+    let mut revisions = Box::pin(host.state_stream().unwrap());
+    assert!(revisions.next().now_or_never().is_none());
+
+    block_on(host.admit(&first)).unwrap();
+    let revision = revisions
+        .next()
+        .now_or_never()
+        .flatten()
+        .expect("committed history wakes its read-only materializer");
+    assert_eq!(revision.added.len(), 1);
+    assert!(revision.retracted.is_empty());
+    assert!(matches!(
+        &revision.added[0],
+        StateRow::Asset(asset)
+            if asset.id == asset_id(0x3005) && asset.uri == "reactive.glb"
+    ));
+
+    let durable_bytes = host.durable_bytes();
+    host.fail_next_persist();
+    assert!(block_on(host.admit(&set(2, entity_id(0x3005), 4.0))).is_err());
+    assert!(
+        revisions.next().now_or_never().is_none(),
+        "an uncommitted write must not wake the materializer"
+    );
+    assert!(host.read_handle().is_err());
+    assert!(host.state_stream().is_err());
+    assert!(host.state_signal_vec().is_err());
+
+    let reopened = DurableProject::recover(project_id, durable_bytes).unwrap();
+    let mut replacement = Box::pin(reopened.state_stream().unwrap());
+    let initial = replacement
+        .next()
+        .now_or_never()
+        .flatten()
+        .expect("a reopened placement starts with its current state");
+    assert_eq!(initial.added, revision.added);
+    assert!(initial.retracted.is_empty());
 }
 
 #[test]

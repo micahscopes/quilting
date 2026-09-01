@@ -10,11 +10,14 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use bincode::Options;
+use futures::Stream;
+use futures_signals::signal_vec::SignalVec;
 use hhhs::{DagRead, DagSnapshot, Digest, EntryHash, LazyReach, Reach, SlicedDag};
+use hhhs_reactive::{signal_vec_view, stream_view, Revision};
 use hhhs_replica::{
     AdmissionPolicy, AdmittedAuthority, AsyncTransactionSink, AuthorityInput, DurableReplicaHost,
-    DurableReplicaHostError, Replica, ReplicaError, ReplicaRecord, ReplicaRepairError,
-    ReplicaWireError, MAX_REPLICA_RECORD_BYTES,
+    DurableReplicaHostError, Replica, ReplicaError, ReplicaReadHandle, ReplicaRecord,
+    ReplicaRepairError, ReplicaWireError, MAX_REPLICA_RECORD_BYTES,
 };
 use hhhs_store::{
     append_storage_transaction_log, decode_storage_transaction_log, empty_storage_transaction_log,
@@ -1376,6 +1379,42 @@ where
         materialize_project(self.project_id, &snapshot.history)
     }
 
+    /// Issue a structurally read-only view of committed public history.
+    ///
+    /// The handle contains no Replica authority, writer, application policy,
+    /// repair host, secret API, or durability sink. If a later persistence
+    /// operation fences this owner, existing handles remain at the last
+    /// published history and callers must replace them after authoritative
+    /// reopen rather than interpreting silence as external durability state.
+    pub fn read_handle(&self) -> Result<ReplicaReadHandle<MemoryStorage>, AdapterError> {
+        Ok(self.host.read_handle()?)
+    }
+
+    /// Observe committed materialized state as coalesced keyed revisions.
+    ///
+    /// Registration is event-driven and does not poll. Construction fails for
+    /// a fenced owner; an already-issued stream belongs to that placement
+    /// generation and must be replaced after authoritative reopen.
+    pub fn state_stream(
+        &self,
+    ) -> Result<impl Stream<Item = Revision<StateRow>> + 'static, AdapterError> {
+        Ok(stream_view(
+            Arc::new(self.read_handle()?),
+            trusted_state_view(self.project_id),
+        ))
+    }
+
+    /// `futures-signals` adapter over the same read-only committed-history
+    /// source as [`Self::state_stream`].
+    pub fn state_signal_vec(
+        &self,
+    ) -> Result<impl SignalVec<Item = StateRow> + 'static, AdapterError> {
+        Ok(signal_vec_view(
+            Arc::new(self.read_handle()?),
+            trusted_state_view(self.project_id),
+        ))
+    }
+
     pub fn history_len(&self) -> usize {
         self.published_history_len
     }
@@ -1456,6 +1495,16 @@ where
     /// offline transport.
     pub fn export_archive(&self) -> Result<Vec<u8>, AdapterError> {
         self.project_archive()?.encode()
+    }
+}
+
+fn trusted_state_view(
+    project_id: ProjectId,
+) -> impl Fn(&DagSnapshot, &hhhs::Position) -> BTreeMap<StateKey, StateRow> + Clone {
+    move |history, _at| {
+        materialize_project(project_id, history)
+            .expect("DurableProject publishes only validated authored payloads")
+            .rows()
     }
 }
 
