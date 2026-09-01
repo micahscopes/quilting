@@ -542,6 +542,41 @@ pub struct AuthoredRevision {
     pub commands: Vec<AuthoredEnvelope>,
 }
 
+/// Failure to compare-and-dispatch one authored projection revision.
+///
+/// The baseline check and reducer step share the same store lock. This lets a
+/// durable-history coordinator detect a writer that bypassed its ingress while
+/// it awaited persistence, without holding a synchronous mutex across `await`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthoredProjectionDispatchError {
+    BaselineChanged {
+        expected: Option<u64>,
+        actual: Option<u64>,
+    },
+    Reduce(ReduceError),
+}
+
+impl fmt::Display for AuthoredProjectionDispatchError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BaselineChanged { expected, actual } => write!(
+                formatter,
+                "authored projection baseline changed: expected {expected:?}, found {actual:?}",
+            ),
+            Self::Reduce(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for AuthoredProjectionDispatchError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Reduce(error) => Some(error),
+            Self::BaselineChanged { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssetLoadOutcome {
     Loaded {
@@ -2888,6 +2923,36 @@ impl AppStore {
 
     pub fn dispatch(&self, event: AppEvent) -> Result<AppCommit, ReduceError> {
         let commit = self.lock_state().reduce(event)?;
+        if commit.published_ui {
+            self.flush_read_models();
+        }
+        Ok(commit)
+    }
+
+    /// Dispatch an authored revision only while its expected projection
+    /// baseline is still current.
+    ///
+    /// This is a compare-and-dispatch fence, not a second authored reducer.
+    /// The ordinary [`AppEvent::AuthoredRevision`] reducer remains the sole
+    /// mutation path after the precondition succeeds.
+    pub fn dispatch_authored_if_current(
+        &self,
+        expected: Option<u64>,
+        revision: AuthoredRevision,
+    ) -> Result<AppCommit, AuthoredProjectionDispatchError> {
+        let commit = {
+            let mut state = self.lock_state();
+            let actual = state.authored_projection_revision;
+            if actual != expected {
+                return Err(AuthoredProjectionDispatchError::BaselineChanged {
+                    expected,
+                    actual,
+                });
+            }
+            state
+                .reduce(AppEvent::AuthoredRevision(revision))
+                .map_err(AuthoredProjectionDispatchError::Reduce)?
+        };
         if commit.published_ui {
             self.flush_read_models();
         }
@@ -7331,6 +7396,53 @@ mod tests {
             .is_err());
         assert_eq!(store.frame_snapshot().revision, revision_before);
         assert_eq!(store.authored_scene_snapshot(), scene_before);
+    }
+
+    #[test]
+    fn conditional_authored_dispatch_fences_a_changed_projection_baseline() {
+        let store = AppStore::default();
+        store
+            .dispatch_authored_if_current(
+                None,
+                AuthoredRevision {
+                    projection_revision: 1,
+                    commands: vec![authored(
+                        1,
+                        AuthoredCommand::SetEntityTransform {
+                            entity: EntityId::from_u128(0x44).unwrap(),
+                            transform: transform(1.0),
+                        },
+                    )],
+                },
+            )
+            .unwrap();
+        let before_summary = store.summary_snapshot();
+        let before_scene = store.authored_scene_snapshot();
+
+        let error = store
+            .dispatch_authored_if_current(
+                None,
+                AuthoredRevision {
+                    projection_revision: 2,
+                    commands: vec![authored(
+                        2,
+                        AuthoredCommand::RemoveEntity {
+                            entity: EntityId::from_u128(0x44).unwrap(),
+                        },
+                    )],
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            AuthoredProjectionDispatchError::BaselineChanged {
+                expected: None,
+                actual: Some(1),
+            }
+        );
+        assert_eq!(store.summary_snapshot(), before_summary);
+        assert_eq!(store.authored_scene_snapshot(), before_scene);
     }
 
     #[test]
