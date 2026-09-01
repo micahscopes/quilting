@@ -33,11 +33,14 @@ for (const key of ['env', 'matcap']) {
 const browser = readFileSync(`${repository}/hyperscope.html`, 'utf8');
 for (const required of [
   '&& startupRoute.rendererAssetSettings',
-  'initRendererAssetSettings = startupRoute.rendererAssetSettings;',
+  'initRustStartupRoute = startupRoute;',
+  'applyParams(initParams, initRustStartupRoute)',
+  'const validatedRenderSettings = admittedRoute?.renderSettings ?? null;',
   'validatedRendererAssetSettings?.environment',
   'validatedRendererAssetSettings?.matcap',
 ]) {
   assert.ok(browser.includes(required), `browser typed renderer asset route is missing ${required}`);
 }
+assert.ok(!browser.includes('initRouteSelection,'), 'startup route must not be split at applyParams');
 
 console.log('Rust typed renderer asset route smoke passed');

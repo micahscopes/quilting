@@ -11289,15 +11289,16 @@ effect(() => {
 // --- applyParams: set all signals from URL params (defined after all signals exist) ---
 applyParams = function(
   params,
-  validatedRenderSettings = null,
-  rustRouteAdmitted = false,
-  validatedRouteSelection = null,
-  validatedRouteAnimationClock = null,
-  validatedNavigationSettings = null,
-  validatedPatchLabSession = null,
-  validatedPrimaryAssetSettings = null,
-  validatedRendererAssetSettings = null,
+  admittedRoute = null,
 ) {
+  const rustRouteAdmitted = admittedRoute !== null;
+  const validatedRenderSettings = admittedRoute?.renderSettings ?? null;
+  const validatedRouteSelection = admittedRoute?.selection ?? null;
+  const validatedRouteAnimationClock = admittedRoute?.animationClock ?? null;
+  const validatedNavigationSettings = admittedRoute?.navigationSettings ?? null;
+  const validatedPatchLabSession = admittedRoute?.patchLabSession ?? null;
+  const validatedPrimaryAssetSettings = admittedRoute?.primaryAssetSettings ?? null;
+  const validatedRendererAssetSettings = admittedRoute?.rendererAssetSettings ?? null;
   const finite = (value, fallback, minimum, maximum) => {
     const parsed = Number(value);
     if (!Number.isFinite(parsed)) return fallback;
@@ -15032,13 +15033,10 @@ updateLocalPeerModeView();
 let initParams = readParams(initialRouteParams);
 let initRenderSettings = null;
 let initRustRouteAdmitted = false;
-let initRouteSelection = null;
-let initRouteAnimationClock = null;
-let initNavigationSettings = null;
 let initPatchLabSession = null;
 let initPresentationSettings = null;
 let initPrimaryAssetSettings = null;
-let initRendererAssetSettings = null;
+let initRustStartupRoute = null;
 currentGlb = initParams.glb;
 let initialPatchLabShape = patchLabShape(initParams.lab);
 // Set camera early (not WASM-dependent)
@@ -15096,13 +15094,10 @@ phase('wasm', [], async () => {
         );
         initRenderSettings = startupRoute.renderSettings;
         initRustRouteAdmitted = true;
-        initRouteSelection = startupRoute.selection ?? null;
-        initRouteAnimationClock = startupRoute.animationClock ?? null;
-        initNavigationSettings = startupRoute.navigationSettings;
         initPatchLabSession = startupRoute.patchLabSession;
         initPresentationSettings = startupRoute.presentationSettings;
         initPrimaryAssetSettings = startupRoute.primaryAssetSettings;
-        initRendererAssetSettings = startupRoute.rendererAssetSettings;
+        initRustStartupRoute = startupRoute;
         if (initPresentationSettings.enabled !== RUST_PRESENTATION_ENABLED) {
           throw new Error('Rust presentation route disagrees with the pre-WASM bootstrap');
         }
@@ -15174,17 +15169,7 @@ phase('wasm', [], async () => {
     rendererInitMs: rendererFinished - instantiateFinished,
     sharedCompiledModule: true,
   };
-  applyParams(
-    initParams,
-    initRenderSettings,
-    initRustRouteAdmitted,
-    initRouteSelection,
-    initRouteAnimationClock,
-    initNavigationSettings,
-    initPatchLabSession,
-    initPrimaryAssetSettings,
-    initRendererAssetSettings,
-  ); // Set signal values first
+  applyParams(initParams, initRustStartupRoute); // Set signal values first
   if (RUST_RENDER_SETTINGS_IMPLEMENTATION !== 'js'
       && initRustRouteAdmitted
       && initRenderSettings) {

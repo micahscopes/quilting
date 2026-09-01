@@ -302,7 +302,9 @@ The first application boundary is now explicit:
   `RouteRendererAssetSettings` packet. They remain platform resources: the
   browser still fetches, caches, decodes, cancels, and uploads them, while Rust
   prevents an admitted route from falling back to two independent browser
-  default decisions.
+  default decisions. Browser startup applies the complete admitted route as
+  one object and destructures typed projections locally; it no longer accepts
+  eight separately ordered Rust route arguments.
   Camera/conformal-transform state, SpaceMouse policy, and surface-walk policy
   additionally leave Rust as one typed `RouteNavigationSettings` value.
   Centiseconds and percentages become semantic seconds and fractions before

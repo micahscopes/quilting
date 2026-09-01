@@ -12,6 +12,12 @@ generation, matcap lookup, and GPU upload remain platform/renderer adapter
 work. Rust owns only validation, canonical defaults, and the atomic startup
 projection. The explicit JavaScript route fallback retains its old query path.
 
+The browser startup application seam now receives that one admitted route
+object and destructures its typed projections locally. It no longer accepts
+render, selection, animation, navigation, Patch Lab, primary-asset, and
+renderer-resource values as independently ordered arguments. The generic
+query object remains the one explicit fallback input.
+
 Verification:
 
 - `cargo test -p hyperscope-app --lib`: 143 passed.
@@ -21,4 +27,3 @@ Verification:
   generated development WASM artifact.
 
 No browser, renderer, GPU context, server, or user-owned process was started.
-

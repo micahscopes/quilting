@@ -58,10 +58,10 @@ const browser = readFileSync(`${repository}/hyperscope.html`, 'utf8');
 for (const required of [
   '&& startupRoute.patchLabSession',
   'initPatchLabSession = startupRoute.patchLabSession;',
-  'validatedPatchLabSession = null,',
+  'const validatedPatchLabSession = admittedRoute?.patchLabSession ?? null;',
   '? validatedPatchLabSession?.controls : null;',
   '? patchLabWireField(routePatchLabControls.field)',
-  'initPatchLabSession,',
+  'applyParams(initParams, initRustStartupRoute)',
 ]) {
   assert.ok(browser.includes(required), `browser typed Patch Lab route is missing ${required}`);
 }
