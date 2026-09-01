@@ -227,6 +227,22 @@ impl LocalPeerIngress {
         Ok(())
     }
 
+    /// Observe authored ingress only after its carrier record is known to be
+    /// durable. This restores bounded message deduplication and sender floors
+    /// without replaying an arrival-ordered command into the AppStore.
+    pub fn observe_durable_authored(
+        &mut self,
+        envelope: &AuthoredEnvelope,
+    ) -> Result<(), LocalPeerIngressError> {
+        envelope
+            .validate()
+            .map_err(|error| LocalPeerIngressError::InvalidEnvelope(error.to_string()))?;
+        self.seen_authored.insert(envelope.header.message_id);
+        self.authored_sender_sequences
+            .observe(envelope.header.sender, envelope.header.sequence);
+        Ok(())
+    }
+
     /// Validate and remember one outbound local presence sample. Its relay
     /// echo is consumed without admitting this process as its own remote peer.
     pub fn record_local_presence(
@@ -743,6 +759,45 @@ mod tests {
             LocalAuthoredPreparation::Pending(_) => panic!("completed envelope was not recorded"),
         };
         assert_eq!(duplicate.disposition, LocalPeerDisposition::IgnoredDuplicate);
+    }
+
+    #[test]
+    fn durable_authored_observation_updates_only_ingress_memory() {
+        let mut ingress = LocalPeerIngress::new(2).unwrap();
+        let entity = EntityId::from_u128(0x3232).unwrap();
+        let durable = authored(
+            32,
+            AuthoredCommand::SetEntityTransform {
+                entity,
+                transform: transform(3.2),
+            },
+        );
+        ingress.observe_durable_authored(&durable).unwrap();
+
+        let duplicate = match ingress.prepare_authored(durable).unwrap() {
+            LocalAuthoredPreparation::Immediate(receipt) => receipt,
+            LocalAuthoredPreparation::Pending(_) => panic!("durable envelope was not recorded"),
+        };
+        assert_eq!(duplicate.disposition, LocalPeerDisposition::IgnoredDuplicate);
+
+        let stale = authored(31, AuthoredCommand::RemoveEntity { entity });
+        let stale = match ingress.prepare_authored(stale).unwrap() {
+            LocalAuthoredPreparation::Immediate(receipt) => receipt,
+            LocalAuthoredPreparation::Pending(_) => panic!("durable sender floor was not recorded"),
+        };
+        assert_eq!(stale.disposition, LocalPeerDisposition::IgnoredStale);
+
+        let mut invalid = authored(33, AuthoredCommand::RemoveEntity { entity });
+        invalid.header.version.major = u16::MAX;
+        assert!(matches!(
+            ingress.observe_durable_authored(&invalid),
+            Err(LocalPeerIngressError::InvalidEnvelope(_))
+        ));
+        let corrected = authored(33, AuthoredCommand::RemoveEntity { entity });
+        assert!(matches!(
+            ingress.prepare_authored(corrected).unwrap(),
+            LocalAuthoredPreparation::Pending(_)
+        ));
     }
 
     #[test]
