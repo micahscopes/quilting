@@ -59,6 +59,7 @@ pub struct PortablePbrTextureAtlas {
 pub struct PbrTextureTableDiagnostics {
     pub texture_slots: usize,
     pub occupied_images: usize,
+    pub individual_retained_images: usize,
     pub individual_min_mip_level_count: u32,
     pub individual_max_mip_level_count: u32,
     pub individual_allocated_mip_texels: u64,
@@ -122,15 +123,15 @@ impl PbrMaterialTextureResidency {
 
 impl PbrTextureTable {
     pub fn is_empty(&self) -> bool {
-        self.resources.is_empty()
+        self.descriptors.is_empty()
     }
 
     pub fn len(&self) -> usize {
-        self.resources.len()
+        self.descriptors.len()
     }
 
     pub fn occupied_len(&self) -> usize {
-        self.resources.iter().flatten().count()
+        self.descriptors.iter().flatten().count()
     }
 
     pub fn descriptors(&self) -> &[Option<TextureAssetDescriptor>] {
@@ -149,11 +150,23 @@ impl PbrTextureTable {
             .map(|resource| resource.mip_level_count);
         let individual_min_mip_level_count = mip_level_counts.clone().min().unwrap_or(0);
         let individual_max_mip_level_count = mip_level_counts.max().unwrap_or(0);
+        let individual_retained_images = self.resources.iter().flatten().count();
+        let individual_allocated_mip_texels = self
+            .descriptors
+            .iter()
+            .zip(&self.resources)
+            .filter_map(|(descriptor, resource)| Some((descriptor.as_ref()?, resource.as_ref()?)))
+            .map(|(descriptor, resource)| {
+                texture_mip_texel_count(*descriptor, resource.mip_level_count)
+            })
+            .sum();
         pbr_texture_table_diagnostics(
             self.len(),
             self.occupied_len(),
+            individual_retained_images,
             individual_min_mip_level_count,
             individual_max_mip_level_count,
+            individual_allocated_mip_texels,
             &self.portable_atlas.plan,
             self.portable_atlas.mip_level_count,
         )
@@ -182,17 +195,20 @@ impl PbrTextureTable {
 fn pbr_texture_table_diagnostics(
     texture_slots: usize,
     occupied_images: usize,
+    individual_retained_images: usize,
     individual_min_mip_level_count: u32,
     individual_max_mip_level_count: u32,
+    individual_allocated_mip_texels: u64,
     plan: &PortableTextureAtlasPlan,
     portable_atlas_mip_level_count: u32,
 ) -> PbrTextureTableDiagnostics {
     PbrTextureTableDiagnostics {
         texture_slots,
         occupied_images,
+        individual_retained_images,
         individual_min_mip_level_count,
         individual_max_mip_level_count,
-        individual_allocated_mip_texels: plan.source_mip_texels,
+        individual_allocated_mip_texels,
         portable_atlas_extent: plan.extent,
         portable_atlas_layers: plan.layer_count,
         portable_atlas_source_texels: plan.source_texels,
@@ -206,11 +222,9 @@ fn pbr_texture_table_diagnostics(
             PORTABLE_PBR_ATLAS_USES_MANUAL_BILINEAR_FILTERING,
         portable_atlas_uses_manual_trilinear_filtering:
             PORTABLE_PBR_ATLAS_USES_MANUAL_TRILINEAR_FILTERING,
-        total_allocated_mip_texels: plan
-            .source_mip_texels
+        total_allocated_mip_texels: individual_allocated_mip_texels
             .saturating_add(plan.allocated_mip_texels),
-        total_allocated_bytes: plan
-            .source_mip_texels
+        total_allocated_bytes: individual_allocated_mip_texels
             .saturating_add(plan.allocated_mip_texels)
             .saturating_mul(4),
     }
@@ -400,6 +414,13 @@ impl LodClassifierDevice {
             }
         }
         publish_pbr_texture_mips_and_atlas(&self.device, &self.queue, &resources, &portable_atlas)?;
+        // Every browser render path samples the portable atlas. Source
+        // textures exist only long enough to receive ImageBitmaps and produce
+        // the atlas mip chain; dropping them here halves steady large-scene
+        // image residency without changing stable texture-slot identity.
+        let resources = std::iter::repeat_with(|| None)
+            .take(descriptors.len())
+            .collect();
         Ok(PbrTextureTable {
             descriptors,
             resources,
@@ -694,8 +715,22 @@ fn portable_material_residency(
         (material.textures.transmission, PBR_TRANSMISSION_TEXTURE_BIT),
     ];
     let resident_mask = references.iter().fold(0, |mask, &(slot, bit)| {
-        let resident =
-            slot.is_some_and(|slot| textures.is_some_and(|table| table.resource(slot).is_some()));
+        let resident = slot.is_some_and(|slot| {
+            textures.is_some_and(|table| {
+                usize::try_from(slot).ok().is_some_and(|slot| {
+                    table
+                        .descriptors
+                        .get(slot)
+                        .is_some_and(Option::is_some)
+                        && table
+                            .portable_atlas
+                            .plan
+                            .placements
+                            .get(slot)
+                            .is_some_and(Option::is_some)
+                })
+            })
+        });
         mask | if resident { bit } else { 0 }
     });
     PbrMaterialTextureResidency {
@@ -1165,6 +1200,15 @@ fn texture_mip_descriptor(
     })
 }
 
+fn texture_mip_texel_count(descriptor: TextureAssetDescriptor, mip_level_count: u32) -> u64 {
+    (0..mip_level_count).fold(0u64, |total, mip_level| {
+        total.saturating_add(
+            u64::from((descriptor.width >> mip_level).max(1))
+                .saturating_mul(u64::from((descriptor.height >> mip_level).max(1))),
+        )
+    })
+}
+
 fn address_mode(mode: TextureWrapMode) -> wgpu::AddressMode {
     match mode {
         TextureWrapMode::ClampToEdge => wgpu::AddressMode::ClampToEdge,
@@ -1196,10 +1240,11 @@ mod tests {
             },
         )
         .unwrap();
-        let diagnostics = pbr_texture_table_diagnostics(2, 1, 4, 4, &plan, 4);
+        let diagnostics = pbr_texture_table_diagnostics(2, 1, 1, 4, 4, 43, &plan, 4);
 
         assert_eq!(diagnostics.texture_slots, 2);
         assert_eq!(diagnostics.occupied_images, 1);
+        assert_eq!(diagnostics.individual_retained_images, 1);
         assert_eq!(diagnostics.individual_min_mip_level_count, 4);
         assert_eq!(diagnostics.individual_max_mip_level_count, 4);
         assert_eq!(diagnostics.individual_allocated_mip_texels, 43);
@@ -1219,6 +1264,12 @@ mod tests {
         assert!(diagnostics.portable_atlas_uses_manual_trilinear_filtering);
         assert_eq!(diagnostics.total_allocated_mip_texels, 128);
         assert_eq!(diagnostics.total_allocated_bytes, 512);
+
+        let atlas_only = pbr_texture_table_diagnostics(2, 1, 0, 0, 0, 0, &plan, 4);
+        assert_eq!(atlas_only.individual_retained_images, 0);
+        assert_eq!(atlas_only.individual_allocated_mip_texels, 0);
+        assert_eq!(atlas_only.total_allocated_mip_texels, 85);
+        assert_eq!(atlas_only.total_allocated_bytes, 340);
         quilting_shaders::compile_shader(PBR_MIPMAP_SHADER, Default::default())
             .expect("PBR mipmap shader compiles");
     }

@@ -243,6 +243,7 @@ pub(crate) struct WebGpuBackendDiagnostics {
     textures_ready: bool,
     texture_slots: usize,
     texture_images: usize,
+    pbr_texture_individual_retained_images: usize,
     pbr_texture_min_mip_levels: u32,
     pbr_texture_mip_levels: u32,
     pbr_texture_allocated_mip_texels: u64,
@@ -469,6 +470,8 @@ impl WebGpuBackend {
             textures_ready: self.textures.is_some(),
             texture_slots: pbr_texture_table.texture_slots,
             texture_images: pbr_texture_table.occupied_images,
+            pbr_texture_individual_retained_images: pbr_texture_table
+                .individual_retained_images,
             pbr_texture_min_mip_levels: pbr_texture_table.individual_min_mip_level_count,
             pbr_texture_mip_levels: pbr_texture_table.individual_max_mip_level_count,
             pbr_texture_allocated_mip_texels: pbr_texture_table
@@ -3099,6 +3102,7 @@ mod tests {
         assert_eq!(diagnostics["pbrTextureMinMipLevels"], 0);
         assert_eq!(diagnostics["pbrTextureMipLevels"], 0);
         assert_eq!(diagnostics["pbrTextureAllocatedMipTexels"], 0);
+        assert_eq!(diagnostics["pbrTextureIndividualRetainedImages"], 0);
         assert_eq!(
             diagnostics["pbrPortableAtlasExtent"],
             serde_json::json!([0, 0])

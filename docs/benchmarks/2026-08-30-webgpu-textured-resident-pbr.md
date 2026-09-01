@@ -114,13 +114,15 @@ the complete chains, both at 100% packing utilization. Diagnostics expose both
 base and full-chain allocation so future context-loss investigations can
 separate filtering correctness from residency pressure.
 
-That asset still retains the same 201,326,589 texels in temporary/diagnostic
-individual textures during this intermediate cut, for 402,653,178 RGBA8 texels
-total: 1,610,612,712 bytes (about 1.50 GiB) before driver overhead. The
-diagnostic contract reports this combined figure explicitly. No render path
-now needs that duplicate family; retiring it from browser residency while
-preserving upload-time mip generation and native conformance is the remaining
-resource cut.
+Native conformance retains the same 201,326,589 texels in individual source
+textures, for 402,653,178 RGBA8 texels total: 1,610,612,712 bytes (about 1.50
+GiB) before driver overhead. Browser upload now drops those sources immediately
+after mip/atlas publication because no browser render path consumes them. Its
+steady chess table is therefore 201,326,589 atlas texels, or 805,306,356 bytes
+(about 768 MiB), before driver overhead. Diagnostics distinguish authored
+images from retained individual images and derive total bytes from allocations
+that actually survive publication. Upload-time peak residency remains a
+separate optimization and live context-loss gate.
 
 The pure atlas, mip shader, resident-root shader, and WASM browser-target gates
 pass without acquiring a GPU. Native raster/readback and live Chrome chess
