@@ -1884,7 +1884,7 @@ pub fn get_rest_pose_instances() -> JsValue {
 /// Walks ALL scene nodes, applies world transforms, merges all meshes.
 /// Returns a JS object with:
 ///   { asset_metadata, time_min, time_max, num_vertices, num_faces, materials, textures,
-///     face_node_indices, node_stable_entity_ids, node_world_transforms,
+///     face_node_indices, hyperscape_asset_id, node_stable_entity_ids, node_world_transforms,
 ///     base_color, metallic, roughness }
 /// Built with js_sys to avoid serde overhead on large data.
 #[wasm_bindgen]
@@ -2367,6 +2367,16 @@ pub fn load_gltf_data(data: &[u8]) -> JsValue {
         &result,
         &"has_hyperscape".into(),
         &JsValue::from_bool(authored_coordinates),
+    ).unwrap();
+    js_sys::Reflect::set(
+        &result,
+        &"hyperscape_asset_id".into(),
+        &scene
+            .hyperscape
+            .as_ref()
+            .and_then(|asset| asset.payload.asset_id)
+            .map(|asset| JsValue::from_str(&asset.to_string()))
+            .unwrap_or(JsValue::NULL),
     ).unwrap();
     js_sys::Reflect::set(&result, &"face_material_indices".into(), &js_face_materials).unwrap();
     js_sys::Reflect::set(&result, &"face_node_indices".into(), &js_face_nodes).unwrap();

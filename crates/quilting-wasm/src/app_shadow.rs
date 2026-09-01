@@ -19,7 +19,8 @@ use hyperscape_protocol::{
     RequestId, CURRENT_PROTOCOL_VERSION,
 };
 use hyperscope_app::{
-    session_node_identity, AnimationAction, AnimationClipCompletionDispatch,
+    reconcile_primary_scene_asset_identity, session_node_identity, AnimationAction,
+    AnimationClipCompletionDispatch,
     AnimationClipDescriptor, AnimationClipJobEffect, AnimationClipSelectionCompletion,
     AnimationClipSelectionOutcome, AnimationClipSelectionReadModel, AnimationClock,
     AnimationPoseRequestDisposition, AnimationPoseScheduler, AnimationPoseStamp, AppCommit,
@@ -39,8 +40,9 @@ use hyperscope_app::{
     PatchLabReadModel, PatchLabSessionDispatch, PatchLabSessionIntent, PatchLabShape,
     PresentationAction, PresentationAnimationResidencyBinding,
     PresentationAnimationResidencyDispatch, PrimarySceneInstallCompletion,
-    PrimarySceneInstallCompletionDispatch, PrimarySceneInstallMetadata,
-    PrimarySceneInstallOutcome, RenderSettings,
+    PrimarySceneAssetIdentity, PrimarySceneAssetIdentityProvenance,
+    PrimarySceneInstallCompletionDispatch, PrimarySceneInstallMetadata, PrimarySceneInstallOutcome,
+    RenderSettings,
     RenderSettingsSynchronizationDisposition, SemanticAction, Timed,
     WebGpuLodAuthority, WebGpuLodAuthorityDisposition, WebGpuLodAuthorityPhase,
     WebGpuLodAuthorityReason, WebGpuLodAuthoritySnapshot, WebGpuPresentationEvidence,
@@ -1037,6 +1039,29 @@ impl HyperscopeAppShadow {
                 retryable,
             },
         )?)
+    }
+
+    /// Join process-local renderer residency to durable runtime/glTF identity
+    /// before any model upload begins. Empty durable values mean absent, not a
+    /// request to manufacture authoring identity.
+    #[wasm_bindgen(js_name = reconcilePrimarySceneAssetIdentity)]
+    pub fn reconcile_primary_scene_asset_identity(
+        &self,
+        resident_asset_id: &str,
+        runtime_authoring_asset_id: &str,
+        embedded_authoring_asset_id: &str,
+    ) -> Result<JsValue, JsValue> {
+        let resolution = reconcile_primary_scene_asset_identity(
+            asset_id_from_str(resident_asset_id)?,
+            (!runtime_authoring_asset_id.is_empty())
+                .then(|| asset_id_from_str(runtime_authoring_asset_id))
+                .transpose()?,
+            (!embedded_authoring_asset_id.is_empty())
+                .then(|| asset_id_from_str(embedded_authoring_asset_id))
+                .transpose()?,
+        )
+        .map_err(js_error)?;
+        primary_scene_asset_identity_to_js(resolution)
     }
 
     /// Complete the distinct renderer-install job emitted after a primary
@@ -4497,6 +4522,35 @@ struct ShadowInstalledPrimaryScene {
     num_vertices: u32,
     num_faces: u32,
     animation_clips: Vec<ShadowAnimationClip>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShadowPrimarySceneAssetIdentity {
+    resident_asset_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    authoring_asset_id: Option<String>,
+    interaction_asset_id: String,
+    provenance: &'static str,
+    durable: bool,
+}
+
+fn primary_scene_asset_identity_to_js(
+    identity: PrimarySceneAssetIdentity,
+) -> Result<JsValue, JsValue> {
+    let provenance = match identity.provenance {
+        PrimarySceneAssetIdentityProvenance::SessionResidency => "session_residency",
+        PrimarySceneAssetIdentityProvenance::RuntimeDeclaration => "runtime_declaration",
+        PrimarySceneAssetIdentityProvenance::EmbeddedAuthoring => "embedded_authoring",
+        PrimarySceneAssetIdentityProvenance::RuntimeAndEmbedded => "runtime_and_embedded",
+    };
+    to_js(&ShadowPrimarySceneAssetIdentity {
+        resident_asset_id: identity.resident_asset_id.to_string(),
+        authoring_asset_id: identity.authoring_asset_id.map(|asset| asset.to_string()),
+        interaction_asset_id: identity.interaction_asset_id.to_string(),
+        provenance,
+        durable: identity.authoring_asset_id.is_some(),
+    })
 }
 
 impl From<InstalledPrimarySceneReadModel> for ShadowInstalledPrimaryScene {

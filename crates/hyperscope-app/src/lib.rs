@@ -78,6 +78,93 @@ pub fn session_node_identity(asset: AssetId, source_node: u32) -> AssetEntityId 
         .expect("a validated application asset and session entity form a valid identity")
 }
 
+/// Where the identity used by authored interaction came from after keeping it
+/// distinct from the renderer's process-local residency key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrimarySceneAssetIdentityProvenance {
+    SessionResidency,
+    RuntimeDeclaration,
+    EmbeddedAuthoring,
+    RuntimeAndEmbedded,
+}
+
+/// Explicit join between one renderer residency and the asset identity used
+/// by durable selection, authoring leases, and replicated edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrimarySceneAssetIdentity {
+    pub resident_asset_id: AssetId,
+    pub authoring_asset_id: Option<AssetId>,
+    pub interaction_asset_id: AssetId,
+    pub provenance: PrimarySceneAssetIdentityProvenance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrimarySceneAssetIdentityMismatch {
+    pub runtime_asset_id: AssetId,
+    pub embedded_asset_id: AssetId,
+}
+
+impl fmt::Display for PrimarySceneAssetIdentityMismatch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "runtime authoring asset {} disagrees with embedded glTF asset {}",
+            self.runtime_asset_id, self.embedded_asset_id,
+        )
+    }
+}
+
+impl Error for PrimarySceneAssetIdentityMismatch {}
+
+/// Reconcile renderer residency, an optional durable runtime declaration, and
+/// optional glTF authoring identity without silently conflating their roles.
+///
+/// A session-only asset remains usable for ephemeral interaction. An embedded
+/// identity upgrades that interaction to durable authoring identity. If a
+/// presentation/catalog also declares durable identity, the two declarations
+/// must agree before renderer upload begins.
+pub fn reconcile_primary_scene_asset_identity(
+    resident_asset_id: AssetId,
+    runtime_authoring_asset_id: Option<AssetId>,
+    embedded_authoring_asset_id: Option<AssetId>,
+) -> Result<PrimarySceneAssetIdentity, PrimarySceneAssetIdentityMismatch> {
+    let (authoring_asset_id, interaction_asset_id, provenance) =
+        match (runtime_authoring_asset_id, embedded_authoring_asset_id) {
+            (Some(runtime), Some(embedded)) if runtime != embedded => {
+                return Err(PrimarySceneAssetIdentityMismatch {
+                    runtime_asset_id: runtime,
+                    embedded_asset_id: embedded,
+                });
+            }
+            (Some(runtime), Some(_)) => (
+                Some(runtime),
+                runtime,
+                PrimarySceneAssetIdentityProvenance::RuntimeAndEmbedded,
+            ),
+            (Some(runtime), None) => (
+                Some(runtime),
+                runtime,
+                PrimarySceneAssetIdentityProvenance::RuntimeDeclaration,
+            ),
+            (None, Some(embedded)) => (
+                Some(embedded),
+                embedded,
+                PrimarySceneAssetIdentityProvenance::EmbeddedAuthoring,
+            ),
+            (None, None) => (
+                None,
+                resident_asset_id,
+                PrimarySceneAssetIdentityProvenance::SessionResidency,
+            ),
+        };
+    Ok(PrimarySceneAssetIdentity {
+        resident_asset_id,
+        authoring_asset_id,
+        interaction_asset_id,
+        provenance,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Timed<T> {
     pub sequence: u64,
@@ -3916,6 +4003,73 @@ mod tests {
         assert_ne!(first.entity, later.entity);
         assert_eq!(first.entity, other_asset.entity);
         assert_ne!(first, other_asset);
+    }
+
+    #[test]
+    fn primary_scene_identity_keeps_residency_and_authoring_domains_distinct() {
+        let resident = AssetId::from_u128(0x6000).unwrap();
+        let authored = AssetId::from_u128(0x7000).unwrap();
+
+        assert_eq!(
+            reconcile_primary_scene_asset_identity(resident, None, None).unwrap(),
+            PrimarySceneAssetIdentity {
+                resident_asset_id: resident,
+                authoring_asset_id: None,
+                interaction_asset_id: resident,
+                provenance: PrimarySceneAssetIdentityProvenance::SessionResidency,
+            },
+        );
+        assert_eq!(
+            reconcile_primary_scene_asset_identity(resident, None, Some(authored)).unwrap(),
+            PrimarySceneAssetIdentity {
+                resident_asset_id: resident,
+                authoring_asset_id: Some(authored),
+                interaction_asset_id: authored,
+                provenance: PrimarySceneAssetIdentityProvenance::EmbeddedAuthoring,
+            },
+        );
+        assert_eq!(
+            reconcile_primary_scene_asset_identity(resident, Some(authored), None).unwrap(),
+            PrimarySceneAssetIdentity {
+                resident_asset_id: resident,
+                authoring_asset_id: Some(authored),
+                interaction_asset_id: authored,
+                provenance: PrimarySceneAssetIdentityProvenance::RuntimeDeclaration,
+            },
+        );
+        assert_eq!(
+            reconcile_primary_scene_asset_identity(
+                resident,
+                Some(authored),
+                Some(authored),
+            )
+            .unwrap(),
+            PrimarySceneAssetIdentity {
+                resident_asset_id: resident,
+                authoring_asset_id: Some(authored),
+                interaction_asset_id: authored,
+                provenance: PrimarySceneAssetIdentityProvenance::RuntimeAndEmbedded,
+            },
+        );
+    }
+
+    #[test]
+    fn primary_scene_identity_rejects_conflicting_durable_declarations() {
+        let resident = AssetId::from_u128(0x6000).unwrap();
+        let runtime = AssetId::from_u128(0x7000).unwrap();
+        let embedded = AssetId::from_u128(0x8000).unwrap();
+
+        assert_eq!(
+            reconcile_primary_scene_asset_identity(
+                resident,
+                Some(runtime),
+                Some(embedded),
+            ),
+            Err(PrimarySceneAssetIdentityMismatch {
+                runtime_asset_id: runtime,
+                embedded_asset_id: embedded,
+            }),
+        );
     }
 
     #[test]

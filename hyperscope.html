@@ -6679,6 +6679,30 @@ function primarySceneInstallFacts(info) {
   };
 }
 
+function reconcileDecodedPrimarySceneAssetIdentity(
+  info,
+  assetToken,
+  runtimeAuthoringAssetId,
+  residentAssetId,
+) {
+  if (!rustAppShadow) {
+    throw new Error('primary-scene identity reconciliation requires the Rust app authority');
+  }
+  const resident = String(assetToken?.assetId || residentAssetId || runtimeAuthoringAssetId || '');
+  if (!resident) throw new Error('decoded primary scene has no renderer-residency asset identity');
+  const resolution = rustAppShadow.reconcilePrimarySceneAssetIdentity(
+    resident,
+    runtimeAuthoringAssetId ? String(runtimeAuthoringAssetId) : '',
+    info?.hyperscape_asset_id ? String(info.hyperscape_asset_id) : '',
+  );
+  if (!resolution || resolution.residentAssetId !== resident.toLowerCase()
+      || typeof resolution.interactionAssetId !== 'string'
+      || resolution.durable !== (typeof resolution.authoringAssetId === 'string')) {
+    throw new Error('Rust returned an invalid primary-scene identity reconciliation');
+  }
+  return resolution;
+}
+
 function observePrimarySceneInstallClipCancellations(cancellations, context) {
   if (!Array.isArray(cancellations)) {
     throw new Error(`${context} returned non-array animation clip cancellations`);
@@ -13528,6 +13552,14 @@ async function finishModelUpload(
 ) {
   if (!appAssetMayInstall(assetToken)) return false;
   if (!info) { $('stats').textContent = 'Failed to load model'; return false; }
+  const assetIdentity = reconcileDecodedPrimarySceneAssetIdentity(
+    info,
+    assetToken,
+    durableAssetId,
+    sessionAssetId,
+  );
+  durableAssetId = assetIdentity.authoringAssetId || null;
+  sessionAssetId = assetIdentity.residentAssetId;
   const uploadStarted = performance.now();
   const uploadTimings = { worker: info.loader_timing || null };
   const modelHasAnimations = !!(info.animations && info.animations.length > 0);
@@ -13663,12 +13695,11 @@ async function finishModelUpload(
   info.face_node_indices = null;
   mr_setFaceNodes(faceNodes);
   const currentSelectionNodes = uniqueNodeIds(faceNodes);
-  const currentIdentityAssetId = currentModelDurableAssetId || currentModelSessionAssetId;
-  if (currentIdentityAssetId && modelNodeStableEntityIds.some(Boolean)) {
+  if (currentModelDurableAssetId && modelNodeStableEntityIds.some(Boolean)) {
     try {
       appendPackedNodeIdentities(
         packedNodeIdentities,
-        currentIdentityAssetId,
+        currentModelDurableAssetId,
         modelNodeStableEntityIds,
         currentSelectionNodes,
       );
@@ -14042,6 +14073,15 @@ async function loadStaticPresentationAsset(asset, fetched) {
   );
   if (!appAssetMayInstall(fetched.assetToken)) {
     throw new Error(`${asset.name}: obsolete presentation asset completion`);
+  }
+  const assetIdentity = reconcileDecodedPrimarySceneAssetIdentity(
+    info,
+    fetched.assetToken,
+    asset.id,
+    fetched.assetToken?.assetId,
+  );
+  if (assetIdentity.authoringAssetId !== String(asset.id).toLowerCase()) {
+    throw new Error(`${asset.name}: durable presentation identity was not preserved`);
   }
   if ((info.animations || []).length > 0) {
     throw new Error(`${asset.name}: animated secondary presentation assets are not supported yet`);
@@ -14460,7 +14500,8 @@ function currentModelIdentityAssetId() {
 }
 
 function installCurrentModelStableIdentities(assetId) {
-  if (!modelNodeStableEntityIds.some(Boolean) || currentFaceNodes.length === 0) return 0;
+  if (!currentModelDurableAssetId || assetId !== currentModelDurableAssetId
+      || !modelNodeStableEntityIds.some(Boolean) || currentFaceNodes.length === 0) return 0;
   const staged = new Map();
   const nodes = uniqueNodeIds(currentFaceNodes);
   const count = appendPackedNodeIdentities(
