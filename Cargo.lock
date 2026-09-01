@@ -1864,6 +1864,7 @@ dependencies = [
  "hyperscape-hhhs",
  "hyperscape-protocol",
  "hyperscope-app",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

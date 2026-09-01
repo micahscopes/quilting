@@ -13,6 +13,7 @@ hhhs-replica.workspace = true
 hyperscape-hhhs = { version = "0.1.0", path = "../hyperscape-hhhs" }
 hyperscape-protocol = { version = "0.1.0", path = "../hyperscape-protocol" }
 hyperscope-app = { version = "0.1.0", path = "../hyperscope-app" }
+thiserror = "2"
 
 [dev-dependencies]
 futures = { version = "0.3", features = ["executor"] }

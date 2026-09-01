@@ -3,7 +3,7 @@ use futures::future::ready;
 use hhhs::Digest;
 use hhhs_replica::AsyncTransactionSink;
 use hhhs_store::StorageTransaction;
-use hyperscape_hhhs::{DurableProject, ProjectId};
+use hyperscape_hhhs::{DurableProject, MemoryDurability, ProjectId};
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId, MessageHeader,
     MessageId, PeerId, ProtocolVersion, WireTransform, CURRENT_PROTOCOL_VERSION,
@@ -11,7 +11,8 @@ use hyperscape_protocol::{
 use hyperscope_app::{AppStore, AuthoredRevision, CommitDisposition};
 use hyperscope_hhhs_shadow::{
     AuthoredHhhsShadow, AuthoredShadowCheckpoint, AuthoredShadowError, AuthoredShadowInitError,
-    AuthoredShadowObservation, AUTHORED_SHADOW_CHECKPOINT_DOMAIN,
+    AuthoredShadowObservation, DurableAuthoredCoordinator, DurableAuthoredDispatchError,
+    DurableAuthoredObservation, AUTHORED_SHADOW_CHECKPOINT_DOMAIN,
 };
 
 fn project(value: u128) -> ProjectId {
@@ -349,6 +350,222 @@ fn checkpoint_and_store_mismatches_are_rejected_without_history_writes() {
             .authored_projection_revision,
         Some(99)
     );
+}
+
+#[test]
+fn durable_first_failure_publishes_nothing_and_retry_recovers_the_cursor() {
+    let project_id = project(0x2401);
+    let store = AppStore::default();
+    let mut coordinator = DurableAuthoredCoordinator::new(project_id).unwrap();
+    let revision = AuthoredRevision {
+        projection_revision: 41,
+        commands: vec![asset(1, 0xa)],
+    };
+    let before_summary = store.summary_snapshot();
+    let before_scene = store.authored_scene_snapshot();
+    let before_log = coordinator.durability().bytes().to_vec();
+    coordinator.durability_mut().fail_next_persist();
+
+    let error = block_on(coordinator.dispatch(&store, revision.clone())).unwrap_err();
+    assert!(matches!(error, DurableAuthoredDispatchError::Adapter(_)));
+    assert_eq!(coordinator.history_len(), 0);
+    assert_eq!(coordinator.observed_projection_revision(), None);
+    assert!(coordinator.fault().is_none());
+    assert_eq!(coordinator.durability().bytes(), before_log);
+    assert_eq!(store.summary_snapshot(), before_summary);
+    assert_eq!(store.authored_scene_snapshot(), before_scene);
+
+    let applied = block_on(coordinator.dispatch(&store, revision)).unwrap();
+    assert!(matches!(
+        applied.durable,
+        DurableAuthoredObservation::Applied {
+            projection_revision: 41,
+            history_len: 1,
+            ..
+        }
+    ));
+    assert_eq!(
+        applied.app.unwrap().disposition,
+        CommitDisposition::Applied
+    );
+    assert_eq!(coordinator.observed_projection_revision(), Some(41));
+    assert_eq!(store.authored_scene_snapshot().projection_revision, Some(41));
+
+    let recovered = DurableAuthoredCoordinator::recover(
+        project_id,
+        coordinator.durability().bytes().to_vec(),
+    )
+    .unwrap();
+    assert_eq!(recovered.observed_projection_revision(), Some(41));
+    assert_eq!(recovered.history_len(), 1);
+    assert_eq!(recovered.project_state().unwrap(), coordinator.project_state().unwrap());
+}
+
+#[test]
+fn durable_first_rejects_multi_command_revisions_before_either_side_changes() {
+    let store = AppStore::default();
+    let mut coordinator = DurableAuthoredCoordinator::new(project(0x2402)).unwrap();
+    let before_summary = store.summary_snapshot();
+    let before_log = coordinator.durability().bytes().to_vec();
+
+    let error = block_on(coordinator.dispatch(
+        &store,
+        AuthoredRevision {
+            projection_revision: 1,
+            commands: vec![asset(1, 0xa), transform(2, 0xe, 3.0)],
+        },
+    ))
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        DurableAuthoredDispatchError::UnsupportedCommandCount {
+            projection_revision: 1,
+            command_count: 2,
+        }
+    ));
+    assert_eq!(coordinator.history_len(), 0);
+    assert_eq!(coordinator.durability().bytes(), before_log);
+    assert_eq!(store.summary_snapshot(), before_summary);
+    assert!(coordinator.fault().is_none());
+}
+
+#[test]
+fn durable_first_stale_revision_is_a_zero_write_noop() {
+    let store = AppStore::default();
+    let mut coordinator = DurableAuthoredCoordinator::new(project(0x2404)).unwrap();
+    block_on(coordinator.dispatch(
+        &store,
+        AuthoredRevision {
+            projection_revision: 3,
+            commands: vec![asset(1, 0xa)],
+        },
+    ))
+    .unwrap();
+    let before_log = coordinator.durability().bytes().to_vec();
+
+    let stale = block_on(coordinator.dispatch(
+        &store,
+        AuthoredRevision {
+            projection_revision: 3,
+            commands: vec![asset(2, 0xb)],
+        },
+    ))
+    .unwrap();
+
+    assert_eq!(
+        stale.app.unwrap().disposition,
+        CommitDisposition::IgnoredStale
+    );
+    assert_eq!(
+        stale.durable,
+        DurableAuthoredObservation::IgnoredStale {
+            projection_revision: 3,
+            observed_projection_revision: Some(3),
+            history_len: 1,
+        }
+    );
+    assert_eq!(coordinator.history_len(), 1);
+    assert_eq!(coordinator.durability().bytes(), before_log);
+    assert!(!coordinator
+        .project_state()
+        .unwrap()
+        .assets
+        .contains_key(&AssetId::from_u128(0xb).unwrap()));
+}
+
+struct BypassOnPersist {
+    store: AppStore,
+    inner: MemoryDurability,
+    bypass: Option<AuthoredRevision>,
+}
+
+impl AsyncTransactionSink for BypassOnPersist {
+    type Error = String;
+
+    async fn persist(
+        &mut self,
+        transaction: &StorageTransaction,
+    ) -> Result<(), Self::Error> {
+        if let Some(revision) = self.bypass.take() {
+            self.store
+                .dispatch(hyperscope_app::AppEvent::AuthoredRevision(revision))
+                .map_err(|error| error.to_string())?;
+        }
+        self.inner.persist(transaction).await
+    }
+}
+
+#[test]
+fn durable_first_detects_an_appstore_bypass_during_persistence() {
+    let store = AppStore::default();
+    let durable_project = DurableProject::with_sink(
+        project(0x2403),
+        BypassOnPersist {
+            store: store.clone(),
+            inner: MemoryDurability::default(),
+            bypass: Some(AuthoredRevision {
+                projection_revision: 99,
+                commands: vec![asset(99, 0xb)],
+            }),
+        },
+    )
+    .unwrap();
+    let mut coordinator = DurableAuthoredCoordinator::from_project(durable_project).unwrap();
+
+    let report = block_on(coordinator.dispatch(
+        &store,
+        AuthoredRevision {
+            projection_revision: 1,
+            commands: vec![asset(1, 0xa)],
+        },
+    ))
+    .unwrap();
+    assert!(matches!(
+        report.app,
+        Err(ref fault)
+            if fault.projection_revision == 1
+                && fault.history_len == 1
+                && fault.reason.contains("baseline changed")
+    ));
+    assert!(matches!(
+        report.durable,
+        DurableAuthoredObservation::Applied {
+            projection_revision: 1,
+            history_len: 1,
+            ..
+        }
+    ));
+    assert_eq!(coordinator.history_len(), 1);
+    assert_eq!(coordinator.observed_projection_revision(), Some(1));
+    assert_eq!(store.authored_scene_snapshot().projection_revision, Some(99));
+    assert!(coordinator
+        .project_state()
+        .unwrap()
+        .assets
+        .contains_key(&AssetId::from_u128(0xa).unwrap()));
+    assert!(store
+        .authored_scene_snapshot()
+        .assets
+        .iter()
+        .any(|asset| asset.id == AssetId::from_u128(0xb).unwrap()));
+
+    let poisoned = block_on(coordinator.dispatch(
+        &store,
+        AuthoredRevision {
+            projection_revision: 100,
+            commands: vec![asset(100, 0xc)],
+        },
+    ))
+    .unwrap_err();
+    assert!(matches!(
+        poisoned,
+        DurableAuthoredDispatchError::Poisoned {
+            skipped_projection_revision: 100,
+            ..
+        }
+    ));
+    assert_eq!(coordinator.history_len(), 1);
 }
 
 #[test]

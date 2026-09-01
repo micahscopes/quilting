@@ -20,6 +20,12 @@
 //! would create duplicate HHHS entries. Promoting this path to application
 //! authority requires an atomic or resumable/idempotent batch protocol first.
 //!
+//! [`DurableAuthoredCoordinator`] is the narrow authority path for the common
+//! one-envelope revision. It atomically persists that envelope and a
+//! receiver-local source cursor before compare-and-dispatching the rebuildable
+//! AppStore projection. It deliberately rejects multi-command revisions rather
+//! than inheriting the diagnostic shadow's partial-prefix failure mode.
+//!
 //! This crate accepts only [`AuthoredRevision`]. Camera motion, frame clocks,
 //! presence, selection, animation, renderer state, and GPU resources are not
 //! representable at this boundary.
@@ -33,14 +39,17 @@
 
 #![forbid(unsafe_code)]
 
-use hhhs::Digest;
-use hhhs_replica::AsyncTransactionSink;
-use hyperscape_hhhs::{AdapterError, DurableProject, MemoryDurability, ProjectId, ProjectState};
+use hhhs::{Digest, EntryHash};
+use hhhs_replica::{AsyncTransactionSink, ReplicaRecord};
+use hyperscape_hhhs::{
+    AdapterError, DurableProject, MemoryDurability, ProjectId, ProjectState, ProjectionKey,
+};
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId, WireTransform,
 };
 use hyperscope_app::{
-    AppCommit, AppEvent, AppStore, AuthoredRevision, CommitDisposition, ReduceError,
+    AppCommit, AppEvent, AppStore, AuthoredProjectionDispatchError, AuthoredRevision,
+    AuthoredSceneReadModel, CommitDisposition, ReduceError,
 };
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -54,6 +63,18 @@ const CHECKPOINT_CHECKSUM_BYTES: usize = 32;
 const CHECKPOINT_BODY_BYTES: usize = 4 + 16 + 1 + 8 + 8 + 32 + 32;
 const CHECKPOINT_BYTES: usize =
     AUTHORED_SHADOW_CHECKPOINT_DOMAIN.len() + CHECKPOINT_BODY_BYTES + CHECKPOINT_CHECKSUM_BYTES;
+/// Receiver-local HHHS checkpoint key for the durable-first source cursor.
+pub const DURABLE_AUTHORED_CURSOR_NAME: &str = "hyperscope/authored-source-cursor";
+/// Cursor bytes contain one little-endian `u64` projection revision.
+pub const DURABLE_AUTHORED_CURSOR_SCHEMA: u32 = 1;
+
+pub fn durable_authored_cursor_key() -> ProjectionKey {
+    ProjectionKey::new(
+        DURABLE_AUTHORED_CURSOR_NAME,
+        DURABLE_AUTHORED_CURSOR_SCHEMA,
+    )
+    .expect("the static durable authored cursor key is valid")
+}
 
 /// A successful diagnostic observation after the authoritative AppStore
 /// dispatch completed.
@@ -368,6 +389,348 @@ impl SequentialProjection {
 
     fn matches(&self, state: &ProjectState) -> bool {
         self.assets == state.assets && self.entity_transforms == state.entity_transforms
+    }
+
+    fn matches_app(&self, scene: &AuthoredSceneReadModel) -> bool {
+        scene.assets.len() == self.assets.len()
+            && scene
+                .assets
+                .iter()
+                .all(|asset| self.assets.get(&asset.id) == Some(asset))
+            && scene.entities.len() == self.entity_transforms.len()
+            && scene.entities.iter().all(|entity| {
+                self.entity_transforms.get(&entity.entity) == Some(&entity.transform)
+            })
+    }
+}
+
+/// Permanent evidence that HHHS committed an authored envelope but its
+/// rebuildable AppStore projection could not advance coherently afterward.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableAuthoredFault {
+    pub projection_revision: u64,
+    pub durable_entry: EntryHash,
+    pub history_len: usize,
+    pub reason: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DurableAuthoredInitError {
+    #[error(transparent)]
+    Adapter(#[from] AdapterError),
+    #[error("durable authored history has no local source cursor")]
+    MissingCursor,
+    #[error("empty durable authored history has a source cursor")]
+    UnexpectedCursor,
+    #[error("durable authored source cursor failed its integrity check")]
+    CorruptCursor,
+    #[error("durable authored source cursor is not at the current history root")]
+    CursorHistoryRoot,
+    #[error("durable authored source cursor bytes are malformed")]
+    MalformedCursor,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DurableAuthoredDispatchError {
+    #[error(
+        "durable authored projection {projection_revision} contains {command_count} commands; exactly one is supported"
+    )]
+    UnsupportedCommandCount {
+        projection_revision: u64,
+        command_count: usize,
+    },
+    #[error(
+        "AppStore authored projection revision {actual:?} does not match durable cursor {expected:?}"
+    )]
+    StoreProjectionRevision {
+        expected: Option<u64>,
+        actual: Option<u64>,
+    },
+    #[error("AppStore authored projection content does not match durable history")]
+    StoreProjectionContent,
+    #[error(transparent)]
+    Store(#[from] AuthoredProjectionDispatchError),
+    #[error(transparent)]
+    Adapter(#[from] AdapterError),
+    #[error(
+        "durable authored coordinator is poisoned by projection {}; skipped projection {skipped_projection_revision}",
+        original.projection_revision
+    )]
+    Poisoned {
+        original: DurableAuthoredFault,
+        skipped_projection_revision: u64,
+    },
+}
+
+/// Result of one durable-first authored dispatch. The record in `Applied` is
+/// safe to announce because external persistence and local HHHS publication
+/// both completed before this value was returned. `app` remains a separate
+/// rebuildable-projection outcome so an AppStore race cannot hide a committed
+/// record from the carrier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DurableAuthoredObservation {
+    Applied {
+        projection_revision: u64,
+        record: Box<ReplicaRecord>,
+        history_len: usize,
+    },
+    IgnoredStale {
+        projection_revision: u64,
+        observed_projection_revision: Option<u64>,
+        history_len: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableAuthoredDispatch {
+    pub app: Result<AppCommit, DurableAuthoredFault>,
+    pub durable: DurableAuthoredObservation,
+}
+
+/// One-envelope HHHS-authoritative ingress with an AppStore projection.
+///
+/// Unlike [`AuthoredHhhsShadow`], persistence completes before AppStore is
+/// allowed to publish. Multi-command revisions are rejected before either
+/// side changes; adding them requires an explicit atomic batch payload rather
+/// than a loop of individually durable entries.
+pub struct DurableAuthoredCoordinator<D = MemoryDurability> {
+    project: DurableProject<D>,
+    expected: SequentialProjection,
+    observed_projection_revision: Option<u64>,
+    fault: Option<DurableAuthoredFault>,
+}
+
+impl DurableAuthoredCoordinator<MemoryDurability> {
+    pub fn new(project_id: ProjectId) -> Result<Self, DurableAuthoredInitError> {
+        Self::from_project(DurableProject::new(project_id)?)
+    }
+
+    pub fn recover(
+        project_id: ProjectId,
+        durable_bytes: Vec<u8>,
+    ) -> Result<Self, DurableAuthoredInitError> {
+        Self::from_project(DurableProject::recover(project_id, durable_bytes)?)
+    }
+}
+
+impl<D> DurableAuthoredCoordinator<D> {
+    pub fn from_project(project: DurableProject<D>) -> Result<Self, DurableAuthoredInitError> {
+        let state = project.state()?;
+        let checkpoint = project.projection_checkpoint(&durable_authored_cursor_key());
+        let observed_projection_revision = match (project.history_len(), checkpoint) {
+            (0, None) => None,
+            (0, Some(_)) => return Err(DurableAuthoredInitError::UnexpectedCursor),
+            (_, None) => return Err(DurableAuthoredInitError::MissingCursor),
+            (_, Some(checkpoint)) => {
+                if !checkpoint.is_intact() {
+                    return Err(DurableAuthoredInitError::CorruptCursor);
+                }
+                if checkpoint.history_root.as_bytes() != &state.history_root {
+                    return Err(DurableAuthoredInitError::CursorHistoryRoot);
+                }
+                let bytes: [u8; 8] = checkpoint
+                    .bytes()
+                    .try_into()
+                    .map_err(|_| DurableAuthoredInitError::MalformedCursor)?;
+                Some(u64::from_le_bytes(bytes))
+            }
+        };
+        Ok(Self {
+            project,
+            expected: SequentialProjection::from_state(&state),
+            observed_projection_revision,
+            fault: None,
+        })
+    }
+
+    pub fn project_id(&self) -> ProjectId {
+        self.project.project_id()
+    }
+
+    pub fn history_len(&self) -> usize {
+        self.project.history_len()
+    }
+
+    pub fn project_state(&self) -> Result<ProjectState, AdapterError> {
+        self.project.state()
+    }
+
+    pub fn observed_projection_revision(&self) -> Option<u64> {
+        self.observed_projection_revision
+    }
+
+    pub fn fault(&self) -> Option<&DurableAuthoredFault> {
+        self.fault.as_ref()
+    }
+
+    pub fn durability(&self) -> &D {
+        self.project.durability()
+    }
+
+    pub fn durability_mut(&mut self) -> &mut D {
+        self.project.durability_mut()
+    }
+}
+
+impl<D> DurableAuthoredCoordinator<D>
+where
+    D: AsyncTransactionSink,
+{
+    pub async fn dispatch(
+        &mut self,
+        store: &AppStore,
+        revision: AuthoredRevision,
+    ) -> Result<DurableAuthoredDispatch, DurableAuthoredDispatchError> {
+        if let Some(original) = &self.fault {
+            return Err(DurableAuthoredDispatchError::Poisoned {
+                original: original.clone(),
+                skipped_projection_revision: revision.projection_revision,
+            });
+        }
+
+        let app_baseline = store.authored_scene_snapshot();
+        if app_baseline.projection_revision != self.observed_projection_revision {
+            return Err(DurableAuthoredDispatchError::StoreProjectionRevision {
+                expected: self.observed_projection_revision,
+                actual: app_baseline.projection_revision,
+            });
+        }
+        if !self.expected.matches_app(&app_baseline) {
+            return Err(DurableAuthoredDispatchError::StoreProjectionContent);
+        }
+
+        if self
+            .observed_projection_revision
+            .is_some_and(|current| revision.projection_revision <= current)
+        {
+            let app = store
+                .dispatch_authored_if_current(self.observed_projection_revision, revision.clone())
+                .map_err(DurableAuthoredDispatchError::Store)?;
+            return Ok(DurableAuthoredDispatch {
+                app: Ok(app),
+                durable: DurableAuthoredObservation::IgnoredStale {
+                    projection_revision: revision.projection_revision,
+                    observed_projection_revision: self.observed_projection_revision,
+                    history_len: self.project.history_len(),
+                },
+            });
+        }
+
+        if revision.commands.len() != 1 {
+            return Err(DurableAuthoredDispatchError::UnsupportedCommandCount {
+                projection_revision: revision.projection_revision,
+                command_count: revision.commands.len(),
+            });
+        }
+
+        let envelope = &revision.commands[0];
+        let mut next_expected = self.expected.clone();
+        next_expected.apply(envelope);
+        let record = self
+            .project
+            .admit_with_projection_checkpoint(
+                envelope,
+                durable_authored_cursor_key(),
+                revision.projection_revision.to_le_bytes().to_vec(),
+            )
+            .await?;
+
+        self.expected = next_expected;
+        self.observed_projection_revision = Some(revision.projection_revision);
+        let state = match self.project.state() {
+            Ok(state) => state,
+            Err(error) => {
+                return Ok(self.faulted_dispatch(
+                    revision.projection_revision,
+                    record,
+                    error.to_string(),
+                ));
+            }
+        };
+        if !self.expected.matches(&state) {
+            return Ok(self.faulted_dispatch(
+                revision.projection_revision,
+                record,
+                "HHHS materialization diverged from the sequential authored projection".into(),
+            ));
+        }
+
+        let cursor = self
+            .project
+            .projection_checkpoint(&durable_authored_cursor_key());
+        let cursor_matches = cursor.is_some_and(|cursor| {
+            cursor.is_intact()
+                && cursor.history_root.as_bytes() == &state.history_root
+                && cursor.bytes() == revision.projection_revision.to_le_bytes()
+        });
+        if !cursor_matches {
+            return Ok(self.faulted_dispatch(
+                revision.projection_revision,
+                record,
+                "receiver-local source cursor did not commit at the authored history horizon"
+                    .into(),
+            ));
+        }
+
+        let app = match store.dispatch_authored_if_current(
+            app_baseline.projection_revision,
+            revision.clone(),
+        ) {
+            Ok(app) => app,
+            Err(error) => {
+                return Ok(self.faulted_dispatch(
+                    revision.projection_revision,
+                    record,
+                    error.to_string(),
+                ));
+            }
+        };
+        if app.disposition != CommitDisposition::Applied {
+            return Ok(self.faulted_dispatch(
+                revision.projection_revision,
+                record,
+                "AppStore ignored a revision already committed to HHHS".into(),
+            ));
+        }
+        if !self.expected.matches_app(&store.authored_scene_snapshot()) {
+            return Ok(self.faulted_dispatch(
+                revision.projection_revision,
+                record,
+                "AppStore projection diverged after durable authored dispatch".into(),
+            ));
+        }
+
+        Ok(DurableAuthoredDispatch {
+            app: Ok(app),
+            durable: DurableAuthoredObservation::Applied {
+                projection_revision: revision.projection_revision,
+                record: Box::new(record),
+                history_len: self.project.history_len(),
+            },
+        })
+    }
+
+    fn faulted_dispatch(
+        &mut self,
+        projection_revision: u64,
+        record: ReplicaRecord,
+        reason: String,
+    ) -> DurableAuthoredDispatch {
+        let fault = DurableAuthoredFault {
+            projection_revision,
+            durable_entry: record.entry_hash(),
+            history_len: self.project.history_len(),
+            reason,
+        };
+        self.fault = Some(fault.clone());
+        DurableAuthoredDispatch {
+            app: Err(fault),
+            durable: DurableAuthoredObservation::Applied {
+                projection_revision,
+                record: Box::new(record),
+                history_len: self.project.history_len(),
+            },
+        }
     }
 }
 

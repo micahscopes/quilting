@@ -29,13 +29,33 @@ history root, persisted in one storage transaction, and only then published.
 The focused adapter suite passes 21 tests, including an injected failure,
 successful retry, and exact restart recovery.
 
+## Durable-first application projection
+
+`hyperscope-hhhs-shadow::DurableAuthoredCoordinator` now consumes this seam for
+the common one-envelope browser/Blender revision:
+
+1. Verify that the complete AppStore authored projection matches the durable
+   cursor and HHHS materialization.
+2. Persist the envelope and source cursor atomically in HHHS.
+3. Compare-and-dispatch the AppStore projection against its pre-await revision.
+4. Return the persisted public replica record regardless of the separate
+   AppStore projection outcome, so a carrier never loses an announceable HHHS
+   commit merely because its rebuildable UI projection raced.
+
+An injected AppStore bypass inside the persistence future proves the race
+fence: HHHS remains authoritative, AppStore does not overwrite the bypass, and
+the coordinator enters an explicit poisoned/rebuild-required state. Stale
+revisions are zero-write no-ops, and failed durability remains retryable.
+
 ## Deliberate non-goals
 
-This does not yet make `AppStore` authoritative or claim atomicity across HHHS
-and an in-memory UI projection. The next coordinator will support the common
-one-envelope authored revision by committing HHHS first and rebuilding or
-advancing `AppStore` only after success. Multi-command revisions remain outside
-that authoritative path until they have an explicit batch payload/protocol.
+This does not claim atomicity across HHHS and an in-memory UI projection.
+Instead, HHHS is the authority and AppStore is a rebuildable projection with a
+compare-and-dispatch fence. Multi-command revisions remain outside the
+authoritative path until they have an explicit batch payload/protocol. A
+recovered nonempty HHHS project also requires its AppStore scene projection to
+be restored before new ingress; cursor recovery alone intentionally does not
+invent or duplicate authored commands.
 
 No browser, GPU device, WebGPU context, server, or Blender process was started
 for this CPU-only slice while another workload was exercising the shared GPU.
