@@ -1,0 +1,299 @@
+//! Thin Wasm scalar exports over the three production M1 ingots.
+
+use quilting_domain::{
+    Bary3F,
+    EdgeId,
+    admit_barycentric,
+    bary3f,
+    bary_to_cartesian,
+    cartesian_to_bary,
+    contains,
+    edge_parameter,
+    vec2f,
+    vec3f,
+}
+use quilting_quaternion::{QuatF, inverse_bounded, multiply, quatf, zero}
+use quilting_qb::{
+    QbTriPatch,
+    apply_normal_parity,
+    control,
+    evaluate_uv_differential,
+    patch,
+    permutation_parity,
+    remap_barycentric,
+}
+
+fn input_bary(_ a: f32, _ b: f32, _ c: f32) -> Bary3F {
+    bary3f(a, b, c)
+}
+
+pub fn domain_cartesian_x(_ a: f32, _ b: f32, _ c: f32) -> f32 {
+    bary_to_cartesian(input_bary(a, b, c)).x
+}
+pub fn domain_cartesian_y(_ a: f32, _ b: f32, _ c: f32) -> f32 {
+    bary_to_cartesian(input_bary(a, b, c)).y
+}
+pub fn domain_bary_a(_ x: f32, _ y: f32) -> f32 {
+    cartesian_to_bary(vec2f(x, y)).a
+}
+pub fn domain_bary_b(_ x: f32, _ y: f32) -> f32 {
+    cartesian_to_bary(vec2f(x, y)).b
+}
+pub fn domain_bary_c(_ x: f32, _ y: f32) -> f32 {
+    cartesian_to_bary(vec2f(x, y)).c
+}
+pub fn domain_contains(_ a: f32, _ b: f32, _ c: f32, _ tolerance: f32) -> i32 {
+    if contains(input_bary(a, b, c), tolerance) {
+        1
+    } else {
+        0
+    }
+}
+pub fn domain_edge_parameter(_ edge: u32, _ a: f32, _ b: f32, _ c: f32) -> f32 {
+    match edge {
+        0 => edge_parameter(EdgeId::BC, input_bary(a, b, c)),
+        1 => edge_parameter(EdgeId::CA, input_bary(a, b, c)),
+        _ => edge_parameter(EdgeId::AB, input_bary(a, b, c)),
+    }
+}
+pub fn domain_admit_a(_ a: f32, _ b: f32, _ c: f32, _ epsilon: f32) -> f32 {
+    admit_barycentric(input_bary(a, b, c), epsilon).value.a
+}
+pub fn domain_admit_b(_ a: f32, _ b: f32, _ c: f32, _ epsilon: f32) -> f32 {
+    admit_barycentric(input_bary(a, b, c), epsilon).value.b
+}
+pub fn domain_admit_c(_ a: f32, _ b: f32, _ c: f32, _ epsilon: f32) -> f32 {
+    admit_barycentric(input_bary(a, b, c), epsilon).value.c
+}
+pub fn domain_admit_valid(_ a: f32, _ b: f32, _ c: f32, _ epsilon: f32) -> i32 {
+    if admit_barycentric(input_bary(a, b, c), epsilon).valid {
+        1
+    } else {
+        0
+    }
+}
+
+fn left_quat(_ w: f32, _ x: f32, _ y: f32, _ z: f32) -> QuatF {
+    quatf(w, x, y, z)
+}
+fn right_quat(_ w: f32, _ x: f32, _ y: f32, _ z: f32) -> QuatF {
+    quatf(w, x, y, z)
+}
+fn product(
+    _ aw: f32,
+    _ ax: f32,
+    _ ay: f32,
+    _ az: f32,
+    _ bw: f32,
+    _ bx: f32,
+    _ by: f32,
+    _ bz: f32,
+) -> QuatF {
+    multiply(left_quat(aw, ax, ay, az), right_quat(bw, bx, by, bz))
+}
+pub fn quaternion_multiply_w(
+    _ aw: f32,
+    _ ax: f32,
+    _ ay: f32,
+    _ az: f32,
+    _ bw: f32,
+    _ bx: f32,
+    _ by: f32,
+    _ bz: f32,
+) -> f32 {
+    product(aw, ax, ay, az, bw, bx, by, bz).w
+}
+pub fn quaternion_multiply_x(
+    _ aw: f32,
+    _ ax: f32,
+    _ ay: f32,
+    _ az: f32,
+    _ bw: f32,
+    _ bx: f32,
+    _ by: f32,
+    _ bz: f32,
+) -> f32 {
+    product(aw, ax, ay, az, bw, bx, by, bz).x
+}
+pub fn quaternion_multiply_y(
+    _ aw: f32,
+    _ ax: f32,
+    _ ay: f32,
+    _ az: f32,
+    _ bw: f32,
+    _ bx: f32,
+    _ by: f32,
+    _ bz: f32,
+) -> f32 {
+    product(aw, ax, ay, az, bw, bx, by, bz).y
+}
+pub fn quaternion_multiply_z(
+    _ aw: f32,
+    _ ax: f32,
+    _ ay: f32,
+    _ az: f32,
+    _ bw: f32,
+    _ bx: f32,
+    _ by: f32,
+    _ bz: f32,
+) -> f32 {
+    product(aw, ax, ay, az, bw, bx, by, bz).z
+}
+
+fn bounded_inverse(
+    _ w: f32,
+    _ x: f32,
+    _ y: f32,
+    _ z: f32,
+    _ minimum: f32,
+) -> quilting_quaternion::QuatInverse {
+    inverse_bounded(quatf(w, x, y, z), minimum)
+}
+pub fn quaternion_inverse_w(_ w: f32, _ x: f32, _ y: f32, _ z: f32, _ minimum: f32) -> f32 {
+    bounded_inverse(w, x, y, z, minimum).value.w
+}
+pub fn quaternion_inverse_x(_ w: f32, _ x: f32, _ y: f32, _ z: f32, _ minimum: f32) -> f32 {
+    bounded_inverse(w, x, y, z, minimum).value.x
+}
+pub fn quaternion_inverse_y(_ w: f32, _ x: f32, _ y: f32, _ z: f32, _ minimum: f32) -> f32 {
+    bounded_inverse(w, x, y, z, minimum).value.y
+}
+pub fn quaternion_inverse_z(_ w: f32, _ x: f32, _ y: f32, _ z: f32, _ minimum: f32) -> f32 {
+    bounded_inverse(w, x, y, z, minimum).value.z
+}
+pub fn quaternion_inverse_valid(_ w: f32, _ x: f32, _ y: f32, _ z: f32, _ minimum: f32) -> i32 {
+    if bounded_inverse(w, x, y, z, minimum).valid {
+        1
+    } else {
+        0
+    }
+}
+
+fn curved_patch() -> QbTriPatch {
+    patch(
+        control(vec3f(-0.75, -0.25, 0.1), quatf(1.0, 0.2, -0.1, 0.05)),
+        control(vec3f(0.8, -0.15, -0.2), quatf(0.9, -0.15, 0.25, 0.1)),
+        control(vec3f(0.05, 0.9, 0.35), quatf(1.1, 0.1, 0.05, -0.2)),
+    )
+}
+
+fn flat_patch() -> QbTriPatch {
+    let identity = quatf(1.0, 0.0, 0.0, 0.0)
+    patch(
+        control(vec3f(0.0, 0.0, 0.0), identity),
+        control(vec3f(1.0, 0.0, 0.0), identity),
+        control(vec3f(0.0, 1.0, 0.0), identity),
+    )
+}
+
+fn zero_weight_patch() -> QbTriPatch {
+    let weight = zero()
+    patch(
+        control(vec3f(0.0, 0.0, 0.0), weight),
+        control(vec3f(1.0, 0.0, 0.0), weight),
+        control(vec3f(0.0, 1.0, 0.0), weight),
+    )
+}
+
+fn curved(_ u: f32, _ v: f32) -> quilting_qb::QbDifferential {
+    evaluate_uv_differential(
+        curved_patch(),
+        u,
+        v,
+        0.00000000000000000001,
+        0.000000000001,
+    )
+}
+fn flat(_ u: f32, _ v: f32) -> quilting_qb::QbDifferential {
+    evaluate_uv_differential(flat_patch(), u, v, 0.00000000000000000001, 0.000000000001)
+}
+
+pub fn qb_position_x(_ u: f32, _ v: f32) -> f32 {
+    curved(u, v).sample.position.x
+}
+pub fn qb_position_y(_ u: f32, _ v: f32) -> f32 {
+    curved(u, v).sample.position.y
+}
+pub fn qb_position_z(_ u: f32, _ v: f32) -> f32 {
+    curved(u, v).sample.position.z
+}
+pub fn qb_tangent_u_x(_ u: f32, _ v: f32) -> f32 {
+    curved(u, v).tangent_u.x
+}
+pub fn qb_tangent_u_y(_ u: f32, _ v: f32) -> f32 {
+    curved(u, v).tangent_u.y
+}
+pub fn qb_tangent_u_z(_ u: f32, _ v: f32) -> f32 {
+    curved(u, v).tangent_u.z
+}
+pub fn qb_tangent_v_x(_ u: f32, _ v: f32) -> f32 {
+    curved(u, v).tangent_v.x
+}
+pub fn qb_tangent_v_y(_ u: f32, _ v: f32) -> f32 {
+    curved(u, v).tangent_v.y
+}
+pub fn qb_tangent_v_z(_ u: f32, _ v: f32) -> f32 {
+    curved(u, v).tangent_v.z
+}
+pub fn qb_normal_x(_ u: f32, _ v: f32) -> f32 {
+    curved(u, v).normal.x
+}
+pub fn qb_normal_y(_ u: f32, _ v: f32) -> f32 {
+    curved(u, v).normal.y
+}
+pub fn qb_normal_z(_ u: f32, _ v: f32) -> f32 {
+    curved(u, v).normal.z
+}
+pub fn qb_denominator_norm_squared(_ u: f32, _ v: f32) -> f32 {
+    curved(u, v).sample.denominator_norm_squared
+}
+pub fn qb_flat_position_x(_ u: f32, _ v: f32) -> f32 {
+    flat(u, v).sample.position.x
+}
+pub fn qb_flat_position_y(_ u: f32, _ v: f32) -> f32 {
+    flat(u, v).sample.position.y
+}
+pub fn qb_flat_position_z(_ u: f32, _ v: f32) -> f32 {
+    flat(u, v).sample.position.z
+}
+pub fn qb_flat_normal_z(_ u: f32, _ v: f32) -> f32 {
+    flat(u, v).normal.z
+}
+pub fn qb_zero_weight_conditioned(_ u: f32, _ v: f32) -> i32 {
+    let value = evaluate_uv_differential(
+        zero_weight_patch(),
+        u,
+        v,
+        0.00000000000000000001,
+        0.000000000001,
+    )
+    if value.sample.conditioned { 1 } else { 0 }
+}
+pub fn qb_zero_weight_position_x(_ u: f32, _ v: f32) -> f32 {
+    evaluate_uv_differential(
+        zero_weight_patch(),
+        u,
+        v,
+        0.00000000000000000001,
+        0.000000000001,
+    )
+        .sample
+        .position
+        .x
+}
+
+pub fn qb_remap_a(_ permutation: u32, _ a: f32, _ b: f32, _ c: f32) -> f32 {
+    remap_barycentric(permutation, bary3f(a, b, c)).a
+}
+pub fn qb_remap_b(_ permutation: u32, _ a: f32, _ b: f32, _ c: f32) -> f32 {
+    remap_barycentric(permutation, bary3f(a, b, c)).b
+}
+pub fn qb_remap_c(_ permutation: u32, _ a: f32, _ b: f32, _ c: f32) -> f32 {
+    remap_barycentric(permutation, bary3f(a, b, c)).c
+}
+pub fn qb_permutation_parity(_ permutation: u32) -> f32 {
+    permutation_parity(permutation)
+}
+pub fn qb_permuted_normal_z(_ permutation: u32, _ u: f32, _ v: f32) -> f32 {
+    apply_normal_parity(curved(u, v).normal, permutation).z
+}

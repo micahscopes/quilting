@@ -1,0 +1,6 @@
+[ingot]
+name = "quilting_domain"
+version = "0.1.0"
+
+[dependencies]
+core = true

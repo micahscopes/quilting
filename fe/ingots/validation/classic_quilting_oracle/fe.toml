@@ -1,0 +1,9 @@
+[ingot]
+name = "classic_quilting_oracle"
+version = "0.1.0"
+
+[dependencies]
+core = true
+quilting_domain = true
+quilting_quaternion = true
+quilting_qb = true

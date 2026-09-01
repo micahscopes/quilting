@@ -1,0 +1,255 @@
+{
+  "schemaVersion": 1,
+  "algorithmVersion": 1,
+  "algorithm": "quilting-core direct Bridson sampling plus constrained CDT",
+  "generatorVersion": "0.1.0",
+  "generatorCommand": "cargo run --locked --release --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml --features quilting-export --bin export-classic-quilting-fixtures -- --output fixtures/classic-quilting/v1 --quilting-commit 4e0093457136eacba07dc1ed93f498f99dcada32",
+  "quiltingCommit": "4e0093457136eacba07dc1ed93f498f99dcada32",
+  "license": "MIT OR Apache-2.0",
+  "masterSeed": 42,
+  "kCandidates": 30,
+  "poolWidthsVerified": [
+    1,
+    2,
+    4
+  ],
+  "combined": {
+    "file": "direct-seed42-matrix.cqa",
+    "keys": [
+      [
+        1,
+        1,
+        1
+      ],
+      [
+        1,
+        1,
+        2
+      ],
+      [
+        1,
+        2,
+        2
+      ],
+      [
+        2,
+        4,
+        8
+      ]
+    ],
+    "vertexCount": 33,
+    "triangleCount": 32,
+    "payloadSha256": "fb61279d43d700079866d818795a8206452e4bd1b1cd82b31246aa7324c1cb7c",
+    "boundaryParameterF32Bits": [
+      [
+        [
+          "0x00000000",
+          "0x3f800000"
+        ],
+        [
+          "0x00000000",
+          "0x3f800000"
+        ],
+        [
+          "0x00000000",
+          "0x3f800000"
+        ]
+      ],
+      [
+        [
+          "0x00000000",
+          "0x3f800000"
+        ],
+        [
+          "0x00000000",
+          "0x3f800000"
+        ],
+        [
+          "0x00000000",
+          "0x3f000000",
+          "0x3f800000"
+        ]
+      ],
+      [
+        [
+          "0x00000000",
+          "0x3f800000"
+        ],
+        [
+          "0x00000000",
+          "0x3f000000",
+          "0x3f800000"
+        ],
+        [
+          "0x00000000",
+          "0x3f000000",
+          "0x3f800000"
+        ]
+      ],
+      [
+        [
+          "0x00000000",
+          "0x3f000000",
+          "0x3f800000"
+        ],
+        [
+          "0x00000000",
+          "0x3e800000",
+          "0x3f000000",
+          "0x3f400000",
+          "0x3f800000"
+        ],
+        [
+          "0x00000000",
+          "0x3e000000",
+          "0x3e800000",
+          "0x3ec00000",
+          "0x3f000000",
+          "0x3f200000",
+          "0x3f400000",
+          "0x3f600000",
+          "0x3f800000"
+        ]
+      ]
+    ]
+  },
+  "fixtures": [
+    {
+      "file": "direct-seed42-k1-1-1.cqa",
+      "keys": [
+        [
+          1,
+          1,
+          1
+        ]
+      ],
+      "vertexCount": 3,
+      "triangleCount": 1,
+      "payloadSha256": "9d273b78db9143626019207fbb7822135ad0d3cdd777ecbe2b7a2d01430d1500",
+      "boundaryParameterF32Bits": [
+        [
+          [
+            "0x00000000",
+            "0x3f800000"
+          ],
+          [
+            "0x00000000",
+            "0x3f800000"
+          ],
+          [
+            "0x00000000",
+            "0x3f800000"
+          ]
+        ]
+      ]
+    },
+    {
+      "file": "direct-seed42-k1-1-2.cqa",
+      "keys": [
+        [
+          1,
+          1,
+          2
+        ]
+      ],
+      "vertexCount": 4,
+      "triangleCount": 2,
+      "payloadSha256": "3f36c564af55d421fddc04702b2afa09740cb9cc41535fa0a0f12359d66f3be4",
+      "boundaryParameterF32Bits": [
+        [
+          [
+            "0x00000000",
+            "0x3f800000"
+          ],
+          [
+            "0x00000000",
+            "0x3f800000"
+          ],
+          [
+            "0x00000000",
+            "0x3f000000",
+            "0x3f800000"
+          ]
+        ]
+      ]
+    },
+    {
+      "file": "direct-seed42-k1-2-2.cqa",
+      "keys": [
+        [
+          1,
+          2,
+          2
+        ]
+      ],
+      "vertexCount": 5,
+      "triangleCount": 3,
+      "payloadSha256": "5ec399100a8ecca495409dad8606f4dc59c6e9117325858fb3e114f5dfddc897",
+      "boundaryParameterF32Bits": [
+        [
+          [
+            "0x00000000",
+            "0x3f800000"
+          ],
+          [
+            "0x00000000",
+            "0x3f000000",
+            "0x3f800000"
+          ],
+          [
+            "0x00000000",
+            "0x3f000000",
+            "0x3f800000"
+          ]
+        ]
+      ]
+    },
+    {
+      "file": "direct-seed42-k2-4-8.cqa",
+      "keys": [
+        [
+          2,
+          4,
+          8
+        ]
+      ],
+      "vertexCount": 21,
+      "triangleCount": 26,
+      "payloadSha256": "9afe43705553ab9b08e83f420d7f784a04a6f126d66838d20893a8831ea5d139",
+      "boundaryParameterF32Bits": [
+        [
+          [
+            "0x00000000",
+            "0x3f000000",
+            "0x3f800000"
+          ],
+          [
+            "0x00000000",
+            "0x3e800000",
+            "0x3f000000",
+            "0x3f400000",
+            "0x3f800000"
+          ],
+          [
+            "0x00000000",
+            "0x3e000000",
+            "0x3e800000",
+            "0x3ec00000",
+            "0x3f000000",
+            "0x3f200000",
+            "0x3f400000",
+            "0x3f600000",
+            "0x3f800000"
+          ]
+        ]
+      ]
+    }
+  ],
+  "rejection": {
+    "file": "near-degenerate-rejection.json",
+    "domain": "triangulation",
+    "code": "near_duplicate_points",
+    "firstPoint": 3,
+    "secondPoint": 4
+  }
+}

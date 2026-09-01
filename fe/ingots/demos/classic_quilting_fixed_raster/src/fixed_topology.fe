@@ -1,0 +1,22 @@
+//! @generated from fixtures/classic-quilting/v1/direct-seed42-k1-1-1.cqa.
+//! Regenerate with the classic-quilting artifact tool; do not hand-edit.
+
+use quilting_domain::{Bary3F, bary3f}
+use std::webgpu::TriangleList
+
+pub const SOURCE_VERTEX_COUNT: usize = 3
+pub const SOURCE_TRIANGLE_COUNT: usize = 1
+pub const EXPANDED_VERTEX_COUNT: usize = 3
+
+pub type FixedTopology = TriangleList<3>
+
+/// Checked indexed topology beginning with `[0, 1, 2]`, expanded in draw order.
+pub fn expanded_barycentric(_ vertex_index: u32) -> Bary3F {
+    if vertex_index == 0 {
+        bary3f(1.0, 0.0, 0.0)
+    } else if vertex_index == 1 {
+        bary3f(0.0, 1.0, 0.0)
+    } else {
+        bary3f(0.0, 0.0, 1.0)
+    }
+}

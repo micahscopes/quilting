@@ -1,0 +1,67 @@
+[package]
+name = "classic-quilting-artifact-abi"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Keep this evidence tool out of Quilting's production Cargo workspace. It has
+# intentionally heavyweight optional compiler/Wasmtime/wgpu dependencies.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "export-classic-quilting-fixtures"
+path = "src/bin/export_classic_quilting_fixtures.rs"
+required-features = ["quilting-export"]
+
+[[bin]]
+name = "generate-classic-quilting-fixed-raster"
+path = "src/bin/generate_classic_quilting_fixed_raster.rs"
+
+[features]
+default = []
+quilting-export = ["dep:quilting-core", "dep:serde", "dep:serde_json"]
+fe-oracle = [
+    "quilting-export",
+    "dep:common",
+    "dep:driver",
+    "dep:fe-codegen",
+    "dep:hir",
+    "dep:url",
+    "dep:wasmparser",
+    "dep:wasmtime",
+]
+raster-oracle = [
+    "fe-oracle",
+    "fe-codegen/spirv-backend",
+    "dep:mir",
+    "dep:naga",
+    "dep:pollster",
+    "dep:wgpu",
+]
+
+[dependencies]
+quilting-core = { path = "../../../crates/quilting-core", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+common = { package = "fe-common", path = "../../../.toolchains/fe/crates/common", optional = true }
+driver = { package = "fe-driver", path = "../../../.toolchains/fe/crates/driver", optional = true }
+fe-codegen = { path = "../../../.toolchains/fe/crates/codegen", default-features = false, optional = true }
+hir = { package = "fe-hir", path = "../../../.toolchains/fe/crates/hir", features = ["testutils"], optional = true }
+mir = { package = "fe-mir", path = "../../../.toolchains/fe/crates/mir", optional = true }
+naga = { version = "29", features = ["wgsl-in"], optional = true }
+pollster = { version = "0.4.0", optional = true }
+url = { version = "2.5.4", optional = true }
+wasmparser = { version = "0.248.0", optional = true }
+wasmtime = { version = "44.0.1", optional = true }
+wgpu = { version = "29", default-features = false, features = ["std", "vulkan", "vulkan-portability", "wgsl"], optional = true }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

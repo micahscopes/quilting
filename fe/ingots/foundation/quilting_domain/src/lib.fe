@@ -1,0 +1,141 @@
+//! Pure equilateral reference-triangle and small-vector arithmetic.
+//!
+//! Edge order is normative: `BC`, `CA`, `AB` are opposite controls `A`, `B`,
+//! `C`, so an edge-LOD key `[a,b,c]` uses the same lane order as barycentrics.
+
+use core::marker::Copy
+
+extern {
+    fn __sqrt_f32(_: f32) -> f32
+}
+
+pub const SQRT3: f32 = 1.7320508
+pub const SQRT3_OVER_2: f32 = 0.8660254
+pub const ONE_OVER_SQRT3: f32 = 0.57735026
+
+pub struct Vec2F { pub x: f32, pub y: f32 }
+pub struct Vec3F { pub x: f32, pub y: f32, pub z: f32 }
+pub struct Bary3F { pub a: f32, pub b: f32, pub c: f32 }
+
+impl Copy for Vec2F {}
+impl Copy for Vec3F {}
+impl Copy for Bary3F {}
+
+pub enum EdgeId {
+    BC,
+    CA,
+    AB,
+}
+impl Copy for EdgeId {}
+
+pub struct BaryAdmission { pub value: Bary3F, pub valid: bool }
+impl Copy for BaryAdmission {}
+
+pub fn vec2f(_ x: f32, _ y: f32) -> Vec2F {
+    Vec2F { x: x, y: y }
+}
+pub fn vec3f(_ x: f32, _ y: f32, _ z: f32) -> Vec3F {
+    Vec3F { x: x, y: y, z: z }
+}
+pub fn bary3f(_ a: f32, _ b: f32, _ c: f32) -> Bary3F {
+    Bary3F { a: a, b: b, c: c }
+}
+
+pub fn vertex_a() -> Vec2F {
+    vec2f(0.0, 1.0)
+}
+pub fn vertex_b() -> Vec2F {
+    vec2f(-SQRT3_OVER_2, -0.5)
+}
+pub fn vertex_c() -> Vec2F {
+    vec2f(SQRT3_OVER_2, -0.5)
+}
+
+pub fn bary_to_cartesian(_ bary: Bary3F) -> Vec2F {
+    vec2f(
+        SQRT3_OVER_2 * (bary.c - bary.b),
+        (3.0 * bary.a - 1.0) * 0.5,
+    )
+}
+
+pub fn cartesian_to_bary(_ point: Vec2F) -> Bary3F {
+    bary3f(
+        (1.0 + 2.0 * point.y) / 3.0,
+        (1.0 - point.y) / 3.0 - point.x * ONE_OVER_SQRT3,
+        (1.0 - point.y) / 3.0 + point.x * ONE_OVER_SQRT3,
+    )
+}
+
+pub fn absf(_ value: f32) -> f32 {
+    if value < 0.0 { -value } else { value }
+}
+
+/// Snap near-zero lanes to positive zero and renormalize once.
+pub fn admit_barycentric(_ bary: Bary3F, _ snap_epsilon: f32) -> BaryAdmission {
+    let mut a = bary.a
+    let mut b = bary.b
+    let mut c = bary.c
+    if absf(a) < snap_epsilon {
+        a = 0.0
+    }
+    if absf(b) < snap_epsilon {
+        b = 0.0
+    }
+    if absf(c) < snap_epsilon {
+        c = 0.0
+    }
+    let sum = a + b + c
+    if sum <= 0.0 {
+        return BaryAdmission { value: bary3f(0.0, 0.0, 0.0), valid: false }
+    }
+    let value = bary3f(a / sum, b / sum, c / sum)
+    BaryAdmission { value: value, valid: value.a >= 0.0 && value.b >= 0.0 && value.c >= 0.0 }
+}
+
+pub fn contains(_ bary: Bary3F, _ tolerance: f32) -> bool {
+    bary.a >= -tolerance
+        && bary.b >= -tolerance
+        && bary.c >= -tolerance
+        && absf((bary.a + bary.b + bary.c) - 1.0) <= tolerance
+}
+
+pub fn edge_parameter(_ edge: EdgeId, _ bary: Bary3F) -> f32 {
+    match edge {
+        EdgeId::BC => bary.c,
+        EdgeId::CA => bary.a,
+        EdgeId::AB => bary.b,
+    }
+}
+
+pub fn add3(_ left: Vec3F, _ right: Vec3F) -> Vec3F {
+    vec3f(left.x + right.x, left.y + right.y, left.z + right.z)
+}
+
+pub fn sub3(_ left: Vec3F, _ right: Vec3F) -> Vec3F {
+    vec3f(left.x - right.x, left.y - right.y, left.z - right.z)
+}
+
+pub fn scale3(_ value: Vec3F, _ scale: f32) -> Vec3F {
+    vec3f(value.x * scale, value.y * scale, value.z * scale)
+}
+
+pub fn dot3(_ left: Vec3F, _ right: Vec3F) -> f32 {
+    left.x * right.x + left.y * right.y + left.z * right.z
+}
+
+pub fn cross3(_ left: Vec3F, _ right: Vec3F) -> Vec3F {
+    vec3f(
+        left.y * right.z - left.z * right.y,
+        left.z * right.x - left.x * right.z,
+        left.x * right.y - left.y * right.x,
+    )
+}
+
+pub fn normalize3_or(_ value: Vec3F, _ fallback: Vec3F, _ minimum_norm_squared: f32) -> Vec3F {
+    let norm_squared = dot3(value, value)
+    if norm_squared < minimum_norm_squared {
+        return fallback
+    }
+    let inverse_norm = 1.0 / __sqrt_f32(norm_squared)
+    scale3(value, inverse_norm)
+}

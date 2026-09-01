@@ -1,0 +1,82 @@
+//! Fixed `(w,x,y,z)` quaternion arithmetic for QB surface specialization.
+
+use core::marker::Copy
+
+pub const DEFAULT_MINIMUM_NORM_SQUARED: f32 = 0.00000000000000000001
+
+pub struct QuatF { pub w: f32, pub x: f32, pub y: f32, pub z: f32 }
+impl Copy for QuatF {}
+
+pub struct QuatInverse { pub value: QuatF, pub norm_squared: f32, pub valid: bool }
+impl Copy for QuatInverse {}
+
+pub fn quatf(_ w: f32, _ x: f32, _ y: f32, _ z: f32) -> QuatF {
+    QuatF { w: w, x: x, y: y, z: z }
+}
+
+pub fn zero() -> QuatF {
+    quatf(0.0, 0.0, 0.0, 0.0)
+}
+pub fn one() -> QuatF {
+    quatf(1.0, 0.0, 0.0, 0.0)
+}
+pub fn pure(_ x: f32, _ y: f32, _ z: f32) -> QuatF {
+    quatf(0.0, x, y, z)
+}
+
+pub fn add(_ left: QuatF, _ right: QuatF) -> QuatF {
+    quatf(
+        left.w + right.w,
+        left.x + right.x,
+        left.y + right.y,
+        left.z + right.z,
+    )
+}
+
+pub fn sub(_ left: QuatF, _ right: QuatF) -> QuatF {
+    quatf(
+        left.w - right.w,
+        left.x - right.x,
+        left.y - right.y,
+        left.z - right.z,
+    )
+}
+
+pub fn scale(_ value: QuatF, _ factor: f32) -> QuatF {
+    quatf(
+        value.w * factor,
+        value.x * factor,
+        value.y * factor,
+        value.z * factor,
+    )
+}
+
+pub fn conjugate(_ value: QuatF) -> QuatF {
+    quatf(value.w, -value.x, -value.y, -value.z)
+}
+
+pub fn multiply(_ left: QuatF, _ right: QuatF) -> QuatF {
+    quatf(
+        left.w * right.w - left.x * right.x - left.y * right.y - left.z * right.z,
+        left.w * right.x + left.x * right.w + left.y * right.z - left.z * right.y,
+        left.w * right.y - left.x * right.z + left.y * right.w + left.z * right.x,
+        left.w * right.z + left.x * right.y - left.y * right.x + left.z * right.w,
+    )
+}
+
+pub fn norm_squared(_ value: QuatF) -> f32 {
+    value.w * value.w + value.x * value.x + value.y * value.y + value.z * value.z
+}
+
+/// Fail closed below the declared squared-norm threshold.
+pub fn inverse_bounded(_ value: QuatF, _ minimum_norm_squared: f32) -> QuatInverse {
+    let squared = norm_squared(value)
+    if squared < minimum_norm_squared {
+        return QuatInverse { value: zero(), norm_squared: squared, valid: false }
+    }
+    QuatInverse {
+        value: scale(conjugate(value), 1.0 / squared),
+        norm_squared: squared,
+        valid: true,
+    }
+}

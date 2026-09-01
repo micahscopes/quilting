@@ -1,0 +1,25 @@
+[workspace]
+name = "quilting_fe"
+version = "0.1.0"
+members = [
+  { path = "ingots/foundation/quilting_domain", name = "quilting_domain" },
+  { path = "ingots/algebra/quilting_quaternion", name = "quilting_quaternion" },
+  { path = "ingots/geometry/quilting_qb", name = "quilting_qb" },
+  { path = "ingots/validation/classic_quilting_oracle", name = "classic_quilting_oracle" },
+  { path = "ingots/demos/classic_quilting_fixed_raster", name = "classic_quilting_fixed_raster" },
+]
+default-members = [
+  "ingots/foundation/quilting_domain",
+  "ingots/algebra/quilting_quaternion",
+  "ingots/geometry/quilting_qb",
+  "ingots/validation/classic_quilting_oracle",
+  "ingots/demos/classic_quilting_fixed_raster",
+]
+
+[dependencies]
+core = { path = "../.toolchains/fe/ingots/core" }
+std = { path = "../.toolchains/fe/ingots/std" }
+
+[metadata]
+purpose = "Classic Quilting mathematics, validation oracles, and teaching demos in Fe"
+toolchain = "toolchain/README.md"

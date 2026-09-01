@@ -1,0 +1,67 @@
+//! Smallest fixed authored-raster proof over the frozen classic Quilting atlas.
+//!
+//! The generated topology module expands the checked `[1,1,1]` fixture into a
+//! non-indexed `TriangleList<3>`. The vertex stage evaluates the real
+//! three-control QB patch and carries both position and analytic normal through
+//! the typed raster interface.
+
+use core::marker::Copy
+use quilting_domain::{Bary3F, Vec3F, vec3f}
+use quilting_quaternion::quatf
+use quilting_qb::{QbDifferential, QbTriPatch, control, evaluate_differential, patch}
+use std::webgpu::{ClipPosition, FragmentStage, GpuProgram, RasterVertex, VertexStage, WebGpuBackend}
+
+pub struct SurfaceVarying { pub position: Vec3F, pub normal: Vec3F }
+impl Copy for SurfaceVarying {}
+
+fn curved_patch() -> QbTriPatch {
+    patch(
+        control(vec3f(-0.75, -0.25, 0.1), quatf(1.0, 0.2, -0.1, 0.05)),
+        control(vec3f(0.8, -0.15, -0.2), quatf(0.9, -0.15, 0.25, 0.1)),
+        control(vec3f(0.05, 0.9, 0.35), quatf(1.1, 0.1, 0.05, -0.2)),
+    )
+}
+
+pub fn fixed_barycentric(_ vertex_index: u32) -> Bary3F {
+    fixed_topology::expanded_barycentric(vertex_index)
+}
+
+pub fn fixed_differential(_ vertex_index: u32) -> QbDifferential {
+    evaluate_differential(
+        curved_patch(),
+        fixed_barycentric(vertex_index),
+        0.00000000000000000001,
+        0.000000000001,
+    )
+}
+
+fn clip_position(_ position: Vec3F) -> ClipPosition {
+    ClipPosition { x: position.x, y: position.y, z: position.z * 0.25, w: 1.0 }
+}
+
+actor ClassicQuiltingFixedRaster uses (GpuProgram<WebGpuBackend>) {
+    fn vertices(self, vertex_index: u32) -> RasterVertex<SurfaceVarying>
+        uses (VertexStage<SurfaceVarying, fixed_topology::FixedTopology>)
+    {
+        let differential = fixed_differential(vertex_index)
+        RasterVertex {
+            position: clip_position(differential.sample.position),
+            varying: SurfaceVarying {
+                position: differential.sample.position,
+                normal: differential.normal,
+            },
+        }
+    }
+
+    fn shade(self, varying: SurfaceVarying) -> u32
+        uses (FragmentStage<SurfaceVarying>)
+    {
+        let position_signal = varying.position.x + varying.position.y + varying.position.z
+        let normal_signal = varying.normal.x + varying.normal.y + varying.normal.z
+        if position_signal + normal_signal >= 0.0 {
+            4278255615
+        } else {
+            4294902015
+        }
+    }
+}

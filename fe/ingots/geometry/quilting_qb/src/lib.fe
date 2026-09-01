@@ -1,0 +1,197 @@
+//! Actual three-control quaternionic-Bezier triangular surface arithmetic.
+//!
+//! This is not a six-control polynomial quadratic triangle. Numerator and
+//! denominator are barycentric degree one; right quaternion division creates
+//! the curved Mobius-compatible surface.
+
+use core::marker::Copy
+use quilting_domain::{Bary3F, Vec3F, bary3f, cross3, normalize3_or, vec3f}
+use quilting_quaternion::{QuatF, add, inverse_bounded, multiply, pure, quatf, scale, sub, zero}
+
+pub struct QbControl { pub point: Vec3F, pub weight: QuatF }
+impl Copy for QbControl {}
+
+pub struct QbTriPatch { pub a: QbControl, pub b: QbControl, pub c: QbControl }
+impl Copy for QbTriPatch {}
+
+pub struct QbSample {
+    pub position: Vec3F,
+    pub quotient: QuatF,
+    pub denominator: QuatF,
+    pub denominator_norm_squared: f32,
+    pub conditioned: bool,
+}
+impl Copy for QbSample {}
+
+pub struct QbDifferential {
+    pub sample: QbSample,
+    pub tangent_u: Vec3F,
+    pub tangent_v: Vec3F,
+    pub normal: Vec3F,
+}
+impl Copy for QbDifferential {}
+
+pub fn control(_ point: Vec3F, _ weight: QuatF) -> QbControl {
+    QbControl { point: point, weight: weight }
+}
+
+pub fn patch(_ a: QbControl, _ b: QbControl, _ c: QbControl) -> QbTriPatch {
+    QbTriPatch { a: a, b: b, c: c }
+}
+
+fn weighted_point(_ value: QbControl) -> QuatF {
+    multiply(
+        pure(value.point.x, value.point.y, value.point.z),
+        value.weight,
+    )
+}
+
+fn bary_sum_quat(_ a: QuatF, _ b: QuatF, _ c: QuatF, _ bary: Bary3F) -> QuatF {
+    add(add(scale(a, bary.a), scale(b, bary.b)), scale(c, bary.c))
+}
+
+pub fn evaluate(
+    _ value: QbTriPatch,
+    _ bary: Bary3F,
+    _ minimum_denominator_norm_squared: f32,
+) -> QbSample {
+    let numerator = bary_sum_quat(
+        weighted_point(value.a),
+        weighted_point(value.b),
+        weighted_point(value.c),
+        bary,
+    )
+    let denominator = bary_sum_quat(value.a.weight, value.b.weight, value.c.weight, bary)
+    let inverse = inverse_bounded(denominator, minimum_denominator_norm_squared)
+    if !inverse.valid {
+        return QbSample {
+            position: vec3f(0.0, 0.0, 0.0),
+            quotient: zero(),
+            denominator: denominator,
+            denominator_norm_squared: inverse.norm_squared,
+            conditioned: false,
+        }
+    }
+    let quotient = multiply(numerator, inverse.value)
+    QbSample {
+        position: vec3f(quotient.x, quotient.y, quotient.z),
+        quotient: quotient,
+        denominator: denominator,
+        denominator_norm_squared: inverse.norm_squared,
+        conditioned: true,
+    }
+}
+
+pub fn evaluate_uv(
+    _ value: QbTriPatch,
+    _ u: f32,
+    _ v: f32,
+    _ minimum_denominator_norm_squared: f32,
+) -> QbSample {
+    evaluate(
+        value,
+        bary3f(1.0 - u - v, u, v),
+        minimum_denominator_norm_squared,
+    )
+}
+
+pub fn evaluate_differential(
+    _ value: QbTriPatch,
+    _ bary: Bary3F,
+    _ minimum_denominator_norm_squared: f32,
+    _ minimum_tangent_norm_squared: f32,
+) -> QbDifferential {
+    let sample = evaluate(value, bary, minimum_denominator_norm_squared)
+    if !sample.conditioned {
+        return QbDifferential {
+            sample: sample,
+            tangent_u: vec3f(0.0, 0.0, 0.0),
+            tangent_v: vec3f(0.0, 0.0, 0.0),
+            normal: vec3f(0.0, 0.0, 1.0),
+        }
+    }
+    let inverse = inverse_bounded(sample.denominator, minimum_denominator_norm_squared)
+    let pw0 = weighted_point(value.a)
+    let pw1 = weighted_point(value.b)
+    let pw2 = weighted_point(value.c)
+    let d_n_u = sub(pw1, pw0)
+    let d_n_v = sub(pw2, pw0)
+    let d_d_u = sub(value.b.weight, value.a.weight)
+    let d_d_v = sub(value.c.weight, value.a.weight)
+    let d_x_u = multiply(
+        sub(d_n_u, multiply(sample.quotient, d_d_u)),
+        inverse.value,
+    )
+    let d_x_v = multiply(
+        sub(d_n_v, multiply(sample.quotient, d_d_v)),
+        inverse.value,
+    )
+    let tangent_u = vec3f(d_x_u.x, d_x_u.y, d_x_u.z)
+    let tangent_v = vec3f(d_x_v.x, d_x_v.y, d_x_v.z)
+    let normal = normalize3_or(
+        cross3(tangent_u, tangent_v),
+        vec3f(0.0, 0.0, 1.0),
+        minimum_tangent_norm_squared,
+    )
+    QbDifferential { sample: sample, tangent_u: tangent_u, tangent_v: tangent_v, normal: normal }
+}
+
+pub fn evaluate_uv_differential(
+    _ value: QbTriPatch,
+    _ u: f32,
+    _ v: f32,
+    _ minimum_denominator_norm_squared: f32,
+    _ minimum_tangent_norm_squared: f32,
+) -> QbDifferential {
+    evaluate_differential(
+        value,
+        bary3f(1.0 - u - v, u, v),
+        minimum_denominator_norm_squared,
+        minimum_tangent_norm_squared,
+    )
+}
+
+/// Current Quilting S3 order: identity, three transpositions, and two cycles.
+pub fn remap_barycentric(_ permutation: u32, _ bary: Bary3F) -> Bary3F {
+    match permutation {
+        0 => bary3f(bary.a, bary.b, bary.c),
+        1 => bary3f(bary.a, bary.c, bary.b),
+        2 => bary3f(bary.b, bary.a, bary.c),
+        3 => bary3f(bary.b, bary.c, bary.a),
+        4 => bary3f(bary.c, bary.a, bary.b),
+        5 => bary3f(bary.c, bary.b, bary.a),
+        _ => bary3f(bary.a, bary.b, bary.c),
+    }
+}
+
+pub fn permutation_parity(_ permutation: u32) -> f32 {
+    match permutation {
+        0 => 1.0,
+        3 => 1.0,
+        4 => 1.0,
+        _ => -1.0,
+    }
+}
+
+pub fn apply_normal_parity(_ normal: Vec3F, _ permutation: u32) -> Vec3F {
+    let parity = permutation_parity(permutation)
+    vec3f(normal.x * parity, normal.y * parity, normal.z * parity)
+}
+
+/// ABI/layout sentinel: one control is exactly eight scalar words.
+pub fn control_words(_ value: QbControl) -> [f32; 8] {
+    [
+        0.0,
+        value.point.x,
+        value.point.y,
+        value.point.z,
+        value.weight.w,
+        value.weight.x,
+        value.weight.y,
+        value.weight.z,
+    ]
+}
+
+pub fn quat_from_words(_ words: [f32; 4]) -> QuatF {
+    quatf(words[0], words[1], words[2], words[3])
+}

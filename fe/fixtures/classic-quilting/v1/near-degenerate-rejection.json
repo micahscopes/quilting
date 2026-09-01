@@ -1,0 +1,58 @@
+{
+  "name": "near-collinear AB boundary pair",
+  "cartesianF64Bits": [
+    [
+      "0x0000000000000000",
+      "0x3ff0000000000000"
+    ],
+    [
+      "0xbfebb67ae8584caa",
+      "0xbfe0000000000000"
+    ],
+    [
+      "0x3febb67ae8584caa",
+      "0xbfe0000000000000"
+    ],
+    [
+      "0xbfdbb67ae8584caa",
+      "0x3fd0000000000000"
+    ],
+    [
+      "0xbfdbb67ae8584cad",
+      "0x3fcffffffffffff4"
+    ]
+  ],
+  "barycentricF64Bits": [
+    [
+      "0x3ff0000000000000",
+      "0x0000000000000000",
+      "0x0000000000000000"
+    ],
+    [
+      "0x0000000000000000",
+      "0x3ff0000000000000",
+      "0x0000000000000000"
+    ],
+    [
+      "0x0000000000000000",
+      "0x0000000000000000",
+      "0x3ff0000000000000"
+    ],
+    [
+      "0x3fe0000000000000",
+      "0x3fe0000000000000",
+      "0x0000000000000000"
+    ],
+    [
+      "0x3fdffffffffffffc",
+      "0x3fe0000000000002",
+      "0x0000000000000000"
+    ]
+  ],
+  "result": {
+    "domain": "triangulation",
+    "code": "near_duplicate_points",
+    "firstPoint": 3,
+    "secondPoint": 4
+  }
+}

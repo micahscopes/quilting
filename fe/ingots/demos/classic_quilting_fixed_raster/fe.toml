@@ -1,0 +1,10 @@
+[ingot]
+name = "classic_quilting_fixed_raster"
+version = "0.1.0"
+
+[dependencies]
+core = true
+std = true
+quilting_domain = true
+quilting_quaternion = true
+quilting_qb = true
