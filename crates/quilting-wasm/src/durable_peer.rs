@@ -7,7 +7,7 @@
 use crate::app_shadow::{peer_receipt_to_js, HyperscopeAppShadow};
 use hhhs::EntryHash;
 use hhhs_replica::ReplicaRecord;
-use hyperscape_hhhs::ProjectId;
+use hyperscape_hhhs::{AuthoredRecordFrame, ProjectId};
 use hyperscape_protocol::{LocalPeerEnvelope, PresenceEnvelope};
 use hyperscope_app::AppStore;
 use hyperscope_hhhs_shadow::{
@@ -132,7 +132,11 @@ impl HyperscopeDurablePeer {
             .accept_local_peer(&self.store, envelope, received_at_seconds)
             .await
             .map_err(js_error)?;
-        durable_dispatch_to_js(&dispatch, session.session().history_len())
+        durable_dispatch_to_js(
+            &dispatch,
+            session.session().project_id(),
+            session.session().history_len(),
+        )
     }
 
     /// Persist one encoded HHHS carrier record and atomically advance the
@@ -150,6 +154,24 @@ impl HyperscopeDurablePeer {
         let dispatch = session
             .session_mut()
             .accept_replica_record(&self.store, record)
+            .await
+            .map_err(js_error)?;
+        carrier_dispatch_to_js(&dispatch)
+    }
+
+    /// Decode the canonical Rust-authored JSON carrier frame and admit its
+    /// record. This keeps base64url, schema, and project validation out of the
+    /// JavaScript delivery adapter.
+    #[wasm_bindgen(js_name = receiveReplicaRecordFrame)]
+    pub async fn receive_replica_record_frame(
+        &self,
+        frame_json: &str,
+    ) -> Result<JsValue, JsValue> {
+        let frame = AuthoredRecordFrame::decode_json(frame_json).map_err(js_error)?;
+        let mut session = DurableSessionLease::take(&self.session)?;
+        let dispatch = session
+            .session_mut()
+            .accept_replica_record(&self.store, frame.into_record())
             .await
             .map_err(js_error)?;
         carrier_dispatch_to_js(&dispatch)
@@ -268,6 +290,7 @@ struct DurablePeerStatus {
 
 fn durable_dispatch_to_js(
     dispatch: &DurableLocalPeerDispatch,
+    project_id: ProjectId,
     history_len: usize,
 ) -> Result<JsValue, JsValue> {
     let object = js_sys::Object::new();
@@ -280,6 +303,7 @@ fn durable_dispatch_to_js(
 
     let mut durable_disposition = "none";
     let mut record = JsValue::NULL;
+    let mut record_frame_json = JsValue::NULL;
     let mut app_projection_fault = JsValue::NULL;
     if let Some(durable) = &dispatch.durable {
         if let Err(fault) = &durable.app {
@@ -290,6 +314,10 @@ fn durable_dispatch_to_js(
                 durable_disposition = "applied";
                 let encoded = value.encode();
                 record = js_sys::Uint8Array::from(encoded.as_slice()).into();
+                let frame = AuthoredRecordFrame::new(project_id, value.as_ref().clone())
+                    .and_then(|frame| frame.encode_json())
+                    .map_err(js_error)?;
+                record_frame_json = JsValue::from_str(&frame);
             }
             DurableAuthoredObservation::IgnoredStale { .. } => {
                 durable_disposition = "ignored_stale";
@@ -302,6 +330,7 @@ fn durable_dispatch_to_js(
         &JsValue::from_str(durable_disposition),
     )?;
     set_property(&object, "replicaRecord", &record)?;
+    set_property(&object, "replicaRecordFrameJson", &record_frame_json)?;
     set_property(&object, "appProjectionFault", &app_projection_fault)?;
     Ok(object.into())
 }
@@ -423,10 +452,10 @@ fn js_error(error: impl Display) -> JsValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hyperscape_hhhs::DurableProject;
+    use hyperscape_hhhs::{AuthoredRecordFrame, DurableProject};
     use hyperscape_protocol::{
         AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, MessageHeader, MessageId,
-        PeerId, CURRENT_PROTOCOL_VERSION,
+        LocalPeerEnvelope, PeerId, CURRENT_PROTOCOL_VERSION,
     };
     use wasm_bindgen_test::*;
 
@@ -547,6 +576,10 @@ mod tests {
             .await
             .unwrap();
         let encoded = record.encode();
+        let frame_json = AuthoredRecordFrame::new(project_id, record)
+            .unwrap()
+            .encode_json()
+            .unwrap();
         let app = HyperscopeAppShadow::new();
         let peer = app
             .open_durable_authored_peer(&project_id.as_uuid().to_string())
@@ -554,7 +587,7 @@ mod tests {
             .unwrap();
 
         let applied = peer
-            .receive_replica_record(js_sys::Uint8Array::from(encoded.as_slice()))
+            .receive_replica_record_frame(&frame_json)
             .await
             .unwrap();
         assert_eq!(
@@ -590,6 +623,55 @@ mod tests {
                 .unwrap()
                 .observed_projection_revision(),
             Some(0)
+        );
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn local_durable_admission_returns_rust_encoded_carrier_json() {
+        let time = js_sys::Date::now() as u128;
+        let random = (js_sys::Math::random() * u64::MAX as f64) as u128;
+        let project_id = ProjectId::from_u128(((time + 1) << 64) | (random + 1)).unwrap();
+        let authored = AuthoredEnvelope {
+            header: MessageHeader {
+                version: CURRENT_PROTOCOL_VERSION,
+                message_id: MessageId::from_u128(0xf001).unwrap(),
+                sender: PeerId::from_u128(0xf002).unwrap(),
+                sequence: 1,
+            },
+            command: AuthoredCommand::UpsertAsset {
+                asset: AssetDescriptor {
+                    id: AssetId::from_u128(0xf003).unwrap(),
+                    uri: "announced.glb".into(),
+                    media_type: Some("model/gltf-binary".into()),
+                    content_digest: None,
+                },
+            },
+        };
+        let app = HyperscopeAppShadow::new();
+        let peer = app
+            .open_durable_authored_peer(&project_id.as_uuid().to_string())
+            .await
+            .unwrap();
+        let local_frame = serde_json::to_string(&LocalPeerEnvelope::Authored(authored)).unwrap();
+        let dispatch = peer
+            .receive_local_peer_envelope(1.0, &local_frame)
+            .await
+            .unwrap();
+        let carrier_json = js_sys::Reflect::get(
+            &dispatch,
+            &JsValue::from_str("replicaRecordFrameJson"),
+        )
+        .unwrap()
+        .as_string()
+        .unwrap();
+        let carrier = AuthoredRecordFrame::decode_json(&carrier_json).unwrap();
+        assert_eq!(carrier.project_id(), project_id);
+        assert_eq!(
+            js_sys::Reflect::get(&dispatch, &JsValue::from_str("durableDisposition"))
+                .unwrap()
+                .as_string()
+                .as_deref(),
+            Some("applied")
         );
     }
 }
