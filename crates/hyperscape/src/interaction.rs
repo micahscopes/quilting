@@ -520,6 +520,100 @@ impl InteractionPickAuthority {
     }
 }
 
+/// Bounded handoff from an accepted asynchronous query to a later semantic
+/// activation. The renderer payload never crosses back into the gate: one
+/// process-local token retains the already validated semantic hit and is
+/// consumed at most once.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InteractionPickActivationToken {
+    pub request: InteractionPickRequest,
+    pub hit: InteractionHit,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct InteractionPickActivationGate {
+    token: Option<InteractionPickActivationToken>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractionPickActivationError {
+    InvalidHit(&'static str),
+    Unavailable,
+    RequestMismatch { expected: u64, actual: u64 },
+    StaleTargetEpoch { expected: u32, actual: u32 },
+}
+
+impl fmt::Display for InteractionPickActivationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidHit(reason) => write!(formatter, "pick activation hit is invalid: {reason}"),
+            Self::Unavailable => formatter.write_str("pick activation token is unavailable"),
+            Self::RequestMismatch { expected, actual } => write!(
+                formatter,
+                "pick activation request {actual} is stale; current request is {expected}",
+            ),
+            Self::StaleTargetEpoch { expected, actual } => write!(
+                formatter,
+                "pick activation target epoch {actual} is stale; current epoch is {expected}",
+            ),
+        }
+    }
+}
+
+impl Error for InteractionPickActivationError {}
+
+impl InteractionPickActivationGate {
+    pub fn publish(
+        &mut self,
+        request: InteractionPickRequest,
+        hit: InteractionHit,
+    ) -> Result<(), InteractionPickActivationError> {
+        hit.validate()
+            .map_err(InteractionPickActivationError::InvalidHit)?;
+        self.token = Some(InteractionPickActivationToken { request, hit });
+        Ok(())
+    }
+
+    pub fn clear(&mut self) {
+        self.token = None;
+    }
+
+    pub fn pending_request_id(&self) -> Option<u64> {
+        self.token.map(|token| token.request.request_id)
+    }
+
+    pub fn discard(&mut self, request_id: u64) -> bool {
+        if self.pending_request_id() != Some(request_id) {
+            return false;
+        }
+        self.clear();
+        true
+    }
+
+    pub fn take(
+        &mut self,
+        request_id: u64,
+        current_target_epoch: u32,
+    ) -> Result<InteractionHit, InteractionPickActivationError> {
+        let token = self.token.ok_or(InteractionPickActivationError::Unavailable)?;
+        if token.request.request_id != request_id {
+            return Err(InteractionPickActivationError::RequestMismatch {
+                expected: token.request.request_id,
+                actual: request_id,
+            });
+        }
+        if token.request.target_epoch != current_target_epoch {
+            self.clear();
+            return Err(InteractionPickActivationError::StaleTargetEpoch {
+                expected: current_target_epoch,
+                actual: token.request.target_epoch,
+            });
+        }
+        self.clear();
+        Ok(token.hit)
+    }
+}
+
 /// Current state of the opt-in retained-renderer pick comparison lane. This is
 /// process-local evidence, not authored scene or interaction state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -1329,6 +1423,62 @@ mod tests {
         assert_eq!(rejected.readbacks, 1);
         assert_eq!(rejected.accepted, 0);
         assert_eq!(rejected.errors, 1);
+    }
+
+    #[test]
+    fn accepted_pick_activation_tokens_are_bounded_and_single_use() {
+        let request = InteractionPickRequest {
+            request_id: 7,
+            target_epoch: 3,
+        };
+        let selected = hit(1, 2, 1.0);
+        let mut gate = InteractionPickActivationGate::default();
+        gate.publish(request, selected).unwrap();
+        assert_eq!(gate.pending_request_id(), Some(7));
+        assert_eq!(gate.take(7, 3).unwrap(), selected);
+        assert_eq!(gate.pending_request_id(), None);
+        assert_eq!(
+            gate.take(7, 3),
+            Err(InteractionPickActivationError::Unavailable),
+        );
+    }
+
+    #[test]
+    fn activation_token_rejects_wrong_request_without_consuming_current() {
+        let request = InteractionPickRequest {
+            request_id: 9,
+            target_epoch: 4,
+        };
+        let selected = hit(1, 2, 1.0);
+        let mut gate = InteractionPickActivationGate::default();
+        gate.publish(request, selected).unwrap();
+        assert_eq!(
+            gate.take(8, 4),
+            Err(InteractionPickActivationError::RequestMismatch {
+                expected: 9,
+                actual: 8,
+            }),
+        );
+        assert_eq!(gate.pending_request_id(), Some(9));
+        assert_eq!(gate.take(9, 4).unwrap(), selected);
+    }
+
+    #[test]
+    fn activation_token_consumes_replaced_target_epoch() {
+        let request = InteractionPickRequest {
+            request_id: 10,
+            target_epoch: 5,
+        };
+        let mut gate = InteractionPickActivationGate::default();
+        gate.publish(request, hit(1, 2, 1.0)).unwrap();
+        assert_eq!(
+            gate.take(10, 6),
+            Err(InteractionPickActivationError::StaleTargetEpoch {
+                expected: 6,
+                actual: 5,
+            }),
+        );
+        assert_eq!(gate.pending_request_id(), None);
     }
 
     #[test]

@@ -45,7 +45,8 @@ pub use navigation::{
 };
 pub use interaction::{
     InteractionAction, InteractionActionQueue, InteractionActivation, InteractionActivations,
-    InteractionController, InteractionHit, InteractionPickAuthority,
+    InteractionController, InteractionHit, InteractionPickActivationError,
+    InteractionPickActivationGate, InteractionPickActivationToken, InteractionPickAuthority,
     InteractionPickAuthorityDiagnostics, InteractionPickAuthorityDisposition,
     InteractionPickAuthorityError, InteractionPickAuthorityState,
     InteractionPickEvidenceDiagnostics, InteractionPickEvidenceDisposition,
