@@ -48,12 +48,13 @@ use hyperscape_hhhs::{
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId, LocalPeerEnvelope,
-    WireTransform,
+    PresenceEnvelope, WireTransform,
 };
 use hyperscope_app::{
     AppCommit, AppEvent, AppStore, AuthoredEntityReadModel, AuthoredProjectionDispatchError,
     AuthoredProjectionSnapshot, AuthoredRevision, AuthoredSceneReadModel, CommitDisposition,
     LocalAuthoredPreparation, LocalPeerIngress, LocalPeerIngressError, LocalPeerReceipt, ReduceError,
+    DEFAULT_LOCAL_PEER_MESSAGE_MEMORY,
 };
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -544,6 +545,18 @@ pub enum DurableLocalPeerError {
     Durable(#[from] DurableAuthoredDispatchError),
 }
 
+/// Failure to construct the single-writer authored session from its durable
+/// project and recovered peer-ingress memory.
+#[derive(Debug, thiserror::Error)]
+pub enum DurableAuthoredSessionInitError {
+    #[error(transparent)]
+    Adapter(#[from] AdapterError),
+    #[error(transparent)]
+    Coordinator(#[from] DurableAuthoredInitError),
+    #[error(transparent)]
+    Peer(#[from] LocalPeerIngressError),
+}
+
 /// One-envelope HHHS-authoritative ingress with an AppStore projection.
 ///
 /// Unlike [`AuthoredHhhsShadow`], persistence completes before AppStore is
@@ -555,6 +568,120 @@ pub struct DurableAuthoredCoordinator<D = MemoryDurability> {
     expected: SequentialProjection,
     observed_projection_revision: Option<u64>,
     fault: Option<DurableAuthoredFault>,
+}
+
+/// One restart-safe, single-writer authored ingress boundary.
+///
+/// The coordinator owns durable HHHS authority and the ingress owns bounded
+/// echo/deduplication policy. Keeping them together ensures restart recovery
+/// cannot pair an advanced durable cursor with empty authored message memory.
+/// Presence remains ephemeral and is never reconstructed from HHHS.
+pub struct DurableAuthoredSession<D = MemoryDurability> {
+    coordinator: DurableAuthoredCoordinator<D>,
+    ingress: LocalPeerIngress,
+}
+
+impl DurableAuthoredSession<MemoryDurability> {
+    pub fn new(project_id: ProjectId) -> Result<Self, DurableAuthoredSessionInitError> {
+        Self::from_project(DurableProject::new(project_id)?)
+    }
+
+    pub fn recover(
+        project_id: ProjectId,
+        durable_bytes: Vec<u8>,
+    ) -> Result<Self, DurableAuthoredSessionInitError> {
+        Self::from_project(DurableProject::recover(project_id, durable_bytes)?)
+    }
+}
+
+impl<D> DurableAuthoredSession<D> {
+    pub fn from_project(
+        project: DurableProject<D>,
+    ) -> Result<Self, DurableAuthoredSessionInitError> {
+        Self::from_project_with_message_capacity(project, DEFAULT_LOCAL_PEER_MESSAGE_MEMORY)
+    }
+
+    pub fn from_project_with_message_capacity(
+        project: DurableProject<D>,
+        message_capacity: usize,
+    ) -> Result<Self, DurableAuthoredSessionInitError> {
+        let authored_history = project.authored_history()?;
+        let coordinator = DurableAuthoredCoordinator::from_project(project)?;
+        let ingress =
+            LocalPeerIngress::from_authored_history(message_capacity, &authored_history)?;
+        Ok(Self {
+            coordinator,
+            ingress,
+        })
+    }
+
+    pub fn project_id(&self) -> ProjectId {
+        self.coordinator.project_id()
+    }
+
+    pub fn history_len(&self) -> usize {
+        self.coordinator.history_len()
+    }
+
+    pub fn project_state(&self) -> Result<ProjectState, AdapterError> {
+        self.coordinator.project_state()
+    }
+
+    pub fn observed_projection_revision(&self) -> Option<u64> {
+        self.coordinator.observed_projection_revision()
+    }
+
+    pub fn fault(&self) -> Option<&DurableAuthoredFault> {
+        self.coordinator.fault()
+    }
+
+    pub fn durability(&self) -> &D {
+        self.coordinator.durability()
+    }
+
+    pub fn durability_mut(&mut self) -> &mut D {
+        self.coordinator.durability_mut()
+    }
+
+    pub fn restore_store(
+        &self,
+        store: &AppStore,
+    ) -> Result<Option<AppCommit>, DurableAuthoredRestoreError> {
+        self.coordinator.restore_store(store)
+    }
+
+    pub fn record_local_presence(
+        &mut self,
+        envelope: &PresenceEnvelope,
+    ) -> Result<(), LocalPeerIngressError> {
+        self.ingress.record_local_presence(envelope)
+    }
+}
+
+impl<D> DurableAuthoredSession<D>
+where
+    D: AsyncTransactionSink,
+{
+    /// Admit an authored or remote-presence peer envelope through the paired
+    /// restart-safe ingress. A locally originated authored envelope should
+    /// pass through this method before transport; its relay echo is then an
+    /// ordinary zero-write duplicate. Locally originated presence should use
+    /// [`Self::record_local_presence`] before transport instead.
+    pub async fn accept_local_peer(
+        &mut self,
+        store: &AppStore,
+        envelope: LocalPeerEnvelope,
+        received_at_seconds: f64,
+    ) -> Result<DurableLocalPeerDispatch, DurableLocalPeerError> {
+        self.coordinator
+            .accept_local_peer(
+                &mut self.ingress,
+                store,
+                envelope,
+                received_at_seconds,
+            )
+            .await
+    }
 }
 
 impl DurableAuthoredCoordinator<MemoryDurability> {

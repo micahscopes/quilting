@@ -15,8 +15,8 @@ use hyperscope_app::{
 use hyperscope_hhhs_shadow::{
     AuthoredHhhsShadow, AuthoredShadowCheckpoint, AuthoredShadowError, AuthoredShadowInitError,
     AuthoredShadowObservation, DurableAuthoredCoordinator, DurableAuthoredDispatchError,
-    DurableAuthoredObservation, DurableAuthoredRestoreError, DurableLocalPeerError,
-    AUTHORED_SHADOW_CHECKPOINT_DOMAIN,
+    DurableAuthoredObservation, DurableAuthoredRestoreError, DurableAuthoredSession,
+    DurableLocalPeerError, AUTHORED_SHADOW_CHECKPOINT_DOMAIN,
 };
 
 fn project(value: u128) -> ProjectId {
@@ -499,6 +499,70 @@ fn durable_recovery_restores_a_fresh_store_without_fabricating_history() {
     assert!(continued.durable.is_some());
     assert_eq!(recovered.history_len(), 3);
     assert_eq!(fresh_store.authored_scene_snapshot().projection_revision, Some(9));
+}
+
+#[test]
+fn durable_session_restart_rejects_replayed_peer_history_without_writes() {
+    let project_id = project(0x2411);
+    let source_store = AppStore::default();
+    let mut source = DurableAuthoredSession::new(project_id).unwrap();
+    let first = asset(7, 0xa);
+    let applied = block_on(source.accept_local_peer(
+        &source_store,
+        LocalPeerEnvelope::Authored(first.clone()),
+        1.0,
+    ))
+    .unwrap();
+    assert_eq!(applied.peer.disposition, LocalPeerDisposition::Applied);
+    assert_eq!(applied.peer.projection_revision, Some(0));
+    assert_eq!(source.history_len(), 1);
+
+    let durable_bytes = source.durability().bytes().to_vec();
+    let mut recovered = DurableAuthoredSession::recover(project_id, durable_bytes.clone()).unwrap();
+    let recovered_store = AppStore::default();
+    recovered.restore_store(&recovered_store).unwrap().unwrap();
+    let before_replay = recovered_store.summary_snapshot();
+    let before_state = recovered.project_state().unwrap();
+
+    let replay = block_on(recovered.accept_local_peer(
+        &recovered_store,
+        LocalPeerEnvelope::Authored(first),
+        2.0,
+    ))
+    .unwrap();
+    assert_eq!(replay.peer.disposition, LocalPeerDisposition::IgnoredDuplicate);
+    assert!(replay.durable.is_none());
+    assert_eq!(recovered_store.summary_snapshot(), before_replay);
+    assert_eq!(recovered.history_len(), 1);
+    assert_eq!(recovered.project_state().unwrap(), before_state);
+    assert_eq!(recovered.durability().bytes(), durable_bytes);
+
+    let stale = block_on(recovered.accept_local_peer(
+        &recovered_store,
+        LocalPeerEnvelope::Authored(asset(6, 0xb)),
+        2.1,
+    ))
+    .unwrap();
+    assert_eq!(stale.peer.disposition, LocalPeerDisposition::IgnoredStale);
+    assert!(stale.durable.is_none());
+    assert_eq!(recovered_store.summary_snapshot(), before_replay);
+    assert_eq!(recovered.history_len(), 1);
+    assert_eq!(recovered.durability().bytes(), durable_bytes);
+
+    let next = block_on(recovered.accept_local_peer(
+        &recovered_store,
+        LocalPeerEnvelope::Authored(asset(8, 0xb)),
+        2.2,
+    ))
+    .unwrap();
+    assert_eq!(next.peer.disposition, LocalPeerDisposition::Applied);
+    assert_eq!(next.peer.projection_revision, Some(1));
+    assert!(next.durable.is_some());
+    assert_eq!(recovered.history_len(), 2);
+    assert_eq!(
+        recovered_store.authored_scene_snapshot().projection_revision,
+        Some(1)
+    );
 }
 
 #[test]

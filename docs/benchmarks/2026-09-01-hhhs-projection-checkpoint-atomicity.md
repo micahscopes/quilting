@@ -67,6 +67,14 @@ history length, and materialized HHHS state unchanged, survives a second
 idempotent call, refuses both revision and content divergence, and then accepts
 the next local-peer envelope at the succeeding projection revision.
 
+The coordinator is now wrapped by `DurableAuthoredSession`, which owns the
+paired `LocalPeerIngress`. On restart it decodes canonical authored envelopes
+from HHHS and reconstructs the same bounded message-ID and sender-sequence
+window before accepting ingress. An exact recent relay replay and a distinct
+stale sender sequence both return without AppStore mutation, HHHS admission,
+or IndexedDB-ready transaction bytes; the next sequence advances normally.
+Presence history and pending echo intent are intentionally not reconstructed.
+
 ## Deliberate non-goals
 
 This does not claim atomicity across HHHS and an in-memory UI projection.

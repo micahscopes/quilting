@@ -37,6 +37,10 @@ encoding. The digest detects corruption; it is not an authority signature.
   canonical materialized asset/entity snapshot into an empty AppStore without
   adding an HHHS entry or fabricating source envelopes. Exact parity is a
   no-op; divergent non-empty stores are rejected.
+- `DurableAuthoredSession` owns that coordinator together with its
+  `LocalPeerIngress`. Recovery decodes canonical authored HHHS history and
+  rebuilds the configured bounded message/sender window before any new peer
+  envelope can enter. Presence and pending local echoes remain ephemeral.
 
 ## Atomic-persistence gate
 
@@ -55,3 +59,9 @@ application-revision payload, a generic prepared batch, or an equivalent
 resumable design. Until that lands, the authoritative coordinator deliberately
 accepts exactly one command per revision; the older diagnostic shadow retains
 its explicit partial-prefix reporting for multi-command experiments.
+
+The recovered peer window has the same explicit bounded-memory contract as
+live `LocalPeerIngress`. It prevents immediate relay replay and retains sender
+sequence floors within that configured window; it is not an unbounded global
+message-ID ledger. Stronger adversarial replay protection belongs in a future
+protocol/policy checkpoint rather than being implied by this local demo lane.
