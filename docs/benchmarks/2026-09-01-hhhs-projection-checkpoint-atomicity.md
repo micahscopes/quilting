@@ -47,6 +47,13 @@ fence: HHHS remains authoritative, AppStore does not overwrite the bypass, and
 the coordinator enters an explicit poisoned/rebuild-required state. Stale
 revisions are zero-write no-ops, and failed durability remains retryable.
 
+The transport-neutral local peer boundary now reserves authored deduplication
+across that asynchronous write. Dropping the reservation on persistence failure
+does not advance message or sender-sequence memory, so the exact Blender/browser
+envelope retries successfully. Completion happens only after HHHS admission.
+Presence continues through the direct ephemeral AppStore lane and produces no
+HHHS entry or checkpoint.
+
 ## Deliberate non-goals
 
 This does not claim atomicity across HHHS and an in-memory UI projection.

@@ -45,11 +45,13 @@ use hyperscape_hhhs::{
     AdapterError, DurableProject, MemoryDurability, ProjectId, ProjectState, ProjectionKey,
 };
 use hyperscape_protocol::{
-    AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId, WireTransform,
+    AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId, LocalPeerEnvelope,
+    WireTransform,
 };
 use hyperscope_app::{
     AppCommit, AppEvent, AppStore, AuthoredProjectionDispatchError, AuthoredRevision,
-    AuthoredSceneReadModel, CommitDisposition, ReduceError,
+    AuthoredSceneReadModel, CommitDisposition, LocalAuthoredPreparation, LocalPeerIngress,
+    LocalPeerIngressError, LocalPeerReceipt, ReduceError,
 };
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -487,6 +489,25 @@ pub struct DurableAuthoredDispatch {
     pub durable: DurableAuthoredObservation,
 }
 
+/// One transport-neutral local peer admission. Presence and ignored authored
+/// frames have no durable result; a newly admitted authored frame carries the
+/// announceable HHHS record and the separate AppStore projection outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableLocalPeerDispatch {
+    pub peer: LocalPeerReceipt,
+    pub durable: Option<DurableAuthoredDispatch>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DurableLocalPeerError {
+    #[error(transparent)]
+    Peer(#[from] LocalPeerIngressError),
+    #[error("local peer authored projection revision overflow")]
+    ProjectionRevisionOverflow,
+    #[error(transparent)]
+    Durable(#[from] DurableAuthoredDispatchError),
+}
+
 /// One-envelope HHHS-authoritative ingress with an AppStore projection.
 ///
 /// Unlike [`AuthoredHhhsShadow`], persistence completes before AppStore is
@@ -576,6 +597,64 @@ impl<D> DurableAuthoredCoordinator<D>
 where
     D: AsyncTransactionSink,
 {
+    /// Admit one local Blender/browser peer frame without making ephemeral
+    /// presence durable.
+    ///
+    /// Authored deduplication is reserved across the asynchronous HHHS write.
+    /// A pre-commit failure drops that reservation, so the exact envelope can
+    /// retry. Once HHHS succeeds, ingress memory advances even if AppStore must
+    /// be rebuilt; the returned durable record remains safe to announce.
+    pub async fn accept_local_peer(
+        &mut self,
+        ingress: &mut LocalPeerIngress,
+        store: &AppStore,
+        envelope: LocalPeerEnvelope,
+        received_at_seconds: f64,
+    ) -> Result<DurableLocalPeerDispatch, DurableLocalPeerError> {
+        let authored = match envelope {
+            LocalPeerEnvelope::Presence(presence) => {
+                let peer = ingress.accept(
+                    store,
+                    LocalPeerEnvelope::Presence(presence),
+                    received_at_seconds,
+                )?;
+                return Ok(DurableLocalPeerDispatch {
+                    peer,
+                    durable: None,
+                });
+            }
+            LocalPeerEnvelope::Authored(authored) => authored,
+        };
+        let pending = match ingress.prepare_authored(authored)? {
+            LocalAuthoredPreparation::Immediate(peer) => {
+                return Ok(DurableLocalPeerDispatch {
+                    peer,
+                    durable: None,
+                });
+            }
+            LocalAuthoredPreparation::Pending(pending) => pending,
+        };
+        let projection_revision = self
+            .observed_projection_revision
+            .map_or(Some(0), |revision| revision.checked_add(1))
+            .ok_or(DurableLocalPeerError::ProjectionRevisionOverflow)?;
+        let durable = self
+            .dispatch(
+                store,
+                AuthoredRevision {
+                    projection_revision,
+                    commands: vec![pending.envelope().clone()],
+                },
+            )
+            .await?;
+        let app_commit = durable.app.as_ref().ok().cloned();
+        let peer = pending.complete(projection_revision, app_commit);
+        Ok(DurableLocalPeerDispatch {
+            peer,
+            durable: Some(durable),
+        })
+    }
+
     pub async fn dispatch(
         &mut self,
         store: &AppStore,

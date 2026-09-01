@@ -5,14 +5,17 @@ use hhhs_replica::AsyncTransactionSink;
 use hhhs_store::StorageTransaction;
 use hyperscape_hhhs::{DurableProject, MemoryDurability, ProjectId};
 use hyperscape_protocol::{
-    AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId, MessageHeader,
-    MessageId, PeerId, ProtocolVersion, WireTransform, CURRENT_PROTOCOL_VERSION,
+    AssetDescriptor, AssetId, AuthoredCommand, AuthoredEnvelope, EntityId, EphemeralPresence,
+    LocalPeerEnvelope, MessageHeader, MessageId, PeerId, PresenceEnvelope, ProtocolVersion,
+    WireTransform, CURRENT_PROTOCOL_VERSION,
 };
-use hyperscope_app::{AppStore, AuthoredRevision, CommitDisposition};
+use hyperscope_app::{
+    AppStore, AuthoredRevision, CommitDisposition, LocalPeerDisposition, LocalPeerIngress,
+};
 use hyperscope_hhhs_shadow::{
     AuthoredHhhsShadow, AuthoredShadowCheckpoint, AuthoredShadowError, AuthoredShadowInitError,
     AuthoredShadowObservation, DurableAuthoredCoordinator, DurableAuthoredDispatchError,
-    DurableAuthoredObservation, AUTHORED_SHADOW_CHECKPOINT_DOMAIN,
+    DurableAuthoredObservation, DurableLocalPeerError, AUTHORED_SHADOW_CHECKPOINT_DOMAIN,
 };
 
 fn project(value: u128) -> ProjectId {
@@ -472,6 +475,92 @@ fn durable_first_stale_revision_is_a_zero_write_noop() {
         .unwrap()
         .assets
         .contains_key(&AssetId::from_u128(0xb).unwrap()));
+}
+
+#[test]
+fn durable_local_peer_retry_is_not_deduplicated_after_persistence_failure() {
+    let store = AppStore::default();
+    let mut ingress = LocalPeerIngress::new(8).unwrap();
+    let mut coordinator = DurableAuthoredCoordinator::new(project(0x2405)).unwrap();
+    let envelope = asset(7, 0xa);
+    coordinator.durability_mut().fail_next_persist();
+
+    let error = block_on(coordinator.accept_local_peer(
+        &mut ingress,
+        &store,
+        LocalPeerEnvelope::Authored(envelope.clone()),
+        1.0,
+    ))
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        DurableLocalPeerError::Durable(DurableAuthoredDispatchError::Adapter(_))
+    ));
+    assert_eq!(coordinator.history_len(), 0);
+    assert_eq!(store.authored_scene_snapshot().projection_revision, None);
+
+    let applied = block_on(coordinator.accept_local_peer(
+        &mut ingress,
+        &store,
+        LocalPeerEnvelope::Authored(envelope.clone()),
+        1.1,
+    ))
+    .unwrap();
+    assert_eq!(applied.peer.disposition, LocalPeerDisposition::Applied);
+    assert_eq!(applied.peer.projection_revision, Some(0));
+    assert!(applied.durable.is_some());
+    assert_eq!(coordinator.history_len(), 1);
+
+    let duplicate = block_on(coordinator.accept_local_peer(
+        &mut ingress,
+        &store,
+        LocalPeerEnvelope::Authored(envelope),
+        1.2,
+    ))
+    .unwrap();
+    assert_eq!(
+        duplicate.peer.disposition,
+        LocalPeerDisposition::IgnoredDuplicate
+    );
+    assert!(duplicate.durable.is_none());
+    assert_eq!(coordinator.history_len(), 1);
+}
+
+#[test]
+fn durable_local_peer_keeps_presence_out_of_hhhs() {
+    let store = AppStore::default();
+    let mut ingress = LocalPeerIngress::new(8).unwrap();
+    let mut coordinator = DurableAuthoredCoordinator::new(project(0x2406)).unwrap();
+    let presence = PresenceEnvelope {
+        header: MessageHeader {
+            version: CURRENT_PROTOCOL_VERSION,
+            message_id: MessageId::from_u128(0x2406).unwrap(),
+            sender: PeerId::from_u128(0x2407).unwrap(),
+            sequence: 1,
+        },
+        presence: EphemeralPresence {
+            ttl_millis: 500,
+            camera: None,
+            selection: Vec::new(),
+            authoring_leases: Vec::new(),
+            focus: None,
+            active_cue: None,
+            animation_seconds: Some(2.0),
+        },
+    };
+
+    let receipt = block_on(coordinator.accept_local_peer(
+        &mut ingress,
+        &store,
+        LocalPeerEnvelope::Presence(presence),
+        2.0,
+    ))
+    .unwrap();
+    assert_eq!(receipt.peer.disposition, LocalPeerDisposition::Applied);
+    assert!(receipt.durable.is_none());
+    assert_eq!(coordinator.history_len(), 0);
+    assert_eq!(store.presence_snapshot().len(), 1);
+    assert_eq!(store.authored_scene_snapshot().projection_revision, None);
 }
 
 struct BypassOnPersist {
