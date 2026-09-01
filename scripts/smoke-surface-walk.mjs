@@ -71,7 +71,7 @@ assert.match(
   'reflection transport declarations must match the snake_case serialized packet',
 );
 const reflectionEffectStart = browserSource.indexOf(
-  'const reflectionTransport = transportManualCamera(previousManualReflection, nextReflection);',
+  'const reflectionTransport = rustNavigationProjectionDepth > 0',
 );
 assert.notEqual(reflectionEffectStart, -1, 'browser must stage reflection transport explicitly');
 const reflectionEffect = browserSource.slice(
@@ -80,7 +80,7 @@ const reflectionEffect = browserSource.slice(
 );
 assert.match(
   reflectionEffect,
-  /if \(!reflectionTransport\.accepted\) \{\s+restoreManualReflectionControls\(previousManualReflection\);\s+return;\s+\}\s+previousManualReflection = nextReflection;[\s\S]*mr_setMobius\(flat\);/,
+  /: transportManualCamera\(previousManualReflection, nextReflection\);\s+if \(!reflectionTransport\.accepted\) \{\s+restoreManualReflectionControls\(previousManualReflection\);\s+return;\s+\}\s+previousManualReflection = nextReflection;[\s\S]*mr_setMobius\(flat\);/,
   'a rejected camera/follower/WASM transport must restore controls and abort before chart and renderer commit',
 );
 assert.match(
@@ -90,7 +90,7 @@ assert.match(
 );
 assert.match(
   browserSource,
-  /implementationFromRoute\(\s*initialBrowserParams, 'walkimpl', 'js',\s*\)[\s\S]*SURFACE_WALK_IMPLEMENTATION === 'rust'[\s\S]*applyRustSurfaceWalkCamera\(snapshot\)/,
+  /implementationFromRoute\(\s*initialBrowserParams, 'walkimpl',\s*\)[\s\S]*SURFACE_WALK_IMPLEMENTATION === 'rust'[\s\S]*applyRustSurfaceWalkCamera\(snapshot\)/,
   'walkimpl=rust must select the composed Rust camera snapshot instead of silently falling back to shadow',
 );
 assert.match(
