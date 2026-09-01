@@ -675,6 +675,30 @@ impl HyperscopeAppShadow {
         hyperscope_web::interaction_status::mount_interaction_status(parent, self.store.clone());
     }
 
+    /// Mount the durable authored-session lifecycle over the committed
+    /// AppStore projection. Callbacks own browser resources only; the open
+    /// callback enters the generated durability executor before semantic
+    /// state changes, while relay URLs and credentials never cross this API.
+    #[cfg(feature = "leptos-ui")]
+    #[wasm_bindgen(js_name = mountAuthoredSessionControl)]
+    pub fn mount_authored_session_control(
+        &self,
+        parent: web_sys::HtmlElement,
+        on_open: js_sys::Function,
+        on_close: js_sys::Function,
+        on_new_project: js_sys::Function,
+        on_error: js_sys::Function,
+    ) {
+        hyperscope_web::authored_session::mount_authored_session_control(
+            parent,
+            self.store.clone(),
+            on_open,
+            on_close,
+            on_new_project,
+            on_error,
+        );
+    }
+
     /// Mount the explicit Rust-authority navigation preference controls over
     /// the committed low-rate AppStore projection. The callback receives only
     /// the complete committed packet needed by the browser adapters.

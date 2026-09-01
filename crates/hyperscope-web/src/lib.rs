@@ -26,6 +26,9 @@ pub mod animation_control;
 #[cfg(feature = "asset-credits")]
 pub mod asset_credits;
 
+#[cfg(feature = "authored-session")]
+pub mod authored_session;
+
 #[cfg(feature = "durable-history")]
 pub mod durable_history;
 

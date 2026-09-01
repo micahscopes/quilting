@@ -11,6 +11,7 @@ description = "Optional browser-host adapters for Hyperscope"
 default = []
 animation-control = ["dep:hyperscope-app"]
 asset-credits = ["dep:hyperscape-protocol", "dep:hyperscope-app"]
+authored-session = ["dep:hyperscope-app"]
 camera-controls = ["dep:hyperscape", "dep:hyperscope-app"]
 interaction-status = ["dep:hyperscope-app"]
 navigation-status = ["dep:hyperscope-app"]
@@ -21,6 +22,7 @@ render-controls = ["dep:hyperscope-app"]
 csr = [
     "animation-control",
     "asset-credits",
+    "authored-session",
     "camera-controls",
     "interaction-status",
     "navigation-controls",
