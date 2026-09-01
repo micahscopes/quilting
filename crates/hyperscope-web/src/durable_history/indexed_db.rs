@@ -217,6 +217,16 @@ pub async fn import_project_archive(
     let validated = DurableProject::import_archive(bytes)
         .await
         .map_err(|error| DurableHistoryError::ProjectArchive(error.to_string()))?;
+    import_validated_project_archive(validated).await
+}
+
+/// Persist a project that has already admitted an untrusted portable archive
+/// in memory. Keeping this typed seam avoids decoding and admitting a large
+/// archive twice when a caller also needs its validated project identity
+/// before selecting an application session.
+pub async fn import_validated_project_archive(
+    validated: DurableProject,
+) -> Result<DurableProject<IndexedDbDurability>, DurableHistoryError> {
     let archive = validated
         .project_archive()
         .map_err(|error| DurableHistoryError::ProjectArchive(error.to_string()))?;
@@ -237,6 +247,16 @@ pub async fn import_durable_authored_session(
     store: &AppStore,
 ) -> Result<super::OpenedDurableAuthoredSession<IndexedDbDurability>, DurableHistoryError> {
     let project = import_project_archive(bytes).await?;
+    super::attach_imported_durable_authored_session(project, store).await
+}
+
+/// Persist and attach one already validated archive project without repeating
+/// its in-memory HHHS admission pass.
+pub async fn import_validated_durable_authored_session(
+    validated: DurableProject,
+    store: &AppStore,
+) -> Result<super::OpenedDurableAuthoredSession<IndexedDbDurability>, DurableHistoryError> {
+    let project = import_validated_project_archive(validated).await?;
     super::attach_imported_durable_authored_session(project, store).await
 }
 

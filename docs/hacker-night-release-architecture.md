@@ -379,20 +379,27 @@ The first application boundary is now explicit:
   expiries do not masquerade as the throttled UI read-model revision. These
   methods select no carrier and add no browser state authority.
 - The opt-in `quilting-wasm/durable-history` route now exposes
-  `openDurableAuthoredPeer` on the same application facade. It opens a separate
-  peer object sharing the Rust `AppStore` while owning the IndexedDB-backed
-  `DurableAuthoredSession`; the synchronous direct-demo methods remain intact
-  as a rollback. Authored input is persisted before the result returns, and an
-  applied result includes both carrier-ready encoded `ReplicaRecord` bytes and
-  canonical Rust-produced `AuthoredRecordFrame` JSON. Incoming record frames
-  atomically persist the public entry with a receiver-local cursor, defer
-  missing predecessors without writes, and replace the AppStore authored read
-  model from canonical HHHS materialization rather than arrival order.
-  Presence stays on the ephemeral lane. A per-application writer lease rejects
-  a second live durable peer. An RAII open reservation releases that lease if
-  IndexedDB opening is cancelled, while an RAII session lease prevents
-  reentrant calls without holding a `RefCell` borrow across writes; write
-  cancellation restores the session.
+  `openDurableAuthoredPeer` on the same application facade. Project identity
+  and proposal role now enter the `hyperscope-app` reducer as semantic session
+  intent; the browser resource future executes the returned typed open effect
+  and completes its exact job with recovered history/projection evidence.
+  IndexedDB handles, HHHS objects, archive bytes, relay endpoints, and bearer
+  credentials remain platform resources. The default peer is a replica and
+  rejects raw `authored` proposals; promoting those requires the explicit
+  `openDurableAuthoredPeerWithRole(..., "admission_authority")` path. The peer
+  object shares the Rust `AppStore` while owning its IndexedDB-backed
+  `DurableAuthoredSession`; dropping it executes the matching close lifecycle.
+  Authored input is persisted before the result returns, and an applied result
+  includes both carrier-ready encoded `ReplicaRecord` bytes and canonical
+  Rust-produced `AuthoredRecordFrame` JSON. Incoming record frames atomically
+  persist the public entry with a receiver-local cursor, defer missing
+  predecessors without writes, and replace the AppStore authored read model
+  from canonical HHHS materialization rather than arrival order. Presence
+  stays on the ephemeral lane. A per-application writer lease rejects a second
+  live durable peer. An RAII open reservation reports cancelled opening as a
+  retryable completion against the exact reducer job and releases the writer
+  lease, while an RAII session lease prevents reentrant calls without holding
+  a `RefCell` borrow across writes; write cancellation restores the session.
 - Protocol v0.1 now has an additive optional `authoring_leases` presence field.
   A claim combines a stable lease UUID with an asset-scoped entity identity;
   the containing peer envelope supplies ordering and receipt-relative expiry.

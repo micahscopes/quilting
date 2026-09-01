@@ -28,8 +28,8 @@ use hyperscope_app::{
     AnimationPoseRequestDisposition, AnimationPoseScheduler, AnimationPoseStamp, AppCommit,
     AppEffect, AppEvent, AppFrameSnapshot, AppStore, AssetFetchJob, AssetJobIdentity,
     AssetLoadCompletion, AssetLoadCompletionDispatch, AssetLoadOutcome, AssetLoadRequest,
-    AssetLoadScope, AssetMetadata, AssetReadModel, AssetStatus, AuthoredRevision,
-    AuthoringLeaseStatus, CommitDisposition,
+    AssetLoadScope, AssetMetadata, AssetReadModel, AssetStatus, AuthoredProposalRole,
+    AuthoredRevision, AuthoredSessionEffect, AuthoringLeaseStatus, CommitDisposition,
     FocusDiagnosticView, FocusPostprocessMode, FocusPostprocessSettings, FrameTick,
     GraphicsPresentationDecision,
     InstalledPrimarySceneReadModel, LocalAuthoringLeaseController, LocalPeerDisposition,
@@ -4284,6 +4284,18 @@ enum ShadowEffect {
     PatchLab {
         effect: ShadowPatchLabEffect,
     },
+    OpenAuthoredSession {
+        job_id: String,
+        project_id: String,
+        proposal_role: &'static str,
+    },
+    CancelAuthoredSessionOpen {
+        job_id: String,
+        project_id: String,
+    },
+    CloseAuthoredSession {
+        project_id: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -5554,6 +5566,29 @@ fn shadow_effect(effect: &AppEffect) -> ShadowEffect {
         },
         AppEffect::PatchLab(effect) => ShadowEffect::PatchLab {
             effect: shadow_patch_lab_effect(effect),
+        },
+        AppEffect::AuthoredSession(effect) => match effect {
+            AuthoredSessionEffect::Open { job_id, intent } => {
+                ShadowEffect::OpenAuthoredSession {
+                    job_id: job_id.to_string(),
+                    project_id: intent.project_id.to_string(),
+                    proposal_role: match intent.proposal_role {
+                        AuthoredProposalRole::Replica => "replica",
+                        AuthoredProposalRole::AdmissionAuthority => "admission_authority",
+                    },
+                }
+            }
+            AuthoredSessionEffect::CancelOpen { job_id, project_id } => {
+                ShadowEffect::CancelAuthoredSessionOpen {
+                    job_id: job_id.to_string(),
+                    project_id: project_id.to_string(),
+                }
+            }
+            AuthoredSessionEffect::Close { project_id } => {
+                ShadowEffect::CloseAuthoredSession {
+                    project_id: project_id.to_string(),
+                }
+            }
         },
     }
 }

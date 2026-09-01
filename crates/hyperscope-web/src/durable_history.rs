@@ -29,8 +29,9 @@ use std::collections::BTreeMap;
 mod indexed_db;
 #[cfg(target_arch = "wasm32")]
 pub use indexed_db::{
-    import_durable_authored_session, import_project_archive, open_durable_authored_session,
-    open_durable_project, IndexedDbDurability,
+    import_durable_authored_session, import_project_archive,
+    import_validated_durable_authored_session, import_validated_project_archive,
+    open_durable_authored_session, open_durable_project, IndexedDbDurability,
 };
 #[cfg(target_arch = "wasm32")]
 pub use indexed_db::{origin_persistence, request_origin_persistence};

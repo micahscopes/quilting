@@ -7,15 +7,19 @@
 use crate::app_shadow::{peer_receipt_to_js, HyperscopeAppShadow};
 use hhhs::EntryHash;
 use hhhs_replica::ReplicaRecord;
-use hyperscape_hhhs::{AuthoredRecordFrame, ProjectId};
+use hyperscape_hhhs::{AuthoredRecordFrame, DurableProject, ProjectId};
 use hyperscape_protocol::{LocalPeerEnvelope, PresenceEnvelope};
-use hyperscope_app::AppStore;
+use hyperscope_app::{
+    AppStore, AuthoredProposalRole, AuthoredSessionCompletion, AuthoredSessionEffect,
+    AuthoredSessionIntent, AuthoredSessionOpenOutcome, AuthoredSessionStatus, CommitDisposition,
+};
 use hyperscope_hhhs_shadow::{
     DurableAuthoredObservation, DurableAuthoredSession, DurableCarrierDispatch,
     DurableCarrierObservation, DurableLocalPeerDispatch,
 };
 use hyperscope_web::durable_history::{
-    import_durable_authored_session, open_durable_authored_session, IndexedDbDurability,
+    import_validated_durable_authored_session, open_durable_authored_session,
+    IndexedDbDurability,
 };
 use serde::Serialize;
 use std::cell::{Cell, RefCell};
@@ -28,12 +32,16 @@ use wasm_bindgen::prelude::*;
 pub struct HyperscopeDurablePeer {
     store: AppStore,
     session: RefCell<Option<DurableAuthoredSession<IndexedDbDurability>>>,
+    intent: AuthoredSessionIntent,
     restored_projection_on_open: bool,
     writer_lease: Rc<Cell<bool>>,
 }
 
 impl Drop for HyperscopeDurablePeer {
     fn drop(&mut self) {
+        if self.store.authored_session_snapshot().status.intent() == Some(self.intent) {
+            let _ = self.store.set_authored_session(None);
+        }
         self.writer_lease.set(false);
     }
 }
@@ -47,22 +55,53 @@ impl HyperscopeAppShadow {
         &self,
         project_id: &str,
     ) -> Result<HyperscopeDurablePeer, JsValue> {
+        self.open_durable_authored_peer_with_role(project_id, "replica")
+            .await
+    }
+
+    /// Open a durable peer with an explicit raw-proposal role. Ordinary
+    /// replicas consume only authorized record frames; exactly one selected
+    /// admission authority may promote raw authored proposals.
+    #[wasm_bindgen(js_name = openDurableAuthoredPeerWithRole)]
+    pub async fn open_durable_authored_peer_with_role(
+        &self,
+        project_id: &str,
+        proposal_role: &str,
+    ) -> Result<HyperscopeDurablePeer, JsValue> {
         let project_id = ProjectId::new(
             Uuid::parse_str(project_id)
                 .map_err(|error| js_error(format!("project ID is invalid: {error}")))?,
         )
         .map_err(js_error)?;
+        let intent = AuthoredSessionIntent {
+            project_id,
+            proposal_role: parse_proposal_role(proposal_role)?,
+        };
         let writer_reservation = WriterLeaseReservation::acquire(self.durable_peer_lease())?;
-
         let store = self.store_clone();
-        let opened = open_durable_authored_session(project_id, &store)
-            .await
-            .map_err(js_error)?;
+        let mut opening = AuthoredOpenReservation::begin(store.clone(), intent)?;
+        let opened = match open_durable_authored_session(project_id, &store).await {
+            Ok(opened) => opened,
+            Err(error) => {
+                let message = error.to_string();
+                opening.fail("durable_open_failed", &message)?;
+                return Err(js_error(message));
+            }
+        };
         let restored_projection_on_open = opened.restored_projection().is_some();
+        let history_len = u64::try_from(opened.session().history_len())
+            .map_err(|_| JsValue::from_str("durable authored history length exceeds u64"))?;
+        let projection_revision = opened.session().observed_projection_revision();
         let (session, _) = opened.into_parts();
+        opening.opened(
+            history_len,
+            projection_revision,
+            restored_projection_on_open,
+        )?;
         Ok(HyperscopeDurablePeer {
             store,
             session: RefCell::new(Some(session)),
+            intent,
             restored_projection_on_open,
             writer_lease: writer_reservation.commit(),
         })
@@ -75,16 +114,54 @@ impl HyperscopeAppShadow {
         &self,
         archive_bytes: js_sys::Uint8Array,
     ) -> Result<HyperscopeDurablePeer, JsValue> {
+        self.import_durable_authored_peer_with_role(archive_bytes, "replica")
+            .await
+    }
+
+    /// Import a portable archive and select the resulting durable peer's raw
+    /// proposal role explicitly. Archive bytes remain a platform resource and
+    /// never enter semantic application state.
+    #[wasm_bindgen(js_name = importDurableAuthoredPeerWithRole)]
+    pub async fn import_durable_authored_peer_with_role(
+        &self,
+        archive_bytes: js_sys::Uint8Array,
+        proposal_role: &str,
+    ) -> Result<HyperscopeDurablePeer, JsValue> {
+        let archive_bytes = archive_bytes.to_vec();
+        let proposal_role = parse_proposal_role(proposal_role)?;
         let writer_reservation = WriterLeaseReservation::acquire(self.durable_peer_lease())?;
-        let store = self.store_clone();
-        let opened = import_durable_authored_session(&archive_bytes.to_vec(), &store)
+        let validated = DurableProject::import_archive(&archive_bytes)
             .await
             .map_err(js_error)?;
+        let project_id = validated.project_id();
+        let intent = AuthoredSessionIntent {
+            project_id,
+            proposal_role,
+        };
+        let store = self.store_clone();
+        let mut opening = AuthoredOpenReservation::begin(store.clone(), intent)?;
+        let opened = match import_validated_durable_authored_session(validated, &store).await {
+            Ok(opened) => opened,
+            Err(error) => {
+                let message = error.to_string();
+                opening.fail("durable_import_failed", &message)?;
+                return Err(js_error(message));
+            }
+        };
         let restored_projection_on_open = opened.restored_projection().is_some();
+        let history_len = u64::try_from(opened.session().history_len())
+            .map_err(|_| JsValue::from_str("durable authored history length exceeds u64"))?;
+        let projection_revision = opened.session().observed_projection_revision();
         let (session, _) = opened.into_parts();
+        opening.opened(
+            history_len,
+            projection_revision,
+            restored_projection_on_open,
+        )?;
         Ok(HyperscopeDurablePeer {
             store,
             session: RefCell::new(Some(session)),
+            intent,
             restored_projection_on_open,
             writer_lease: writer_reservation.commit(),
         })
@@ -105,6 +182,7 @@ impl HyperscopeDurablePeer {
             .ok_or_else(|| JsValue::from_str("durable authored peer is already active"))?;
         serde_wasm_bindgen::to_value(&DurablePeerStatus {
             project_id: session.project_id().as_uuid().to_string(),
+            proposal_role: proposal_role_name(self.intent.proposal_role),
             history_len: session.history_len().to_string(),
             projection_revision: session
                 .observed_projection_revision()
@@ -126,6 +204,13 @@ impl HyperscopeDurablePeer {
     ) -> Result<JsValue, JsValue> {
         let envelope = serde_json::from_str::<LocalPeerEnvelope>(frame_json)
             .map_err(|error| js_error(format!("local peer frame is invalid JSON: {error}")))?;
+        if matches!(&envelope, LocalPeerEnvelope::Authored(_))
+            && self.intent.proposal_role != AuthoredProposalRole::AdmissionAuthority
+        {
+            return Err(JsValue::from_str(
+                "durable replica cannot admit raw authored proposals; select admission_authority explicitly",
+            ));
+        }
         let mut session = DurableSessionLease::take(&self.session)?;
         let dispatch = session
             .session_mut()
@@ -192,6 +277,138 @@ impl HyperscopeDurablePeer {
             .ok_or_else(|| JsValue::from_str("durable authored peer is already active"))?
             .record_local_presence(&envelope)
             .map_err(js_error)
+    }
+}
+
+/// Tracks the reducer job while a browser resource future is in flight.
+/// Dropping a cancelled future reports a retryable failure against the exact
+/// job identity; a newer project selection therefore treats it as stale.
+struct AuthoredOpenReservation {
+    store: AppStore,
+    job_id: u64,
+    intent: AuthoredSessionIntent,
+    settled: bool,
+}
+
+impl AuthoredOpenReservation {
+    fn begin(store: AppStore, intent: AuthoredSessionIntent) -> Result<Self, JsValue> {
+        let dispatch = store.set_authored_session(Some(intent)).map_err(js_error)?;
+        let mut opening = None;
+        for effect in dispatch.effects {
+            if let AuthoredSessionEffect::Open {
+                job_id,
+                intent: effect_intent,
+            } = effect
+            {
+                if opening.replace((job_id, effect_intent)).is_some() {
+                    let _ = store.set_authored_session(None);
+                    return Err(JsValue::from_str(
+                        "authored session emitted multiple open effects",
+                    ));
+                }
+            }
+        }
+        let Some((job_id, effect_intent)) = opening else {
+            let _ = store.set_authored_session(None);
+            return Err(JsValue::from_str(
+                "authored session emitted no open effect for an available writer",
+            ));
+        };
+        if effect_intent != intent
+            || dispatch.state.status != (AuthoredSessionStatus::Opening { job_id, intent })
+        {
+            let _ = store.set_authored_session(None);
+            return Err(JsValue::from_str(
+                "authored session open effect diverged from reducer state",
+            ));
+        }
+        Ok(Self {
+            store,
+            job_id,
+            intent,
+            settled: false,
+        })
+    }
+
+    fn opened(
+        &mut self,
+        history_len: u64,
+        projection_revision: Option<u64>,
+        restored_projection: bool,
+    ) -> Result<(), JsValue> {
+        let dispatch = self
+            .store
+            .complete_authored_session(AuthoredSessionCompletion {
+                job_id: self.job_id,
+                project_id: self.intent.project_id,
+                outcome: AuthoredSessionOpenOutcome::Opened {
+                    history_len,
+                    projection_revision,
+                    restored_projection,
+                },
+            })
+            .map_err(js_error)?;
+        if dispatch.commit.disposition != CommitDisposition::Applied
+            || dispatch.state.status
+                != (AuthoredSessionStatus::Active {
+                    intent: self.intent,
+                    history_len,
+                    projection_revision,
+                    restored_projection,
+                })
+        {
+            return Err(JsValue::from_str(
+                "authored session opening completed after its reducer job was retired",
+            ));
+        }
+        self.settled = true;
+        Ok(())
+    }
+
+    fn fail(&mut self, code: &str, message: &str) -> Result<(), JsValue> {
+        let message = if message.trim().is_empty() {
+            "durable authored resource opening failed"
+        } else {
+            message
+        };
+        let dispatch = self
+            .store
+            .complete_authored_session(AuthoredSessionCompletion {
+                job_id: self.job_id,
+                project_id: self.intent.project_id,
+                outcome: AuthoredSessionOpenOutcome::Failed {
+                    code: code.to_owned(),
+                    message: message.to_owned(),
+                    retryable: true,
+                },
+            })
+            .map_err(js_error)?;
+        if dispatch.commit.disposition != CommitDisposition::Applied {
+            return Err(JsValue::from_str(
+                "authored session failure completed after its reducer job was retired",
+            ));
+        }
+        self.settled = true;
+        Ok(())
+    }
+}
+
+impl Drop for AuthoredOpenReservation {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let _ = self
+            .store
+            .complete_authored_session(AuthoredSessionCompletion {
+                job_id: self.job_id,
+                project_id: self.intent.project_id,
+                outcome: AuthoredSessionOpenOutcome::Failed {
+                    code: "durable_open_cancelled".to_owned(),
+                    message: "durable authored resource opening was cancelled".to_owned(),
+                    retryable: true,
+                },
+            });
     }
 }
 
@@ -282,6 +499,7 @@ impl Drop for WriterLeaseReservation {
 #[serde(rename_all = "camelCase")]
 struct DurablePeerStatus {
     project_id: String,
+    proposal_role: &'static str,
     history_len: String,
     projection_revision: Option<String>,
     restored_projection_on_open: bool,
@@ -445,6 +663,23 @@ fn set_property(object: &js_sys::Object, name: &str, value: &JsValue) -> Result<
     Ok(())
 }
 
+fn parse_proposal_role(role: &str) -> Result<AuthoredProposalRole, JsValue> {
+    match role {
+        "replica" => Ok(AuthoredProposalRole::Replica),
+        "admission_authority" => Ok(AuthoredProposalRole::AdmissionAuthority),
+        _ => Err(JsValue::from_str(
+            "authored proposal role must be replica or admission_authority",
+        )),
+    }
+}
+
+fn proposal_role_name(role: AuthoredProposalRole) -> &'static str {
+    match role {
+        AuthoredProposalRole::Replica => "replica",
+        AuthoredProposalRole::AdmissionAuthority => "admission_authority",
+    }
+}
+
 fn js_error(error: impl Display) -> JsValue {
     JsValue::from_str(&error.to_string())
 }
@@ -485,8 +720,17 @@ mod tests {
         let app = HyperscopeAppShadow::new();
 
         let first = app.open_durable_authored_peer(&project_id).await.unwrap();
+        assert!(matches!(
+            app.store_clone().authored_session_snapshot().status,
+            AuthoredSessionStatus::Active { intent, .. }
+                if intent.proposal_role == AuthoredProposalRole::Replica
+        ));
         assert!(app.open_durable_authored_peer(&project_id).await.is_err());
         drop(first);
+        assert_eq!(
+            app.store_clone().authored_session_snapshot().status,
+            AuthoredSessionStatus::Disabled
+        );
 
         let reopened = app.open_durable_authored_peer(&project_id).await.unwrap();
         assert_eq!(reopened.session.borrow().as_ref().unwrap().history_len(), 0);
@@ -648,11 +892,25 @@ mod tests {
             },
         };
         let app = HyperscopeAppShadow::new();
-        let peer = app
+        let local_frame =
+            serde_json::to_string(&LocalPeerEnvelope::Authored(authored.clone())).unwrap();
+        let replica = app
             .open_durable_authored_peer(&project_id.as_uuid().to_string())
             .await
             .unwrap();
-        let local_frame = serde_json::to_string(&LocalPeerEnvelope::Authored(authored)).unwrap();
+        assert!(replica
+            .receive_local_peer_envelope(1.0, &local_frame)
+            .await
+            .is_err());
+        drop(replica);
+
+        let peer = app
+            .open_durable_authored_peer_with_role(
+                &project_id.as_uuid().to_string(),
+                "admission_authority",
+            )
+            .await
+            .unwrap();
         let dispatch = peer
             .receive_local_peer_envelope(1.0, &local_frame)
             .await
