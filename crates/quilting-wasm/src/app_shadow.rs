@@ -292,6 +292,7 @@ pub fn encode_local_presence_envelope(
                 up: vector3(up, "presence camera up")?,
             }),
             selection,
+            authoring_leases: Vec::new(),
             focus,
             active_cue,
             animation_seconds,

@@ -173,6 +173,39 @@ class ProtocolTests(unittest.TestCase):
         )
         self.assertEqual(constructed, fixture)
 
+    def test_authoring_lease_constructor_matches_the_rust_fixture(self) -> None:
+        text, fixture = self.fixture("presence-authoring-lease-v0.1.json")
+        protocol.validate_presence_envelope(fixture)
+        self.assertEqual(protocol.canonical_json(fixture), text)
+        constructed = protocol.presence_envelope(
+            message_id="00000000-0000-0000-0000-000000000011",
+            sender="00000000-0000-0000-0000-000000000012",
+            sequence=9,
+            ttl_millis=1500,
+            authoring_leases=[
+                {
+                    "lease_id": "00000000-0000-0000-0000-000000000013",
+                    "target": {
+                        "asset": "00000000-0000-0000-0000-000000000014",
+                        "entity": "00000000-0000-0000-0000-000000000015",
+                    },
+                }
+            ],
+        )
+        self.assertEqual(constructed, fixture)
+
+        duplicate = json.loads(json.dumps(fixture))
+        duplicate["presence"]["authoring_leases"].append(
+            {
+                "lease_id": "00000000-0000-0000-0000-000000000016",
+                "target": fixture["presence"]["authoring_leases"][0]["target"],
+            }
+        )
+        with self.assertRaisesRegex(
+            protocol.HyperscapeProtocolError, "repeats.*target"
+        ):
+            protocol.validate_presence_envelope(duplicate)
+
     def test_authored_inbox_matches_rust_stale_duplicate_and_echo_policy(self) -> None:
         _, first = self.fixture("authored-set-transform-v0.1.json")
         inbox = protocol.AuthoredInbox(capacity=4)

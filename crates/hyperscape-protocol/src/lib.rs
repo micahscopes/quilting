@@ -7,12 +7,14 @@
 //! hover, selection presence, or animation clocks.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
 
 pub const CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 1 };
 pub const MAX_PRESENCE_TTL_MILLIS: u32 = 60_000;
+pub const MAX_AUTHORING_LEASES_PER_PRESENCE: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolVersion {
@@ -74,6 +76,7 @@ stable_id!(RequestId, "request");
 stable_id!(AssetId, "asset");
 stable_id!(EntityId, "entity");
 stable_id!(ConformalFrameId, "conformal frame");
+stable_id!(LeaseId, "lease");
 
 /// Authored ambient orientation policy for a surface-pinned conformal frame.
 /// This is chart parity, independent of material sidedness or the selected
@@ -109,6 +112,24 @@ impl AssetEntityId {
     pub fn validate(self) -> Result<(), WireError> {
         self.asset.validate()?;
         self.entity.validate()
+    }
+}
+
+/// One advisory, short-lived intent to author an asset-scoped entity.
+///
+/// The containing presence envelope supplies holder identity, sender ordering,
+/// and receipt-relative expiry. This claim is neither authorization nor a
+/// durable lock: competing live claims resolve to explicit contention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct AuthoringLeaseClaim {
+    pub lease_id: LeaseId,
+    pub target: AssetEntityId,
+}
+
+impl AuthoringLeaseClaim {
+    pub fn validate(self) -> Result<(), WireError> {
+        self.lease_id.validate()?;
+        self.target.validate()
     }
 }
 
@@ -282,6 +303,8 @@ pub struct EphemeralPresence {
     pub camera: Option<CameraPresence>,
     #[serde(default)]
     pub selection: Vec<EntityId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authoring_leases: Vec<AuthoringLeaseClaim>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focus: Option<FocusPresence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -300,6 +323,26 @@ impl EphemeralPresence {
         }
         for entity in &self.selection {
             entity.validate()?;
+        }
+        if self.authoring_leases.len() > MAX_AUTHORING_LEASES_PER_PRESENCE {
+            return Err(WireError::InvalidValue(
+                "presence has too many authoring lease claims",
+            ));
+        }
+        let mut lease_ids = BTreeSet::new();
+        let mut lease_targets = BTreeSet::new();
+        for lease in &self.authoring_leases {
+            lease.validate()?;
+            if !lease_ids.insert(lease.lease_id) {
+                return Err(WireError::InvalidValue(
+                    "presence repeats an authoring lease ID",
+                ));
+            }
+            if !lease_targets.insert(lease.target) {
+                return Err(WireError::InvalidValue(
+                    "presence repeats an authoring lease target",
+                ));
+            }
         }
         if let Some(focus) = self.focus {
             focus.validate()?;
@@ -427,6 +470,8 @@ mod tests {
         include_str!("../fixtures/authored-set-transform-v0.1.json");
     const PRESENCE_FIXTURE: &str =
         include_str!("../fixtures/presence-camera-v0.1.json");
+    const AUTHORING_LEASE_FIXTURE: &str =
+        include_str!("../fixtures/presence-authoring-lease-v0.1.json");
 
     fn header() -> MessageHeader {
         MessageHeader {
@@ -479,6 +524,7 @@ mod tests {
                     up: [0.0, 1.0, 0.0],
                 }),
                 selection: vec![EntityId::from_u128(5).unwrap()],
+                authoring_leases: Vec::new(),
                 focus: None,
                 active_cue: None,
                 animation_seconds: Some(2.0),
@@ -498,6 +544,42 @@ mod tests {
         assert_eq!(
             format!("{}\n", serde_json::to_string_pretty(&envelope).unwrap()),
             PRESENCE_FIXTURE
+        );
+    }
+
+    #[test]
+    fn checked_in_authoring_lease_fixture_is_ephemeral_asset_scoped_and_unique() {
+        let envelope: PresenceEnvelope = serde_json::from_str(AUTHORING_LEASE_FIXTURE).unwrap();
+        envelope.validate().unwrap();
+        assert_eq!(
+            format!("{}\n", serde_json::to_string_pretty(&envelope).unwrap()),
+            AUTHORING_LEASE_FIXTURE
+        );
+        let claim = envelope.presence.authoring_leases[0];
+        assert_eq!(claim.lease_id, LeaseId::from_u128(0x13).unwrap());
+        assert_eq!(claim.target.asset, AssetId::from_u128(0x14).unwrap());
+        assert_eq!(claim.target.entity, EntityId::from_u128(0x15).unwrap());
+
+        let mut duplicate_target = envelope.clone();
+        let mut second = claim;
+        second.lease_id = LeaseId::from_u128(0x16).unwrap();
+        duplicate_target.presence.authoring_leases.push(second);
+        assert_eq!(
+            duplicate_target.validate(),
+            Err(WireError::InvalidValue(
+                "presence repeats an authoring lease target"
+            )),
+        );
+
+        let mut duplicate_id = envelope;
+        let mut second = claim;
+        second.target.entity = EntityId::from_u128(0x17).unwrap();
+        duplicate_id.presence.authoring_leases.push(second);
+        assert_eq!(
+            duplicate_id.validate(),
+            Err(WireError::InvalidValue(
+                "presence repeats an authoring lease ID"
+            )),
         );
     }
 

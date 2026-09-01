@@ -378,6 +378,14 @@ The first application boundary is now explicit:
   deliberately separate high-rate lane whose sender sequences and local
   expiries do not masquerade as the throttled UI read-model revision. These
   methods select no carrier and add no browser state authority.
+- Protocol v0.1 now has an additive optional `authoring_leases` presence field.
+  A claim combines a stable lease UUID with an asset-scoped entity identity;
+  the containing peer envelope supplies ordering and receipt-relative expiry.
+  The app derives key-sorted `held` or explicit `contended` read models from
+  live presence. It never chooses a winner from arrival order, and omission or
+  TTL expiry releases a claim. These values are advisory coordination—not
+  capabilities, authorization, durable locks, or HHHS history. Blender/browser
+  acquisition and edit gating remain a measured adapter cutover.
 - `hyperscope-web` offers an optional `local-peer-relay` binary, excluded from
   default features. It is an authenticated, exact-origin, loopback-default
   HTTP adapter over bounded opaque JSON delivery. Process generations and

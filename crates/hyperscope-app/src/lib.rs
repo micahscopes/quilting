@@ -39,8 +39,8 @@ use hyperscape::{
 };
 use hyperscape_protocol::{
     AssetDescriptor, AssetEntityId, AssetId, AuthoredCommand, AuthoredEnvelope, CameraPresence,
-    EntityId, EphemeralPresence, FocusPresence, MessageId, PeerId, PresenceEnvelope, RequestId,
-    WireError, WireTransform,
+    EntityId, EphemeralPresence, FocusPresence, LeaseId, MessageId, PeerId, PresenceEnvelope,
+    RequestId, WireError, WireTransform,
 };
 pub use quilting_core::render::FocusPostprocessMode;
 pub use quilting_gltf::GltfAssetMetadata as AssetMetadata;
@@ -1316,6 +1316,27 @@ pub struct PeerPresenceReadModel {
     pub sequence: u64,
     pub expires_at_seconds: f64,
     pub presence: EphemeralPresence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AuthoringLeaseHolder {
+    pub peer: PeerId,
+    pub lease_id: LeaseId,
+}
+
+/// Arrival-order-independent resolution of the live claims for one target.
+/// Contention deliberately has no implicit winner: lease claims coordinate
+/// editing but never become authorization or durable scene state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthoringLeaseStatus {
+    Held(AuthoringLeaseHolder),
+    Contended(Vec<AuthoringLeaseHolder>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthoringLeaseReadModel {
+    pub target: AssetEntityId,
+    pub status: AuthoringLeaseStatus,
 }
 
 /// One durable authored entity projection. The protocol currently exposes
@@ -2598,6 +2619,7 @@ impl AppState {
                 up: basis.up,
             }),
             selection,
+            authoring_leases: Vec::new(),
             focus: include_focus.then_some(FocusPresence {
                 center: focus.sphere.center,
                 radius: focus.sphere.radius,
@@ -2647,6 +2669,33 @@ impl AppState {
                 sequence: record.sequence,
                 expires_at_seconds: record.expires_at_seconds,
                 presence: record.presence.clone(),
+            })
+            .collect()
+    }
+
+    fn authoring_lease_read_models(&self) -> Vec<AuthoringLeaseReadModel> {
+        let mut holders = BTreeMap::<AssetEntityId, Vec<AuthoringLeaseHolder>>::new();
+        for (&peer, record) in &self.presence {
+            for claim in &record.presence.authoring_leases {
+                holders
+                    .entry(claim.target)
+                    .or_default()
+                    .push(AuthoringLeaseHolder {
+                        peer,
+                        lease_id: claim.lease_id,
+                    });
+            }
+        }
+        holders
+            .into_iter()
+            .map(|(target, mut claims)| {
+                claims.sort_unstable();
+                let status = if claims.len() == 1 {
+                    AuthoringLeaseStatus::Held(claims[0])
+                } else {
+                    AuthoringLeaseStatus::Contended(claims)
+                };
+                AuthoringLeaseReadModel { target, status }
             })
             .collect()
     }
@@ -3556,6 +3605,13 @@ impl AppStore {
         self.lock_state().presence_read_models()
     }
 
+    /// Derive live asset-scoped edit coordination from ephemeral presence.
+    /// Omission releases a claim and TTL expiry removes it; no result is
+    /// persisted, admitted to HHHS, or interpreted as access control.
+    pub fn authoring_lease_snapshot(&self) -> Vec<AuthoringLeaseReadModel> {
+        self.lock_state().authoring_lease_read_models()
+    }
+
     pub fn summary_signal(&self) -> MutableSignalCloned<AppSummary> {
         self.summary.signal_cloned()
     }
@@ -3755,8 +3811,8 @@ mod tests {
     use super::*;
     use hyperscape::{CameraRig, NavigationFrame};
     use hyperscape_protocol::{
-        AuthoredCommand, CameraPresence, EntityId, MessageHeader, MessageId, ProtocolVersion,
-        WireTransform, CURRENT_PROTOCOL_VERSION,
+        AuthoredCommand, AuthoringLeaseClaim, CameraPresence, EntityId, MessageHeader, MessageId,
+        ProtocolVersion, WireTransform, CURRENT_PROTOCOL_VERSION,
     };
 
     fn asset(id: u128, uri: &str) -> AssetDescriptor {
@@ -6554,6 +6610,7 @@ mod tests {
                     up: [0.0, 1.0, 0.0],
                 }),
                 selection: Vec::new(),
+                authoring_leases: Vec::new(),
                 focus: None,
                 active_cue: None,
                 animation_seconds: None,
@@ -6584,6 +6641,100 @@ mod tests {
         assert_eq!(store.navigation_snapshot().elapsed_seconds, 0.2);
         assert_eq!(store.summary_snapshot().active_peers, 0);
         assert!(store.presence_snapshot().is_empty());
+    }
+
+    #[test]
+    fn authoring_leases_are_asset_scoped_expiring_and_arrival_order_independent() {
+        let target = AssetEntityId::new(
+            AssetId::from_u128(30).unwrap(),
+            EntityId::from_u128(31).unwrap(),
+        )
+        .unwrap();
+        let presence =
+            |message: u128, sender: u128, sequence: u64, ttl_millis: u32, lease: Option<u128>| {
+                PresenceEnvelope {
+                    header: MessageHeader {
+                        version: CURRENT_PROTOCOL_VERSION,
+                        message_id: MessageId::from_u128(message).unwrap(),
+                        sender: PeerId::from_u128(sender).unwrap(),
+                        sequence,
+                    },
+                    presence: EphemeralPresence {
+                        ttl_millis,
+                        camera: None,
+                        selection: Vec::new(),
+                        authoring_leases: lease
+                            .map(|lease| {
+                                vec![AuthoringLeaseClaim {
+                                    lease_id: LeaseId::from_u128(lease).unwrap(),
+                                    target,
+                                }]
+                            })
+                            .unwrap_or_default(),
+                        focus: None,
+                        active_cue: None,
+                        animation_seconds: None,
+                    },
+                }
+            };
+        let first = presence(32, 40, 1, 100, Some(50));
+        let second = presence(33, 41, 1, 200, Some(51));
+        let first_store = AppStore::default();
+        let second_store = AppStore::default();
+        for (store, envelopes) in [
+            (&first_store, [&first, &second]),
+            (&second_store, [&second, &first]),
+        ] {
+            for envelope in envelopes {
+                store
+                    .dispatch(AppEvent::RemotePresence(ReceivedPresence {
+                        envelope: envelope.clone(),
+                        received_at_seconds: 0.0,
+                    }))
+                    .unwrap();
+            }
+        }
+        let expected = vec![AuthoringLeaseReadModel {
+            target,
+            status: AuthoringLeaseStatus::Contended(vec![
+                AuthoringLeaseHolder {
+                    peer: PeerId::from_u128(40).unwrap(),
+                    lease_id: LeaseId::from_u128(50).unwrap(),
+                },
+                AuthoringLeaseHolder {
+                    peer: PeerId::from_u128(41).unwrap(),
+                    lease_id: LeaseId::from_u128(51).unwrap(),
+                },
+            ]),
+        }];
+        assert_eq!(first_store.authoring_lease_snapshot(), expected);
+        assert_eq!(second_store.authoring_lease_snapshot(), expected);
+
+        first_store
+            .dispatch(AppEvent::Frame(FrameTick {
+                elapsed_seconds: 0.11,
+                delta_seconds: 0.11,
+            }))
+            .unwrap();
+        assert_eq!(
+            first_store.authoring_lease_snapshot(),
+            vec![AuthoringLeaseReadModel {
+                target,
+                status: AuthoringLeaseStatus::Held(AuthoringLeaseHolder {
+                    peer: PeerId::from_u128(41).unwrap(),
+                    lease_id: LeaseId::from_u128(51).unwrap(),
+                }),
+            }],
+        );
+
+        let released = presence(34, 41, 2, 200, None);
+        first_store
+            .dispatch(AppEvent::RemotePresence(ReceivedPresence {
+                envelope: released,
+                received_at_seconds: 0.12,
+            }))
+            .unwrap();
+        assert!(first_store.authoring_lease_snapshot().is_empty());
     }
 
     #[test]

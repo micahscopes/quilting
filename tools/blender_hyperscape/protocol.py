@@ -18,6 +18,7 @@ from typing import Any, Mapping, Sequence
 
 PROTOCOL_VERSION = {"major": 0, "minor": 1}
 MAX_PRESENCE_TTL_MILLIS = 60_000
+MAX_AUTHORING_LEASES_PER_PRESENCE = 256
 MAX_U64 = (1 << 64) - 1
 
 
@@ -128,6 +129,21 @@ def _asset(value: Any) -> None:
             raise HyperscapeProtocolError("asset digest must contain 32 bytes")
 
 
+def _authoring_lease(value: Any, context: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise HyperscapeProtocolError(f"{context} must be an object")
+    target = value.get("target")
+    if not isinstance(target, Mapping):
+        raise HyperscapeProtocolError(f"{context} target must be an object")
+    return {
+        "lease_id": _uuid(value.get("lease_id"), "authoring lease ID"),
+        "target": {
+            "asset": _uuid(target.get("asset"), "authoring lease asset ID"),
+            "entity": _uuid(target.get("entity"), "authoring lease entity ID"),
+        },
+    }
+
+
 def validate_authored_envelope(envelope: Any) -> None:
     if not isinstance(envelope, Mapping):
         raise HyperscapeProtocolError("authored envelope must be an object")
@@ -179,6 +195,27 @@ def validate_presence_envelope(envelope: Any) -> None:
         raise HyperscapeProtocolError("presence selection must be an array")
     for entity in selection:
         _uuid(entity, "selected entity ID")
+    authoring_leases = presence.get("authoring_leases", [])
+    if not isinstance(authoring_leases, list):
+        raise HyperscapeProtocolError("presence authoring leases must be an array")
+    if len(authoring_leases) > MAX_AUTHORING_LEASES_PER_PRESENCE:
+        raise HyperscapeProtocolError("presence has too many authoring lease claims")
+    lease_ids: set[str] = set()
+    lease_targets: set[tuple[str, str]] = set()
+    for index, lease in enumerate(authoring_leases):
+        normalized = _authoring_lease(lease, f"authoring lease {index}")
+        lease_id = normalized["lease_id"]
+        target = normalized["target"]
+        target_identity = (
+            target["asset"],
+            target["entity"],
+        )
+        if lease_id in lease_ids:
+            raise HyperscapeProtocolError("presence repeats an authoring lease ID")
+        if target_identity in lease_targets:
+            raise HyperscapeProtocolError("presence repeats an authoring lease target")
+        lease_ids.add(lease_id)
+        lease_targets.add(target_identity)
     focus = presence.get("focus")
     if focus is not None:
         if not isinstance(focus, Mapping):
@@ -264,6 +301,7 @@ def presence_envelope(
     ttl_millis: int,
     camera: Mapping[str, Any] | None = None,
     selection: Sequence[str] = (),
+    authoring_leases: Sequence[Mapping[str, Any]] = (),
     focus: Mapping[str, Any] | None = None,
     active_cue: str | None = None,
     animation_seconds: float | None = None,
@@ -272,6 +310,11 @@ def presence_envelope(
         "ttl_millis": ttl_millis,
         "selection": [_uuid(entity, "selected entity ID") for entity in selection],
     }
+    if authoring_leases:
+        presence["authoring_leases"] = [
+            _authoring_lease(lease, f"authoring lease {index}")
+            for index, lease in enumerate(authoring_leases)
+        ]
     if camera is not None:
         presence["camera"] = {
             "eye": list(camera.get("eye", ())),
