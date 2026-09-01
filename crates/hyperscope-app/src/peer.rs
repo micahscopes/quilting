@@ -1,7 +1,9 @@
 //! Transport-independent admission for the direct local Blender peer.
 //!
-//! This is an arrival-ordered, single-writer demo path. Multi-writer authored
-//! convergence remains the responsibility of `hyperscape-hhhs`.
+//! This is an arrival-ordered, single-writer demo path. Both lanes reject
+//! delayed sender-local sequences before dispatch; presence remains ephemeral,
+//! while multi-writer authored convergence remains the responsibility of
+//! `hyperscape-hhhs`.
 
 use crate::{AppCommit, AppEvent, AppStore, AuthoredRevision, CommitDisposition, ReceivedPresence};
 use hyperscape_protocol::{
@@ -46,6 +48,7 @@ pub struct LocalPeerIngress {
     local_authored_echoes: BoundedMessageMemory,
     local_presence_echoes: BoundedMessageMemory,
     authored_sender_sequences: BoundedSenderSequences,
+    presence_sender_sequences: BoundedSenderSequences,
 }
 
 impl Default for LocalPeerIngress {
@@ -66,6 +69,7 @@ impl LocalPeerIngress {
             local_authored_echoes: BoundedMessageMemory::new(message_capacity),
             local_presence_echoes: BoundedMessageMemory::new(message_capacity),
             authored_sender_sequences: BoundedSenderSequences::new(message_capacity),
+            presence_sender_sequences: BoundedSenderSequences::new(message_capacity),
         })
     }
 
@@ -96,6 +100,8 @@ impl LocalPeerIngress {
             .map_err(|error| LocalPeerIngressError::InvalidEnvelope(error.to_string()))?;
         self.local_presence_echoes
             .insert(envelope.header.message_id);
+        self.presence_sender_sequences
+            .observe(envelope.header.sender, envelope.header.sequence);
         Ok(())
     }
 
@@ -169,13 +175,16 @@ impl LocalPeerIngress {
                 })
             }
             LocalPeerEnvelope::Presence(envelope) => {
-                let message_id = envelope.header.message_id;
+                let header = envelope.header;
+                let message_id = header.message_id;
                 envelope
                     .presence
                     .expires_at_seconds(received_at_seconds)
                     .map_err(|error| LocalPeerIngressError::InvalidEnvelope(error.to_string()))?;
                 if self.local_presence_echoes.remove(message_id) {
                     self.seen_presence.insert(message_id);
+                    self.presence_sender_sequences
+                        .observe(header.sender, header.sequence);
                     return Ok(LocalPeerReceipt {
                         lane: LocalPeerLane::Presence,
                         disposition: LocalPeerDisposition::IgnoredEcho,
@@ -191,6 +200,18 @@ impl LocalPeerIngress {
                         commit: None,
                     });
                 }
+                if self
+                    .presence_sender_sequences
+                    .is_stale(header.sender, header.sequence)
+                {
+                    self.seen_presence.insert(message_id);
+                    return Ok(LocalPeerReceipt {
+                        lane: LocalPeerLane::Presence,
+                        disposition: LocalPeerDisposition::IgnoredStale,
+                        projection_revision: None,
+                        commit: None,
+                    });
+                }
                 let commit = store
                     .dispatch(AppEvent::RemotePresence(ReceivedPresence {
                         envelope,
@@ -198,6 +219,8 @@ impl LocalPeerIngress {
                     }))
                     .map_err(|error| LocalPeerIngressError::Application(error.to_string()))?;
                 self.seen_presence.insert(message_id);
+                self.presence_sender_sequences
+                    .observe(header.sender, header.sequence);
                 let disposition = commit_disposition(&commit);
                 Ok(LocalPeerReceipt {
                     lane: LocalPeerLane::Presence,
@@ -568,6 +591,93 @@ mod tests {
             store.authored_scene_snapshot().entities[0].transform,
             transform(2.0),
         );
+    }
+
+    #[test]
+    fn delayed_presence_is_rejected_before_it_can_refresh_an_older_pose() {
+        let store = AppStore::default();
+        let mut ingress = LocalPeerIngress::new(2).unwrap();
+        let sender = PeerId::from_u128(120).unwrap();
+        let entity = EntityId::from_u128(121).unwrap();
+        let presence = |message: u128, sequence, ttl_millis| PresenceEnvelope {
+            header: MessageHeader {
+                version: CURRENT_PROTOCOL_VERSION,
+                message_id: MessageId::from_u128(message).unwrap(),
+                sender,
+                sequence,
+            },
+            presence: EphemeralPresence {
+                ttl_millis,
+                camera: None,
+                selection: vec![entity],
+                focus: None,
+                active_cue: None,
+                animation_seconds: Some(sequence as f64),
+            },
+        };
+
+        let newest = presence(122, 10, 100);
+        assert_eq!(
+            ingress
+                .accept(&store, LocalPeerEnvelope::Presence(newest), 2.0)
+                .unwrap()
+                .disposition,
+            LocalPeerDisposition::Applied,
+        );
+        let revision = store.frame_snapshot().revision;
+        let delayed = presence(123, 9, 60_000);
+        let receipt = ingress
+            .accept(&store, LocalPeerEnvelope::Presence(delayed), 2.09)
+            .unwrap();
+        assert_eq!(receipt.disposition, LocalPeerDisposition::IgnoredStale);
+        assert_eq!(receipt.commit, None);
+        assert_eq!(store.frame_snapshot().revision, revision);
+        let retained = &store.presence_snapshot()[0];
+        assert_eq!(retained.sequence, 10);
+        assert_eq!(retained.expires_at_seconds, 2.1);
+
+        store
+            .dispatch(AppEvent::Frame(FrameTick {
+                elapsed_seconds: 2.11,
+                delta_seconds: 2.11,
+            }))
+            .unwrap();
+        assert!(store.presence_snapshot().is_empty());
+    }
+
+    #[test]
+    fn local_presence_sequence_fences_distinct_delayed_echoes() {
+        let store = AppStore::default();
+        let mut ingress = LocalPeerIngress::new(2).unwrap();
+        let sender = PeerId::from_u128(124).unwrap();
+        let make_presence = |message: u128, sequence| PresenceEnvelope {
+            header: MessageHeader {
+                version: CURRENT_PROTOCOL_VERSION,
+                message_id: MessageId::from_u128(message).unwrap(),
+                sender,
+                sequence,
+            },
+            presence: EphemeralPresence {
+                ttl_millis: 100,
+                camera: None,
+                selection: Vec::new(),
+                focus: None,
+                active_cue: None,
+                animation_seconds: None,
+            },
+        };
+        let outbound = make_presence(125, 8);
+        ingress.record_local_presence(&outbound).unwrap();
+
+        let delayed = make_presence(126, 7);
+        assert_eq!(
+            ingress
+                .accept(&store, LocalPeerEnvelope::Presence(delayed), 3.0)
+                .unwrap()
+                .disposition,
+            LocalPeerDisposition::IgnoredStale,
+        );
+        assert!(store.presence_snapshot().is_empty());
     }
 
     #[test]
