@@ -1,5 +1,5 @@
 use crate::app_shadow::FocusPostprocessShadow;
-use hyperscope_app::{HyperscopeRoute, HYPERSCOPE_CONTROL_SPECS};
+use hyperscope_app::{HyperscopeRoute, PatchLabControls, HYPERSCOPE_CONTROL_SPECS};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -11,6 +11,7 @@ struct RouteShadowResult {
     diagnostics: Vec<RouteShadowDiagnostic>,
     render_settings: Option<RouteRenderSettings>,
     navigation_settings: Option<RouteNavigationSettings>,
+    patch_lab_session: Option<RoutePatchLabSession>,
     #[serde(skip_serializing_if = "Option::is_none")]
     selection: Option<RouteSelection>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -69,6 +70,45 @@ struct RouteSelection {
 struct RouteAnimationClock {
     time_seconds: Option<f64>,
     speed: Option<f64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RoutePatchLabSession {
+    active: bool,
+    controls: RoutePatchLabControls,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RoutePatchLabControls {
+    shape: &'static str,
+    field: &'static str,
+    manual_edge_exponents: [u8; 3],
+    min_exponent: u8,
+    max_exponent: u8,
+    phase_microradians: u32,
+    phase_radians: f64,
+    bend_percent: u8,
+    grid: u8,
+    animate: bool,
+}
+
+impl From<PatchLabControls> for RoutePatchLabControls {
+    fn from(controls: PatchLabControls) -> Self {
+        Self {
+            shape: controls.shape.wire_name(),
+            field: controls.field.wire_name(),
+            manual_edge_exponents: controls.manual_edge_exponents,
+            min_exponent: controls.min_exponent,
+            max_exponent: controls.max_exponent,
+            phase_microradians: controls.phase_microradians,
+            phase_radians: controls.phase_radians(),
+            bend_percent: controls.bend_percent,
+            grid: controls.grid,
+            animate: controls.animate,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -185,6 +225,13 @@ pub fn canonicalize_hyperscope_route(pairs: JsValue) -> Result<JsValue, JsValue>
             time_seconds: clock.time_seconds,
             speed: clock.speed,
         });
+    let patch_lab_session = route
+        .patch_lab_session()
+        .ok()
+        .map(|session| RoutePatchLabSession {
+            active: session.active,
+            controls: session.controls.into(),
+        });
     let navigation_settings =
         route
             .navigation_settings()
@@ -237,6 +284,7 @@ pub fn canonicalize_hyperscope_route(pairs: JsValue) -> Result<JsValue, JsValue>
         diagnostics,
         render_settings,
         navigation_settings,
+        patch_lab_session,
         selection,
         animation_clock,
     })

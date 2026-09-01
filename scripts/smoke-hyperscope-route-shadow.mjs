@@ -202,6 +202,47 @@ assert.deepEqual(
   canonicalizeHyperscopeRoute([['animtime', '1.25'], ['animspeed', '-0.5']]).animationClock,
   { timeSeconds: 1.25, speed: -0.5 },
 );
+assert.deepEqual(canonicalizeHyperscopeRoute([]).patchLabSession, {
+  active: false,
+  controls: {
+    shape: 'triangle',
+    field: 'manual_edges',
+    manualEdgeExponents: [3, 4, 4],
+    minExponent: 1,
+    maxExponent: 6,
+    phaseMicroradians: 0,
+    phaseRadians: 0,
+    bendPercent: 55,
+    grid: 8,
+    animate: false,
+  },
+});
+assert.deepEqual(canonicalizeHyperscopeRoute([
+  ['atlas', '5'],
+  ['lab', 'plane'],
+  ['labfield', 'edges'],
+  ['laba', '5'],
+  ['labb', '4'],
+  ['labc', '3'],
+  ['labmin', '4'],
+  ['labmax', '2'],
+  ['labphase', '6.283185'],
+  ['labgrid', '16'],
+]).patchLabSession, {
+  active: true,
+  controls: {
+    shape: 'plane',
+    field: 'wave',
+    manualEdgeExponents: [4, 4, 4],
+    minExponent: 4,
+    maxExponent: 4,
+    phaseMicroradians: 0,
+    phaseRadians: 0,
+    bendPercent: 55,
+    grid: 16,
+    animate: false,
+  },
+});
 for (const [key, value] of [
   ['res', '7'], ['res', '3.5'],
   ['density', '0'], ['density', '12.5'], ['density', '501'],
@@ -1338,16 +1379,19 @@ for (const startupStep of [
   'startupRoute.diagnostics.length === 0',
   '&& startupRoute.renderSettings',
   '&& startupRoute.navigationSettings',
+  '&& startupRoute.patchLabSession',
   'new URLSearchParams(startupRoute.resolvedPairs),',
   'new URLSearchParams(startupRoute.pairs),',
   'initRenderSettings = startupRoute.renderSettings;',
   'initRustRouteAdmitted = true;',
   'initRouteSelection = startupRoute.selection ?? null;',
   'initRouteAnimationClock = startupRoute.animationClock ?? null;',
+  'initPatchLabSession = startupRoute.patchLabSession;',
   "rustRouteShadowDiagnostics.startupSource = 'browser-fallback';",
   "'missing-typed-route-settings'",
   'initRouteSelection,',
   'initRouteAnimationClock,',
+  'initPatchLabSession,',
   "synchronizeRustRenderSettingsPacket(\n        app,\n        initRenderSettings,\n        'route-startup',",
   "rustRenderSettingsDiagnostics.state = 'route-committed';",
 ]) {
@@ -1411,7 +1455,7 @@ assert.equal(
 );
 
 const applyParamsSource = browserSource.match(
-  /applyParams = function\([\s\S]*?validatedRouteAnimationClock = null,[\s\S]*?\) \{([\s\S]*?)\n\};\n\n\/\/ --- IndexedDB/,
+  /applyParams = function\([\s\S]*?validatedPatchLabSession = null,[\s\S]*?\) \{([\s\S]*?)\n\};\n\n\/\/ --- IndexedDB/,
 )?.[1];
 assert.ok(applyParamsSource, 'could not locate browser startup state adapter');
 for (const exactProjection of [
@@ -1443,6 +1487,9 @@ for (const exactAdmissionStep of [
   '? validatedRouteSelection',
   'pendingRouteAnimationClock = rustRouteAdmitted',
   '? validatedRouteAnimationClock',
+  'const routePatchLabControls = rustRouteAdmitted',
+  '? validatedPatchLabSession?.controls : null;',
+  '? patchLabWireField(routePatchLabControls.field)',
 ]) {
   assert.ok(
     applyParamsSource.includes(exactAdmissionStep),

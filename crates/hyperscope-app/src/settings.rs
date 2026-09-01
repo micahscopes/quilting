@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    FocusDiagnosticView, FocusPostprocessMode, FocusPostprocessSettings, RenderSettings,
+    FocusDiagnosticView, FocusPostprocessMode, FocusPostprocessSettings, PatchLabControls,
+    PatchLabField, PatchLabSessionIntent, PatchLabShape, RenderSettings,
+    PATCH_LAB_PHASE_TURN_MICRORADIANS,
 };
 use hyperscape::SurfaceWalkControls;
 use hyperscape_protocol::{AssetEntityId, AssetId, EntityId};
@@ -796,6 +798,70 @@ impl HyperscopeRoute {
         }
     }
 
+    /// Resolve the complete educational Patch Lab session carried by a URL.
+    ///
+    /// This is deliberately a typed application intent rather than a bag of
+    /// browser control strings. Periodic phase, resident-atlas limits, the
+    /// manual-edge field's shape constraint, and min/max reconciliation all
+    /// use the same normalization as [`crate::AppStore`]. A browser adapter
+    /// may render this packet, but must not reinterpret it before admission.
+    pub fn patch_lab_session(&self) -> Result<PatchLabSessionIntent, &'static str> {
+        let checked = |key, error| {
+            self.value(key)
+                .filter(|value| {
+                    hyperscope_control_spec(key).is_some_and(|spec| spec.accepts(value))
+                })
+                .ok_or(error)
+        };
+        let exponent = |key, error| checked(key, error)?.parse::<u8>().map_err(|_| error);
+
+        let (active, shape) = match checked("lab", "route Patch Lab shape is invalid")? {
+            "0" => (false, PatchLabShape::Triangle),
+            "triangle" => (true, PatchLabShape::Triangle),
+            "plane" => (true, PatchLabShape::Plane),
+            "cube" => (true, PatchLabShape::Cube),
+            _ => return Err("route Patch Lab shape is invalid"),
+        };
+        let field = match checked("labfield", "route Patch Lab field is invalid")? {
+            "edges" => PatchLabField::ManualEdges,
+            "wave" => PatchLabField::Wave,
+            "radial" => PatchLabField::Radial,
+            "sweep" => PatchLabField::Sweep,
+            "uniform" => PatchLabField::Uniform,
+            _ => return Err("route Patch Lab field is invalid"),
+        };
+        let phase_radians = checked("labphase", "route Patch Lab phase is invalid")?
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .ok_or("route Patch Lab phase is invalid")?;
+        let phase_microradians = ((phase_radians.rem_euclid(std::f64::consts::TAU) * 1_000_000.0)
+            .round() as u32)
+            % PATCH_LAB_PHASE_TURN_MICRORADIANS;
+        let atlas_exponent = exponent("atlas", "route atlas exponent is invalid")?;
+        let controls = PatchLabControls {
+            shape,
+            field,
+            manual_edge_exponents: [
+                exponent("laba", "route Patch Lab edge A is invalid")?,
+                exponent("labb", "route Patch Lab edge B is invalid")?,
+                exponent("labc", "route Patch Lab edge C is invalid")?,
+            ],
+            min_exponent: exponent("labmin", "route Patch Lab minimum is invalid")?,
+            max_exponent: exponent("labmax", "route Patch Lab maximum is invalid")?,
+            phase_microradians,
+            bend_percent: exponent("labbend", "route Patch Lab bend is invalid")?,
+            grid: exponent("labgrid", "route Patch Lab grid is invalid")?,
+            animate: match checked("labanimate", "route Patch Lab animation is invalid")? {
+                "0" => false,
+                "1" => true,
+                _ => return Err("route Patch Lab animation is invalid"),
+            },
+        }
+        .normalized(atlas_exponent);
+        Ok(PatchLabSessionIntent { active, controls })
+    }
+
     pub fn navigation_settings(&self) -> Result<RouteNavigationSettings, &'static str> {
         let number = |key, error| {
             self.value(key)
@@ -1301,6 +1367,107 @@ mod tests {
         let over_resident_atlas = HyperscopeRoute::from_pairs([("atlas", "7"), ("laba", "8")]);
         assert_eq!(over_resident_atlas.diagnostics().len(), 1);
         assert_eq!(over_resident_atlas.diagnostics()[0].key, "laba");
+    }
+
+    #[test]
+    fn patch_lab_route_resolves_one_normalized_application_intent() {
+        assert_eq!(
+            HyperscopeRoute::default().patch_lab_session().unwrap(),
+            PatchLabSessionIntent::default(),
+        );
+
+        let route = HyperscopeRoute::from_pairs([
+            ("atlas", "9"),
+            ("lab", "triangle"),
+            ("labfield", "edges"),
+            ("laba", "2"),
+            ("labb", "8"),
+            ("labc", "9"),
+            ("labmin", "3"),
+            ("labmax", "7"),
+            ("labphase", "1.234567"),
+            ("labbend", "73"),
+            ("labgrid", "12"),
+            ("labanimate", "1"),
+        ]);
+        assert!(route.diagnostics().is_empty());
+        assert_eq!(
+            route.patch_lab_session().unwrap(),
+            PatchLabSessionIntent {
+                active: true,
+                controls: PatchLabControls {
+                    shape: PatchLabShape::Triangle,
+                    field: PatchLabField::ManualEdges,
+                    manual_edge_exponents: [2, 8, 9],
+                    min_exponent: 3,
+                    max_exponent: 7,
+                    phase_microradians: 1_234_567,
+                    bend_percent: 73,
+                    grid: 12,
+                    animate: true,
+                },
+            },
+        );
+    }
+
+    #[test]
+    fn patch_lab_route_uses_app_normalization_and_round_trips_canonical_pairs() {
+        let route = HyperscopeRoute::from_pairs([
+            ("atlas", "5"),
+            ("lab", "plane"),
+            ("labfield", "edges"),
+            ("laba", "5"),
+            ("labb", "4"),
+            ("labc", "3"),
+            ("labmin", "4"),
+            ("labmax", "2"),
+            ("labphase", "6.283185"),
+            ("labgrid", "16"),
+        ]);
+        assert!(route.diagnostics().is_empty());
+        let session = route.patch_lab_session().unwrap();
+        assert!(session.active);
+        assert_eq!(session.controls.shape, PatchLabShape::Plane);
+        assert_eq!(session.controls.field, PatchLabField::Wave);
+        assert_eq!(session.controls.min_exponent, 4);
+        assert_eq!(session.controls.max_exponent, 4);
+        assert_eq!(session.controls.manual_edge_exponents, [4, 4, 4]);
+        assert_eq!(session.controls.phase_microradians, 0);
+
+        let canonical = route
+            .canonical_pairs()
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect::<Vec<_>>();
+        let reparsed = HyperscopeRoute::from_pairs(canonical);
+        assert!(reparsed.diagnostics().is_empty());
+        assert_eq!(reparsed.patch_lab_session().unwrap(), session);
+    }
+
+    #[test]
+    fn patch_lab_typed_route_fails_closed_on_invalid_controls() {
+        for (key, value) in [
+            ("lab", "sphere"),
+            ("labfield", "noise"),
+            ("laba", "2.5"),
+            ("labphase", "NaN"),
+            ("labanimate", "yes"),
+        ] {
+            let route = HyperscopeRoute::from_pairs([(key, value)]);
+            assert!(!route.diagnostics().is_empty(), "{key}={value}");
+            assert!(route.patch_lab_session().is_err(), "{key}={value}");
+        }
+        let outside_resident_atlas = HyperscopeRoute::from_pairs([("atlas", "4"), ("labmax", "5")]);
+        assert!(!outside_resident_atlas.diagnostics().is_empty());
+        assert_eq!(
+            outside_resident_atlas
+                .patch_lab_session()
+                .unwrap()
+                .controls
+                .max_exponent,
+            4,
+            "the typed packet is normalized even though route admission must reject its diagnostic",
+        );
     }
 
     #[test]

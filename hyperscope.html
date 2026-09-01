@@ -11292,6 +11292,7 @@ applyParams = function(
   validatedRouteSelection = null,
   validatedRouteAnimationClock = null,
   validatedNavigationSettings = null,
+  validatedPatchLabSession = null,
 ) {
   const finite = (value, fallback, minimum, maximum) => {
     const parsed = Number(value);
@@ -11429,31 +11430,38 @@ applyParams = function(
     surfaceWalk.minimumNear = routeSurfaceWalk.minimumNear;
     surfaceWalk.nearEyeFraction = routeSurfaceWalk.nearEyeFraction;
   }
-  patchLab.shape = patchLabShape(params.lab) || 'triangle';
-  $('patch-lab-field').value = rustRouteAdmitted
-    ? params.labfield
+  const routePatchLabControls = rustRouteAdmitted
+    ? validatedPatchLabSession?.controls : null;
+  patchLab.shape = routePatchLabControls?.shape
+    ?? patchLabShape(params.lab) ?? 'triangle';
+  $('patch-lab-field').value = routePatchLabControls
+    ? patchLabWireField(routePatchLabControls.field)
     : PATCH_LAB_FIELDS.has(params.labfield) ? params.labfield : 'edges';
   const atlasExp = validatedRenderSettings?.atlasExponent
     ?? integer(params.atlas, 7, 3, 9);
+  const routeManualEdges = routePatchLabControls?.manualEdgeExponents;
   for (const [id, value, fallback] of [
-    ['patch-lab-edge-a', params.laba, 3],
-    ['patch-lab-edge-b', params.labb, 4],
-    ['patch-lab-edge-c', params.labc, 4],
-    ['patch-lab-min', params.labmin, 1],
-    ['patch-lab-max', params.labmax, 6],
+    ['patch-lab-edge-a', routeManualEdges?.[0] ?? params.laba, 3],
+    ['patch-lab-edge-b', routeManualEdges?.[1] ?? params.labb, 4],
+    ['patch-lab-edge-c', routeManualEdges?.[2] ?? params.labc, 4],
+    ['patch-lab-min', routePatchLabControls?.minExponent ?? params.labmin, 1],
+    ['patch-lab-max', routePatchLabControls?.maxExponent ?? params.labmax, 6],
   ]) {
     $(id).max = atlasExp;
     $(id).value = admittedInteger(value, fallback, 0, atlasExp);
     patchLabPowerLabel(id);
   }
-  $('patch-lab-phase').value = admittedNumber(params.labphase, 0, 0, Math.PI * 2);
+  $('patch-lab-phase').value = routePatchLabControls?.phaseRadians
+    ?? admittedNumber(params.labphase, 0, 0, Math.PI * 2);
   $('patch-lab-phase-v').textContent = Number($('patch-lab-phase').value).toFixed(2);
-  $('patch-lab-bend-slider').value = admittedInteger(params.labbend, 55, 0, 100);
+  $('patch-lab-bend-slider').value = routePatchLabControls?.bendPercent
+    ?? admittedInteger(params.labbend, 55, 0, 100);
   $('patch-lab-bend-slider-v').textContent =
     (Number($('patch-lab-bend-slider').value) / 100).toFixed(2);
-  $('patch-lab-grid-slider').value = admittedInteger(params.labgrid, 8, 2, 16);
+  $('patch-lab-grid-slider').value = routePatchLabControls?.grid
+    ?? admittedInteger(params.labgrid, 8, 2, 16);
   $('patch-lab-grid-slider-v').textContent = `${$('patch-lab-grid-slider').value}²`;
-  patchLab.animate = params.labanimate === '1';
+  patchLab.animate = routePatchLabControls?.animate ?? params.labanimate === '1';
   patchLab.lastAnimatedAt = performance.now();
   $('patch-lab-animate').classList.toggle('on', patchLab.animate);
   updatePatchLabControlVisibility();
@@ -15019,6 +15027,7 @@ let initRustRouteAdmitted = false;
 let initRouteSelection = null;
 let initRouteAnimationClock = null;
 let initNavigationSettings = null;
+let initPatchLabSession = null;
 currentGlb = initParams.glb;
 let initialPatchLabShape = patchLabShape(initParams.lab);
 // Set camera early (not WASM-dependent)
@@ -15065,7 +15074,8 @@ phase('wasm', [], async () => {
       if (startupRoute
           && startupRoute.diagnostics.length === 0
           && startupRoute.renderSettings
-          && startupRoute.navigationSettings) {
+          && startupRoute.navigationSettings
+          && startupRoute.patchLabSession) {
         initParams = readParams(
           new URLSearchParams(startupRoute.resolvedPairs),
           new URLSearchParams(startupRoute.pairs),
@@ -15075,8 +15085,10 @@ phase('wasm', [], async () => {
         initRouteSelection = startupRoute.selection ?? null;
         initRouteAnimationClock = startupRoute.animationClock ?? null;
         initNavigationSettings = startupRoute.navigationSettings;
+        initPatchLabSession = startupRoute.patchLabSession;
         currentGlb = initParams.glb;
-        initialPatchLabShape = patchLabShape(initParams.lab);
+        initialPatchLabShape = initPatchLabSession.active
+          ? initPatchLabSession.controls.shape : null;
         rustRouteShadowDiagnostics.startupSource = 'rust';
       } else {
         rustRouteShadowDiagnostics.startupSource = 'browser-fallback';
@@ -15149,6 +15161,7 @@ phase('wasm', [], async () => {
     initRouteSelection,
     initRouteAnimationClock,
     initNavigationSettings,
+    initPatchLabSession,
   ); // Set signal values first
   if (RUST_RENDER_SETTINGS_IMPLEMENTATION !== 'js'
       && initRustRouteAdmitted
