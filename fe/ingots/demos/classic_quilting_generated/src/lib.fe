@@ -12,15 +12,18 @@ use quilting_atlas_webgpu::{
     advance_parallel_topology_generation,
     arbitrate_parallel_topology_point_lane,
     compact_candidate_points,
+    DelaunayRestoration,
     initialize_candidate_lane,
     initialize_parallel_topology_lane,
     locate_parallel_topology_point_lane,
     parallel_topology_progress,
-    parallel_topology_triangle,
     plan_parallel_topology_face_lane,
     propose_candidate_lane,
+    publish_parallel_topology_triangle_lane,
     rebuild_parallel_topology_face_lane,
     resident_point,
+    resident_triangle,
+    restore_constrained_delaunay,
     retire_candidate_lane,
     retire_parallel_topology_point_lane,
     scan_parallel_topology_face_plan,
@@ -61,6 +64,7 @@ const THREADS: usize = 128
 const WORKGROUPS: usize = 5
 const SAMPLING_ROUNDS: usize = 64
 const INSERTION_ROUNDS: usize = 64
+const FLIP_LIMIT: usize = 512
 const SEED: u32 = 0x51c32a97
 
 pub struct SamplingRound {}
@@ -70,6 +74,23 @@ pub struct MeshVarying { pub edge: Bary3F, pub normal: Vec3F }
 impl Copy for MeshVarying {}
 
 struct GeneratedParams {}
+
+fn flag(_ value: bool) -> u32 {
+    if value { 1 } else { 0 }
+}
+
+fn store_delaunay_receipt(
+    _ receipt: Shared<u32, 23>,
+    _ restored: DelaunayRestoration,
+) {
+    receipt.store(index: 16, value: flag(restored.valid))
+    receipt.store(index: 17, value: flag(restored.converged))
+    receipt.store(index: 18, value: restored.resident_points)
+    receipt.store(index: 19, value: restored.resident_triangles)
+    receipt.store(index: 20, value: restored.flips)
+    receipt.store(index: 21, value: restored.remaining_violations)
+    receipt.store(index: 22, value: restored.invariant_failures)
+}
 
 fn key() -> AtlasKey {
     AtlasKey { a: 1, b: 2, c: 3 }
@@ -120,8 +141,9 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
     points: Shared<u32, POINT_WORDS>,
     triangles_a: Shared<u32, TRIANGLE_WORDS>,
     triangles_b: Shared<u32, TRIANGLE_WORDS>,
+    triangles: Shared<u32, TRIANGLE_WORDS>,
     topology_workspace: Shared<u32, TOPOLOGY_WORKSPACE_WORDS>,
-    receipt: Shared<u32, 16>,
+    receipt: Shared<u32, 23>,
 
     const fn view() -> Surface<GeneratedParams> {
         Surface { extent: Extent::square(768), params: GeneratedParams {} }
@@ -346,6 +368,67 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
         )
     }
 
+    fn topology_publish(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Once<WORKGROUPS, 1, 1>>)
+    {
+        publish_parallel_topology_triangle_lane<
+            POINTS,
+            TRIANGLES,
+            TRIANGLE_WORDS,
+            TOPOLOGY_WORKSPACE_WORDS,
+        >(
+            self.triangles_a,
+            self.triangles_b,
+            self.topology_workspace,
+            self.triangles,
+            invocation,
+        )
+    }
+
+    fn topology_restore(self) uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+        let resident_points = self.receipt.load(index: 6)
+        let boundary = self.receipt.load(index: 5)
+        let resident_triangles = parallel_topology_progress<POINTS, TRIANGLES, TOPOLOGY_WORKSPACE_WORDS>(
+            self.topology_workspace,
+            2,
+        )
+        let pending = parallel_topology_progress<POINTS, TRIANGLES, TOPOLOGY_WORKSPACE_WORDS>(
+            self.topology_workspace,
+            3,
+        )
+        let locations = parallel_topology_progress<POINTS, TRIANGLES, TOPOLOGY_WORKSPACE_WORDS>(
+            self.topology_workspace,
+            6,
+        )
+        let invariants = parallel_topology_progress<POINTS, TRIANGLES, TOPOLOGY_WORKSPACE_WORDS>(
+            self.topology_workspace,
+            7,
+        )
+        let expected = if resident_points + resident_points > boundary + 2 {
+            resident_points + resident_points - boundary - 2
+        } else {
+            0
+        }
+        let source_valid = self.receipt.load(index: 0) != 0
+            && resident_triangles == expected
+            && pending == 0
+            && locations == 0
+            && invariants == 0
+        let restored = restore_constrained_delaunay<
+            POINT_WORDS,
+            TRIANGLE_WORDS,
+            FLIP_LIMIT,
+        >(
+            key(),
+            source_valid,
+            resident_points,
+            resident_triangles,
+            self.points,
+            self.triangles,
+        )
+        store_delaunay_receipt(self.receipt, restored)
+    }
+
     fn topology_seal(self) uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>) {
         let points = self.receipt.load(index: 6)
         let boundary = self.receipt.load(index: 5)
@@ -371,6 +454,7 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
             0
         }
         let valid = self.receipt.load(index: 0) != 0
+            && self.receipt.load(index: 16) != 0
             && triangles == expected
             && pending == 0
             && locations == 0
@@ -403,17 +487,7 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
         if self.receipt.load(index: 7) != 0 {
             let face = vertex_index / 3
             let corner = vertex_index % 3
-            let triangle = parallel_topology_triangle<
-                POINTS,
-                TRIANGLES,
-                TRIANGLE_WORDS,
-                TOPOLOGY_WORKSPACE_WORDS,
-            >(
-                self.triangles_a,
-                self.triangles_b,
-                self.topology_workspace,
-                face,
-            )
+                let triangle = resident_triangle<TRIANGLE_WORDS>(self.triangles, face)
             if triangle.valid {
                 let point_id = if corner == 0 {
                     triangle.first

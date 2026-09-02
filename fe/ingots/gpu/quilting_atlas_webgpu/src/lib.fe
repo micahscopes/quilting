@@ -32,7 +32,6 @@ use quilting_atlas::topology::{
     FlipProposal,
     Triangle,
     TrianglePair,
-    boundary_ring_vertex,
     classify_point_in_triangle,
     directed_edges_form_interior_pair,
     flip_proposal_precedes,
@@ -63,7 +62,7 @@ pub const POINT_INVALID: u32 = 2
 
 pub const PROPOSAL_NONE: u32 = 0
 pub const PROPOSAL_STRICT_FACE: u32 = 1
-pub const PROPOSAL_INTERIOR_EDGE: u32 = 2
+pub const PROPOSAL_EDGE: u32 = 2
 pub const PROPOSAL_INVALID: u32 = 3
 
 pub struct CandidateCompaction {
@@ -474,7 +473,60 @@ where
     result
 }
 
-/// Initialize the parallel topology state and emit the locked convex hull fan.
+/// Publish the selected immutable topology generation into one canonical
+/// resident buffer. This is a GPU-to-GPU generation boundary: downstream
+/// restoration and raster stages no longer need parity-specific branches.
+pub fn publish_parallel_topology_triangle_lane<
+    const POINT_CAPACITY: usize,
+    const TRIANGLE_CAPACITY: usize,
+    const TRIANGLE_STORAGE_WORDS: usize,
+    const WORKSPACE_WORDS: usize,
+>(
+    _ triangles_a: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+    _ triangles_b: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ resident: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where
+    {
+        TRIANGLE_STORAGE_WORDS == TRIANGLE_CAPACITY * TRIANGLE_WORDS
+    },
+    {
+        WORKSPACE_WORDS == POINT_CAPACITY * 7 + TRIANGLE_CAPACITY * 3 + TOPOLOGY_PROGRESS_WORDS
+    }
+{
+    let face = invocation.global.x
+    if face < TRIANGLE_CAPACITY.downcast_truncate() {
+        triangle_store<TRIANGLE_STORAGE_WORDS>(
+            resident,
+            face,
+            parallel_topology_triangle<
+                POINT_CAPACITY,
+                TRIANGLE_CAPACITY,
+                TRIANGLE_STORAGE_WORDS,
+                WORKSPACE_WORDS,
+            >(triangles_a, triangles_b, workspace, face),
+        )
+    }
+}
+
+/// Read one triangle from a canonical resident topology buffer.
+pub fn resident_triangle<const TRIANGLE_STORAGE_WORDS: usize>(
+    _ triangles: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+    _ face: u32,
+) -> Triangle
+where { TRIANGLE_STORAGE_WORDS % TRIANGLE_WORDS == 0 }
+{
+    triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, face)
+}
+
+/// Initialize the parallel topology state from the three exact corner seeds.
+///
+/// Non-corner boundary samples remain pending: treating them as an already
+/// triangulated polygon would require a fan through collinear edge points and
+/// produce degenerate faces. The ordinary immutable-generation rounds insert
+/// them through one-face boundary splits before or alongside interior points.
 /// Every lane owns disjoint point, face, and workspace records.
 pub fn initialize_parallel_topology_lane<
     const POINT_CAPACITY: usize,
@@ -508,17 +560,25 @@ where
     let triangle_capacity: u32 = TRIANGLE_CAPACITY.downcast_truncate()
     let canonical_key = key.a <= key.b && key.b <= key.c && key.c <= MAX_LOD
     let boundary = boundary_vertices(key)
+    let corner_a: u32 = 0
+    let corner_b = edge_resolution(key.c)
+    let corner_c = corner_b + edge_resolution(key.b)
+    let expected_triangles = if requested_points + requested_points > boundary + 2 {
+        requested_points + requested_points - boundary - 2
+    } else {
+        0
+    }
     let source_admitted = source_valid
         && canonical_key
         && requested_points >= boundary
         && requested_points <= point_capacity
         && boundary >= 3
-        && boundary - 2 <= triangle_capacity
+        && expected_triangles <= triangle_capacity
 
     if lane < point_capacity {
         let state = if !source_admitted || lane >= requested_points {
             POINT_INVALID
-        } else if lane < boundary {
+        } else if lane == corner_a || lane == corner_b || lane == corner_c {
             POINT_INSERTED
         } else {
             POINT_PENDING
@@ -555,18 +615,14 @@ where
                 index: topology_face_output_offset<POINT_CAPACITY, TRIANGLE_CAPACITY>(lane),
                 value: 0,
             )
-        let hull_triangles = if source_admitted { boundary - 2 } else { 0 }
-        if lane < hull_triangles {
-            let first_id = boundary_ring_vertex(key, 0)
-            let second_id = boundary_ring_vertex(key, lane + 1)
-            let third_id = boundary_ring_vertex(key, lane + 2)
+        if source_admitted && lane == 0 {
             let triangle = normalized_triangle(
-                first_id,
-                point_load<POINT_STORAGE_WORDS>(points, first_id),
-                second_id,
-                point_load<POINT_STORAGE_WORDS>(points, second_id),
-                third_id,
-                point_load<POINT_STORAGE_WORDS>(points, third_id),
+                corner_a,
+                point_load<POINT_STORAGE_WORDS>(points, corner_a),
+                corner_b,
+                point_load<POINT_STORAGE_WORDS>(points, corner_b),
+                corner_c,
+                point_load<POINT_STORAGE_WORDS>(points, corner_c),
             )
             triangle_store<TRIANGLE_STORAGE_WORDS>(triangles_a, lane, triangle)
             triangle_store<TRIANGLE_STORAGE_WORDS>(triangles_b, lane, triangle)
@@ -574,9 +630,9 @@ where
     }
 
     if lane == 0 {
-        let hull_triangles = if source_admitted { boundary - 2 } else { 0 }
+        let seed_triangles = if source_admitted { 1 } else { 0 }
         let pending = if source_admitted {
-            requested_points - boundary
+            requested_points - 3
         } else {
             0
         }
@@ -585,7 +641,7 @@ where
         topology_store_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
             workspace,
             2,
-            hull_triangles,
+            seed_triangles,
         )
         topology_store_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
             workspace,
@@ -595,7 +651,7 @@ where
         topology_store_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
             workspace,
             4,
-            hull_triangles,
+            seed_triangles,
         )
         topology_store_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(workspace, 5, 0)
         topology_store_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
@@ -666,8 +722,8 @@ fn topology_proposals_share_face<const POINT_CAPACITY: usize, const WORKSPACE_WO
 ) -> bool {
     let left_kind = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, left, 0)
     let right_kind = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, right, 0)
-    let left_valid = left_kind == PROPOSAL_STRICT_FACE || left_kind == PROPOSAL_INTERIOR_EDGE
-    let right_valid = right_kind == PROPOSAL_STRICT_FACE || right_kind == PROPOSAL_INTERIOR_EDGE
+    let left_valid = left_kind == PROPOSAL_STRICT_FACE || left_kind == PROPOSAL_EDGE
+    let right_valid = right_kind == PROPOSAL_STRICT_FACE || right_kind == PROPOSAL_EDGE
     let left_first = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, left, 1)
     let left_second = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, left, 2)
     let right_first = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, right, 1)
@@ -677,14 +733,16 @@ fn topology_proposals_share_face<const POINT_CAPACITY: usize, const WORKSPACE_WO
         if left_first == right_first {
             shared = true
         }
-        if right_kind == PROPOSAL_INTERIOR_EDGE && left_first == right_second {
+        if right_kind == PROPOSAL_EDGE && right_second != INVALID_VERTEX && left_first == right_second {
             shared = true
         }
-        if left_kind == PROPOSAL_INTERIOR_EDGE && left_second == right_first {
+        if left_kind == PROPOSAL_EDGE && left_second != INVALID_VERTEX && left_second == right_first {
             shared = true
         }
-        if left_kind == PROPOSAL_INTERIOR_EDGE
-            && right_kind == PROPOSAL_INTERIOR_EDGE
+        if left_kind == PROPOSAL_EDGE
+            && right_kind == PROPOSAL_EDGE
+            && left_second != INVALID_VERTEX
+            && right_second != INVALID_VERTEX
             && left_second == right_second {
             shared = true
         }
@@ -700,7 +758,7 @@ fn topology_proposal_owns_face<const POINT_CAPACITY: usize, const WORKSPACE_WORD
     let kind = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, point, 0)
     let first = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, point, 1)
     let second = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, point, 2)
-    first == face || (kind == PROPOSAL_INTERIOR_EDGE && second == face)
+    first == face || (kind == PROPOSAL_EDGE && second == face)
 }
 
 /// Locate one pending point against an immutable triangle generation.
@@ -812,9 +870,18 @@ where
         topology_store_proposal<POINT_CAPACITY, WORKSPACE_WORDS>(
             workspace,
             point_id,
-            PROPOSAL_INTERIOR_EDGE,
+            PROPOSAL_EDGE,
             first_edge_face,
             second_edge_face,
+            diagnostic,
+        )
+    } else if strict_hits == 0 && edge_hits == 1 && vertex_hits == 0 {
+        topology_store_proposal<POINT_CAPACITY, WORKSPACE_WORDS>(
+            workspace,
+            point_id,
+            PROPOSAL_EDGE,
+            first_edge_face,
+            INVALID_VERTEX,
             diagnostic,
         )
     } else {
@@ -852,7 +919,7 @@ where { WORKSPACE_WORDS == POINT_CAPACITY * 7 + TRIANGLE_CAPACITY * 3 + TOPOLOGY
         )
         let kind = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, point_id, 0)
         let eligible = point_state == POINT_PENDING
-            && (kind == PROPOSAL_STRICT_FACE || kind == PROPOSAL_INTERIOR_EDGE)
+            && (kind == PROPOSAL_STRICT_FACE || kind == PROPOSAL_EDGE)
         let mut preceding_conflict = false
         let mut other: u32 = 0
         if eligible {
@@ -1016,7 +1083,7 @@ where
                     value: 3,
                 )
         }
-    } else if kind == PROPOSAL_INTERIOR_EDGE {
+    } else if kind == PROPOSAL_EDGE {
         let split = split_resident_triangle_edge<POINT_STORAGE_WORDS>(
             points,
             triangle,
@@ -1110,6 +1177,7 @@ where { WORKSPACE_WORDS == POINT_CAPACITY * 7 + TRIANGLE_CAPACITY * 3 + TOPOLOGY
     )
     let mut winners: u32 = 0
     let mut location_failures: u32 = 0
+    let mut expected_output = triangle_count
     let mut point_id: u32 = 0
     while point_id < point_capacity {
         if topology_load_point_state<POINT_CAPACITY, WORKSPACE_WORDS>(
@@ -1123,12 +1191,19 @@ where { WORKSPACE_WORDS == POINT_CAPACITY * 7 + TRIANGLE_CAPACITY * 3 + TOPOLOGY
                 point_id,
                 0,
             )
-            if kind != PROPOSAL_STRICT_FACE && kind != PROPOSAL_INTERIOR_EDGE {
+            if kind != PROPOSAL_STRICT_FACE && kind != PROPOSAL_EDGE {
                 location_failures = location_failures + 1
             }
             if workspace.load(index: topology_winner_offset<POINT_CAPACITY>(point_id)) != 0 {
                 winners = winners + 1
-                let expected_faces: u32 = if kind == PROPOSAL_STRICT_FACE { 1 } else { 2 }
+                let second_face = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(
+                    workspace,
+                    point_id,
+                    2,
+                )
+                let boundary_edge = kind == PROPOSAL_EDGE && second_face == INVALID_VERTEX
+                let expected_faces: u32 = if kind == PROPOSAL_EDGE && !boundary_edge { 2 } else { 1 }
+                expected_output = expected_output + if boundary_edge { 1 } else { 2 }
                 let mut owned_faces: u32 = 0
                 let mut owned_face: u32 = 0
                 while owned_face < triangle_count {
@@ -1153,7 +1228,6 @@ where { WORKSPACE_WORDS == POINT_CAPACITY * 7 + TRIANGLE_CAPACITY * 3 + TOPOLOGY
     if winners == 0 && location_failures == 0 {
         invariant_failures = invariant_failures + 1
     }
-    let expected_output = triangle_count + winners + winners
     if output != expected_output || output > triangle_capacity {
         invariant_failures = invariant_failures + 1
     }
