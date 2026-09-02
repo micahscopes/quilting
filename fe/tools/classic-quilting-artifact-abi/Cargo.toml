@@ -21,6 +21,11 @@ required-features = ["quilting-export"]
 name = "generate-classic-quilting-fixed-raster"
 path = "src/bin/generate_classic_quilting_fixed_raster.rs"
 
+[[bin]]
+name = "precompile-quilting-fe-web"
+path = "src/bin/precompile_quilting_fe_web.rs"
+required-features = ["web-demo"]
+
 [features]
 default = []
 quilting-export = ["dep:quilting-core", "dep:serde", "dep:serde_json"]
@@ -43,6 +48,17 @@ raster-oracle = [
     "dep:pollster",
     "dep:wgpu",
 ]
+web-demo = [
+    "dep:common",
+    "dep:driver",
+    "dep:fe-codegen",
+    "fe-codegen/spirv-backend",
+    "dep:fe-html-precompile",
+    "dep:hir",
+    "dep:salsa",
+    "dep:tempfile",
+    "dep:url",
+]
 
 [dependencies]
 quilting-core = { path = "../../../crates/quilting-core", optional = true }
@@ -51,11 +67,13 @@ serde_json = { version = "1", optional = true }
 common = { package = "fe-common", path = "../../../.toolchains/fe/crates/common", optional = true }
 driver = { package = "fe-driver", path = "../../../.toolchains/fe/crates/driver", optional = true }
 fe-codegen = { path = "../../../.toolchains/fe/crates/codegen", default-features = false, optional = true }
+fe-html-precompile = { path = "../../../.toolchains/fe/crates/html-precompile", optional = true }
 hir = { package = "fe-hir", path = "../../../.toolchains/fe/crates/hir", features = ["testutils"], optional = true }
 mir = { package = "fe-mir", path = "../../../.toolchains/fe/crates/mir", optional = true }
 naga = { version = "29", features = ["wgsl-in"], optional = true }
 pollster = { version = "0.4.0", optional = true }
 salsa = { version = "0.20", optional = true }
+tempfile = { version = "3.23", optional = true }
 url = { version = "2.5.4", optional = true }
 wasmparser = { version = "0.248.0", optional = true }
 wasmtime = { version = "44.0.1", optional = true }

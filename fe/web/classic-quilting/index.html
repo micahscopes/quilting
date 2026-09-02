@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <title>Classic Quilting · Fe</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      background: #090c12;
+      color: #dce6f7;
+    }
+    * { box-sizing: border-box; }
+    body {
+      min-height: 100vh;
+      margin: 0;
+      padding: clamp(18px, 4vw, 52px);
+      background:
+        radial-gradient(circle at 18% 8%, #182844 0, transparent 34rem),
+        radial-gradient(circle at 90% 90%, #132b27 0, transparent 30rem),
+        #090c12;
+    }
+    main {
+      width: min(1100px, 100%);
+      margin: 0 auto;
+      display: grid;
+      gap: 22px;
+    }
+    header {
+      display: grid;
+      gap: 8px;
+      max-width: 78ch;
+    }
+    .eyebrow {
+      color: #7bf1c8;
+      font-size: 11px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+    }
+    h1 {
+      margin: 0;
+      font: 500 clamp(24px, 5vw, 46px)/1.05 system-ui, sans-serif;
+      letter-spacing: -.035em;
+    }
+    p { margin: 0; color: #95a6bd; line-height: 1.6; }
+    .stage {
+      padding: clamp(12px, 2vw, 20px);
+      border: 1px solid #263349;
+      border-radius: 18px;
+      background: color-mix(in srgb, #101722 88%, transparent);
+      box-shadow: 0 30px 80px #0008;
+    }
+    fe-surface { display: block; width: 100%; }
+    fe-surface::part(canvas) {
+      width: 100%;
+      aspect-ratio: 1;
+      max-height: min(70vh, 760px);
+      border-radius: 12px;
+      background: #07090d;
+    }
+    fe-surface::part(panel) { gap: 10px; }
+    fe-surface::part(badge) {
+      border-radius: 999px;
+      letter-spacing: .04em;
+    }
+    fe-surface::part(meta) { color: #758399; }
+    footer {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px 24px;
+      align-items: baseline;
+      color: #77869b;
+      font-size: 12px;
+    }
+    a { color: #8fdcff; text-underline-offset: 3px; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <span class="eyebrow">quilting-fe · fixed raster proof</span>
+      <h1>A quaternion Bézier triangle, authored in Fe.</h1>
+      <p>
+        This first browser slice draws the frozen one-triangle Quilting atlas
+        through Fe’s typed vertex and fragment stages. The browser shell,
+        manifest, WGSL, lifecycle, and diagnostics use the same compiler-owned
+        surface runtime as the MB2 demos.
+      </p>
+    </header>
+    <section class="stage" aria-label="Classic Quilting WebGPU demonstration">
+      <script type="application/fe"
+              data-fe-src="../../ingots/demos/classic_quilting_fixed_raster"
+              data-fe-entry="shade"
+              data-fe-render></script>
+    </section>
+    <footer>
+      <span>WebGPU rendering · release compiler profile · no handwritten shader</span>
+      <a data-fe-publish
+         href="../../ingots/demos/classic_quilting_fixed_raster/src/lib.fe">Fe source</a>
+    </footer>
+  </main>
+</body>
+</html>

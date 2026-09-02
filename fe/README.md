@@ -69,6 +69,33 @@ authored raster runtime package uses its optimized compiler path.
 The strict GPU comparison is documented in
 [`docs/classic-quilting-M1-fixed-raster.md`](docs/classic-quilting-M1-fixed-raster.md).
 
+## Browser proof
+
+The first standards-based browser page is
+[`web/classic-quilting/index.html`](web/classic-quilting/index.html). It uses an
+inert `application/fe` entry and Fe's compiler-owned `<fe-surface>` runtime;
+there is no demo-authored JavaScript or handwritten shader. Its render contract
+is intentionally WebGPU-only. Wasm remains available for validation, workers,
+and CPU-side algorithms, while a possible SPIR-V-to-WebGL compatibility backend
+is deferred until the primary WebGPU render and compute path is mature.
+
+Build and serve it from the repository root:
+
+```sh
+CARGO_TARGET_DIR=.toolchains/fe/target cargo run --release \
+  --manifest-path fe/tools/classic-quilting-artifact-abi/Cargo.toml \
+  --features web-demo --bin precompile-quilting-fe-web -- \
+  fe/web/classic-quilting/index.html fe/target/web/classic-quilting
+python3 -m http.server 8765 --bind 127.0.0.1 \
+  --directory fe/target/web/classic-quilting
+```
+
+The local precompiler is a narrow release-profile adapter over Fe's HTML
+precompiler and Web bundle APIs. It exists because the current `fe web`
+commands do not expose a compilation-profile flag; it must be retired in favor
+of the upstream CLI when that release-profile contract lands. Generated site
+artifacts live under ignored `fe/target/` and are not committed.
+
 ## CGA and Clifford-Bézier direction
 
 The primary next surface lane is `quilting_clifford_bezier`, supported by a

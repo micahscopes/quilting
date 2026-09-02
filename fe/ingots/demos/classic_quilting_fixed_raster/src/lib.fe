@@ -10,9 +10,12 @@ use quilting_domain::{Bary3F, Vec3F, vec3f}
 use quilting_quaternion::quatf
 use quilting_qb::{QbDifferential, QbTriPatch, control, evaluate_differential, patch}
 use std::webgpu::{ClipPosition, FragmentStage, GpuProgram, RasterVertex, VertexStage, WebGpuBackend}
+use std::web::view::{Extent, Surface}
 
 pub struct SurfaceVarying { pub position: Vec3F, pub normal: Vec3F }
 impl Copy for SurfaceVarying {}
+
+struct FixedRasterParams {}
 
 fn curved_patch() -> QbTriPatch {
     patch(
@@ -40,6 +43,13 @@ fn clip_position(_ position: Vec3F) -> ClipPosition {
 }
 
 actor ClassicQuiltingFixedRaster uses (GpuProgram<WebGpuBackend>) {
+    const fn view() -> Surface<FixedRasterParams> {
+        Surface {
+            extent: Extent::square(512),
+            params: FixedRasterParams {},
+        }
+    }
+
     fn vertices(self, vertex_index: u32) -> RasterVertex<SurfaceVarying>
         uses (VertexStage<SurfaceVarying, fixed_topology::FixedTopology>)
     {
