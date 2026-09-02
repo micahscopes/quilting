@@ -6,6 +6,15 @@
 
 use core::marker::Copy
 use quilting_domain::{Bary3F, Vec3F, bary3f, cross3, normalize3_or, vec3f}
+use quilting_hyperpatch::{
+    BarycentricTriangle,
+    DenotationSample,
+    Euclidean3Points,
+    HyperPatch,
+    HyperPatchKernel,
+    denotation_sample,
+    hyperpatch,
+}
 use quilting_quaternion::{QuatF, add, inverse_bounded, multiply, pure, quatf, scale, sub, zero}
 
 pub struct QbControl { pub point: Vec3F, pub weight: QuatF }
@@ -30,6 +39,15 @@ pub struct QbDifferential {
     pub normal: Vec3F,
 }
 impl Copy for QbDifferential {}
+
+/// Conditioning policy for the common HyperPatch denotation. Detailed QB
+/// differential thresholds remain arguments to the family-specific API.
+pub struct QbPolicy { pub minimum_denominator_norm_squared: f32 }
+impl Copy for QbPolicy {}
+
+/// Zero-sized static kernel tag for the current three-control triangular QB.
+pub struct QbTriangleKernel {}
+impl Copy for QbTriangleKernel {}
 
 pub fn control(_ point: Vec3F, _ weight: QuatF) -> QbControl {
     QbControl { point: point, weight: weight }
@@ -80,6 +98,32 @@ pub fn evaluate(
         denominator_norm_squared: inverse.norm_squared,
         conditioned: true,
     }
+}
+
+impl HyperPatchKernel for QbTriangleKernel {
+    type Controls = QbTriPatch
+    type Domain = BarycentricTriangle
+    type Codomain = Euclidean3Points
+    type Policy = QbPolicy
+    const CONTROL_COUNT: usize = 3
+
+    fn denote(
+        self,
+        _ controls: QbTriPatch,
+        _ parameter: Bary3F,
+        _ policy: QbPolicy,
+    ) -> DenotationSample<Euclidean3Points> {
+        let sample = evaluate(
+            controls,
+            parameter,
+            policy.minimum_denominator_norm_squared,
+        )
+        denotation_sample<Euclidean3Points>(sample.position, sample.conditioned)
+    }
+}
+
+pub fn as_hyperpatch(_ value: QbTriPatch) -> HyperPatch<QbTriangleKernel> {
+    hyperpatch(QbTriangleKernel {}, value)
 }
 
 pub fn evaluate_uv(

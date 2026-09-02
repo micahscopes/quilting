@@ -10,6 +10,7 @@ use fe_codegen::{
 use hir::hir_def::HirIngot;
 use quilting_core::patch::QBTriPatch;
 use quilting_core::quaternion::Quat;
+use salsa::Setter;
 use url::Url;
 use wasmtime::{Instance, Store};
 
@@ -30,6 +31,9 @@ fn compiled_raster() -> &'static CompiledRaster {
             .join("../../ingots/demos/classic_quilting_fixed_raster");
         let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
         let mut db = DriverDataBase::default();
+        db.compilation_settings()
+            .set_profile(&mut db)
+            .to("release".into());
         assert!(
             !driver::init_ingot(&mut db, &url),
             "fixed raster ingot initialization diagnostics"

@@ -1,9 +1,7 @@
 [ingot]
-name = "quilting_qb"
+name = "quilting_hyperpatch"
 version = "0.1.0"
 
 [dependencies]
 core = true
 quilting_domain = true
-quilting_hyperpatch = true
-quilting_quaternion = true

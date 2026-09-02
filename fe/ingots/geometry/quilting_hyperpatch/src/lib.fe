@@ -1,0 +1,109 @@
+//! Type-directed denotation shared by distinct Quilting patch families.
+//!
+//! A kernel tag fixes controls, parameter domain, ambient space, and policy at
+//! compile time. There is deliberately no runtime enum over patch families.
+//! Family-specific diagnostics and differentials remain on the family API;
+//! this common surface promises only a partial typed point.
+
+use core::marker::Copy
+use quilting_domain::{Bary3F, Vec2F, Vec3F}
+
+/// A nominal parameter domain associates one coordinate representation.
+pub trait ParameterDomain {
+    type Parameter: Copy
+}
+
+/// Barycentric coordinates over a triangular parameter domain.
+pub struct BarycentricTriangle {}
+impl Copy for BarycentricTriangle {}
+impl ParameterDomain for BarycentricTriangle {
+    type Parameter = Bary3F
+}
+
+/// Tensor-product coordinates over a unit square.
+pub struct UnitSquare {}
+impl Copy for UnitSquare {}
+impl ParameterDomain for UnitSquare {
+    type Parameter = Vec2F
+}
+
+/// Tensor-product coordinates over a unit cube.
+pub struct UnitCube {}
+impl Copy for UnitCube {}
+impl ParameterDomain for UnitCube {
+    type Parameter = Vec3F
+}
+
+/// Unbounded Euclidean coordinates used to query an implicit field. This is
+/// nominally distinct from `UnitCube` even though both carry three f32 lanes.
+pub struct Euclidean3Coordinates {}
+impl Copy for Euclidean3Coordinates {}
+impl ParameterDomain for Euclidean3Coordinates {
+    type Parameter = Vec3F
+}
+
+/// A codomain owns the value produced by a denotation. Point, density, and
+/// richer field values remain distinct static types.
+pub trait Codomain {
+    type Value: Copy
+}
+
+/// Ordinary Euclidean three-space points.
+pub struct Euclidean3Points {}
+impl Copy for Euclidean3Points {}
+impl Codomain for Euclidean3Points {
+    type Value = Vec3F
+}
+
+/// Scalar density values. The domain determines whether this is a finite
+/// parametric volume or an implicit field queried in ambient coordinates.
+pub struct ScalarDensity {}
+impl Copy for ScalarDensity {}
+impl Codomain for ScalarDensity {
+    type Value = f32
+}
+
+/// The smallest law shared by every patch family: a typed parameter denotes a
+/// typed value or an explicit finite failure.
+pub struct DenotationSample<C: Codomain> { pub value: <C as Codomain>::Value, pub defined: bool }
+impl<C: Codomain> Copy for DenotationSample<C> {}
+
+pub fn denotation_sample<C: Codomain>(
+    _ value: <C as Codomain>::Value,
+    _ defined: bool,
+) -> DenotationSample<C> {
+    DenotationSample<C> { value: value, defined: defined }
+}
+
+/// A kernel tag fixes the complete family ABI at compile time.
+pub trait HyperPatchKernel: Copy {
+    type Controls: Copy
+    type Domain: ParameterDomain
+    type Codomain: Codomain
+    type Policy: Copy
+    const CONTROL_COUNT: usize
+
+    fn denote(
+        self,
+        _ controls: Self::Controls,
+        _ parameter: <Self::Domain as ParameterDomain>::Parameter,
+        _ policy: Self::Policy,
+    ) -> DenotationSample<Self::Codomain>
+}
+
+/// A patch stores its family-specific controls and kernel value. Current
+/// kernels have no data fields; static dispatch avoids a runtime family switch.
+pub struct HyperPatch<K: HyperPatchKernel> { pub kernel: K, pub controls: K::Controls }
+impl<K: HyperPatchKernel> Copy for HyperPatch<K> {}
+
+pub fn hyperpatch<K: HyperPatchKernel>(_ kernel: K, _ controls: K::Controls) -> HyperPatch<K> {
+    HyperPatch<K> { kernel: kernel, controls: controls }
+}
+
+pub fn denote<K: HyperPatchKernel>(
+    _ value: HyperPatch<K>,
+    _ parameter: <K::Domain as ParameterDomain>::Parameter,
+    _ policy: K::Policy,
+) -> DenotationSample<K::Codomain> {
+    value.kernel.denote(value.controls, parameter, policy)
+}

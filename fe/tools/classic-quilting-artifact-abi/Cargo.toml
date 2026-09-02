@@ -30,6 +30,7 @@ fe-oracle = [
     "dep:driver",
     "dep:fe-codegen",
     "dep:hir",
+    "dep:salsa",
     "dep:url",
     "dep:wasmparser",
     "dep:wasmtime",
@@ -54,6 +55,7 @@ hir = { package = "fe-hir", path = "../../../.toolchains/fe/crates/hir", feature
 mir = { package = "fe-mir", path = "../../../.toolchains/fe/crates/mir", optional = true }
 naga = { version = "29", features = ["wgsl-in"], optional = true }
 pollster = { version = "0.4.0", optional = true }
+salsa = { version = "0.20", optional = true }
 url = { version = "2.5.4", optional = true }
 wasmparser = { version = "0.248.0", optional = true }
 wasmtime = { version = "44.0.1", optional = true }

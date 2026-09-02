@@ -793,6 +793,7 @@ dependencies = [
  "naga",
  "pollster",
  "quilting-core",
+ "salsa",
  "serde",
  "serde_json",
  "url",

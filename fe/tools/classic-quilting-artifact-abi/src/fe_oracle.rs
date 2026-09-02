@@ -8,6 +8,7 @@ use hir::hir_def::HirIngot;
 use quilting_core::patch::QBTriPatch;
 use quilting_core::permutation::{perm_sign, S3_PERMUTATIONS};
 use quilting_core::quaternion::Quat;
+use salsa::Setter;
 use url::Url;
 use wasmtime::{Instance, Store, TypedFunc};
 
@@ -19,6 +20,9 @@ fn compile_oracle_gate() -> &'static [u8] {
             .join("../../ingots/validation/classic_quilting_oracle");
         let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
         let mut db = DriverDataBase::default();
+        db.compilation_settings()
+            .set_profile(&mut db)
+            .to("release".into());
         assert!(
             !driver::init_ingot(&mut db, &url),
             "classic Quilting oracle ingot initialization diagnostics"
@@ -35,7 +39,7 @@ fn compile_oracle_gate() -> &'static [u8] {
         );
         let wasm = BackendKind::Wasm
             .create()
-            .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+            .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O2)
             .expect("classic Quilting oracle should compile to Wasm")
             .into_bytecode()
             .expect("Wasm output should be bytecode");
@@ -386,6 +390,50 @@ fn assert_curved_patch(store: &mut Store<()>, instance: &Instance) {
             }
         }
     }
+}
+
+#[test]
+fn hyperpatch_qb_adapter_is_identical_to_the_family_evaluator() {
+    let (mut store, instance) = instantiate();
+    let direct_exports = ["qb_position_x", "qb_position_y", "qb_position_z"];
+    let hyperpatch_exports = [
+        "hyperpatch_qb_position_x",
+        "hyperpatch_qb_position_y",
+        "hyperpatch_qb_position_z",
+    ];
+
+    for denominator in 1_u16..=4 {
+        for u_step in 0..=denominator {
+            for v_step in 0..=denominator - u_step {
+                let u = f32::from(u_step) / f32::from(denominator);
+                let v = f32::from(v_step) / f32::from(denominator);
+                assert_eq!(
+                    function::<(f32, f32), i32>(&mut store, &instance, "hyperpatch_qb_defined",)
+                        .call(&mut store, (u, v))
+                        .unwrap(),
+                    1,
+                    "HyperPatch QB should be defined at ({u},{v})",
+                );
+                for lane in 0..3 {
+                    let direct = call2(&mut store, &instance, direct_exports[lane], u, v);
+                    let generic = call2(&mut store, &instance, hyperpatch_exports[lane], u, v);
+                    assert_eq!(
+                        generic.to_bits(),
+                        direct.to_bits(),
+                        "HyperPatch/QB mismatch at ({u},{v}) lane {lane}",
+                    );
+                }
+            }
+        }
+    }
+
+    assert_eq!(
+        function::<(f32, f32), i32>(&mut store, &instance, "hyperpatch_zero_weight_defined",)
+            .call(&mut store, (0.25, 0.5))
+            .unwrap(),
+        0,
+        "HyperPatch QB must preserve the family evaluator's explicit conditioning failure",
+    );
 }
 
 fn assert_flat_patch(store: &mut Store<()>, instance: &Instance) {

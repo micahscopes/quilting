@@ -9,17 +9,21 @@ The workspace is deliberately layered:
 
 ```text
 external Fe core
-  ├── ingots/foundation/quilting_domain ─────┐
-  └── ingots/algebra/quilting_quaternion ────┤
-                                             ▼
-                              ingots/geometry/quilting_qb
-                                             │
-                                  ┌──────────┴──────────┐
-                                  ▼                     ▼
-                  ingots/validation/             ingots/demos/
-                  classic_quilting_oracle        classic_quilting_fixed_raster
-                                                        ▲
-                                                 external Fe std
+  ├── ingots/foundation/quilting_domain ───────────┐
+  │                    │                           │
+  │                    ▼                           │
+  │       ingots/geometry/quilting_hyperpatch      │
+  │                    │                           │
+  └── ingots/algebra/quilting_quaternion ──────────┤
+                                                   ▼
+                                    ingots/geometry/quilting_qb
+                                                   │
+                                        ┌──────────┴──────────┐
+                                        ▼                     ▼
+                        ingots/validation/             ingots/demos/
+                        classic_quilting_oracle        classic_quilting_fixed_raster
+                                                              ▲
+                                                       external Fe std
 ```
 
 - `foundation` owns reference-domain values and invariants.
@@ -48,12 +52,19 @@ formatting never traverses compiler sources.
 After preparing it, run from this directory:
 
 ```sh
-../.toolchains/fe/target/debug/fe fmt --check ingots --color never
-../.toolchains/fe/target/debug/fe check . --color never
-cargo test --locked --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml
-cargo test --locked --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml --features quilting-export
-cargo test --locked --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml --features fe-oracle
+../.toolchains/fe/target/release/fe fmt --check ingots --color never
+../.toolchains/fe/target/release/fe check . --profile release --color never
+CARGO_TARGET_DIR=../.toolchains/fe/target cargo test --release --locked --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml
+CARGO_TARGET_DIR=../.toolchains/fe/target cargo test --release --locked --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml --features quilting-export
+CARGO_TARGET_DIR=../.toolchains/fe/target cargo test --release --locked --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml --features fe-oracle
 ```
+
+Debug-mode checks are useful during editing, but they are not accepted as
+performance or release evidence. Release evidence uses both the optimized Fe
+compiler binary and the Fe `release` project profile; generated Rust, Wasm,
+and GPU-oracle hosts are also compiled with Cargo's `--release` profile. The
+Fe/Wasm oracle itself requests Fe's highest current backend level, `O2`; the
+authored raster runtime package uses its optimized compiler path.
 
 The strict GPU comparison is documented in
 [`docs/classic-quilting-M1-fixed-raster.md`](docs/classic-quilting-M1-fixed-raster.md).
@@ -67,7 +78,8 @@ mechanisms; the Clifford-Bézier ingot will use compile-time specialization to
 turn its fixed construction into bounded straight-line shader arithmetic.
 Neither begins as a copy of an experimental gallery. The existing QB path is
 the compact production baseline and shared oracle, not the ceiling of this Fe
-workspace. See
+workspace. The type and backend boundaries are recorded in
+[`docs/hyperpatch-architecture.md`](docs/hyperpatch-architecture.md). See also
 [`docs/quilting-cga-direction.md`](docs/quilting-cga-direction.md).
 
 ## Evidence ladder

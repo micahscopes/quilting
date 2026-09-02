@@ -18,8 +18,11 @@ paths. Add a member to `../fe.toml`, then declare sibling dependencies as
 `name = true`. Only the workspace root may name the external Fe `core` and
 `std` checkout.
 
-Principal next additions:
+Current generic seam and principal next additions:
 
+- `geometry/quilting_hyperpatch` is the small type-directed denotation and
+  codomain vocabulary shared by peer patch families; it contains no runtime
+  patch-family switch;
 - `algebra/quilting_cga` for typed conformal authoring and spherical controls;
 - `geometry/quilting_clifford_bezier` for the Krasauskas–Zubė surface lane,
   with QB retained as a shared restriction/baseline oracle; and

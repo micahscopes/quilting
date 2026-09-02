@@ -12,10 +12,13 @@ use quilting_domain::{
     vec2f,
     vec3f,
 }
+use quilting_hyperpatch::{DenotationSample, Euclidean3Points, denote}
 use quilting_quaternion::{QuatF, inverse_bounded, multiply, quatf, zero}
 use quilting_qb::{
+    QbPolicy,
     QbTriPatch,
     apply_normal_parity,
+    as_hyperpatch,
     control,
     evaluate_uv_differential,
     patch,
@@ -203,6 +206,46 @@ fn curved(_ u: f32, _ v: f32) -> quilting_qb::QbDifferential {
         0.00000000000000000001,
         0.000000000001,
     )
+}
+
+fn curved_hyperpatch(_ u: f32, _ v: f32) -> DenotationSample<Euclidean3Points> {
+    denote(
+        as_hyperpatch(curved_patch()),
+        bary3f(1.0 - u - v, u, v),
+        QbPolicy { minimum_denominator_norm_squared: 0.00000000000000000001 },
+    )
+}
+
+fn zero_weight_hyperpatch(_ u: f32, _ v: f32) -> DenotationSample<Euclidean3Points> {
+    denote(
+        as_hyperpatch(zero_weight_patch()),
+        bary3f(1.0 - u - v, u, v),
+        QbPolicy { minimum_denominator_norm_squared: 0.00000000000000000001 },
+    )
+}
+
+pub fn hyperpatch_qb_position_x(_ u: f32, _ v: f32) -> f32 {
+    curved_hyperpatch(u, v).value.x
+}
+pub fn hyperpatch_qb_position_y(_ u: f32, _ v: f32) -> f32 {
+    curved_hyperpatch(u, v).value.y
+}
+pub fn hyperpatch_qb_position_z(_ u: f32, _ v: f32) -> f32 {
+    curved_hyperpatch(u, v).value.z
+}
+pub fn hyperpatch_qb_defined(_ u: f32, _ v: f32) -> i32 {
+    if curved_hyperpatch(u, v).defined {
+        1
+    } else {
+        0
+    }
+}
+pub fn hyperpatch_zero_weight_defined(_ u: f32, _ v: f32) -> i32 {
+    if zero_weight_hyperpatch(u, v).defined {
+        1
+    } else {
+        0
+    }
 }
 fn flat(_ u: f32, _ v: f32) -> quilting_qb::QbDifferential {
     evaluate_uv_differential(flat_patch(), u, v, 0.00000000000000000001, 0.000000000001)

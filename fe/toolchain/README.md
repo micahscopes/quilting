@@ -27,8 +27,12 @@ the source worktree:
 ```sh
 git clone --shared --no-checkout /path/to/fe-repository ../.toolchains/fe
 git -C ../.toolchains/fe checkout --detach c6ab98f222d5def80ad6d2bf6c99373666d6b48e
-cargo build --manifest-path ../.toolchains/fe/Cargo.toml --bin fe
+cargo build --release --locked --manifest-path ../.toolchains/fe/Cargo.toml --bin fe
 ```
+
+All release gates use `target/release/fe`. Fe project analysis additionally
+passes `--profile release`; this profile is independent of the Cargo profile
+used to build the compiler itself.
 
 Once that exact commit (or a tested successor) is published, replace this
 temporary local bootstrap with a normal pinned checkout and rerun every Fe,
