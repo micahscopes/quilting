@@ -33,7 +33,7 @@ external Fe core
   comparisons; it is not application code.
 - `demos` contains bounded visual programs. A demo may depend inward on the
   other layers, but no library ingot may depend on a demo or oracle.
-- `tools/classic-quilting-artifact-abi` is a separate Rust crate. It freezes
+- `tools/quilting-fe-fixtures` is a separate Rust crate. It freezes
   binary fixtures and compares Rust, Fe/Wasm, and generated WGSL without
   making Rust tooling part of the Fe dependency graph.
 
@@ -54,9 +54,9 @@ After preparing it, run from this directory:
 ```sh
 ../.toolchains/fe/target/release/fe fmt --check ingots --color never
 ../.toolchains/fe/target/release/fe check . --profile release --color never
-CARGO_TARGET_DIR=../.toolchains/fe/target cargo test --release --locked --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml
-CARGO_TARGET_DIR=../.toolchains/fe/target cargo test --release --locked --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml --features quilting-export
-CARGO_TARGET_DIR=../.toolchains/fe/target cargo test --release --locked --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml --features fe-oracle
+CARGO_TARGET_DIR=../.toolchains/fe/target cargo test --release --locked --manifest-path tools/quilting-fe-fixtures/Cargo.toml
+CARGO_TARGET_DIR=../.toolchains/fe/target cargo test --release --locked --manifest-path tools/quilting-fe-fixtures/Cargo.toml --features quilting-export
+CARGO_TARGET_DIR=../.toolchains/fe/target cargo test --release --locked --manifest-path tools/quilting-fe-fixtures/Cargo.toml --features fe-oracle
 ```
 
 Debug-mode checks are useful during editing, but they are not accepted as
@@ -94,7 +94,7 @@ root:
 
 ```sh
 CARGO_TARGET_DIR=.toolchains/fe/target cargo run --release \
-  --manifest-path fe/tools/classic-quilting-artifact-abi/Cargo.toml \
+  --manifest-path fe/tools/quilting-fe-fixtures/Cargo.toml \
   --features web-demo --bin precompile-quilting-fe-web -- \
   fe/web/classic-quilting/index.html fe/target/web/classic-quilting
 python3 -m http.server 8765 --bind 127.0.0.1 \

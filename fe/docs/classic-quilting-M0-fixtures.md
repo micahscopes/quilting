@@ -15,7 +15,7 @@ The exact generator command was:
 
 ```sh
 cargo run --locked --release \
-  --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml \
+  --manifest-path tools/quilting-fe-fixtures/Cargo.toml \
   --features quilting-export \
   --bin export-classic-quilting-fixtures -- \
   --output fixtures/classic-quilting/v1 \

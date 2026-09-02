@@ -4,16 +4,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use classic_quilting_artifact_abi::quilting_export::{
+use quilting_fe_fixtures::quilting_export::{
     build_direct_fixture_artifact, build_direct_fixture_matrix, checked_triangulate_fixture,
     near_degenerate_fixture, DIRECT_ALGORITHM_VERSION, FIXTURE_KEYS, FIXTURE_K_CANDIDATES,
     FIXTURE_MASTER_SEED, VERIFIED_POOL_WIDTHS,
 };
-use classic_quilting_artifact_abi::{decode, encode, Artifact, AtlasKey};
+use quilting_fe_fixtures::{decode, encode, Artifact, AtlasKey};
 use serde::Serialize;
 
 const DEFAULT_OUTPUT: &str = "fixtures/classic-quilting/v1";
-const GENERATOR_COMMAND_PREFIX: &str = "cargo run --locked --release --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml --features quilting-export --bin export-classic-quilting-fixtures -- --output fixtures/classic-quilting/v1 --quilting-commit";
+const GENERATOR_COMMAND_PREFIX: &str = "cargo run --locked --release --manifest-path tools/quilting-fe-fixtures/Cargo.toml --features quilting-export --bin export-classic-quilting-fixtures -- --output fixtures/classic-quilting/v1 --quilting-commit";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -107,7 +107,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let rejection_file = "near-degenerate-rejection.json";
     let rejection = write_rejection_fixture(&output.join(rejection_file))?;
     let manifest = Manifest {
-        schema_version: classic_quilting_artifact_abi::SCHEMA_VERSION,
+        schema_version: quilting_fe_fixtures::SCHEMA_VERSION,
         algorithm_version: DIRECT_ALGORITHM_VERSION,
         algorithm: "quilting-core direct Bridson sampling plus constrained CDT",
         generator_version: env!("CARGO_PKG_VERSION"),
@@ -215,7 +215,7 @@ fn write_rejection_fixture(path: &Path) -> Result<RejectionRecord, Box<dyn Error
     let Err(error) = checked_triangulate_fixture(&positions, &barycentrics) else {
         return Err("the frozen near-degenerate fixture must reject".into());
     };
-    let classic_quilting_artifact_abi::quilting_export::FixtureExportError::NearDuplicatePoints {
+    let quilting_fe_fixtures::quilting_export::FixtureExportError::NearDuplicatePoints {
         first,
         second,
     } = error

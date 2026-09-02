@@ -2,7 +2,7 @@
 /target/
 /.toolchains/
 /fe/target/
-/fe/tools/classic-quilting-artifact-abi/target/
+/fe/tools/quilting-fe-fixtures/target/
 /pkg/
 /dist/
 /dist-lab/

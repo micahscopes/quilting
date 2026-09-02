@@ -106,14 +106,14 @@ All commands ran from `/laboratory/fe-stuff/mb2`.
 /laboratory/fe-stuff/fe-worktrees/mb2/target/debug/fe fmt --check ingots/classic_quilting_oracle --color never
 /laboratory/fe-stuff/fe-worktrees/mb2/target/debug/fe fmt --check ingots/classic_quilting_fixed_raster --color never
 /laboratory/fe-stuff/fe-worktrees/mb2/target/debug/fe check ingots/classic_quilting_fixed_raster --color never
-cargo fmt --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml -- --check
-cargo run --locked --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml --bin generate-classic-quilting-fixed-raster -- fixtures/classic-quilting/v1/direct-seed42-k1-1-1.cqa tools/classic-quilting-artifact-abi/target/regenerated-fixed-topology.fe
-cmp tools/classic-quilting-artifact-abi/target/regenerated-fixed-topology.fe ingots/classic_quilting_fixed_raster/src/fixed_topology.fe
-cargo test --locked --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml
-cargo test --locked --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml --features quilting-export
-cargo test --locked --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml --features fe-oracle -- --nocapture
-cargo clippy --locked --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml --all-targets --all-features --no-deps -- -D warnings
-LD_LIBRARY_PATH=/nix/store/7krvb015vp4wq7lj6v3wadjy4q9asc8q-vulkan-loader-1.4.341.0/lib:/run/opengl-driver/lib VK_ICD_FILENAMES=/run/opengl-driver/share/vulkan/icd.d/lvp_icd.x86_64.json WGPU_BACKEND=vulkan cargo test --locked --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml --features raster-oracle -- --nocapture
+cargo fmt --manifest-path tools/quilting-fe-fixtures/Cargo.toml -- --check
+cargo run --locked --manifest-path tools/quilting-fe-fixtures/Cargo.toml --bin generate-classic-quilting-fixed-raster -- fixtures/classic-quilting/v1/direct-seed42-k1-1-1.cqa tools/quilting-fe-fixtures/target/regenerated-fixed-topology.fe
+cmp tools/quilting-fe-fixtures/target/regenerated-fixed-topology.fe ingots/classic_quilting_fixed_raster/src/fixed_topology.fe
+cargo test --locked --manifest-path tools/quilting-fe-fixtures/Cargo.toml
+cargo test --locked --manifest-path tools/quilting-fe-fixtures/Cargo.toml --features quilting-export
+cargo test --locked --manifest-path tools/quilting-fe-fixtures/Cargo.toml --features fe-oracle -- --nocapture
+cargo clippy --locked --manifest-path tools/quilting-fe-fixtures/Cargo.toml --all-targets --all-features --no-deps -- -D warnings
+LD_LIBRARY_PATH=/nix/store/7krvb015vp4wq7lj6v3wadjy4q9asc8q-vulkan-loader-1.4.341.0/lib:/run/opengl-driver/lib VK_ICD_FILENAMES=/run/opengl-driver/share/vulkan/icd.d/lvp_icd.x86_64.json WGPU_BACKEND=vulkan cargo test --locked --manifest-path tools/quilting-fe-fixtures/Cargo.toml --features raster-oracle -- --nocapture
 ```
 
 The final MB2-local regressions pass 7 default ABI tests and 11 exporter tests.

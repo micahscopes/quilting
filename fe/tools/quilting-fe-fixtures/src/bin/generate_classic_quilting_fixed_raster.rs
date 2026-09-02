@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-use classic_quilting_artifact_abi::{decode, fixed_raster_source};
+use quilting_fe_fixtures::{decode, fixed_raster_source};
 
 fn main() {
     let arguments = env::args().skip(1).collect::<Vec<_>>();

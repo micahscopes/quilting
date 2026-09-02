@@ -65,11 +65,11 @@ All commands ran from `/laboratory/fe-stuff/mb2`.
 /laboratory/fe-stuff/fe-worktrees/mb2/target/debug/fe fmt --check ingots/quilting_qb --color never
 /laboratory/fe-stuff/fe-worktrees/mb2/target/debug/fe fmt --check ingots/classic_quilting_oracle --color never
 /laboratory/fe-stuff/fe-worktrees/mb2/target/debug/fe check ingots/classic_quilting_oracle --color never
-cargo fmt --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml -- --check
-CARGO_TARGET_DIR=/laboratory/fe-stuff/fe-worktrees/mb2/target cargo test --locked --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml
-CARGO_TARGET_DIR=/laboratory/fe-stuff/fe-worktrees/mb2/target cargo test --locked --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml --features quilting-export
-CARGO_TARGET_DIR=/laboratory/fe-stuff/fe-worktrees/mb2/target cargo test --locked --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml --features fe-oracle
-CARGO_TARGET_DIR=/laboratory/fe-stuff/fe-worktrees/mb2/target cargo clippy --locked --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml --all-targets --all-features --no-deps -- -D warnings
+cargo fmt --manifest-path tools/quilting-fe-fixtures/Cargo.toml -- --check
+CARGO_TARGET_DIR=/laboratory/fe-stuff/fe-worktrees/mb2/target cargo test --locked --manifest-path tools/quilting-fe-fixtures/Cargo.toml
+CARGO_TARGET_DIR=/laboratory/fe-stuff/fe-worktrees/mb2/target cargo test --locked --manifest-path tools/quilting-fe-fixtures/Cargo.toml --features quilting-export
+CARGO_TARGET_DIR=/laboratory/fe-stuff/fe-worktrees/mb2/target cargo test --locked --manifest-path tools/quilting-fe-fixtures/Cargo.toml --features fe-oracle
+CARGO_TARGET_DIR=/laboratory/fe-stuff/fe-worktrees/mb2/target cargo clippy --locked --manifest-path tools/quilting-fe-fixtures/Cargo.toml --all-targets --all-features --no-deps -- -D warnings
 ```
 
 The default ABI suite passes 6 tests, the M0 exporter suite passes 10, and the

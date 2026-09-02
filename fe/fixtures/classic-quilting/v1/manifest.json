@@ -3,7 +3,7 @@
   "algorithmVersion": 1,
   "algorithm": "quilting-core direct Bridson sampling plus constrained CDT",
   "generatorVersion": "0.1.0",
-  "generatorCommand": "cargo run --locked --release --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml --features quilting-export --bin export-classic-quilting-fixtures -- --output fixtures/classic-quilting/v1 --quilting-commit 4e0093457136eacba07dc1ed93f498f99dcada32",
+  "generatorCommand": "cargo run --locked --release --manifest-path tools/quilting-fe-fixtures/Cargo.toml --features quilting-export --bin export-classic-quilting-fixtures -- --output fixtures/classic-quilting/v1 --quilting-commit 4e0093457136eacba07dc1ed93f498f99dcada32",
   "quiltingCommit": "4e0093457136eacba07dc1ed93f498f99dcada32",
   "license": "MIT OR Apache-2.0",
   "masterSeed": 42,

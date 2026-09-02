@@ -13,10 +13,10 @@ fixtures, and GPU record. It is not part of the first implementation ladder.
 ## Schema v1
 
 The independent checked codec lives in
-`tools/classic-quilting-artifact-abi`. Run it with:
+`tools/quilting-fe-fixtures`. Run it with:
 
 ```sh
-cargo test --manifest-path tools/classic-quilting-artifact-abi/Cargo.toml
+cargo test --manifest-path tools/quilting-fe-fixtures/Cargo.toml
 ```
 
 All integers are unsigned little-endian fixed-width values. All offsets are
