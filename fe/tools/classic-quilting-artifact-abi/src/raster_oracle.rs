@@ -118,7 +118,7 @@ fn expected_vectors() -> [[f32; VECTOR_LANES]; 3] {
         [
             oracle_f32(differential.position[0]),
             oracle_f32(differential.position[1]),
-            oracle_f32(differential.position[2] * 0.25),
+            oracle_f32(differential.position[2] * 0.25 + 0.5),
             1.0,
             oracle_f32(differential.position[0]),
             oracle_f32(differential.position[1]),
@@ -128,6 +128,21 @@ fn expected_vectors() -> [[f32; VECTOR_LANES]; 3] {
             oracle_f32(normal[2]),
         ]
     })
+}
+
+#[test]
+fn authored_raster_fixture_is_wholly_inside_clip_volume() {
+    for (vertex, vector) in expected_vectors().into_iter().enumerate() {
+        let [x, y, z, w, ..] = vector;
+        assert!(
+            w > 0.0,
+            "vertex {vertex} has nonpositive clip w: {vector:?}"
+        );
+        assert!(
+            x.abs() <= w && y.abs() <= w && (0.0..=w).contains(&z),
+            "vertex {vertex} is clipped: {vector:?}"
+        );
+    }
 }
 
 fn assert_vector_close(actual: &[f32], expected: &[f32], context: &str) {

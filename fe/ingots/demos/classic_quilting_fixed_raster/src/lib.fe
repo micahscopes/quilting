@@ -39,7 +39,7 @@ pub fn fixed_differential(_ vertex_index: u32) -> QbDifferential {
 }
 
 fn clip_position(_ position: Vec3F) -> ClipPosition {
-    ClipPosition { x: position.x, y: position.y, z: position.z * 0.25, w: 1.0 }
+    ClipPosition { x: position.x, y: position.y, z: position.z * 0.25 + 0.5, w: 1.0 }
 }
 
 actor ClassicQuiltingFixedRaster uses (GpuProgram<WebGpuBackend>) {
@@ -63,15 +63,9 @@ actor ClassicQuiltingFixedRaster uses (GpuProgram<WebGpuBackend>) {
         }
     }
 
-    fn shade(self, varying: SurfaceVarying) -> u32
+    fn shade(self, _ varying: SurfaceVarying) -> u32
         uses (FragmentStage<SurfaceVarying>)
     {
-        let position_signal = varying.position.x + varying.position.y + varying.position.z
-        let normal_signal = varying.normal.x + varying.normal.y + varying.normal.z
-        if position_signal + normal_signal >= 0.0 {
-            4278255615
-        } else {
-            4294902015
-        }
+        4290695800
     }
 }

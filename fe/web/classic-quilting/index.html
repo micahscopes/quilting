@@ -9,85 +9,58 @@
     :root {
       color-scheme: dark;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      background: #090c12;
-      color: #dce6f7;
+      background: #111318;
+      color: #c7cbd2;
     }
     * { box-sizing: border-box; }
     body {
-      min-height: 100vh;
       margin: 0;
-      padding: clamp(18px, 4vw, 52px);
-      background:
-        radial-gradient(circle at 18% 8%, #182844 0, transparent 34rem),
-        radial-gradient(circle at 90% 90%, #132b27 0, transparent 30rem),
-        #090c12;
+      min-height: 100svh;
+      background: #111318;
     }
     main {
-      width: min(1100px, 100%);
-      margin: 0 auto;
       display: grid;
-      gap: 22px;
+      grid-template-rows: 38px minmax(0, 1fr);
+      min-height: 100svh;
     }
     header {
-      display: grid;
-      gap: 8px;
-      max-width: 78ch;
-    }
-    .eyebrow {
-      color: #7bf1c8;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 0 12px;
+      border-bottom: 1px solid #2b2f37;
+      color: #858b95;
       font-size: 11px;
-      letter-spacing: .16em;
-      text-transform: uppercase;
     }
-    h1 {
-      margin: 0;
-      font: 500 clamp(24px, 5vw, 46px)/1.05 system-ui, sans-serif;
-      letter-spacing: -.035em;
-    }
-    p { margin: 0; color: #95a6bd; line-height: 1.6; }
+    header strong { color: #d6d9df; font-weight: 500; }
     .stage {
-      padding: clamp(12px, 2vw, 20px);
-      border: 1px solid #263349;
-      border-radius: 18px;
-      background: color-mix(in srgb, #101722 88%, transparent);
-      box-shadow: 0 30px 80px #0008;
+      display: grid;
+      place-items: center;
+      min-height: 0;
+      padding: 12px;
     }
-    fe-surface { display: block; width: 100%; }
+    fe-surface {
+      display: block;
+      width: min(100%, calc(100svh - 62px));
+    }
     fe-surface::part(canvas) {
       width: 100%;
       aspect-ratio: 1;
-      max-height: min(70vh, 760px);
-      border-radius: 12px;
-      background: #07090d;
+      background: #090a0d;
     }
-    fe-surface::part(panel) { gap: 10px; }
+    fe-surface::part(panel) { gap: 6px; }
     fe-surface::part(badge) {
-      border-radius: 999px;
-      letter-spacing: .04em;
+      border-radius: 2px;
+      letter-spacing: 0;
     }
-    fe-surface::part(meta) { color: #758399; }
-    footer {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px 24px;
-      align-items: baseline;
-      color: #77869b;
-      font-size: 12px;
-    }
-    a { color: #8fdcff; text-underline-offset: 3px; }
+    fe-surface::part(meta) { color: #737984; }
   </style>
 </head>
 <body>
   <main>
     <header>
-      <span class="eyebrow">quilting-fe · fixed raster proof</span>
-      <h1>A quaternion Bézier triangle, authored in Fe.</h1>
-      <p>
-        This first browser slice draws the frozen one-triangle Quilting atlas
-        through Fe’s typed vertex and fragment stages. The browser shell,
-        manifest, WGSL, lifecycle, and diagnostics use the same compiler-owned
-        surface runtime as the MB2 demos.
-      </p>
+      <strong>classic quilting</strong>
+      <span>M1 fixed raster · 3 QB corner samples · 1 triangle · WebGPU</span>
     </header>
     <section class="stage" aria-label="Classic Quilting WebGPU demonstration">
       <script type="application/fe"
@@ -95,11 +68,6 @@
               data-fe-entry="shade"
               data-fe-render></script>
     </section>
-    <footer>
-      <span>WebGPU rendering · release compiler profile · no handwritten shader</span>
-      <a data-fe-publish
-         href="../../ingots/demos/classic_quilting_fixed_raster/src/lib.fe">Fe source</a>
-    </footer>
   </main>
 </body>
 </html>
