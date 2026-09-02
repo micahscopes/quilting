@@ -1,0 +1,255 @@
+//! One checked classic-Quilting artifact, shown three ways.
+//!
+//! Left: deterministic boundary/interior samples. Middle: their constrained
+//! Delaunay topology with one selected triangle. Right: that exact topology
+//! evaluating the three-control quaternionic-Bezier patch. The CQA bytes are a
+//! compiler-verified immutable GPU resource; no generated lookup tree, page
+//! reducer, or host-side topology copy participates in a frame.
+
+use core::marker::Copy
+use std::web::view::{Extent, Surface}
+use quilting_domain::{Bary3F, Vec3F, bary3f, bary_to_cartesian, vec3f}
+use quilting_quaternion::quatf
+use quilting_qb::{QbTriPatch, control, evaluate_differential, patch}
+use std::webgpu::{
+    ClipPosition,
+    ContentAddressed,
+    FragmentStage,
+    FragmentSurface,
+    GpuProgram,
+    ImmutableStorageBuffer,
+    RasterVertex,
+    TriangleList,
+    VertexStage,
+    WebGpuBackend,
+}
+
+extern {
+    const fn __bitcast<From, To>(_: From) -> To
+}
+
+pub const FIXTURE_POINT_COUNT: u32 = 21
+pub const FIXTURE_TRIANGLE_COUNT: u32 = 26
+pub const FIXTURE_WORD_COUNT: usize = 228
+pub const FIXTURE_BYTES: u32 = 912
+pub const SELECTED_TRIANGLE: u32 = 10
+
+const VERTEX_BASE_WORD: u32 = 40
+const VERTEX_STRIDE_WORDS: u32 = 4
+const TRIANGLE_BASE_WORD: u32 = 124
+const TRIANGLE_STRIDE_WORDS: u32 = 4
+
+pub type FixtureIdentity = ContentAddressed<
+    0xb1e8f9c6,
+    0x31c30271,
+    0x393a8a1c,
+    0x33f1929f,
+    0xe954ffbe,
+    0x7a77f185,
+    0xa68218dc,
+    0xa33487ff,
+>
+
+pub type FixtureBuffer = ImmutableStorageBuffer<FixtureIdentity, FIXTURE_WORD_COUNT, u32>
+
+pub struct PointVarying { pub source_class: f32 }
+impl Copy for PointVarying {}
+
+pub struct MeshVarying { pub edge: Bary3F, pub selected: f32 }
+impl Copy for MeshVarying {}
+
+pub struct PatchVarying { pub edge: Bary3F, pub normal: Vec3F }
+impl Copy for PatchVarying {}
+
+struct AtlasParams {}
+
+pub fn fixture_receipt() -> (u32, u32, u32, u32) {
+    (FIXTURE_POINT_COUNT, FIXTURE_TRIANGLE_COUNT, SELECTED_TRIANGLE, FIXTURE_BYTES)
+}
+
+fn word_as_f32(_ word: u32) -> f32 {
+    __bitcast(word)
+}
+
+fn fixture_barycentric(_ fixture: FixtureBuffer, _ point_index: u32) -> Bary3F {
+    let base = VERTEX_BASE_WORD + point_index * VERTEX_STRIDE_WORDS
+    bary3f(
+        word_as_f32(fixture.load(index: base)),
+        word_as_f32(fixture.load(index: base + 1)),
+        word_as_f32(fixture.load(index: base + 2)),
+    )
+}
+
+fn fixture_source_class(_ fixture: FixtureBuffer, _ point_index: u32) -> u32 {
+    fixture.load(
+            index: VERTEX_BASE_WORD + point_index * VERTEX_STRIDE_WORDS + 3,
+        )
+}
+
+fn fixture_triangle_index(_ fixture: FixtureBuffer, _ triangle_index: u32, _ corner: u32) -> u32 {
+    fixture.load(
+            index: TRIANGLE_BASE_WORD + triangle_index * TRIANGLE_STRIDE_WORDS + corner,
+        )
+}
+
+fn local_corner(_ corner: u32) -> Bary3F {
+    if corner == 0 {
+        bary3f(1.0, 0.0, 0.0)
+    } else if corner == 1 {
+        bary3f(0.0, 1.0, 0.0)
+    } else {
+        bary3f(0.0, 0.0, 1.0)
+    }
+}
+
+fn minimum3(_ value: Bary3F) -> f32 {
+    let mut result = value.a
+    if value.b < result {
+        result = value.b
+    }
+    if value.c < result {
+        result = value.c
+    }
+    result
+}
+
+fn parameter_clip(_ bary: Bary3F, _ center_x: f32) -> ClipPosition {
+    let point = bary_to_cartesian(bary)
+    ClipPosition { x: center_x + point.x * 0.29, y: point.y * 0.43, z: 0.0, w: 1.0 }
+}
+
+fn marker_clip(_ bary: Bary3F, _ corner: u32, _ source_class: u32) -> ClipPosition {
+    let point = parameter_clip(bary, -0.66)
+    let mut radius: f32 = 0.011
+    if source_class == 1 {
+        radius = 0.014
+    }
+    if source_class == 2 {
+        radius = 0.018
+    }
+    let mut dx: f32 = -radius
+    let mut dy: f32 = -radius
+    if corner == 1 || corner == 4 || corner == 5 {
+        dx = radius
+    }
+    if corner == 2 || corner == 3 || corner == 5 {
+        dy = radius
+    }
+    ClipPosition { x: point.x + dx, y: point.y + dy, z: 0.0, w: 1.0 }
+}
+
+fn curved_patch() -> QbTriPatch {
+    patch(
+        control(vec3f(-0.75, -0.25, 0.1), quatf(1.0, 0.2, -0.1, 0.05)),
+        control(vec3f(0.8, -0.15, -0.2), quatf(0.9, -0.15, 0.25, 0.1)),
+        control(vec3f(0.05, 0.9, 0.35), quatf(1.1, 0.1, 0.05, -0.2)),
+    )
+}
+
+fn patch_clip(_ position: Vec3F) -> ClipPosition {
+    ClipPosition { x: 0.66 + position.x * 0.32, y: position.y * 0.42, z: position.z * 0.12, w: 1.0 }
+}
+
+actor ClassicQuiltingAtlas uses (GpuProgram<WebGpuBackend>) {
+    fixture: FixtureBuffer,
+
+    const fn view() -> Surface<AtlasParams> {
+        Surface { extent: Extent::square(768), params: AtlasParams {} }
+    }
+
+    fn background(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        -15396337
+    }
+
+    fn delaunay_vertices(self, vertex_index: u32) -> RasterVertex<MeshVarying>
+        uses (VertexStage<MeshVarying, TriangleList<78>>)
+    {
+        let triangle_index = vertex_index / 3
+        let corner = vertex_index % 3
+        let point_index = fixture_triangle_index(self.fixture, triangle_index, corner)
+        RasterVertex {
+            position: parameter_clip(fixture_barycentric(self.fixture, point_index), 0.0),
+            varying: MeshVarying {
+                edge: local_corner(corner),
+                selected: if triangle_index == SELECTED_TRIANGLE { 1.0 } else { 0.0 },
+            },
+        }
+    }
+
+    fn delaunay_fragment(self, varying: MeshVarying) -> u32
+        uses (FragmentStage<MeshVarying>)
+    {
+        if minimum3(varying.edge) < 0.035 {
+            4281543976
+        } else if varying.selected > 0.5 {
+            4291983973
+        } else {
+            4282004265
+        }
+    }
+
+    fn patch_vertices(self, vertex_index: u32) -> RasterVertex<PatchVarying>
+        uses (VertexStage<PatchVarying, TriangleList<78>>)
+    {
+        let triangle_index = vertex_index / 3
+        let corner = vertex_index % 3
+        let point_index = fixture_triangle_index(self.fixture, triangle_index, corner)
+        let differential = evaluate_differential(
+            curved_patch(),
+            fixture_barycentric(self.fixture, point_index),
+            0.00000000000000000001,
+            0.000000000001,
+        )
+        RasterVertex {
+            position: patch_clip(differential.sample.position),
+            varying: PatchVarying { edge: local_corner(corner), normal: differential.normal },
+        }
+    }
+
+    fn patch_fragment(self, varying: PatchVarying) -> u32
+        uses (FragmentStage<PatchVarying>)
+    {
+        if minimum3(varying.edge) < 0.035 {
+            4281543976
+        } else if varying.normal.z > 0.0 {
+            4292985706
+        } else {
+            4286476244
+        }
+    }
+
+    fn point_vertices(self, vertex_index: u32) -> RasterVertex<PointVarying>
+        uses (VertexStage<PointVarying, TriangleList<126>>)
+    {
+        let point_index = vertex_index / 6
+        let corner = vertex_index % 6
+        let source_class = fixture_source_class(self.fixture, point_index)
+        let source_class_value = if source_class == 2 {
+            2.0
+        } else if source_class == 1 {
+            1.0
+        } else {
+            0.0
+        }
+        RasterVertex {
+            position: marker_clip(
+                fixture_barycentric(self.fixture, point_index),
+                corner,
+                source_class,
+            ),
+            varying: PointVarying { source_class: source_class_value },
+        }
+    }
+
+    fn point_fragment(self, varying: PointVarying) -> u32
+        uses (FragmentStage<PointVarying>)
+    {
+        if varying.source_class > 1.5 {
+            4292985706
+        } else if varying.source_class > 0.5 {
+            4284895976
+        } else {
+            4287210615
+        }
+    }
+}

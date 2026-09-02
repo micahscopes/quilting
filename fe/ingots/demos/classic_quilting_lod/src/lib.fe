@@ -1,0 +1,354 @@
+//! Pointer-reactive LoD over four checked classic-Quilting atlas slices.
+//!
+//! Pointer position is interpreted in Fe as a barycentric focus. Moving from
+//! the patch centre toward an edge or corner selects progressively denser
+//! canonical edge keys: `[1,1,1]`, `[1,1,2]`, `[1,2,2]`, then `[2,4,8]`.
+//! The canonical topology is permuted in the vertex stage so its densest edge
+//! follows the nearest focused edge. The browser reports pointer facts and
+//! realizes WebGPU resources; it owns neither LoD policy nor topology.
+
+use core::marker::Copy
+use std::web::view::{Extent, Param, Surface, SurfaceEvent, SurfaceState}
+use quilting_domain::{Bary3F, Vec3F, bary3f, bary_to_cartesian, cartesian_to_bary, vec2f, vec3f}
+use quilting_quaternion::quatf
+use quilting_qb::{QbTriPatch, control, evaluate_differential, patch}
+use std::webgpu::{
+    ClipPosition,
+    ContentAddressed,
+    FragmentStage,
+    FragmentSurface,
+    GpuProgram,
+    ImmutableStorageBuffer,
+    LatestPerFrame,
+    RasterVertex,
+    ResponsiveBacking,
+    StandardSurfaceRecovery,
+    SurfaceQuality,
+    SurfacePointerMotion,
+    SurfaceRecovery,
+    SurfaceScheduling,
+    SurfaceTransition,
+    TriangleList,
+    VertexStage,
+    WebGpuBackend,
+}
+
+extern {
+    const fn __bitcast<From, To>(_: From) -> To
+}
+
+pub const FIXTURE_PATCH_COUNT: u32 = 4
+pub const FIXTURE_POINT_COUNT: u32 = 33
+pub const FIXTURE_TRIANGLE_COUNT: u32 = 32
+pub const MAX_PATCH_TRIANGLE_COUNT: u32 = 26
+pub const FIXTURE_WORD_COUNT: usize = 324
+pub const FIXTURE_BYTES: u32 = 1296
+
+const PATCH_BASE_WORD: u32 = 32
+const PATCH_STRIDE_WORDS: u32 = 8
+const VERTEX_BASE_WORD: u32 = 64
+const VERTEX_STRIDE_WORDS: u32 = 4
+const TRIANGLE_BASE_WORD: u32 = 196
+const TRIANGLE_STRIDE_WORDS: u32 = 4
+const PATCH_SCALE: f32 = 0.72
+
+pub type FixtureIdentity = ContentAddressed<
+    0x9c23cbef,
+    0xd561abea,
+    0x57cb9f29,
+    0xf79a40d6,
+    0x6761f0ae,
+    0xb1c89876,
+    0xb9aed503,
+    0x1750d5f1,
+>
+
+pub type FixtureBuffer = ImmutableStorageBuffer<FixtureIdentity, FIXTURE_WORD_COUNT, u32>
+
+pub struct PatchVarying { pub edge: Bary3F, pub normal: Vec3F, pub band: f32 }
+impl Copy for PatchVarying {}
+
+pub struct FocusVarying { pub band: f32 }
+impl Copy for FocusVarying {}
+
+struct AtlasLodParams { pointer_x: Param, pointer_y: Param, band: Param, res: Param }
+
+struct AtlasLodState { pointer_x: f32, pointer_y: f32, band: f32, res: f32 }
+
+impl SurfaceState for AtlasLodState {
+    type Params = AtlasLodParams
+}
+
+const fn atlas_lod_params() -> AtlasLodParams {
+    AtlasLodParams {
+        pointer_x: Param::fixed(0.0),
+        pointer_y: Param::fixed(0.0),
+        band: Param::fixed(0.0),
+        res: Param::extent_x(),
+    }
+}
+
+pub fn fixture_receipt() -> (u32, u32, u32, u32) {
+    (FIXTURE_PATCH_COUNT, FIXTURE_POINT_COUNT, FIXTURE_TRIANGLE_COUNT, FIXTURE_BYTES)
+}
+
+fn word_as_f32(_ word: u32) -> f32 {
+    __bitcast(word)
+}
+
+fn patch_word(_ fixture: FixtureBuffer, _ patch_index: u32, _ lane: u32) -> u32 {
+    fixture.load(
+            index: PATCH_BASE_WORD + patch_index * PATCH_STRIDE_WORDS + lane,
+        )
+}
+
+fn patch_first_vertex(_ fixture: FixtureBuffer, _ patch_index: u32) -> u32 {
+    patch_word(fixture, patch_index, 3)
+}
+
+fn patch_first_triangle(_ fixture: FixtureBuffer, _ patch_index: u32) -> u32 {
+    patch_word(fixture, patch_index, 5)
+}
+
+fn patch_triangle_count(_ fixture: FixtureBuffer, _ patch_index: u32) -> u32 {
+    patch_word(fixture, patch_index, 6)
+}
+
+fn fixture_barycentric(_ fixture: FixtureBuffer, _ point_index: u32) -> Bary3F {
+    let base = VERTEX_BASE_WORD + point_index * VERTEX_STRIDE_WORDS
+    bary3f(
+        word_as_f32(fixture.load(index: base)),
+        word_as_f32(fixture.load(index: base + 1)),
+        word_as_f32(fixture.load(index: base + 2)),
+    )
+}
+
+fn fixture_triangle_index(_ fixture: FixtureBuffer, _ triangle_index: u32, _ corner: u32) -> u32 {
+    fixture.load(
+            index: TRIANGLE_BASE_WORD + triangle_index * TRIANGLE_STRIDE_WORDS + corner,
+        )
+}
+
+fn local_corner(_ corner: u32) -> Bary3F {
+    if corner == 0 {
+        bary3f(1.0, 0.0, 0.0)
+    } else if corner == 1 {
+        bary3f(0.0, 1.0, 0.0)
+    } else {
+        bary3f(0.0, 0.0, 1.0)
+    }
+}
+
+fn minimum3(_ value: Bary3F) -> f32 {
+    let mut result = value.a
+    if value.b < result {
+        result = value.b
+    }
+    if value.c < result {
+        result = value.c
+    }
+    result
+}
+
+fn maximum3(_ value: Bary3F) -> f32 {
+    let mut result = value.a
+    if value.b > result {
+        result = value.b
+    }
+    if value.c > result {
+        result = value.c
+    }
+    result
+}
+
+fn diagnostic_wire_width(_ band: f32) -> f32 {
+    // Barycentric width is relative to each resident cell. Denser slices need
+    // a larger fraction to remain visible at this deliberately small teaching
+    // surface; this is a diagnostic overlay, not production antialiasing.
+    if band < 0.5 {
+        0.018
+    } else if band < 1.5 {
+        0.026
+    } else if band < 2.5 { 0.042 } else { 0.068 }
+}
+
+fn band_from_focus(_ focus: Bary3F) -> f32 {
+    let concentration = maximum3(focus)
+    if concentration < 0.46 {
+        0.0
+    } else if concentration < 0.60 {
+        1.0
+    } else if concentration < 0.76 { 2.0 } else { 3.0 }
+}
+
+fn patch_index_from_band(_ band: f32) -> u32 {
+    if band < 0.5 {
+        0
+    } else if band < 1.5 {
+        1
+    } else if band < 2.5 { 2 } else { 3 }
+}
+
+/// Map canonical key lanes from low-to-high density onto focus lanes from
+/// farthest-to-nearest edge. This is the six-way atlas permutation in readable
+/// Fe rather than a host lookup table.
+fn focus_permutation(_ source: Bary3F, _ focus: Bary3F) -> Bary3F {
+    if focus.a <= focus.b && focus.a <= focus.c {
+        if focus.b <= focus.c {
+            bary3f(source.c, source.b, source.a)
+        } else {
+            bary3f(source.c, source.a, source.b)
+        }
+    } else if focus.b <= focus.a && focus.b <= focus.c {
+        if focus.a <= focus.c {
+            bary3f(source.b, source.c, source.a)
+        } else {
+            bary3f(source.a, source.c, source.b)
+        }
+    } else if focus.a <= focus.b {
+        bary3f(source.b, source.a, source.c)
+    } else {
+        bary3f(source.a, source.b, source.c)
+    }
+}
+
+fn reference_clip(_ bary: Bary3F, _ z: f32) -> ClipPosition {
+    let point = bary_to_cartesian(bary)
+    ClipPosition { x: point.x * PATCH_SCALE, y: point.y * PATCH_SCALE, z: z, w: 1.0 }
+}
+
+fn focus_from_clip(_ clip_x: f32, _ clip_y: f32) -> Bary3F {
+    cartesian_to_bary(vec2f(clip_x / PATCH_SCALE, clip_y / PATCH_SCALE))
+}
+
+fn curved_patch() -> QbTriPatch {
+    patch(
+        control(vec3f(-0.75, -0.25, 0.1), quatf(1.0, 0.2, -0.1, 0.05)),
+        control(vec3f(0.8, -0.15, -0.2), quatf(0.9, -0.15, 0.25, 0.1)),
+        control(vec3f(0.05, 0.9, 0.35), quatf(1.1, 0.1, 0.05, -0.2)),
+    )
+}
+
+fn focus_marker_clip(_ pointer_x: f32, _ pointer_y: f32, _ corner: u32) -> ClipPosition {
+    let radius: f32 = 0.018
+    let mut dx: f32 = 0.0 - radius
+    let mut dy: f32 = 0.0 - radius
+    if corner == 1 || corner == 4 || corner == 5 {
+        dx = radius
+    }
+    if corner == 2 || corner == 3 || corner == 5 {
+        dy = radius
+    }
+    ClipPosition { x: pointer_x + dx, y: pointer_y + dy, z: 0.0, w: 1.0 }
+}
+
+actor ClassicQuiltingLod uses (
+    GpuProgram<WebGpuBackend>,
+    SurfaceQuality<ResponsiveBacking>,
+    SurfaceRecovery<StandardSurfaceRecovery>,
+    SurfacePointerMotion,
+) {
+    fixture: FixtureBuffer,
+    pointer_x: f32,
+    pointer_y: f32,
+    band: f32,
+    res: f32,
+
+    const fn view() -> Surface<AtlasLodParams> {
+        Surface { extent: Extent::square(768), params: atlas_lod_params() }
+    }
+
+    fn navigate(self, event: own SurfaceEvent) -> AtlasLodState
+        uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>)
+    {
+        if event.is_pointer_move() {
+            let pointer_x = event.pointer_x * 2.0 / event.width - 1.0
+            let pointer_y = 1.0 - event.pointer_y * 2.0 / event.height
+            return AtlasLodState {
+                pointer_x: pointer_x,
+                pointer_y: pointer_y,
+                band: band_from_focus(focus_from_clip(pointer_x, pointer_y)),
+                res: event.width,
+            }
+        }
+        AtlasLodState {
+            pointer_x: self.pointer_x,
+            pointer_y: self.pointer_y,
+            band: self.band,
+            res: self.res,
+        }
+    }
+
+    fn background(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        -15396337
+    }
+
+    fn patch_vertices(self, vertex_index: u32) -> RasterVertex<PatchVarying>
+        uses (VertexStage<PatchVarying, TriangleList<78>>)
+    {
+        let patch_index = patch_index_from_band(self.band)
+        let triangle_index = vertex_index / 3
+        let corner = vertex_index % 3
+        let triangle_count = patch_triangle_count(self.fixture, patch_index)
+        let focus = focus_from_clip(self.pointer_x, self.pointer_y)
+        let mut point_index = patch_first_vertex(self.fixture, patch_index)
+        if triangle_index < triangle_count {
+            point_index = fixture_triangle_index(
+                self.fixture,
+                patch_first_triangle(self.fixture, patch_index) + triangle_index,
+                corner,
+            )
+        }
+        let bary = focus_permutation(
+            fixture_barycentric(self.fixture, point_index),
+            focus,
+        )
+        let differential = evaluate_differential(
+            curved_patch(), bary, 0.00000000000000000001, 0.000000000001,
+        )
+        RasterVertex {
+            // WebGPU's clip-depth interval is [0, w]. Keep the QB relief
+            // centred inside it; raw signed surface z would clip half the
+            // patch even though its x/y projection is entirely visible.
+            position: reference_clip(bary, 0.5 + differential.sample.position.z * 0.05),
+            varying: PatchVarying {
+                edge: local_corner(corner),
+                normal: differential.normal,
+                band: self.band,
+            },
+        }
+    }
+
+    fn patch_fragment(self, varying: PatchVarying) -> u32
+        uses (FragmentStage<PatchVarying>)
+    {
+        if minimum3(varying.edge) < diagnostic_wire_width(varying.band) {
+            4281543976
+        } else if varying.band < 0.5 {
+            4282004265
+        } else if varying.band < 1.5 {
+            4284895976
+        } else if varying.band < 2.5 {
+            4287210615
+        } else if varying.normal.z > 0.0 {
+            4292985706
+        } else {
+            4286476244
+        }
+    }
+
+    fn focus_vertices(self, vertex_index: u32) -> RasterVertex<FocusVarying>
+        uses (VertexStage<FocusVarying, TriangleList<6>>)
+    {
+        RasterVertex {
+            position: focus_marker_clip(self.pointer_x, self.pointer_y, vertex_index),
+            varying: FocusVarying { band: self.band },
+        }
+    }
+
+    fn focus_fragment(self, varying: FocusVarying) -> u32
+        uses (FragmentStage<FocusVarying>)
+    {
+        if varying.band < 1.5 { 4292985706 } else { 4291983973 }
+    }
+}

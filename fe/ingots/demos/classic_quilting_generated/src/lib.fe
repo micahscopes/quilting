@@ -1,0 +1,461 @@
+//! One direct blue-noise patch generated, triangulated, and rendered without
+//! leaving WebGPU storage.
+//!
+//! Sampling and topology construction are separate immutable-generation actor
+//! cycles. Their only handoff is the checked resident point buffer and receipt;
+//! no GPU-to-CPU-to-GPU trip or host-side topology authority exists.
+
+use core::marker::Copy
+use quilting_atlas::{AtlasKey, canonical_key_ordinal}
+use quilting_atlas_webgpu::{
+    advance_candidate_generation,
+    advance_parallel_topology_generation,
+    arbitrate_parallel_topology_point_lane,
+    compact_candidate_points,
+    initialize_candidate_lane,
+    initialize_parallel_topology_lane,
+    locate_parallel_topology_point_lane,
+    parallel_topology_progress,
+    parallel_topology_triangle,
+    plan_parallel_topology_face_lane,
+    propose_candidate_lane,
+    rebuild_parallel_topology_face_lane,
+    resident_point,
+    retire_candidate_lane,
+    retire_parallel_topology_point_lane,
+    scan_parallel_topology_face_plan,
+}
+use quilting_domain::{Bary3F, Vec3F, bary3f, vec3f}
+use quilting_quaternion::quatf
+use quilting_qb::{QbTriPatch, control, evaluate_differential, patch}
+use std::web::view::{Extent, Surface}
+use std::webgpu::{
+    ClipPosition,
+    ComputeInvocation,
+    ComputeSurface as Kernel,
+    CycledDispatch as Cycle,
+    FixedDispatch as Once,
+    FragmentStage,
+    FragmentSurface,
+    GpuProgram as Program,
+    RasterVertex,
+    StorageBuffer as Shared,
+    TriangleList,
+    VertexStage,
+    WebGpuBackend,
+    Workgroup as Threads,
+}
+
+extern {
+    const fn __f32_from_i32(_: i32) -> f32
+}
+
+const CANDIDATES: usize = 272
+const SAMPLING_WORKSPACE_WORDS: usize = CANDIDATES * 8 + 1
+const POINTS: usize = 286
+const POINT_WORDS: usize = POINTS * 3
+const TRIANGLES: usize = 556
+const TRIANGLE_WORDS: usize = TRIANGLES * 4
+const TOPOLOGY_WORKSPACE_WORDS: usize = POINTS * 7 + TRIANGLES * 3 + 8
+const THREADS: usize = 128
+const WORKGROUPS: usize = 5
+const SAMPLING_ROUNDS: usize = 64
+const INSERTION_ROUNDS: usize = 64
+const SEED: u32 = 0x51c32a97
+
+pub struct SamplingRound {}
+pub struct InsertionRound {}
+
+pub struct MeshVarying { pub edge: Bary3F, pub normal: Vec3F }
+impl Copy for MeshVarying {}
+
+struct GeneratedParams {}
+
+fn key() -> AtlasKey {
+    AtlasKey { a: 1, b: 2, c: 3 }
+}
+
+fn local_corner(_ corner: u32) -> Bary3F {
+    if corner == 0 {
+        bary3f(1.0, 0.0, 0.0)
+    } else if corner == 1 {
+        bary3f(0.0, 1.0, 0.0)
+    } else {
+        bary3f(0.0, 0.0, 1.0)
+    }
+}
+
+fn minimum3(_ value: Bary3F) -> f32 {
+    let mut result = value.a
+    if value.b < result {
+        result = value.b
+    }
+    if value.c < result {
+        result = value.c
+    }
+    result
+}
+
+fn fixed_lane(_ value: u32) -> f32 {
+    __f32_from_i32(value.downcast_unchecked()) / 16384.0
+}
+
+fn curved_patch() -> QbTriPatch {
+    patch(
+        control(vec3f(-0.75, -0.25, 0.1), quatf(1.0, 0.2, -0.1, 0.05)),
+        control(vec3f(0.8, -0.15, -0.2), quatf(0.9, -0.15, 0.25, 0.1)),
+        control(vec3f(0.05, 0.9, 0.35), quatf(1.1, 0.1, 0.05, -0.2)),
+    )
+}
+
+fn invalid_vertex() -> RasterVertex<MeshVarying> {
+    RasterVertex {
+        position: ClipPosition { x: 2.0, y: 2.0, z: 0.0, w: 1.0 },
+        varying: MeshVarying { edge: bary3f(0.0, 0.0, 0.0), normal: vec3f(0.0, 0.0, 1.0) },
+    }
+}
+
+actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
+    sampling_workspace: Shared<u32, SAMPLING_WORKSPACE_WORDS>,
+    points: Shared<u32, POINT_WORDS>,
+    triangles_a: Shared<u32, TRIANGLE_WORDS>,
+    triangles_b: Shared<u32, TRIANGLE_WORDS>,
+    topology_workspace: Shared<u32, TOPOLOGY_WORKSPACE_WORDS>,
+    receipt: Shared<u32, 16>,
+
+    const fn view() -> Surface<GeneratedParams> {
+        Surface { extent: Extent::square(768), params: GeneratedParams {} }
+    }
+
+    fn sample_initialize(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Once<WORKGROUPS, 1, 1>>)
+    {
+        let atlas_key = key()
+        initialize_candidate_lane<CANDIDATES, SAMPLING_WORKSPACE_WORDS>(
+            atlas_key,
+            canonical_key_ordinal(atlas_key),
+            SEED,
+            self.sampling_workspace,
+            invocation,
+        )
+    }
+
+    fn sample_propose(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<SamplingRound, Once<WORKGROUPS, 1, 1>, SAMPLING_ROUNDS>,
+            >
+        )
+    {
+        propose_candidate_lane<CANDIDATES, SAMPLING_WORKSPACE_WORDS>(
+            key(),
+            self.sampling_workspace,
+            invocation,
+        )
+    }
+
+    fn sample_retire(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<SamplingRound, Once<WORKGROUPS, 1, 1>, SAMPLING_ROUNDS>,
+            >
+        )
+    {
+        retire_candidate_lane<CANDIDATES, SAMPLING_WORKSPACE_WORDS>(
+            key(),
+            self.sampling_workspace,
+            invocation,
+        )
+    }
+
+    fn sample_advance(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<SamplingRound, Once<WORKGROUPS, 1, 1>, SAMPLING_ROUNDS>,
+            >
+        )
+    {
+        advance_candidate_generation<CANDIDATES, SAMPLING_WORKSPACE_WORDS>(
+            self.sampling_workspace,
+            invocation,
+        )
+    }
+
+    fn sample_compact(self) uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+        let compacted = compact_candidate_points<
+            CANDIDATES,
+            SAMPLING_WORKSPACE_WORDS,
+            POINT_WORDS,
+        >(key(), self.sampling_workspace, self.points)
+        self.receipt.store(index: 0, value: if compacted.valid { 1 } else { 0 })
+        self.receipt.store(index: 1, value: if compacted.converged { 1 } else { 0 })
+        self.receipt.store(index: 2, value: if compacted.overflowed { 1 } else { 0 })
+        self.receipt.store(index: 3, value: compacted.candidate_slots)
+        self.receipt.store(index: 4, value: compacted.accepted_candidates)
+        self.receipt.store(index: 5, value: compacted.boundary_points)
+        self.receipt.store(index: 6, value: compacted.resident_points)
+    }
+
+    fn topology_initialize(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Once<WORKGROUPS, 1, 1>>)
+    {
+        initialize_parallel_topology_lane<
+            POINTS,
+            POINT_WORDS,
+            TRIANGLES,
+            TRIANGLE_WORDS,
+            TOPOLOGY_WORKSPACE_WORDS,
+        >(
+            key(),
+            self.receipt.load(index: 0) != 0,
+            self.receipt.load(index: 6),
+            self.points,
+            self.triangles_a,
+            self.triangles_b,
+            self.topology_workspace,
+            invocation,
+        )
+    }
+
+    fn topology_locate(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<InsertionRound, Once<WORKGROUPS, 1, 1>, INSERTION_ROUNDS>,
+            >
+        )
+    {
+        locate_parallel_topology_point_lane<
+            POINTS,
+            POINT_WORDS,
+            TRIANGLES,
+            TRIANGLE_WORDS,
+            TOPOLOGY_WORKSPACE_WORDS,
+        >(
+            self.points,
+            self.triangles_a,
+            self.triangles_b,
+            self.topology_workspace,
+            invocation,
+        )
+    }
+
+    fn topology_arbitrate(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<InsertionRound, Once<WORKGROUPS, 1, 1>, INSERTION_ROUNDS>,
+            >
+        )
+    {
+        arbitrate_parallel_topology_point_lane<
+            POINTS,
+            TRIANGLES,
+            TOPOLOGY_WORKSPACE_WORDS,
+        >(self.topology_workspace, invocation)
+    }
+
+    fn topology_plan(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<InsertionRound, Once<WORKGROUPS, 1, 1>, INSERTION_ROUNDS>,
+            >
+        )
+    {
+        plan_parallel_topology_face_lane<
+            POINTS,
+            POINT_WORDS,
+            TRIANGLES,
+            TRIANGLE_WORDS,
+            TOPOLOGY_WORKSPACE_WORDS,
+        >(
+            self.points,
+            self.triangles_a,
+            self.triangles_b,
+            self.topology_workspace,
+            invocation,
+        )
+    }
+
+    fn topology_scan(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<InsertionRound, Once<WORKGROUPS, 1, 1>, INSERTION_ROUNDS>,
+            >
+        )
+    {
+        scan_parallel_topology_face_plan<POINTS, TRIANGLES, TOPOLOGY_WORKSPACE_WORDS>(
+            self.topology_workspace,
+            invocation,
+        )
+    }
+
+    fn topology_rebuild(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<InsertionRound, Once<WORKGROUPS, 1, 1>, INSERTION_ROUNDS>,
+            >
+        )
+    {
+        rebuild_parallel_topology_face_lane<
+            POINTS,
+            POINT_WORDS,
+            TRIANGLES,
+            TRIANGLE_WORDS,
+            TOPOLOGY_WORKSPACE_WORDS,
+        >(
+            self.points,
+            self.triangles_a,
+            self.triangles_b,
+            self.topology_workspace,
+            invocation,
+        )
+    }
+
+    fn topology_retire(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<InsertionRound, Once<WORKGROUPS, 1, 1>, INSERTION_ROUNDS>,
+            >
+        )
+    {
+        retire_parallel_topology_point_lane<POINTS, TRIANGLES, TOPOLOGY_WORKSPACE_WORDS>(
+            self.topology_workspace,
+            invocation,
+        )
+    }
+
+    fn topology_advance(self, invocation: ComputeInvocation)
+        uses (
+            Kernel<
+                Threads<THREADS, 1, 1>,
+                Cycle<InsertionRound, Once<WORKGROUPS, 1, 1>, INSERTION_ROUNDS>,
+            >
+        )
+    {
+        advance_parallel_topology_generation<POINTS, TRIANGLES, TOPOLOGY_WORKSPACE_WORDS>(
+            self.topology_workspace,
+            invocation,
+        )
+    }
+
+    fn topology_seal(self) uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>) {
+        let points = self.receipt.load(index: 6)
+        let boundary = self.receipt.load(index: 5)
+        let triangles = parallel_topology_progress<POINTS, TRIANGLES, TOPOLOGY_WORKSPACE_WORDS>(
+            self.topology_workspace,
+            2,
+        )
+        let pending = parallel_topology_progress<POINTS, TRIANGLES, TOPOLOGY_WORKSPACE_WORDS>(
+            self.topology_workspace,
+            3,
+        )
+        let locations = parallel_topology_progress<POINTS, TRIANGLES, TOPOLOGY_WORKSPACE_WORDS>(
+            self.topology_workspace,
+            6,
+        )
+        let invariants = parallel_topology_progress<POINTS, TRIANGLES, TOPOLOGY_WORKSPACE_WORDS>(
+            self.topology_workspace,
+            7,
+        )
+        let expected = if points + points > boundary + 2 {
+            points + points - boundary - 2
+        } else {
+            0
+        }
+        let valid = self.receipt.load(index: 0) != 0
+            && triangles == expected
+            && pending == 0
+            && locations == 0
+            && invariants == 0
+        self.receipt.store(index: 7, value: if valid { 1 } else { 0 })
+        self.receipt.store(index: 8, value: points)
+        self.receipt.store(index: 9, value: boundary)
+        self.receipt.store(index: 10, value: triangles)
+        self.receipt.store(index: 11, value: pending)
+        self.receipt.store(index: 12, value: locations)
+        self.receipt.store(index: 13, value: invariants)
+        self.receipt.store(
+            index: 14,
+            value: parallel_topology_progress<POINTS, TRIANGLES, TOPOLOGY_WORKSPACE_WORDS>(
+                self.topology_workspace,
+                0,
+            ),
+        )
+        self.receipt.store(index: 15, value: 1)
+    }
+
+    fn background(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        -15396337
+    }
+
+    fn mesh_vertices(self, vertex_index: u32) -> RasterVertex<MeshVarying>
+        uses (VertexStage<MeshVarying, TriangleList<1668>>)
+    {
+        let mut result = invalid_vertex()
+        if self.receipt.load(index: 7) != 0 {
+            let face = vertex_index / 3
+            let corner = vertex_index % 3
+            let triangle = parallel_topology_triangle<
+                POINTS,
+                TRIANGLES,
+                TRIANGLE_WORDS,
+                TOPOLOGY_WORKSPACE_WORDS,
+            >(
+                self.triangles_a,
+                self.triangles_b,
+                self.topology_workspace,
+                face,
+            )
+            if triangle.valid {
+                let point_id = if corner == 0 {
+                    triangle.first
+                } else if corner == 1 {
+                    triangle.second
+                } else {
+                    triangle.third
+                }
+                let fixed = resident_point<POINT_WORDS>(self.points, point_id)
+                let bary = bary3f(fixed_lane(fixed.a), fixed_lane(fixed.b), fixed_lane(fixed.c))
+                let differential = evaluate_differential(
+                    curved_patch(),
+                    bary,
+                    0.00000000000000000001,
+                    0.000000000001,
+                )
+                result = RasterVertex {
+                    position: ClipPosition {
+                        x: differential.sample.position.x * 0.75,
+                        y: differential.sample.position.y * 0.75,
+                        z: differential.sample.position.z * 0.12,
+                        w: 1.0,
+                    },
+                    varying: MeshVarying {
+                        edge: local_corner(corner),
+                        normal: differential.normal,
+                    },
+                }
+            }
+        }
+        result
+    }
+
+    fn mesh_fragment(self, varying: MeshVarying) -> u32
+        uses (FragmentStage<MeshVarying>)
+    {
+        if minimum3(varying.edge) < 0.035 {
+            4281543976
+        } else if varying.normal.z > 0.0 {
+            4292985706
+        } else {
+            4286476244
+        }
+    }
+}
