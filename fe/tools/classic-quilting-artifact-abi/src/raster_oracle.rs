@@ -15,8 +15,8 @@ use url::Url;
 use wasmtime::{Instance, Store};
 
 const FIXTURE: &[u8] =
-    include_bytes!("../../../fixtures/classic-quilting/v1/direct-seed42-k1-1-1.cqa");
-const VECTOR_LANES: usize = 10;
+    include_bytes!("../../../fixtures/classic-quilting/v1/direct-seed42-k2-4-8.cqa");
+const VECTOR_LANES: usize = 13;
 
 struct CompiledRaster {
     bundle: WebBundle,
@@ -106,28 +106,47 @@ fn oracle_f32(value: f64) -> f32 {
     }
 }
 
-fn expected_vectors() -> [[f32; VECTOR_LANES]; 3] {
-    let artifact = crate::decode(FIXTURE).expect("checked smallest M0 fixture");
-    let patch = curved_patch();
-    let triangle = artifact.triangles[0];
-    triangle.indices.map(|index| {
-        let vertex = artifact.vertices[usize::try_from(index).unwrap()];
-        let [_, u, v] = vertex.barycentric;
-        let differential = patch.eval_differential(f64::from(u), f64::from(v));
-        let normal = normal_from_tangents(differential.tangent_u, differential.tangent_v);
-        [
-            oracle_f32(differential.position[0]),
-            oracle_f32(differential.position[1]),
-            oracle_f32(differential.position[2] * 0.25 + 0.5),
-            1.0,
-            oracle_f32(differential.position[0]),
-            oracle_f32(differential.position[1]),
-            oracle_f32(differential.position[2]),
-            oracle_f32(normal[0]),
-            oracle_f32(normal[1]),
-            oracle_f32(normal[2]),
-        ]
-    })
+fn expected_vectors() -> Vec<[f32; VECTOR_LANES]> {
+    let artifact = crate::decode(FIXTURE).expect("checked asymmetric wire fixture");
+    let atlas_patch = artifact.patches[0];
+    let first_triangle = usize::try_from(atlas_patch.first_triangle).unwrap();
+    let triangle_count = usize::try_from(atlas_patch.triangle_count).unwrap();
+    let triangles = &artifact.triangles[first_triangle..first_triangle + triangle_count];
+    assert_eq!(artifact.vertices.len(), 21);
+    assert_eq!(triangles.len(), 26);
+
+    let surface = curved_patch();
+    triangles
+        .iter()
+        .flat_map(|triangle| triangle.indices)
+        .enumerate()
+        .map(|(expanded_index, index)| {
+            let vertex = artifact.vertices[usize::try_from(index).unwrap()];
+            let [_, u, v] = vertex.barycentric;
+            let differential = surface.eval_differential(f64::from(u), f64::from(v));
+            let normal = normal_from_tangents(differential.tangent_u, differential.tangent_v);
+            let local = match expanded_index % 3 {
+                0 => [1.0, 0.0, 0.0],
+                1 => [0.0, 1.0, 0.0],
+                _ => [0.0, 0.0, 1.0],
+            };
+            [
+                oracle_f32(differential.position[0]),
+                oracle_f32(differential.position[1]),
+                oracle_f32(differential.position[2] * 0.25 + 0.5),
+                1.0,
+                oracle_f32(differential.position[0]),
+                oracle_f32(differential.position[1]),
+                oracle_f32(differential.position[2]),
+                oracle_f32(normal[0]),
+                oracle_f32(normal[1]),
+                oracle_f32(normal[2]),
+                local[0],
+                local[1],
+                local[2],
+            ]
+        })
+        .collect()
 }
 
 #[test]
@@ -143,6 +162,25 @@ fn authored_raster_fixture_is_wholly_inside_clip_volume() {
             "vertex {vertex} is clipped: {vector:?}"
         );
     }
+}
+
+#[test]
+fn authored_raster_fixture_has_nondegenerate_projected_triangles() {
+    let vectors = expected_vectors();
+    let mut projected_area = 0.0_f32;
+    for (triangle, vertices) in vectors.as_chunks::<3>().0.iter().enumerate() {
+        let [a, b, c] = vertices;
+        let twice_area = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+        assert!(
+            twice_area.abs() > 1.0e-7,
+            "triangle {triangle} is projection-degenerate: {vertices:?}"
+        );
+        projected_area += twice_area.abs() * 0.5;
+    }
+    assert!(
+        projected_area > 0.1,
+        "projected atlas area is unexpectedly small: {projected_area}"
+    );
 }
 
 fn assert_vector_close(actual: &[f32], expected: &[f32], context: &str) {
@@ -161,7 +199,10 @@ fn authored_raster_bundle_has_the_generated_draw_and_vector_interface() {
     let bundle = &compiled_raster().bundle;
     assert_eq!(bundle.manifest.passes.len(), 1);
     let pass = &bundle.manifest.passes[0];
-    assert_eq!(pass.draw_vertices, Some(3));
+    assert_eq!(
+        pass.draw_vertices,
+        Some(u32::try_from(expected_vectors().len()).unwrap())
+    );
     assert_eq!(pass.layout.bindings.as_slice(), []);
     assert_eq!(pass.layout.vertex_entry.as_deref(), Some("vertices"));
     assert_eq!(pass.layout.fragment_entry.as_deref(), Some("shade"));
@@ -177,10 +218,10 @@ fn authored_raster_bundle_has_the_generated_draw_and_vector_interface() {
     .expect("authored raster WGSL validates with browser capabilities");
     assert!(bundle.wgsl.contains("@vertex\nfn vertices"));
     assert!(bundle.wgsl.contains("@fragment\nfn shade"));
-    for location in 0..6 {
+    for location in 0..9 {
         assert!(
             bundle.wgsl.contains(&format!("@location({location})")),
-            "missing typed position/normal varying lane {location}"
+            "missing typed position/normal/local varying lane {location}"
         );
     }
 }
@@ -197,7 +238,21 @@ fn instantiate_wasm() -> (Store<()>, Instance) {
 
 #[test]
 fn authored_raster_wasm_vectors_match_the_frozen_rust_oracle() {
-    type RasterVector = (f32, f32, f32, f32, f32, f32, f32, f32, f32, f32);
+    type RasterVector = (
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+    );
 
     let (mut store, instance) = instantiate_wasm();
     let vertices = instance
@@ -210,7 +265,7 @@ fn authored_raster_wasm_vectors_match_the_frozen_rust_oracle() {
         assert_vector_close(
             &[
                 actual.0, actual.1, actual.2, actual.3, actual.4, actual.5, actual.6, actual.7,
-                actual.8, actual.9,
+                actual.8, actual.9, actual.10, actual.11, actual.12,
             ],
             &expected,
             &format!("Wasm vertex {index}"),
@@ -234,7 +289,7 @@ fn wgsl_capture_shader() -> String {
         "    @builtin(position) position",
         "    position",
     );
-    for location in 0..6 {
+    for location in 0..9 {
         replace_once(
             &mut shader,
             &format!("    @location({location}) v{location}_"),
@@ -255,7 +310,7 @@ var<storage, read_write> captured: array<f32>;
 @compute @workgroup_size(1)
 fn capture(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let vector = vertices(invocation.x);
-    let base = invocation.x * 10u;
+    let base = invocation.x * 13u;
     captured[base + 0u] = vector.position.x;
     captured[base + 1u] = vector.position.y;
     captured[base + 2u] = vector.position.z;
@@ -266,6 +321,9 @@ fn capture(@builtin(global_invocation_id) invocation: vec3<u32>) {
     captured[base + 7u] = vector.v3_;
     captured[base + 8u] = vector.v4_;
     captured[base + 9u] = vector.v5_;
+    captured[base + 10u] = vector.v6_;
+    captured[base + 11u] = vector.v7_;
+    captured[base + 12u] = vector.v8_;
 }
 ",
     );
@@ -333,7 +391,9 @@ fn authored_raster_wgsl_vectors_match_the_frozen_rust_oracle() {
     .validate(&parsed)
     .expect("WGSL capture shader validates");
 
-    let byte_count = u64::try_from(3 * VECTOR_LANES * size_of::<f32>()).unwrap();
+    let expected = expected_vectors();
+    let vertex_count = u32::try_from(expected.len()).unwrap();
+    let byte_count = u64::try_from(expected.len() * VECTOR_LANES * size_of::<f32>()).unwrap();
     let output = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("fixed raster WGSL vectors"),
         size: byte_count,
@@ -394,7 +454,7 @@ fn authored_raster_wgsl_vectors_match_the_frozen_rust_oracle() {
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &group, &[]);
-        pass.dispatch_workgroups(3, 1, 1);
+        pass.dispatch_workgroups(vertex_count, 1, 1);
     }
     encoder.copy_buffer_to_buffer(&output, 0, &staging, 0, byte_count);
     queue.submit(Some(encoder.finish()));
@@ -405,8 +465,8 @@ fn authored_raster_wgsl_vectors_match_the_frozen_rust_oracle() {
         .iter()
         .map(|word| f32::from_le_bytes(*word))
         .collect::<Vec<_>>();
-    assert_eq!(actual.len(), 3 * VECTOR_LANES);
-    for (index, expected) in expected_vectors().iter().enumerate() {
+    assert_eq!(actual.len(), expected.len() * VECTOR_LANES);
+    for (index, expected) in expected.iter().enumerate() {
         let start = index * VECTOR_LANES;
         assert_vector_close(
             &actual[start..start + VECTOR_LANES],

@@ -1,9 +1,9 @@
-//! Smallest fixed authored-raster proof over the frozen classic Quilting atlas.
+//! Fixed authored-raster proof over one frozen direct Quilting atlas patch.
 //!
-//! The generated topology module expands the checked `[1,1,1]` fixture into a
-//! non-indexed `TriangleList<3>`. The vertex stage evaluates the real
-//! three-control QB patch and carries both position and analytic normal through
-//! the typed raster interface.
+//! The generated topology module expands the checked `[2,4,8]` fixture into a
+//! non-indexed triangle list. The vertex stage evaluates the real three-control
+//! QB patch and carries position, analytic normal, and triangle-local
+//! barycentrics through the typed raster interface.
 
 use core::marker::Copy
 use quilting_domain::{Bary3F, Vec3F, vec3f}
@@ -12,7 +12,7 @@ use quilting_qb::{QbDifferential, QbTriPatch, control, evaluate_differential, pa
 use std::webgpu::{ClipPosition, FragmentStage, GpuProgram, RasterVertex, VertexStage, WebGpuBackend}
 use std::web::view::{Extent, Surface}
 
-pub struct SurfaceVarying { pub position: Vec3F, pub normal: Vec3F }
+pub struct SurfaceVarying { pub position: Vec3F, pub normal: Vec3F, pub local: Bary3F }
 impl Copy for SurfaceVarying {}
 
 struct FixedRasterParams {}
@@ -59,13 +59,18 @@ actor ClassicQuiltingFixedRaster uses (GpuProgram<WebGpuBackend>) {
             varying: SurfaceVarying {
                 position: differential.sample.position,
                 normal: differential.normal,
+                local: fixed_topology::local_barycentric(vertex_index),
             },
         }
     }
 
-    fn shade(self, _ varying: SurfaceVarying) -> u32
+    fn shade(self, varying: SurfaceVarying) -> u32
         uses (FragmentStage<SurfaceVarying>)
     {
-        4290695800
+        if varying.local.a < 0.035 || varying.local.b < 0.035 || varying.local.c < 0.035 {
+            4278190080
+        } else {
+            4290695800
+        }
     }
 }

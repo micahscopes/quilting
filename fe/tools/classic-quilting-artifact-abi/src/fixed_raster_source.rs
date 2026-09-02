@@ -42,6 +42,27 @@ fn patch_range(patch: AtlasPatch) -> Result<(usize, usize, usize, usize), Error>
     Ok((first_vertex, vertex_count, first_triangle, triangle_count))
 }
 
+fn write_barycentric_lookup(
+    source: &mut String,
+    barycentrics: &[[f32; 3]],
+    first_index: usize,
+    indent: usize,
+) {
+    let padding = "    ".repeat(indent);
+    if let [[a, b, c]] = barycentrics {
+        writeln!(source, "{padding}bary3f({a:?}, {b:?}, {c:?})").unwrap();
+        return;
+    }
+
+    let middle = barycentrics.len() / 2;
+    let pivot = first_index + middle;
+    writeln!(source, "{padding}if vertex_index < {pivot} {{").unwrap();
+    write_barycentric_lookup(source, &barycentrics[..middle], first_index, indent + 1);
+    writeln!(source, "{padding}}} else {{").unwrap();
+    write_barycentric_lookup(source, &barycentrics[middle..], pivot, indent + 1);
+    writeln!(source, "{padding}}}").unwrap();
+}
+
 /// Render one artifact patch as a fixed, non-indexed Fe vertex stream.
 ///
 /// # Errors
@@ -127,22 +148,21 @@ pub fn render(
     )
     .unwrap();
     source.push_str("pub fn expanded_barycentric(_ vertex_index: u32) -> Bary3F {\n");
-    for (expanded_index, vertex_index) in expanded.into_iter().enumerate() {
-        let barycentric = artifact.vertices[vertex_index].barycentric;
-        if expanded_index == 0 {
-            writeln!(source, "    if vertex_index == {expanded_index} {{").unwrap();
-        } else if expanded_index + 1 == expanded_count {
-            source.push_str("    } else {\n");
-        } else {
-            writeln!(source, "    }} else if vertex_index == {expanded_index} {{").unwrap();
-        }
-        writeln!(
-            source,
-            "        bary3f({:?}, {:?}, {:?})",
-            barycentric[0], barycentric[1], barycentric[2]
-        )
-        .unwrap();
-    }
+    let barycentrics = expanded
+        .into_iter()
+        .map(|vertex_index| artifact.vertices[vertex_index].barycentric)
+        .collect::<Vec<_>>();
+    write_barycentric_lookup(&mut source, &barycentrics, 0, 1);
+    source.push_str("}\n");
+    source.push_str("\n/// Triangle-local barycentrics for a non-indexed triangle-list stream.\n");
+    source.push_str("pub fn local_barycentric(_ vertex_index: u32) -> Bary3F {\n");
+    source.push_str("    let corner = vertex_index % 3\n");
+    source.push_str("    if corner == 0 {\n");
+    source.push_str("        bary3f(1.0, 0.0, 0.0)\n");
+    source.push_str("    } else if corner == 1 {\n");
+    source.push_str("        bary3f(0.0, 1.0, 0.0)\n");
+    source.push_str("    } else {\n");
+    source.push_str("        bary3f(0.0, 0.0, 1.0)\n");
     source.push_str("    }\n}\n");
     Ok(source)
 }
@@ -150,18 +170,42 @@ pub fn render(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn committed_smallest_topology_is_exactly_regenerated() {
+    fn committed_wire_topology_is_exactly_regenerated() {
         let artifact = crate::decode(include_bytes!(
-            "../../../fixtures/classic-quilting/v1/direct-seed42-k1-1-1.cqa"
+            "../../../fixtures/classic-quilting/v1/direct-seed42-k2-4-8.cqa"
         ))
-        .expect("checked smallest M0 fixture");
-        let generated = super::render(&artifact, "direct-seed42-k1-1-1.cqa", 0)
-            .expect("expand smallest topology");
+        .expect("checked asymmetric wire fixture");
+        let generated =
+            super::render(&artifact, "direct-seed42-k2-4-8.cqa", 0).expect("expand wire topology");
         assert_eq!(
             generated,
             include_str!(
                 "../../../ingots/demos/classic_quilting_fixed_raster/src/fixed_topology.fe"
             )
+        );
+    }
+
+    #[test]
+    fn wire_topology_lookup_depth_stays_bounded() {
+        let source = include_str!(
+            "../../../ingots/demos/classic_quilting_fixed_raster/src/fixed_topology.fe"
+        );
+        let lookup = source
+            .split_once("pub fn expanded_barycentric")
+            .expect("expanded lookup")
+            .1
+            .split_once("pub fn local_barycentric")
+            .expect("local lookup follows expanded lookup")
+            .0;
+        let maximum_indent = lookup
+            .lines()
+            .map(|line| line.len() - line.trim_start_matches(' ').len())
+            .max()
+            .unwrap_or_default();
+
+        assert!(
+            maximum_indent <= 8 * 4,
+            "generated selector nesting regressed beyond the browser-safe balanced tree"
         );
     }
 }

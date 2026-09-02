@@ -75,11 +75,22 @@ The first standards-based browser page is
 [`web/classic-quilting/index.html`](web/classic-quilting/index.html). It uses an
 inert `application/fe` entry and Fe's compiler-owned `<fe-surface>` runtime;
 there is no demo-authored JavaScript or handwritten shader. Its render contract
-is intentionally WebGPU-only. Wasm remains available for validation, workers,
-and CPU-side algorithms, while a possible SPIR-V-to-WebGL compatibility backend
-is deferred until the primary WebGPU render and compute path is mature.
+is intentionally WebGPU-only. The current view renders a frozen 21-sample,
+26-triangle Quilting atlas patch with an actual triangle-local wire diagnostic;
+see [`docs/classic-quilting-M2-wire.md`](docs/classic-quilting-M2-wire.md).
+Wasm remains available for validation, workers, and CPU-side algorithms, while
+a possible SPIR-V-to-WebGL compatibility backend is deferred until the primary
+WebGPU render and compute path is mature.
 
-Build and serve it from the repository root:
+For the normal edit/reload loop, `fe web dev` watches by default:
+
+```sh
+.toolchains/fe/target/release/fe web dev \
+  --port 8766 fe/web/classic-quilting/index.html
+```
+
+For deterministic release evidence, build and serve it from the repository
+root:
 
 ```sh
 CARGO_TARGET_DIR=.toolchains/fe/target cargo run --release \
@@ -117,8 +128,8 @@ workspace. The type and backend boundaries are recorded in
 - C1 is the next principal slice: freeze the Krasauskas–Zubė Clifford
   construction, prove its quaternion-subalgebra restriction, and render one
   genuinely Clifford patch through the same cross-backend oracle.
-- M2 adds the blue-noise and Delaunay teaching views around those proven patch
-  evaluators.
+- M2 begins with the checked frozen-atlas wire proof, then adds the blue-noise
+  and Delaunay teaching views around those proven patch evaluators.
 - Later milestones add seams, LOD/permutations, controls, workers, and browser
   integration only after the preceding oracle remains green.
 
