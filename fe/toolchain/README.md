@@ -9,7 +9,7 @@ Quilting's ingots.
 Validated revision:
 
 ```text
-c6ab98f222d5def80ad6d2bf6c99373666d6b48e
+6081b9b66acc7689768c1c0ece27d64a960403f7
 ```
 
 Canonical remote:
@@ -18,15 +18,14 @@ Canonical remote:
 https://github.com/micahscopes/fe.git
 ```
 
-As of 2026-09-01, the validated revision is four commits ahead of the remote
-`mb2` head (`ba0d41fdd21f9c3ad7523accc72843ba4aa025a9`). Therefore it cannot yet
-be represented honestly as a portable git dependency or submodule. On a
-machine that already has the commit, create a private clone without modifying
-the source worktree:
+As of 2026-09-02, the validated revision is the `mb2` commit that adds the
+Fe-owned `SurfacePointerMotion` capability. The canonical GitHub remote may
+still lag the local `mb2` branch, so a machine that already has the commit can
+create a private clone without modifying the source worktree:
 
 ```sh
 git clone --shared --no-checkout /path/to/fe-repository ../.toolchains/fe
-git -C ../.toolchains/fe checkout --detach c6ab98f222d5def80ad6d2bf6c99373666d6b48e
+git -C ../.toolchains/fe checkout --detach 6081b9b66acc7689768c1c0ece27d64a960403f7
 cargo build --release --locked --manifest-path ../.toolchains/fe/Cargo.toml --bin fe
 ```
 
@@ -38,6 +37,7 @@ Once that exact commit (or a tested successor) is published, replace this
 temporary local bootstrap with a normal pinned checkout and rerun every Fe,
 Wasm, WGSL, and raster-oracle gate before changing the pin.
 
-The final M1 evidence also records a later uncommitted compiler regression in
-the active development worktree. That dirt is not part of this pin and must
-not be repaired from this repository.
+The pin passed the locked fixture, exact Quilting-export, and Fe/Wasm oracle
+gates (8, 12, and 16 tests respectively). The active `mb2` worktree's unrelated
+Mandelbrot changes are not part of this pin and must not be repaired from this
+repository.
