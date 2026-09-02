@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <title>Generated Quilting · Fe</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      background: #111318;
+      color: #c7cbd2;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100svh;
+      background: #111318;
+    }
+    main {
+      display: grid;
+      grid-template-rows: 38px minmax(0, 1fr);
+      min-height: 100svh;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 0 12px;
+      border-bottom: 1px solid #2b2f37;
+      color: #858b95;
+      font-size: 11px;
+    }
+    header strong { color: #d6d9df; font-weight: 500; }
+    .stage {
+      display: grid;
+      place-items: center;
+      min-height: 0;
+      padding: 12px;
+    }
+    fe-surface {
+      display: block;
+      width: min(100%, calc(100svh - 62px));
+    }
+    fe-surface::part(canvas) {
+      width: 100%;
+      aspect-ratio: 1;
+      background: #090a0d;
+    }
+    fe-surface::part(panel) { gap: 6px; }
+    fe-surface::part(badge) {
+      border-radius: 2px;
+      letter-spacing: 0;
+    }
+    fe-surface::part(meta) { color: #737984; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <strong>generated quilting</strong>
+      <span>GPU samples → topology → QB patch · no readback</span>
+    </header>
+    <section class="stage" aria-label="GPU-generated Quilting patch demonstration">
+      <script type="application/fe"
+              data-fe-src="../../ingots/demos/classic_quilting_generated"
+              data-fe-render></script>
+    </section>
+  </main>
+</body>
+</html>
