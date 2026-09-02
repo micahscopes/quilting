@@ -1,0 +1,355 @@
+//! Placement-neutral planning for a complete dyadic Quilting atlas.
+//!
+//! This ingot owns the semantic work graph. It enumerates the 165 canonical
+//! edge-LoD triples for levels 0 through 8, records their hierarchy, derives
+//! conservative capacities, and assigns the independent roots to execution
+//! lanes at compile time. A browser-worker provider, WebGPU provider, or future
+//! native-thread provider may realize the same plan without putting a backend
+//! branch in the sampling or triangulation algorithm.
+//!
+//! Atlas generation itself remains runtime work. CTFE decides *what* work
+//! exists, its stable identity, bounded storage envelope, dependency order, and
+//! placement classes; it does not bake sampled points or triangles into source.
+
+use core::backend::Backend
+use core::execution::Compute
+use core::marker::Copy
+use core::pending::Pending
+
+pub use sampling
+pub use topology
+pub use triangulation
+
+pub const MIN_LOD: u32 = 0
+pub const MAX_LOD: u32 = 8
+pub const LOD_LEVELS: usize = 9
+pub const CANONICAL_KEY_COUNT: usize = 165
+pub const IRREDUCIBLE_ROOT_COUNT: usize = 45
+
+/// A requested edge density in dyadic LoD exponents. Each resident edge
+/// resolution is `2^lod`; a canonical key satisfies `a <= b <= c`.
+pub struct AtlasKey { pub a: u32, pub b: u32, pub c: u32 }
+impl Copy for AtlasKey {}
+
+/// The six permutations of a triangular patch's edge lanes.
+///
+/// `ABC` is identity. The other variants name the requested-lane order in
+/// terms of the canonical `(a, b, c)` lanes. This witness lets sampling,
+/// rendering, and adjacency code share one checked permutation convention.
+pub enum EdgePermutation {
+    ABC,
+    ACB,
+    BAC,
+    BCA,
+    CAB,
+    CBA,
+}
+impl Copy for EdgePermutation {}
+
+pub struct CanonicalKey { pub key: AtlasKey, pub permutation: EdgePermutation }
+impl Copy for CanonicalKey {}
+
+/// One compile-time-derived unit of atlas work.
+pub struct AtlasJob {
+    pub ordinal: u32,
+    pub key: AtlasKey,
+    pub root_ordinal: u32,
+    pub parent_ordinal: u32,
+    pub boundary_vertices: u32,
+    pub vertex_capacity: u32,
+    pub triangle_capacity: u32,
+    pub estimated_work: u32,
+    pub capacity_class: u32,
+}
+impl Copy for AtlasJob {}
+
+/// A deterministic greedy placement of the semantic jobs onto `LANES`.
+///
+/// `execution_order` is reverse canonical density order.
+/// `lane_for_job` indexes by canonical job ordinal. Providers may execute lanes
+/// concurrently, sequentially, or as GPU queues while preserving job identity.
+pub struct AtlasSchedule<const LANES: usize> {
+    pub execution_order: [u32; CANONICAL_KEY_COUNT],
+    pub lane_for_job: [u32; CANONICAL_KEY_COUNT],
+    pub lane_loads: [u32; LANES],
+    pub maximum_lane_load: u32,
+}
+impl<const LANES: usize> Copy for AtlasSchedule<LANES> {}
+
+/// Semantic brand used with `core::execution::Compute`.
+///
+/// Providers implement the existing backend-generic compute effect for this
+/// brand; Quilting does not invent a second task or dispatch protocol. `R` is
+/// the atlas's residency backend, deliberately distinct from the backend that
+/// delivers the completion token.
+pub struct BuildAtlas<Plan, R: Backend> {}
+
+/// Runtime inputs shared by every placement.
+pub struct AtlasBuildRequest { pub seed: u32, pub maximum_lod: u32, pub maximum_edge_ratio: u32 }
+impl Copy for AtlasBuildRequest {}
+
+/// Placement-independent facts attached to every completed resident atlas.
+pub struct AtlasReceipt {
+    pub canonical_jobs: u32,
+    pub completed_jobs: u32,
+    pub vertices: u32,
+    pub triangles: u32,
+    pub overflowed_jobs: u32,
+    pub invariant_failures: u32,
+}
+impl Copy for AtlasReceipt {}
+
+/// A resident atlas whose storage representation is selected by `B`.
+///
+/// On Wasm this can be linear memory, on WebGPU it is a device buffer, and a
+/// future native backend can select a native arena. The semantic result type is
+/// unchanged and GPU output need never be read back before rendering.
+pub struct ResidentAtlas<B: Backend> { pub words: B::Buffer<u32>, pub receipt: AtlasReceipt }
+
+/// Begin an atlas build through the standard placement-neutral compute effect.
+///
+/// `D` delivers completion; `R` owns the resulting arena. A browser worker can
+/// therefore return either Wasm-resident words or a WebGPU-resident buffer over
+/// the same Wasm actor-completion rail, with no readback and no task shim.
+pub fn build_atlas<D: Backend, R: Backend, Plan>(_ request: own AtlasBuildRequest) -> Pending<
+    D,
+    ResidentAtlas<R>,
+>
+uses (compute: mut Compute<D, BuildAtlas<Plan, R>, AtlasBuildRequest, ResidentAtlas<R>>)
+{
+    compute.compute_begin(request)
+}
+
+const fn invalid_key() -> AtlasKey {
+    AtlasKey { a: 0xffffffff, b: 0xffffffff, c: 0xffffffff }
+}
+
+const fn empty_job() -> AtlasJob {
+    AtlasJob {
+        ordinal: 0,
+        key: invalid_key(),
+        root_ordinal: 0,
+        parent_ordinal: 0xffffffff,
+        boundary_vertices: 0,
+        vertex_capacity: 0,
+        triangle_capacity: 0,
+        estimated_work: 0,
+        capacity_class: 0,
+    }
+}
+
+pub const fn edge_resolution(_ lod: u32) -> u32 {
+    if lod > MAX_LOD { return 0 }
+    1 << lod
+}
+
+/// Resolve a canonical triple from its lexicographic rank without storing a
+/// generated lookup table.
+pub const fn canonical_key_at(_ ordinal: usize) -> AtlasKey {
+    if ordinal >= CANONICAL_KEY_COUNT {
+        return invalid_key()
+    }
+    let levels = usize_to_u32(LOD_LEVELS)
+    let mut remaining = usize_to_u32(ordinal)
+    let mut a: u32 = MIN_LOD
+    let mut count = choose2(levels - a + 1)
+    while remaining >= count {
+        remaining = remaining - count
+        a = a + 1
+        count = choose2(levels - a + 1)
+    }
+    let mut b = a
+    count = levels - b
+    while remaining >= count {
+        remaining = remaining - count
+        b = b + 1
+        count = levels - b
+    }
+    AtlasKey { a: a, b: b, c: b + remaining }
+}
+
+pub const fn canonical_key_ordinal(_ key: AtlasKey) -> u32 {
+    if key.a > key.b || key.b > key.c || key.c > MAX_LOD {
+        return 0xffffffff
+    }
+    let levels = usize_to_u32(LOD_LEVELS)
+    let before_a = usize_to_u32(CANONICAL_KEY_COUNT) - choose3(levels - key.a + 2)
+    let before_b: u32 = choose2(levels - key.a + 1) - choose2(levels - key.b + 1)
+    before_a + before_b + key.c - key.b
+}
+
+const fn usize_to_u32(_ value: usize) -> u32 {
+    value.downcast_truncate()
+}
+
+const fn choose2(_ n: u32) -> u32 {
+    n * (n - 1) / 2
+}
+
+const fn choose3(_ n: u32) -> u32 {
+    n * (n - 1) * (n - 2) / 6
+}
+
+/// Canonicalize a requested key and retain the exact lane permutation.
+pub const fn canonicalize(_ key: AtlasKey) -> CanonicalKey {
+    if key.a <= key.b && key.a <= key.c {
+        if key.b <= key.c {
+            CanonicalKey { key: key, permutation: EdgePermutation::ABC }
+        } else {
+            CanonicalKey {
+                key: AtlasKey { a: key.a, b: key.c, c: key.b },
+                permutation: EdgePermutation::ACB,
+            }
+        }
+    } else if key.b <= key.a && key.b <= key.c {
+        if key.a <= key.c {
+            CanonicalKey {
+                key: AtlasKey { a: key.b, b: key.a, c: key.c },
+                permutation: EdgePermutation::BAC,
+            }
+        } else {
+            CanonicalKey {
+                key: AtlasKey { a: key.b, b: key.c, c: key.a },
+                permutation: EdgePermutation::BCA,
+            }
+        }
+    } else if key.a <= key.b {
+        CanonicalKey {
+            key: AtlasKey { a: key.c, b: key.a, c: key.b },
+            permutation: EdgePermutation::CAB,
+        }
+    } else {
+        CanonicalKey {
+            key: AtlasKey { a: key.c, b: key.b, c: key.a },
+            permutation: EdgePermutation::CBA,
+        }
+    }
+}
+
+pub const fn hierarchy_root(_ key: AtlasKey) -> AtlasKey {
+    AtlasKey { a: key.a - key.a, b: key.b - key.a, c: key.c - key.a }
+}
+
+pub const fn hierarchy_parent(_ key: AtlasKey) -> AtlasKey {
+    if key.a == 0 {
+        return invalid_key()
+    }
+    AtlasKey { a: key.a - 1, b: key.b - 1, c: key.c - 1 }
+}
+
+/// Conservative disk-packing capacity for a reference triangle whose smallest
+/// admitted separation is `1 / largest_edge_resolution`.
+///
+/// The rational coefficients round upward from `3*sqrt(3)/pi` and
+/// `6*sqrt(3)/pi`. Every provider must still report overflow rather than write
+/// past this envelope.
+pub const fn vertex_capacity(_ key: AtlasKey) -> u32 {
+    let c = edge_resolution(key.c)
+    (1654 * c * c + 3308 * c + 999) / 1000 + 1
+}
+
+pub const fn boundary_vertices(_ key: AtlasKey) -> u32 {
+    edge_resolution(key.a) + edge_resolution(key.b) + edge_resolution(key.c)
+}
+
+pub const fn triangle_capacity(_ key: AtlasKey) -> u32 {
+    let vertices = vertex_capacity(key)
+    let boundary = boundary_vertices(key)
+    let doubled = vertices + vertices
+    if doubled <= boundary + 2 {
+        0
+    } else {
+        doubled - boundary - 2
+    }
+}
+
+/// Symmetric, monotone work estimate used only for placement.
+///
+/// Pairwise edge-resolution products model reference-triangle area density
+/// without letting one anisotropic long edge alone dominate the schedule.
+pub const fn estimated_work(_ key: AtlasKey) -> u32 {
+    let a = edge_resolution(key.a)
+    let b = edge_resolution(key.b)
+    let c = edge_resolution(key.c)
+    a * b + b * c + c * a
+}
+
+pub const fn atlas_job(_ ordinal: usize) -> AtlasJob {
+    let key = canonical_key_at(ordinal)
+    let root = hierarchy_root(key)
+    let parent = hierarchy_parent(key)
+    AtlasJob {
+        ordinal: ordinal.downcast_truncate(),
+        key: key,
+        root_ordinal: canonical_key_ordinal(root),
+        parent_ordinal: canonical_key_ordinal(parent),
+        boundary_vertices: boundary_vertices(key),
+        vertex_capacity: vertex_capacity(key),
+        triangle_capacity: triangle_capacity(key),
+        estimated_work: estimated_work(key),
+        capacity_class: key.c,
+    }
+}
+
+pub const fn atlas_jobs() -> [AtlasJob; CANONICAL_KEY_COUNT] {
+    let mut jobs = [empty_job(); CANONICAL_KEY_COUNT]
+    let mut ordinal: usize = 0
+    while ordinal < CANONICAL_KEY_COUNT {
+        jobs[ordinal] = atlas_job(ordinal)
+        ordinal = ordinal + 1
+    }
+    jobs
+}
+
+/// Greedy, deterministic compile-time work allocation.
+///
+/// Denser canonical keys are visited in reverse order and assigned to the
+/// least-loaded estimated lane. Lower lane index is the stable tie-break. This
+/// avoids an unnecessary CTFE sort while retaining the measured load balance
+/// of full estimated-work sorting for the LoD-0-through-8 atlas.
+pub const fn atlas_schedule<const LANES: usize>() -> AtlasSchedule<LANES> {
+    let mut order = [0; CANONICAL_KEY_COUNT]
+    let mut lane_for_job = [0; CANONICAL_KEY_COUNT]
+    let mut lane_loads = [0; LANES]
+    let mut rank: usize = 0
+    while rank < CANONICAL_KEY_COUNT {
+        let best_job = CANONICAL_KEY_COUNT - rank - 1
+        let best_work = atlas_job(best_job).estimated_work
+
+        let mut best_lane: usize = 0
+        let mut lane: usize = 1
+        while lane < LANES {
+            if lane_loads[lane] < lane_loads[best_lane] {
+                best_lane = lane
+            }
+            lane = lane + 1
+        }
+
+        order[rank] = best_job.downcast_truncate()
+        lane_for_job[best_job] = best_lane.downcast_truncate()
+        lane_loads[best_lane] = lane_loads[best_lane] + best_work
+        rank = rank + 1
+    }
+
+    let mut maximum_lane_load: u32 = 0
+    let mut lane: usize = 0
+    while lane < LANES {
+        if lane_loads[lane] > maximum_lane_load {
+            maximum_lane_load = lane_loads[lane]
+        }
+        lane = lane + 1
+    }
+
+    AtlasSchedule {
+        execution_order: order,
+        lane_for_job: lane_for_job,
+        lane_loads: lane_loads,
+        maximum_lane_load: maximum_lane_load,
+    }
+}
+
+pub struct DirectLod0To8 {}
+pub struct HierarchicalLod0To8 {}
+
+#[const_eval_limit = 16000000]
+pub const DIRECT_16_LANE_SCHEDULE: AtlasSchedule<16> = atlas_schedule<16>()

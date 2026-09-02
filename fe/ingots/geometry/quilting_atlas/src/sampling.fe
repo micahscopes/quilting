@@ -1,0 +1,485 @@
+//! Deterministic sampling semantics shared by worker and WebGPU placements.
+//!
+//! Topology authority uses fixed-point barycentrics and explicit wrapping only
+//! in the counter hash. This keeps Wasm and WGSL behavior identical despite
+//! their different default overflow and floating-point rules.
+
+use super::{AtlasKey, MAX_LOD, boundary_vertices, edge_resolution}
+use core::marker::Copy
+
+/// Q14 barycentric denominator. It exactly represents every dyadic boundary
+/// subdivision through LoD 8 while keeping the equilateral distance form in a
+/// portable `u32` envelope.
+pub const BARYCENTRIC_SCALE: u32 = 16384
+pub const CANDIDATE_GRID_MULTIPLIER: u32 = 2
+pub const CANDIDATE_TRIALS_PER_CELL: u32 = 2
+pub const ACCEPTANCE_ROUND_LIMIT: u32 = 64
+
+/// Stable candidate states stored identically by scalar and GPU providers.
+pub const CANDIDATE_PENDING: u32 = 0
+pub const CANDIDATE_ACCEPTED: u32 = 1
+pub const CANDIDATE_REJECTED: u32 = 2
+pub const CANDIDATE_INVALID: u32 = 3
+
+pub struct FixedBarycentric { pub a: u32, pub b: u32, pub c: u32 }
+impl Copy for FixedBarycentric {}
+
+pub struct BoundarySeed {
+    pub point: FixedBarycentric,
+    pub edge: u32,
+    pub step: u32,
+    pub valid: bool,
+}
+impl Copy for BoundarySeed {}
+
+pub struct InteriorCandidate {
+    pub point: FixedBarycentric,
+    pub radius_squared: u32,
+    pub priority: u32,
+    pub slot: u32,
+    pub valid: bool,
+}
+impl Copy for InteriorCandidate {}
+
+pub struct CandidateCell {
+    pub cell_b: u32,
+    pub cell_c: u32,
+    pub trial: u32,
+    pub valid: bool,
+}
+impl Copy for CandidateCell {}
+
+const fn invalid_point() -> FixedBarycentric {
+    FixedBarycentric { a: 0, b: 0, c: 0 }
+}
+
+const fn invalid_boundary_seed() -> BoundarySeed {
+    BoundarySeed { point: invalid_point(), edge: 0xffffffff, step: 0, valid: false }
+}
+
+const fn invalid_candidate_cell() -> CandidateCell {
+    CandidateCell { cell_b: 0, cell_c: 0, trial: 0, valid: false }
+}
+
+pub const fn fixed_barycentric_valid(_ point: FixedBarycentric) -> bool {
+    point.a + point.b + point.c == BARYCENTRIC_SCALE
+}
+
+/// Exact, duplicate-free boundary sequence matching the classic sampler:
+/// AB includes both corners, AC excludes A, and BC excludes both corners.
+pub const fn boundary_seed(_ key: AtlasKey, _ ordinal: u32) -> BoundarySeed {
+    if key.a > key.b || key.b > key.c || key.c > MAX_LOD {
+        return invalid_boundary_seed()
+    }
+    let resolution_a = edge_resolution(key.a)
+    let resolution_b = edge_resolution(key.b)
+    let resolution_c = edge_resolution(key.c)
+    if ordinal >= boundary_vertices(key) {
+        return invalid_boundary_seed()
+    }
+
+    if ordinal <= resolution_c {
+        let step = ordinal
+        let t = step * (BARYCENTRIC_SCALE / resolution_c)
+        return BoundarySeed {
+            point: FixedBarycentric { a: BARYCENTRIC_SCALE - t, b: t, c: 0 },
+            edge: 2,
+            step: step,
+            valid: true,
+        }
+    }
+
+    let after_ab = ordinal - resolution_c - 1
+    if after_ab < resolution_b {
+        let step = after_ab + 1
+        let t = step * (BARYCENTRIC_SCALE / resolution_b)
+        return BoundarySeed {
+            point: FixedBarycentric { a: BARYCENTRIC_SCALE - t, b: 0, c: t },
+            edge: 1,
+            step: step,
+            valid: true,
+        }
+    }
+
+    let step = after_ab - resolution_b + 1
+    let t = step * (BARYCENTRIC_SCALE / resolution_a)
+    BoundarySeed {
+        point: FixedBarycentric { a: 0, b: BARYCENTRIC_SCALE - t, c: t },
+        edge: 0,
+        step: step,
+        valid: true,
+    }
+}
+
+/// Normative edge-density exponent in Q8.
+///
+/// Because atlas resolutions are powers of two, geometric interpolation of
+/// density is linear interpolation of LoD exponents. The edge weights are the
+/// products of the two endpoint barycentric coordinates, exactly matching the
+/// classic `tri_edge_density` field. A vertex uses the maximum exponent.
+pub const fn density_exponent_q8(_ key: AtlasKey, _ point: FixedBarycentric) -> u32 {
+    if !fixed_barycentric_valid(point) {
+        return 0
+    }
+    let weight_a = point.b * point.c
+    let weight_b = point.a * point.c
+    let weight_c = point.a * point.b
+    let weight_sum = weight_a + weight_b + weight_c
+    if weight_sum == 0 {
+        return key.c * 256
+    }
+    let weighted = weight_a * key.a + weight_b * key.b + weight_c * key.c
+    ratio_q8(weighted, weight_sum)
+}
+
+/// `floor(numerator * 256 / denominator)` without a wide integer multiply.
+/// The eight remainder-doubling steps are exact because the density weights
+/// remain below the Q14 barycentric square envelope.
+const fn ratio_q8(_ numerator: u32, _ denominator: u32) -> u32 {
+    let integer = numerator / denominator
+    let mut remainder = numerator % denominator
+    let mut fraction: u32 = 0
+    let mut bit: u32 = 0
+    while bit < 8 {
+        remainder = remainder + remainder
+        fraction = fraction + fraction
+        if remainder >= denominator {
+            remainder = remainder - denominator
+            fraction = fraction + 1
+        }
+        bit = bit + 1
+    }
+    integer * 256 + fraction
+}
+
+const fn multiply_q16(_ left: u32, _ right: u32) -> u32 {
+    (left * right + 32768) >> 16
+}
+
+/// Q16 approximation to `2^(-fraction/256)` over one fractional octave.
+///
+/// Each constant is `2^(-bit/256)` for one of the eight fractional bits. This
+/// product form needs only portable unsigned multiplication and shifting; it
+/// avoids signed division, transcendentals, and a 256-entry lookup table.
+const fn negative_exp2_fraction_q16(_ fraction: u32) -> u32 {
+    let mut value: u32 = 65536
+    if fraction & 1 != 0 {
+        value = multiply_q16(value, 65359)
+    }
+    if fraction & 2 != 0 {
+        value = multiply_q16(value, 65182)
+    }
+    if fraction & 4 != 0 {
+        value = multiply_q16(value, 64830)
+    }
+    if fraction & 8 != 0 {
+        value = multiply_q16(value, 64132)
+    }
+    if fraction & 16 != 0 {
+        value = multiply_q16(value, 62757)
+    }
+    if fraction & 32 != 0 {
+        value = multiply_q16(value, 60097)
+    }
+    if fraction & 64 != 0 {
+        value = multiply_q16(value, 55109)
+    }
+    if fraction & 128 != 0 {
+        value = multiply_q16(value, 46341)
+    }
+    value
+}
+
+const fn u32_to_i32(_ value: u32) -> i32 {
+    value.downcast_truncate()
+}
+
+const fn i32_to_u32(_ value: i32) -> u32 {
+    value.downcast_truncate()
+}
+
+/// Squared exclusion radius in the exact integer equilateral metric.
+///
+/// `density = 2^lod`; spacing is its reciprocal in the unit-circumradius
+/// equilateral domain. `equilateral_distance_squared` scales physical squared
+/// distance by `BARYCENTRIC_SCALE^2`, so this returns
+/// `scale^2 * 2^(-2*lod)` with a Q8-interpolated exponent.
+pub const fn poisson_radius_squared(_ key: AtlasKey, _ point: FixedBarycentric) -> u32 {
+    let density_exponent = density_exponent_q8(key, point)
+    let doubled_exponent = density_exponent + density_exponent
+    let integer_shift = doubled_exponent / 256
+    let fraction = doubled_exponent % 256
+    let fractional_q16 = negative_exp2_fraction_q16(fraction)
+    (fractional_q16 << 12) >> integer_shift
+}
+
+fn signed_difference(_ left: u32, _ right: u32) -> i32 {
+    u32_to_i32(left) - u32_to_i32(right)
+}
+
+/// Squared distance on the equilateral reference triangle, expressed entirely
+/// in two independent barycentric lanes.
+pub fn equilateral_distance_squared(_ left: FixedBarycentric, _ right: FixedBarycentric) -> u32 {
+    let db = signed_difference(left.b, right.b)
+    let dc = signed_difference(left.c, right.c)
+    let form = db * db + dc * dc + db * dc
+    i32_to_u32(form * 3)
+}
+
+/// Symmetric bigger-disk conflict rule used by both parallel providers.
+pub fn poisson_conflict(
+    _ left: FixedBarycentric,
+    _ left_radius_squared: u32,
+    _ right: FixedBarycentric,
+    _ right_radius_squared: u32,
+) -> bool {
+    let radius = if left_radius_squared > right_radius_squared {
+        left_radius_squared
+    } else {
+        right_radius_squared
+    }
+    equilateral_distance_squared(left, right) < radius
+}
+
+/// Explicitly wrapping counter hash. No other sampler arithmetic relies on
+/// backend overflow behavior.
+pub const fn mix32(_ input: u32) -> u32 {
+    let mut value = input
+    value = value ^ (value >> 16)
+    value = value.wrapping_mul(0x7feb352d)
+    value = value ^ (value >> 15)
+    value = value.wrapping_mul(0x846ca68b)
+    value ^ (value >> 16)
+}
+
+pub const fn candidate_priority(_ seed: u32, _ patch_ordinal: u32, _ slot: u32) -> u32 {
+    let patch_key = patch_ordinal.wrapping_mul(0x9e3779b9)
+    let slot_key = slot.wrapping_mul(0x85ebca6b)
+    mix32(seed ^ patch_key ^ slot_key)
+}
+
+pub const fn candidate_grid_side(_ key: AtlasKey) -> u32 {
+    edge_resolution(key.c) * CANDIDATE_GRID_MULTIPLIER
+}
+
+pub const fn candidate_cell_count(_ key: AtlasKey) -> u32 {
+    let side = candidate_grid_side(key)
+    side * (side + 1) / 2
+}
+
+pub const fn candidate_slot_count(_ key: AtlasKey) -> u32 {
+    candidate_cell_count(key) * CANDIDATE_TRIALS_PER_CELL
+}
+
+/// Invert the compact triangular row-major candidate index without a lookup
+/// table or floating-point square root. The bounded binary search takes at
+/// most nine iterations through LoD 8 on every placement.
+pub const fn candidate_cell_at_slot(_ key: AtlasKey, _ slot: u32) -> CandidateCell {
+    if slot >= candidate_slot_count(key) {
+        return invalid_candidate_cell()
+    }
+    let side = candidate_grid_side(key)
+    let cell = slot / CANDIDATE_TRIALS_PER_CELL
+    let mut low: u32 = 0
+    let mut high = side
+    while low + 1 < high {
+        let middle = (low + high) / 2
+        let row_start = middle * (side + side - middle + 1) / 2
+        if row_start <= cell {
+            low = middle
+        } else {
+            high = middle
+        }
+    }
+    let row_start = low * (side + side - low + 1) / 2
+    CandidateCell {
+        cell_b: low,
+        cell_c: cell - row_start,
+        trial: slot % CANDIDATE_TRIALS_PER_CELL,
+        valid: true,
+    }
+}
+
+/// Materialize one deterministic jittered candidate for a triangular grid
+/// cell. The caller's work decomposition supplies `(cell_b, cell_c, trial)`;
+/// worker lanes and GPU invocations therefore invoke the same function without
+/// an index-unranking table.
+pub const fn interior_candidate(
+    _ key: AtlasKey,
+    _ patch_ordinal: u32,
+    _ seed: u32,
+    _ cell_b: u32,
+    _ cell_c: u32,
+    _ trial: u32,
+) -> InteriorCandidate {
+    let side = candidate_grid_side(key)
+    if trial >= CANDIDATE_TRIALS_PER_CELL || cell_b + cell_c >= side {
+        return InteriorCandidate {
+            point: invalid_point(),
+            radius_squared: 0,
+            priority: 0,
+            slot: 0,
+            valid: false,
+        }
+    }
+    let cell_width = BARYCENTRIC_SCALE / side
+    // Compact row-major indexing over the upper-left triangular half of the
+    // square grid. This preserves a dense `[0, candidate_cell_count)` domain
+    // without an unranking table or backend-specific dispatch map.
+    let cell = cell_b * (side + side - cell_b + 1) / 2 + cell_c
+    let slot = cell * CANDIDATE_TRIALS_PER_CELL + trial
+    let first_hash = candidate_priority(seed, patch_ordinal, slot)
+    let second_hash = mix32(first_hash ^ 0xa511e9b3)
+    let mut jitter_b = first_hash % cell_width
+    let mut jitter_c = second_hash % cell_width
+    if jitter_b + jitter_c >= cell_width {
+        jitter_b = cell_width - 1 - jitter_b
+        jitter_c = cell_width - 1 - jitter_c
+    }
+    let b = cell_b * cell_width + jitter_b
+    let c = cell_c * cell_width + jitter_c
+    let point = FixedBarycentric { a: BARYCENTRIC_SCALE - b - c, b: b, c: c }
+    let valid = point.a > 0 && point.b > 0 && point.c > 0
+    InteriorCandidate {
+        point: point,
+        radius_squared: poisson_radius_squared(key, point),
+        priority: first_hash,
+        slot: slot,
+        valid: valid,
+    }
+}
+
+/// Materialize one candidate directly from its compact provider work index.
+pub const fn interior_candidate_at_slot(
+    _ key: AtlasKey,
+    _ patch_ordinal: u32,
+    _ seed: u32,
+    _ slot: u32,
+) -> InteriorCandidate {
+    let cell = candidate_cell_at_slot(key, slot)
+    if !cell.valid {
+        return InteriorCandidate {
+            point: invalid_point(),
+            radius_squared: 0,
+            priority: 0,
+            slot: 0,
+            valid: false,
+        }
+    }
+    interior_candidate(
+        key,
+        patch_ordinal,
+        seed,
+        cell.cell_b,
+        cell.cell_c,
+        cell.trial,
+    )
+}
+
+/// Exact exclusion of an interior candidate by the locked boundary ring.
+/// Providers may replace the linear scan with an indexed query, but the
+/// admitted/rejected result must match this reference relation exactly.
+pub fn candidate_conflicts_boundary(
+    _ key: AtlasKey,
+    _ candidate: InteriorCandidate,
+) -> bool {
+    if !candidate.valid { return false }
+    let mut ordinal: u32 = 0
+    let count = boundary_vertices(key)
+    while ordinal < count {
+        let boundary = boundary_seed(key, ordinal)
+        if poisson_conflict(
+            candidate.point,
+            candidate.radius_squared,
+            boundary.point,
+            poisson_radius_squared(key, boundary.point),
+        ) {
+            return true
+        }
+        ordinal = ordinal + 1
+    }
+    false
+}
+
+/// Initial state after materialization and boundary-seed exclusion.
+pub const fn initial_candidate_state(_ valid: bool, _ boundary_conflict: bool) -> u32 {
+    if !valid {
+        CANDIDATE_INVALID
+    } else if boundary_conflict {
+        CANDIDATE_REJECTED
+    } else {
+        CANDIDATE_PENDING
+    }
+}
+
+/// Stable total order for parallel maximal-independent-set rounds.
+/// Lower hash wins; the compact candidate slot breaks the vanishingly rare
+/// hash tie without relying on invocation or atomic-append order.
+pub const fn candidate_precedes(
+    _ left_priority: u32,
+    _ left_slot: u32,
+    _ right_priority: u32,
+    _ right_slot: u32,
+) -> bool {
+    left_priority < right_priority || (left_priority == right_priority && left_slot < right_slot)
+}
+
+/// Decide the provisional-winner mask from one immutable state generation.
+/// Providers may calculate the two conflict summaries in any order.
+pub const fn candidate_is_round_winner(
+    _ state: u32,
+    _ has_accepted_conflict: bool,
+    _ has_preceding_pending_conflict: bool,
+) -> bool {
+    state == CANDIDATE_PENDING && !has_accepted_conflict && !has_preceding_pending_conflict
+}
+
+/// Retire one candidate using a winner mask derived from the same immutable
+/// state generation. Winner computation and retirement are separate passes,
+/// preventing dispatch order from changing topology.
+pub const fn candidate_state_after_round(
+    _ state: u32,
+    _ has_accepted_conflict: bool,
+    _ is_winner: bool,
+    _ has_winner_conflict: bool,
+) -> u32 {
+    if state != CANDIDATE_PENDING {
+        state
+    } else if has_accepted_conflict {
+        CANDIDATE_REJECTED
+    } else if is_winner {
+        CANDIDATE_ACCEPTED
+    } else if has_winner_conflict {
+        CANDIDATE_REJECTED
+    } else {
+        CANDIDATE_PENDING
+    }
+}
+
+/// Dyadic density bucket used by a provider's multilevel candidate index.
+pub const fn candidate_density_bucket(_ key: AtlasKey, _ point: FixedBarycentric) -> u32 {
+    density_exponent_q8(key, point) / 256
+}
+
+/// Conservative cell-coordinate span for checking two density buckets.
+///
+/// A candidate cell is half one finest-edge interval wide. In the equilateral
+/// metric, either barycentric coordinate can change by at most `2r/3` across a
+/// radius `r`. Two finest/coarsest cells per dyadic ratio plus one halo are
+/// therefore conservative for the symmetric bigger-disk rule. Providers query
+/// each populated density bucket separately rather than searching every fine
+/// cell when one endpoint has a coarse radius.
+pub const fn candidate_conflict_cell_span(
+    _ key: AtlasKey,
+    _ left_bucket: u32,
+    _ right_bucket: u32,
+) -> u32 {
+    let coarse = if left_bucket < right_bucket {
+        left_bucket
+    } else {
+        right_bucket
+    }
+    if coarse > key.c { return 0 }
+    let ratio = edge_resolution(key.c) / edge_resolution(coarse)
+    ratio + ratio + 1
+}

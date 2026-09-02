@@ -1,0 +1,490 @@
+//! Deterministic triangle-soup topology shared by every atlas provider.
+//!
+//! Providers own storage, scans, radix sorting, and dispatch. This module owns
+//! the exact state transitions those placements execute: constrained boundary
+//! identity, point classification, insertion splits, directed-edge pairing,
+//! Delaunay flips, and face-disjoint winner arbitration. Rebuilding a sorted
+//! directed-edge stream between mutation rounds avoids backend-specific
+//! pointer topology and makes every mutation generation immutable to readers.
+
+use super::{AtlasKey, MAX_LOD, boundary_vertices, edge_resolution}
+use super::sampling::FixedBarycentric
+use super::triangulation::{incircle_sign, orientation, should_flip_edge}
+use core::marker::Copy
+
+pub const INVALID_VERTEX: u32 = 0xffffffff
+pub const POINT_OUTSIDE: u32 = 0
+pub const POINT_STRICTLY_INSIDE: u32 = 1
+pub const POINT_ON_EDGE: u32 = 2
+pub const POINT_ON_VERTEX: u32 = 3
+
+pub struct Triangle {
+    pub first: u32,
+    pub second: u32,
+    pub third: u32,
+    pub valid: bool,
+}
+impl Copy for Triangle {}
+
+pub struct TrianglePair { pub first: Triangle, pub second: Triangle, pub valid: bool }
+impl Copy for TrianglePair {}
+
+pub struct TriangleTriple {
+    pub first: Triangle,
+    pub second: Triangle,
+    pub third: Triangle,
+    pub valid: bool,
+}
+impl Copy for TriangleTriple {}
+
+pub struct DirectedEdge {
+    pub first: u32,
+    pub second: u32,
+    pub triangle: u32,
+    pub local_edge: u32,
+    pub constrained: bool,
+    pub valid: bool,
+}
+impl Copy for DirectedEdge {}
+
+pub struct FlipDecision {
+    pub incircle: i32,
+    pub convex: bool,
+    pub flip: bool,
+}
+impl Copy for FlipDecision {}
+
+pub struct FlipProposal {
+    pub first_triangle: u32,
+    pub second_triangle: u32,
+    pub edge_low: u32,
+    pub edge_high: u32,
+    pub active: bool,
+}
+impl Copy for FlipProposal {}
+
+const fn invalid_triangle() -> Triangle {
+    Triangle { first: INVALID_VERTEX, second: INVALID_VERTEX, third: INVALID_VERTEX, valid: false }
+}
+
+const fn invalid_pair() -> TrianglePair {
+    TrianglePair { first: invalid_triangle(), second: invalid_triangle(), valid: false }
+}
+
+const fn invalid_triple() -> TriangleTriple {
+    TriangleTriple {
+        first: invalid_triangle(),
+        second: invalid_triangle(),
+        third: invalid_triangle(),
+        valid: false,
+    }
+}
+
+fn same_point(_ left: FixedBarycentric, _ right: FixedBarycentric) -> bool {
+    left.a == right.a && left.b == right.b && left.c == right.c
+}
+
+/// Construct a nondegenerate CCW triangle, normalizing the final two lanes.
+pub fn normalized_triangle(
+    _ first_id: u32,
+    _ first: FixedBarycentric,
+    _ second_id: u32,
+    _ second: FixedBarycentric,
+    _ third_id: u32,
+    _ third: FixedBarycentric,
+) -> Triangle {
+    if first_id == second_id || first_id == third_id || second_id == third_id {
+        return invalid_triangle()
+    }
+    let winding = orientation(first, second, third)
+    if winding > 0 {
+        Triangle { first: first_id, second: second_id, third: third_id, valid: true }
+    } else if winding < 0 {
+        Triangle { first: first_id, second: third_id, third: second_id, valid: true }
+    } else {
+        invalid_triangle()
+    }
+}
+
+/// Exact location of one point relative to a valid CCW triangle.
+pub fn classify_point_in_triangle(
+    _ first: FixedBarycentric,
+    _ second: FixedBarycentric,
+    _ third: FixedBarycentric,
+    _ query: FixedBarycentric,
+) -> u32 {
+    let first_edge = orientation(first, second, query)
+    let second_edge = orientation(second, third, query)
+    let third_edge = orientation(third, first, query)
+    if first_edge < 0 || second_edge < 0 || third_edge < 0 {
+        return POINT_OUTSIDE
+    }
+    let mut zeros: u32 = 0
+    if first_edge == 0 { zeros = zeros + 1 }
+    if second_edge == 0 { zeros = zeros + 1 }
+    if third_edge == 0 { zeros = zeros + 1 }
+    if zeros == 0 {
+        POINT_STRICTLY_INSIDE
+    } else if zeros == 1 {
+        POINT_ON_EDGE
+    } else {
+        POINT_ON_VERTEX
+    }
+}
+
+/// Split a CCW triangle at a strictly interior point. Output slots are in
+/// stable source-edge order and remain CCW without another predicate pass.
+pub fn split_triangle_interior(
+    _ triangle: Triangle,
+    _ first: FixedBarycentric,
+    _ second: FixedBarycentric,
+    _ third: FixedBarycentric,
+    _ point_id: u32,
+    _ point: FixedBarycentric,
+) -> TriangleTriple {
+    if !triangle.valid
+        || point_id == triangle.first
+        || point_id == triangle.second
+        || point_id == triangle.third
+        || classify_point_in_triangle(first, second, third, point) != POINT_STRICTLY_INSIDE
+    {
+        return invalid_triple()
+    }
+    TriangleTriple {
+        first: Triangle {
+            first: triangle.first,
+            second: triangle.second,
+            third: point_id,
+            valid: true,
+        },
+        second: Triangle {
+            first: triangle.second,
+            second: triangle.third,
+            third: point_id,
+            valid: true,
+        },
+        third: Triangle {
+            first: triangle.third,
+            second: triangle.first,
+            third: point_id,
+            valid: true,
+        },
+        valid: true,
+    }
+}
+
+fn strictly_between(_ first: FixedBarycentric, _ second: FixedBarycentric, _ point: FixedBarycentric) -> bool {
+    if same_point(first, point) || same_point(second, point) {
+        return false
+    }
+    let a_low = if first.a < second.a { first.a } else { second.a }
+    let a_high = if first.a > second.a { first.a } else { second.a }
+    let b_low = if first.b < second.b { first.b } else { second.b }
+    let b_high = if first.b > second.b { first.b } else { second.b }
+    let c_low = if first.c < second.c { first.c } else { second.c }
+    let c_high = if first.c > second.c { first.c } else { second.c }
+    point.a >= a_low && point.a <= a_high
+        && point.b >= b_low && point.b <= b_high
+        && point.c >= c_low && point.c <= c_high
+}
+
+/// Split one directed triangle edge at a strict on-segment point. A provider
+/// locates the sole adjacent face for a constrained boundary edge, then uses
+/// this transition while inserting the ordered boundary chain.
+pub fn split_triangle_edge(
+    _ triangle: Triangle,
+    _ edge: u32,
+    _ edge_first: FixedBarycentric,
+    _ edge_second: FixedBarycentric,
+    _ opposite: FixedBarycentric,
+    _ point_id: u32,
+    _ point: FixedBarycentric,
+) -> TrianglePair {
+    if !triangle.valid
+        || edge > 2
+        || point_id == triangle.first
+        || point_id == triangle.second
+        || point_id == triangle.third
+        || orientation(edge_first, edge_second, point) != 0
+        || !strictly_between(edge_first, edge_second, point)
+    {
+        return invalid_pair()
+    }
+    let first_id = triangle_edge_first(triangle, edge)
+    let second_id = triangle_edge_second(triangle, edge)
+    let opposite_id = triangle_edge_opposite(triangle, edge)
+    let first = normalized_triangle(first_id, edge_first, point_id, point, opposite_id, opposite)
+    let second = normalized_triangle(point_id, point, second_id, edge_second, opposite_id, opposite)
+    TrianglePair { first: first, second: second, valid: first.valid && second.valid }
+}
+
+pub const fn triangle_edge_first(_ triangle: Triangle, _ edge: u32) -> u32 {
+    if edge == 0 { triangle.first } else if edge == 1 { triangle.second } else if edge == 2 {
+        triangle.third
+    } else { INVALID_VERTEX }
+}
+
+pub const fn triangle_edge_second(_ triangle: Triangle, _ edge: u32) -> u32 {
+    if edge == 0 { triangle.second } else if edge == 1 { triangle.third } else if edge == 2 {
+        triangle.first
+    } else { INVALID_VERTEX }
+}
+
+pub const fn triangle_edge_opposite(_ triangle: Triangle, _ edge: u32) -> u32 {
+    if edge == 0 { triangle.third } else if edge == 1 { triangle.first } else if edge == 2 {
+        triangle.second
+    } else { INVALID_VERTEX }
+}
+
+fn unordered_pair_is(_ first: u32, _ second: u32, _ expected_first: u32, _ expected_second: u32) -> bool {
+    (first == expected_first && second == expected_second)
+        || (first == expected_second && second == expected_first)
+}
+
+/// Map a CCW hull-ring ordinal to the compact boundary-seed vertex ID.
+///
+/// Sampling stores AB from A to B, then AC from A to C without A, then BC
+/// interiors from B to C. Topology wants A→B→C→A. This mapping performs that
+/// change of view arithmetically, without a generated permutation table.
+pub const fn boundary_ring_vertex(_ key: AtlasKey, _ ring_ordinal: u32) -> u32 {
+    if key.a > key.b
+        || key.b > key.c
+        || key.c > MAX_LOD
+        || ring_ordinal >= boundary_vertices(key)
+    {
+        return INVALID_VERTEX
+    }
+    let resolution_a = edge_resolution(key.a)
+    let resolution_b = edge_resolution(key.b)
+    let resolution_c = edge_resolution(key.c)
+    let vertex_b = resolution_c
+    let vertex_c = resolution_c + resolution_b
+
+    // A through B, including both corners.
+    if ring_ordinal <= vertex_b {
+        return ring_ordinal
+    }
+    let after_ab = ring_ordinal - vertex_b - 1
+
+    // BC interiors, followed by C.
+    if after_ab < resolution_a - 1 {
+        return vertex_c + 1 + after_ab
+    }
+    if after_ab == resolution_a - 1 {
+        return vertex_c
+    }
+
+    // AC interiors in reverse, from the neighbour of C back toward A.
+    let reverse_interior = after_ab - resolution_a
+    vertex_c - 1 - reverse_interior
+}
+
+/// Whether two boundary-seed IDs are one locked segment in the reference
+/// triangle's three ordered chains.
+pub fn is_constrained_boundary_edge(_ key: AtlasKey, _ first: u32, _ second: u32) -> bool {
+    if key.a > key.b
+        || key.b > key.c
+        || key.c > MAX_LOD
+        || first == second
+        || first >= boundary_vertices(key)
+        || second >= boundary_vertices(key)
+    {
+        return false
+    }
+    let resolution_a = edge_resolution(key.a)
+    let resolution_b = edge_resolution(key.b)
+    let resolution_c = edge_resolution(key.c)
+    let vertex_a: u32 = 0
+    let vertex_b = resolution_c
+    let vertex_c = resolution_c + resolution_b
+
+    // AB is stored contiguously, including both endpoints.
+    if first <= vertex_b && second <= vertex_b {
+        let low = if first < second { first } else { second }
+        let high = if first < second { second } else { first }
+        if high == low + 1 { return true }
+    }
+
+    // AC stores A separately, followed by its interior points and C.
+    let ac_first = vertex_b + 1
+    if unordered_pair_is(first, second, vertex_a, ac_first) {
+        return true
+    }
+    if first >= ac_first && first <= vertex_c && second >= ac_first && second <= vertex_c {
+        let low = if first < second { first } else { second }
+        let high = if first < second { second } else { first }
+        if high == low + 1 { return true }
+    }
+
+    // BC stores only interior points after C; B and C retain their IDs above.
+    if resolution_a == 1 {
+        return unordered_pair_is(first, second, vertex_b, vertex_c)
+    }
+    let bc_first = vertex_c + 1
+    let bc_last = vertex_c + resolution_a - 1
+    if unordered_pair_is(first, second, vertex_b, bc_first)
+        || unordered_pair_is(first, second, bc_last, vertex_c)
+    {
+        return true
+    }
+    if first >= bc_first && first <= bc_last && second >= bc_first && second <= bc_last {
+        let low = if first < second { first } else { second }
+        let high = if first < second { second } else { first }
+        return high == low + 1
+    }
+    false
+}
+
+pub const fn edge_low(_ edge: DirectedEdge) -> u32 {
+    if edge.first < edge.second { edge.first } else { edge.second }
+}
+
+pub const fn edge_high(_ edge: DirectedEdge) -> u32 {
+    if edge.first > edge.second { edge.first } else { edge.second }
+}
+
+pub fn triangle_directed_edge(
+    _ key: AtlasKey,
+    _ triangle: Triangle,
+    _ triangle_ordinal: u32,
+    _ local_edge: u32,
+) -> DirectedEdge {
+    let first = triangle_edge_first(triangle, local_edge)
+    let second = triangle_edge_second(triangle, local_edge)
+    let valid = triangle.valid && local_edge < 3 && first != second
+    DirectedEdge {
+        first: first,
+        second: second,
+        triangle: triangle_ordinal,
+        local_edge: local_edge,
+        constrained: valid && is_constrained_boundary_edge(key, first, second),
+        valid: valid,
+    }
+}
+
+/// Stable lexicographic order for radix-sort conformance or scalar fallback.
+pub fn directed_edge_precedes(_ left: DirectedEdge, _ right: DirectedEdge) -> bool {
+    let left_low = edge_low(left)
+    let right_low = edge_low(right)
+    let left_high = edge_high(left)
+    let right_high = edge_high(right)
+    left_low < right_low
+        || (left_low == right_low && left_high < right_high)
+        || (left_low == right_low && left_high == right_high && left.triangle < right.triangle)
+        || (left_low == right_low
+            && left_high == right_high
+            && left.triangle == right.triangle
+            && left.local_edge < right.local_edge)
+}
+
+/// Exact manifold pairing after the directed-edge stream has been sorted.
+pub fn directed_edges_form_interior_pair(_ first: DirectedEdge, _ second: DirectedEdge) -> bool {
+    first.valid
+        && second.valid
+        && !first.constrained
+        && !second.constrained
+        && first.triangle != second.triangle
+        && first.first == second.second
+        && first.second == second.first
+}
+
+/// Delaunay decision for two CCW triangles sharing directed edge `u -> v` in
+/// the first face and `v -> u` in the second. `first_opposite` and
+/// `second_opposite` are the vertices across that edge.
+pub fn interior_edge_flip_decision(
+    _ u_id: u32,
+    _ u: FixedBarycentric,
+    _ v_id: u32,
+    _ v: FixedBarycentric,
+    _ first_opposite_id: u32,
+    _ first_opposite: FixedBarycentric,
+    _ second_opposite_id: u32,
+    _ second_opposite: FixedBarycentric,
+) -> FlipDecision {
+    let first_winding = orientation(u, v, first_opposite)
+    let second_winding = orientation(v, u, second_opposite)
+    let first_replacement = orientation(first_opposite, u, second_opposite)
+    let second_replacement = orientation(second_opposite, v, first_opposite)
+    let convex = first_winding > 0
+        && second_winding > 0
+        && first_replacement > 0
+        && second_replacement > 0
+    if !convex {
+        return FlipDecision { incircle: 0, convex: false, flip: false }
+    }
+    let circle = incircle_sign(u, v, first_opposite, second_opposite)
+    FlipDecision {
+        incircle: circle,
+        convex: true,
+        flip: should_flip_edge(
+            u_id,
+            v_id,
+            first_opposite_id,
+            second_opposite_id,
+            circle,
+        ),
+    }
+}
+
+pub fn flipped_triangle_pair(
+    _ decision: FlipDecision,
+    _ u_id: u32,
+    _ u: FixedBarycentric,
+    _ v_id: u32,
+    _ v: FixedBarycentric,
+    _ first_opposite_id: u32,
+    _ first_opposite: FixedBarycentric,
+    _ second_opposite_id: u32,
+    _ second_opposite: FixedBarycentric,
+) -> TrianglePair {
+    if !decision.convex || !decision.flip {
+        return invalid_pair()
+    }
+    let first = normalized_triangle(
+        first_opposite_id,
+        first_opposite,
+        u_id,
+        u,
+        second_opposite_id,
+        second_opposite,
+    )
+    let second = normalized_triangle(
+        second_opposite_id,
+        second_opposite,
+        v_id,
+        v,
+        first_opposite_id,
+        first_opposite,
+    )
+    TrianglePair { first: first, second: second, valid: first.valid && second.valid }
+}
+
+pub const fn flip_proposals_conflict(_ left: FlipProposal, _ right: FlipProposal) -> bool {
+    left.active
+        && right.active
+        && (left.first_triangle == right.first_triangle
+            || left.first_triangle == right.second_triangle
+            || left.second_triangle == right.first_triangle
+            || left.second_triangle == right.second_triangle)
+}
+
+pub const fn flip_proposal_precedes(_ left: FlipProposal, _ right: FlipProposal) -> bool {
+    left.edge_low < right.edge_low
+        || (left.edge_low == right.edge_low && left.edge_high < right.edge_high)
+        || (left.edge_low == right.edge_low
+            && left.edge_high == right.edge_high
+            && left.first_triangle < right.first_triangle)
+        || (left.edge_low == right.edge_low
+            && left.edge_high == right.edge_high
+            && left.first_triangle == right.first_triangle
+            && left.second_triangle < right.second_triangle)
+}
+
+/// Winner decision from one immutable proposal generation. Providers compute
+/// the conflict summary in parallel, then mutate only winner-owned face pairs.
+pub const fn flip_proposal_is_round_winner(
+    _ proposal: FlipProposal,
+    _ has_preceding_face_conflict: bool,
+) -> bool {
+    proposal.active && !has_preceding_face_conflict
+}

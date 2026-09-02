@@ -1,0 +1,235 @@
+//! Exact, backend-portable predicates for constrained Delaunay topology.
+//!
+//! WebGPU does not expose 64-bit integers portably. The incircle determinant
+//! nevertheless needs about 60 signed bits for Q14 barycentrics. This module
+//! evaluates only that determinant in a two-word sign-magnitude accumulator;
+//! every leaf product remains an exact portable 32-bit operation. Worker and
+//! GPU providers therefore make identical flip decisions without floats.
+
+use super::sampling::FixedBarycentric
+use core::marker::Copy
+
+const HALF_BITS: u32 = 16
+const HALF_MASK: u32 = 65535
+
+struct WideMagnitude { lo: u32, hi: u32 }
+impl Copy for WideMagnitude {}
+
+struct SignedWide { magnitude: WideMagnitude, negative: bool }
+impl Copy for SignedWide {}
+
+const fn wide_zero() -> WideMagnitude {
+    WideMagnitude { lo: 0, hi: 0 }
+}
+
+fn wide_is_zero(_ value: WideMagnitude) -> bool {
+    value.lo == 0 && value.hi == 0
+}
+
+/// Exact 32x32 product as two 32-bit words, using four 16x16 products.
+fn wide_product(_ left: u32, _ right: u32) -> WideMagnitude {
+    let left_low = left & HALF_MASK
+    let left_high = left >> HALF_BITS
+    let right_low = right & HALF_MASK
+    let right_high = right >> HALF_BITS
+    let low_low = left_low * right_low
+    let low_high = left_low * right_high
+    let high_low = left_high * right_low
+    let high_high = left_high * right_high
+    let middle = (low_low >> HALF_BITS) + (low_high & HALF_MASK) + (high_low & HALF_MASK)
+    WideMagnitude {
+        lo: (low_low & HALF_MASK) | ((middle & HALF_MASK) << HALF_BITS),
+        hi: high_high + (low_high >> HALF_BITS) + (high_low >> HALF_BITS) + (middle >> HALF_BITS),
+    }
+}
+
+/// `-1`, `0`, or `1` without subtracting the two-word values.
+fn wide_compare(_ left: WideMagnitude, _ right: WideMagnitude) -> i32 {
+    if left.hi < right.hi {
+        -1
+    } else if left.hi > right.hi {
+        1
+    } else if left.lo < right.lo {
+        -1
+    } else if left.lo > right.lo { 1 } else { 0 }
+}
+
+/// Exact addition for the bounded incircle envelope. The low word explicitly
+/// wraps; the high-word sum is below `2^28` for valid Q14 barycentrics.
+fn wide_add(_ left: WideMagnitude, _ right: WideMagnitude) -> WideMagnitude {
+    let lo = left.lo.wrapping_add(right.lo)
+    let carry = if lo < left.lo { 1 } else { 0 }
+    WideMagnitude { lo: lo, hi: left.hi + right.hi + carry }
+}
+
+/// Exact subtraction under the precondition `left >= right`.
+fn wide_subtract(_ left: WideMagnitude, _ right: WideMagnitude) -> WideMagnitude {
+    let borrow = if left.lo < right.lo { 1 } else { 0 }
+    WideMagnitude { lo: left.lo.wrapping_sub(right.lo), hi: left.hi - right.hi - borrow }
+}
+
+fn signed_product(_ unsigned: u32, _ signed: i32) -> SignedWide {
+    if signed == 0 || unsigned == 0 {
+        return SignedWide { magnitude: wide_zero(), negative: false }
+    }
+    let negative = signed < 0
+    let magnitude: u32 = if negative {
+        (-signed).downcast_truncate()
+    } else {
+        signed.downcast_truncate()
+    }
+    SignedWide { magnitude: wide_product(unsigned, magnitude), negative: negative }
+}
+
+fn signed_add(_ left: SignedWide, _ right: SignedWide) -> SignedWide {
+    if wide_is_zero(left.magnitude) {
+        return right
+    }
+    if wide_is_zero(right.magnitude) {
+        return left
+    }
+    if left.negative == right.negative {
+        return SignedWide {
+            magnitude: wide_add(left.magnitude, right.magnitude),
+            negative: left.negative,
+        }
+    }
+    let ordering = wide_compare(left.magnitude, right.magnitude)
+    if ordering == 0 {
+        SignedWide { magnitude: wide_zero(), negative: false }
+    } else if ordering > 0 {
+        SignedWide {
+            magnitude: wide_subtract(left.magnitude, right.magnitude),
+            negative: left.negative,
+        }
+    } else {
+        SignedWide {
+            magnitude: wide_subtract(right.magnitude, left.magnitude),
+            negative: right.negative,
+        }
+    }
+}
+
+fn signed_sign(_ value: SignedWide) -> i32 {
+    if wide_is_zero(value.magnitude) {
+        0
+    } else if value.negative { -1 } else { 1 }
+}
+
+fn difference(_ left: u32, _ right: u32) -> i32 {
+    let left: i32 = left.downcast_truncate()
+    let right: i32 = right.downcast_truncate()
+    left - right
+}
+
+/// Exact orientation in the independent `(b, c)` barycentric plane.
+/// The map from this plane to the unit-circumradius equilateral triangle has a
+/// positive determinant, so the sign is also the physical orientation.
+pub fn orientation(
+    _ first: FixedBarycentric,
+    _ second: FixedBarycentric,
+    _ third: FixedBarycentric,
+) -> i32 {
+    let ab_b = difference(second.b, first.b)
+    let ab_c = difference(second.c, first.c)
+    let ac_b = difference(third.b, first.b)
+    let ac_c = difference(third.c, first.c)
+    ab_b * ac_c - ab_c * ac_b
+}
+
+/// Squared length without the common factor three in the equilateral metric.
+fn equilateral_lift(_ delta_b: i32, _ delta_c: i32) -> u32 {
+    let value = delta_b * delta_b + delta_c * delta_c + delta_b * delta_c
+    value.downcast_truncate()
+}
+
+/// Exact incircle sign normalized to the first three points' winding.
+///
+/// Positive means `query` is strictly inside the circumcircle; negative means
+/// outside; zero is exactly cocircular or the defining triangle is degenerate.
+pub fn incircle_sign(
+    _ first: FixedBarycentric,
+    _ second: FixedBarycentric,
+    _ third: FixedBarycentric,
+    _ query: FixedBarycentric,
+) -> i32 {
+    let first_b = difference(first.b, query.b)
+    let first_c = difference(first.c, query.c)
+    let second_b = difference(second.b, query.b)
+    let second_c = difference(second.c, query.c)
+    let third_b = difference(third.b, query.b)
+    let third_c = difference(third.c, query.c)
+
+    let first_second = first_b * second_c - second_b * first_c
+    let second_third = second_b * third_c - third_b * second_c
+    let third_first = third_b * first_c - first_b * third_c
+    let first_lift = equilateral_lift(first_b, first_c)
+    let second_lift = equilateral_lift(second_b, second_c)
+    let third_lift = equilateral_lift(third_b, third_c)
+
+    let determinant = signed_add(
+        signed_add(
+            signed_product(first_lift, second_third),
+            signed_product(second_lift, third_first),
+        ),
+        signed_product(third_lift, first_second),
+    )
+    let sign = signed_sign(determinant)
+    let winding = orientation(first, second, third)
+    if winding < 0 {
+        -sign
+    } else if winding > 0 { sign } else { 0 }
+}
+
+fn ordered_edge_precedes(
+    _ left_first: u32,
+    _ left_second: u32,
+    _ right_first: u32,
+    _ right_second: u32,
+) -> bool {
+    let left_low = if left_first < left_second {
+        left_first
+    } else {
+        left_second
+    }
+    let left_high = if left_first < left_second {
+        left_second
+    } else {
+        left_first
+    }
+    let right_low = if right_first < right_second {
+        right_first
+    } else {
+        right_second
+    }
+    let right_high = if right_first < right_second {
+        right_second
+    } else {
+        right_first
+    }
+    left_low < right_low || (left_low == right_low && left_high < right_high)
+}
+
+/// Decide one legal interior-edge flip. For an exact cocircular tie, topology
+/// monotonically moves toward the lexicographically smaller undirected
+/// diagonal, preventing provider-order oscillation.
+pub fn should_flip_edge(
+    _ current_first: u32,
+    _ current_second: u32,
+    _ proposed_first: u32,
+    _ proposed_second: u32,
+    _ normalized_incircle_sign: i32,
+) -> bool {
+    if normalized_incircle_sign > 0 {
+        true
+    } else if normalized_incircle_sign < 0 {
+        false
+    } else {
+        ordered_edge_precedes(
+            proposed_first,
+            proposed_second,
+            current_first,
+            current_second,
+        )
+    }
+}

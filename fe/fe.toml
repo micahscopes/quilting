@@ -6,6 +6,8 @@ members = [
   { path = "ingots/algebra/quilting_quaternion", name = "quilting_quaternion" },
   { path = "ingots/geometry/quilting_hyperpatch", name = "quilting_hyperpatch" },
   { path = "ingots/geometry/quilting_qb", name = "quilting_qb" },
+  { path = "ingots/geometry/quilting_atlas", name = "quilting_atlas" },
+  { path = "ingots/gpu/quilting_atlas_webgpu", name = "quilting_atlas_webgpu" },
   { path = "ingots/validation/classic_quilting_oracle", name = "classic_quilting_oracle" },
   { path = "ingots/demos/classic_quilting_fixed_raster", name = "classic_quilting_fixed_raster" },
 ]
@@ -14,6 +16,8 @@ default-members = [
   "ingots/algebra/quilting_quaternion",
   "ingots/geometry/quilting_hyperpatch",
   "ingots/geometry/quilting_qb",
+  "ingots/geometry/quilting_atlas",
+  "ingots/gpu/quilting_atlas_webgpu",
   "ingots/validation/classic_quilting_oracle",
   "ingots/demos/classic_quilting_fixed_raster",
 ]

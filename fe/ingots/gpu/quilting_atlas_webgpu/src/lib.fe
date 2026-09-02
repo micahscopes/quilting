@@ -1,0 +1,2234 @@
+//! WebGPU-resident realization of portable Quilting atlas stages.
+//!
+//! This ingot owns buffer placement and immutable-generation scheduling only.
+//! Candidate identity, sampling, exclusion, priority, and state transitions
+//! remain in `quilting_atlas::sampling`, shared with Wasm-worker and future
+//! native providers.
+
+use quilting_atlas::{AtlasKey, MAX_LOD, boundary_vertices, edge_resolution}
+use quilting_atlas::sampling::{
+    CANDIDATE_ACCEPTED,
+    CANDIDATE_INVALID,
+    CANDIDATE_PENDING,
+    FixedBarycentric,
+    InteriorCandidate,
+    boundary_seed,
+    candidate_conflicts_boundary,
+    candidate_is_round_winner,
+    candidate_precedes,
+    candidate_slot_count,
+    candidate_state_after_round,
+    initial_candidate_state,
+    interior_candidate_at_slot,
+    poisson_conflict,
+}
+use quilting_atlas::triangulation::orientation
+use quilting_atlas::topology::{
+    INVALID_VERTEX,
+    POINT_ON_EDGE,
+    POINT_ON_VERTEX,
+    POINT_STRICTLY_INSIDE,
+    DirectedEdge,
+    FlipProposal,
+    Triangle,
+    TrianglePair,
+    boundary_ring_vertex,
+    classify_point_in_triangle,
+    directed_edges_form_interior_pair,
+    flip_proposal_precedes,
+    normalized_triangle,
+    flipped_triangle_pair,
+    interior_edge_flip_decision,
+    split_triangle_edge,
+    split_triangle_interior,
+    triangle_directed_edge,
+    triangle_edge_first,
+    triangle_edge_opposite,
+    triangle_edge_second,
+}
+use std::webgpu::{ComputeInvocation, StorageBuffer}
+
+pub const CANDIDATE_WORDS: usize = 5
+pub const SAMPLING_WORDS_PER_CANDIDATE: usize = 8
+pub const SAMPLING_PROGRESS_WORDS: usize = 1
+pub const POINT_WORDS: usize = 3
+pub const TRIANGLE_WORDS: usize = 4
+pub const TOPOLOGY_PROPOSAL_WORDS: usize = 4
+pub const TOPOLOGY_PROGRESS_WORDS: usize = 8
+pub const GENERATION_PARITY: u32 = 0
+
+pub const POINT_PENDING: u32 = 0
+pub const POINT_INSERTED: u32 = 1
+pub const POINT_INVALID: u32 = 2
+
+pub const PROPOSAL_NONE: u32 = 0
+pub const PROPOSAL_STRICT_FACE: u32 = 1
+pub const PROPOSAL_INTERIOR_EDGE: u32 = 2
+pub const PROPOSAL_INVALID: u32 = 3
+
+pub struct CandidateCompaction {
+    pub valid: bool,
+    pub converged: bool,
+    pub overflowed: bool,
+    pub candidate_slots: u32,
+    pub accepted_candidates: u32,
+    pub boundary_points: u32,
+    pub resident_points: u32,
+}
+impl core::marker::Copy for CandidateCompaction {}
+
+pub struct TopologyConstruction {
+    pub valid: bool,
+    pub overflowed: bool,
+    pub resident_points: u32,
+    pub boundary_points: u32,
+    pub inserted_points: u32,
+    pub resident_triangles: u32,
+    pub expected_triangles: u32,
+    pub location_failures: u32,
+    pub invariant_failures: u32,
+}
+impl core::marker::Copy for TopologyConstruction {}
+
+pub struct DelaunayRestoration {
+    pub valid: bool,
+    pub converged: bool,
+    pub resident_points: u32,
+    pub resident_triangles: u32,
+    pub flips: u32,
+    pub remaining_violations: u32,
+    pub invariant_failures: u32,
+}
+impl core::marker::Copy for DelaunayRestoration {}
+
+fn candidate_offset(_ slot: u32) -> u32 {
+    slot * CANDIDATE_WORDS.downcast_truncate()
+}
+
+fn candidate_state_a_offset<const CAPACITY: usize>(_ slot: u32) -> u32 {
+    let capacity: u32 = CAPACITY.downcast_truncate()
+    capacity * CANDIDATE_WORDS.downcast_truncate() + slot
+}
+
+fn candidate_state_b_offset<const CAPACITY: usize>(_ slot: u32) -> u32 {
+    let capacity: u32 = CAPACITY.downcast_truncate()
+    capacity * (CANDIDATE_WORDS + 1).downcast_truncate() + slot
+}
+
+fn candidate_winner_offset<const CAPACITY: usize>(_ slot: u32) -> u32 {
+    let capacity: u32 = CAPACITY.downcast_truncate()
+    capacity * (CANDIDATE_WORDS + 2).downcast_truncate() + slot
+}
+
+fn candidate_progress_offset<const CAPACITY: usize>() -> u32 {
+    let capacity: u32 = CAPACITY.downcast_truncate()
+    capacity * SAMPLING_WORDS_PER_CANDIDATE.downcast_truncate()
+}
+
+fn store_candidate<const WORDS: usize>(
+    _ workspace: StorageBuffer<u32, WORDS>,
+    _ candidate: InteriorCandidate,
+    _ slot: u32,
+) {
+    let offset = candidate_offset(slot)
+    workspace.store(index: offset, value: candidate.point.a)
+    workspace.store(index: offset + 1, value: candidate.point.b)
+    workspace.store(index: offset + 2, value: candidate.point.c)
+    workspace.store(index: offset + 3, value: candidate.radius_squared)
+    workspace.store(index: offset + 4, value: candidate.priority)
+}
+
+fn load_candidate<const WORDS: usize>(
+    _ workspace: StorageBuffer<u32, WORDS>,
+    _ slot: u32,
+) -> InteriorCandidate {
+    let offset = candidate_offset(slot)
+    let point = FixedBarycentric {
+        a: workspace.load(index: offset),
+        b: workspace.load(index: offset + 1),
+        c: workspace.load(index: offset + 2),
+    }
+    InteriorCandidate {
+        point: point,
+        radius_squared: workspace.load(index: offset + 3),
+        priority: workspace.load(index: offset + 4),
+        slot: slot,
+        valid: true,
+    }
+}
+
+fn load_generation_state<const CAPACITY: usize, const WORDS: usize>(
+    _ workspace: StorageBuffer<u32, WORDS>,
+    _ parity: u32,
+    _ slot: u32,
+) -> u32 {
+    let offset = if parity == 0 {
+        candidate_state_a_offset<CAPACITY>(slot)
+    } else {
+        candidate_state_b_offset<CAPACITY>(slot)
+    }
+    workspace.load(index: offset)
+}
+
+fn store_next_generation_state<const CAPACITY: usize, const WORDS: usize>(
+    _ workspace: StorageBuffer<u32, WORDS>,
+    _ parity: u32,
+    _ slot: u32,
+    _ state: u32,
+) {
+    let offset = if parity == 0 {
+        candidate_state_b_offset<CAPACITY>(slot)
+    } else {
+        candidate_state_a_offset<CAPACITY>(slot)
+    }
+    workspace.store(index: offset, value: state)
+}
+
+fn point_store<const WORDS: usize>(
+    _ points: StorageBuffer<u32, WORDS>,
+    _ ordinal: u32,
+    _ point: FixedBarycentric,
+) {
+    let offset = ordinal * POINT_WORDS.downcast_truncate()
+    points.store(index: offset, value: point.a)
+    points.store(index: offset + 1, value: point.b)
+    points.store(index: offset + 2, value: point.c)
+}
+
+fn point_load<const WORDS: usize>(
+    _ points: StorageBuffer<u32, WORDS>,
+    _ ordinal: u32,
+) -> FixedBarycentric {
+    let offset = ordinal * POINT_WORDS.downcast_truncate()
+    FixedBarycentric {
+        a: points.load(index: offset),
+        b: points.load(index: offset + 1),
+        c: points.load(index: offset + 2),
+    }
+}
+
+fn triangle_offset(_ ordinal: u32) -> u32 {
+    ordinal * TRIANGLE_WORDS.downcast_truncate()
+}
+
+const fn invalid_triangle() -> Triangle {
+    Triangle { first: INVALID_VERTEX, second: INVALID_VERTEX, third: INVALID_VERTEX, valid: false }
+}
+
+const fn invalid_triangle_pair() -> TrianglePair {
+    TrianglePair { first: invalid_triangle(), second: invalid_triangle(), valid: false }
+}
+
+const fn invalid_flip_proposal() -> FlipProposal {
+    FlipProposal {
+        first_triangle: INVALID_VERTEX,
+        second_triangle: INVALID_VERTEX,
+        edge_low: INVALID_VERTEX,
+        edge_high: INVALID_VERTEX,
+        active: false,
+    }
+}
+
+fn triangle_store<const WORDS: usize>(
+    _ triangles: StorageBuffer<u32, WORDS>,
+    _ ordinal: u32,
+    _ triangle: Triangle,
+) {
+    let offset = triangle_offset(ordinal)
+    triangles.store(index: offset, value: triangle.first)
+    triangles.store(index: offset + 1, value: triangle.second)
+    triangles.store(index: offset + 2, value: triangle.third)
+    triangles.store(
+            index: offset + 3,
+            value: if triangle.valid { 1 } else { 0 },
+        )
+}
+
+fn triangle_load<const WORDS: usize>(
+    _ triangles: StorageBuffer<u32, WORDS>,
+    _ ordinal: u32,
+) -> Triangle {
+    let offset = triangle_offset(ordinal)
+    Triangle {
+        first: triangles.load(index: offset),
+        second: triangles.load(index: offset + 1),
+        third: triangles.load(index: offset + 2),
+        valid: triangles.load(index: offset + 3) != 0,
+    }
+}
+
+fn triangle_point<const POINT_STORAGE_WORDS: usize>(
+    _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
+    _ triangle: Triangle,
+    _ lane: u32,
+) -> FixedBarycentric {
+    let vertex = if lane == 0 {
+        triangle.first
+    } else if lane == 1 {
+        triangle.second
+    } else {
+        triangle.third
+    }
+    point_load<POINT_STORAGE_WORDS>(points, vertex)
+}
+
+fn classify_resident_point<const POINT_STORAGE_WORDS: usize>(
+    _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
+    _ triangle: Triangle,
+    _ point: FixedBarycentric,
+) -> u32 {
+    classify_point_in_triangle(
+        triangle_point<POINT_STORAGE_WORDS>(points, triangle, 0),
+        triangle_point<POINT_STORAGE_WORDS>(points, triangle, 1),
+        triangle_point<POINT_STORAGE_WORDS>(points, triangle, 2),
+        point,
+    )
+}
+
+fn split_resident_triangle_edge<const POINT_STORAGE_WORDS: usize>(
+    _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
+    _ triangle: Triangle,
+    _ point_id: u32,
+    _ point: FixedBarycentric,
+) -> TrianglePair {
+    let mut edge: u32 = 0
+    while edge < 3 {
+        let first_id = triangle_edge_first(triangle, edge)
+        let second_id = triangle_edge_second(triangle, edge)
+        let opposite_id = triangle_edge_opposite(triangle, edge)
+        let split = split_triangle_edge(
+            triangle,
+            edge,
+            point_load<POINT_STORAGE_WORDS>(points, first_id),
+            point_load<POINT_STORAGE_WORDS>(points, second_id),
+            point_load<POINT_STORAGE_WORDS>(points, opposite_id),
+            point_id,
+            point,
+        )
+        if split.valid {
+            return split
+        }
+        edge = edge + 1
+    }
+    invalid_triangle_pair()
+}
+
+fn topology_state_a_offset(_ slot: u32) -> u32 {
+    slot
+}
+
+fn topology_state_b_offset<const POINT_CAPACITY: usize>(_ slot: u32) -> u32 {
+    let capacity: u32 = POINT_CAPACITY.downcast_truncate()
+    capacity + slot
+}
+
+fn topology_proposal_offset<const POINT_CAPACITY: usize>(_ slot: u32) -> u32 {
+    let capacity: u32 = POINT_CAPACITY.downcast_truncate()
+    capacity * 2 + slot * TOPOLOGY_PROPOSAL_WORDS.downcast_truncate()
+}
+
+fn topology_winner_offset<const POINT_CAPACITY: usize>(_ slot: u32) -> u32 {
+    let capacity: u32 = POINT_CAPACITY.downcast_truncate()
+    capacity * 6 + slot
+}
+
+fn topology_face_owner_offset<const POINT_CAPACITY: usize>(_ face: u32) -> u32 {
+    let point_capacity: u32 = POINT_CAPACITY.downcast_truncate()
+    point_capacity * 7 + face
+}
+
+fn topology_face_expansion_offset<const POINT_CAPACITY: usize, const TRIANGLE_CAPACITY: usize>(
+    _ face: u32,
+) -> u32 {
+    let point_capacity: u32 = POINT_CAPACITY.downcast_truncate()
+    let triangle_capacity: u32 = TRIANGLE_CAPACITY.downcast_truncate()
+    point_capacity * 7 + triangle_capacity + face
+}
+
+fn topology_face_output_offset<const POINT_CAPACITY: usize, const TRIANGLE_CAPACITY: usize>(
+    _ face: u32,
+) -> u32 {
+    let point_capacity: u32 = POINT_CAPACITY.downcast_truncate()
+    let triangle_capacity: u32 = TRIANGLE_CAPACITY.downcast_truncate()
+    point_capacity * 7 + triangle_capacity * 2 + face
+}
+
+fn topology_progress_offset<const POINT_CAPACITY: usize, const TRIANGLE_CAPACITY: usize>(
+    _ lane: u32,
+) -> u32 {
+    let point_capacity: u32 = POINT_CAPACITY.downcast_truncate()
+    let triangle_capacity: u32 = TRIANGLE_CAPACITY.downcast_truncate()
+    point_capacity * 7 + triangle_capacity * 3 + lane
+}
+
+fn topology_store_point_state<const POINT_CAPACITY: usize, const WORKSPACE_WORDS: usize>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ parity: u32,
+    _ slot: u32,
+    _ state: u32,
+) {
+    let offset = if parity == 0 {
+        topology_state_a_offset(slot)
+    } else {
+        topology_state_b_offset<POINT_CAPACITY>(slot)
+    }
+    workspace.store(index: offset, value: state)
+}
+
+fn topology_load_point_state<const POINT_CAPACITY: usize, const WORKSPACE_WORDS: usize>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ parity: u32,
+    _ slot: u32,
+) -> u32 {
+    let offset = if parity == 0 {
+        topology_state_a_offset(slot)
+    } else {
+        topology_state_b_offset<POINT_CAPACITY>(slot)
+    }
+    workspace.load(index: offset)
+}
+
+fn topology_store_progress<
+    const POINT_CAPACITY: usize,
+    const TRIANGLE_CAPACITY: usize,
+    const WORKSPACE_WORDS: usize,
+>(_ workspace: StorageBuffer<u32, WORKSPACE_WORDS>, _ lane: u32, _ value: u32) {
+    workspace
+        .store(
+            index: topology_progress_offset<POINT_CAPACITY, TRIANGLE_CAPACITY>(lane),
+            value: value,
+        )
+}
+
+fn topology_load_progress<
+    const POINT_CAPACITY: usize,
+    const TRIANGLE_CAPACITY: usize,
+    const WORKSPACE_WORDS: usize,
+>(_ workspace: StorageBuffer<u32, WORKSPACE_WORDS>, _ lane: u32) -> u32 {
+    workspace.load(
+            index: topology_progress_offset<POINT_CAPACITY, TRIANGLE_CAPACITY>(lane),
+        )
+}
+
+pub fn parallel_topology_progress<
+    const POINT_CAPACITY: usize,
+    const TRIANGLE_CAPACITY: usize,
+    const WORKSPACE_WORDS: usize,
+>(_ workspace: StorageBuffer<u32, WORKSPACE_WORDS>, _ lane: u32) -> u32
+where { WORKSPACE_WORDS == POINT_CAPACITY * 7 + TRIANGLE_CAPACITY * 3 + TOPOLOGY_PROGRESS_WORDS }
+{
+    if lane >= TOPOLOGY_PROGRESS_WORDS.downcast_truncate() {
+        return 0xffffffff
+    }
+    topology_load_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(workspace, lane)
+}
+
+/// Read one resident fixed-point point without exposing the packed buffer ABI
+/// to a renderer or validator.
+pub fn resident_point<const POINT_STORAGE_WORDS: usize>(
+    _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
+    _ point: u32,
+) -> FixedBarycentric
+where { POINT_STORAGE_WORDS % POINT_WORDS == 0 }
+{
+    point_load<POINT_STORAGE_WORDS>(points, point)
+}
+
+/// Read one triangle from the currently published immutable generation.
+pub fn parallel_topology_triangle<
+    const POINT_CAPACITY: usize,
+    const TRIANGLE_CAPACITY: usize,
+    const TRIANGLE_STORAGE_WORDS: usize,
+    const WORKSPACE_WORDS: usize,
+>(
+    _ triangles_a: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+    _ triangles_b: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ face: u32,
+) -> Triangle
+where
+    {
+        TRIANGLE_STORAGE_WORDS == TRIANGLE_CAPACITY * TRIANGLE_WORDS
+    },
+    {
+        WORKSPACE_WORDS == POINT_CAPACITY * 7 + TRIANGLE_CAPACITY * 3 + TOPOLOGY_PROGRESS_WORDS
+    }
+{
+    let triangle_count = topology_load_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        2,
+    )
+    let mut result = invalid_triangle()
+    if face < triangle_count {
+        let parity = topology_load_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+            workspace,
+            0,
+        )
+        result = topology_load_triangle<TRIANGLE_STORAGE_WORDS>(
+            triangles_a,
+            triangles_b,
+            parity,
+            face,
+        )
+    }
+    result
+}
+
+/// Initialize the parallel topology state and emit the locked convex hull fan.
+/// Every lane owns disjoint point, face, and workspace records.
+pub fn initialize_parallel_topology_lane<
+    const POINT_CAPACITY: usize,
+    const POINT_STORAGE_WORDS: usize,
+    const TRIANGLE_CAPACITY: usize,
+    const TRIANGLE_STORAGE_WORDS: usize,
+    const WORKSPACE_WORDS: usize,
+>(
+    _ key: AtlasKey,
+    _ source_valid: bool,
+    _ requested_points: u32,
+    _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
+    _ triangles_a: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+    _ triangles_b: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where
+    {
+        POINT_STORAGE_WORDS == POINT_CAPACITY * POINT_WORDS
+    },
+    {
+        TRIANGLE_STORAGE_WORDS == TRIANGLE_CAPACITY * TRIANGLE_WORDS
+    },
+    {
+        WORKSPACE_WORDS == POINT_CAPACITY * 7 + TRIANGLE_CAPACITY * 3 + TOPOLOGY_PROGRESS_WORDS
+    }
+{
+    let lane = invocation.global.x
+    let point_capacity: u32 = POINT_CAPACITY.downcast_truncate()
+    let triangle_capacity: u32 = TRIANGLE_CAPACITY.downcast_truncate()
+    let canonical_key = key.a <= key.b && key.b <= key.c && key.c <= MAX_LOD
+    let boundary = boundary_vertices(key)
+    let source_admitted = source_valid
+        && canonical_key
+        && requested_points >= boundary
+        && requested_points <= point_capacity
+        && boundary >= 3
+        && boundary - 2 <= triangle_capacity
+
+    if lane < point_capacity {
+        let state = if !source_admitted || lane >= requested_points {
+            POINT_INVALID
+        } else if lane < boundary {
+            POINT_INSERTED
+        } else {
+            POINT_PENDING
+        }
+        topology_store_point_state<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, 0, lane, state)
+        topology_store_point_state<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, 1, lane, state)
+        let proposal = topology_proposal_offset<POINT_CAPACITY>(lane)
+        workspace.store(index: proposal, value: PROPOSAL_NONE)
+        workspace.store(index: proposal + 1, value: INVALID_VERTEX)
+        workspace.store(index: proposal + 2, value: INVALID_VERTEX)
+        workspace.store(index: proposal + 3, value: 0)
+        workspace.store(
+                index: topology_winner_offset<POINT_CAPACITY>(lane),
+                value: 0,
+            )
+    }
+
+    if lane < triangle_capacity {
+        let invalid = invalid_triangle()
+        triangle_store<TRIANGLE_STORAGE_WORDS>(triangles_a, lane, invalid)
+        triangle_store<TRIANGLE_STORAGE_WORDS>(triangles_b, lane, invalid)
+        workspace
+            .store(
+                index: topology_face_owner_offset<POINT_CAPACITY>(lane),
+                value: INVALID_VERTEX,
+            )
+        workspace
+            .store(
+                index: topology_face_expansion_offset<POINT_CAPACITY, TRIANGLE_CAPACITY>(lane),
+                value: 0,
+            )
+        workspace
+            .store(
+                index: topology_face_output_offset<POINT_CAPACITY, TRIANGLE_CAPACITY>(lane),
+                value: 0,
+            )
+        let hull_triangles = if source_admitted { boundary - 2 } else { 0 }
+        if lane < hull_triangles {
+            let first_id = boundary_ring_vertex(key, 0)
+            let second_id = boundary_ring_vertex(key, lane + 1)
+            let third_id = boundary_ring_vertex(key, lane + 2)
+            let triangle = normalized_triangle(
+                first_id,
+                point_load<POINT_STORAGE_WORDS>(points, first_id),
+                second_id,
+                point_load<POINT_STORAGE_WORDS>(points, second_id),
+                third_id,
+                point_load<POINT_STORAGE_WORDS>(points, third_id),
+            )
+            triangle_store<TRIANGLE_STORAGE_WORDS>(triangles_a, lane, triangle)
+            triangle_store<TRIANGLE_STORAGE_WORDS>(triangles_b, lane, triangle)
+        }
+    }
+
+    if lane == 0 {
+        let hull_triangles = if source_admitted { boundary - 2 } else { 0 }
+        let pending = if source_admitted {
+            requested_points - boundary
+        } else {
+            0
+        }
+        topology_store_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(workspace, 0, 0)
+        topology_store_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(workspace, 1, 0)
+        topology_store_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+            workspace,
+            2,
+            hull_triangles,
+        )
+        topology_store_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+            workspace,
+            3,
+            pending,
+        )
+        topology_store_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+            workspace,
+            4,
+            hull_triangles,
+        )
+        topology_store_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(workspace, 5, 0)
+        topology_store_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+            workspace,
+            6,
+            if source_admitted { 0 } else { 1 },
+        )
+        topology_store_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(workspace, 7, 0)
+    }
+}
+
+fn topology_load_triangle<const TRIANGLE_STORAGE_WORDS: usize>(
+    _ triangles_a: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+    _ triangles_b: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+    _ parity: u32,
+    _ face: u32,
+) -> Triangle {
+    if parity == 0 {
+        triangle_load<TRIANGLE_STORAGE_WORDS>(triangles_a, face)
+    } else {
+        triangle_load<TRIANGLE_STORAGE_WORDS>(triangles_b, face)
+    }
+}
+
+fn topology_store_next_triangle<const TRIANGLE_STORAGE_WORDS: usize>(
+    _ triangles_a: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+    _ triangles_b: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+    _ parity: u32,
+    _ face: u32,
+    _ triangle: Triangle,
+) {
+    if parity == 0 {
+        triangle_store<TRIANGLE_STORAGE_WORDS>(triangles_b, face, triangle)
+    } else {
+        triangle_store<TRIANGLE_STORAGE_WORDS>(triangles_a, face, triangle)
+    }
+}
+
+fn topology_store_proposal<const POINT_CAPACITY: usize, const WORKSPACE_WORDS: usize>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ point: u32,
+    _ kind: u32,
+    _ first_face: u32,
+    _ second_face: u32,
+    _ diagnostic: u32,
+) {
+    let offset = topology_proposal_offset<POINT_CAPACITY>(point)
+    workspace.store(index: offset, value: kind)
+    workspace.store(index: offset + 1, value: first_face)
+    workspace.store(index: offset + 2, value: second_face)
+    workspace.store(index: offset + 3, value: diagnostic)
+}
+
+fn topology_proposal_word<const POINT_CAPACITY: usize, const WORKSPACE_WORDS: usize>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ point: u32,
+    _ lane: u32,
+) -> u32 {
+    workspace.load(
+            index: topology_proposal_offset<POINT_CAPACITY>(point) + lane,
+        )
+}
+
+fn topology_proposals_share_face<const POINT_CAPACITY: usize, const WORKSPACE_WORDS: usize>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ left: u32,
+    _ right: u32,
+) -> bool {
+    let left_kind = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, left, 0)
+    let right_kind = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, right, 0)
+    let left_valid = left_kind == PROPOSAL_STRICT_FACE || left_kind == PROPOSAL_INTERIOR_EDGE
+    let right_valid = right_kind == PROPOSAL_STRICT_FACE || right_kind == PROPOSAL_INTERIOR_EDGE
+    let left_first = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, left, 1)
+    let left_second = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, left, 2)
+    let right_first = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, right, 1)
+    let right_second = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, right, 2)
+    let mut shared = false
+    if left_valid && right_valid {
+        if left_first == right_first {
+            shared = true
+        }
+        if right_kind == PROPOSAL_INTERIOR_EDGE && left_first == right_second {
+            shared = true
+        }
+        if left_kind == PROPOSAL_INTERIOR_EDGE && left_second == right_first {
+            shared = true
+        }
+        if left_kind == PROPOSAL_INTERIOR_EDGE
+            && right_kind == PROPOSAL_INTERIOR_EDGE
+            && left_second == right_second {
+            shared = true
+        }
+    }
+    shared
+}
+
+fn topology_proposal_owns_face<const POINT_CAPACITY: usize, const WORKSPACE_WORDS: usize>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ point: u32,
+    _ face: u32,
+) -> bool {
+    let kind = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, point, 0)
+    let first = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, point, 1)
+    let second = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, point, 2)
+    first == face || (kind == PROPOSAL_INTERIOR_EDGE && second == face)
+}
+
+/// Locate one pending point against an immutable triangle generation.
+pub fn locate_parallel_topology_point_lane<
+    const POINT_CAPACITY: usize,
+    const POINT_STORAGE_WORDS: usize,
+    const TRIANGLE_CAPACITY: usize,
+    const TRIANGLE_STORAGE_WORDS: usize,
+    const WORKSPACE_WORDS: usize,
+>(
+    _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
+    _ triangles_a: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+    _ triangles_b: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where
+    {
+        POINT_STORAGE_WORDS == POINT_CAPACITY * POINT_WORDS
+    },
+    {
+        TRIANGLE_STORAGE_WORDS == TRIANGLE_CAPACITY * TRIANGLE_WORDS
+    },
+    {
+        WORKSPACE_WORDS == POINT_CAPACITY * 7 + TRIANGLE_CAPACITY * 3 + TOPOLOGY_PROGRESS_WORDS
+    }
+{
+    let point_id = invocation.global.x
+    if point_id >= POINT_CAPACITY.downcast_truncate() {
+        return
+    }
+    topology_store_proposal<POINT_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        point_id,
+        PROPOSAL_NONE,
+        INVALID_VERTEX,
+        INVALID_VERTEX,
+        0,
+    )
+    workspace.store(
+            index: topology_winner_offset<POINT_CAPACITY>(point_id),
+            value: 0,
+        )
+    let point_parity = topology_load_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        1,
+    )
+    if topology_load_point_state<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, point_parity, point_id)
+        != POINT_PENDING {
+        return
+    }
+    let triangle_parity = topology_load_progress<
+        POINT_CAPACITY,
+        TRIANGLE_CAPACITY,
+        WORKSPACE_WORDS,
+    >(workspace, 0)
+    let triangle_count = topology_load_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        2,
+    )
+    let point = point_load<POINT_STORAGE_WORDS>(points, point_id)
+    let mut strict_hits: u32 = 0
+    let mut strict_face: u32 = INVALID_VERTEX
+    let mut edge_hits: u32 = 0
+    let mut first_edge_face: u32 = INVALID_VERTEX
+    let mut second_edge_face: u32 = INVALID_VERTEX
+    let mut vertex_hits: u32 = 0
+    let mut face: u32 = 0
+    while face < triangle_count {
+        let triangle = topology_load_triangle<TRIANGLE_STORAGE_WORDS>(
+            triangles_a,
+            triangles_b,
+            triangle_parity,
+            face,
+        )
+        if triangle.valid {
+            let classification = classify_resident_point<POINT_STORAGE_WORDS>(
+                points,
+                triangle,
+                point,
+            )
+            if classification == POINT_STRICTLY_INSIDE {
+                strict_hits = strict_hits + 1
+                strict_face = face
+            } else if classification == POINT_ON_EDGE {
+                if edge_hits == 0 {
+                    first_edge_face = face
+                } else if edge_hits == 1 {
+                    second_edge_face = face
+                }
+                edge_hits = edge_hits + 1
+            } else if classification == POINT_ON_VERTEX {
+                vertex_hits = vertex_hits + 1
+            }
+        }
+        face = face + 1
+    }
+    let diagnostic = strict_hits + (edge_hits << 8) + (vertex_hits << 16)
+    if strict_hits == 1 && edge_hits == 0 && vertex_hits == 0 {
+        topology_store_proposal<POINT_CAPACITY, WORKSPACE_WORDS>(
+            workspace,
+            point_id,
+            PROPOSAL_STRICT_FACE,
+            strict_face,
+            INVALID_VERTEX,
+            diagnostic,
+        )
+    } else if strict_hits == 0 && edge_hits == 2 && vertex_hits == 0 {
+        topology_store_proposal<POINT_CAPACITY, WORKSPACE_WORDS>(
+            workspace,
+            point_id,
+            PROPOSAL_INTERIOR_EDGE,
+            first_edge_face,
+            second_edge_face,
+            diagnostic,
+        )
+    } else {
+        topology_store_proposal<POINT_CAPACITY, WORKSPACE_WORDS>(
+            workspace,
+            point_id,
+            PROPOSAL_INVALID,
+            INVALID_VERTEX,
+            INVALID_VERTEX,
+            diagnostic,
+        )
+    }
+}
+
+/// Select a deterministic face-disjoint subset of the located points.
+pub fn arbitrate_parallel_topology_point_lane<
+    const POINT_CAPACITY: usize,
+    const TRIANGLE_CAPACITY: usize,
+    const WORKSPACE_WORDS: usize,
+>(_ workspace: StorageBuffer<u32, WORKSPACE_WORDS>, _ invocation: ComputeInvocation)
+where { WORKSPACE_WORDS == POINT_CAPACITY * 7 + TRIANGLE_CAPACITY * 3 + TOPOLOGY_PROGRESS_WORDS }
+{
+    let point_id = invocation.global.x
+    let point_capacity: u32 = POINT_CAPACITY.downcast_truncate()
+    if point_id < point_capacity {
+        let point_parity = topology_load_progress<
+            POINT_CAPACITY,
+            TRIANGLE_CAPACITY,
+            WORKSPACE_WORDS,
+        >(workspace, 1)
+        let point_state = topology_load_point_state<POINT_CAPACITY, WORKSPACE_WORDS>(
+            workspace,
+            point_parity,
+            point_id,
+        )
+        let kind = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, point_id, 0)
+        let eligible = point_state == POINT_PENDING
+            && (kind == PROPOSAL_STRICT_FACE || kind == PROPOSAL_INTERIOR_EDGE)
+        let mut preceding_conflict = false
+        let mut other: u32 = 0
+        if eligible {
+            while other < point_id {
+                let other_pending = topology_load_point_state<POINT_CAPACITY, WORKSPACE_WORDS>(
+                        workspace,
+                        point_parity,
+                        other,
+                    )
+                    == POINT_PENDING
+                if other_pending
+                    && topology_proposals_share_face<POINT_CAPACITY, WORKSPACE_WORDS>(
+                        workspace,
+                        point_id,
+                        other,
+                    ) {
+                    preceding_conflict = true
+                }
+                other = other + 1
+            }
+        }
+        workspace
+            .store(
+                index: topology_winner_offset<POINT_CAPACITY>(point_id),
+                value: if eligible && !preceding_conflict {
+                    1
+                } else {
+                    0
+                },
+            )
+    }
+}
+
+/// Validate and size the unique rewrite owned by each current face.
+///
+/// Arbitration guarantees that at most one winning point names a face. An
+/// untouched face contributes one output triangle, a strict-face insertion
+/// contributes three, and each half of an interior-edge insertion contributes
+/// two. Invalid ownership or invalid exact splits are represented by a zero
+/// expansion and are rejected by the ordered scan before publication.
+pub fn plan_parallel_topology_face_lane<
+    const POINT_CAPACITY: usize,
+    const POINT_STORAGE_WORDS: usize,
+    const TRIANGLE_CAPACITY: usize,
+    const TRIANGLE_STORAGE_WORDS: usize,
+    const WORKSPACE_WORDS: usize,
+>(
+    _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
+    _ triangles_a: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+    _ triangles_b: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where
+    {
+        POINT_STORAGE_WORDS == POINT_CAPACITY * POINT_WORDS
+    },
+    {
+        TRIANGLE_STORAGE_WORDS == TRIANGLE_CAPACITY * TRIANGLE_WORDS
+    },
+    {
+        WORKSPACE_WORDS == POINT_CAPACITY * 7 + TRIANGLE_CAPACITY * 3 + TOPOLOGY_PROGRESS_WORDS
+    }
+{
+    let face = invocation.global.x
+    let triangle_capacity: u32 = TRIANGLE_CAPACITY.downcast_truncate()
+    if face >= triangle_capacity {
+        return
+    }
+    workspace.store(
+            index: topology_face_owner_offset<POINT_CAPACITY>(face),
+            value: INVALID_VERTEX,
+        )
+    workspace
+        .store(
+            index: topology_face_expansion_offset<POINT_CAPACITY, TRIANGLE_CAPACITY>(face),
+            value: 0,
+        )
+    let location_failures = topology_load_progress<
+        POINT_CAPACITY,
+        TRIANGLE_CAPACITY,
+        WORKSPACE_WORDS,
+    >(workspace, 6)
+    let invariant_failures = topology_load_progress<
+        POINT_CAPACITY,
+        TRIANGLE_CAPACITY,
+        WORKSPACE_WORDS,
+    >(workspace, 7)
+    let pending = topology_load_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        3,
+    )
+    if location_failures != 0 || invariant_failures != 0 || pending == 0 {
+        return
+    }
+    let triangle_count = topology_load_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        2,
+    )
+    if face >= triangle_count {
+        return
+    }
+    let triangle_parity = topology_load_progress<
+        POINT_CAPACITY,
+        TRIANGLE_CAPACITY,
+        WORKSPACE_WORDS,
+    >(workspace, 0)
+    let triangle = topology_load_triangle<TRIANGLE_STORAGE_WORDS>(
+        triangles_a,
+        triangles_b,
+        triangle_parity,
+        face,
+    )
+    if !triangle.valid { return }
+
+    let point_capacity: u32 = POINT_CAPACITY.downcast_truncate()
+    let mut owner: u32 = INVALID_VERTEX
+    let mut owners: u32 = 0
+    let mut point_id: u32 = 0
+    while point_id < point_capacity {
+        if workspace.load(index: topology_winner_offset<POINT_CAPACITY>(point_id)) != 0
+            && topology_proposal_owns_face<POINT_CAPACITY, WORKSPACE_WORDS>(
+                workspace,
+                point_id,
+                face,
+            ) {
+            owner = point_id
+            owners = owners + 1
+        }
+        point_id = point_id + 1
+    }
+    if owners == 0 {
+        workspace
+            .store(
+                index: topology_face_expansion_offset<POINT_CAPACITY, TRIANGLE_CAPACITY>(face),
+                value: 1,
+            )
+        return
+    }
+    workspace.store(
+            index: topology_face_owner_offset<POINT_CAPACITY>(face),
+            value: owner,
+        )
+    if owners != 1 { return }
+
+    let kind = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, owner, 0)
+    let point = point_load<POINT_STORAGE_WORDS>(points, owner)
+    if kind == PROPOSAL_STRICT_FACE {
+        let split = split_triangle_interior(
+            triangle,
+            triangle_point<POINT_STORAGE_WORDS>(points, triangle, 0),
+            triangle_point<POINT_STORAGE_WORDS>(points, triangle, 1),
+            triangle_point<POINT_STORAGE_WORDS>(points, triangle, 2),
+            owner,
+            point,
+        )
+        if split.valid {
+            workspace
+                .store(
+                    index: topology_face_expansion_offset<POINT_CAPACITY, TRIANGLE_CAPACITY>(face),
+                    value: 3,
+                )
+        }
+    } else if kind == PROPOSAL_INTERIOR_EDGE {
+        let split = split_resident_triangle_edge<POINT_STORAGE_WORDS>(
+            points,
+            triangle,
+            owner,
+            point,
+        )
+        if split.valid {
+            workspace
+                .store(
+                    index: topology_face_expansion_offset<POINT_CAPACITY, TRIANGLE_CAPACITY>(face),
+                    value: 2,
+                )
+        }
+    }
+}
+
+/// Produce stable face offsets and validate the immutable insertion plan.
+///
+/// This scalar exclusive scan is the topology oracle. A later parallel scan
+/// may replace its physical work only if it produces the same offsets and
+/// progress receipt byte-for-byte.
+pub fn scan_parallel_topology_face_plan<
+    const POINT_CAPACITY: usize,
+    const TRIANGLE_CAPACITY: usize,
+    const WORKSPACE_WORDS: usize,
+>(_ workspace: StorageBuffer<u32, WORKSPACE_WORDS>, _ invocation: ComputeInvocation)
+where { WORKSPACE_WORDS == POINT_CAPACITY * 7 + TRIANGLE_CAPACITY * 3 + TOPOLOGY_PROGRESS_WORDS }
+{
+    if invocation.global.x != 0 {
+        return
+    }
+    let prior_location_failures = topology_load_progress<
+        POINT_CAPACITY,
+        TRIANGLE_CAPACITY,
+        WORKSPACE_WORDS,
+    >(workspace, 6)
+    let prior_invariant_failures = topology_load_progress<
+        POINT_CAPACITY,
+        TRIANGLE_CAPACITY,
+        WORKSPACE_WORDS,
+    >(workspace, 7)
+    if prior_location_failures != 0 || prior_invariant_failures != 0 {
+        return
+    }
+    let triangle_count = topology_load_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        2,
+    )
+    let pending = topology_load_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        3,
+    )
+    if pending == 0 {
+        topology_store_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+            workspace,
+            4,
+            triangle_count,
+        )
+        topology_store_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(workspace, 5, 0)
+        return
+    }
+
+    let triangle_capacity: u32 = TRIANGLE_CAPACITY.downcast_truncate()
+    let mut output: u32 = 0
+    let mut invariant_failures: u32 = 0
+    let mut face: u32 = 0
+    while face < triangle_count {
+        workspace
+            .store(
+                index: topology_face_output_offset<POINT_CAPACITY, TRIANGLE_CAPACITY>(face),
+                value: output,
+            )
+        let expansion = workspace
+            .load(
+                index: topology_face_expansion_offset<POINT_CAPACITY, TRIANGLE_CAPACITY>(face),
+            )
+        if expansion == 0 || expansion > 3 {
+            invariant_failures = invariant_failures + 1
+        } else if output > triangle_capacity || expansion > triangle_capacity - output {
+            invariant_failures = invariant_failures + 1
+        } else {
+            output = output + expansion
+        }
+        face = face + 1
+    }
+
+    let point_capacity: u32 = POINT_CAPACITY.downcast_truncate()
+    let point_parity = topology_load_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        1,
+    )
+    let mut winners: u32 = 0
+    let mut location_failures: u32 = 0
+    let mut point_id: u32 = 0
+    while point_id < point_capacity {
+        if topology_load_point_state<POINT_CAPACITY, WORKSPACE_WORDS>(
+                workspace,
+                point_parity,
+                point_id,
+            )
+            == POINT_PENDING {
+            let kind = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(
+                workspace,
+                point_id,
+                0,
+            )
+            if kind != PROPOSAL_STRICT_FACE && kind != PROPOSAL_INTERIOR_EDGE {
+                location_failures = location_failures + 1
+            }
+            if workspace.load(index: topology_winner_offset<POINT_CAPACITY>(point_id)) != 0 {
+                winners = winners + 1
+                let expected_faces: u32 = if kind == PROPOSAL_STRICT_FACE { 1 } else { 2 }
+                let mut owned_faces: u32 = 0
+                let mut owned_face: u32 = 0
+                while owned_face < triangle_count {
+                    if workspace.load(
+                                index: topology_face_owner_offset<POINT_CAPACITY>(owned_face),
+                            )
+                        == point_id {
+                        owned_faces = owned_faces + 1
+                    }
+                    owned_face = owned_face + 1
+                }
+                if owned_faces != expected_faces {
+                    invariant_failures = invariant_failures + 1
+                }
+            }
+        }
+        point_id = point_id + 1
+    }
+    if winners > pending {
+        invariant_failures = invariant_failures + 1
+    }
+    if winners == 0 && location_failures == 0 {
+        invariant_failures = invariant_failures + 1
+    }
+    let expected_output = triangle_count + winners + winners
+    if output != expected_output || output > triangle_capacity {
+        invariant_failures = invariant_failures + 1
+    }
+    topology_store_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        4,
+        output,
+    )
+    topology_store_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        5,
+        winners,
+    )
+    topology_store_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        6,
+        location_failures,
+    )
+    topology_store_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        7,
+        invariant_failures,
+    )
+}
+
+/// Materialize disjoint face rewrites into the next triangle generation.
+pub fn rebuild_parallel_topology_face_lane<
+    const POINT_CAPACITY: usize,
+    const POINT_STORAGE_WORDS: usize,
+    const TRIANGLE_CAPACITY: usize,
+    const TRIANGLE_STORAGE_WORDS: usize,
+    const WORKSPACE_WORDS: usize,
+>(
+    _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
+    _ triangles_a: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+    _ triangles_b: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where
+    {
+        POINT_STORAGE_WORDS == POINT_CAPACITY * POINT_WORDS
+    },
+    {
+        TRIANGLE_STORAGE_WORDS == TRIANGLE_CAPACITY * TRIANGLE_WORDS
+    },
+    {
+        WORKSPACE_WORDS == POINT_CAPACITY * 7 + TRIANGLE_CAPACITY * 3 + TOPOLOGY_PROGRESS_WORDS
+    }
+{
+    let face = invocation.global.x
+    let triangle_count = topology_load_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        2,
+    )
+    if face >= triangle_count {
+        return
+    }
+    let pending = topology_load_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        3,
+    )
+    let location_failures = topology_load_progress<
+        POINT_CAPACITY,
+        TRIANGLE_CAPACITY,
+        WORKSPACE_WORDS,
+    >(workspace, 6)
+    let invariant_failures = topology_load_progress<
+        POINT_CAPACITY,
+        TRIANGLE_CAPACITY,
+        WORKSPACE_WORDS,
+    >(workspace, 7)
+    if pending == 0 || location_failures != 0 || invariant_failures != 0 {
+        return
+    }
+    let triangle_parity = topology_load_progress<
+        POINT_CAPACITY,
+        TRIANGLE_CAPACITY,
+        WORKSPACE_WORDS,
+    >(workspace, 0)
+    let triangle = topology_load_triangle<TRIANGLE_STORAGE_WORDS>(
+        triangles_a,
+        triangles_b,
+        triangle_parity,
+        face,
+    )
+    let output = workspace
+        .load(
+            index: topology_face_output_offset<POINT_CAPACITY, TRIANGLE_CAPACITY>(face),
+        )
+    let expansion = workspace
+        .load(
+            index: topology_face_expansion_offset<POINT_CAPACITY, TRIANGLE_CAPACITY>(face),
+        )
+    let owner = workspace.load(index: topology_face_owner_offset<POINT_CAPACITY>(face))
+    if expansion == 1 {
+        topology_store_next_triangle<TRIANGLE_STORAGE_WORDS>(
+            triangles_a,
+            triangles_b,
+            triangle_parity,
+            output,
+            triangle,
+        )
+    } else if expansion == 3 {
+        let point = point_load<POINT_STORAGE_WORDS>(points, owner)
+        let split = split_triangle_interior(
+            triangle,
+            triangle_point<POINT_STORAGE_WORDS>(points, triangle, 0),
+            triangle_point<POINT_STORAGE_WORDS>(points, triangle, 1),
+            triangle_point<POINT_STORAGE_WORDS>(points, triangle, 2),
+            owner,
+            point,
+        )
+        topology_store_next_triangle<TRIANGLE_STORAGE_WORDS>(
+            triangles_a,
+            triangles_b,
+            triangle_parity,
+            output,
+            split.first,
+        )
+        topology_store_next_triangle<TRIANGLE_STORAGE_WORDS>(
+            triangles_a,
+            triangles_b,
+            triangle_parity,
+            output + 1,
+            split.second,
+        )
+        topology_store_next_triangle<TRIANGLE_STORAGE_WORDS>(
+            triangles_a,
+            triangles_b,
+            triangle_parity,
+            output + 2,
+            split.third,
+        )
+    } else if expansion == 2 {
+        let point = point_load<POINT_STORAGE_WORDS>(points, owner)
+        let split = split_resident_triangle_edge<POINT_STORAGE_WORDS>(
+            points,
+            triangle,
+            owner,
+            point,
+        )
+        topology_store_next_triangle<TRIANGLE_STORAGE_WORDS>(
+            triangles_a,
+            triangles_b,
+            triangle_parity,
+            output,
+            split.first,
+        )
+        topology_store_next_triangle<TRIANGLE_STORAGE_WORDS>(
+            triangles_a,
+            triangles_b,
+            triangle_parity,
+            output + 1,
+            split.second,
+        )
+    }
+}
+
+/// Publish point-state changes into the generation not read by this round.
+pub fn retire_parallel_topology_point_lane<
+    const POINT_CAPACITY: usize,
+    const TRIANGLE_CAPACITY: usize,
+    const WORKSPACE_WORDS: usize,
+>(_ workspace: StorageBuffer<u32, WORKSPACE_WORDS>, _ invocation: ComputeInvocation)
+where { WORKSPACE_WORDS == POINT_CAPACITY * 7 + TRIANGLE_CAPACITY * 3 + TOPOLOGY_PROGRESS_WORDS }
+{
+    let point_id = invocation.global.x
+    let point_capacity: u32 = POINT_CAPACITY.downcast_truncate()
+    if point_id >= point_capacity {
+        return
+    }
+    let point_parity = topology_load_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        1,
+    )
+    let current = topology_load_point_state<POINT_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        point_parity,
+        point_id,
+    )
+    let pending = topology_load_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        3,
+    )
+    let location_failures = topology_load_progress<
+        POINT_CAPACITY,
+        TRIANGLE_CAPACITY,
+        WORKSPACE_WORDS,
+    >(workspace, 6)
+    let invariant_failures = topology_load_progress<
+        POINT_CAPACITY,
+        TRIANGLE_CAPACITY,
+        WORKSPACE_WORDS,
+    >(workspace, 7)
+    let winner = workspace.load(index: topology_winner_offset<POINT_CAPACITY>(point_id)) != 0
+    let next = if pending != 0
+        && location_failures == 0
+        && invariant_failures == 0
+        && current == POINT_PENDING
+        && winner {
+        POINT_INSERTED
+    } else {
+        current
+    }
+    topology_store_point_state<POINT_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        if point_parity == 0 { 1 } else { 0 },
+        point_id,
+        next,
+    )
+}
+
+/// Expose the rebuilt triangle and point-state generations after the ordered
+/// rebuild and retirement dispatches have completed.
+pub fn advance_parallel_topology_generation<
+    const POINT_CAPACITY: usize,
+    const TRIANGLE_CAPACITY: usize,
+    const WORKSPACE_WORDS: usize,
+>(_ workspace: StorageBuffer<u32, WORKSPACE_WORDS>, _ invocation: ComputeInvocation)
+where { WORKSPACE_WORDS == POINT_CAPACITY * 7 + TRIANGLE_CAPACITY * 3 + TOPOLOGY_PROGRESS_WORDS }
+{
+    if invocation.global.x != 0 {
+        return
+    }
+    let pending = topology_load_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        3,
+    )
+    if pending == 0 { return }
+    let location_failures = topology_load_progress<
+        POINT_CAPACITY,
+        TRIANGLE_CAPACITY,
+        WORKSPACE_WORDS,
+    >(workspace, 6)
+    let invariant_failures = topology_load_progress<
+        POINT_CAPACITY,
+        TRIANGLE_CAPACITY,
+        WORKSPACE_WORDS,
+    >(workspace, 7)
+    if location_failures != 0 || invariant_failures != 0 {
+        return
+    }
+    let winners = topology_load_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        5,
+    )
+    if winners == 0 || winners > pending {
+        topology_store_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+            workspace,
+            7,
+            invariant_failures + 1,
+        )
+        return
+    }
+    let next_triangle_count = topology_load_progress<
+        POINT_CAPACITY,
+        TRIANGLE_CAPACITY,
+        WORKSPACE_WORDS,
+    >(workspace, 4)
+    let triangle_parity = topology_load_progress<
+        POINT_CAPACITY,
+        TRIANGLE_CAPACITY,
+        WORKSPACE_WORDS,
+    >(workspace, 0)
+    let point_parity = topology_load_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        1,
+    )
+    topology_store_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        0,
+        if triangle_parity == 0 { 1 } else { 0 },
+    )
+    topology_store_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        1,
+        if point_parity == 0 { 1 } else { 0 },
+    )
+    topology_store_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        2,
+        next_triangle_count,
+    )
+    topology_store_progress<POINT_CAPACITY, TRIANGLE_CAPACITY, WORKSPACE_WORDS>(
+        workspace,
+        3,
+        pending - winners,
+    )
+}
+
+fn resident_candidate_slots<const CAPACITY: usize>(_ key: AtlasKey) -> u32 {
+    let requested = candidate_slot_count(key)
+    let capacity: u32 = CAPACITY.downcast_truncate()
+    if requested < capacity {
+        requested
+    } else {
+        capacity
+    }
+}
+
+/// Materialize one compact work item and its boundary-exclusion state.
+pub fn initialize_candidate_lane<const CAPACITY: usize, const WORDS: usize>(
+    _ key: AtlasKey,
+    _ patch_ordinal: u32,
+    _ seed: u32,
+    _ workspace: StorageBuffer<u32, WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WORDS }
+{
+    let slot = invocation.global.x
+    if slot >= CAPACITY.downcast_truncate() {
+        return
+    }
+    let candidate = interior_candidate_at_slot(key, patch_ordinal, seed, slot)
+    store_candidate<WORDS>(workspace, candidate, slot)
+    let state = initial_candidate_state(
+        candidate.valid,
+        candidate_conflicts_boundary(key, candidate),
+    )
+    workspace.store(
+            index: candidate_state_a_offset<CAPACITY>(slot),
+            value: state,
+        )
+    workspace.store(
+            index: candidate_state_b_offset<CAPACITY>(slot),
+            value: state,
+        )
+    workspace.store(index: candidate_winner_offset<CAPACITY>(slot), value: 0)
+    if slot == 0 {
+        workspace.store(index: candidate_progress_offset<CAPACITY>(), value: 0)
+    }
+}
+
+/// Derive winners from one immutable candidate-state generation.
+pub fn propose_candidate_lane<const CAPACITY: usize, const WORDS: usize>(
+    _ key: AtlasKey,
+    _ workspace: StorageBuffer<u32, WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WORDS }
+{
+    let slot = invocation.global.x
+    if slot >= CAPACITY.downcast_truncate() {
+        return
+    }
+    let count = resident_candidate_slots<CAPACITY>(key)
+    if slot >= count {
+        workspace.store(index: candidate_winner_offset<CAPACITY>(slot), value: 0)
+        return
+    }
+    let parity = workspace.load(index: candidate_progress_offset<CAPACITY>())
+    let state = load_generation_state<CAPACITY, WORDS>(workspace, parity, slot)
+    if state != CANDIDATE_PENDING {
+        workspace.store(index: candidate_winner_offset<CAPACITY>(slot), value: 0)
+        return
+    }
+    let candidate = load_candidate<WORDS>(workspace, slot)
+    let mut accepted_conflict = false
+    let mut preceding_pending_conflict = false
+    let mut other_slot: u32 = 0
+    while other_slot < count {
+        if other_slot != slot {
+            let other_state = load_generation_state<CAPACITY, WORDS>(workspace, parity, other_slot)
+            if other_state == CANDIDATE_ACCEPTED || other_state == CANDIDATE_PENDING {
+                let other = load_candidate<WORDS>(workspace, other_slot)
+                if poisson_conflict(
+                    candidate.point,
+                    candidate.radius_squared,
+                    other.point,
+                    other.radius_squared,
+                ) {
+                    if other_state == CANDIDATE_ACCEPTED {
+                        accepted_conflict = true
+                    } else if candidate_precedes(
+                        other.priority,
+                        other.slot,
+                        candidate.priority,
+                        candidate.slot,
+                    ) {
+                        preceding_pending_conflict = true
+                    }
+                }
+            }
+        }
+        other_slot = other_slot + 1
+    }
+    workspace
+        .store(
+            index: candidate_winner_offset<CAPACITY>(slot),
+            value: if candidate_is_round_winner(
+                state,
+                accepted_conflict,
+                preceding_pending_conflict,
+            ) {
+                1
+            } else {
+                0
+            },
+        )
+}
+
+/// Retire candidates into the generation not read by this round.
+pub fn retire_candidate_lane<const CAPACITY: usize, const WORDS: usize>(
+    _ key: AtlasKey,
+    _ workspace: StorageBuffer<u32, WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WORDS }
+{
+    let slot = invocation.global.x
+    if slot >= CAPACITY.downcast_truncate() {
+        return
+    }
+    let count = resident_candidate_slots<CAPACITY>(key)
+    let parity = workspace.load(index: candidate_progress_offset<CAPACITY>())
+    let state = load_generation_state<CAPACITY, WORDS>(workspace, parity, slot)
+    if slot >= count || state != CANDIDATE_PENDING {
+        store_next_generation_state<CAPACITY, WORDS>(workspace, parity, slot, state)
+        return
+    }
+    let candidate = load_candidate<WORDS>(workspace, slot)
+    let winner = workspace.load(index: candidate_winner_offset<CAPACITY>(slot)) != 0
+    let mut accepted_conflict = false
+    let mut winner_conflict = false
+    let mut other_slot: u32 = 0
+    while other_slot < count {
+        if other_slot != slot {
+            let other_state = load_generation_state<CAPACITY, WORDS>(workspace, parity, other_slot)
+            let other_winner = workspace.load(index: candidate_winner_offset<CAPACITY>(other_slot))
+                != 0
+            if other_state == CANDIDATE_ACCEPTED || other_winner {
+                let other = load_candidate<WORDS>(workspace, other_slot)
+                if poisson_conflict(
+                    candidate.point,
+                    candidate.radius_squared,
+                    other.point,
+                    other.radius_squared,
+                ) {
+                    if other_state == CANDIDATE_ACCEPTED {
+                        accepted_conflict = true
+                    }
+                    if other_winner {
+                        winner_conflict = true
+                    }
+                }
+            }
+        }
+        other_slot = other_slot + 1
+    }
+    store_next_generation_state<CAPACITY, WORDS>(
+        workspace,
+        parity,
+        slot,
+        candidate_state_after_round(state, accepted_conflict, winner, winner_conflict),
+    )
+}
+
+/// Advance the immutable generation after the ordered retire dispatch.
+pub fn advance_candidate_generation<const CAPACITY: usize, const WORDS: usize>(
+    _ workspace: StorageBuffer<u32, WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WORDS }
+{
+    if invocation.global.x == 0 {
+        let progress = candidate_progress_offset<CAPACITY>()
+        let parity = workspace.load(index: progress)
+        workspace.store(index: progress, value: if parity == 0 { 1 } else { 0 })
+    }
+}
+
+/// Stable-prefix compaction into a GPU-resident point buffer.
+///
+/// This scalar reference placement is deliberately simple. A scan-based GPU
+/// placement may replace its physical work, but must return the same receipt
+/// and byte-identical point prefix.
+pub fn compact_candidate_points<
+    const CAPACITY: usize,
+    const WORDS: usize,
+    const POINT_STORAGE_WORDS: usize,
+>(
+    _ key: AtlasKey,
+    _ workspace: StorageBuffer<u32, WORDS>,
+    _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
+) -> CandidateCompaction
+where
+    {
+        WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WORDS
+    },
+    {
+        POINT_STORAGE_WORDS % POINT_WORDS == 0
+    }
+{
+    let requested_slots = candidate_slot_count(key)
+    let slots = resident_candidate_slots<CAPACITY>(key)
+    let boundary = boundary_vertices(key)
+    let point_capacity: u32 = (POINT_STORAGE_WORDS / POINT_WORDS).downcast_truncate()
+    let mut resident: u32 = 0
+    let mut overflowed = requested_slots > CAPACITY.downcast_truncate()
+    let mut boundary_ordinal: u32 = 0
+    while boundary_ordinal < boundary {
+        if resident < point_capacity {
+            point_store<POINT_STORAGE_WORDS>(
+                points,
+                resident,
+                boundary_seed(key, boundary_ordinal).point,
+            )
+        } else {
+            overflowed = true
+        }
+        resident = resident + 1
+        boundary_ordinal = boundary_ordinal + 1
+    }
+
+    let parity = workspace.load(index: candidate_progress_offset<CAPACITY>())
+    let mut accepted: u32 = 0
+    let mut pending: u32 = 0
+    let mut slot: u32 = 0
+    while slot < slots {
+        let state = load_generation_state<CAPACITY, WORDS>(workspace, parity, slot)
+        if state == CANDIDATE_ACCEPTED {
+            let candidate = load_candidate<WORDS>(workspace, slot)
+            if resident < point_capacity {
+                point_store<POINT_STORAGE_WORDS>(points, resident, candidate.point)
+            } else {
+                overflowed = true
+            }
+            resident = resident + 1
+            accepted = accepted + 1
+        } else if state == CANDIDATE_PENDING {
+            pending = pending + 1
+        }
+        slot = slot + 1
+    }
+    CandidateCompaction {
+        valid: requested_slots <= CAPACITY.downcast_truncate() && !overflowed && pending == 0,
+        converged: pending == 0,
+        overflowed: overflowed,
+        candidate_slots: requested_slots,
+        accepted_candidates: accepted,
+        boundary_points: boundary,
+        resident_points: resident,
+    }
+}
+
+/// Deterministic constrained triangle construction over the resident points.
+///
+/// This is the scalar reference *placement* of the portable topology rules. It
+/// runs in a single compute invocation and never leaves GPU storage. A later
+/// parallel insertion provider must preserve its point order, locked boundary
+/// chain, receipt, and canonical triangle bytes.
+pub fn construct_constrained_triangles<
+    const POINT_STORAGE_WORDS: usize,
+    const TRIANGLE_STORAGE_WORDS: usize,
+>(
+    _ key: AtlasKey,
+    _ source_valid: bool,
+    _ requested_points: u32,
+    _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
+    _ triangles: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+) -> TopologyConstruction
+where { POINT_STORAGE_WORDS % POINT_WORDS == 0 }, { TRIANGLE_STORAGE_WORDS % TRIANGLE_WORDS == 0 }
+{
+    let point_capacity: u32 = (POINT_STORAGE_WORDS / POINT_WORDS).downcast_truncate()
+    let triangle_capacity: u32 = (TRIANGLE_STORAGE_WORDS / TRIANGLE_WORDS).downcast_truncate()
+    let boundary = boundary_vertices(key)
+    let mut overflowed = requested_points > point_capacity
+    let resident_points = if requested_points < point_capacity {
+        requested_points
+    } else {
+        point_capacity
+    }
+
+    let mut clear: u32 = 0
+    while clear < triangle_capacity {
+        triangle_store<TRIANGLE_STORAGE_WORDS>(triangles, clear, invalid_triangle())
+        clear = clear + 1
+    }
+
+    let canonical_key = key.a <= key.b && key.b <= key.c && key.c <= MAX_LOD
+    if !source_valid
+        || !canonical_key
+        || boundary < 3
+        || resident_points < boundary
+        || triangle_capacity == 0 {
+        return TopologyConstruction {
+            valid: false,
+            overflowed: overflowed,
+            resident_points: resident_points,
+            boundary_points: boundary,
+            inserted_points: 0,
+            resident_triangles: 0,
+            expected_triangles: 0,
+            location_failures: 1,
+            invariant_failures: 1,
+        }
+    }
+
+    let corner_a: u32 = 0
+    let corner_b = edge_resolution(key.c)
+    let corner_c = corner_b + edge_resolution(key.b)
+    let seed = normalized_triangle(
+        corner_a,
+        point_load<POINT_STORAGE_WORDS>(points, corner_a),
+        corner_b,
+        point_load<POINT_STORAGE_WORDS>(points, corner_b),
+        corner_c,
+        point_load<POINT_STORAGE_WORDS>(points, corner_c),
+    )
+    if !seed.valid {
+        return TopologyConstruction {
+            valid: false,
+            overflowed: overflowed,
+            resident_points: resident_points,
+            boundary_points: boundary,
+            inserted_points: 0,
+            resident_triangles: 0,
+            expected_triangles: 0,
+            location_failures: 1,
+            invariant_failures: 1,
+        }
+    }
+    triangle_store<TRIANGLE_STORAGE_WORDS>(triangles, 0, seed)
+    let mut triangle_count: u32 = 1
+    let mut inserted: u32 = 3
+    let mut location_failures: u32 = 0
+    let mut invariant_failures: u32 = 0
+
+    // Insert each non-corner boundary seed into its unique current hull edge.
+    let mut point_id: u32 = 0
+    while point_id < boundary && location_failures == 0 && invariant_failures == 0 {
+        if point_id != corner_a && point_id != corner_b && point_id != corner_c {
+            let point = point_load<POINT_STORAGE_WORDS>(points, point_id)
+            let mut found: u32 = 0
+            let mut found_face: u32 = 0
+            let mut found_split = invalid_triangle_pair()
+            let mut face: u32 = 0
+            while face < triangle_count {
+                let triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, face)
+                if triangle.valid
+                    && classify_resident_point<POINT_STORAGE_WORDS>(points, triangle, point)
+                        == POINT_ON_EDGE {
+                    let split = split_resident_triangle_edge<POINT_STORAGE_WORDS>(
+                        points,
+                        triangle,
+                        point_id,
+                        point,
+                    )
+                    if split.valid {
+                        found = found + 1
+                        found_face = face
+                        found_split = split
+                    }
+                }
+                face = face + 1
+            }
+            if found != 1 {
+                location_failures = location_failures + 1
+            } else if triangle_count >= triangle_capacity {
+                overflowed = true
+            } else {
+                triangle_store<TRIANGLE_STORAGE_WORDS>(triangles, found_face, found_split.first)
+                triangle_store<TRIANGLE_STORAGE_WORDS>(
+                    triangles,
+                    triangle_count,
+                    found_split.second,
+                )
+                triangle_count = triangle_count + 1
+                inserted = inserted + 1
+            }
+        }
+        point_id = point_id + 1
+    }
+
+    // Insert stable-prefix interior points. A strict face hit becomes three
+    // faces; an exact interior-edge hit splits both adjacent faces into four.
+    point_id = boundary
+    while point_id < resident_points
+        && !overflowed
+        && location_failures == 0
+        && invariant_failures == 0 {
+        let point = point_load<POINT_STORAGE_WORDS>(points, point_id)
+        let mut strict_hits: u32 = 0
+        let mut strict_face: u32 = 0
+        let mut edge_hits: u32 = 0
+        let mut first_edge_face: u32 = 0
+        let mut second_edge_face: u32 = 0
+        let mut vertex_hits: u32 = 0
+        let mut face: u32 = 0
+        while face < triangle_count {
+            let triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, face)
+            if triangle.valid {
+                let classification = classify_resident_point<POINT_STORAGE_WORDS>(
+                    points,
+                    triangle,
+                    point,
+                )
+                if classification == POINT_STRICTLY_INSIDE {
+                    strict_hits = strict_hits + 1
+                    strict_face = face
+                } else if classification == POINT_ON_EDGE {
+                    if edge_hits == 0 {
+                        first_edge_face = face
+                    } else if edge_hits == 1 {
+                        second_edge_face = face
+                    }
+                    edge_hits = edge_hits + 1
+                } else if classification == POINT_ON_VERTEX {
+                    vertex_hits = vertex_hits + 1
+                }
+            }
+            face = face + 1
+        }
+
+        if vertex_hits != 0
+            || (strict_hits == 1 && edge_hits != 0)
+            || strict_hits > 1
+            || edge_hits > 2 {
+            invariant_failures = invariant_failures + 1
+        } else if strict_hits == 1 {
+            if triangle_count + 2 > triangle_capacity {
+                overflowed = true
+            } else {
+                let triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, strict_face)
+                let split = split_triangle_interior(
+                    triangle,
+                    triangle_point<POINT_STORAGE_WORDS>(points, triangle, 0),
+                    triangle_point<POINT_STORAGE_WORDS>(points, triangle, 1),
+                    triangle_point<POINT_STORAGE_WORDS>(points, triangle, 2),
+                    point_id,
+                    point,
+                )
+                if !split.valid {
+                    invariant_failures = invariant_failures + 1
+                } else {
+                    triangle_store<TRIANGLE_STORAGE_WORDS>(triangles, strict_face, split.first)
+                    triangle_store<TRIANGLE_STORAGE_WORDS>(triangles, triangle_count, split.second)
+                    triangle_store<TRIANGLE_STORAGE_WORDS>(
+                        triangles,
+                        triangle_count + 1,
+                        split.third,
+                    )
+                    triangle_count = triangle_count + 2
+                    inserted = inserted + 1
+                }
+            }
+        } else if edge_hits == 2 {
+            if triangle_count + 2 > triangle_capacity {
+                overflowed = true
+            } else {
+                let first_triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(
+                    triangles,
+                    first_edge_face,
+                )
+                let second_triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(
+                    triangles,
+                    second_edge_face,
+                )
+                let first_split = split_resident_triangle_edge<POINT_STORAGE_WORDS>(
+                    points,
+                    first_triangle,
+                    point_id,
+                    point,
+                )
+                let second_split = split_resident_triangle_edge<POINT_STORAGE_WORDS>(
+                    points,
+                    second_triangle,
+                    point_id,
+                    point,
+                )
+                if !first_split.valid || !second_split.valid {
+                    invariant_failures = invariant_failures + 1
+                } else {
+                    triangle_store<TRIANGLE_STORAGE_WORDS>(
+                        triangles,
+                        first_edge_face,
+                        first_split.first,
+                    )
+                    triangle_store<TRIANGLE_STORAGE_WORDS>(
+                        triangles,
+                        second_edge_face,
+                        second_split.first,
+                    )
+                    triangle_store<TRIANGLE_STORAGE_WORDS>(
+                        triangles,
+                        triangle_count,
+                        first_split.second,
+                    )
+                    triangle_store<TRIANGLE_STORAGE_WORDS>(
+                        triangles,
+                        triangle_count + 1,
+                        second_split.second,
+                    )
+                    triangle_count = triangle_count + 2
+                    inserted = inserted + 1
+                }
+            }
+        } else {
+            location_failures = location_failures + 1
+        }
+        point_id = point_id + 1
+    }
+
+    let expected = if resident_points + resident_points > boundary + 2 {
+        resident_points + resident_points - boundary - 2
+    } else {
+        0
+    }
+    if !overflowed
+        && location_failures == 0
+        && invariant_failures == 0
+        && triangle_count != expected {
+        invariant_failures = invariant_failures + 1
+    }
+    TopologyConstruction {
+        valid: !overflowed
+            && location_failures == 0
+            && invariant_failures == 0
+            && inserted == resident_points
+            && triangle_count == expected,
+        overflowed: overflowed,
+        resident_points: resident_points,
+        boundary_points: boundary,
+        inserted_points: inserted,
+        resident_triangles: triangle_count,
+        expected_triangles: expected,
+        location_failures: location_failures,
+        invariant_failures: invariant_failures,
+    }
+}
+
+fn flippable_pair<const POINT_STORAGE_WORDS: usize>(
+    _ key: AtlasKey,
+    _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
+    _ first_triangle: Triangle,
+    _ first_face: u32,
+    _ first_edge: u32,
+    _ second_triangle: Triangle,
+    _ second_face: u32,
+    _ second_edge: u32,
+) -> TrianglePair {
+    let first = triangle_directed_edge(key, first_triangle, first_face, first_edge)
+    let second = triangle_directed_edge(key, second_triangle, second_face, second_edge)
+    if !directed_edges_form_interior_pair(first, second) {
+        return invalid_triangle_pair()
+    }
+    let first_opposite_id = triangle_edge_opposite(first_triangle, first_edge)
+    let second_opposite_id = triangle_edge_opposite(second_triangle, second_edge)
+    let u = point_load<POINT_STORAGE_WORDS>(points, first.first)
+    let v = point_load<POINT_STORAGE_WORDS>(points, first.second)
+    let first_opposite = point_load<POINT_STORAGE_WORDS>(points, first_opposite_id)
+    let second_opposite = point_load<POINT_STORAGE_WORDS>(points, second_opposite_id)
+    let decision = interior_edge_flip_decision(
+        first.first,
+        u,
+        first.second,
+        v,
+        first_opposite_id,
+        first_opposite,
+        second_opposite_id,
+        second_opposite,
+    )
+    flipped_triangle_pair(
+        decision,
+        first.first,
+        u,
+        first.second,
+        v,
+        first_opposite_id,
+        first_opposite,
+        second_opposite_id,
+        second_opposite,
+    )
+}
+
+fn flip_proposal_for_edges(_ first: DirectedEdge, _ second: DirectedEdge) -> FlipProposal {
+    let first_face = if first.triangle < second.triangle {
+        first.triangle
+    } else {
+        second.triangle
+    }
+    let second_face = if first.triangle < second.triangle {
+        second.triangle
+    } else {
+        first.triangle
+    }
+    let low = if first.first < first.second {
+        first.first
+    } else {
+        first.second
+    }
+    let high = if first.first > first.second {
+        first.first
+    } else {
+        first.second
+    }
+    FlipProposal {
+        first_triangle: first_face,
+        second_triangle: second_face,
+        edge_low: low,
+        edge_high: high,
+        active: true,
+    }
+}
+
+/// Restore constrained Delaunay topology without reading the atlas back.
+///
+/// This deterministic scalar placement always flips the lexicographically
+/// first illegal unlocked edge. Exact incircle signs and the canonical
+/// cocircular tie rule come from `quilting_atlas::topology`. The bounded flip
+/// budget is explicit: exhaustion reports nonconvergence instead of silently
+/// publishing a partially restored atlas.
+pub fn restore_constrained_delaunay<
+    const POINT_STORAGE_WORDS: usize,
+    const TRIANGLE_STORAGE_WORDS: usize,
+    const FLIP_LIMIT: usize,
+>(
+    _ key: AtlasKey,
+    _ source_valid: bool,
+    _ resident_points: u32,
+    _ resident_triangles: u32,
+    _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
+    _ triangles: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+) -> DelaunayRestoration
+where { POINT_STORAGE_WORDS % POINT_WORDS == 0 }, { TRIANGLE_STORAGE_WORDS % TRIANGLE_WORDS == 0 }
+{
+    let point_capacity: u32 = (POINT_STORAGE_WORDS / POINT_WORDS).downcast_truncate()
+    let triangle_capacity: u32 = (TRIANGLE_STORAGE_WORDS / TRIANGLE_WORDS).downcast_truncate()
+    let flip_limit: u32 = FLIP_LIMIT.downcast_truncate()
+    let mut invariant_failures: u32 = 0
+    if !source_valid || resident_points > point_capacity || resident_triangles > triangle_capacity {
+        invariant_failures = invariant_failures + 1
+    }
+    let mut face: u32 = 0
+    while face < resident_triangles {
+        let triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, face)
+        if !triangle.valid
+            || triangle.first >= resident_points
+            || triangle.second >= resident_points
+            || triangle.third >= resident_points
+            || triangle.first == triangle.second
+            || triangle.first == triangle.third
+            || triangle.second == triangle.third {
+            invariant_failures = invariant_failures + 1
+        } else if orientation(
+                point_load<POINT_STORAGE_WORDS>(points, triangle.first),
+                point_load<POINT_STORAGE_WORDS>(points, triangle.second),
+                point_load<POINT_STORAGE_WORDS>(points, triangle.third),
+            )
+            <= 0 {
+            invariant_failures = invariant_failures + 1
+        }
+        face = face + 1
+    }
+
+    let mut flips: u32 = 0
+    let mut searching = invariant_failures == 0
+    let mut converged = false
+    while searching && flips < flip_limit {
+        let mut found = false
+        let mut best = invalid_flip_proposal()
+        let mut best_first_face: u32 = 0
+        let mut best_second_face: u32 = 0
+        let mut best_pair = invalid_triangle_pair()
+        let mut first_face: u32 = 0
+        while first_face < resident_triangles {
+            let first_triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, first_face)
+            let mut second_face = first_face + 1
+            while second_face < resident_triangles {
+                let second_triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, second_face)
+                let mut first_edge: u32 = 0
+                while first_edge < 3 {
+                    let directed_first = triangle_directed_edge(
+                        key,
+                        first_triangle,
+                        first_face,
+                        first_edge,
+                    )
+                    let mut second_edge: u32 = 0
+                    while second_edge < 3 {
+                        let directed_second = triangle_directed_edge(
+                            key,
+                            second_triangle,
+                            second_face,
+                            second_edge,
+                        )
+                        if directed_edges_form_interior_pair(directed_first, directed_second) {
+                            let pair = flippable_pair<POINT_STORAGE_WORDS>(
+                                key,
+                                points,
+                                first_triangle,
+                                first_face,
+                                first_edge,
+                                second_triangle,
+                                second_face,
+                                second_edge,
+                            )
+                            if pair.valid {
+                                let proposal = flip_proposal_for_edges(
+                                    directed_first,
+                                    directed_second,
+                                )
+                                if !found || flip_proposal_precedes(proposal, best) {
+                                    found = true
+                                    best = proposal
+                                    best_first_face = first_face
+                                    best_second_face = second_face
+                                    best_pair = pair
+                                }
+                            }
+                        }
+                        second_edge = second_edge + 1
+                    }
+                    first_edge = first_edge + 1
+                }
+                second_face = second_face + 1
+            }
+            first_face = first_face + 1
+        }
+        if found {
+            triangle_store<TRIANGLE_STORAGE_WORDS>(triangles, best_first_face, best_pair.first)
+            triangle_store<TRIANGLE_STORAGE_WORDS>(triangles, best_second_face, best_pair.second)
+            flips = flips + 1
+        } else {
+            converged = true
+            searching = false
+        }
+    }
+
+    let mut remaining: u32 = 0
+    if invariant_failures == 0 {
+        let mut first_face: u32 = 0
+        while first_face < resident_triangles {
+            let first_triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, first_face)
+            let mut second_face = first_face + 1
+            while second_face < resident_triangles {
+                let second_triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, second_face)
+                let mut first_edge: u32 = 0
+                while first_edge < 3 {
+                    let mut second_edge: u32 = 0
+                    while second_edge < 3 {
+                        let pair = flippable_pair<POINT_STORAGE_WORDS>(
+                            key,
+                            points,
+                            first_triangle,
+                            first_face,
+                            first_edge,
+                            second_triangle,
+                            second_face,
+                            second_edge,
+                        )
+                        if pair.valid {
+                            remaining = remaining + 1
+                        }
+                        second_edge = second_edge + 1
+                    }
+                    first_edge = first_edge + 1
+                }
+                second_face = second_face + 1
+            }
+            first_face = first_face + 1
+        }
+    }
+    if remaining == 0 && invariant_failures == 0 {
+        converged = true
+    }
+    DelaunayRestoration {
+        valid: source_valid && converged && remaining == 0 && invariant_failures == 0,
+        converged: converged,
+        resident_points: resident_points,
+        resident_triangles: resident_triangles,
+        flips: flips,
+        remaining_violations: remaining,
+        invariant_failures: invariant_failures,
+    }
+}
