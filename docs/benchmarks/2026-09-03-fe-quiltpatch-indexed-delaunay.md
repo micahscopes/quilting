@@ -190,3 +190,32 @@ watch-loop defect was observed separately: after a dependency diagnostic,
 `fe web dev` served the last-good artifact but did not consume the corrected
 dependency event, requiring a server restart. This is a tooling/cache issue,
 not part of the runtime timing above.
+
+The remaining quadratic initialization was then replaced by a sparse
+vertex-incidence index: one outgoing-edge head per resident point and one next
+link per resident half-edge. Reverse-edge matching now visits only the target
+vertex's outgoing list, while retaining the original provider's exact match
+count and reciprocal-twin validation. Each chart adds a 3,272-byte typed scratch
+resource; together with points, samples, triangles, twins, proposals, and the
+receipt, each restoration pass uses seven storage bindings under WebGPU's
+portable limit of eight.
+
+| Warm phase with sparse incidence | Time |
+| --- | ---: |
+| Chart 0 Delaunay restoration | 20.9 ms |
+| Chart 1 Delaunay restoration | 4.7 ms |
+| Exact 16-pixel gesture release | 52.0 ms |
+
+The default and moved triangle hashes remained byte-identical to both prior
+indexed checkpoints. The same seven-state deformation sweep completed in
+29.1–39.5 ms per full frame, retained the exact prior flip counts, and reported
+zero invariant failures on both charts. The first pullback-mode activation
+after a page reload measured 1,463.3 ms; this cold activation cost remains to
+be separated into browser pipeline compilation and first-dispatch work.
+
+The sparse-incidence release build took 363,154 ms and emitted 14 passes,
+35,258 Wasm bytes, 687,407 compiler-reported WGSL bytes, and 909,256 total
+bytes. A discarded open-address-index prototype also exposed a Sonatina SPIR-V
+structurizer regression for a valid outcome-controlled probe loop; the
+incidence formulation is both simpler and better matched to mesh topology, so
+production no longer depends on that rejected shape.

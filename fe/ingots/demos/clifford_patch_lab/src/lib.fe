@@ -161,6 +161,7 @@ const DEFORMED_POINT_WORDS: usize = DEFORMED_POINTS * 3
 const DEFORMED_TRIANGLES: usize = DEFORMED_POINTS * 2 - DEFORMED_BOUNDARY_POINTS - 2
 const DEFORMED_TRIANGLE_WORDS: usize = DEFORMED_TRIANGLES * TRIANGLE_WORDS
 const DEFORMED_TWIN_WORDS: usize = DEFORMED_TRIANGLES * TOPOLOGY_TWIN_WORDS_PER_TRIANGLE
+const DEFORMED_EDGE_INDEX_WORDS: usize = DEFORMED_POINTS + DEFORMED_TWIN_WORDS
 const DEFORMED_PROPOSAL_WORDS: usize = (DEFORMED_TWIN_WORDS + 31) / 32
 const DEFORMED_SAMPLE_LANES: usize = 6
 const DEFORMED_SAMPLE_WORDS: usize = DEFORMED_CANDIDATES * DEFORMED_SAMPLE_LANES
@@ -415,6 +416,7 @@ fn restore_deformed_topology(
     _ points: StorageBuffer<u32, DEFORMED_POINT_WORDS>,
     _ triangles: StorageBuffer<u32, DEFORMED_TRIANGLE_WORDS>,
     _ twins: StorageBuffer<u32, DEFORMED_TWIN_WORDS>,
+    _ edge_index: StorageBuffer<u32, DEFORMED_EDGE_INDEX_WORDS>,
     _ proposals: StorageBuffer<u32, DEFORMED_PROPOSAL_WORDS>,
 ) {
     let policy = SurfaceInteriorEdgeFlip { samples: samples }
@@ -423,6 +425,7 @@ fn restore_deformed_topology(
         DEFORMED_POINT_WORDS,
         DEFORMED_TRIANGLE_WORDS,
         DEFORMED_TWIN_WORDS,
+        DEFORMED_EDGE_INDEX_WORDS,
         DEFORMED_PROPOSAL_WORDS,
         DEFORMED_FLIP_LIMIT,
     >(
@@ -434,6 +437,7 @@ fn restore_deformed_topology(
         points,
         triangles,
         twins,
+        edge_index,
         proposals,
     )
     receipt.store(index: 5, value: if restored.valid { 1 } else { 0 })
@@ -1372,6 +1376,8 @@ actor CliffordPatchLab uses (
     triangles_1: StorageBuffer<u32, DEFORMED_TRIANGLE_WORDS>,
     twins_0: StorageBuffer<u32, DEFORMED_TWIN_WORDS>,
     twins_1: StorageBuffer<u32, DEFORMED_TWIN_WORDS>,
+    edge_index_0: StorageBuffer<u32, DEFORMED_EDGE_INDEX_WORDS>,
+    edge_index_1: StorageBuffer<u32, DEFORMED_EDGE_INDEX_WORDS>,
     proposals_0: StorageBuffer<u32, DEFORMED_PROPOSAL_WORDS>,
     proposals_1: StorageBuffer<u32, DEFORMED_PROPOSAL_WORDS>,
     receipt_0: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
@@ -1756,9 +1762,9 @@ actor CliffordPatchLab uses (
         }
     }
 
-    // Each chart is a separate pass so its four resident products remain below
-    // the portable per-stage storage-binding budget. A runtime chart branch
-    // would make both disjoint resource sets reachable from one shader.
+    // Each chart is a separate pass so its seven resident storage resources
+    // remain below WebGPU's portable eight-buffer per-stage limit. A runtime
+    // chart branch would make both disjoint resource sets reachable at once.
     fn deformed_topology_restore_0(self, invocation: ComputeInvocation)
         uses (
             ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>,
@@ -1772,6 +1778,7 @@ actor CliffordPatchLab uses (
             self.points_0,
             self.triangles_0,
             self.twins_0,
+            self.edge_index_0,
             self.proposals_0,
         )
     }
@@ -1789,6 +1796,7 @@ actor CliffordPatchLab uses (
             self.points_1,
             self.triangles_1,
             self.twins_1,
+            self.edge_index_1,
             self.proposals_1,
         )
     }
