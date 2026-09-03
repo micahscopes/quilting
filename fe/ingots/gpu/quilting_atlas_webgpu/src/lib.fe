@@ -2432,6 +2432,46 @@ where
     failures
 }
 
+const RESIDENT_PROPOSAL_BITS_PER_WORD: usize = 32
+
+/// Read one cached half-edge proposal from its packed resident bitset.
+///
+/// Delaunay restoration is deliberately scalar: one invocation owns the
+/// topology, twins, and proposal cache. Packed read/modify/write therefore
+/// needs no atomics and remains deterministic across WebGPU implementations.
+fn resident_edge_proposal<
+    const PROPOSAL_STORAGE_WORDS: usize,
+>(
+    _ proposals: StorageBuffer<u32, PROPOSAL_STORAGE_WORDS>,
+    _ slot: u32,
+) -> bool
+where PROPOSAL_STORAGE_WORDS > 0
+{
+    let word = slot >> 5
+    let bit = slot & 31
+    (proposals.load(index: word) & (1 << bit)) != 0
+}
+
+/// Set or clear one cached half-edge proposal in its packed resident bitset.
+fn set_resident_edge_proposal<
+    const PROPOSAL_STORAGE_WORDS: usize,
+>(
+    _ proposals: StorageBuffer<u32, PROPOSAL_STORAGE_WORDS>,
+    _ slot: u32,
+    _ active: bool,
+)
+where PROPOSAL_STORAGE_WORDS > 0
+{
+    let word = slot >> 5
+    let bit = slot & 31
+    let mask: u32 = 1 << bit
+    let present = proposals.load(index: word)
+    proposals.store(
+        index: word,
+        value: if active { present | mask } else { present & (!mask) },
+    )
+}
+
 fn clear_resident_face_proposals<
     const TWIN_STORAGE_WORDS: usize,
     const PROPOSAL_STORAGE_WORDS: usize,
@@ -2440,15 +2480,17 @@ fn clear_resident_face_proposals<
     _ twins: StorageBuffer<u32, TWIN_STORAGE_WORDS>,
     _ proposals: StorageBuffer<u32, PROPOSAL_STORAGE_WORDS>,
 )
-where { PROPOSAL_STORAGE_WORDS == TWIN_STORAGE_WORDS }
+where
+    PROPOSAL_STORAGE_WORDS > 0,
+    { PROPOSAL_STORAGE_WORDS * RESIDENT_PROPOSAL_BITS_PER_WORD >= TWIN_STORAGE_WORDS }
 {
     let mut local: u32 = 0
     while local < TOPOLOGY_TWIN_WORDS_PER_TRIANGLE.downcast_truncate() {
         let slot = half_edge_slot(face, local)
         let twin = twins.load(index: slot)
-        proposals.store(index: slot, value: 0)
-        if twin != INVALID_VERTEX && twin < PROPOSAL_STORAGE_WORDS.downcast_truncate() {
-            proposals.store(index: twin, value: 0)
+        set_resident_edge_proposal<PROPOSAL_STORAGE_WORDS>(proposals, slot, false)
+        if twin != INVALID_VERTEX && twin < TWIN_STORAGE_WORDS.downcast_truncate() {
+            set_resident_edge_proposal<PROPOSAL_STORAGE_WORDS>(proposals, twin, false)
         }
         local = local + 1
     }
@@ -2458,7 +2500,7 @@ where { PROPOSAL_STORAGE_WORDS == TWIN_STORAGE_WORDS }
 ///
 /// The cache is keyed by the lower of a reciprocal half-edge pair. Calling the
 /// function through either direction is harmless; only the canonical lane
-/// evaluates the policy, while the other lane remains zero.
+/// evaluates the policy, while every noncanonical bit remains clear.
 fn refresh_resident_edge_proposal<
     P: InteriorEdgeFlipPolicy,
     const POINT_STORAGE_WORDS: usize,
@@ -2479,13 +2521,14 @@ where
     { POINT_STORAGE_WORDS % POINT_WORDS == 0 },
     { TRIANGLE_STORAGE_WORDS % TRIANGLE_WORDS == 0 },
     { TWIN_STORAGE_WORDS == TRIANGLE_STORAGE_WORDS / TRIANGLE_WORDS * TOPOLOGY_TWIN_WORDS_PER_TRIANGLE },
-    { PROPOSAL_STORAGE_WORDS == TWIN_STORAGE_WORDS }
+    PROPOSAL_STORAGE_WORDS > 0,
+    { PROPOSAL_STORAGE_WORDS * RESIDENT_PROPOSAL_BITS_PER_WORD >= TWIN_STORAGE_WORDS }
 {
     let half_edges = resident_triangles * TOPOLOGY_TWIN_WORDS_PER_TRIANGLE.downcast_truncate()
     if slot >= half_edges {
         return 0
     }
-    proposals.store(index: slot, value: 0)
+    set_resident_edge_proposal<PROPOSAL_STORAGE_WORDS>(proposals, slot, false)
     let twin = twins.load(index: slot)
     if twin == INVALID_VERTEX {
         return 0
@@ -2512,7 +2555,7 @@ where
         second_face,
         second_edge,
     )
-    proposals.store(index: canonical, value: if pair.valid { 1 } else { 0 })
+    set_resident_edge_proposal<PROPOSAL_STORAGE_WORDS>(proposals, canonical, pair.valid)
     0
 }
 
@@ -2536,7 +2579,8 @@ where
     { POINT_STORAGE_WORDS % POINT_WORDS == 0 },
     { TRIANGLE_STORAGE_WORDS % TRIANGLE_WORDS == 0 },
     { TWIN_STORAGE_WORDS == TRIANGLE_STORAGE_WORDS / TRIANGLE_WORDS * TOPOLOGY_TWIN_WORDS_PER_TRIANGLE },
-    { PROPOSAL_STORAGE_WORDS == TWIN_STORAGE_WORDS }
+    PROPOSAL_STORAGE_WORDS > 0,
+    { PROPOSAL_STORAGE_WORDS * RESIDENT_PROPOSAL_BITS_PER_WORD >= TWIN_STORAGE_WORDS }
 {
     let mut failures: u32 = 0
     let mut local: u32 = 0
@@ -2595,7 +2639,8 @@ where
     { POINT_STORAGE_WORDS % POINT_WORDS == 0 },
     { TRIANGLE_STORAGE_WORDS % TRIANGLE_WORDS == 0 },
     { TWIN_STORAGE_WORDS == TRIANGLE_STORAGE_WORDS / TRIANGLE_WORDS * TOPOLOGY_TWIN_WORDS_PER_TRIANGLE },
-    { PROPOSAL_STORAGE_WORDS == TWIN_STORAGE_WORDS }
+    PROPOSAL_STORAGE_WORDS > 0,
+    { PROPOSAL_STORAGE_WORDS * RESIDENT_PROPOSAL_BITS_PER_WORD >= TWIN_STORAGE_WORDS }
 {
     let point_capacity: u32 = (POINT_STORAGE_WORDS / POINT_WORDS).downcast_truncate()
     let triangle_capacity: u32 = (TRIANGLE_STORAGE_WORDS / TRIANGLE_WORDS).downcast_truncate()
@@ -2660,41 +2705,50 @@ where
         let mut best_slot: u32 = INVALID_VERTEX
         let mut best_first_face: u32 = 0
         let mut best_second_face: u32 = 0
-        let mut slot: u32 = 0
-        while slot < half_edges {
-            let twin = twins.load(index: slot)
-            if proposals.load(index: slot) != 0
-                && twin != INVALID_VERTEX
-                && slot < twin
-                && twin < half_edges {
-                let first_face = half_edge_face(slot)
-                let first_edge = half_edge_local(slot)
-                let second_face = half_edge_face(twin)
-                let second_edge = half_edge_local(twin)
-                let first_triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, first_face)
-                let second_triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, second_face)
-                let first = triangle_directed_edge(
-                    key,
-                    first_triangle,
-                    first_face,
-                    first_edge,
-                )
-                let second = triangle_directed_edge(
-                    key,
-                    second_triangle,
-                    second_face,
-                    second_edge,
-                )
-                let proposal = flip_proposal_for_edges(first, second)
-                if !found || flip_proposal_precedes(proposal, best) {
-                    found = true
-                    best = proposal
-                    best_slot = slot
-                    best_first_face = first_face
-                    best_second_face = second_face
+        let proposal_words = (half_edges + 31) >> 5
+        let mut proposal_word: u32 = 0
+        while proposal_word < proposal_words {
+            let mut active = proposals.load(index: proposal_word)
+            let mut bit: u32 = 0
+            // A sparse word stops at its highest active bit. Empty words skip
+            // all 32 half-edge slots without changing proposal ordering.
+            while active != 0 {
+                if (active & 1) != 0 {
+                    let slot = (proposal_word << 5) + bit
+                    let twin = twins.load(index: slot)
+                    if twin != INVALID_VERTEX && slot < twin && twin < half_edges {
+                        let first_face = half_edge_face(slot)
+                        let first_edge = half_edge_local(slot)
+                        let second_face = half_edge_face(twin)
+                        let second_edge = half_edge_local(twin)
+                        let first_triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, first_face)
+                        let second_triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, second_face)
+                        let first = triangle_directed_edge(
+                            key,
+                            first_triangle,
+                            first_face,
+                            first_edge,
+                        )
+                        let second = triangle_directed_edge(
+                            key,
+                            second_triangle,
+                            second_face,
+                            second_edge,
+                        )
+                        let proposal = flip_proposal_for_edges(first, second)
+                        if !found || flip_proposal_precedes(proposal, best) {
+                            found = true
+                            best = proposal
+                            best_slot = slot
+                            best_first_face = first_face
+                            best_second_face = second_face
+                        }
+                    }
                 }
+                active = active >> 1
+                bit = bit + 1
             }
-            slot = slot + 1
+            proposal_word = proposal_word + 1
         }
         if found {
             let best_twin = twins.load(index: best_slot)
@@ -2788,12 +2842,15 @@ where
 
     let mut remaining: u32 = 0
     if invariant_failures == 0 {
-        let mut slot: u32 = 0
-        while slot < half_edges {
-            if proposals.load(index: slot) != 0 {
-                remaining = remaining + 1
+        let proposal_words = (half_edges + 31) >> 5
+        let mut proposal_word: u32 = 0
+        while proposal_word < proposal_words {
+            let mut active = proposals.load(index: proposal_word)
+            while active != 0 {
+                remaining = remaining + (active & 1)
+                active = active >> 1
             }
-            slot = slot + 1
+            proposal_word = proposal_word + 1
         }
     }
     if remaining == 0 && invariant_failures == 0 {
