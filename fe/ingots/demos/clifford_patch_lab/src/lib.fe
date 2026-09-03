@@ -116,6 +116,8 @@ use std::webgpu::{
     Instanced,
     LatestPerFrame,
     PassActivation,
+    PassPreparation,
+    PassPreparationMode,
     RasterConfiguration,
     RasterPlan,
     RasterVertex,
@@ -558,6 +560,18 @@ impl PullbackPatchTopology {
                 state.dragging < 0.5 && state.orbiting < 0.5
             },
         }
+    }
+}
+
+/// Compile the complete pullback topology/render subgraph once the lab is
+/// visible and the browser has an idle opportunity. This changes physical
+/// residency only; the two activation policies above remain the sole
+/// authority over whether any pullback pass executes.
+struct PullbackPipelinePreparation {}
+
+impl PullbackPipelinePreparation {
+    pub fn residency(_ state: CliffordLabState) -> PassPreparationMode {
+        PassPreparationMode::VisibleIdle
     }
 }
 
@@ -1418,6 +1432,7 @@ actor CliffordPatchLab uses (
                 FixedDispatch<DEFORMED_WORKGROUPS, 2, 1>,
             >,
             PassActivation<PullbackPatchTopology>,
+            PassPreparation<PullbackPipelinePreparation>,
         )
     {
         if self.sampler_mode < 2.5 {
@@ -1456,6 +1471,7 @@ actor CliffordPatchLab uses (
                 FixedDispatch<DEFORMED_WORKGROUPS, 2, 1>,
             >,
             PassActivation<PullbackPatchTopology>,
+            PassPreparation<PullbackPipelinePreparation>,
         )
     {
         if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
@@ -1519,6 +1535,7 @@ actor CliffordPatchLab uses (
                 >,
             >,
             PassActivation<PullbackPatchTopology>,
+            PassPreparation<PullbackPipelinePreparation>,
         )
     {
         if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
@@ -1577,6 +1594,7 @@ actor CliffordPatchLab uses (
                 >,
             >,
             PassActivation<PullbackPatchTopology>,
+            PassPreparation<PullbackPipelinePreparation>,
         )
     {
         if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
@@ -1635,6 +1653,7 @@ actor CliffordPatchLab uses (
                 >,
             >,
             PassActivation<PullbackPatchTopology>,
+            PassPreparation<PullbackPipelinePreparation>,
         )
     {
         if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
@@ -1657,6 +1676,7 @@ actor CliffordPatchLab uses (
         uses (
             ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 2, 1>>,
             PassActivation<PullbackPatchTopology>,
+            PassPreparation<PullbackPipelinePreparation>,
         )
     {
         if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
@@ -1687,6 +1707,7 @@ actor CliffordPatchLab uses (
         uses (
             ComputeSurface<Workgroup<DEFORMED_THREADS, 1, 1>, FixedDispatch<1, 2, 1>>,
             PassActivation<PullbackPatchTopology>,
+            PassPreparation<PullbackPipelinePreparation>,
         )
     {
         if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
@@ -1728,6 +1749,7 @@ actor CliffordPatchLab uses (
         uses (
             ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 2, 1>>,
             PassActivation<PullbackPatchTopology>,
+            PassPreparation<PullbackPipelinePreparation>,
         )
     {
         if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
@@ -1769,6 +1791,7 @@ actor CliffordPatchLab uses (
         uses (
             ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>,
             PassActivation<PullbackPatchTopology>,
+            PassPreparation<PullbackPipelinePreparation>,
         )
     {
         if self.sampler_mode < 2.5 { return }
@@ -1787,6 +1810,7 @@ actor CliffordPatchLab uses (
         uses (
             ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>,
             PassActivation<PullbackPatchTopology>,
+            PassPreparation<PullbackPipelinePreparation>,
         )
     {
         if self.sampler_mode < 2.5 { return }
@@ -2063,6 +2087,7 @@ actor CliffordPatchLab uses (
         uses (
             VertexStage<PatchVarying, TriangleList<DEFORMED_RENDER_VERTICES>>,
             PassActivation<PullbackPatchPipeline>,
+            PassPreparation<PullbackPipelinePreparation>,
         )
     {
         let chart_vertices: u32 = (DEFORMED_TRIANGLES * 3).downcast_truncate()
@@ -2140,6 +2165,7 @@ actor CliffordPatchLab uses (
         uses (
             FragmentStage<PatchVarying>,
             PassActivation<PullbackPatchPipeline>,
+            PassPreparation<PullbackPipelinePreparation>,
         )
     {
         let edge_pixels = minimum3(varying.edge_seed) / varying.view_depth
