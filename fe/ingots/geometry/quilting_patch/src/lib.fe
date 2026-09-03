@@ -6,7 +6,7 @@
 //! this common surface promises only a partial typed point.
 
 use core::marker::Copy
-use quilting_domain::{Bary3F, Vec2F, Vec3F, length3, sub3}
+use quilting_domain::{Bary3F, Vec2F, Vec3F, dot3, length3, sub3}
 
 /// A nominal parameter domain associates one coordinate representation.
 pub trait ParameterDomain {
@@ -178,6 +178,185 @@ pub fn measure_patch_edge<K: PatchKernel, M: CodomainMetric<K::Codomain>>(
     let midpoint_sample = denote(value, midpoint, policy)
     let right_sample = denote(value, right, policy)
     measure_codomain_edge(left_sample, midpoint_sample, right_sample, metric)
+}
+
+// ---------------------------------------------------------------------------
+// Pullback metrics and deformation-aware triangulation
+// ---------------------------------------------------------------------------
+
+/// Symmetric 2x2 metric tensor in one oriented parameter chart.
+///
+/// The tensor is deliberately separate from any patch family: it is the small
+/// value shared by surface-aware sampling, anisotropic Delaunay restoration,
+/// screen-space error estimation, and future native/WebGPU providers.
+pub struct PullbackMetric2 { pub uu: f32, pub uv: f32, pub vv: f32, pub defined: bool }
+impl Copy for PullbackMetric2 {}
+
+/// One chart point carrying the local surface metric induced by its patch.
+pub struct PullbackSample2 { pub parameter: Vec2F, pub metric: PullbackMetric2 }
+impl Copy for PullbackSample2 {}
+
+pub fn pullback_metric2(_ uu: f32, _ uv: f32, _ vv: f32, _ defined: bool) -> PullbackMetric2 {
+    PullbackMetric2 { uu: uu, uv: uv, vv: vv, defined: defined }
+}
+
+pub fn pullback_sample2(_ parameter: Vec2F, _ metric: PullbackMetric2) -> PullbackSample2 {
+    PullbackSample2 { parameter: parameter, metric: metric }
+}
+
+/// Exact first fundamental form for a Euclidean three-space differential.
+pub fn euclidean3_pullback_metric(_ tangent_u: Vec3F, _ tangent_v: Vec3F) -> PullbackMetric2 {
+    pullback_metric2(
+        dot3(tangent_u, tangent_u),
+        dot3(tangent_u, tangent_v),
+        dot3(tangent_v, tangent_v),
+        true,
+    )
+}
+
+/// First fundamental form estimated only from denotation and codomain
+/// distance. The caller chooses two valid neighboring chart samples, so this
+/// also serves non-Euclidean codomains without exposing tangent storage.
+pub fn finite_pullback_metric<C: Codomain, M: CodomainMetric<C>>(
+    _ origin: DenotationSample<C>,
+    _ step_u: DenotationSample<C>,
+    _ step_v: DenotationSample<C>,
+    _ delta_u: f32,
+    _ delta_v: f32,
+    _ metric: M,
+) -> PullbackMetric2 {
+    if !origin.defined || !step_u.defined || !step_v.defined || delta_u <= 0.0 || delta_v <= 0.0 {
+        return pullback_metric2(0.0, 0.0, 0.0, false)
+    }
+    let distance_u = metric.distance(origin.value, step_u.value)
+    let distance_v = metric.distance(origin.value, step_v.value)
+    let distance_uv = metric.distance(step_u.value, step_v.value)
+    let uu = distance_u * distance_u / (delta_u * delta_u)
+    let vv = distance_v * distance_v / (delta_v * delta_v)
+    let uv = (distance_u * distance_u + distance_v * distance_v - distance_uv * distance_uv)
+        / (2.0 * delta_u * delta_v)
+    pullback_metric2(uu, uv, vv, true)
+}
+
+pub fn pullback_determinant(_ metric: PullbackMetric2) -> f32 {
+    metric.uu * metric.vv - metric.uv * metric.uv
+}
+
+/// Squared local surface distance of one chart displacement.
+pub fn pullback_distance_squared(_ metric: PullbackMetric2, _ delta: Vec2F) -> f32 {
+    metric.uu * delta.x * delta.x
+        + 2.0 * metric.uv * delta.x * delta.y
+        + metric.vv * delta.y * delta.y
+}
+
+/// Symmetric quadrilateral metric used by an edge-flip decision.
+///
+/// Averaging the four vertex tensors makes the result independent of which
+/// diagonal is currently resident. This prevents the remesher from encoding
+/// its own history into a varying-metric tie.
+pub fn average_pullback_metric4(
+    _ first: PullbackMetric2,
+    _ second: PullbackMetric2,
+    _ third: PullbackMetric2,
+    _ fourth: PullbackMetric2,
+) -> PullbackMetric2 {
+    pullback_metric2(
+        (first.uu + second.uu + third.uu + fourth.uu) * 0.25,
+        (first.uv + second.uv + third.uv + fourth.uv) * 0.25,
+        (first.vv + second.vv + third.vv + fourth.vv) * 0.25,
+        first.defined && second.defined && third.defined && fourth.defined,
+    )
+}
+
+pub fn average_pullback_metric2(
+    _ first: PullbackMetric2,
+    _ second: PullbackMetric2,
+) -> PullbackMetric2 {
+    pullback_metric2(
+        (first.uu + second.uu) * 0.5,
+        (first.uv + second.uv) * 0.5,
+        (first.vv + second.vv) * 0.5,
+        first.defined && second.defined,
+    )
+}
+
+/// Symmetric local-distance estimate used by deformation-aware Poisson
+/// exclusion. The midpoint-rule tensor is approximated by endpoint averaging,
+/// so reversing a candidate pair cannot change admission.
+pub fn pullback_sample_distance_squared(
+    _ first: PullbackSample2,
+    _ second: PullbackSample2,
+) -> f32 {
+    let metric = average_pullback_metric2(first.metric, second.metric)
+    pullback_distance_squared(
+        metric,
+        Vec2F {
+            x: second.parameter.x - first.parameter.x,
+            y: second.parameter.y - first.parameter.y,
+        },
+    )
+}
+
+pub fn pullback_poisson_conflict(
+    _ first: PullbackSample2,
+    _ first_radius_squared: f32,
+    _ second: PullbackSample2,
+    _ second_radius_squared: f32,
+) -> bool {
+    let radius_squared = if first_radius_squared > second_radius_squared {
+        first_radius_squared
+    } else {
+        second_radius_squared
+    }
+    first.metric.defined
+        && second.metric.defined
+        && pullback_sample_distance_squared(first, second) < radius_squared
+}
+
+fn chart_orientation(_ first: Vec2F, _ second: Vec2F, _ third: Vec2F) -> f32 {
+    (second.x - first.x) * (third.y - first.y) - (second.y - first.y) * (third.x - first.x)
+}
+
+fn metric_lift(_ metric: PullbackMetric2, _ point: Vec2F, _ query: Vec2F) -> f32 {
+    pullback_distance_squared(
+        metric,
+        Vec2F { x: point.x - query.x, y: point.y - query.y },
+    )
+}
+
+/// Anisotropic incircle determinant in an oriented chart.
+///
+/// For a constant positive-definite metric this is exactly ordinary Delaunay
+/// after the metric's affine square-root transform. Positive means `query` is
+/// inside the first triangle's metric circumellipse. A varying surface uses a
+/// symmetric local tensor, normally `average_pullback_metric4`, and retains
+/// chart orientation rather than projecting a possibly folded 3D quad.
+pub fn pullback_incircle_value(
+    _ metric: PullbackMetric2,
+    _ first: Vec2F,
+    _ second: Vec2F,
+    _ third: Vec2F,
+    _ query: Vec2F,
+) -> f32 {
+    if !metric.defined || pullback_determinant(metric) <= 0.0 {
+        return 0.0
+    }
+    let first_x = first.x - query.x
+    let first_y = first.y - query.y
+    let second_x = second.x - query.x
+    let second_y = second.y - query.y
+    let third_x = third.x - query.x
+    let third_y = third.y - query.y
+    let first_second = first_x * second_y - second_x * first_y
+    let second_third = second_x * third_y - third_x * second_y
+    let third_first = third_x * first_y - first_x * third_y
+    let determinant = metric_lift(metric, first, query) * second_third
+        + metric_lift(metric, second, query) * third_first
+        + metric_lift(metric, third, query) * first_second
+    let winding = chart_orientation(first, second, third)
+    if winding < 0.0 {
+        -determinant
+    } else if winding > 0.0 { determinant } else { 0.0 }
 }
 
 // ---------------------------------------------------------------------------
@@ -360,6 +539,26 @@ impl<A: ProjectiveAlgebra> ProjectiveInterpolation<
             ),
         }
     }
+}
+
+/// Varying-metric Delaunay value over one candidate quadrilateral.
+///
+/// All four tensors participate symmetrically, so the predicate is unchanged
+/// when the resident and proposed diagonals trade places. The exact chart
+/// topology still decides convexity and boundary constraints separately.
+pub fn varying_pullback_incircle_value(
+    _ first: PullbackSample2,
+    _ second: PullbackSample2,
+    _ third: PullbackSample2,
+    _ query: PullbackSample2,
+) -> f32 {
+    pullback_incircle_value(
+        average_pullback_metric4(first.metric, second.metric, third.metric, query.metric),
+        first.parameter,
+        second.parameter,
+        third.parameter,
+        query.parameter,
+    )
 }
 
 /// Degree-one barycentric interpolation over a triangle.
