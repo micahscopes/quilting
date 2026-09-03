@@ -76,7 +76,7 @@ pub fn denotation_sample<C: Codomain>(
 }
 
 /// A kernel tag fixes the complete family ABI at compile time.
-pub trait HyperPatchKernel: Copy {
+pub trait PatchKernel: Copy {
     type Controls: Copy
     type Domain: ParameterDomain
     type Codomain: Codomain
@@ -93,15 +93,15 @@ pub trait HyperPatchKernel: Copy {
 
 /// A patch stores its family-specific controls and kernel value. Current
 /// kernels have no data fields; static dispatch avoids a runtime family switch.
-pub struct HyperPatch<K: HyperPatchKernel> { pub kernel: K, pub controls: K::Controls }
-impl<K: HyperPatchKernel> Copy for HyperPatch<K> {}
+pub struct Patch<K: PatchKernel> { pub kernel: K, pub controls: K::Controls }
+impl<K: PatchKernel> Copy for Patch<K> {}
 
-pub fn hyperpatch<K: HyperPatchKernel>(_ kernel: K, _ controls: K::Controls) -> HyperPatch<K> {
-    HyperPatch<K> { kernel: kernel, controls: controls }
+pub fn patch<K: PatchKernel>(_ kernel: K, _ controls: K::Controls) -> Patch<K> {
+    Patch<K> { kernel: kernel, controls: controls }
 }
 
-pub fn denote<K: HyperPatchKernel>(
-    _ value: HyperPatch<K>,
+pub fn denote<K: PatchKernel>(
+    _ value: Patch<K>,
     _ parameter: <K::Domain as ParameterDomain>::Parameter,
     _ policy: K::Policy,
 ) -> DenotationSample<K::Codomain> {
@@ -115,14 +115,10 @@ pub fn denote<K: HyperPatchKernel>(
 /// A metric belongs to a codomain, not to a parameter chart.
 ///
 /// The same sampler can therefore measure a QB, Clifford, CGA, PGA, QCGA, or
-/// genuinely hyperbolic HyperPatch without treating its UV coordinates as
+/// genuinely hyperbolic patch without treating its UV coordinates as
 /// geometric distance. Fe specializes the selected metric and kernel together.
 pub trait CodomainMetric<C: Codomain>: Copy {
-    fn distance(
-        self,
-        _ left: <C as Codomain>::Value,
-        _ right: <C as Codomain>::Value,
-    ) -> f32
+    fn distance(self, _ left: <C as Codomain>::Value, _ right: <C as Codomain>::Value) -> f32
 }
 
 /// Ordinary chord distance in the admitted Euclidean chart.
@@ -135,30 +131,30 @@ impl CodomainMetric<Euclidean3Points> for Euclidean3Metric {
     }
 }
 
-/// Three-point image of one parameter edge under a HyperPatch.
+/// Three-point image of one parameter edge under a patch.
 ///
 /// `arc_length` is the two-chord length through the mapped midpoint. It reacts
 /// to projective stretching and to first-order bending while remaining exact
 /// at the three samples. More elaborate samplers may recurse using the same
 /// metric contract without changing a patch family.
-pub struct HyperPatchEdgeMeasure {
+pub struct PatchEdgeMeasure {
     pub chord_length: f32,
     pub arc_length: f32,
     pub midpoint_excess: f32,
     pub defined: bool,
 }
-impl Copy for HyperPatchEdgeMeasure {}
+impl Copy for PatchEdgeMeasure {}
 
 pub fn measure_codomain_edge<C: Codomain, M: CodomainMetric<C>>(
     _ left: DenotationSample<C>,
     _ midpoint: DenotationSample<C>,
     _ right: DenotationSample<C>,
     _ metric: M,
-) -> HyperPatchEdgeMeasure {
+) -> PatchEdgeMeasure {
     let chord_length = metric.distance(left.value, right.value)
     let arc_length = metric.distance(left.value, midpoint.value)
         + metric.distance(midpoint.value, right.value)
-    HyperPatchEdgeMeasure {
+    PatchEdgeMeasure {
         chord_length: chord_length,
         arc_length: arc_length,
         midpoint_excess: if arc_length > chord_length {
@@ -170,17 +166,14 @@ pub fn measure_codomain_edge<C: Codomain, M: CodomainMetric<C>>(
     }
 }
 
-pub fn measure_hyperpatch_edge<
-    K: HyperPatchKernel,
-    M: CodomainMetric<K::Codomain>,
->(
-    _ value: HyperPatch<K>,
+pub fn measure_patch_edge<K: PatchKernel, M: CodomainMetric<K::Codomain>>(
+    _ value: Patch<K>,
     _ left: <K::Domain as ParameterDomain>::Parameter,
     _ midpoint: <K::Domain as ParameterDomain>::Parameter,
     _ right: <K::Domain as ParameterDomain>::Parameter,
     _ policy: K::Policy,
     _ metric: M,
-) -> HyperPatchEdgeMeasure {
+) -> PatchEdgeMeasure {
     let left_sample = denote(value, left, policy)
     let midpoint_sample = denote(value, midpoint, policy)
     let right_sample = denote(value, right, policy)
@@ -427,7 +420,7 @@ impl<
     P: ProjectiveAdmission<A>,
     Controls: Copy,
     Domain: ParameterDomain,
-> HyperPatchKernel for ProjectiveKernel<A, I, P, Controls, Domain> {
+> PatchKernel for ProjectiveKernel<A, I, P, Controls, Domain> {
     type Controls = Controls
     type Domain = Domain
     type Codomain = P::Codomain
@@ -446,7 +439,7 @@ impl<
     }
 }
 
-pub fn projective_hyperpatch<
+pub fn projective_patch<
     A: ProjectiveAlgebra,
     I: ProjectiveInterpolation<A, Controls, Domain>,
     P: ProjectiveAdmission<A>,
@@ -458,8 +451,8 @@ pub fn projective_hyperpatch<
     _ admission: P,
     _ domain: Domain,
     _ controls: Controls,
-) -> HyperPatch<ProjectiveKernel<A, I, P, Controls, Domain>> {
-    HyperPatch<ProjectiveKernel<A, I, P, Controls, Domain>> {
+) -> Patch<ProjectiveKernel<A, I, P, Controls, Domain>> {
+    Patch<ProjectiveKernel<A, I, P, Controls, Domain>> {
         kernel: ProjectiveKernel<A, I, P, Controls, Domain> {
             algebra: algebra,
             interpolation: interpolation,

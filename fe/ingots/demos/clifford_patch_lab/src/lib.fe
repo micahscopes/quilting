@@ -1,4 +1,4 @@
-//! Interactive Clifford-Bezier HyperPatch with an honest perspective camera.
+//! Interactive Clifford-Bezier patch with an honest perspective camera.
 //!
 //! The surface is Krasauskas, Zube, and Cacciola's bilinear isotropic
 //! Clifford-Bezier cyclide. Fe owns the orbit camera, point manipulation,
@@ -893,14 +893,16 @@ fn depth_surface_color(
     // it reads depth without introducing another aliased contour edge.
     let depth_wave = 0.94 + 0.06 * cos(TAU * view_depth * AnalyticDepthWire::depth_frequency())
     let depth_scale = mix(1.0, 0.84, smoothstep(0.0, 1.0, depth_t) * depth_cue)
-    to_display_rgb(scale_lightness_chroma(
-        base,
-        (0.72 + 0.30 * diffuse) * depth_wave * depth_scale,
-        mix(1.0, 0.82, depth_t * depth_cue),
-    ))
+    to_display_rgb(
+        scale_lightness_chroma(
+            base,
+            (0.72 + 0.30 * diffuse) * depth_wave * depth_scale,
+            mix(1.0, 0.82, depth_t * depth_cue),
+        ),
+    )
 }
 
-actor CliffordHyperpatchLab uses (
+actor CliffordPatchLab uses (
     GpuProgram<WebGpuBackend>,
     SurfaceQuality<ResponsiveBacking>,
     SurfaceRecovery<StandardSurfaceRecovery>,

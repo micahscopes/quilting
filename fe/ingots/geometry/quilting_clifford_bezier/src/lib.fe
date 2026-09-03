@@ -26,13 +26,13 @@ use ga_expr::{
     Strict,
 }
 use quilting_domain::{Vec2F, Vec3F, absf, cross3, normalize3_or, vec3f}
-use quilting_hyperpatch::{
+use quilting_patch::{
     BilinearBernstein,
     BilinearProjectiveControls,
     DenotationSample,
     Euclidean3Points,
-    HyperPatch,
-    HyperPatchKernel,
+    Patch,
+    PatchKernel,
     LinearElement,
     ProjectiveAdmission,
     ProjectiveAlgebra,
@@ -41,9 +41,9 @@ use quilting_hyperpatch::{
     UnitSquare,
     bilinear_projective_controls,
     denotation_sample,
-    hyperpatch,
+    patch as typed_patch,
     projective_control,
-    projective_hyperpatch,
+    projective_patch,
 }
 
 /// A weight in Cl(2, 0, 1)'s even subalgebra E0 + E2.
@@ -603,16 +603,14 @@ pub type IsotropicProjectiveKernel = ProjectiveKernel<
     UnitSquare,
 >
 
-pub fn as_projective_hyperpatch(_ value: IsotropicBilinearPatch) -> HyperPatch<
-    IsotropicProjectiveKernel,
-> {
+pub fn as_projective_patch(_ value: IsotropicBilinearPatch) -> Patch<IsotropicProjectiveKernel> {
     let controls: IsotropicProjectiveControls = bilinear_projective_controls(
         projective_control(value.p00.point, value.p00.weight),
         projective_control(value.p10.point, value.p10.weight),
         projective_control(value.p01.point, value.p01.weight),
         projective_control(value.p11.point, value.p11.weight),
     )
-    projective_hyperpatch(
+    projective_patch(
         IsotropicCliffordAlgebra {},
         BilinearBernstein {},
         IsotropicVectorAdmission {},
@@ -651,7 +649,7 @@ pub fn reconcile_fourth_weight(
     }
 }
 
-impl HyperPatchKernel for IsotropicBilinearKernel {
+impl PatchKernel for IsotropicBilinearKernel {
     type Controls = IsotropicBilinearPatch
     type Domain = UnitSquare
     type Codomain = Euclidean3Points
@@ -672,6 +670,6 @@ impl HyperPatchKernel for IsotropicBilinearKernel {
     }
 }
 
-pub fn as_hyperpatch(_ value: IsotropicBilinearPatch) -> HyperPatch<IsotropicBilinearKernel> {
-    hyperpatch(IsotropicBilinearKernel {}, value)
+pub fn as_patch(_ value: IsotropicBilinearPatch) -> Patch<IsotropicBilinearKernel> {
+    typed_patch(IsotropicBilinearKernel {}, value)
 }

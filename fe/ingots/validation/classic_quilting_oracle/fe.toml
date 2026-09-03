@@ -7,6 +7,6 @@ core = true
 quilting_cga = true
 quilting_domain = true
 quilting_clifford_bezier = true
-quilting_hyperpatch = true
+quilting_patch = true
 quilting_quaternion = true
 quilting_qb = true

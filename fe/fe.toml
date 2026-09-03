@@ -5,7 +5,7 @@ members = [
   { path = "ingots/foundation/quilting_domain", name = "quilting_domain" },
   { path = "ingots/algebra/quilting_quaternion", name = "quilting_quaternion" },
   { path = "ingots/algebra/quilting_cga", name = "quilting_cga" },
-  { path = "ingots/geometry/quilting_hyperpatch", name = "quilting_hyperpatch" },
+  { path = "ingots/geometry/quilting_patch", name = "quilting_patch" },
   { path = "ingots/geometry/quilting_qb", name = "quilting_qb" },
   { path = "ingots/geometry/quilting_clifford_bezier", name = "quilting_clifford_bezier" },
   { path = "ingots/geometry/quilting_atlas", name = "quilting_atlas" },
@@ -15,13 +15,13 @@ members = [
   { path = "ingots/demos/classic_quilting_atlas", name = "classic_quilting_atlas" },
   { path = "ingots/demos/classic_quilting_lod", name = "classic_quilting_lod" },
   { path = "ingots/demos/classic_quilting_generated", name = "classic_quilting_generated" },
-  { path = "ingots/demos/clifford_hyperpatch_lab", name = "clifford_hyperpatch_lab" },
+  { path = "ingots/demos/clifford_patch_lab", name = "clifford_patch_lab" },
 ]
 default-members = [
   "ingots/foundation/quilting_domain",
   "ingots/algebra/quilting_quaternion",
   "ingots/algebra/quilting_cga",
-  "ingots/geometry/quilting_hyperpatch",
+  "ingots/geometry/quilting_patch",
   "ingots/geometry/quilting_qb",
   "ingots/geometry/quilting_clifford_bezier",
   "ingots/geometry/quilting_atlas",
@@ -31,7 +31,7 @@ default-members = [
   "ingots/demos/classic_quilting_atlas",
   "ingots/demos/classic_quilting_lod",
   "ingots/demos/classic_quilting_generated",
-  "ingots/demos/clifford_hyperpatch_lab",
+  "ingots/demos/clifford_patch_lab",
 ]
 
 [dependencies]

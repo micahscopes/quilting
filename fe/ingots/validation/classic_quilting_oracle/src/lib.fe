@@ -17,7 +17,7 @@ use quilting_clifford_bezier::{
     IsotropicDifferential,
     IsotropicPolicy,
     IsotropicSample,
-    as_hyperpatch as isotropic_hyperpatch,
+    as_patch as isotropic_typed_patch,
     control as isotropic_control,
     evaluate as evaluate_isotropic,
     evaluate_differential as evaluate_isotropic_differential,
@@ -37,13 +37,13 @@ use quilting_domain::{
     vec2f,
     vec3f,
 }
-use quilting_hyperpatch::{DenotationSample, Euclidean3Points, denote}
+use quilting_patch::{DenotationSample, Euclidean3Points, denote}
 use quilting_quaternion::{QuatF, inverse_bounded, multiply, quatf, zero}
 use quilting_qb::{
     QbPolicy,
     QbTriPatch,
     apply_normal_parity,
-    as_hyperpatch,
+    as_patch as typed_qb_patch,
     control,
     evaluate_uv_differential,
     patch,
@@ -233,40 +233,40 @@ fn curved(_ u: f32, _ v: f32) -> quilting_qb::QbDifferential {
     )
 }
 
-fn curved_hyperpatch(_ u: f32, _ v: f32) -> DenotationSample<Euclidean3Points> {
+fn curved_typed_patch(_ u: f32, _ v: f32) -> DenotationSample<Euclidean3Points> {
     denote(
-        as_hyperpatch(curved_patch()),
+        typed_qb_patch(curved_patch()),
         bary3f(1.0 - u - v, u, v),
         QbPolicy { minimum_denominator_norm_squared: 0.00000000000000000001 },
     )
 }
 
-fn zero_weight_hyperpatch(_ u: f32, _ v: f32) -> DenotationSample<Euclidean3Points> {
+fn zero_weight_typed_patch(_ u: f32, _ v: f32) -> DenotationSample<Euclidean3Points> {
     denote(
-        as_hyperpatch(zero_weight_patch()),
+        typed_qb_patch(zero_weight_patch()),
         bary3f(1.0 - u - v, u, v),
         QbPolicy { minimum_denominator_norm_squared: 0.00000000000000000001 },
     )
 }
 
-pub fn hyperpatch_qb_position_x(_ u: f32, _ v: f32) -> f32 {
-    curved_hyperpatch(u, v).value.x
+pub fn patch_qb_position_x(_ u: f32, _ v: f32) -> f32 {
+    curved_typed_patch(u, v).value.x
 }
-pub fn hyperpatch_qb_position_y(_ u: f32, _ v: f32) -> f32 {
-    curved_hyperpatch(u, v).value.y
+pub fn patch_qb_position_y(_ u: f32, _ v: f32) -> f32 {
+    curved_typed_patch(u, v).value.y
 }
-pub fn hyperpatch_qb_position_z(_ u: f32, _ v: f32) -> f32 {
-    curved_hyperpatch(u, v).value.z
+pub fn patch_qb_position_z(_ u: f32, _ v: f32) -> f32 {
+    curved_typed_patch(u, v).value.z
 }
-pub fn hyperpatch_qb_defined(_ u: f32, _ v: f32) -> i32 {
-    if curved_hyperpatch(u, v).defined {
+pub fn patch_qb_defined(_ u: f32, _ v: f32) -> i32 {
+    if curved_typed_patch(u, v).defined {
         1
     } else {
         0
     }
 }
-pub fn hyperpatch_zero_weight_defined(_ u: f32, _ v: f32) -> i32 {
-    if zero_weight_hyperpatch(u, v).defined {
+pub fn patch_zero_weight_defined(_ u: f32, _ v: f32) -> i32 {
+    if zero_weight_typed_patch(u, v).defined {
         1
     } else {
         0
@@ -447,9 +447,9 @@ pub fn clifford_normal_z(_ s: f32, _ t: f32) -> f32 {
     paper_clifford_differential(s, t).normal.z
 }
 
-pub fn clifford_hyperpatch_defined(_ s: f32, _ t: f32) -> i32 {
+pub fn clifford_patch_defined(_ s: f32, _ t: f32) -> i32 {
     let sample = denote(
-        isotropic_hyperpatch(paper_clifford_patch()),
+        isotropic_typed_patch(paper_clifford_patch()),
         vec2f(s, t),
         clifford_policy(),
     )

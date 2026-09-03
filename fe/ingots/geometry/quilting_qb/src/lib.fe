@@ -6,14 +6,14 @@
 
 use core::marker::Copy
 use quilting_domain::{Bary3F, Vec3F, bary3f, cross3, normalize3_or, vec3f}
-use quilting_hyperpatch::{
+use quilting_patch::{
     BarycentricTriangle,
     DenotationSample,
     Euclidean3Points,
-    HyperPatch,
-    HyperPatchKernel,
+    Patch,
+    PatchKernel,
     denotation_sample,
-    hyperpatch,
+    patch as typed_patch,
 }
 use quilting_quaternion::{QuatF, add, inverse_bounded, multiply, pure, quatf, scale, sub, zero}
 
@@ -40,7 +40,7 @@ pub struct QbDifferential {
 }
 impl Copy for QbDifferential {}
 
-/// Conditioning policy for the common HyperPatch denotation. Detailed QB
+/// Conditioning policy for the common Patch denotation. Detailed QB
 /// differential thresholds remain arguments to the family-specific API.
 pub struct QbPolicy { pub minimum_denominator_norm_squared: f32 }
 impl Copy for QbPolicy {}
@@ -100,7 +100,7 @@ pub fn evaluate(
     }
 }
 
-impl HyperPatchKernel for QbTriangleKernel {
+impl PatchKernel for QbTriangleKernel {
     type Controls = QbTriPatch
     type Domain = BarycentricTriangle
     type Codomain = Euclidean3Points
@@ -122,8 +122,8 @@ impl HyperPatchKernel for QbTriangleKernel {
     }
 }
 
-pub fn as_hyperpatch(_ value: QbTriPatch) -> HyperPatch<QbTriangleKernel> {
-    hyperpatch(QbTriangleKernel {}, value)
+pub fn as_patch(_ value: QbTriPatch) -> Patch<QbTriangleKernel> {
+    typed_patch(QbTriangleKernel {}, value)
 }
 
 pub fn evaluate_uv(

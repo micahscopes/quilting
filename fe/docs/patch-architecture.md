@@ -1,6 +1,6 @@
-# HyperPatch architecture and compiler-cost boundary
+# Patch architecture and compiler-cost boundary
 
-`quilting_hyperpatch` is a small static vocabulary for asking different patch
+`quilting_patch` is a small static vocabulary for asking different patch
 families the same narrow question: what typed value does this typed parameter
 denote, and was that finite evaluation defined? It is not a runtime algebra
 interpreter, scene model, tessellator, or replacement for Rust Quilting.
@@ -29,7 +29,7 @@ joining this interface.
 
 The Fe signature places `Controls`, `Domain`, `Codomain`, and `Policy` behind
 kernel-associated types. An initial qualified return spelling,
-`DenotationSample<<Self as HyperPatchKernel>::Codomain>`, appeared to fail with
+`DenotationSample<<Self as PatchKernel>::Codomain>`, appeared to fail with
 a projection mismatch. The minimized upstream reproduction showed that the
 failure comes from adjacent `<<` parsing, not projection normalization: adding
 whitespace makes the same qualified type compile. Unfortunately `fe fmt`
@@ -43,12 +43,12 @@ and release-profile compile timing remains a gate. A more elaborate GAT
 reconstruction was observed to compile pathologically slowly, but it is not
 needed for this interface and is not being substituted for the direct design.
 
-## HyperPatch is not atlas selection
+## Patch is not atlas selection
 
 Quilting's static-dynamic LOD machinery remains separate. Rust builds a
 canonical resident tessellation atlas and its seam-safe permutation metadata;
 warm frames select precomputed LOD/permutation instances so tessellation looks
-dynamic without rebuilding topology. HyperPatch specializes the arithmetic
+dynamic without rebuilding topology. Patch specializes the arithmetic
 evaluated over selected samples. It does not own atlas construction or per-frame
 selection.
 
@@ -84,7 +84,7 @@ workspace check then took 68.24s cold and 16.26s warm.
 
 - artifact ABI without optional compiler features: 7/7;
 - read-only Rust Quilting export and pool-width determinism: 11/11;
-- O2 Fe/Wasm oracle, including bit-identical direct-QB/HyperPatch output:
+- O2 Fe/Wasm oracle, including bit-identical direct-QB/Patch output:
   15/15;
 - optimized Fe/Wasm plus generated WGSL on Vulkan llvmpipe: 18/18;
 - strict release Clippy for the complete raster-oracle feature surface: green;
@@ -133,7 +133,7 @@ coefficient `3e23`. The paper's coefficient matrix and stated quartic require
 oracle records this disambiguation and verifies the fourth-weight scale,
 grade-three cancellation, and quartic residual.
 
-The `clifford_hyperpatch_lab` browser composition is WebGPU-only and keeps its
+The `clifford_patch_lab` browser composition is WebGPU-only and keeps its
 control transition, scheduling, resident state, patch arithmetic, and three
 render passes authored in Fe. A fixed browser host performs only DOM, input,
 device, and WebGPU realization. Four projected handles are draggable; the

@@ -187,11 +187,11 @@ fn sparse_clifford_patch_wasm_matches_the_independent_dense_oracle() {
                 &format!("Clifford patch ({s},{t}) trivector residual"),
             );
             assert_eq!(
-                function::<(f32, f32), i32>(&mut store, &instance, "clifford_hyperpatch_defined",)
+                function::<(f32, f32), i32>(&mut store, &instance, "clifford_patch_defined",)
                     .call(&mut store, (s, t))
                     .unwrap(),
                 1,
-                "paper patch must remain a defined Euclidean HyperPatch at ({s},{t})",
+                "paper patch must remain a defined Euclidean Patch at ({s},{t})",
             );
         }
     }
@@ -662,13 +662,13 @@ fn assert_curved_patch(store: &mut Store<()>, instance: &Instance) {
 }
 
 #[test]
-fn hyperpatch_qb_adapter_is_identical_to_the_family_evaluator() {
+fn patch_qb_adapter_is_identical_to_the_family_evaluator() {
     let (mut store, instance) = instantiate();
     let direct_exports = ["qb_position_x", "qb_position_y", "qb_position_z"];
-    let hyperpatch_exports = [
-        "hyperpatch_qb_position_x",
-        "hyperpatch_qb_position_y",
-        "hyperpatch_qb_position_z",
+    let patch_exports = [
+        "patch_qb_position_x",
+        "patch_qb_position_y",
+        "patch_qb_position_z",
     ];
 
     for denominator in 1_u16..=4 {
@@ -677,19 +677,19 @@ fn hyperpatch_qb_adapter_is_identical_to_the_family_evaluator() {
                 let u = f32::from(u_step) / f32::from(denominator);
                 let v = f32::from(v_step) / f32::from(denominator);
                 assert_eq!(
-                    function::<(f32, f32), i32>(&mut store, &instance, "hyperpatch_qb_defined",)
+                    function::<(f32, f32), i32>(&mut store, &instance, "patch_qb_defined",)
                         .call(&mut store, (u, v))
                         .unwrap(),
                     1,
-                    "HyperPatch QB should be defined at ({u},{v})",
+                    "Patch QB should be defined at ({u},{v})",
                 );
                 for lane in 0..3 {
                     let direct = call2(&mut store, &instance, direct_exports[lane], u, v);
-                    let generic = call2(&mut store, &instance, hyperpatch_exports[lane], u, v);
+                    let generic = call2(&mut store, &instance, patch_exports[lane], u, v);
                     assert_eq!(
                         generic.to_bits(),
                         direct.to_bits(),
-                        "HyperPatch/QB mismatch at ({u},{v}) lane {lane}",
+                        "Patch/QB mismatch at ({u},{v}) lane {lane}",
                     );
                 }
             }
@@ -697,11 +697,11 @@ fn hyperpatch_qb_adapter_is_identical_to_the_family_evaluator() {
     }
 
     assert_eq!(
-        function::<(f32, f32), i32>(&mut store, &instance, "hyperpatch_zero_weight_defined",)
+        function::<(f32, f32), i32>(&mut store, &instance, "patch_zero_weight_defined",)
             .call(&mut store, (0.25, 0.5))
             .unwrap(),
         0,
-        "HyperPatch QB must preserve the family evaluator's explicit conditioning failure",
+        "Patch QB must preserve the family evaluator's explicit conditioning failure",
     );
 }
 

@@ -12,7 +12,7 @@ external Fe core
   ├── ingots/foundation/quilting_domain ───────────┐
   │                    │                           │
   │                    ▼                           │
-  │       ingots/geometry/quilting_hyperpatch      │
+  │       ingots/geometry/quilting_patch           │
   │                    │                           │
   └── ingots/algebra/quilting_quaternion ──────────┤
                                                    ▼
@@ -117,7 +117,7 @@ turn its fixed construction into bounded straight-line shader arithmetic.
 Neither begins as a copy of an experimental gallery. The existing QB path is
 the compact production baseline and shared oracle, not the ceiling of this Fe
 workspace. The type and backend boundaries are recorded in
-[`docs/hyperpatch-architecture.md`](docs/hyperpatch-architecture.md). See also
+[`docs/patch-architecture.md`](docs/patch-architecture.md). See also
 [`docs/quilting-cga-direction.md`](docs/quilting-cga-direction.md).
 
 ## Evidence ladder

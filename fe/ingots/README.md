@@ -20,7 +20,7 @@ paths. Add a member to `../fe.toml`, then declare sibling dependencies as
 
 Current generic seam and principal next additions:
 
-- `geometry/quilting_hyperpatch` is the small type-directed denotation and
+- `geometry/quilting_patch` is the small type-directed denotation and
   codomain vocabulary shared by peer patch families; it contains no runtime
   patch-family switch;
 - `algebra/quilting_cga` for typed conformal authoring and spherical controls;

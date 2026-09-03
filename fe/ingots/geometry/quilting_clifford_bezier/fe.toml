@@ -6,4 +6,4 @@ version = "0.1.0"
 core = true
 ga_expr = true
 quilting_domain = true
-quilting_hyperpatch = true
+quilting_patch = true
