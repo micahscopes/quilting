@@ -25,7 +25,7 @@ use ga_expr::{
     SignedOrthogonalMetric,
     Strict,
 }
-use quilting_domain::{Vec2F, Vec3F, absf, vec3f}
+use quilting_domain::{Vec2F, Vec3F, absf, cross3, normalize3_or, vec3f}
 use quilting_hyperpatch::{
     DenotationSample,
     Euclidean3Points,
@@ -67,6 +67,24 @@ pub struct IsotropicSample {
 }
 impl Copy for IsotropicSample {}
 
+pub struct IsotropicDifferential {
+    pub sample: IsotropicSample,
+    pub tangent_s: Vec3F,
+    pub tangent_t: Vec3F,
+    pub normal: Vec3F,
+}
+impl Copy for IsotropicDifferential {}
+
+struct EvaluationFrame {
+    sample: IsotropicSample,
+    denominator: IsotropicEvenF,
+    f00: IsotropicOddF,
+    f10: IsotropicOddF,
+    f01: IsotropicOddF,
+    f11: IsotropicOddF,
+}
+impl Copy for EvaluationFrame {}
+
 pub struct IsotropicPolicy {
     pub minimum_denominator_norm_squared: f32,
     pub maximum_trivector_residual: f32,
@@ -105,6 +123,12 @@ type OddTimesReverseWeightExpression = Geometric<OddMv, Reverse<WeightMv>>
 struct OddTimesReverseWeightOperands { odd: OddCoefficients, weight: WeightCoefficients }
 derive EvaluateGaF32 for OddTimesReverseWeightOperands using CompileGaF32<
     GaProgram<OddTimesReverseWeightExpression, IsotropicMetric, Strict>,
+>
+
+type OddTimesWeightExpression = Geometric<OddMv, WeightMv>
+struct OddTimesWeightOperands { odd: OddCoefficients, weight: WeightCoefficients }
+derive EvaluateGaF32 for OddTimesWeightOperands using CompileGaF32<
+    GaProgram<OddTimesWeightExpression, IsotropicMetric, Strict>,
 >
 
 type WeightNormExpression = ScalarProduct<WeightMv, Reverse<WeightMv>>
@@ -159,6 +183,16 @@ fn odd_times_reverse_weight(_ value: IsotropicOddF, _ weight: IsotropicEvenF) ->
     IsotropicOddF { e1: output.0, e2: output.1, e3: output.2, e123: output.3 }
 }
 
+fn odd_times_weight(_ value: IsotropicOddF, _ weight: IsotropicEvenF) -> IsotropicOddF {
+    let output = <OddTimesWeightOperands as EvaluateGaF32>::evaluate(
+        OddTimesWeightOperands {
+            odd: odd_coefficients(value),
+            weight: weight_coefficients(weight),
+        },
+    )
+    IsotropicOddF { e1: output.0, e2: output.1, e3: output.2, e123: output.3 }
+}
+
 pub fn weight_norm_squared(_ value: IsotropicEvenF) -> f32 {
     let output = <WeightNormOperands as EvaluateGaF32>::evaluate(
         WeightNormOperands { weight: weight_coefficients(value) },
@@ -205,18 +239,112 @@ fn blend_odd(
     }
 }
 
-pub fn evaluate(
+fn add_odd(_ left: IsotropicOddF, _ right: IsotropicOddF) -> IsotropicOddF {
+    IsotropicOddF {
+        e1: left.e1 + right.e1,
+        e2: left.e2 + right.e2,
+        e3: left.e3 + right.e3,
+        e123: left.e123 + right.e123,
+    }
+}
+
+fn sub_odd(_ left: IsotropicOddF, _ right: IsotropicOddF) -> IsotropicOddF {
+    IsotropicOddF {
+        e1: left.e1 - right.e1,
+        e2: left.e2 - right.e2,
+        e3: left.e3 - right.e3,
+        e123: left.e123 - right.e123,
+    }
+}
+
+fn scale_odd(_ value: IsotropicOddF, _ scale: f32) -> IsotropicOddF {
+    IsotropicOddF {
+        e1: value.e1 * scale,
+        e2: value.e2 * scale,
+        e3: value.e3 * scale,
+        e123: value.e123 * scale,
+    }
+}
+
+fn sub_even(_ left: IsotropicEvenF, _ right: IsotropicEvenF) -> IsotropicEvenF {
+    even(
+        left.scalar - right.scalar,
+        left.e12 - right.e12,
+        left.e13 - right.e13,
+        left.e23 - right.e23,
+    )
+}
+
+fn tangent_odd_s(
+    _ p00: IsotropicOddF,
+    _ p10: IsotropicOddF,
+    _ p01: IsotropicOddF,
+    _ p11: IsotropicOddF,
+    _ t: f32,
+) -> IsotropicOddF {
+    add_odd(
+        scale_odd(sub_odd(p10, p00), 1.0 - t),
+        scale_odd(sub_odd(p11, p01), t),
+    )
+}
+
+fn tangent_odd_t(
+    _ p00: IsotropicOddF,
+    _ p10: IsotropicOddF,
+    _ p01: IsotropicOddF,
+    _ p11: IsotropicOddF,
+    _ s: f32,
+) -> IsotropicOddF {
+    add_odd(
+        scale_odd(sub_odd(p01, p00), 1.0 - s),
+        scale_odd(sub_odd(p11, p10), s),
+    )
+}
+
+fn tangent_even_s(
+    _ p00: IsotropicEvenF,
+    _ p10: IsotropicEvenF,
+    _ p01: IsotropicEvenF,
+    _ p11: IsotropicEvenF,
+    _ t: f32,
+) -> IsotropicEvenF {
+    let lower = scale_even(sub_even(p10, p00), 1.0 - t)
+    let upper = scale_even(sub_even(p11, p01), t)
+    even(
+        lower.scalar + upper.scalar,
+        lower.e12 + upper.e12,
+        lower.e13 + upper.e13,
+        lower.e23 + upper.e23,
+    )
+}
+
+fn tangent_even_t(
+    _ p00: IsotropicEvenF,
+    _ p10: IsotropicEvenF,
+    _ p01: IsotropicEvenF,
+    _ p11: IsotropicEvenF,
+    _ s: f32,
+) -> IsotropicEvenF {
+    let left = scale_even(sub_even(p01, p00), 1.0 - s)
+    let right = scale_even(sub_even(p11, p10), s)
+    even(
+        left.scalar + right.scalar,
+        left.e12 + right.e12,
+        left.e13 + right.e13,
+        left.e23 + right.e23,
+    )
+}
+
+fn evaluate_frame(
     _ value: IsotropicBilinearPatch,
     _ parameter: Vec2F,
     _ policy: IsotropicPolicy,
-) -> IsotropicSample {
-    let numerator = blend_odd(
-        weighted_point(value.p00),
-        weighted_point(value.p10),
-        weighted_point(value.p01),
-        weighted_point(value.p11),
-        parameter,
-    )
+) -> EvaluationFrame {
+    let f00 = weighted_point(value.p00)
+    let f10 = weighted_point(value.p10)
+    let f01 = weighted_point(value.p01)
+    let f11 = weighted_point(value.p11)
+    let numerator = blend_odd(f00, f10, f01, f11, parameter)
     let denominator = blend_even(
         value.p00.weight,
         value.p10.weight,
@@ -227,29 +355,131 @@ pub fn evaluate(
     let denominator_norm_squared = weight_norm_squared(denominator)
     let conditioned = denominator_norm_squared >= policy.minimum_denominator_norm_squared
     if !conditioned {
-        return IsotropicSample {
-            position: vec3f(0.0, 0.0, 0.0),
-            homogeneous: IsotropicOddF { e1: 0.0, e2: 0.0, e3: 0.0, e123: 0.0 },
-            denominator_norm_squared: denominator_norm_squared,
-            trivector_residual: 0.0,
-            conditioned: false,
-            vector_valued: false,
+        return EvaluationFrame {
+            sample: IsotropicSample {
+                position: vec3f(0.0, 0.0, 0.0),
+                homogeneous: IsotropicOddF { e1: 0.0, e2: 0.0, e3: 0.0, e123: 0.0 },
+                denominator_norm_squared: denominator_norm_squared,
+                trivector_residual: 0.0,
+                conditioned: false,
+                vector_valued: false,
+            },
+            denominator: denominator,
+            f00: f00,
+            f10: f10,
+            f01: f01,
+            f11: f11,
         }
     }
     let homogeneous = odd_times_reverse_weight(numerator, denominator)
     let inverse_norm = 1.0 / denominator_norm_squared
     let trivector_residual = homogeneous.e123 * inverse_norm
-    IsotropicSample {
-        position: vec3f(
-            homogeneous.e1 * inverse_norm,
-            homogeneous.e2 * inverse_norm,
-            homogeneous.e3 * inverse_norm,
+    EvaluationFrame {
+        sample: IsotropicSample {
+            position: vec3f(
+                homogeneous.e1 * inverse_norm,
+                homogeneous.e2 * inverse_norm,
+                homogeneous.e3 * inverse_norm,
+            ),
+            homogeneous: homogeneous,
+            denominator_norm_squared: denominator_norm_squared,
+            trivector_residual: trivector_residual,
+            conditioned: true,
+            vector_valued: absf(trivector_residual) <= policy.maximum_trivector_residual,
+        },
+        denominator: denominator,
+        f00: f00,
+        f10: f10,
+        f01: f01,
+        f11: f11,
+    }
+}
+
+pub fn evaluate(
+    _ value: IsotropicBilinearPatch,
+    _ parameter: Vec2F,
+    _ policy: IsotropicPolicy,
+) -> IsotropicSample {
+    evaluate_frame(value, parameter, policy).sample
+}
+
+fn quotient_derivative(
+    _ value: IsotropicOddF,
+    _ numerator_derivative: IsotropicOddF,
+    _ denominator: IsotropicEvenF,
+    _ denominator_derivative: IsotropicEvenF,
+    _ inverse_denominator_norm_squared: f32,
+) -> IsotropicOddF {
+    scale_odd(
+        odd_times_reverse_weight(
+            sub_odd(
+                numerator_derivative,
+                odd_times_weight(value, denominator_derivative),
+            ),
+            denominator,
         ),
-        homogeneous: homogeneous,
-        denominator_norm_squared: denominator_norm_squared,
-        trivector_residual: trivector_residual,
-        conditioned: true,
-        vector_valued: absf(trivector_residual) <= policy.maximum_trivector_residual,
+        inverse_denominator_norm_squared,
+    )
+}
+
+/// Analytic derivatives of the same right quotient used by `evaluate`:
+/// d(F W^-1) = (dF - P dW) W^-1.
+pub fn evaluate_differential(
+    _ patch: IsotropicBilinearPatch,
+    _ parameter: Vec2F,
+    _ policy: IsotropicPolicy,
+    _ minimum_tangent_norm_squared: f32,
+) -> IsotropicDifferential {
+    let frame = evaluate_frame(patch, parameter, policy)
+    let sample = frame.sample
+    if !sample.conditioned {
+        return IsotropicDifferential {
+            sample: sample,
+            tangent_s: vec3f(0.0, 0.0, 0.0),
+            tangent_t: vec3f(0.0, 0.0, 0.0),
+            normal: vec3f(0.0, 0.0, 1.0),
+        }
+    }
+
+    let inverse_norm = 1.0 / sample.denominator_norm_squared
+    let value = scale_odd(sample.homogeneous, inverse_norm)
+    let derivative_s = quotient_derivative(
+        value,
+        tangent_odd_s(frame.f00, frame.f10, frame.f01, frame.f11, parameter.y),
+        frame.denominator,
+        tangent_even_s(
+            patch.p00.weight,
+            patch.p10.weight,
+            patch.p01.weight,
+            patch.p11.weight,
+            parameter.y,
+        ),
+        inverse_norm,
+    )
+    let derivative_t = quotient_derivative(
+        value,
+        tangent_odd_t(frame.f00, frame.f10, frame.f01, frame.f11, parameter.x),
+        frame.denominator,
+        tangent_even_t(
+            patch.p00.weight,
+            patch.p10.weight,
+            patch.p01.weight,
+            patch.p11.weight,
+            parameter.x,
+        ),
+        inverse_norm,
+    )
+    let tangent_s = vec3f(derivative_s.e1, derivative_s.e2, derivative_s.e3)
+    let tangent_t = vec3f(derivative_t.e1, derivative_t.e2, derivative_t.e3)
+    IsotropicDifferential {
+        sample: sample,
+        tangent_s: tangent_s,
+        tangent_t: tangent_t,
+        normal: normalize3_or(
+            cross3(tangent_s, tangent_t),
+            vec3f(0.0, 0.0, 1.0),
+            minimum_tangent_norm_squared,
+        ),
     }
 }
 

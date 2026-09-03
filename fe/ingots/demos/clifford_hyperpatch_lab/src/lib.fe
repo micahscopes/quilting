@@ -1,0 +1,443 @@
+//! A genuine bilinear Clifford-Bezier patch from the primary literature.
+//!
+//! The topology is a bounded dyadic square grid. Every vertex evaluates the
+//! shared sparse `HyperPatch` family in Cl(2, 0, 1); Fe FCO has already erased
+//! the geometric-algebra expression into straight-line scalar arithmetic.
+//! The surface is the isotropic cyclide from Krasauskas, Zube, and Cacciola's
+//! Example 1, whose implicit quartic is independently checked in Rust.
+//! Point and differential evaluation share one immutable algebraic frame.
+
+use core::marker::Copy
+use quilting_clifford_bezier::{
+    IsotropicBilinearPatch,
+    IsotropicPolicy,
+    control,
+    evaluate_differential,
+    even,
+    patch,
+}
+use quilting_domain::{Bary3F, Vec2F, Vec3F, bary3f, vec2f, vec3f}
+use std::web::view::{
+    ApplyParamBindings,
+    Extent,
+    Param,
+    ParamBindingsProvider,
+    Surface,
+    SurfaceEvent,
+    SurfaceState,
+}
+use std::webgpu::{
+    ClipPosition,
+    FragmentStage,
+    FragmentSurface,
+    GpuProgram,
+    LatestPerFrame,
+    RasterVertex,
+    ResponsiveBacking,
+    StandardSurfaceRecovery,
+    SurfaceQuality,
+    SurfaceRecovery,
+    SurfaceScheduling,
+    SurfaceTransition,
+    TriangleList,
+    VertexStage,
+    WebGpuBackend,
+}
+
+extern {
+    const fn __f32_from_i32(_: i32) -> f32
+}
+
+const GRID: u32 = 56
+const VERTICES: usize = 18816
+
+pub struct PatchVarying { pub local: Bary3F, pub normal: Vec3F, pub residual: f32 }
+impl Copy for PatchVarying {}
+
+pub struct HandleVarying { pub selected: f32 }
+impl Copy for HandleVarying {}
+
+struct ControlPositions { p00: Vec3F, p10: Vec3F, p01: Vec3F, p11: Vec3F }
+impl Copy for ControlPositions {}
+
+struct CliffordLabParams {
+    p00_x: Param,
+    p00_y: Param,
+    p00_z: Param,
+    p10_x: Param,
+    p10_y: Param,
+    p10_z: Param,
+    p01_x: Param,
+    p01_y: Param,
+    p01_z: Param,
+    p11_x: Param,
+    p11_y: Param,
+    p11_z: Param,
+    selected: Param,
+    dragging: Param,
+}
+
+struct CliffordLabState {
+    p00_x: f32,
+    p00_y: f32,
+    p00_z: f32,
+    p10_x: f32,
+    p10_y: f32,
+    p10_z: f32,
+    p01_x: f32,
+    p01_y: f32,
+    p01_z: f32,
+    p11_x: f32,
+    p11_y: f32,
+    p11_z: f32,
+    selected: f32,
+    dragging: f32,
+}
+
+impl SurfaceState for CliffordLabState {
+    type Params = CliffordLabParams
+}
+
+derive ApplyParamBindings for CliffordLabState using ParamBindingsProvider
+
+const fn lab_params() -> CliffordLabParams {
+    CliffordLabParams {
+        p00_x: Param::fixed(0.0),
+        p00_y: Param::fixed(2.0),
+        p00_z: Param::fixed(0.0),
+        p10_x: Param::fixed(0.0),
+        p10_y: Param::fixed(1.0),
+        p10_z: Param::fixed(0.0),
+        p01_x: Param::fixed(0.0),
+        p01_y: Param::fixed(-2.0),
+        p01_z: Param::fixed(0.0),
+        p11_x: Param::fixed(0.0),
+        p11_y: Param::fixed(-1.0),
+        p11_z: Param::fixed(0.0),
+        selected: Param::fixed(-1.0),
+        dragging: Param::fixed(0.0),
+    }
+}
+
+fn as_f32(_ value: u32) -> f32 {
+    __f32_from_i32(value.downcast_unchecked())
+}
+
+fn controlled_patch(_ positions: ControlPositions) -> IsotropicBilinearPatch {
+    patch(
+        control(positions.p00, even(1.0, 0.0, 0.0, 0.0)),
+        control(positions.p10, even(0.0, 1.0, 0.0, -1.0)),
+        // This is 2e12 + e23. Some PDF text extraction fuses the comma
+        // before w3 into a misleading coefficient `3e23`; the paper's own
+        // coefficient matrix and quartic disambiguate it.
+        control(positions.p01, even(0.0, 2.0, 0.0, 1.0)),
+        control(positions.p11, even(-6.0, 0.0, -3.0, 0.0)),
+    )
+}
+
+fn positions(_ state: CliffordLabState) -> ControlPositions {
+    ControlPositions {
+        p00: vec3f(state.p00_x, state.p00_y, state.p00_z),
+        p10: vec3f(state.p10_x, state.p10_y, state.p10_z),
+        p01: vec3f(state.p01_x, state.p01_y, state.p01_z),
+        p11: vec3f(state.p11_x, state.p11_y, state.p11_z),
+    }
+}
+
+fn handle_point(_ positions: ControlPositions, _ index: u32) -> Vec3F {
+    if index == 0 {
+        positions.p00
+    } else if index == 1 {
+        positions.p10
+    } else if index == 2 {
+        positions.p01
+    } else {
+        positions.p11
+    }
+}
+
+fn policy() -> IsotropicPolicy {
+    IsotropicPolicy {
+        minimum_denominator_norm_squared: 0.000000000001,
+        maximum_trivector_residual: 0.00001,
+    }
+}
+
+fn corner_parameter(_ local_vertex: u32) -> Vec2F {
+    if local_vertex == 0 {
+        vec2f(0.0, 0.0)
+    } else if local_vertex == 1 {
+        vec2f(1.0, 0.0)
+    } else if local_vertex == 2 {
+        vec2f(0.0, 1.0)
+    } else if local_vertex == 3 {
+        vec2f(1.0, 0.0)
+    } else if local_vertex == 4 {
+        vec2f(1.0, 1.0)
+    } else {
+        vec2f(0.0, 1.0)
+    }
+}
+
+fn local_barycentric(_ local_vertex: u32) -> Bary3F {
+    if local_vertex == 0 || local_vertex == 3 {
+        bary3f(1.0, 0.0, 0.0)
+    } else if local_vertex == 1 || local_vertex == 4 {
+        bary3f(0.0, 1.0, 0.0)
+    } else {
+        bary3f(0.0, 0.0, 1.0)
+    }
+}
+
+fn grid_parameter(_ vertex_index: u32) -> Vec2F {
+    let cell = vertex_index / 6
+    let local_vertex = vertex_index % 6
+    let x = cell % GRID
+    let y = cell / GRID
+    let corner = corner_parameter(local_vertex)
+    vec2f(
+        (as_f32(x) + corner.x) / as_f32(GRID),
+        (as_f32(y) + corner.y) / as_f32(GRID),
+    )
+}
+
+fn clip_position(_ position: Vec3F) -> ClipPosition {
+    // A fixed affine camera is sufficient for the first denotational proof.
+    // It makes the surface and its collinear control polygon visible at once.
+    let x = position.x - 1.1
+    ClipPosition {
+        x: (x * 0.75 + position.z * 0.66) * 0.42,
+        y: position.y * 0.36 + position.z * 0.12 - x * 0.06,
+        z: 0.5 + position.z * 0.08 + x * 0.015,
+        w: 1.0,
+    }
+}
+
+fn squared_distance_to_handle(
+    _ positions: ControlPositions,
+    _ index: u32,
+    _ pointer_x: f32,
+    _ pointer_y: f32,
+) -> f32 {
+    let clip = clip_position(handle_point(positions, index))
+    let dx = pointer_x - clip.x
+    let dy = pointer_y - clip.y
+    dx * dx + dy * dy
+}
+
+fn nearest_handle(_ positions: ControlPositions, _ pointer_x: f32, _ pointer_y: f32) -> f32 {
+    let mut selected: f32 = -1.0
+    let mut best: f32 = 0.005
+    let mut index: u32 = 0
+    while index < 4 {
+        let distance = squared_distance_to_handle(positions, index, pointer_x, pointer_y)
+        if distance < best {
+            best = distance
+            selected = as_f32(index)
+        }
+        index = index + 1
+    }
+    selected
+}
+
+fn handle_clip(_ center: ClipPosition, _ corner: u32, _ selected: bool) -> ClipPosition {
+    let radius = if selected { 0.028 } else { 0.021 }
+    let mut dx = 0.0 - radius
+    let mut dy = 0.0 - radius
+    if corner == 1 || corner == 4 || corner == 5 {
+        dx = radius
+    }
+    if corner == 2 || corner == 3 || corner == 5 {
+        dy = radius
+    }
+    ClipPosition { x: center.x + dx, y: center.y + dy, z: 0.02, w: 1.0 }
+}
+
+fn minimum3(_ value: Bary3F) -> f32 {
+    let mut result = value.a
+    if value.b < result {
+        result = value.b
+    }
+    if value.c < result {
+        result = value.c
+    }
+    result
+}
+
+fn lit_color(_ normal: Vec3F) -> u32 {
+    if normal.z > 0.55 {
+        4291992191
+    } else if normal.z > 0.0 {
+        4287730090
+    } else if normal.z > -0.55 {
+        4284765748
+    } else {
+        4283252532
+    }
+}
+
+actor CliffordHyperpatchLab uses (
+    GpuProgram<WebGpuBackend>,
+    SurfaceQuality<ResponsiveBacking>,
+    SurfaceRecovery<StandardSurfaceRecovery>,
+) {
+    p00_x: f32,
+    p00_y: f32,
+    p00_z: f32,
+    p10_x: f32,
+    p10_y: f32,
+    p10_z: f32,
+    p01_x: f32,
+    p01_y: f32,
+    p01_z: f32,
+    p11_x: f32,
+    p11_y: f32,
+    p11_z: f32,
+    selected: f32,
+    dragging: f32,
+
+    const fn view() -> Surface<CliffordLabParams> {
+        Surface { extent: Extent::square(768), params: lab_params() }
+    }
+
+    fn navigate(self, event: own SurfaceEvent) -> CliffordLabState
+        uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>)
+    {
+        let mut state = CliffordLabState {
+            p00_x: self.p00_x,
+            p00_y: self.p00_y,
+            p00_z: self.p00_z,
+            p10_x: self.p10_x,
+            p10_y: self.p10_y,
+            p10_z: self.p10_z,
+            p01_x: self.p01_x,
+            p01_y: self.p01_y,
+            p01_z: self.p01_z,
+            p11_x: self.p11_x,
+            p11_y: self.p11_y,
+            p11_z: self.p11_z,
+            selected: self.selected,
+            dragging: self.dragging,
+        }.apply_param_bindings(lab_params(), event)
+
+        if event.is_pointer_down() {
+            let pointer_x = event.pointer_x * 2.0 / event.width - 1.0
+            let pointer_y = 1.0 - event.pointer_y * 2.0 / event.height
+            state.selected = nearest_handle(positions(state), pointer_x, pointer_y)
+            state.dragging = if state.selected >= 0.0 { 1.0 } else { 0.0 }
+        }
+
+        if event.is_pointer_move() && state.dragging > 0.5 && event.buttons != 0 {
+            let clip_dx = event.delta_x * 2.0 / event.width
+            let clip_dy = event.delta_y * -2.0 / event.height
+            // Exact inverse of clip_position's x/y response when z is fixed.
+            let world_dx = clip_dx / 0.315
+            let world_dy = (clip_dy + world_dx * 0.06) / 0.36
+            if state.selected < 0.5 {
+                state.p00_x = state.p00_x + world_dx
+                state.p00_y = state.p00_y + world_dy
+            } else if state.selected < 1.5 {
+                state.p10_x = state.p10_x + world_dx
+                state.p10_y = state.p10_y + world_dy
+            } else if state.selected < 2.5 {
+                state.p01_x = state.p01_x + world_dx
+                state.p01_y = state.p01_y + world_dy
+            } else {
+                state.p11_x = state.p11_x + world_dx
+                state.p11_y = state.p11_y + world_dy
+            }
+        }
+
+        if event.is_pointer_up() { state.dragging = 0.0 }
+
+        if event.wheel_delta != 0.0 && state.selected >= 0.0 {
+            let depth_step = if event.wheel_delta < 0.0 { 0.08 } else { -0.08 }
+            if state.selected < 0.5 {
+                state.p00_z = (state.p00_z + depth_step).clamp(-4.0, 4.0)
+            } else if state.selected < 1.5 {
+                state.p10_z = (state.p10_z + depth_step).clamp(-4.0, 4.0)
+            } else if state.selected < 2.5 {
+                state.p01_z = (state.p01_z + depth_step).clamp(-4.0, 4.0)
+            } else {
+                state.p11_z = (state.p11_z + depth_step).clamp(-4.0, 4.0)
+            }
+        }
+        state
+    }
+
+    fn background(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        -15396337
+    }
+
+    fn patch_vertices(self, vertex_index: u32) -> RasterVertex<PatchVarying>
+        uses (VertexStage<PatchVarying, TriangleList<VERTICES>>)
+    {
+        let parameter = grid_parameter(vertex_index)
+        let current = positions(CliffordLabState {
+            p00_x: self.p00_x,
+            p00_y: self.p00_y,
+            p00_z: self.p00_z,
+            p10_x: self.p10_x,
+            p10_y: self.p10_y,
+            p10_z: self.p10_z,
+            p01_x: self.p01_x,
+            p01_y: self.p01_y,
+            p01_z: self.p01_z,
+            p11_x: self.p11_x,
+            p11_y: self.p11_y,
+            p11_z: self.p11_z,
+            selected: self.selected,
+            dragging: self.dragging,
+        })
+        let differential = evaluate_differential(
+            controlled_patch(current), parameter, policy(), 0.000000000001,
+        )
+        RasterVertex {
+            position: clip_position(differential.sample.position),
+            varying: PatchVarying {
+                local: local_barycentric(vertex_index % 6),
+                normal: differential.normal,
+                residual: differential.sample.trivector_residual,
+            },
+        }
+    }
+
+    fn patch_fragment(self, varying: PatchVarying) -> u32
+        uses (FragmentStage<PatchVarying>)
+    {
+        if minimum3(varying.local) < 0.025 {
+            4280295456
+        } else if varying.residual < -0.00001 || varying.residual > 0.00001 {
+            4291318320
+        } else {
+            lit_color(varying.normal)
+        }
+    }
+
+    fn handle_vertices(self, vertex_index: u32) -> RasterVertex<HandleVarying>
+        uses (VertexStage<HandleVarying, TriangleList<24>>)
+    {
+        let handle_index = vertex_index / 6
+        let selected = self.selected >= 0.0 && as_f32(handle_index) == self.selected
+        let current = ControlPositions {
+            p00: vec3f(self.p00_x, self.p00_y, self.p00_z),
+            p10: vec3f(self.p10_x, self.p10_y, self.p10_z),
+            p01: vec3f(self.p01_x, self.p01_y, self.p01_z),
+            p11: vec3f(self.p11_x, self.p11_y, self.p11_z),
+        }
+        RasterVertex {
+            position: handle_clip(
+                clip_position(handle_point(current, handle_index)),
+                vertex_index % 6,
+                selected,
+            ),
+            varying: HandleVarying { selected: if selected { 1.0 } else { 0.0 } },
+        }
+    }
+
+    fn handle_fragment(self, varying: HandleVarying) -> u32
+        uses (FragmentStage<HandleVarying>)
+    {
+        if varying.selected > 0.5 { 4291983973 } else { 4292985706 }
+    }
+}

@@ -101,3 +101,55 @@ runtime claims.
 The parser/formatter reproduction passes and fails identically on the pinned
 revision and clean Fe `6d26c910a25c8cc4d4428c861d77204c72e8d2bb`.
 Upstream acknowledged the minimized report and plans a focused regression.
+
+## Clifford surface checkpoint
+
+`quilting_clifford_bezier` now supplies a genuinely Clifford-valued peer to
+the QB kernel, following Krasauskas, Zubė, and Cacciola's
+[bilinear Clifford-Bézier construction](https://doi.org/10.1007/978-3-642-54382-1_17)
+in isotropic `Cl(2, 0, 1)`. This is not standard conformal geometric algebra:
+the future `Cl(4, 1)` CGA authoring lane remains separate. The denotation is
+
+```text
+P(s, t) = F(s, t) W(s, t)^-1
+```
+
+for bilinear Bernstein blends of vector-even products `F` and even weights
+`W`. Its analytic differential uses the same immutable evaluation frame:
+
+```text
+dP = (dF - P dW) W^-1
+```
+
+The products are typed `ga_expr` programs. Fe's FCO compiler specializes the
+fixed metric, grades, supports, and association policy into straight-line
+scalar arithmetic; runtime Wasm and WGSL contain no multivector arrays, blade
+masks, algebra interpreter, or generated source shim.
+
+The literature's cyclide example exposed a useful source-quality trap. One
+PDF text extraction fuses the comma before `w3` and makes `w2` appear to have
+coefficient `3e23`. The paper's coefficient matrix and stated quartic require
+`w2 = 2e12 + e23`, followed by `w3 = -3(2 + e13)`. The independent dense f64
+oracle records this disambiguation and verifies the fourth-weight scale,
+grade-three cancellation, and quartic residual.
+
+The `clifford_hyperpatch_lab` browser composition is WebGPU-only and keeps its
+control transition, scheduling, resident state, patch arithmetic, and three
+render passes authored in Fe. A fixed browser host performs only DOM, input,
+device, and WebGPU realization. Four projected handles are draggable; the
+wheel adjusts the selected control's depth. The diagnostic turns a surface
+blue when editing has broken the vector-valued Clifford constraint, rather
+than pretending every free edit is still a valid Euclidean Clifford-Bézier
+surface.
+
+At this checkpoint the responsive lab draws a 56-by-56 square grid (18,816
+vertices). Its patch pass is 17,549 bytes / 512 WGSL lines after sharing the
+point-and-differential evaluation frame, down from 18,936 bytes / 524 lines.
+The emitted patch shader has no loops, switches, arrays, support masks, or
+blade machinery. The independently authored validation lane compares Fe/Wasm
+positions and residuals against dense f64 evaluation and compares analytic
+tangents and normals against central finite differences of that oracle.
+
+Multisample antialiasing is intentionally deferred until the typed surface
+and pipeline vocabulary can express it. Faking it with a larger primitive or
+an ad hoc host-side blur would weaken both the rendering and the abstraction.

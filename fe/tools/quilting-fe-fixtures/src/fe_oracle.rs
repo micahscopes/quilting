@@ -134,6 +134,136 @@ fn assert_close(actual: f32, expected: f32, tolerance: f32, context: &str) {
 }
 
 #[test]
+fn sparse_clifford_patch_wasm_matches_the_independent_dense_oracle() {
+    let (mut store, instance) = instantiate();
+    let position_exports = [
+        "clifford_position_x",
+        "clifford_position_y",
+        "clifford_position_z",
+    ];
+
+    for s_step in 0_u16..=8 {
+        for t_step in 0_u16..=8 {
+            let s = f32::from(s_step) / 8.0;
+            let t = f32::from(t_step) / 8.0;
+            let (expected_position, expected_residual) =
+                crate::clifford_oracle::paper_sample(f64::from(s), f64::from(t));
+            for lane in 0..3 {
+                assert_close(
+                    call2(&mut store, &instance, position_exports[lane], s, t),
+                    oracle_f32(expected_position[lane]),
+                    2.0e-5,
+                    &format!("Clifford patch ({s},{t}) lane {lane}"),
+                );
+            }
+            assert_close(
+                call2(&mut store, &instance, "clifford_trivector_residual", s, t),
+                oracle_f32(expected_residual),
+                2.0e-5,
+                &format!("Clifford patch ({s},{t}) trivector residual"),
+            );
+            assert_eq!(
+                function::<(f32, f32), i32>(&mut store, &instance, "clifford_hyperpatch_defined",)
+                    .call(&mut store, (s, t))
+                    .unwrap(),
+                1,
+                "paper patch must remain a defined Euclidean HyperPatch at ({s},{t})",
+            );
+        }
+    }
+
+    assert_close(
+        function::<(), f32>(&mut store, &instance, "clifford_reconciliation_scale")
+            .call(&mut store, ())
+            .unwrap(),
+        oracle_f32(crate::clifford_oracle::paper_reconciliation_scale()),
+        f32::EPSILON,
+        "paper fourth-weight reconciliation",
+    );
+    assert_eq!(
+        function::<(), i32>(&mut store, &instance, "clifford_reconciliation_conditioned",)
+            .call(&mut store, ())
+            .unwrap(),
+        1,
+    );
+}
+
+#[test]
+fn sparse_clifford_differential_wasm_matches_finite_differences_of_the_dense_oracle() {
+    let (mut store, instance) = instantiate();
+    let tangent_exports = [
+        [
+            "clifford_tangent_s_x",
+            "clifford_tangent_s_y",
+            "clifford_tangent_s_z",
+        ],
+        [
+            "clifford_tangent_t_x",
+            "clifford_tangent_t_y",
+            "clifford_tangent_t_z",
+        ],
+    ];
+    let normal_exports = [
+        "clifford_normal_x",
+        "clifford_normal_y",
+        "clifford_normal_z",
+    ];
+    let h = 1.0e-5_f64;
+
+    for s_step in 1_u16..8 {
+        for t_step in 1_u16..8 {
+            let s = f32::from(s_step) / 8.0;
+            let t = f32::from(t_step) / 8.0;
+            let s64 = f64::from(s);
+            let t64 = f64::from(t);
+            let (s_lower, _) = crate::clifford_oracle::paper_sample(s64 - h, t64);
+            let (s_upper, _) = crate::clifford_oracle::paper_sample(s64 + h, t64);
+            let (t_lower, _) = crate::clifford_oracle::paper_sample(s64, t64 - h);
+            let (t_upper, _) = crate::clifford_oracle::paper_sample(s64, t64 + h);
+            let tangent_s: [f64; 3] =
+                std::array::from_fn(|lane| (s_upper[lane] - s_lower[lane]) / (2.0 * h));
+            let tangent_t: [f64; 3] =
+                std::array::from_fn(|lane| (t_upper[lane] - t_lower[lane]) / (2.0 * h));
+            let cross = [
+                tangent_s[1] * tangent_t[2] - tangent_s[2] * tangent_t[1],
+                tangent_s[2] * tangent_t[0] - tangent_s[0] * tangent_t[2],
+                tangent_s[0] * tangent_t[1] - tangent_s[1] * tangent_t[0],
+            ];
+            let cross_norm = cross
+                .iter()
+                .map(|component| component * component)
+                .sum::<f64>()
+                .sqrt();
+            assert!(
+                cross_norm > 1.0e-8,
+                "oracle differential degenerated at ({s},{t})"
+            );
+
+            for lane in 0..3 {
+                assert_close(
+                    call2(&mut store, &instance, tangent_exports[0][lane], s, t),
+                    oracle_f32(tangent_s[lane]),
+                    7.5e-4,
+                    &format!("Clifford tangent-s ({s},{t}) lane {lane}"),
+                );
+                assert_close(
+                    call2(&mut store, &instance, tangent_exports[1][lane], s, t),
+                    oracle_f32(tangent_t[lane]),
+                    7.5e-4,
+                    &format!("Clifford tangent-t ({s},{t}) lane {lane}"),
+                );
+                assert_close(
+                    call2(&mut store, &instance, normal_exports[lane], s, t),
+                    oracle_f32(cross[lane] / cross_norm),
+                    2.0e-4,
+                    &format!("Clifford normal ({s},{t}) lane {lane}"),
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn quilting_domain_wasm_matches_the_frozen_m0_barycentrics() {
     const MATRIX: &[u8] =
         include_bytes!("../../../fixtures/classic-quilting/v1/direct-seed42-matrix.cqa");

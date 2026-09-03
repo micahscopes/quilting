@@ -1,5 +1,19 @@
 //! Thin Wasm scalar exports over the three production M1 ingots.
 
+use quilting_clifford_bezier::{
+    FourthWeightReconciliation,
+    IsotropicBilinearPatch,
+    IsotropicDifferential,
+    IsotropicPolicy,
+    IsotropicSample,
+    as_hyperpatch as isotropic_hyperpatch,
+    control as isotropic_control,
+    evaluate as evaluate_isotropic,
+    evaluate_differential as evaluate_isotropic_differential,
+    even,
+    patch as isotropic_patch,
+    reconcile_fourth_weight,
+}
 use quilting_domain::{
     Bary3F,
     EdgeId,
@@ -339,4 +353,118 @@ pub fn qb_permutation_parity(_ permutation: u32) -> f32 {
 }
 pub fn qb_permuted_normal_z(_ permutation: u32, _ u: f32, _ v: f32) -> f32 {
     apply_normal_parity(curved(u, v).normal, permutation).z
+}
+
+fn clifford_policy() -> IsotropicPolicy {
+    IsotropicPolicy {
+        minimum_denominator_norm_squared: 0.000000000001,
+        maximum_trivector_residual: 0.00001,
+    }
+}
+
+fn paper_clifford_patch() -> IsotropicBilinearPatch {
+    isotropic_patch(
+        isotropic_control(vec3f(0.0, 2.0, 0.0), even(1.0, 0.0, 0.0, 0.0)),
+        isotropic_control(vec3f(0.0, 1.0, 0.0), even(0.0, 1.0, 0.0, -1.0)),
+        isotropic_control(vec3f(0.0, -2.0, 0.0), even(0.0, 2.0, 0.0, 1.0)),
+        isotropic_control(vec3f(0.0, -1.0, 0.0), even(-6.0, 0.0, -3.0, 0.0)),
+    )
+}
+
+fn paper_clifford_sample(_ s: f32, _ t: f32) -> IsotropicSample {
+    evaluate_isotropic(paper_clifford_patch(), vec2f(s, t), clifford_policy())
+}
+
+fn paper_clifford_differential(_ s: f32, _ t: f32) -> IsotropicDifferential {
+    evaluate_isotropic_differential(
+        paper_clifford_patch(),
+        vec2f(s, t),
+        clifford_policy(),
+        0.000000000001,
+    )
+}
+
+pub fn clifford_position_x(_ s: f32, _ t: f32) -> f32 {
+    paper_clifford_sample(s, t).position.x
+}
+
+pub fn clifford_position_y(_ s: f32, _ t: f32) -> f32 {
+    paper_clifford_sample(s, t).position.y
+}
+
+pub fn clifford_position_z(_ s: f32, _ t: f32) -> f32 {
+    paper_clifford_sample(s, t).position.z
+}
+
+pub fn clifford_trivector_residual(_ s: f32, _ t: f32) -> f32 {
+    paper_clifford_sample(s, t).trivector_residual
+}
+
+pub fn clifford_tangent_s_x(_ s: f32, _ t: f32) -> f32 {
+    paper_clifford_differential(s, t).tangent_s.x
+}
+
+pub fn clifford_tangent_s_y(_ s: f32, _ t: f32) -> f32 {
+    paper_clifford_differential(s, t).tangent_s.y
+}
+
+pub fn clifford_tangent_s_z(_ s: f32, _ t: f32) -> f32 {
+    paper_clifford_differential(s, t).tangent_s.z
+}
+
+pub fn clifford_tangent_t_x(_ s: f32, _ t: f32) -> f32 {
+    paper_clifford_differential(s, t).tangent_t.x
+}
+
+pub fn clifford_tangent_t_y(_ s: f32, _ t: f32) -> f32 {
+    paper_clifford_differential(s, t).tangent_t.y
+}
+
+pub fn clifford_tangent_t_z(_ s: f32, _ t: f32) -> f32 {
+    paper_clifford_differential(s, t).tangent_t.z
+}
+
+pub fn clifford_normal_x(_ s: f32, _ t: f32) -> f32 {
+    paper_clifford_differential(s, t).normal.x
+}
+
+pub fn clifford_normal_y(_ s: f32, _ t: f32) -> f32 {
+    paper_clifford_differential(s, t).normal.y
+}
+
+pub fn clifford_normal_z(_ s: f32, _ t: f32) -> f32 {
+    paper_clifford_differential(s, t).normal.z
+}
+
+pub fn clifford_hyperpatch_defined(_ s: f32, _ t: f32) -> i32 {
+    let sample = denote(
+        isotropic_hyperpatch(paper_clifford_patch()),
+        vec2f(s, t),
+        clifford_policy(),
+    )
+    if sample.defined { 1 } else { 0 }
+}
+
+fn reconcile_paper_fourth_weight() -> FourthWeightReconciliation {
+    reconcile_fourth_weight(
+        isotropic_patch(
+            isotropic_control(vec3f(0.0, 2.0, 0.0), even(1.0, 0.0, 0.0, 0.0)),
+            isotropic_control(vec3f(0.0, 1.0, 0.0), even(0.0, 1.0, 0.0, -1.0)),
+            isotropic_control(vec3f(0.0, -2.0, 0.0), even(0.0, 2.0, 0.0, 1.0)),
+            isotropic_control(vec3f(0.0, -1.0, 0.0), even(2.0, 0.0, 1.0, 0.0)),
+        ),
+        0.000000000001,
+    )
+}
+
+pub fn clifford_reconciliation_scale() -> f32 {
+    reconcile_paper_fourth_weight().scale
+}
+
+pub fn clifford_reconciliation_conditioned() -> i32 {
+    if reconcile_paper_fourth_weight().conditioned {
+        1
+    } else {
+        0
+    }
 }

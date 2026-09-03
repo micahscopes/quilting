@@ -14,6 +14,7 @@ members = [
   { path = "ingots/demos/classic_quilting_atlas", name = "classic_quilting_atlas" },
   { path = "ingots/demos/classic_quilting_lod", name = "classic_quilting_lod" },
   { path = "ingots/demos/classic_quilting_generated", name = "classic_quilting_generated" },
+  { path = "ingots/demos/clifford_hyperpatch_lab", name = "clifford_hyperpatch_lab" },
 ]
 default-members = [
   "ingots/foundation/quilting_domain",
@@ -28,6 +29,7 @@ default-members = [
   "ingots/demos/classic_quilting_atlas",
   "ingots/demos/classic_quilting_lod",
   "ingots/demos/classic_quilting_generated",
+  "ingots/demos/clifford_hyperpatch_lab",
 ]
 
 [dependencies]

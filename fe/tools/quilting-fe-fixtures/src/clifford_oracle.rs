@@ -161,6 +161,16 @@ fn paper_example(unscaled_fourth_weight: bool) -> [Control; 4] {
     ]
 }
 
+pub(crate) fn paper_sample(s: f64, t: f64) -> ([f64; 3], f64) {
+    let value = evaluate(paper_example(false), s, t);
+    ([value.0[1], value.0[2], value.0[4]], value.0[7])
+}
+
+pub(crate) fn paper_reconciliation_scale() -> f64 {
+    let controls = paper_example(true);
+    -grade_three_pair(controls[1], controls[2]) / grade_three_pair(controls[0], controls[3])
+}
+
 fn assert_close(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance,
@@ -170,10 +180,7 @@ fn assert_close(actual: f64, expected: f64, tolerance: f64) {
 
 #[test]
 fn paper_reconciliation_recovers_negative_three_scale() {
-    let controls = paper_example(true);
-    let numerator = grade_three_pair(controls[1], controls[2]);
-    let denominator = grade_three_pair(controls[0], controls[3]);
-    assert_close(-numerator / denominator, -3.0, 1.0e-12);
+    assert_close(paper_reconciliation_scale(), -3.0, 1.0e-12);
 }
 
 #[test]
