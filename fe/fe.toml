@@ -4,6 +4,7 @@ version = "0.1.0"
 members = [
   { path = "ingots/foundation/quilting_domain", name = "quilting_domain" },
   { path = "ingots/algebra/quilting_quaternion", name = "quilting_quaternion" },
+  { path = "ingots/algebra/quilting_cga", name = "quilting_cga" },
   { path = "ingots/geometry/quilting_hyperpatch", name = "quilting_hyperpatch" },
   { path = "ingots/geometry/quilting_qb", name = "quilting_qb" },
   { path = "ingots/geometry/quilting_clifford_bezier", name = "quilting_clifford_bezier" },
@@ -19,6 +20,7 @@ members = [
 default-members = [
   "ingots/foundation/quilting_domain",
   "ingots/algebra/quilting_quaternion",
+  "ingots/algebra/quilting_cga",
   "ingots/geometry/quilting_hyperpatch",
   "ingots/geometry/quilting_qb",
   "ingots/geometry/quilting_clifford_bezier",

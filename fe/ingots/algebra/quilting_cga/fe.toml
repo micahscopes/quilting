@@ -1,0 +1,8 @@
+[ingot]
+name = "quilting_cga"
+version = "0.1.0"
+
+[dependencies]
+core = true
+ga_expr = true
+quilting_domain = true

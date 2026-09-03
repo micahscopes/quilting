@@ -122,6 +122,30 @@ fn call8(store: &mut Store<()>, instance: &Instance, name: &str, values: [f32; 8
         .unwrap()
 }
 
+#[allow(clippy::many_single_char_names)]
+fn call7_f32(store: &mut Store<()>, instance: &Instance, name: &str, values: [f32; 7]) -> f32 {
+    let [a, b, c, d, e, f, g] = values;
+    function::<(f32, f32, f32, f32, f32, f32, f32), f32>(store, instance, name)
+        .call(store, (a, b, c, d, e, f, g))
+        .unwrap()
+}
+
+#[allow(clippy::many_single_char_names)]
+fn call7_i32(store: &mut Store<()>, instance: &Instance, name: &str, values: [f32; 7]) -> i32 {
+    let [a, b, c, d, e, f, g] = values;
+    function::<(f32, f32, f32, f32, f32, f32, f32), i32>(store, instance, name)
+        .call(store, (a, b, c, d, e, f, g))
+        .unwrap()
+}
+
+#[allow(clippy::many_single_char_names)]
+fn call10_f32(store: &mut Store<()>, instance: &Instance, name: &str, values: [f32; 10]) -> f32 {
+    let [a, b, c, d, e, f, g, h, i, j] = values;
+    function::<(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32), f32>(store, instance, name)
+        .call(store, (a, b, c, d, e, f, g, h, i, j))
+        .unwrap()
+}
+
 fn assert_close(actual: f32, expected: f32, tolerance: f32, context: &str) {
     assert!(
         actual.is_finite(),
@@ -260,6 +284,121 @@ fn sparse_clifford_differential_wasm_matches_finite_differences_of_the_dense_ora
                 );
             }
         }
+    }
+}
+
+#[test]
+fn sparse_cga_sphere_map_wasm_matches_the_independent_dense_cl41_oracle() {
+    let (mut store, instance) = instantiate();
+    let position_exports = [
+        "cga_reflect_position_x",
+        "cga_reflect_position_y",
+        "cga_reflect_position_z",
+    ];
+    let tangent_exports = [
+        "cga_reflect_tangent_x",
+        "cga_reflect_tangent_y",
+        "cga_reflect_tangent_z",
+    ];
+    let normal_exports = [
+        "cga_reflect_xy_normal_x",
+        "cga_reflect_xy_normal_y",
+        "cga_reflect_xy_normal_z",
+    ];
+    let cases = [
+        ([1.0, 0.5, -0.25], [0.0, 0.0, 0.0], 0.5),
+        ([-0.8, 1.4, 2.0], [0.35, -0.7, 1.1], 1.25),
+        ([3.0, -2.0, 0.7], [-1.3, 0.2, 0.4], 2.0),
+    ];
+    let tangents = [[1.0, 0.0, 0.0], [0.3, -0.8, 0.5], [0.0, 0.0, 1.0]];
+
+    for (point, center, radius) in cases {
+        let values = [
+            point[0], point[1], point[2], center[0], center[1], center[2], radius,
+        ];
+        let expected = crate::cga_oracle::sphere_reflection(
+            point.map(f64::from),
+            center.map(f64::from),
+            f64::from(radius),
+        );
+        for lane in 0..3 {
+            assert_close(
+                call7_f32(&mut store, &instance, position_exports[lane], values),
+                oracle_f32(expected.position[lane]),
+                4.0e-5,
+                &format!("CGA reflected position {point:?} lane {lane}"),
+            );
+        }
+        assert_close(
+            call7_f32(&mut store, &instance, "cga_reflect_weight", values),
+            oracle_f32(expected.weight),
+            4.0e-5,
+            &format!("CGA projective weight {point:?}"),
+        );
+        assert_close(
+            call7_f32(&mut store, &instance, "cga_reflect_null_residual", values),
+            oracle_f32(expected.null_residual),
+            3.0e-5,
+            &format!("CGA null residual {point:?}"),
+        );
+        assert_eq!(
+            call7_i32(&mut store, &instance, "cga_reflect_conditioned", values),
+            1,
+        );
+
+        for tangent in tangents {
+            let tangent_values = [
+                point[0], point[1], point[2], tangent[0], tangent[1], tangent[2], center[0],
+                center[1], center[2], radius,
+            ];
+            let expected_tangent = crate::cga_oracle::finite_difference_tangent(
+                point.map(f64::from),
+                tangent.map(f64::from),
+                center.map(f64::from),
+                f64::from(radius),
+            );
+            for lane in 0..3 {
+                assert_close(
+                    call10_f32(&mut store, &instance, tangent_exports[lane], tangent_values),
+                    oracle_f32(expected_tangent[lane]),
+                    6.0e-4,
+                    &format!("CGA reflected tangent {point:?}/{tangent:?} lane {lane}"),
+                );
+            }
+        }
+
+        let expected_normal = crate::cga_oracle::xy_normal(
+            point.map(f64::from),
+            center.map(f64::from),
+            f64::from(radius),
+        );
+        for lane in 0..3 {
+            assert_close(
+                call7_f32(&mut store, &instance, normal_exports[lane], values),
+                oracle_f32(expected_normal[lane]),
+                3.0e-4,
+                &format!("CGA reflected xy normal {point:?} lane {lane}"),
+            );
+        }
+    }
+
+    let center = [0.4_f32, -0.2, 0.7];
+    let radius = 1.75_f32;
+    for direction in [[1.0_f32, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]] {
+        let point = std::array::from_fn(|lane| center[lane] + radius * direction[lane]);
+        let values = [
+            point[0], point[1], point[2], center[0], center[1], center[2], radius,
+        ];
+        assert_close(
+            call7_f32(&mut store, &instance, "cga_sphere_incidence", values),
+            oracle_f32(crate::cga_oracle::sphere_incidence(
+                point.map(f64::from),
+                center.map(f64::from),
+                f64::from(radius),
+            )),
+            2.0e-6,
+            "CGA point-on-sphere incidence",
+        );
     }
 }
 

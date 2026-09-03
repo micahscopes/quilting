@@ -1,5 +1,16 @@
 //! Thin Wasm scalar exports over the three production M1 ingots.
 
+use quilting_cga::{
+    CgaMapPolicy,
+    CgaMappedDifferential,
+    CgaPointProjection,
+    dual_sphere,
+    embed_point,
+    point_sphere_incidence,
+    reflect_differential,
+    reflect_point,
+    sphere_reflection,
+}
 use quilting_clifford_bezier::{
     FourthWeightReconciliation,
     IsotropicBilinearPatch,
@@ -467,4 +478,237 @@ pub fn clifford_reconciliation_conditioned() -> i32 {
     } else {
         0
     }
+}
+
+fn cga_policy() -> CgaMapPolicy {
+    CgaMapPolicy {
+        minimum_projective_weight: 0.000000000001,
+        minimum_distance_squared: 0.000000000001,
+        minimum_tangent_norm_squared: 0.000000000001,
+    }
+}
+
+fn cga_reflection_sample(
+    _ px: f32,
+    _ py: f32,
+    _ pz: f32,
+    _ cx: f32,
+    _ cy: f32,
+    _ cz: f32,
+    _ radius: f32,
+) -> CgaPointProjection {
+    reflect_point(
+        sphere_reflection(vec3f(cx, cy, cz), radius),
+        vec3f(px, py, pz),
+        cga_policy(),
+    )
+}
+
+fn cga_reflection_tangent(
+    _ px: f32,
+    _ py: f32,
+    _ pz: f32,
+    _ tx: f32,
+    _ ty: f32,
+    _ tz: f32,
+    _ cx: f32,
+    _ cy: f32,
+    _ cz: f32,
+    _ radius: f32,
+) -> CgaMappedDifferential {
+    reflect_differential(
+        sphere_reflection(vec3f(cx, cy, cz), radius),
+        vec3f(px, py, pz),
+        vec3f(tx, ty, tz),
+        vec3f(0.0, 0.0, 0.0),
+        cga_policy(),
+    )
+}
+
+fn cga_reflection_xy_frame(
+    _ px: f32,
+    _ py: f32,
+    _ pz: f32,
+    _ cx: f32,
+    _ cy: f32,
+    _ cz: f32,
+    _ radius: f32,
+) -> CgaMappedDifferential {
+    reflect_differential(
+        sphere_reflection(vec3f(cx, cy, cz), radius),
+        vec3f(px, py, pz),
+        vec3f(1.0, 0.0, 0.0),
+        vec3f(0.0, 1.0, 0.0),
+        cga_policy(),
+    )
+}
+
+pub fn cga_sphere_incidence(
+    _ px: f32,
+    _ py: f32,
+    _ pz: f32,
+    _ cx: f32,
+    _ cy: f32,
+    _ cz: f32,
+    _ radius: f32,
+) -> f32 {
+    let map = sphere_reflection(vec3f(cx, cy, cz), radius)
+    point_sphere_incidence(embed_point(vec3f(px, py, pz)), dual_sphere(map))
+}
+
+pub fn cga_reflect_position_x(
+    _ px: f32,
+    _ py: f32,
+    _ pz: f32,
+    _ cx: f32,
+    _ cy: f32,
+    _ cz: f32,
+    _ radius: f32,
+) -> f32 {
+    cga_reflection_sample(px, py, pz, cx, cy, cz, radius).position.x
+}
+
+pub fn cga_reflect_position_y(
+    _ px: f32,
+    _ py: f32,
+    _ pz: f32,
+    _ cx: f32,
+    _ cy: f32,
+    _ cz: f32,
+    _ radius: f32,
+) -> f32 {
+    cga_reflection_sample(px, py, pz, cx, cy, cz, radius).position.y
+}
+
+pub fn cga_reflect_position_z(
+    _ px: f32,
+    _ py: f32,
+    _ pz: f32,
+    _ cx: f32,
+    _ cy: f32,
+    _ cz: f32,
+    _ radius: f32,
+) -> f32 {
+    cga_reflection_sample(px, py, pz, cx, cy, cz, radius).position.z
+}
+
+pub fn cga_reflect_weight(
+    _ px: f32,
+    _ py: f32,
+    _ pz: f32,
+    _ cx: f32,
+    _ cy: f32,
+    _ cz: f32,
+    _ radius: f32,
+) -> f32 {
+    cga_reflection_sample(px, py, pz, cx, cy, cz, radius).weight
+}
+
+pub fn cga_reflect_null_residual(
+    _ px: f32,
+    _ py: f32,
+    _ pz: f32,
+    _ cx: f32,
+    _ cy: f32,
+    _ cz: f32,
+    _ radius: f32,
+) -> f32 {
+    cga_reflection_sample(px, py, pz, cx, cy, cz, radius).null_residual
+}
+
+pub fn cga_reflect_conditioned(
+    _ px: f32,
+    _ py: f32,
+    _ pz: f32,
+    _ cx: f32,
+    _ cy: f32,
+    _ cz: f32,
+    _ radius: f32,
+) -> i32 {
+    if cga_reflection_sample(px, py, pz, cx, cy, cz, radius).conditioned {
+        1
+    } else {
+        0
+    }
+}
+
+pub fn cga_reflect_tangent_x(
+    _ px: f32,
+    _ py: f32,
+    _ pz: f32,
+    _ tx: f32,
+    _ ty: f32,
+    _ tz: f32,
+    _ cx: f32,
+    _ cy: f32,
+    _ cz: f32,
+    _ radius: f32,
+) -> f32 {
+    cga_reflection_tangent(px, py, pz, tx, ty, tz, cx, cy, cz, radius).tangent_s.x
+}
+
+pub fn cga_reflect_tangent_y(
+    _ px: f32,
+    _ py: f32,
+    _ pz: f32,
+    _ tx: f32,
+    _ ty: f32,
+    _ tz: f32,
+    _ cx: f32,
+    _ cy: f32,
+    _ cz: f32,
+    _ radius: f32,
+) -> f32 {
+    cga_reflection_tangent(px, py, pz, tx, ty, tz, cx, cy, cz, radius).tangent_s.y
+}
+
+pub fn cga_reflect_tangent_z(
+    _ px: f32,
+    _ py: f32,
+    _ pz: f32,
+    _ tx: f32,
+    _ ty: f32,
+    _ tz: f32,
+    _ cx: f32,
+    _ cy: f32,
+    _ cz: f32,
+    _ radius: f32,
+) -> f32 {
+    cga_reflection_tangent(px, py, pz, tx, ty, tz, cx, cy, cz, radius).tangent_s.z
+}
+
+pub fn cga_reflect_xy_normal_x(
+    _ px: f32,
+    _ py: f32,
+    _ pz: f32,
+    _ cx: f32,
+    _ cy: f32,
+    _ cz: f32,
+    _ radius: f32,
+) -> f32 {
+    cga_reflection_xy_frame(px, py, pz, cx, cy, cz, radius).normal.x
+}
+
+pub fn cga_reflect_xy_normal_y(
+    _ px: f32,
+    _ py: f32,
+    _ pz: f32,
+    _ cx: f32,
+    _ cy: f32,
+    _ cz: f32,
+    _ radius: f32,
+) -> f32 {
+    cga_reflection_xy_frame(px, py, pz, cx, cy, cz, radius).normal.y
+}
+
+pub fn cga_reflect_xy_normal_z(
+    _ px: f32,
+    _ py: f32,
+    _ pz: f32,
+    _ cx: f32,
+    _ cy: f32,
+    _ cz: f32,
+    _ radius: f32,
+) -> f32 {
+    cga_reflection_xy_frame(px, py, pz, cx, cy, cz, radius).normal.z
 }

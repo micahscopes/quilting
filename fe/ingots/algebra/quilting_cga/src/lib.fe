@@ -1,0 +1,234 @@
+//! Sparse conformal maps for Euclidean three-space in null-basis Cl(4, 1).
+//!
+//! The algebra is authored once through named basis and expression types.
+//! Fe FCO specializes the reflected point/sphere incidence and sandwich into
+//! straight-line scalar arithmetic; no runtime blade storage or dispatch is
+//! part of the map. Euclidean projection and differential transport remain
+//! explicit, conditioned operations.
+
+use core::marker::Copy
+use ga_expr::{BasisMetric, CompileNamedVectorDotF32, EvaluateVectorScalarF32, Null, Positive, Prime}
+use quilting_domain::{Vec3F, absf, cross3, dot3, normalize3_or, scale3, sub3, vec3f}
+
+struct InfinityPair {}
+struct Cga3Basis {
+    e1: Positive,
+    e2: Positive,
+    e3: Positive,
+    eo: Null<InfinityPair>,
+    ei: Prime<InfinityPair>,
+}
+type Cga3Metric = BasisMetric<Cga3Basis>
+
+struct PointCoefficients { e1: f32, e2: f32, e3: f32, eo: f32, ei: f32 }
+struct SphereCoefficients { e1: f32, e2: f32, e3: f32, eo: f32, ei: f32 }
+struct IncidenceOperands { point: PointCoefficients, sphere: SphereCoefficients }
+derive EvaluateVectorScalarF32 for IncidenceOperands using CompileNamedVectorDotF32<
+    PointCoefficients,
+    SphereCoefficients,
+    Cga3Metric,
+>
+
+struct LeftSphereCoefficients { e1: f32, e2: f32, e3: f32, eo: f32, ei: f32 }
+struct RightSphereCoefficients { e1: f32, e2: f32, e3: f32, eo: f32, ei: f32 }
+struct SphereNormOperands { left: LeftSphereCoefficients, right: RightSphereCoefficients }
+derive EvaluateVectorScalarF32 for SphereNormOperands using CompileNamedVectorDotF32<
+    LeftSphereCoefficients,
+    RightSphereCoefficients,
+    Cga3Metric,
+>
+
+pub struct CgaPointF { pub e1: f32, pub e2: f32, pub e3: f32, pub eo: f32, pub ei: f32 }
+impl Copy for CgaPointF {}
+
+pub struct CgaDualSphereF { pub e1: f32, pub e2: f32, pub e3: f32, pub eo: f32, pub ei: f32 }
+impl Copy for CgaDualSphereF {}
+
+pub struct SphereReflection { pub center: Vec3F, pub radius_squared: f32 }
+impl Copy for SphereReflection {}
+
+pub struct CgaPointProjection {
+    pub position: Vec3F,
+    pub homogeneous: CgaPointF,
+    pub weight: f32,
+    pub null_residual: f32,
+    pub conditioned: bool,
+}
+impl Copy for CgaPointProjection {}
+
+pub struct CgaMappedDifferential {
+    pub point: CgaPointProjection,
+    pub tangent_s: Vec3F,
+    pub tangent_t: Vec3F,
+    pub normal: Vec3F,
+}
+impl Copy for CgaMappedDifferential {}
+
+pub struct CgaMapPolicy {
+    pub minimum_projective_weight: f32,
+    pub minimum_distance_squared: f32,
+    pub minimum_tangent_norm_squared: f32,
+}
+impl Copy for CgaMapPolicy {}
+
+fn point_coefficients(_ value: CgaPointF) -> PointCoefficients {
+    PointCoefficients { e1: value.e1, e2: value.e2, e3: value.e3, eo: value.eo, ei: value.ei }
+}
+
+fn sphere_coefficients(_ value: CgaDualSphereF) -> SphereCoefficients {
+    SphereCoefficients { e1: value.e1, e2: value.e2, e3: value.e3, eo: value.eo, ei: value.ei }
+}
+
+fn left_sphere_coefficients(_ value: CgaDualSphereF) -> LeftSphereCoefficients {
+    LeftSphereCoefficients { e1: value.e1, e2: value.e2, e3: value.e3, eo: value.eo, ei: value.ei }
+}
+
+fn right_sphere_coefficients(_ value: CgaDualSphereF) -> RightSphereCoefficients {
+    RightSphereCoefficients { e1: value.e1, e2: value.e2, e3: value.e3, eo: value.eo, ei: value.ei }
+}
+
+/// X(x) = x + eo + |x|^2 ei / 2.
+pub fn embed_point(_ point: Vec3F) -> CgaPointF {
+    CgaPointF { e1: point.x, e2: point.y, e3: point.z, eo: 1.0, ei: 0.5 * dot3(point, point) }
+}
+
+/// S(c,r) = c + eo + (|c|^2 - r^2) ei / 2.
+pub fn sphere_reflection(_ center: Vec3F, _ radius: f32) -> SphereReflection {
+    let radius_squared = radius * radius
+    SphereReflection { center: center, radius_squared: radius_squared }
+}
+
+pub fn dual_sphere(_ map: SphereReflection) -> CgaDualSphereF {
+    CgaDualSphereF {
+        e1: map.center.x,
+        e2: map.center.y,
+        e3: map.center.z,
+        eo: 1.0,
+        ei: 0.5 * (dot3(map.center, map.center) - map.radius_squared),
+    }
+}
+
+/// The conformal point/dual-sphere scalar product. It is zero on the sphere.
+pub fn point_sphere_incidence(_ point: CgaPointF, _ sphere: CgaDualSphereF) -> f32 {
+    <IncidenceOperands as EvaluateVectorScalarF32>::scalar(
+        IncidenceOperands { point: point_coefficients(point), sphere: sphere_coefficients(sphere) },
+    )
+}
+
+fn sphere_norm_squared(_ sphere: CgaDualSphereF) -> f32 {
+    <SphereNormOperands as EvaluateVectorScalarF32>::scalar(
+        SphereNormOperands {
+            left: left_sphere_coefficients(sphere),
+            right: right_sphere_coefficients(sphere),
+        },
+    )
+}
+
+// For vectors, S X S = 2(S . X)S - (S . S)X. This is exactly the
+// grade-one sphere sandwich, factored through two reflected named-basis dot
+// programs so no general multivector intermediate exists even at compile time.
+fn reflect_homogeneous(_ point: CgaPointF, _ sphere: CgaDualSphereF) -> CgaPointF {
+    let incidence_scale = 2.0 * point_sphere_incidence(point, sphere)
+    let norm_squared = sphere_norm_squared(sphere)
+    CgaPointF {
+        e1: incidence_scale * sphere.e1 - norm_squared * point.e1,
+        e2: incidence_scale * sphere.e2 - norm_squared * point.e2,
+        e3: incidence_scale * sphere.e3 - norm_squared * point.e3,
+        eo: incidence_scale * sphere.eo - norm_squared * point.eo,
+        ei: incidence_scale * sphere.ei - norm_squared * point.ei,
+    }
+}
+
+fn undefined_projection(_ homogeneous: CgaPointF, _ weight: f32) -> CgaPointProjection {
+    CgaPointProjection {
+        position: vec3f(0.0, 0.0, 0.0),
+        homogeneous: homogeneous,
+        weight: weight,
+        null_residual: 0.0,
+        conditioned: false,
+    }
+}
+
+/// Reflect one Euclidean point in a sphere through the sparse CGA sandwich.
+pub fn reflect_point(
+    _ map: SphereReflection,
+    _ position: Vec3F,
+    _ policy: CgaMapPolicy,
+) -> CgaPointProjection {
+    let homogeneous = reflect_homogeneous(embed_point(position), dual_sphere(map))
+    let weight = homogeneous.eo
+    if absf(weight) < policy.minimum_projective_weight {
+        return undefined_projection(homogeneous, weight)
+    }
+    let inverse_weight = 1.0 / weight
+    let projected = vec3f(
+        homogeneous.e1 * inverse_weight,
+        homogeneous.e2 * inverse_weight,
+        homogeneous.e3 * inverse_weight,
+    )
+    let spatial_norm_squared = homogeneous.e1 * homogeneous.e1
+        + homogeneous.e2 * homogeneous.e2
+        + homogeneous.e3 * homogeneous.e3
+    let null_pair = 2.0 * homogeneous.eo * homogeneous.ei
+    let null_residual = (spatial_norm_squared - null_pair) * inverse_weight * inverse_weight
+    CgaPointProjection {
+        position: projected,
+        homogeneous: homogeneous,
+        weight: weight,
+        null_residual: null_residual,
+        conditioned: true,
+    }
+}
+
+fn transport_tangent(
+    _ displacement: Vec3F,
+    _ tangent: Vec3F,
+    _ scale: f32,
+    _ inverse_distance_squared: f32,
+) -> Vec3F {
+    scale3(
+        sub3(
+            tangent,
+            scale3(
+                displacement,
+                2.0 * dot3(displacement, tangent) * inverse_distance_squared,
+            ),
+        ),
+        scale,
+    )
+}
+
+/// Apply the same sphere reflection to a point and its parameter tangents.
+pub fn reflect_differential(
+    _ map: SphereReflection,
+    _ position: Vec3F,
+    _ tangent_s: Vec3F,
+    _ tangent_t: Vec3F,
+    _ policy: CgaMapPolicy,
+) -> CgaMappedDifferential {
+    let point = reflect_point(map, position, policy)
+    let displacement = sub3(position, map.center)
+    let distance_squared = dot3(displacement, displacement)
+    if !point.conditioned || distance_squared < policy.minimum_distance_squared {
+        return CgaMappedDifferential {
+            point: point,
+            tangent_s: vec3f(0.0, 0.0, 0.0),
+            tangent_t: vec3f(0.0, 0.0, 0.0),
+            normal: vec3f(0.0, 0.0, 1.0),
+        }
+    }
+    let inverse_distance_squared = 1.0 / distance_squared
+    let scale = map.radius_squared * inverse_distance_squared
+    let mapped_s = transport_tangent(displacement, tangent_s, scale, inverse_distance_squared)
+    let mapped_t = transport_tangent(displacement, tangent_t, scale, inverse_distance_squared)
+    CgaMappedDifferential {
+        point: point,
+        tangent_s: mapped_s,
+        tangent_t: mapped_t,
+        normal: normalize3_or(
+            cross3(mapped_s, mapped_t),
+            vec3f(0.0, 0.0, 1.0),
+            policy.minimum_tangent_norm_squared,
+        ),
+    }
+}

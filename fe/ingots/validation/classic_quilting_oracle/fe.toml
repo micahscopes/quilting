@@ -4,6 +4,7 @@ version = "0.1.0"
 
 [dependencies]
 core = true
+quilting_cga = true
 quilting_domain = true
 quilting_clifford_bezier = true
 quilting_hyperpatch = true
