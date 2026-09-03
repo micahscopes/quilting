@@ -2432,6 +2432,138 @@ where
     failures
 }
 
+fn clear_resident_face_proposals<
+    const TWIN_STORAGE_WORDS: usize,
+    const PROPOSAL_STORAGE_WORDS: usize,
+>(
+    _ face: u32,
+    _ twins: StorageBuffer<u32, TWIN_STORAGE_WORDS>,
+    _ proposals: StorageBuffer<u32, PROPOSAL_STORAGE_WORDS>,
+)
+where { PROPOSAL_STORAGE_WORDS == TWIN_STORAGE_WORDS }
+{
+    let mut local: u32 = 0
+    while local < TOPOLOGY_TWIN_WORDS_PER_TRIANGLE.downcast_truncate() {
+        let slot = half_edge_slot(face, local)
+        let twin = twins.load(index: slot)
+        proposals.store(index: slot, value: 0)
+        if twin != INVALID_VERTEX && twin < PROPOSAL_STORAGE_WORDS.downcast_truncate() {
+            proposals.store(index: twin, value: 0)
+        }
+        local = local + 1
+    }
+}
+
+/// Refresh one canonical edge's cached illegality decision.
+///
+/// The cache is keyed by the lower of a reciprocal half-edge pair. Calling the
+/// function through either direction is harmless; only the canonical lane
+/// evaluates the policy, while the other lane remains zero.
+fn refresh_resident_edge_proposal<
+    P: InteriorEdgeFlipPolicy,
+    const POINT_STORAGE_WORDS: usize,
+    const TRIANGLE_STORAGE_WORDS: usize,
+    const TWIN_STORAGE_WORDS: usize,
+    const PROPOSAL_STORAGE_WORDS: usize,
+>(
+    _ key: AtlasKey,
+    _ policy: P,
+    _ resident_triangles: u32,
+    _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
+    _ triangles: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+    _ twins: StorageBuffer<u32, TWIN_STORAGE_WORDS>,
+    _ proposals: StorageBuffer<u32, PROPOSAL_STORAGE_WORDS>,
+    _ slot: u32,
+) -> u32
+where
+    { POINT_STORAGE_WORDS % POINT_WORDS == 0 },
+    { TRIANGLE_STORAGE_WORDS % TRIANGLE_WORDS == 0 },
+    { TWIN_STORAGE_WORDS == TRIANGLE_STORAGE_WORDS / TRIANGLE_WORDS * TOPOLOGY_TWIN_WORDS_PER_TRIANGLE },
+    { PROPOSAL_STORAGE_WORDS == TWIN_STORAGE_WORDS }
+{
+    let half_edges = resident_triangles * TOPOLOGY_TWIN_WORDS_PER_TRIANGLE.downcast_truncate()
+    if slot >= half_edges {
+        return 0
+    }
+    proposals.store(index: slot, value: 0)
+    let twin = twins.load(index: slot)
+    if twin == INVALID_VERTEX {
+        return 0
+    }
+    if twin >= half_edges || twins.load(index: twin) != slot {
+        return 1
+    }
+    let canonical = if slot < twin { slot } else { twin }
+    if slot != canonical {
+        return 0
+    }
+    let first_face = half_edge_face(slot)
+    let first_edge = half_edge_local(slot)
+    let second_face = half_edge_face(twin)
+    let second_edge = half_edge_local(twin)
+    let pair = flippable_pair_with_policy<P, POINT_STORAGE_WORDS>(
+        key,
+        policy,
+        points,
+        triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, first_face),
+        first_face,
+        first_edge,
+        triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, second_face),
+        second_face,
+        second_edge,
+    )
+    proposals.store(index: canonical, value: if pair.valid { 1 } else { 0 })
+    0
+}
+
+fn refresh_resident_face_proposals<
+    P: InteriorEdgeFlipPolicy,
+    const POINT_STORAGE_WORDS: usize,
+    const TRIANGLE_STORAGE_WORDS: usize,
+    const TWIN_STORAGE_WORDS: usize,
+    const PROPOSAL_STORAGE_WORDS: usize,
+>(
+    _ key: AtlasKey,
+    _ policy: P,
+    _ face: u32,
+    _ resident_triangles: u32,
+    _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
+    _ triangles: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+    _ twins: StorageBuffer<u32, TWIN_STORAGE_WORDS>,
+    _ proposals: StorageBuffer<u32, PROPOSAL_STORAGE_WORDS>,
+) -> u32
+where
+    { POINT_STORAGE_WORDS % POINT_WORDS == 0 },
+    { TRIANGLE_STORAGE_WORDS % TRIANGLE_WORDS == 0 },
+    { TWIN_STORAGE_WORDS == TRIANGLE_STORAGE_WORDS / TRIANGLE_WORDS * TOPOLOGY_TWIN_WORDS_PER_TRIANGLE },
+    { PROPOSAL_STORAGE_WORDS == TWIN_STORAGE_WORDS }
+{
+    let mut failures: u32 = 0
+    let mut local: u32 = 0
+    while local < TOPOLOGY_TWIN_WORDS_PER_TRIANGLE.downcast_truncate() {
+        let slot = half_edge_slot(face, local)
+        let twin = twins.load(index: slot)
+        failures = failures + refresh_resident_edge_proposal<
+            P,
+            POINT_STORAGE_WORDS,
+            TRIANGLE_STORAGE_WORDS,
+            TWIN_STORAGE_WORDS,
+            PROPOSAL_STORAGE_WORDS,
+        >(key, policy, resident_triangles, points, triangles, twins, proposals, slot)
+        if twin != INVALID_VERTEX {
+            failures = failures + refresh_resident_edge_proposal<
+                P,
+                POINT_STORAGE_WORDS,
+                TRIANGLE_STORAGE_WORDS,
+                TWIN_STORAGE_WORDS,
+                PROPOSAL_STORAGE_WORDS,
+            >(key, policy, resident_triangles, points, triangles, twins, proposals, twin)
+        }
+        local = local + 1
+    }
+    failures
+}
+
 /// Restore constrained Delaunay topology through a resident half-edge index.
 ///
 /// This is semantically the same deterministic provider as
@@ -2446,6 +2578,7 @@ pub fn restore_indexed_constrained_delaunay_with_policy<
     const POINT_STORAGE_WORDS: usize,
     const TRIANGLE_STORAGE_WORDS: usize,
     const TWIN_STORAGE_WORDS: usize,
+    const PROPOSAL_STORAGE_WORDS: usize,
     const FLIP_LIMIT: usize,
 >(
     _ key: AtlasKey,
@@ -2456,11 +2589,13 @@ pub fn restore_indexed_constrained_delaunay_with_policy<
     _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
     _ triangles: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
     _ twins: StorageBuffer<u32, TWIN_STORAGE_WORDS>,
+    _ proposals: StorageBuffer<u32, PROPOSAL_STORAGE_WORDS>,
 ) -> DelaunayRestoration
 where
     { POINT_STORAGE_WORDS % POINT_WORDS == 0 },
     { TRIANGLE_STORAGE_WORDS % TRIANGLE_WORDS == 0 },
-    { TWIN_STORAGE_WORDS == TRIANGLE_STORAGE_WORDS / TRIANGLE_WORDS * TOPOLOGY_TWIN_WORDS_PER_TRIANGLE }
+    { TWIN_STORAGE_WORDS == TRIANGLE_STORAGE_WORDS / TRIANGLE_WORDS * TOPOLOGY_TWIN_WORDS_PER_TRIANGLE },
+    { PROPOSAL_STORAGE_WORDS == TWIN_STORAGE_WORDS }
 {
     let point_capacity: u32 = (POINT_STORAGE_WORDS / POINT_WORDS).downcast_truncate()
     let triangle_capacity: u32 = (TRIANGLE_STORAGE_WORDS / TRIANGLE_WORDS).downcast_truncate()
@@ -2498,19 +2633,40 @@ where
     }
 
     let half_edges = resident_triangles * TOPOLOGY_TWIN_WORDS_PER_TRIANGLE.downcast_truncate()
+    let mut slot: u32 = 0
+    while slot < PROPOSAL_STORAGE_WORDS.downcast_truncate() {
+        proposals.store(index: slot, value: 0)
+        slot = slot + 1
+    }
+    if invariant_failures == 0 {
+        slot = 0
+        while slot < half_edges {
+            invariant_failures = invariant_failures + refresh_resident_edge_proposal<
+                P,
+                POINT_STORAGE_WORDS,
+                TRIANGLE_STORAGE_WORDS,
+                TWIN_STORAGE_WORDS,
+                PROPOSAL_STORAGE_WORDS,
+            >(key, policy, resident_triangles, points, triangles, twins, proposals, slot)
+            slot = slot + 1
+        }
+    }
     let mut flips: u32 = 0
     let mut searching = invariant_failures == 0
     let mut converged = false
     while searching && flips < flip_limit {
         let mut found = false
         let mut best = invalid_flip_proposal()
+        let mut best_slot: u32 = INVALID_VERTEX
         let mut best_first_face: u32 = 0
         let mut best_second_face: u32 = 0
-        let mut best_pair = invalid_triangle_pair()
         let mut slot: u32 = 0
         while slot < half_edges {
             let twin = twins.load(index: slot)
-            if twin != INVALID_VERTEX && slot < twin && twin < half_edges {
+            if proposals.load(index: slot) != 0
+                && twin != INVALID_VERTEX
+                && slot < twin
+                && twin < half_edges {
                 let first_face = half_edge_face(slot)
                 let first_edge = half_edge_local(slot)
                 let second_face = half_edge_face(twin)
@@ -2529,46 +2685,100 @@ where
                     second_face,
                     second_edge,
                 )
-                let pair = flippable_pair_with_policy<P, POINT_STORAGE_WORDS>(
-                    key,
-                    policy,
-                    points,
-                    first_triangle,
-                    first_face,
-                    first_edge,
-                    second_triangle,
-                    second_face,
-                    second_edge,
-                )
-                if pair.valid {
-                    let proposal = flip_proposal_for_edges(first, second)
-                    if !found || flip_proposal_precedes(proposal, best) {
-                        found = true
-                        best = proposal
-                        best_first_face = first_face
-                        best_second_face = second_face
-                        best_pair = pair
-                    }
+                let proposal = flip_proposal_for_edges(first, second)
+                if !found || flip_proposal_precedes(proposal, best) {
+                    found = true
+                    best = proposal
+                    best_slot = slot
+                    best_first_face = first_face
+                    best_second_face = second_face
                 }
             }
             slot = slot + 1
         }
         if found {
-            disconnect_resident_face<TWIN_STORAGE_WORDS>(best_first_face, twins)
-            disconnect_resident_face<TWIN_STORAGE_WORDS>(best_second_face, twins)
-            triangle_store<TRIANGLE_STORAGE_WORDS>(triangles, best_first_face, best_pair.first)
-            triangle_store<TRIANGLE_STORAGE_WORDS>(triangles, best_second_face, best_pair.second)
-            invariant_failures = invariant_failures + reconnect_resident_face<
-                TRIANGLE_STORAGE_WORDS,
-                TWIN_STORAGE_WORDS,
-            >(key, best_first_face, resident_triangles, triangles, twins)
-            invariant_failures = invariant_failures + reconnect_resident_face<
-                TRIANGLE_STORAGE_WORDS,
-                TWIN_STORAGE_WORDS,
-            >(key, best_second_face, resident_triangles, triangles, twins)
-            flips = flips + 1
-            if invariant_failures != 0 {
+            let best_twin = twins.load(index: best_slot)
+            let best_first_triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(
+                triangles,
+                best_first_face,
+            )
+            let best_second_triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(
+                triangles,
+                best_second_face,
+            )
+            let best_pair = flippable_pair_with_policy<P, POINT_STORAGE_WORDS>(
+                key,
+                policy,
+                points,
+                best_first_triangle,
+                best_first_face,
+                half_edge_local(best_slot),
+                best_second_triangle,
+                best_second_face,
+                half_edge_local(best_twin),
+            )
+            if !best_pair.valid {
+                invariant_failures = invariant_failures + 1
                 searching = false
+            } else {
+                clear_resident_face_proposals<TWIN_STORAGE_WORDS, PROPOSAL_STORAGE_WORDS>(
+                    best_first_face,
+                    twins,
+                    proposals,
+                )
+                clear_resident_face_proposals<TWIN_STORAGE_WORDS, PROPOSAL_STORAGE_WORDS>(
+                    best_second_face,
+                    twins,
+                    proposals,
+                )
+                disconnect_resident_face<TWIN_STORAGE_WORDS>(best_first_face, twins)
+                disconnect_resident_face<TWIN_STORAGE_WORDS>(best_second_face, twins)
+                triangle_store<TRIANGLE_STORAGE_WORDS>(triangles, best_first_face, best_pair.first)
+                triangle_store<TRIANGLE_STORAGE_WORDS>(triangles, best_second_face, best_pair.second)
+                invariant_failures = invariant_failures + reconnect_resident_face<
+                    TRIANGLE_STORAGE_WORDS,
+                    TWIN_STORAGE_WORDS,
+                >(key, best_first_face, resident_triangles, triangles, twins)
+                invariant_failures = invariant_failures + reconnect_resident_face<
+                    TRIANGLE_STORAGE_WORDS,
+                    TWIN_STORAGE_WORDS,
+                >(key, best_second_face, resident_triangles, triangles, twins)
+                invariant_failures = invariant_failures + refresh_resident_face_proposals<
+                    P,
+                    POINT_STORAGE_WORDS,
+                    TRIANGLE_STORAGE_WORDS,
+                    TWIN_STORAGE_WORDS,
+                    PROPOSAL_STORAGE_WORDS,
+                >(
+                    key,
+                    policy,
+                    best_first_face,
+                    resident_triangles,
+                    points,
+                    triangles,
+                    twins,
+                    proposals,
+                )
+                invariant_failures = invariant_failures + refresh_resident_face_proposals<
+                    P,
+                    POINT_STORAGE_WORDS,
+                    TRIANGLE_STORAGE_WORDS,
+                    TWIN_STORAGE_WORDS,
+                    PROPOSAL_STORAGE_WORDS,
+                >(
+                    key,
+                    policy,
+                    best_second_face,
+                    resident_triangles,
+                    points,
+                    triangles,
+                    twins,
+                    proposals,
+                )
+                flips = flips + 1
+                if invariant_failures != 0 {
+                    searching = false
+                }
             }
         } else {
             converged = true
@@ -2580,26 +2790,8 @@ where
     if invariant_failures == 0 {
         let mut slot: u32 = 0
         while slot < half_edges {
-            let twin = twins.load(index: slot)
-            if twin != INVALID_VERTEX && slot < twin && twin < half_edges {
-                let first_face = half_edge_face(slot)
-                let first_edge = half_edge_local(slot)
-                let second_face = half_edge_face(twin)
-                let second_edge = half_edge_local(twin)
-                let pair = flippable_pair_with_policy<P, POINT_STORAGE_WORDS>(
-                    key,
-                    policy,
-                    points,
-                    triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, first_face),
-                    first_face,
-                    first_edge,
-                    triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, second_face),
-                    second_face,
-                    second_edge,
-                )
-                if pair.valid {
-                    remaining = remaining + 1
-                }
+            if proposals.load(index: slot) != 0 {
+                remaining = remaining + 1
             }
             slot = slot + 1
         }
