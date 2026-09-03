@@ -210,6 +210,40 @@ pub fn weight_norm_squared(_ value: IsotropicEvenF) -> f32 {
     output.0
 }
 
+/// Squared norm of the projective denominator at one parameter value. This
+/// is the inexpensive chart-admission measure shared by sampling and raster
+/// topology; callers that only need conditioning do not evaluate the full
+/// Clifford quotient or its differential.
+pub fn denominator_norm_squared_at(_ value: IsotropicBilinearPatch, _ parameter: Vec2F) -> f32 {
+    weight_norm_squared(
+        blend_even(
+            value.p00.weight,
+            value.p10.weight,
+            value.p01.weight,
+            value.p11.weight,
+            parameter,
+        ),
+    )
+}
+
+/// Admit a parameter triangle as one coherent projective simplex. A raster
+/// backend must never replace only one undefined vertex with a sentinel while
+/// retaining its neighbors: that would create a large, spurious triangle
+/// between unrelated charts. Interior singularities remain a refinement
+/// concern, while this boundary proves all three resident vertices belong to
+/// the same finite chart.
+pub fn parameter_triangle_conditioned(
+    _ value: IsotropicBilinearPatch,
+    _ p0: Vec2F,
+    _ p1: Vec2F,
+    _ p2: Vec2F,
+    _ policy: IsotropicPolicy,
+) -> bool {
+    denominator_norm_squared_at(value, p0) >= policy.minimum_denominator_norm_squared
+        && denominator_norm_squared_at(value, p1) >= policy.minimum_denominator_norm_squared
+        && denominator_norm_squared_at(value, p2) >= policy.minimum_denominator_norm_squared
+}
+
 fn blend_scalar(_ p00: f32, _ p10: f32, _ p01: f32, _ p11: f32, _ parameter: Vec2F) -> f32 {
     let one_minus_s = 1.0 - parameter.x
     let one_minus_t = 1.0 - parameter.y

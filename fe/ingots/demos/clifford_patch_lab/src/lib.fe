@@ -54,6 +54,7 @@ use quilting_clifford_bezier::{
     control,
     evaluate_differential,
     even,
+    parameter_triangle_conditioned,
     patch,
     scale_weight,
 }
@@ -1072,6 +1073,9 @@ fn deformed_raster_vertex(
     let parameter0 = fixed_parameter(chart, point0)
     let parameter1 = fixed_parameter(chart, point1)
     let parameter2 = fixed_parameter(chart, point2)
+    if !parameter_triangle_conditioned(patch, parameter0, parameter1, parameter2, policy()) {
+        return invalid_patch_vertex()
+    }
     let parameter = if corner == 0 {
         parameter0
     } else if corner == 1 { parameter1 } else { parameter2 }
@@ -1978,26 +1982,36 @@ actor CliffordPatchLab uses (
             if vertex_index >= GRID_VERTICES_PER_INSTANCE || grid_vertex >= GRID_VERTICES {
                 invalid_patch_vertex()
             } else {
+                let triangle_vertex = grid_vertex - grid_vertex % 3
+                let parameter0 = grid_parameter(triangle_vertex)
+                let parameter1 = grid_parameter(triangle_vertex + 1)
+                let parameter2 = grid_parameter(triangle_vertex + 2)
                 let parameter = grid_parameter(grid_vertex)
-                let differential = evaluate_differential(
-                    patch_value, parameter, policy(), 0.000000000001,
-                )
-                let projected = project(camera, differential.sample.position)
-                let local_vertex = grid_vertex % 6
-                let altitude = pixel_altitude(
-                    differential, projected, camera, local_vertex, self.res_x, self.res_y,
-                )
-                RasterVertex {
-                    position: projected.clip,
-                    varying: PatchVarying {
-                        edge_seed: edge_seed(
-                            local_barycentric(local_vertex), altitude, projected.depth,
-                        ),
-                        normal: differential.normal,
-                        residual: differential.sample.trivector_residual,
-                        parameter: parameter,
-                        view_depth: projected.depth,
-                    },
+                if !parameter_triangle_conditioned(
+                    patch_value, parameter0, parameter1, parameter2, policy(),
+                ) {
+                    invalid_patch_vertex()
+                } else {
+                    let differential = evaluate_differential(
+                        patch_value, parameter, policy(), 0.000000000001,
+                    )
+                    let projected = project(camera, differential.sample.position)
+                    let local_vertex = grid_vertex % 6
+                    let altitude = pixel_altitude(
+                        differential, projected, camera, local_vertex, self.res_x, self.res_y,
+                    )
+                    RasterVertex {
+                        position: projected.clip,
+                        varying: PatchVarying {
+                            edge_seed: edge_seed(
+                                local_barycentric(local_vertex), altitude, projected.depth,
+                            ),
+                            normal: differential.normal,
+                            residual: differential.sample.trivector_residual,
+                            parameter: parameter,
+                            view_depth: projected.depth,
+                        },
+                    }
                 }
             }
         } else {
@@ -2023,39 +2037,45 @@ actor CliffordPatchLab uses (
                 let parameter2 = map_macro_parameter(
                     chart, fixture_barycentric(self.fixture, point2),
                 )
-                let parameter = if corner == 0 {
-                    parameter0
-                } else if corner == 1 {
-                    parameter1
+                if !parameter_triangle_conditioned(
+                    patch_value, parameter0, parameter1, parameter2, policy(),
+                ) {
+                    invalid_patch_vertex()
                 } else {
-                    parameter2
-                }
-                let differential = evaluate_differential(
-                    patch_value, parameter, policy(), 0.000000000001,
-                )
-                let projected = project(camera, differential.sample.position)
-                let altitude = atlas_pixel_altitude(
-                    differential,
-                    projected,
-                    camera,
-                    parameter0,
-                    parameter1,
-                    parameter2,
-                    corner,
-                    self.res_x,
-                    self.res_y,
-                )
-                RasterVertex {
-                    position: projected.clip,
-                    varying: PatchVarying {
-                        edge_seed: edge_seed(
-                            local_barycentric(corner), altitude, projected.depth,
-                        ),
-                        normal: differential.normal,
-                        residual: differential.sample.trivector_residual,
-                        parameter: parameter,
-                        view_depth: projected.depth,
-                    },
+                    let parameter = if corner == 0 {
+                        parameter0
+                    } else if corner == 1 {
+                        parameter1
+                    } else {
+                        parameter2
+                    }
+                    let differential = evaluate_differential(
+                        patch_value, parameter, policy(), 0.000000000001,
+                    )
+                    let projected = project(camera, differential.sample.position)
+                    let altitude = atlas_pixel_altitude(
+                        differential,
+                        projected,
+                        camera,
+                        parameter0,
+                        parameter1,
+                        parameter2,
+                        corner,
+                        self.res_x,
+                        self.res_y,
+                    )
+                    RasterVertex {
+                        position: projected.clip,
+                        varying: PatchVarying {
+                            edge_seed: edge_seed(
+                                local_barycentric(corner), altitude, projected.depth,
+                            ),
+                            normal: differential.normal,
+                            residual: differential.sample.trivector_residual,
+                            parameter: parameter,
+                            view_depth: projected.depth,
+                        },
+                    }
                 }
             }
         }
