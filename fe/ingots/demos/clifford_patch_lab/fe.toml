@@ -8,6 +8,8 @@ std = true
 fmath = true
 classic_quilting_lod = true
 quilting_atlas = true
+quilting_atlas_webgpu = true
 quilting_clifford_bezier = true
 quilting_domain = true
 quilting_oklch = { path = "../../color/quilting_oklch" }
+quilting_patch = true

@@ -20,7 +20,32 @@ use classic_quilting_lod::{
     patch_triangle_count,
 }
 use fmath::{TAU, abs, clamp, clamp01, cos, mix, sin, smoothstep, wrap_pi}
-use quilting_atlas::{AtlasKey, canonical_key_ordinal}
+use quilting_atlas::{AtlasKey, boundary_vertices, canonical_key_ordinal}
+use quilting_atlas::sampling::{
+    BARYCENTRIC_SCALE,
+    FixedBarycentric,
+    InteriorCandidate,
+    boundary_seed,
+    interior_candidate_at_slot,
+}
+use quilting_atlas::topology::{FlipDecision, interior_edge_flip_decision}
+use quilting_atlas::triangulation::should_flip_edge
+use quilting_atlas_webgpu::{
+    CandidateConflictPolicy,
+    InteriorEdgeFlipPolicy,
+    SAMPLING_PROGRESS_WORDS,
+    SAMPLING_WORDS_PER_CANDIDATE,
+    TRIANGLE_WORDS,
+    advance_candidate_generation,
+    compact_candidate_points,
+    construct_constrained_triangles,
+    initialize_candidate_lane_with_policy,
+    propose_candidate_lane_with_policy,
+    resident_point,
+    resident_triangle,
+    restore_constrained_delaunay_with_policy,
+    retire_candidate_lane_with_policy,
+}
 use quilting_clifford_bezier::{
     IsotropicBilinearPatch,
     IsotropicDifferential,
@@ -57,8 +82,18 @@ use quilting_oklch::{
     scale_lightness_chroma,
     to_display_rgb,
 }
+use quilting_patch::{
+    PullbackMetric2,
+    PullbackSample2,
+    euclidean3_pullback_metric,
+    pullback_metric2,
+    pullback_poisson_conflict,
+    pullback_sample2,
+    varying_pullback_incircle_value,
+}
 use std::web::view::{
     ApplyParamBindings,
+    ChoiceOptions,
     Extent,
     Param,
     ParamBindingsProvider,
@@ -68,7 +103,11 @@ use std::web::view::{
 }
 use std::webgpu::{
     ClipPosition,
+    ComputeInvocation,
+    ComputeSurface,
+    CycledDispatch,
     Depth24LessEqualMsaa4,
+    FixedDispatch,
     FragmentStage,
     FragmentSurface,
     GpuProgram,
@@ -83,9 +122,11 @@ use std::webgpu::{
     SurfaceRecovery,
     SurfaceScheduling,
     SurfaceTransition,
+    StorageBuffer,
     TriangleList,
     VertexStage,
     WebGpuBackend,
+    Workgroup,
     raster_plan,
 }
 
@@ -102,6 +143,40 @@ const ATLAS_VERTICES_PER_MACRO: u32 = ATLAS_TRIANGLES_PER_MACRO * 3
 const MAX_MACRO_TRIANGLES: u32 = 8
 const VERTICES_PER_INSTANCE: usize = 4926
 const INSTANCE_COUNT: usize = 8
+
+
+const DEFORMED_CANDIDATES: usize = 272
+const DEFORMED_SAMPLING_WORDS: usize = DEFORMED_CANDIDATES * SAMPLING_WORDS_PER_CANDIDATE
+    + SAMPLING_PROGRESS_WORDS
+const DEFORMED_POINTS: usize = 64
+const DEFORMED_POINT_WORDS: usize = DEFORMED_POINTS * 3
+const DEFORMED_TRIANGLES: usize = 116
+const DEFORMED_TRIANGLE_WORDS: usize = DEFORMED_TRIANGLES * TRIANGLE_WORDS
+const DEFORMED_SAMPLE_LANES: usize = 6
+const DEFORMED_SAMPLE_WORDS: usize = DEFORMED_CANDIDATES * DEFORMED_SAMPLE_LANES
+const DEFORMED_POINT_SAMPLE_WORDS: usize = DEFORMED_POINTS * DEFORMED_SAMPLE_LANES
+const DEFORMED_RENDER_VERTICES: usize = DEFORMED_TRIANGLES * 2 * 3
+const DEFORMED_THREADS: usize = 128
+const DEFORMED_WORKGROUPS: usize = 3
+const DEFORMED_SAMPLING_ROUNDS: usize = 64
+const DEFORMED_FLIP_LIMIT: usize = 256
+
+const DEFORMED_RADIUS_SQUARED: f32 = 0.18
+const DEFORMED_RECEIPT_WORDS: usize = 8
+
+pub struct DeformedSamplingRound {}
+
+fn deformed_key() -> AtlasKey {
+    AtlasKey { a: 3, b: 3, c: 3 }
+}
+
+fn deformed_seed(_ chart: u32) -> u32 {
+    if chart == 0 { 0x51c32a97 } else { 0xc87a4d31 }
+}
+
+fn deformed_patch_ordinal(_ chart: u32) -> u32 {
+    canonical_key_ordinal(deformed_key()) + chart
+}
 
 /// The chosen visual policy is compile-time data. Changing the policy creates
 /// a different specialized shader; no per-fragment quality branch survives.
@@ -157,6 +232,189 @@ impl Copy for Projection {}
 
 struct ParameterTriangle { p0: Vec2F, p1: Vec2F, p2: Vec2F, valid: bool }
 impl Copy for ParameterTriangle {}
+
+struct SurfaceCandidateConflict<const WORDS: usize> {
+    samples: StorageBuffer<f32, WORDS>,
+    patch: IsotropicBilinearPatch,
+    chart: u32,
+}
+impl<const WORDS: usize> Copy for SurfaceCandidateConflict<WORDS> {}
+
+struct SurfaceInteriorEdgeFlip<const WORDS: usize> { samples: StorageBuffer<f32, WORDS> }
+impl<const WORDS: usize> Copy for SurfaceInteriorEdgeFlip<WORDS> {}
+
+fn fixed_parameter(_ chart: u32, _ point: FixedBarycentric) -> Vec2F {
+    let scale = as_f32(BARYCENTRIC_SCALE)
+    map_macro_parameter(
+        split_parameter_triangle(chart),
+        bary3f(
+            as_f32(point.a) / scale,
+            as_f32(point.b) / scale,
+            as_f32(point.c) / scale,
+        ),
+    )
+}
+
+fn patch_pullback_sample(_ patch: IsotropicBilinearPatch, _ parameter: Vec2F) -> PullbackSample2 {
+    let differential = evaluate_differential(patch, parameter, policy(), 0.000000000001)
+    let raw = euclidean3_pullback_metric(differential.tangent_s, differential.tangent_t)
+    pullback_sample2(
+        parameter,
+        pullback_metric2(
+            raw.uu,
+            raw.uv,
+            raw.vv,
+            differential.sample.conditioned && differential.sample.vector_valued,
+        ),
+    )
+}
+
+fn fixed_pullback_sample(
+    _ patch: IsotropicBilinearPatch,
+    _ chart: u32,
+    _ point: FixedBarycentric,
+) -> PullbackSample2 {
+    patch_pullback_sample(patch, fixed_parameter(chart, point))
+}
+
+fn sample_offset(_ ordinal: u32) -> u32 {
+    ordinal * DEFORMED_SAMPLE_LANES.downcast_truncate()
+}
+
+fn store_pullback_sample<const WORDS: usize>(
+    _ samples: StorageBuffer<f32, WORDS>,
+    _ ordinal: u32,
+    _ sample: PullbackSample2,
+) {
+    let offset = sample_offset(ordinal)
+    samples.store(index: offset, value: sample.parameter.x)
+    samples.store(index: offset + 1, value: sample.parameter.y)
+    samples.store(index: offset + 2, value: sample.metric.uu)
+    samples.store(index: offset + 3, value: sample.metric.uv)
+    samples.store(index: offset + 4, value: sample.metric.vv)
+    samples.store(
+            index: offset + 5,
+            value: if sample.metric.defined { 1.0 } else { 0.0 },
+        )
+}
+
+fn load_pullback_sample<const WORDS: usize>(
+    _ samples: StorageBuffer<f32, WORDS>,
+    _ ordinal: u32,
+) -> PullbackSample2 {
+    let offset = sample_offset(ordinal)
+    pullback_sample2(
+        vec2f(
+            samples.load(index: offset),
+            samples.load(index: offset + 1),
+        ),
+        pullback_metric2(
+            samples.load(index: offset + 2),
+            samples.load(index: offset + 3),
+            samples.load(index: offset + 4),
+            samples.load(index: offset + 5) > 0.5,
+        ),
+    )
+}
+
+impl<const WORDS: usize> CandidateConflictPolicy for SurfaceCandidateConflict<WORDS> {
+    fn conflicts_boundary(self, _ key: AtlasKey, _ candidate: InteriorCandidate) -> bool {
+        let candidate_sample = load_pullback_sample(self.samples, candidate.slot)
+        let mut conflict = !candidate.valid || !candidate_sample.metric.defined
+        let mut ordinal: u32 = 0
+        let count = boundary_vertices(key)
+        while ordinal < count {
+            let boundary = boundary_seed(key, ordinal)
+            if boundary.valid
+                && pullback_poisson_conflict(
+                    candidate_sample,
+                    DEFORMED_RADIUS_SQUARED,
+                    fixed_pullback_sample(self.patch, self.chart, boundary.point),
+                    DEFORMED_RADIUS_SQUARED,
+                ) {
+                conflict = true
+            }
+            ordinal = ordinal + 1
+        }
+        conflict
+    }
+
+    fn conflicts(self, _ left: InteriorCandidate, _ right: InteriorCandidate) -> bool {
+        pullback_poisson_conflict(
+            load_pullback_sample(self.samples, left.slot),
+            DEFORMED_RADIUS_SQUARED,
+            load_pullback_sample(self.samples, right.slot),
+            DEFORMED_RADIUS_SQUARED,
+        )
+    }
+}
+
+impl<const WORDS: usize> InteriorEdgeFlipPolicy for SurfaceInteriorEdgeFlip<WORDS> {
+    fn decision(
+        self,
+        _ u_id: u32,
+        _ u: FixedBarycentric,
+        _ v_id: u32,
+        _ v: FixedBarycentric,
+        _ first_opposite_id: u32,
+        _ first_opposite: FixedBarycentric,
+        _ second_opposite_id: u32,
+        _ second_opposite: FixedBarycentric,
+    ) -> FlipDecision {
+        let chart_decision = interior_edge_flip_decision(
+            u_id,
+            u,
+            v_id,
+            v,
+            first_opposite_id,
+            first_opposite,
+            second_opposite_id,
+            second_opposite,
+        )
+        if !chart_decision.convex {
+            return chart_decision
+        }
+        let value = varying_pullback_incircle_value(
+            load_pullback_sample(self.samples, u_id),
+            load_pullback_sample(self.samples, v_id),
+            load_pullback_sample(self.samples, first_opposite_id),
+            load_pullback_sample(self.samples, second_opposite_id),
+        )
+        let sign: i32 = if value > 0.0000001 {
+            1
+        } else if value < -0.0000001 { -1 } else { 0 }
+        FlipDecision {
+            incircle: sign,
+            convex: true,
+            flip: should_flip_edge(u_id, v_id, first_opposite_id, second_opposite_id, sign),
+        }
+    }
+}
+
+fn restore_deformed_topology(
+    _ samples: StorageBuffer<f32, DEFORMED_POINT_SAMPLE_WORDS>,
+    _ receipt: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
+    _ points: StorageBuffer<u32, DEFORMED_POINT_WORDS>,
+    _ triangles: StorageBuffer<u32, DEFORMED_TRIANGLE_WORDS>,
+) {
+    let policy = SurfaceInteriorEdgeFlip { samples: samples }
+    let restored = restore_constrained_delaunay_with_policy<
+        SurfaceInteriorEdgeFlip<DEFORMED_POINT_SAMPLE_WORDS>,
+        DEFORMED_POINT_WORDS,
+        DEFORMED_TRIANGLE_WORDS,
+        DEFORMED_FLIP_LIMIT,
+    >(
+        deformed_key(),
+        policy,
+        receipt.load(index: 3) != 0,
+        receipt.load(index: 1),
+        receipt.load(index: 4),
+        points,
+        triangles,
+    )
+    receipt.store(index: 5, value: if restored.valid { 1 } else { 0 })
+    receipt.store(index: 6, value: restored.flips)
+}
 
 struct CliffordLabParams {
     p00_x: Param,
@@ -252,8 +510,17 @@ const fn lab_params() -> CliffordLabParams {
         orbit_distance: Param::log(min: 2.5, max: 16.0, init: 6.2),
         wire_px: Param::range(min: 0.0, max: 2.5, init: 0.72),
         depth_cue: Param::unit(init: 0.82),
-        // 0 = regular UV grid, 1 = two atlas charts, 2 = eight-chart fan.
-        sampler_mode: Param::int(min: 0.0, max: 2.0, init: 1.0),
+        // 0 = regular UV grid, 1 = two atlas charts, 2 = eight-chart fan,
+        // 3 = pullback-blue-noise points with varying-metric Delaunay flips.
+        sampler_mode: Param::choice(
+            options: ChoiceOptions::four(
+                first: "regular grid",
+                second: "atlas charts",
+                third: "eight-chart fan",
+                fourth: "pullback blue noise",
+            ),
+            init: 1.0,
+        ),
         atlas_lod: Param::int(min: 0.0, max: 5.0, init: 4.0),
         res_x: Param::extent_x(),
         res_y: Param::extent_y(),
@@ -679,6 +946,66 @@ fn invalid_patch_vertex() -> RasterVertex<PatchVarying> {
     }
 }
 
+fn deformed_raster_vertex(
+    _ points: StorageBuffer<u32, DEFORMED_POINT_WORDS>,
+    _ triangles: StorageBuffer<u32, DEFORMED_TRIANGLE_WORDS>,
+    _ receipt: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
+    _ chart: u32,
+    _ local_vertex: u32,
+    _ patch: IsotropicBilinearPatch,
+    _ camera: CameraFrame,
+    _ res_x: f32,
+    _ res_y: f32,
+) -> RasterVertex<PatchVarying> {
+    if receipt.load(index: 5) == 0 {
+        return invalid_patch_vertex()
+    }
+    let face = local_vertex / 3
+    let corner = local_vertex % 3
+    if face >= receipt.load(index: 4) {
+        return invalid_patch_vertex()
+    }
+    let triangle = resident_triangle(triangles, face)
+    if !triangle.valid {
+        return invalid_patch_vertex()
+    }
+    let point0 = resident_point(points, triangle.first)
+    let point1 = resident_point(points, triangle.second)
+    let point2 = resident_point(points, triangle.third)
+    let parameter0 = fixed_parameter(chart, point0)
+    let parameter1 = fixed_parameter(chart, point1)
+    let parameter2 = fixed_parameter(chart, point2)
+    let parameter = if corner == 0 {
+        parameter0
+    } else if corner == 1 { parameter1 } else { parameter2 }
+    let differential = evaluate_differential(patch, parameter, policy(), 0.000000000001)
+    if !differential.sample.conditioned || !differential.sample.vector_valued {
+        return invalid_patch_vertex()
+    }
+    let projected = project(camera, differential.sample.position)
+    let altitude = atlas_pixel_altitude(
+        differential,
+        projected,
+        camera,
+        parameter0,
+        parameter1,
+        parameter2,
+        corner,
+        res_x,
+        res_y,
+    )
+    RasterVertex {
+        position: projected.clip,
+        varying: PatchVarying {
+            edge_seed: edge_seed(local_barycentric(corner), altitude, projected.depth),
+            normal: differential.normal,
+            residual: differential.sample.trivector_residual,
+            parameter: parameter,
+            view_depth: projected.depth,
+        },
+    }
+}
+
 fn minimum3(_ value: Bary3F) -> f32 {
     let mut result = value.a
     if value.b < result {
@@ -902,12 +1229,56 @@ fn depth_surface_color(
     )
 }
 
+/// Project the browser-facing scalar uniform record into the shared patch
+/// denotation. Actor stage methods are independent entry points, so this pure
+/// module function is their common semantic boundary.
+fn patch_from_uniforms(
+    _ p00_x: f32,
+    _ p00_y: f32,
+    _ p00_z: f32,
+    _ p10_x: f32,
+    _ p10_y: f32,
+    _ p10_z: f32,
+    _ p01_x: f32,
+    _ p01_y: f32,
+    _ p01_z: f32,
+    _ p11_x: f32,
+    _ p11_y: f32,
+    _ p11_z: f32,
+    _ w00: f32,
+    _ w10: f32,
+    _ w01: f32,
+    _ w11: f32,
+) -> IsotropicBilinearPatch {
+    controlled_patch(
+        ControlPositions {
+            p00: vec3f(p00_x, p00_y, p00_z),
+            p10: vec3f(p10_x, p10_y, p10_z),
+            p01: vec3f(p01_x, p01_y, p01_z),
+            p11: vec3f(p11_x, p11_y, p11_z),
+        },
+        CornerWeights { w00: w00, w10: w10, w01: w01, w11: w11 },
+    )
+}
+
 actor CliffordPatchLab uses (
     GpuProgram<WebGpuBackend>,
     SurfaceQuality<ResponsiveBacking>,
     SurfaceRecovery<StandardSurfaceRecovery>,
 ) {
     fixture: FixtureBuffer,
+    sampling_workspace_0: StorageBuffer<u32, DEFORMED_SAMPLING_WORDS>,
+    sampling_workspace_1: StorageBuffer<u32, DEFORMED_SAMPLING_WORDS>,
+    candidate_samples_0: StorageBuffer<f32, DEFORMED_SAMPLE_WORDS>,
+    candidate_samples_1: StorageBuffer<f32, DEFORMED_SAMPLE_WORDS>,
+    points_0: StorageBuffer<u32, DEFORMED_POINT_WORDS>,
+    points_1: StorageBuffer<u32, DEFORMED_POINT_WORDS>,
+    point_samples_0: StorageBuffer<f32, DEFORMED_POINT_SAMPLE_WORDS>,
+    point_samples_1: StorageBuffer<f32, DEFORMED_POINT_SAMPLE_WORDS>,
+    triangles_0: StorageBuffer<u32, DEFORMED_TRIANGLE_WORDS>,
+    triangles_1: StorageBuffer<u32, DEFORMED_TRIANGLE_WORDS>,
+    receipt_0: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
+    receipt_1: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
     p00_x: f32,
     p00_y: f32,
     p00_z: f32,
@@ -936,6 +1307,364 @@ actor CliffordPatchLab uses (
     selected: f32,
     dragging: f32,
     orbiting: f32,
+
+    fn deformed_candidate_samples(self, invocation: ComputeInvocation)
+        uses (
+            ComputeSurface<
+                Workgroup<DEFORMED_THREADS, 1, 1>,
+                FixedDispatch<DEFORMED_WORKGROUPS, 2, 1>,
+            >
+        )
+    {
+        if self.sampler_mode < 2.5 {
+            return
+        }
+        let slot = invocation.global.x
+        let chart = invocation.global.y
+        if slot >= DEFORMED_CANDIDATES.downcast_truncate() || chart >= 2 {
+            return
+        }
+        let candidate = interior_candidate_at_slot(
+            deformed_key(),
+            deformed_patch_ordinal(chart),
+            deformed_seed(chart),
+            slot,
+        )
+        let patch = patch_from_uniforms(
+            self.p00_x, self.p00_y, self.p00_z,
+            self.p10_x, self.p10_y, self.p10_z,
+            self.p01_x, self.p01_y, self.p01_z,
+            self.p11_x, self.p11_y, self.p11_z,
+            self.w00, self.w10, self.w01, self.w11,
+        )
+        let sample = fixed_pullback_sample(patch, chart, candidate.point)
+        if chart == 0 {
+            store_pullback_sample(self.candidate_samples_0, slot, sample)
+        } else {
+            store_pullback_sample(self.candidate_samples_1, slot, sample)
+        }
+    }
+
+    fn deformed_sampling_initialize(self, invocation: ComputeInvocation)
+        uses (
+            ComputeSurface<
+                Workgroup<DEFORMED_THREADS, 1, 1>,
+                FixedDispatch<DEFORMED_WORKGROUPS, 2, 1>,
+            >
+        )
+    {
+        if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
+            return
+        }
+        let chart = invocation.global.y
+        let patch = patch_from_uniforms(
+            self.p00_x, self.p00_y, self.p00_z,
+            self.p10_x, self.p10_y, self.p10_z,
+            self.p01_x, self.p01_y, self.p01_z,
+            self.p11_x, self.p11_y, self.p11_z,
+            self.w00, self.w10, self.w01, self.w11,
+        )
+        if chart == 0 {
+            let policy = SurfaceCandidateConflict {
+                samples: self.candidate_samples_0,
+                patch: patch,
+                chart: chart,
+            }
+            initialize_candidate_lane_with_policy<
+                SurfaceCandidateConflict<DEFORMED_SAMPLE_WORDS>,
+                DEFORMED_CANDIDATES,
+                DEFORMED_SAMPLING_WORDS,
+            >(
+                deformed_key(),
+                deformed_patch_ordinal(chart),
+                deformed_seed(chart),
+                policy,
+                self.sampling_workspace_0,
+                invocation,
+            )
+        } else {
+            let policy = SurfaceCandidateConflict {
+                samples: self.candidate_samples_1,
+                patch: patch,
+                chart: chart,
+            }
+            initialize_candidate_lane_with_policy<
+                SurfaceCandidateConflict<DEFORMED_SAMPLE_WORDS>,
+                DEFORMED_CANDIDATES,
+                DEFORMED_SAMPLING_WORDS,
+            >(
+                deformed_key(),
+                deformed_patch_ordinal(chart),
+                deformed_seed(chart),
+                policy,
+                self.sampling_workspace_1,
+                invocation,
+            )
+        }
+    }
+
+    fn deformed_sampling_propose(self, invocation: ComputeInvocation)
+        uses (
+            ComputeSurface<
+                Workgroup<DEFORMED_THREADS, 1, 1>,
+                CycledDispatch<
+                    DeformedSamplingRound,
+                    FixedDispatch<DEFORMED_WORKGROUPS, 2, 1>,
+                    DEFORMED_SAMPLING_ROUNDS,
+                >,
+            >
+        )
+    {
+        if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
+            return
+        }
+        let patch = patch_from_uniforms(
+            self.p00_x, self.p00_y, self.p00_z,
+            self.p10_x, self.p10_y, self.p10_z,
+            self.p01_x, self.p01_y, self.p01_z,
+            self.p11_x, self.p11_y, self.p11_z,
+            self.w00, self.w10, self.w01, self.w11,
+        )
+        if invocation.global.y == 0 {
+            let policy = SurfaceCandidateConflict {
+                samples: self.candidate_samples_0,
+                patch: patch,
+                chart: 0,
+            }
+            propose_candidate_lane_with_policy<
+                SurfaceCandidateConflict<DEFORMED_SAMPLE_WORDS>,
+                DEFORMED_CANDIDATES,
+                DEFORMED_SAMPLING_WORDS,
+            >(
+                deformed_key(),
+                policy,
+                self.sampling_workspace_0,
+                invocation,
+            )
+        } else {
+            let policy = SurfaceCandidateConflict {
+                samples: self.candidate_samples_1,
+                patch: patch,
+                chart: 1,
+            }
+            propose_candidate_lane_with_policy<
+                SurfaceCandidateConflict<DEFORMED_SAMPLE_WORDS>,
+                DEFORMED_CANDIDATES,
+                DEFORMED_SAMPLING_WORDS,
+            >(
+                deformed_key(),
+                policy,
+                self.sampling_workspace_1,
+                invocation,
+            )
+        }
+    }
+
+    fn deformed_sampling_retire(self, invocation: ComputeInvocation)
+        uses (
+            ComputeSurface<
+                Workgroup<DEFORMED_THREADS, 1, 1>,
+                CycledDispatch<
+                    DeformedSamplingRound,
+                    FixedDispatch<DEFORMED_WORKGROUPS, 2, 1>,
+                    DEFORMED_SAMPLING_ROUNDS,
+                >,
+            >
+        )
+    {
+        if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
+            return
+        }
+        let patch = patch_from_uniforms(
+            self.p00_x, self.p00_y, self.p00_z,
+            self.p10_x, self.p10_y, self.p10_z,
+            self.p01_x, self.p01_y, self.p01_z,
+            self.p11_x, self.p11_y, self.p11_z,
+            self.w00, self.w10, self.w01, self.w11,
+        )
+        if invocation.global.y == 0 {
+            let policy = SurfaceCandidateConflict {
+                samples: self.candidate_samples_0,
+                patch: patch,
+                chart: 0,
+            }
+            retire_candidate_lane_with_policy<
+                SurfaceCandidateConflict<DEFORMED_SAMPLE_WORDS>,
+                DEFORMED_CANDIDATES,
+                DEFORMED_SAMPLING_WORDS,
+            >(
+                deformed_key(),
+                policy,
+                self.sampling_workspace_0,
+                invocation,
+            )
+        } else {
+            let policy = SurfaceCandidateConflict {
+                samples: self.candidate_samples_1,
+                patch: patch,
+                chart: 1,
+            }
+            retire_candidate_lane_with_policy<
+                SurfaceCandidateConflict<DEFORMED_SAMPLE_WORDS>,
+                DEFORMED_CANDIDATES,
+                DEFORMED_SAMPLING_WORDS,
+            >(
+                deformed_key(),
+                policy,
+                self.sampling_workspace_1,
+                invocation,
+            )
+        }
+    }
+
+    fn deformed_sampling_advance(self, invocation: ComputeInvocation)
+        uses (
+            ComputeSurface<
+                Workgroup<DEFORMED_THREADS, 1, 1>,
+                CycledDispatch<
+                    DeformedSamplingRound,
+                    FixedDispatch<DEFORMED_WORKGROUPS, 2, 1>,
+                    DEFORMED_SAMPLING_ROUNDS,
+                >,
+            >
+        )
+    {
+        if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
+            return
+        }
+        if invocation.global.y == 0 {
+            advance_candidate_generation<DEFORMED_CANDIDATES, DEFORMED_SAMPLING_WORDS>(
+                self.sampling_workspace_0,
+                invocation,
+            )
+        } else {
+            advance_candidate_generation<DEFORMED_CANDIDATES, DEFORMED_SAMPLING_WORDS>(
+                self.sampling_workspace_1,
+                invocation,
+            )
+        }
+    }
+
+    fn deformed_sampling_compact(self, invocation: ComputeInvocation)
+        uses (ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 2, 1>>)
+    {
+        if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
+            return
+        }
+        if invocation.global.y == 0 {
+            let compacted = compact_candidate_points<
+                DEFORMED_CANDIDATES,
+                DEFORMED_SAMPLING_WORDS,
+                DEFORMED_POINT_WORDS,
+            >(deformed_key(), self.sampling_workspace_0, self.points_0)
+            self.receipt_0.store(index: 0, value: if compacted.valid { 1 } else { 0 })
+            self.receipt_0.store(index: 1, value: compacted.resident_points)
+            self.receipt_0.store(index: 2, value: compacted.boundary_points)
+        } else {
+            let compacted = compact_candidate_points<
+                DEFORMED_CANDIDATES,
+                DEFORMED_SAMPLING_WORDS,
+                DEFORMED_POINT_WORDS,
+            >(deformed_key(), self.sampling_workspace_1, self.points_1)
+            self.receipt_1.store(index: 0, value: if compacted.valid { 1 } else { 0 })
+            self.receipt_1.store(index: 1, value: compacted.resident_points)
+            self.receipt_1.store(index: 2, value: compacted.boundary_points)
+        }
+    }
+
+    fn deformed_point_samples(self, invocation: ComputeInvocation)
+        uses (ComputeSurface<Workgroup<DEFORMED_THREADS, 1, 1>, FixedDispatch<1, 2, 1>>)
+    {
+        if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
+            return
+        }
+        let point = invocation.global.x
+        let chart = invocation.global.y
+        let patch = patch_from_uniforms(
+            self.p00_x, self.p00_y, self.p00_z,
+            self.p10_x, self.p10_y, self.p10_z,
+            self.p01_x, self.p01_y, self.p01_z,
+            self.p11_x, self.p11_y, self.p11_z,
+            self.w00, self.w10, self.w01, self.w11,
+        )
+        if chart == 0 && point < self.receipt_0.load(index: 1) {
+            store_pullback_sample(
+                self.point_samples_0,
+                point,
+                fixed_pullback_sample(
+                    patch,
+                    chart,
+                    resident_point(self.points_0, point),
+                ),
+            )
+        } else if chart == 1 && point < self.receipt_1.load(index: 1) {
+            store_pullback_sample(
+                self.point_samples_1,
+                point,
+                fixed_pullback_sample(
+                    patch,
+                    chart,
+                    resident_point(self.points_1, point),
+                ),
+            )
+        }
+    }
+
+    fn deformed_topology_construct(self, invocation: ComputeInvocation)
+        uses (ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 2, 1>>)
+    {
+        if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
+            return
+        }
+        if invocation.global.y == 0 {
+            let built = construct_constrained_triangles<
+                DEFORMED_POINT_WORDS,
+                DEFORMED_TRIANGLE_WORDS,
+            >(
+                deformed_key(),
+                self.receipt_0.load(index: 0) != 0,
+                self.receipt_0.load(index: 1),
+                self.points_0,
+                self.triangles_0,
+            )
+            self.receipt_0.store(index: 3, value: if built.valid { 1 } else { 0 })
+            self.receipt_0.store(index: 4, value: built.resident_triangles)
+        } else {
+            let built = construct_constrained_triangles<
+                DEFORMED_POINT_WORDS,
+                DEFORMED_TRIANGLE_WORDS,
+            >(
+                deformed_key(),
+                self.receipt_1.load(index: 0) != 0,
+                self.receipt_1.load(index: 1),
+                self.points_1,
+                self.triangles_1,
+            )
+            self.receipt_1.store(index: 3, value: if built.valid { 1 } else { 0 })
+            self.receipt_1.store(index: 4, value: built.resident_triangles)
+        }
+    }
+
+    // Each chart is a separate pass so its four resident products remain below
+    // the portable per-stage storage-binding budget. A runtime chart branch
+    // would make both disjoint resource sets reachable from one shader.
+    fn deformed_topology_restore_0(self, invocation: ComputeInvocation)
+        uses (ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>)
+    {
+        if self.sampler_mode < 2.5 { return }
+        restore_deformed_topology(
+            self.point_samples_0, self.receipt_0, self.points_0, self.triangles_0,
+        )
+    }
+
+    fn deformed_topology_restore_1(self, invocation: ComputeInvocation)
+        uses (ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>)
+    {
+        if self.sampler_mode < 2.5 { return }
+        restore_deformed_topology(
+            self.point_samples_1, self.receipt_1, self.points_1, self.triangles_1,
+        )
+    }
 
     const fn raster() -> RasterPlan uses (RasterConfiguration) {
         raster_plan<Depth24LessEqualMsaa4>()
@@ -1082,7 +1811,9 @@ actor CliffordPatchLab uses (
         }
         let patch_value = controlled_patch(positions(state), weights(state))
         let camera = camera_frame(state)
-        if self.sampler_mode < 0.5 {
+        if self.sampler_mode >= 2.5 {
+            invalid_patch_vertex()
+        } else if self.sampler_mode < 0.5 {
             let grid_vertex = instance_index * GRID_VERTICES_PER_INSTANCE + vertex_index
             if vertex_index >= GRID_VERTICES_PER_INSTANCE || grid_vertex >= GRID_VERTICES {
                 invalid_patch_vertex()
@@ -1171,6 +1902,99 @@ actor CliffordPatchLab uses (
     }
 
     fn patch_fragment(self, varying: PatchVarying) -> i32
+        uses (FragmentStage<PatchVarying>)
+    {
+        let edge_pixels = minimum3(varying.edge_seed) / varying.view_depth
+        let feather = AnalyticDepthWire::feather_pixels()
+        let wire_coverage = 1.0 - smoothstep(
+            self.wire_px - feather, self.wire_px + feather, edge_pixels,
+        )
+        let surface = depth_surface_color(
+            varying.parameter,
+            varying.view_depth,
+            varying.normal,
+            varying.residual,
+            self.depth_cue,
+        )
+        let wire = display_rgb(0.018, 0.025, 0.043)
+        pack_rgba8(mix_display_rgb(surface, wire, wire_coverage))
+    }
+
+    fn deformed_vertices(self, vertex_index: u32) -> RasterVertex<PatchVarying>
+        uses (VertexStage<PatchVarying, TriangleList<DEFORMED_RENDER_VERTICES>>)
+    {
+        let chart_vertices: u32 = (DEFORMED_TRIANGLES * 3).downcast_truncate()
+        let chart = vertex_index / chart_vertices
+        let local_vertex = vertex_index % chart_vertices
+        let patch = patch_from_uniforms(
+            self.p00_x, self.p00_y, self.p00_z,
+            self.p10_x, self.p10_y, self.p10_z,
+            self.p01_x, self.p01_y, self.p01_z,
+            self.p11_x, self.p11_y, self.p11_z,
+            self.w00, self.w10, self.w01, self.w11,
+        )
+        let state = CliffordLabState {
+            p00_x: self.p00_x,
+            p00_y: self.p00_y,
+            p00_z: self.p00_z,
+            p10_x: self.p10_x,
+            p10_y: self.p10_y,
+            p10_z: self.p10_z,
+            p01_x: self.p01_x,
+            p01_y: self.p01_y,
+            p01_z: self.p01_z,
+            p11_x: self.p11_x,
+            p11_y: self.p11_y,
+            p11_z: self.p11_z,
+            w00: self.w00,
+            w10: self.w10,
+            w01: self.w01,
+            w11: self.w11,
+            orbit_yaw: self.orbit_yaw,
+            orbit_pitch: self.orbit_pitch,
+            orbit_distance: self.orbit_distance,
+            wire_px: self.wire_px,
+            depth_cue: self.depth_cue,
+            sampler_mode: self.sampler_mode,
+            atlas_lod: self.atlas_lod,
+            res_x: self.res_x,
+            res_y: self.res_y,
+            selected: self.selected,
+            dragging: self.dragging,
+            orbiting: self.orbiting,
+        }
+        if self.sampler_mode < 2.5 {
+            invalid_patch_vertex()
+        } else if chart == 0 {
+            deformed_raster_vertex(
+                self.points_0,
+                self.triangles_0,
+                self.receipt_0,
+                chart,
+                local_vertex,
+                patch,
+                camera_frame(state),
+                self.res_x,
+                self.res_y,
+            )
+        } else if chart == 1 {
+            deformed_raster_vertex(
+                self.points_1,
+                self.triangles_1,
+                self.receipt_1,
+                chart,
+                local_vertex,
+                patch,
+                camera_frame(state),
+                self.res_x,
+                self.res_y,
+            )
+        } else {
+            invalid_patch_vertex()
+        }
+    }
+
+    fn deformed_fragment(self, varying: PatchVarying) -> i32
         uses (FragmentStage<PatchVarying>)
     {
         let edge_pixels = minimum3(varying.edge_seed) / varying.view_depth
