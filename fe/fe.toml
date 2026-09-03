@@ -38,6 +38,7 @@ default-members = [
 core = { path = "../.toolchains/fe/ingots/core" }
 std = { path = "../.toolchains/fe/ingots/std" }
 ga_expr = { path = "../.toolchains/fe/ingots/ga_expr" }
+fmath = { path = "../.toolchains/fe/demos/sketches/fmath" }
 
 [metadata]
 purpose = "Classic Quilting mathematics, validation oracles, and teaching demos in Fe"

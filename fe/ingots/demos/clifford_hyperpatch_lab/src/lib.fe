@@ -1,22 +1,43 @@
-//! A genuine bilinear Clifford-Bezier patch from the primary literature.
+//! Interactive Clifford-Bezier HyperPatch with an honest perspective camera.
 //!
-//! The topology is a bounded dyadic square grid. Every vertex evaluates the
-//! shared sparse `HyperPatch` family in Cl(2, 0, 1); Fe FCO has already erased
-//! the geometric-algebra expression into straight-line scalar arithmetic.
-//! The surface is the isotropic cyclide from Krasauskas, Zube, and Cacciola's
-//! Example 1, whose implicit quartic is independently checked in Rust.
-//! Point and differential evaluation share one immutable algebraic frame.
+//! The surface is Krasauskas, Zube, and Cacciola's bilinear isotropic
+//! Clifford-Bezier cyclide. Fe owns the orbit camera, point manipulation,
+//! independent rational corner weights, depth palette, and analytic wire
+//! coverage. The fixed browser host transports events and realizes WebGPU.
+//!
+//! Wire antialiasing is geometric rather than sampled: the vertex shader
+//! projects the local surface differential and emits the opposite-edge
+//! altitude of each dyadic microtriangle in physical pixels. Perspective
+//! interpolation reconstructs screen-space edge distance in the fragment
+//! shader, where one smooth coverage ramp supplies a constant-pixel feather.
 
 use core::marker::Copy
+use fmath::{TAU, abs, clamp, clamp01, cos, mix, rgba, sin, smoothstep, wrap_pi}
 use quilting_clifford_bezier::{
     IsotropicBilinearPatch,
+    IsotropicDifferential,
     IsotropicPolicy,
     control,
     evaluate_differential,
     even,
     patch,
+    scale_weight,
 }
-use quilting_domain::{Bary3F, Vec2F, Vec3F, bary3f, vec2f, vec3f}
+use quilting_domain::{
+    Bary3F,
+    Vec2F,
+    Vec3F,
+    add3,
+    bary3f,
+    cross3,
+    dot3,
+    length2,
+    normalize3_or,
+    scale3,
+    sub3,
+    vec2f,
+    vec3f,
+}
 use std::web::view::{
     ApplyParamBindings,
     Extent,
@@ -28,10 +49,13 @@ use std::web::view::{
 }
 use std::webgpu::{
     ClipPosition,
+    Depth24LessEqualMsaa4,
     FragmentStage,
     FragmentSurface,
     GpuProgram,
     LatestPerFrame,
+    RasterConfiguration,
+    RasterPlan,
     RasterVertex,
     ResponsiveBacking,
     StandardSurfaceRecovery,
@@ -42,6 +66,7 @@ use std::webgpu::{
     TriangleList,
     VertexStage,
     WebGpuBackend,
+    raster_plan,
 }
 
 extern {
@@ -51,14 +76,59 @@ extern {
 const GRID: u32 = 56
 const VERTICES: usize = 18816
 
-pub struct PatchVarying { pub local: Bary3F, pub normal: Vec3F, pub residual: f32 }
+/// The chosen visual policy is compile-time data. Changing the policy creates
+/// a different specialized shader; no per-fragment quality branch survives.
+struct AnalyticDepthWire {}
+
+impl AnalyticDepthWire {
+    const fn feather_pixels() -> f32 {
+        0.72
+    }
+    const fn depth_frequency() -> f32 {
+        0.32
+    }
+    const fn near_depth() -> f32 {
+        2.0
+    }
+    const fn far_depth() -> f32 {
+        11.0
+    }
+}
+
+pub struct PatchVarying {
+    pub edge_seed: Bary3F,
+    pub normal: Vec3F,
+    pub residual: f32,
+    pub view_depth: f32,
+}
 impl Copy for PatchVarying {}
 
-pub struct HandleVarying { pub selected: f32 }
+pub struct HandleVarying { pub selected: f32, pub weight: f32 }
 impl Copy for HandleVarying {}
 
 struct ControlPositions { p00: Vec3F, p10: Vec3F, p01: Vec3F, p11: Vec3F }
 impl Copy for ControlPositions {}
+
+struct CornerWeights { w00: f32, w10: f32, w01: f32, w11: f32 }
+impl Copy for CornerWeights {}
+
+struct CameraFrame {
+    eye: Vec3F,
+    right: Vec3F,
+    up: Vec3F,
+    forward: Vec3F,
+    focal: f32,
+    aspect: f32,
+    near: f32,
+    far: f32,
+}
+impl Copy for CameraFrame {}
+
+struct Projection { clip: ClipPosition, depth: f32, view_x: f32, view_y: f32 }
+impl Copy for Projection {}
+
+struct Rgb { red: f32, green: f32, blue: f32 }
+impl Copy for Rgb {}
 
 struct CliffordLabParams {
     p00_x: Param,
@@ -73,8 +143,20 @@ struct CliffordLabParams {
     p11_x: Param,
     p11_y: Param,
     p11_z: Param,
+    w00: Param,
+    w10: Param,
+    w01: Param,
+    w11: Param,
+    orbit_yaw: Param,
+    orbit_pitch: Param,
+    orbit_distance: Param,
+    wire_px: Param,
+    depth_cue: Param,
+    res_x: Param,
+    res_y: Param,
     selected: Param,
     dragging: Param,
+    orbiting: Param,
 }
 
 struct CliffordLabState {
@@ -90,8 +172,20 @@ struct CliffordLabState {
     p11_x: f32,
     p11_y: f32,
     p11_z: f32,
+    w00: f32,
+    w10: f32,
+    w01: f32,
+    w11: f32,
+    orbit_yaw: f32,
+    orbit_pitch: f32,
+    orbit_distance: f32,
+    wire_px: f32,
+    depth_cue: f32,
+    res_x: f32,
+    res_y: f32,
     selected: f32,
     dragging: f32,
+    orbiting: f32,
 }
 
 impl SurfaceState for CliffordLabState {
@@ -114,25 +208,28 @@ const fn lab_params() -> CliffordLabParams {
         p11_x: Param::fixed(0.0),
         p11_y: Param::fixed(-1.0),
         p11_z: Param::fixed(0.0),
+        // These are canonical relative weights: every transition projects
+        // them back onto w00 + w10 + w01 + w11 = 4. Common projective scale
+        // therefore cannot masquerade as a fourth geometric degree of freedom.
+        w00: Param::range(min: 0.0, max: 4.0, init: 1.0),
+        w10: Param::range(min: 0.0, max: 4.0, init: 1.0),
+        w01: Param::range(min: 0.0, max: 4.0, init: 1.0),
+        w11: Param::range(min: 0.0, max: 4.0, init: 1.0),
+        orbit_yaw: Param::range(min: -3.14159265, max: 3.14159265, init: -0.72),
+        orbit_pitch: Param::range(min: -1.35, max: 1.35, init: 0.12),
+        orbit_distance: Param::log(min: 2.5, max: 16.0, init: 6.2),
+        wire_px: Param::range(min: 0.0, max: 2.5, init: 0.72),
+        depth_cue: Param::unit(init: 0.82),
+        res_x: Param::extent_x(),
+        res_y: Param::extent_y(),
         selected: Param::fixed(-1.0),
         dragging: Param::fixed(0.0),
+        orbiting: Param::fixed(0.0),
     }
 }
 
 fn as_f32(_ value: u32) -> f32 {
     __f32_from_i32(value.downcast_unchecked())
-}
-
-fn controlled_patch(_ positions: ControlPositions) -> IsotropicBilinearPatch {
-    patch(
-        control(positions.p00, even(1.0, 0.0, 0.0, 0.0)),
-        control(positions.p10, even(0.0, 1.0, 0.0, -1.0)),
-        // This is 2e12 + e23. Some PDF text extraction fuses the comma
-        // before w3 into a misleading coefficient `3e23`; the paper's own
-        // coefficient matrix and quartic disambiguate it.
-        control(positions.p01, even(0.0, 2.0, 0.0, 1.0)),
-        control(positions.p11, even(-6.0, 0.0, -3.0, 0.0)),
-    )
 }
 
 fn positions(_ state: CliffordLabState) -> ControlPositions {
@@ -144,16 +241,100 @@ fn positions(_ state: CliffordLabState) -> ControlPositions {
     }
 }
 
-fn handle_point(_ positions: ControlPositions, _ index: u32) -> Vec3F {
-    if index == 0 {
-        positions.p00
-    } else if index == 1 {
-        positions.p10
-    } else if index == 2 {
-        positions.p01
+fn weights(_ state: CliffordLabState) -> CornerWeights {
+    CornerWeights { w00: state.w00, w10: state.w10, w01: state.w01, w11: state.w11 }
+}
+
+fn normalize_weight_state(_ state: own CliffordLabState) -> CliffordLabState {
+    let sum = state.w00 + state.w10 + state.w01 + state.w11
+    let mut result = state
+    if sum > 0.000001 {
+        let scale = 4.0 / sum
+        result.w00 = result.w00 * scale
+        result.w10 = result.w10 * scale
+        result.w01 = result.w01 * scale
+        result.w11 = result.w11 * scale
     } else {
-        positions.p11
+        result.w00 = 1.0
+        result.w10 = 1.0
+        result.w01 = 1.0
+        result.w11 = 1.0
     }
+    result
+}
+
+fn weight_at(_ weights: CornerWeights, _ index: u32) -> f32 {
+    if index == 0 {
+        weights.w00
+    } else if index == 1 {
+        weights.w10
+    } else if index == 2 { weights.w01 } else { weights.w11 }
+}
+
+fn set_weight(_ state: own CliffordLabState, _ index: u32, _ value: f32) -> CliffordLabState {
+    let mut result = state
+    let bounded = clamp(value, 0.0, 4.0)
+    if index == 0 {
+        result.w00 = bounded
+    } else if index == 1 {
+        result.w10 = bounded
+    } else if index == 2 {
+        result.w01 = bounded
+    } else {
+        result.w11 = bounded
+    }
+    normalize_weight_state(result)
+}
+
+fn selected_weight(_ state: CliffordLabState) -> f32 {
+    if state.selected < 4.5 {
+        state.w00
+    } else if state.selected < 5.5 {
+        state.w10
+    } else if state.selected < 6.5 {
+        state.w01
+    } else {
+        state.w11
+    }
+}
+
+fn set_selected_weight(_ state: own CliffordLabState, _ value: f32) -> CliffordLabState {
+    let selected = state.selected
+    if selected < 4.5 {
+        set_weight(state, 0, value)
+    } else if selected < 5.5 {
+        set_weight(state, 1, value)
+    } else if selected < 6.5 {
+        set_weight(state, 2, value)
+    } else {
+        set_weight(state, 3, value)
+    }
+}
+
+fn controlled_patch(
+    _ positions: ControlPositions,
+    _ weights: CornerWeights,
+) -> IsotropicBilinearPatch {
+    patch(
+        control(
+            positions.p00,
+            scale_weight(even(1.0, 0.0, 0.0, 0.0), weights.w00),
+        ),
+        control(
+            positions.p10,
+            scale_weight(even(0.0, 1.0, 0.0, -1.0), weights.w10),
+        ),
+        // This is 2e12 + e23. The paper's coefficient matrix disambiguates
+        // the punctuation lost by one PDF text extraction.
+        control(
+            positions.p01,
+            scale_weight(even(0.0, 2.0, 0.0, 1.0), weights.w01),
+        ),
+        control(
+            positions.p11,
+            scale_weight(even(-6.0, 0.0, -3.0, 0.0), weights.w11),
+        ),
+    )
 }
 
 fn policy() -> IsotropicPolicy {
@@ -161,6 +342,89 @@ fn policy() -> IsotropicPolicy {
         minimum_denominator_norm_squared: 0.000000000001,
         maximum_trivector_residual: 0.00001,
     }
+}
+
+fn camera_target() -> Vec3F {
+    vec3f(1.1, 0.0, 0.0)
+}
+
+fn camera_frame(_ state: CliffordLabState) -> CameraFrame {
+    let cp = cos(state.orbit_pitch)
+    let sp = sin(state.orbit_pitch)
+    let cy = cos(state.orbit_yaw)
+    let sy = sin(state.orbit_yaw)
+    let offset = vec3f(cp * sy, sp, cp * cy)
+    let target = camera_target()
+    let eye = add3(target, scale3(offset, state.orbit_distance))
+    let forward = normalize3_or(sub3(target, eye), vec3f(0.0, 0.0, -1.0), 0.00000001)
+    let right = normalize3_or(
+        cross3(forward, vec3f(0.0, 1.0, 0.0)),
+        vec3f(1.0, 0.0, 0.0),
+        0.00000001,
+    )
+    let up = normalize3_or(cross3(right, forward), vec3f(0.0, 1.0, 0.0), 0.00000001)
+    let aspect = if state.res_y > 0.0 {
+        state.res_x / state.res_y
+    } else {
+        1.0
+    }
+    CameraFrame {
+        eye: eye,
+        right: right,
+        up: up,
+        forward: forward,
+        focal: 1.75,
+        aspect: aspect,
+        near: 0.05,
+        far: 80.0,
+    }
+}
+
+fn project(_ camera: CameraFrame, _ position: Vec3F) -> Projection {
+    let relative = sub3(position, camera.eye)
+    let view_x = dot3(relative, camera.right)
+    let view_y = dot3(relative, camera.up)
+    let depth = dot3(relative, camera.forward)
+    let depth_scale = camera.far / (camera.far - camera.near)
+    Projection {
+        clip: ClipPosition {
+            x: camera.focal * view_x / camera.aspect,
+            y: camera.focal * view_y,
+            z: depth_scale * depth - depth_scale * camera.near,
+            w: depth,
+        },
+        depth: depth,
+        view_x: view_x,
+        view_y: view_y,
+    }
+}
+
+/// Differential of perspective projection, returned in physical backing
+/// pixels per unit patch parameter. This makes wire coverage resolution-exact.
+fn screen_tangent(
+    _ camera: CameraFrame,
+    _ projection: Projection,
+    _ tangent: Vec3F,
+    _ res_x: f32,
+    _ res_y: f32,
+) -> Vec2F {
+    let tangent_x = dot3(tangent, camera.right)
+    let tangent_y = dot3(tangent, camera.up)
+    let tangent_z = dot3(tangent, camera.forward)
+    let inverse_depth_squared = 1.0 / (projection.depth * projection.depth)
+    vec2f(
+        0.5
+            * res_x
+            * camera.focal
+            / camera.aspect
+            * (tangent_x * projection.depth - projection.view_x * tangent_z)
+            * inverse_depth_squared,
+        0.5
+            * res_y
+            * camera.focal
+            * (tangent_y * projection.depth - projection.view_y * tangent_z)
+            * inverse_depth_squared,
+    )
 }
 
 fn corner_parameter(_ local_vertex: u32) -> Vec2F {
@@ -201,56 +465,37 @@ fn grid_parameter(_ vertex_index: u32) -> Vec2F {
     )
 }
 
-fn clip_position(_ position: Vec3F) -> ClipPosition {
-    // A fixed affine camera is sufficient for the first denotational proof.
-    // It makes the surface and its collinear control polygon visible at once.
-    let x = position.x - 1.1
-    ClipPosition {
-        x: (x * 0.75 + position.z * 0.66) * 0.42,
-        y: position.y * 0.36 + position.z * 0.12 - x * 0.06,
-        z: 0.5 + position.z * 0.08 + x * 0.015,
-        w: 1.0,
-    }
-}
-
-fn squared_distance_to_handle(
-    _ positions: ControlPositions,
-    _ index: u32,
-    _ pointer_x: f32,
-    _ pointer_y: f32,
+/// Pixel altitude at the current triangle vertex. The two dyadic triangles
+/// share one Jacobian parallelogram; their six altitudes reduce to three edge
+/// lengths, selected here without sampling neighboring surface points.
+fn pixel_altitude(
+    _ differential: IsotropicDifferential,
+    _ projection: Projection,
+    _ camera: CameraFrame,
+    _ local_vertex: u32,
+    _ res_x: f32,
+    _ res_y: f32,
 ) -> f32 {
-    let clip = clip_position(handle_point(positions, index))
-    let dx = pointer_x - clip.x
-    let dy = pointer_y - clip.y
-    dx * dx + dy * dy
+    let inverse_grid = 1.0 / as_f32(GRID)
+    let ds = screen_tangent(camera, projection, differential.tangent_s, res_x, res_y)
+    let dt = screen_tangent(camera, projection, differential.tangent_t, res_x, res_y)
+    let s = vec2f(ds.x * inverse_grid, ds.y * inverse_grid)
+    let t = vec2f(dt.x * inverse_grid, dt.y * inverse_grid)
+    let diagonal = vec2f(t.x - s.x, t.y - s.y)
+    let twice_area = abs(s.x * t.y - s.y * t.x)
+    let opposite_length = if local_vertex == 0 || local_vertex == 4 {
+        length2(diagonal)
+    } else if local_vertex == 1 || local_vertex == 5 {
+        length2(t)
+    } else {
+        length2(s)
+    }
+    twice_area / (opposite_length + 0.00001)
 }
 
-fn nearest_handle(_ positions: ControlPositions, _ pointer_x: f32, _ pointer_y: f32) -> f32 {
-    let mut selected: f32 = -1.0
-    let mut best: f32 = 0.005
-    let mut index: u32 = 0
-    while index < 4 {
-        let distance = squared_distance_to_handle(positions, index, pointer_x, pointer_y)
-        if distance < best {
-            best = distance
-            selected = as_f32(index)
-        }
-        index = index + 1
-    }
-    selected
-}
-
-fn handle_clip(_ center: ClipPosition, _ corner: u32, _ selected: bool) -> ClipPosition {
-    let radius = if selected { 0.028 } else { 0.021 }
-    let mut dx = 0.0 - radius
-    let mut dy = 0.0 - radius
-    if corner == 1 || corner == 4 || corner == 5 {
-        dx = radius
-    }
-    if corner == 2 || corner == 3 || corner == 5 {
-        dy = radius
-    }
-    ClipPosition { x: center.x + dx, y: center.y + dy, z: 0.02, w: 1.0 }
+fn edge_seed(_ local: Bary3F, _ altitude_pixels: f32, _ view_depth: f32) -> Bary3F {
+    let seed = altitude_pixels * view_depth
+    bary3f(local.a * seed, local.b * seed, local.c * seed)
 }
 
 fn minimum3(_ value: Bary3F) -> f32 {
@@ -264,16 +509,219 @@ fn minimum3(_ value: Bary3F) -> f32 {
     result
 }
 
-fn lit_color(_ normal: Vec3F) -> u32 {
-    if normal.z > 0.55 {
-        4291992191
-    } else if normal.z > 0.0 {
-        4287730090
-    } else if normal.z > -0.55 {
-        4284765748
+fn handle_point(_ positions: ControlPositions, _ index: u32) -> Vec3F {
+    if index == 0 {
+        positions.p00
+    } else if index == 1 {
+        positions.p10
+    } else if index == 2 {
+        positions.p01
     } else {
-        4283252532
+        positions.p11
     }
+}
+
+fn weight_handle_center(_ center: ClipPosition, _ weight: f32) -> ClipPosition {
+    ClipPosition {
+        x: center.x + 0.050 * center.w,
+        y: center.y + (weight - 1.0) * 0.080 * center.w,
+        z: center.z - 0.0007 * center.w,
+        w: center.w,
+    }
+}
+
+fn selectable_handle_center(
+    _ positions: ControlPositions,
+    _ weights: CornerWeights,
+    _ camera: CameraFrame,
+    _ index: u32,
+) -> ClipPosition {
+    let point_index = if index < 4 { index } else { index - 4 }
+    let projected = project(camera, handle_point(positions, point_index)).clip
+    if index < 4 {
+        projected
+    } else {
+        weight_handle_center(projected, weight_at(weights, point_index))
+    }
+}
+
+fn squared_distance_to_handle(
+    _ positions: ControlPositions,
+    _ weights: CornerWeights,
+    _ camera: CameraFrame,
+    _ index: u32,
+    _ pointer_x: f32,
+    _ pointer_y: f32,
+) -> f32 {
+    let clip = selectable_handle_center(positions, weights, camera, index)
+    let dx = pointer_x - clip.x / clip.w
+    let dy = pointer_y - clip.y / clip.w
+    dx * dx + dy * dy
+}
+
+fn nearest_handle(
+    _ positions: ControlPositions,
+    _ weights: CornerWeights,
+    _ camera: CameraFrame,
+    _ pointer_x: f32,
+    _ pointer_y: f32,
+) -> f32 {
+    let mut selected: f32 = -1.0
+    let mut best: f32 = 0.0028
+    let mut index: u32 = 0
+    while index < 8 {
+        let distance = squared_distance_to_handle(
+            positions,
+            weights,
+            camera,
+            index,
+            pointer_x,
+            pointer_y,
+        )
+        if distance < best {
+            best = distance
+            selected = as_f32(index)
+        }
+        index = index + 1
+    }
+    selected
+}
+
+fn handle_clip(
+    _ center: ClipPosition,
+    _ corner: u32,
+    _ selected: bool,
+    _ weight_handle: bool,
+) -> ClipPosition {
+    let radius = if weight_handle {
+        if selected { 0.021 } else { 0.015 }
+    } else if selected { 0.029 } else { 0.021 }
+    let mut dx = 0.0 - radius
+    let mut dy = 0.0 - radius
+    if weight_handle {
+        if corner == 0 {
+            dx = 0.0
+        } else if corner == 1 || corner == 3 {
+            dx = radius
+            dy = 0.0
+        } else if corner == 2 || corner == 5 {
+            dx = 0.0 - radius
+            dy = 0.0
+        } else {
+            dx = 0.0
+            dy = radius
+        }
+    } else {
+        if corner == 1 || corner == 4 || corner == 5 {
+            dx = radius
+        }
+        if corner == 2 || corner == 3 || corner == 5 {
+            dy = radius
+        }
+    }
+    ClipPosition {
+        x: center.x + dx * center.w,
+        y: center.y + dy * center.w,
+        z: center.z - 0.0005 * center.w,
+        w: center.w,
+    }
+}
+
+fn moved_in_camera_plane(
+    _ point: Vec3F,
+    _ camera: CameraFrame,
+    _ clip_dx: f32,
+    _ clip_dy: f32,
+) -> Vec3F {
+    let depth = project(camera, point).depth
+    let right_distance = clip_dx * camera.aspect * depth / camera.focal
+    let up_distance = clip_dy * depth / camera.focal
+    add3(
+        point,
+        add3(
+            scale3(camera.right, right_distance),
+            scale3(camera.up, up_distance),
+        ),
+    )
+}
+
+fn moved_in_depth(_ point: Vec3F, _ camera: CameraFrame, _ distance: f32) -> Vec3F {
+    add3(point, scale3(camera.forward, distance))
+}
+
+fn set_handle(_ state: own CliffordLabState, _ point: Vec3F) -> CliffordLabState {
+    let selected = state.selected
+    let mut result = state
+    if selected < 0.5 {
+        result.p00_x = point.x
+        result.p00_y = point.y
+        result.p00_z = point.z
+    } else if selected < 1.5 {
+        result.p10_x = point.x
+        result.p10_y = point.y
+        result.p10_z = point.z
+    } else if selected < 2.5 {
+        result.p01_x = point.x
+        result.p01_y = point.y
+        result.p01_z = point.z
+    } else {
+        result.p11_x = point.x
+        result.p11_y = point.y
+        result.p11_z = point.z
+    }
+    result
+}
+
+fn selected_point(_ state: CliffordLabState) -> Vec3F {
+    let current = positions(state)
+    if state.selected < 0.5 {
+        current.p00
+    } else if state.selected < 1.5 {
+        current.p10
+    } else if state.selected < 2.5 {
+        current.p01
+    } else {
+        current.p11
+    }
+}
+
+fn mix_rgb(_ left: Rgb, _ right: Rgb, _ amount: f32) -> Rgb {
+    Rgb {
+        red: mix(left.red, right.red, amount),
+        green: mix(left.green, right.green, amount),
+        blue: mix(left.blue, right.blue, amount),
+    }
+}
+
+fn scale_rgb(_ value: Rgb, _ scale: f32) -> Rgb {
+    Rgb { red: value.red * scale, green: value.green * scale, blue: value.blue * scale }
+}
+
+fn depth_surface_color(
+    _ view_depth: f32,
+    _ normal: Vec3F,
+    _ residual: f32,
+    _ depth_cue: f32,
+) -> Rgb {
+    if residual < -0.00001 || residual > 0.00001 {
+        return Rgb { red: 0.10, green: 0.30, blue: 0.92 }
+    }
+    let depth_t = clamp01(
+        (view_depth - AnalyticDepthWire::near_depth())
+            / (AnalyticDepthWire::far_depth() - AnalyticDepthWire::near_depth()),
+    )
+    let near = Rgb { red: 0.93, green: 0.57, blue: 0.25 }
+    let far = Rgb { red: 0.16, green: 0.33, blue: 0.76 }
+    let neutral = Rgb { red: 0.28, green: 0.43, blue: 0.78 }
+    let depth_color = mix_rgb(near, far, smoothstep(0.0, 1.0, depth_t))
+    let base = mix_rgb(neutral, depth_color, depth_cue)
+    let unit_normal = normalize3_or(normal, vec3f(0.0, 0.0, 1.0), 0.0000001)
+    let light = normalize3_or(vec3f(-0.35, 0.48, 0.82), vec3f(0.0, 0.0, 1.0), 0.0000001)
+    let diffuse = abs(dot3(unit_normal, light))
+    // A continuous low-frequency depth wave is intentionally below Nyquist;
+    // it reads depth without introducing another aliased contour edge.
+    let depth_wave = 0.94 + 0.06 * cos(TAU * view_depth * AnalyticDepthWire::depth_frequency())
+    scale_rgb(base, (0.55 + 0.45 * diffuse) * depth_wave)
 }
 
 actor CliffordHyperpatchLab uses (
@@ -293,8 +741,24 @@ actor CliffordHyperpatchLab uses (
     p11_x: f32,
     p11_y: f32,
     p11_z: f32,
+    w00: f32,
+    w10: f32,
+    w01: f32,
+    w11: f32,
+    orbit_yaw: f32,
+    orbit_pitch: f32,
+    orbit_distance: f32,
+    wire_px: f32,
+    depth_cue: f32,
+    res_x: f32,
+    res_y: f32,
     selected: f32,
     dragging: f32,
+    orbiting: f32,
+
+    const fn raster() -> RasterPlan uses (RasterConfiguration) {
+        raster_plan<Depth24LessEqualMsaa4>()
+    }
 
     const fn view() -> Surface<CliffordLabParams> {
         Surface { extent: Extent::square(768), params: lab_params() }
@@ -316,53 +780,75 @@ actor CliffordHyperpatchLab uses (
             p11_x: self.p11_x,
             p11_y: self.p11_y,
             p11_z: self.p11_z,
+            w00: self.w00,
+            w10: self.w10,
+            w01: self.w01,
+            w11: self.w11,
+            orbit_yaw: self.orbit_yaw,
+            orbit_pitch: self.orbit_pitch,
+            orbit_distance: self.orbit_distance,
+            wire_px: self.wire_px,
+            depth_cue: self.depth_cue,
+            res_x: self.res_x,
+            res_y: self.res_y,
             selected: self.selected,
             dragging: self.dragging,
+            orbiting: self.orbiting,
         }.apply_param_bindings(lab_params(), event)
 
         if event.is_pointer_down() {
             let pointer_x = event.pointer_x * 2.0 / event.width - 1.0
             let pointer_y = 1.0 - event.pointer_y * 2.0 / event.height
-            state.selected = nearest_handle(positions(state), pointer_x, pointer_y)
+            state.selected = nearest_handle(
+                positions(state), weights(state), camera_frame(state), pointer_x, pointer_y,
+            )
             state.dragging = if state.selected >= 0.0 { 1.0 } else { 0.0 }
+            state.orbiting = if state.selected < 0.0 { 1.0 } else { 0.0 }
         }
 
-        if event.is_pointer_move() && state.dragging > 0.5 && event.buttons != 0 {
-            let clip_dx = event.delta_x * 2.0 / event.width
-            let clip_dy = event.delta_y * -2.0 / event.height
-            // Exact inverse of clip_position's x/y response when z is fixed.
-            let world_dx = clip_dx / 0.315
-            let world_dy = (clip_dy + world_dx * 0.06) / 0.36
-            if state.selected < 0.5 {
-                state.p00_x = state.p00_x + world_dx
-                state.p00_y = state.p00_y + world_dy
-            } else if state.selected < 1.5 {
-                state.p10_x = state.p10_x + world_dx
-                state.p10_y = state.p10_y + world_dy
-            } else if state.selected < 2.5 {
-                state.p01_x = state.p01_x + world_dx
-                state.p01_y = state.p01_y + world_dy
-            } else {
-                state.p11_x = state.p11_x + world_dx
-                state.p11_y = state.p11_y + world_dy
+        if event.is_pointer_move() && event.buttons != 0 {
+            if state.dragging > 0.5 && state.selected >= 0.0 && state.selected < 4.0 {
+                let clip_dx = event.delta_x * 2.0 / event.width
+                let clip_dy = event.delta_y * -2.0 / event.height
+                let moved = moved_in_camera_plane(
+                    selected_point(state), camera_frame(state), clip_dx, clip_dy,
+                )
+                state = set_handle(state, moved)
+            } else if state.dragging > 0.5 && state.selected >= 4.0 {
+                let value = selected_weight(state) - event.delta_y * 2.0 / event.height / 0.080
+                state = set_selected_weight(state, value)
+            } else if state.orbiting > 0.5 {
+                state.orbit_yaw = wrap_pi(state.orbit_yaw - event.delta_x * 0.008)
+                state.orbit_pitch = clamp(
+                    state.orbit_pitch - event.delta_y * 0.008, -1.35, 1.35,
+                )
             }
         }
 
-        if event.is_pointer_up() { state.dragging = 0.0 }
+        if event.is_pointer_up() {
+            state.dragging = 0.0
+            state.orbiting = 0.0
+        }
 
-        if event.wheel_delta != 0.0 && state.selected >= 0.0 {
-            let depth_step = if event.wheel_delta < 0.0 { 0.08 } else { -0.08 }
-            if state.selected < 0.5 {
-                state.p00_z = (state.p00_z + depth_step).clamp(-4.0, 4.0)
-            } else if state.selected < 1.5 {
-                state.p10_z = (state.p10_z + depth_step).clamp(-4.0, 4.0)
-            } else if state.selected < 2.5 {
-                state.p01_z = (state.p01_z + depth_step).clamp(-4.0, 4.0)
+        if event.wheel_delta != 0.0 {
+            if state.selected >= 0.0 && state.selected < 4.0 {
+                let direction = if event.wheel_delta < 0.0 { -1.0 } else { 1.0 }
+                let moved = moved_in_depth(
+                    selected_point(state), camera_frame(state),
+                    direction * state.orbit_distance * 0.018,
+                )
+                state = set_handle(state, moved)
+            } else if state.selected >= 4.0 {
+                let direction = if event.wheel_delta < 0.0 { 1.0 } else { -1.0 }
+                let value = selected_weight(state) + direction * 0.12
+                state = set_selected_weight(state, value)
+            } else if event.wheel_delta < 0.0 {
+                state.orbit_distance = clamp(state.orbit_distance * 0.90, 2.5, 16.0)
             } else {
-                state.p11_z = (state.p11_z + depth_step).clamp(-4.0, 4.0)
+                state.orbit_distance = clamp(state.orbit_distance * 1.10, 2.5, 16.0)
             }
         }
-        state
+        normalize_weight_state(state)
     }
 
     fn background(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
@@ -372,8 +858,7 @@ actor CliffordHyperpatchLab uses (
     fn patch_vertices(self, vertex_index: u32) -> RasterVertex<PatchVarying>
         uses (VertexStage<PatchVarying, TriangleList<VERTICES>>)
     {
-        let parameter = grid_parameter(vertex_index)
-        let current = positions(CliffordLabState {
+        let state = CliffordLabState {
             p00_x: self.p00_x,
             p00_y: self.p00_y,
             p00_z: self.p00_z,
@@ -386,58 +871,120 @@ actor CliffordHyperpatchLab uses (
             p11_x: self.p11_x,
             p11_y: self.p11_y,
             p11_z: self.p11_z,
+            w00: self.w00,
+            w10: self.w10,
+            w01: self.w01,
+            w11: self.w11,
+            orbit_yaw: self.orbit_yaw,
+            orbit_pitch: self.orbit_pitch,
+            orbit_distance: self.orbit_distance,
+            wire_px: self.wire_px,
+            depth_cue: self.depth_cue,
+            res_x: self.res_x,
+            res_y: self.res_y,
             selected: self.selected,
             dragging: self.dragging,
-        })
+            orbiting: self.orbiting,
+        }
+        let parameter = grid_parameter(vertex_index)
         let differential = evaluate_differential(
-            controlled_patch(current), parameter, policy(), 0.000000000001,
+            controlled_patch(positions(state), weights(state)),
+            parameter,
+            policy(),
+            0.000000000001,
+        )
+        let camera = camera_frame(state)
+        let projected = project(camera, differential.sample.position)
+        let local = local_barycentric(vertex_index % 6)
+        let altitude = pixel_altitude(
+            differential, projected, camera, vertex_index % 6, self.res_x, self.res_y,
         )
         RasterVertex {
-            position: clip_position(differential.sample.position),
+            position: projected.clip,
             varying: PatchVarying {
-                local: local_barycentric(vertex_index % 6),
+                edge_seed: edge_seed(local, altitude, projected.depth),
                 normal: differential.normal,
                 residual: differential.sample.trivector_residual,
+                view_depth: projected.depth,
             },
         }
     }
 
-    fn patch_fragment(self, varying: PatchVarying) -> u32
+    fn patch_fragment(self, varying: PatchVarying) -> i32
         uses (FragmentStage<PatchVarying>)
     {
-        if minimum3(varying.local) < 0.025 {
-            4280295456
-        } else if varying.residual < -0.00001 || varying.residual > 0.00001 {
-            4291318320
-        } else {
-            lit_color(varying.normal)
-        }
+        let edge_pixels = minimum3(varying.edge_seed) / varying.view_depth
+        let feather = AnalyticDepthWire::feather_pixels()
+        let wire_coverage = 1.0 - smoothstep(
+            self.wire_px - feather, self.wire_px + feather, edge_pixels,
+        )
+        let surface = depth_surface_color(
+            varying.view_depth, varying.normal, varying.residual, self.depth_cue,
+        )
+        let wire = Rgb { red: 0.018, green: 0.025, blue: 0.043 }
+        let color = mix_rgb(surface, wire, wire_coverage)
+        rgba(color.red, color.green, color.blue)
     }
 
     fn handle_vertices(self, vertex_index: u32) -> RasterVertex<HandleVarying>
-        uses (VertexStage<HandleVarying, TriangleList<24>>)
+        uses (VertexStage<HandleVarying, TriangleList<48>>)
     {
         let handle_index = vertex_index / 6
-        let selected = self.selected >= 0.0 && as_f32(handle_index) == self.selected
-        let current = ControlPositions {
-            p00: vec3f(self.p00_x, self.p00_y, self.p00_z),
-            p10: vec3f(self.p10_x, self.p10_y, self.p10_z),
-            p01: vec3f(self.p01_x, self.p01_y, self.p01_z),
-            p11: vec3f(self.p11_x, self.p11_y, self.p11_z),
+        let weight_handle = handle_index >= 4
+        let is_selected = self.selected >= 0.0 && as_f32(handle_index) == self.selected
+        let state = CliffordLabState {
+            p00_x: self.p00_x,
+            p00_y: self.p00_y,
+            p00_z: self.p00_z,
+            p10_x: self.p10_x,
+            p10_y: self.p10_y,
+            p10_z: self.p10_z,
+            p01_x: self.p01_x,
+            p01_y: self.p01_y,
+            p01_z: self.p01_z,
+            p11_x: self.p11_x,
+            p11_y: self.p11_y,
+            p11_z: self.p11_z,
+            w00: self.w00,
+            w10: self.w10,
+            w01: self.w01,
+            w11: self.w11,
+            orbit_yaw: self.orbit_yaw,
+            orbit_pitch: self.orbit_pitch,
+            orbit_distance: self.orbit_distance,
+            wire_px: self.wire_px,
+            depth_cue: self.depth_cue,
+            res_x: self.res_x,
+            res_y: self.res_y,
+            selected: self.selected,
+            dragging: self.dragging,
+            orbiting: self.orbiting,
         }
         RasterVertex {
             position: handle_clip(
-                clip_position(handle_point(current, handle_index)),
+                selectable_handle_center(
+                    positions(state), weights(state), camera_frame(state), handle_index,
+                ),
                 vertex_index % 6,
-                selected,
+                is_selected,
+                weight_handle,
             ),
-            varying: HandleVarying { selected: if selected { 1.0 } else { 0.0 } },
+            varying: HandleVarying {
+                selected: if is_selected { 1.0 } else { 0.0 },
+                weight: if weight_handle { 1.0 } else { 0.0 },
+            },
         }
     }
 
     fn handle_fragment(self, varying: HandleVarying) -> u32
         uses (FragmentStage<HandleVarying>)
     {
-        if varying.selected > 0.5 { 4291983973 } else { 4292985706 }
+        if varying.selected > 0.5 {
+            4291983973
+        } else if varying.weight > 0.5 {
+            4294071641
+        } else {
+            4292985706
+        }
     }
 }
