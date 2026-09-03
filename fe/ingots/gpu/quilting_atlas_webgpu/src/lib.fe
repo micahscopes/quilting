@@ -2366,58 +2366,134 @@ fn disconnect_resident_face<const TWIN_STORAGE_WORDS: usize>(
     }
 }
 
-/// Reconnect only one changed face against the resident half-edge index.
-/// Existing external twins were detached before the triangle rewrite, so a
-/// unique reverse edge can be installed without races by this scalar provider.
-fn reconnect_resident_face<
+/// Twin slots touching the two faces about to be flipped.
+///
+/// The old shared edge points back into this pair; the other four finite slots
+/// are precisely the external neighborhood whose boundary survives the flip.
+/// Retaining these six values lets the rewritten pair reconnect locally rather
+/// than searching every resident half-edge after every flip.
+struct ResidentFacePairTwins {
+    first_0: u32,
+    first_1: u32,
+    first_2: u32,
+    second_0: u32,
+    second_1: u32,
+    second_2: u32,
+}
+
+fn resident_face_pair_twins<const TWIN_STORAGE_WORDS: usize>(
+    _ first_face: u32,
+    _ second_face: u32,
+    _ twins: StorageBuffer<u32, TWIN_STORAGE_WORDS>,
+) -> ResidentFacePairTwins {
+    ResidentFacePairTwins {
+        first_0: twins.load(index: half_edge_slot(first_face, 0)),
+        first_1: twins.load(index: half_edge_slot(first_face, 1)),
+        first_2: twins.load(index: half_edge_slot(first_face, 2)),
+        second_0: twins.load(index: half_edge_slot(second_face, 0)),
+        second_1: twins.load(index: half_edge_slot(second_face, 1)),
+        second_2: twins.load(index: half_edge_slot(second_face, 2)),
+    }
+}
+
+fn resident_face_pair_twin(_ pair: ResidentFacePairTwins, _ index: u32) -> u32 {
+    if index == 0 {
+        pair.first_0
+    } else if index == 1 {
+        pair.first_1
+    } else if index == 2 {
+        pair.first_2
+    } else if index == 3 {
+        pair.second_0
+    } else if index == 4 {
+        pair.second_1
+    } else if index == 5 { pair.second_2 } else { INVALID_VERTEX }
+}
+
+fn resident_face_pair_slot(_ first_face: u32, _ second_face: u32, _ index: u32) -> u32 {
+    if index < TOPOLOGY_TWIN_WORDS_PER_TRIANGLE.downcast_truncate() {
+        half_edge_slot(first_face, index)
+    } else {
+        half_edge_slot(
+            second_face,
+            index - TOPOLOGY_TWIN_WORDS_PER_TRIANGLE.downcast_truncate(),
+        )
+    }
+}
+
+/// Reconnect a flipped face pair from its preserved local neighborhood.
+///
+/// An edge flip changes only the diagonal shared by the two faces. Its four
+/// outer directed edges are identical to the pre-flip boundary, even when
+/// normalized triangle winding changes their local slots. The candidate set
+/// is therefore bounded by the six rewritten slots plus their six former
+/// twins. A full resident scan would be semantically redundant.
+fn reconnect_resident_face_pair<
     const TRIANGLE_STORAGE_WORDS: usize,
     const TWIN_STORAGE_WORDS: usize,
 >(
     _ key: AtlasKey,
-    _ face: u32,
+    _ first_face: u32,
+    _ second_face: u32,
     _ resident_triangles: u32,
     _ triangles: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
     _ twins: StorageBuffer<u32, TWIN_STORAGE_WORDS>,
+    _ previous: ResidentFacePairTwins,
 ) -> u32
 where
     { TRIANGLE_STORAGE_WORDS % TRIANGLE_WORDS == 0 },
     { TWIN_STORAGE_WORDS == TRIANGLE_STORAGE_WORDS / TRIANGLE_WORDS * TOPOLOGY_TWIN_WORDS_PER_TRIANGLE }
 {
     let half_edges = resident_triangles * TOPOLOGY_TWIN_WORDS_PER_TRIANGLE.downcast_truncate()
-    let triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, face)
+    let changed_edges: u32 = (TOPOLOGY_TWIN_WORDS_PER_TRIANGLE * 2).downcast_truncate()
     let mut failures: u32 = 0
-    let mut local: u32 = 0
-    while local < TOPOLOGY_TWIN_WORDS_PER_TRIANGLE.downcast_truncate() {
-        let slot = half_edge_slot(face, local)
+    let mut changed: u32 = 0
+    while changed < changed_edges {
+        let slot = resident_face_pair_slot(first_face, second_face, changed)
         if twins.load(index: slot) == INVALID_VERTEX {
-            let directed = triangle_directed_edge(key, triangle, face, local)
+            let face = half_edge_face(slot)
+            let directed = triangle_directed_edge(
+                key,
+                triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, face),
+                face,
+                half_edge_local(slot),
+            )
             let mut matches: u32 = 0
             let mut twin: u32 = INVALID_VERTEX
-            let mut other_slot: u32 = 0
-            while other_slot < half_edges {
-                if other_slot != slot {
-                    let other_face = half_edge_face(other_slot)
-                    let other_local = half_edge_local(other_slot)
-                    let other_triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(
-                        triangles,
-                        other_face,
-                    )
-                    let other = triangle_directed_edge(
-                        key,
-                        other_triangle,
-                        other_face,
-                        other_local,
-                    )
-                    if directed_edges_form_interior_pair(directed, other) {
-                        matches = matches + 1
-                        twin = other_slot
+            let mut candidate_index: u32 = 0
+            while candidate_index < 12 {
+                let local_candidate = candidate_index < 6
+                let candidate = if local_candidate {
+                    resident_face_pair_slot(first_face, second_face, candidate_index)
+                } else {
+                    resident_face_pair_twin(previous, candidate_index - 6)
+                }
+                if candidate != INVALID_VERTEX && candidate < half_edges && candidate != slot {
+                    let candidate_face = half_edge_face(candidate)
+                    let external_candidate = candidate_face != first_face
+                        && candidate_face != second_face
+                    if local_candidate || external_candidate {
+                        let other_triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(
+                            triangles,
+                            candidate_face,
+                        )
+                        let other = triangle_directed_edge(
+                            key,
+                            other_triangle,
+                            candidate_face,
+                            half_edge_local(candidate),
+                        )
+                        if directed_edges_form_interior_pair(directed, other) {
+                            matches = matches + 1
+                            twin = candidate
+                        }
                     }
                 }
-                other_slot = other_slot + 1
+                candidate_index = candidate_index + 1
             }
             if matches == 1 {
-                let previous = twins.load(index: twin)
-                if previous == INVALID_VERTEX || previous == slot {
+                let prior = twins.load(index: twin)
+                if prior == INVALID_VERTEX || prior == slot {
                     twins.store(index: slot, value: twin)
                     twins.store(index: twin, value: slot)
                 } else {
@@ -2427,7 +2503,7 @@ where
                 failures = failures + 1
             }
         }
-        local = local + 1
+        changed = changed + 1
     }
     failures
 }
@@ -2775,6 +2851,11 @@ where
                 invariant_failures = invariant_failures + 1
                 searching = false
             } else {
+                let previous_twins = resident_face_pair_twins<TWIN_STORAGE_WORDS>(
+                    best_first_face,
+                    best_second_face,
+                    twins,
+                )
                 clear_resident_face_proposals<TWIN_STORAGE_WORDS, PROPOSAL_STORAGE_WORDS>(
                     best_first_face,
                     twins,
@@ -2789,14 +2870,18 @@ where
                 disconnect_resident_face<TWIN_STORAGE_WORDS>(best_second_face, twins)
                 triangle_store<TRIANGLE_STORAGE_WORDS>(triangles, best_first_face, best_pair.first)
                 triangle_store<TRIANGLE_STORAGE_WORDS>(triangles, best_second_face, best_pair.second)
-                invariant_failures = invariant_failures + reconnect_resident_face<
+                invariant_failures = invariant_failures + reconnect_resident_face_pair<
                     TRIANGLE_STORAGE_WORDS,
                     TWIN_STORAGE_WORDS,
-                >(key, best_first_face, resident_triangles, triangles, twins)
-                invariant_failures = invariant_failures + reconnect_resident_face<
-                    TRIANGLE_STORAGE_WORDS,
-                    TWIN_STORAGE_WORDS,
-                >(key, best_second_face, resident_triangles, triangles, twins)
+                >(
+                    key,
+                    best_first_face,
+                    best_second_face,
+                    resident_triangles,
+                    triangles,
+                    twins,
+                    previous_twins,
+                )
                 invariant_failures = invariant_failures + refresh_resident_face_proposals<
                     P,
                     POINT_STORAGE_WORDS,

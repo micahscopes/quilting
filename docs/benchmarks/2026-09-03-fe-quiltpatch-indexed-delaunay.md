@@ -143,3 +143,50 @@ reports 659,239 bytes across 14 shaders. The compiler process reached roughly
 missed the populated render cache. Persistent cross-process cache reuse and
 incremental pass-level lowering are therefore separate, measured authoring
 toolchain needs.
+
+## Packed proposals and local twin repair
+
+Commit `9670166` packs the resident illegal-edge membership cache from one
+`u32` per half-edge to one bit per half-edge. Each chart's proposal resource
+shrinks from 2,760 bytes to 88 bytes. The scalar restoration invocation owns
+the cache, so read/modify/write is deterministic and requires no atomics.
+Default triangle-prefix hashes remained byte-identical. Packing alone reduced
+one chart-1 observation from 13.9 ms to 4.9 ms, but chart 0 remained 163.2 ms;
+proposal storage and empty-slot scanning were not the dominant chart-0 cost.
+
+The next measured checkpoint retains the six twin slots touching a face pair
+before an edge flip. A flip preserves its four-edge outer boundary, so every
+valid post-flip twin must be either one of the six rewritten slots or one of
+their six former twins. Reconnecting against that bounded neighborhood
+replaces the previous all-half-edge search after every flip.
+
+| Warm phase after local repair | Time |
+| --- | ---: |
+| Candidate pullback samples | 13.3 ms |
+| Sampling initialization | 2.5 ms |
+| 64 proposal/retire/advance cycles | 3.1 ms |
+| Point compaction | 2.4 ms |
+| Resident point samples | 2.4 ms |
+| Initial constrained topology | 2.3 ms |
+| Chart 0 Delaunay restoration | 32.7 ms |
+| Chart 1 Delaunay restoration | 4.9 ms |
+
+The exact 16-backing-pixel `p10` gesture measured 33.4 ms while held and 90.7
+ms on release, versus 219.4 ms on release before local repair. The resulting
+receipts were `[1, 66, 24, 1, 106, 1, 213, 0]` and
+`[1, 26, 24, 1, 26, 1, 47, 0]`. Their used triangle byte ranges retained the
+pre-change SHA-256 values
+`f300f7f86d22fb316503cf64d4d2388cb089e070ea6e6b01738d8858cfdc28f6`
+and `3b3515a94a7665c15220f5b74e6f926956542b80a19f5756944280dc271ab034`.
+
+Seven larger `p10` deformations admitted 58–71 points on chart 0 and converged
+in 63.2–110.6 ms for the complete frame. Both charts remained valid with zero
+invariant failures, and chart-0 flip counts exactly matched the prior indexed
+oracle: 221, 192, 237, 171, 240, 174, and 228.
+
+The fresh release-server build took 333,464 ms and emitted 14 passes, 35,256
+Wasm bytes, 680,501 compiler-reported WGSL bytes, and 900,764 total bytes. A
+watch-loop defect was observed separately: after a dependency diagnostic,
+`fe web dev` served the last-good artifact but did not consume the corrected
+dependency event, requiring a server restart. This is a tooling/cache issue,
+not part of the runtime timing above.
