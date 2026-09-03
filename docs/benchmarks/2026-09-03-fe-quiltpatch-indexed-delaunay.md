@@ -219,3 +219,37 @@ bytes. A discarded open-address-index prototype also exposed a Sonatina SPIR-V
 structurizer regression for a valid outcome-controlled probe loop; the
 incidence formulation is both simpler and better matched to mesh topology, so
 production no longer depends on that rejected shape.
+
+## Prepared pipelines and singular-simplex admission
+
+Quilting commits `1bfa30c` and `3a4268e`, using the Fe pass-preparation
+candidate at `3b368f0e9`, move the dormant pullback subgraph's physical pipeline
+creation to a visible idle opportunity. Fe-authored pass activation remains
+the only execution decision. On the exact release artifact, live entry took
+163.2 ms; after a 2.5-second idle window every one of the twelve pullback
+compute/raster passes was resident. Switching from the analytic atlas to the
+pullback sampler then incurred no first-use pipeline error or driver-scale
+pause.
+
+A 20-step geometric-handle drag produced 22 frames at an 18.8 ms mean interval
+(44.8 ms maximum, including the first selected frame). Browser-side command
+encoding was 0.3--0.4 ms for held-drag frames. The release frame, which alone
+reactivates sampling and Delaunay settlement, encoded in 2.4 ms in this warm
+observation.
+
+The same browser sequence reproduced the former black-frame failure by moving
+one normalized Clifford weight to exactly zero. Its projective denominator is
+then undefined at the corresponding corner. Previously only that vertex used
+the off-canvas sentinel, so its two finite neighbors formed a viewport-sized
+spurious triangle. The shared Fe geometry predicate now admits or rejects all
+three vertices as one coherent simplex in every sampler. At weights
+`[0, 4/3, 4/3, 4/3]`, the singular incident triangles form an honest hole;
+all handles remain visible and draggable, and Chromium reports no WebGPU or
+runtime error.
+
+The final bundle contains 14 passes, 35,352 Wasm bytes, and 703,756 manifest-
+reported WGSL bytes. A fresh second `fe web dev` process reused the persistent
+render bundle in 352 ms, establishing that the earlier cross-process cache miss
+is no longer present for this exact source/dependency closure. Incremental
+lowering after a source edit remains unresolved: the two measured fresh
+lowerings took 313.3 and 339.8 seconds.
