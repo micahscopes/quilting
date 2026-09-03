@@ -27,13 +27,23 @@ use ga_expr::{
 }
 use quilting_domain::{Vec2F, Vec3F, absf, cross3, normalize3_or, vec3f}
 use quilting_hyperpatch::{
+    BilinearBernstein,
+    BilinearProjectiveControls,
     DenotationSample,
     Euclidean3Points,
     HyperPatch,
     HyperPatchKernel,
+    LinearElement,
+    ProjectiveAdmission,
+    ProjectiveAlgebra,
+    ProjectiveKernel,
+    QuotientSample,
     UnitSquare,
+    bilinear_projective_controls,
     denotation_sample,
     hyperpatch,
+    projective_control,
+    projective_hyperpatch,
 }
 
 /// A weight in Cl(2, 0, 1)'s even subalgebra E0 + E2.
@@ -111,7 +121,7 @@ struct OddCoefficients { e1: f32, e2: f32, e3: f32, e123: f32 }
 type PointMv = MultivectorInput<PointCoefficients, 22>
 type WeightMv = MultivectorInput<WeightCoefficients, 105>
 type OddMv = MultivectorInput<OddCoefficients, 150>
-type IsotropicMetric = SignedOrthogonalMetric<3, 3, 0>
+pub type IsotropicMetric = SignedOrthogonalMetric<3, 3, 0>
 
 type WeightedPointExpression = Geometric<PointMv, WeightMv>
 struct WeightedPointOperands { point: PointCoefficients, weight: WeightCoefficients }
@@ -163,7 +173,7 @@ fn odd_coefficients(_ value: IsotropicOddF) -> OddCoefficients {
 }
 
 /// Evaluate `point * weight` through the statically compiled sparse product.
-pub fn weighted_point(_ value: IsotropicControl) -> IsotropicOddF {
+pub fn weighted_isotropic_point(_ value: IsotropicControl) -> IsotropicOddF {
     let output = <WeightedPointOperands as EvaluateGaF32>::evaluate(
         WeightedPointOperands {
             point: PointCoefficients { e1: value.point.x, e2: value.point.y, e3: value.point.z },
@@ -308,8 +318,8 @@ fn tangent_even_s(
     _ p11: IsotropicEvenF,
     _ t: f32,
 ) -> IsotropicEvenF {
-    let lower = scale_even(sub_even(p10, p00), 1.0 - t)
-    let upper = scale_even(sub_even(p11, p01), t)
+    let lower = scale_weight(sub_even(p10, p00), 1.0 - t)
+    let upper = scale_weight(sub_even(p11, p01), t)
     even(
         lower.scalar + upper.scalar,
         lower.e12 + upper.e12,
@@ -325,8 +335,8 @@ fn tangent_even_t(
     _ p11: IsotropicEvenF,
     _ s: f32,
 ) -> IsotropicEvenF {
-    let left = scale_even(sub_even(p01, p00), 1.0 - s)
-    let right = scale_even(sub_even(p11, p10), s)
+    let left = scale_weight(sub_even(p01, p00), 1.0 - s)
+    let right = scale_weight(sub_even(p11, p10), s)
     even(
         left.scalar + right.scalar,
         left.e12 + right.e12,
@@ -340,10 +350,10 @@ fn evaluate_frame(
     _ parameter: Vec2F,
     _ policy: IsotropicPolicy,
 ) -> EvaluationFrame {
-    let f00 = weighted_point(value.p00)
-    let f10 = weighted_point(value.p10)
-    let f01 = weighted_point(value.p01)
-    let f11 = weighted_point(value.p11)
+    let f00 = weighted_isotropic_point(value.p00)
+    let f10 = weighted_isotropic_point(value.p10)
+    let f01 = weighted_isotropic_point(value.p01)
+    let f11 = weighted_isotropic_point(value.p11)
     let numerator = blend_odd(f00, f10, f01, f11, parameter)
     let denominator = blend_even(
         value.p00.weight,
@@ -483,7 +493,10 @@ pub fn evaluate_differential(
     }
 }
 
-fn scale_even(_ value: IsotropicEvenF, _ scale: f32) -> IsotropicEvenF {
+/// Scale one even Clifford weight without exposing its sparse storage policy
+/// to a patch editor. Scalar multiplication preserves every grade-support and
+/// vector-valuedness relation; independently chosen corner scales may not.
+pub fn scale_weight(_ value: IsotropicEvenF, _ scale: f32) -> IsotropicEvenF {
     even(
         value.scalar * scale,
         value.e12 * scale,
@@ -492,9 +505,125 @@ fn scale_even(_ value: IsotropicEvenF, _ scale: f32) -> IsotropicEvenF {
     )
 }
 
+impl LinearElement for IsotropicEvenF {
+    fn plus(self, _ right: Self) -> Self {
+        even(
+            self.scalar + right.scalar,
+            self.e12 + right.e12,
+            self.e13 + right.e13,
+            self.e23 + right.e23,
+        )
+    }
+
+    fn scaled(self, _ scale: f32) -> Self {
+        scale_weight(self, scale)
+    }
+}
+
+impl LinearElement for IsotropicOddF {
+    fn plus(self, _ right: Self) -> Self {
+        add_odd(self, right)
+    }
+
+    fn scaled(self, _ scale: f32) -> Self {
+        scale_odd(self, scale)
+    }
+}
+
+/// One model instance of the generic projective-patch machinery. Its metric,
+/// legal point and weight elements, and quotient carrier are all static type
+/// choices. The `ga_expr` derivations above close over the same metric alias.
+pub struct IsotropicCliffordAlgebra {}
+impl Copy for IsotropicCliffordAlgebra {}
+
+impl ProjectiveAlgebra for IsotropicCliffordAlgebra {
+    type Metric = IsotropicMetric
+    type Point = Vec3F
+    type Weight = IsotropicEvenF
+    type Numerator = IsotropicOddF
+    type Quotient = IsotropicOddF
+    type Policy = IsotropicPolicy
+
+    fn weighted_point(self, _ point: Vec3F, _ weight: IsotropicEvenF) -> IsotropicOddF {
+        weighted_isotropic_point(control(point, weight))
+    }
+
+    fn right_quotient(
+        self,
+        _ numerator: IsotropicOddF,
+        _ denominator: IsotropicEvenF,
+        _ policy: IsotropicPolicy,
+    ) -> QuotientSample<IsotropicOddF> {
+        let denominator_measure = weight_norm_squared(denominator)
+        if denominator_measure < policy.minimum_denominator_norm_squared {
+            return QuotientSample<IsotropicOddF> {
+                value: IsotropicOddF { e1: 0.0, e2: 0.0, e3: 0.0, e123: 0.0 },
+                denominator_measure: denominator_measure,
+                defined: false,
+            }
+        }
+        QuotientSample<IsotropicOddF> {
+            value: scale_odd(
+                odd_times_reverse_weight(numerator, denominator),
+                1.0 / denominator_measure,
+            ),
+            denominator_measure: denominator_measure,
+            defined: true,
+        }
+    }
+}
+
+/// Admit only the grade-one Euclidean chart. An independently varied weight
+/// may leave a grade-three residual; that is a typed failed denotation rather
+/// than a silently projected point.
+pub struct IsotropicVectorAdmission {}
+impl Copy for IsotropicVectorAdmission {}
+
+impl ProjectiveAdmission<IsotropicCliffordAlgebra> for IsotropicVectorAdmission {
+    type Codomain = Euclidean3Points
+
+    fn admit(
+        self,
+        _ quotient: QuotientSample<IsotropicOddF>,
+        _ policy: IsotropicPolicy,
+    ) -> DenotationSample<Euclidean3Points> {
+        denotation_sample<Euclidean3Points>(
+            vec3f(quotient.value.e1, quotient.value.e2, quotient.value.e3),
+            quotient.defined && absf(quotient.value.e123) <= policy.maximum_trivector_residual,
+        )
+    }
+}
+
+pub type IsotropicProjectiveControls = BilinearProjectiveControls<IsotropicCliffordAlgebra>
+pub type IsotropicProjectiveKernel = ProjectiveKernel<
+    IsotropicCliffordAlgebra,
+    BilinearBernstein,
+    IsotropicVectorAdmission,
+    IsotropicProjectiveControls,
+    UnitSquare,
+>
+
+pub fn as_projective_hyperpatch(_ value: IsotropicBilinearPatch) -> HyperPatch<
+    IsotropicProjectiveKernel,
+> {
+    let controls: IsotropicProjectiveControls = bilinear_projective_controls(
+        projective_control(value.p00.point, value.p00.weight),
+        projective_control(value.p10.point, value.p10.weight),
+        projective_control(value.p01.point, value.p01.weight),
+        projective_control(value.p11.point, value.p11.weight),
+    )
+    projective_hyperpatch(
+        IsotropicCliffordAlgebra {},
+        BilinearBernstein {},
+        IsotropicVectorAdmission {},
+        UnitSquare {},
+        controls,
+    )
+}
+
 fn cross_grade_three(_ left: IsotropicControl, _ right: IsotropicControl) -> f32 {
-    odd_times_reverse_weight(weighted_point(left), right.weight).e123
-        + odd_times_reverse_weight(weighted_point(right), left.weight).e123
+    odd_times_reverse_weight(weighted_isotropic_point(left), right.weight).e123
+        + odd_times_reverse_weight(weighted_isotropic_point(right), left.weight).e123
 }
 
 /// Apply the paper's unique fourth-weight scale when its grade-three
@@ -515,7 +644,7 @@ pub fn reconcile_fourth_weight(
             value.p00,
             value.p10,
             value.p01,
-            control(value.p11.point, scale_even(value.p11.weight, lambda)),
+            control(value.p11.point, scale_weight(value.p11.weight, lambda)),
         ),
         scale: lambda,
         conditioned: true,

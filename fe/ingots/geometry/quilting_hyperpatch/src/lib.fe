@@ -107,3 +107,286 @@ pub fn denote<K: HyperPatchKernel>(
 ) -> DenotationSample<K::Codomain> {
     value.kernel.denote(value.controls, parameter, policy)
 }
+
+// ---------------------------------------------------------------------------
+// Metric-parametric projective patches
+// ---------------------------------------------------------------------------
+
+/// Runtime coefficients that admit affine combination. A concrete sparse
+/// Clifford element implements this once; every interpolation scheme can then
+/// blend it without knowing its blades, metric, or physical representation.
+pub trait LinearElement: Copy {
+    fn plus(self, _ right: Self) -> Self
+    fn scaled(self, _ scale: f32) -> Self
+}
+
+/// The algebraic half of a rational/projective patch model.
+///
+/// `Metric` is static type data. A CGA, PGA, QCGA, or custom model closes this
+/// associated type over its named basis metric and implements the two products
+/// below with `ga_expr` FCO. `Point`, `Weight`, and `Numerator` are independently
+/// chosen sparse elements; the framework never assumes an even weight or a
+/// grade-one point. Consequently the emitted shader carries coefficients only,
+/// never a runtime metric or blade tag.
+pub trait ProjectiveAlgebra: Copy {
+    type Metric
+    type Point: Copy
+    type Weight: LinearElement
+    type Numerator: LinearElement
+    type Quotient: Copy
+    type Policy: Copy
+
+    fn weighted_point(self, _ point: Self::Point, _ weight: Self::Weight) -> Self::Numerator
+
+    fn right_quotient(
+        self,
+        _ numerator: Self::Numerator,
+        _ denominator: Self::Weight,
+        _ policy: Self::Policy,
+    ) -> QuotientSample<Self::Quotient>
+}
+
+/// A conditioned algebraic quotient before model-specific admission.
+pub struct QuotientSample<Q: Copy> { pub value: Q, pub denominator_measure: f32, pub defined: bool }
+impl<Q: Copy> Copy for QuotientSample<Q> {}
+
+/// Project a quotient into one geometric model.
+///
+/// This is deliberately separate from the metric and products. CGA may
+/// normalize a null point, PGA may select a finite affine chart, and QCGA may
+/// admit a quadric element or field value. Failed chart/grade/null conditions
+/// remain explicit in the returned denotation.
+pub trait ProjectiveAdmission<A: ProjectiveAlgebra>: Copy {
+    type Codomain: Codomain
+
+    fn admit(
+        self,
+        _ quotient: QuotientSample<A::Quotient>,
+        _ policy: A::Policy,
+    ) -> DenotationSample<Self::Codomain>
+}
+
+/// One control whose point and weight element are fixed by algebra `A`.
+pub struct ProjectiveControl<A: ProjectiveAlgebra> { pub point: A::Point, pub weight: A::Weight }
+impl<A: ProjectiveAlgebra> Copy for ProjectiveControl<A> {}
+
+pub fn projective_control<A: ProjectiveAlgebra>(
+    _ point: A::Point,
+    _ weight: A::Weight,
+) -> ProjectiveControl<A> {
+    ProjectiveControl<A> { point: point, weight: weight }
+}
+
+/// Tensor-product bilinear control order 00, 10, 01, 11.
+pub struct BilinearProjectiveControls<A: ProjectiveAlgebra> {
+    pub p00: ProjectiveControl<A>,
+    pub p10: ProjectiveControl<A>,
+    pub p01: ProjectiveControl<A>,
+    pub p11: ProjectiveControl<A>,
+}
+impl<A: ProjectiveAlgebra> Copy for BilinearProjectiveControls<A> {}
+
+pub fn bilinear_projective_controls<A: ProjectiveAlgebra>(
+    _ p00: ProjectiveControl<A>,
+    _ p10: ProjectiveControl<A>,
+    _ p01: ProjectiveControl<A>,
+    _ p11: ProjectiveControl<A>,
+) -> BilinearProjectiveControls<A> {
+    BilinearProjectiveControls<A> { p00: p00, p10: p10, p01: p01, p11: p11 }
+}
+
+/// Linear triangular control order A, B, C.
+pub struct TriangularProjectiveControls<A: ProjectiveAlgebra> {
+    pub a: ProjectiveControl<A>,
+    pub b: ProjectiveControl<A>,
+    pub c: ProjectiveControl<A>,
+}
+impl<A: ProjectiveAlgebra> Copy for TriangularProjectiveControls<A> {}
+
+pub fn triangular_projective_controls<A: ProjectiveAlgebra>(
+    _ a: ProjectiveControl<A>,
+    _ b: ProjectiveControl<A>,
+    _ c: ProjectiveControl<A>,
+) -> TriangularProjectiveControls<A> {
+    TriangularProjectiveControls<A> { a: a, b: b, c: c }
+}
+
+/// Numerator and denominator after interpolation but before division.
+pub struct RationalFrame<A: ProjectiveAlgebra> {
+    pub numerator: A::Numerator,
+    pub denominator: A::Weight,
+}
+impl<A: ProjectiveAlgebra> Copy for RationalFrame<A> {}
+
+fn bilinear_blend<T: LinearElement>(
+    _ p00: T,
+    _ p10: T,
+    _ p01: T,
+    _ p11: T,
+    _ parameter: Vec2F,
+) -> T {
+    let one_minus_s = 1.0 - parameter.x
+    let one_minus_t = 1.0 - parameter.y
+    p00.scaled(one_minus_s * one_minus_t)
+        .plus(p10.scaled(parameter.x * one_minus_t))
+        .plus(p01.scaled(one_minus_s * parameter.y))
+        .plus(p11.scaled(parameter.x * parameter.y))
+}
+
+fn triangular_blend<T: LinearElement>(_ a: T, _ b: T, _ c: T, _ parameter: Bary3F) -> T {
+    a.scaled(parameter.a).plus(b.scaled(parameter.b)).plus(c.scaled(parameter.c))
+}
+
+/// An interpolation policy maps typed controls and a parameter to one rational
+/// frame. Algebra and interpolation are independent static choices.
+pub trait ProjectiveInterpolation<
+    A: ProjectiveAlgebra,
+    Controls: Copy,
+    Domain: ParameterDomain,
+>: Copy {
+    const CONTROL_COUNT: usize
+
+    fn frame(
+        self,
+        _ algebra: A,
+        _ controls: Controls,
+        _ parameter: <Domain as ParameterDomain>::Parameter,
+    ) -> RationalFrame<A>
+}
+
+/// Degree-(1,1) tensor-product Bernstein interpolation.
+pub struct BilinearBernstein {}
+impl Copy for BilinearBernstein {}
+
+impl<A: ProjectiveAlgebra> ProjectiveInterpolation<
+    A,
+    BilinearProjectiveControls<A>,
+    UnitSquare,
+> for BilinearBernstein {
+    const CONTROL_COUNT: usize = 4
+
+    fn frame(
+        self,
+        _ algebra: A,
+        _ controls: BilinearProjectiveControls<A>,
+        _ parameter: Vec2F,
+    ) -> RationalFrame<A> {
+        RationalFrame<A> {
+            numerator: bilinear_blend<A::Numerator>(
+                algebra.weighted_point(controls.p00.point, controls.p00.weight),
+                algebra.weighted_point(controls.p10.point, controls.p10.weight),
+                algebra.weighted_point(controls.p01.point, controls.p01.weight),
+                algebra.weighted_point(controls.p11.point, controls.p11.weight),
+                parameter,
+            ),
+            denominator: bilinear_blend<A::Weight>(
+                controls.p00.weight,
+                controls.p10.weight,
+                controls.p01.weight,
+                controls.p11.weight,
+                parameter,
+            ),
+        }
+    }
+}
+
+/// Degree-one barycentric interpolation over a triangle.
+pub struct LinearBarycentric {}
+impl Copy for LinearBarycentric {}
+
+impl<A: ProjectiveAlgebra> ProjectiveInterpolation<
+    A,
+    TriangularProjectiveControls<A>,
+    BarycentricTriangle,
+> for LinearBarycentric {
+    const CONTROL_COUNT: usize = 3
+
+    fn frame(
+        self,
+        _ algebra: A,
+        _ controls: TriangularProjectiveControls<A>,
+        _ parameter: Bary3F,
+    ) -> RationalFrame<A> {
+        RationalFrame<A> {
+            numerator: triangular_blend<A::Numerator>(
+                algebra.weighted_point(controls.a.point, controls.a.weight),
+                algebra.weighted_point(controls.b.point, controls.b.weight),
+                algebra.weighted_point(controls.c.point, controls.c.weight),
+                parameter,
+            ),
+            denominator: triangular_blend<A::Weight>(
+                controls.a.weight,
+                controls.b.weight,
+                controls.c.weight,
+                parameter,
+            ),
+        }
+    }
+}
+
+/// Static composition of algebra, interpolation, and projective admission.
+/// Closing these three types is the complete shader specialization key.
+pub struct ProjectiveKernel<
+    A: ProjectiveAlgebra,
+    I: ProjectiveInterpolation<A, Controls, Domain>,
+    P: ProjectiveAdmission<A>,
+    Controls: Copy,
+    Domain: ParameterDomain,
+> { pub algebra: A, pub interpolation: I, pub admission: P, pub domain: Domain }
+
+impl<
+    A: ProjectiveAlgebra,
+    I: ProjectiveInterpolation<A, Controls, Domain>,
+    P: ProjectiveAdmission<A>,
+    Controls: Copy,
+    Domain: ParameterDomain,
+> Copy for ProjectiveKernel<A, I, P, Controls, Domain> {}
+
+impl<
+    A: ProjectiveAlgebra,
+    I: ProjectiveInterpolation<A, Controls, Domain>,
+    P: ProjectiveAdmission<A>,
+    Controls: Copy,
+    Domain: ParameterDomain,
+> HyperPatchKernel for ProjectiveKernel<A, I, P, Controls, Domain> {
+    type Controls = Controls
+    type Domain = Domain
+    type Codomain = P::Codomain
+    type Policy = A::Policy
+    const CONTROL_COUNT: usize = I::CONTROL_COUNT
+
+    fn denote(
+        self,
+        _ controls: Controls,
+        _ parameter: <Domain as ParameterDomain>::Parameter,
+        _ policy: A::Policy,
+    ) -> DenotationSample<P::Codomain> {
+        let frame = self.interpolation.frame(self.algebra, controls, parameter)
+        let quotient = self.algebra.right_quotient(frame.numerator, frame.denominator, policy)
+        self.admission.admit(quotient, policy)
+    }
+}
+
+pub fn projective_hyperpatch<
+    A: ProjectiveAlgebra,
+    I: ProjectiveInterpolation<A, Controls, Domain>,
+    P: ProjectiveAdmission<A>,
+    Controls: Copy,
+    Domain: ParameterDomain,
+>(
+    _ algebra: A,
+    _ interpolation: I,
+    _ admission: P,
+    _ domain: Domain,
+    _ controls: Controls,
+) -> HyperPatch<ProjectiveKernel<A, I, P, Controls, Domain>> {
+    HyperPatch<ProjectiveKernel<A, I, P, Controls, Domain>> {
+        kernel: ProjectiveKernel<A, I, P, Controls, Domain> {
+            algebra: algebra,
+            interpolation: interpolation,
+            admission: admission,
+            domain: domain,
+        },
+        controls: controls,
+    }
+}
