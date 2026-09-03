@@ -55,6 +55,7 @@ pub const POINT_WORDS: usize = 3
 pub const TRIANGLE_WORDS: usize = 4
 pub const TOPOLOGY_PROPOSAL_WORDS: usize = 4
 pub const TOPOLOGY_PROGRESS_WORDS: usize = 8
+pub const TOPOLOGY_TWIN_WORDS_PER_TRIANGLE: usize = 3
 pub const GENERATION_PARITY: u32 = 0
 
 pub const POINT_PENDING: u32 = 0
@@ -2271,6 +2272,349 @@ fn flip_proposal_for_edges(_ first: DirectedEdge, _ second: DirectedEdge) -> Fli
         edge_low: low,
         edge_high: high,
         active: true,
+    }
+}
+
+fn half_edge_slot(_ face: u32, _ edge: u32) -> u32 {
+    face * TOPOLOGY_TWIN_WORDS_PER_TRIANGLE.downcast_truncate() + edge
+}
+
+fn half_edge_face(_ slot: u32) -> u32 {
+    slot / TOPOLOGY_TWIN_WORDS_PER_TRIANGLE.downcast_truncate()
+}
+
+fn half_edge_local(_ slot: u32) -> u32 {
+    slot % TOPOLOGY_TWIN_WORDS_PER_TRIANGLE.downcast_truncate()
+}
+
+/// Build the exact resident half-edge relation once for a mutable topology.
+///
+/// Each lane is one directed triangle edge and stores the reverse-directed
+/// twin lane, or `INVALID_VERTEX` for a constrained boundary edge. This scalar
+/// construction is deliberately deterministic and detects non-manifold input;
+/// its cost is paid once rather than once for every Delaunay flip.
+fn initialize_resident_twins<
+    const TRIANGLE_STORAGE_WORDS: usize,
+    const TWIN_STORAGE_WORDS: usize,
+>(
+    _ key: AtlasKey,
+    _ resident_triangles: u32,
+    _ triangles: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+    _ twins: StorageBuffer<u32, TWIN_STORAGE_WORDS>,
+) -> u32
+where
+    { TRIANGLE_STORAGE_WORDS % TRIANGLE_WORDS == 0 },
+    { TWIN_STORAGE_WORDS == TRIANGLE_STORAGE_WORDS / TRIANGLE_WORDS * TOPOLOGY_TWIN_WORDS_PER_TRIANGLE }
+{
+    let half_edges = resident_triangles * TOPOLOGY_TWIN_WORDS_PER_TRIANGLE.downcast_truncate()
+    let mut failures: u32 = 0
+    let mut slot: u32 = 0
+    while slot < TWIN_STORAGE_WORDS.downcast_truncate() {
+        twins.store(index: slot, value: INVALID_VERTEX)
+        slot = slot + 1
+    }
+    slot = 0
+    while slot < half_edges {
+        let face = half_edge_face(slot)
+        let local = half_edge_local(slot)
+        let triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, face)
+        let directed = triangle_directed_edge(key, triangle, face, local)
+        let mut matches: u32 = 0
+        let mut twin: u32 = INVALID_VERTEX
+        let mut other_slot: u32 = 0
+        while other_slot < half_edges {
+            if other_slot != slot {
+                let other_face = half_edge_face(other_slot)
+                let other_local = half_edge_local(other_slot)
+                let other_triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, other_face)
+                let other = triangle_directed_edge(
+                    key,
+                    other_triangle,
+                    other_face,
+                    other_local,
+                )
+                if directed_edges_form_interior_pair(directed, other) {
+                    matches = matches + 1
+                    twin = other_slot
+                }
+            }
+            other_slot = other_slot + 1
+        }
+        if matches == 1 {
+            twins.store(index: slot, value: twin)
+        } else if matches > 1 {
+            failures = failures + 1
+        }
+        slot = slot + 1
+    }
+    failures
+}
+
+fn disconnect_resident_face<const TWIN_STORAGE_WORDS: usize>(
+    _ face: u32,
+    _ twins: StorageBuffer<u32, TWIN_STORAGE_WORDS>,
+) {
+    let mut local: u32 = 0
+    while local < TOPOLOGY_TWIN_WORDS_PER_TRIANGLE.downcast_truncate() {
+        let slot = half_edge_slot(face, local)
+        let twin = twins.load(index: slot)
+        if twin != INVALID_VERTEX && twin < TWIN_STORAGE_WORDS.downcast_truncate() {
+            twins.store(index: twin, value: INVALID_VERTEX)
+        }
+        twins.store(index: slot, value: INVALID_VERTEX)
+        local = local + 1
+    }
+}
+
+/// Reconnect only one changed face against the resident half-edge index.
+/// Existing external twins were detached before the triangle rewrite, so a
+/// unique reverse edge can be installed without races by this scalar provider.
+fn reconnect_resident_face<
+    const TRIANGLE_STORAGE_WORDS: usize,
+    const TWIN_STORAGE_WORDS: usize,
+>(
+    _ key: AtlasKey,
+    _ face: u32,
+    _ resident_triangles: u32,
+    _ triangles: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+    _ twins: StorageBuffer<u32, TWIN_STORAGE_WORDS>,
+) -> u32
+where
+    { TRIANGLE_STORAGE_WORDS % TRIANGLE_WORDS == 0 },
+    { TWIN_STORAGE_WORDS == TRIANGLE_STORAGE_WORDS / TRIANGLE_WORDS * TOPOLOGY_TWIN_WORDS_PER_TRIANGLE }
+{
+    let half_edges = resident_triangles * TOPOLOGY_TWIN_WORDS_PER_TRIANGLE.downcast_truncate()
+    let triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, face)
+    let mut failures: u32 = 0
+    let mut local: u32 = 0
+    while local < TOPOLOGY_TWIN_WORDS_PER_TRIANGLE.downcast_truncate() {
+        let slot = half_edge_slot(face, local)
+        if twins.load(index: slot) == INVALID_VERTEX {
+            let directed = triangle_directed_edge(key, triangle, face, local)
+            let mut matches: u32 = 0
+            let mut twin: u32 = INVALID_VERTEX
+            let mut other_slot: u32 = 0
+            while other_slot < half_edges {
+                if other_slot != slot {
+                    let other_face = half_edge_face(other_slot)
+                    let other_local = half_edge_local(other_slot)
+                    let other_triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(
+                        triangles,
+                        other_face,
+                    )
+                    let other = triangle_directed_edge(
+                        key,
+                        other_triangle,
+                        other_face,
+                        other_local,
+                    )
+                    if directed_edges_form_interior_pair(directed, other) {
+                        matches = matches + 1
+                        twin = other_slot
+                    }
+                }
+                other_slot = other_slot + 1
+            }
+            if matches == 1 {
+                let previous = twins.load(index: twin)
+                if previous == INVALID_VERTEX || previous == slot {
+                    twins.store(index: slot, value: twin)
+                    twins.store(index: twin, value: slot)
+                } else {
+                    failures = failures + 1
+                }
+            } else if matches > 1 {
+                failures = failures + 1
+            }
+        }
+        local = local + 1
+    }
+    failures
+}
+
+/// Restore constrained Delaunay topology through a resident half-edge index.
+///
+/// This is semantically the same deterministic provider as
+/// `restore_constrained_delaunay_with_policy`: it repeatedly flips the
+/// lexicographically first illegal unlocked edge. The physical placement is
+/// different. Instead of rescanning every pair of faces after every flip, it
+/// builds reverse-directed twin lanes once, scans each interior edge once per
+/// round, and repairs only the two rewritten faces. The scalar provider above
+/// remains the simple oracle for exact-output comparison.
+pub fn restore_indexed_constrained_delaunay_with_policy<
+    P: InteriorEdgeFlipPolicy,
+    const POINT_STORAGE_WORDS: usize,
+    const TRIANGLE_STORAGE_WORDS: usize,
+    const TWIN_STORAGE_WORDS: usize,
+    const FLIP_LIMIT: usize,
+>(
+    _ key: AtlasKey,
+    _ policy: P,
+    _ source_valid: bool,
+    _ resident_points: u32,
+    _ resident_triangles: u32,
+    _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
+    _ triangles: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+    _ twins: StorageBuffer<u32, TWIN_STORAGE_WORDS>,
+) -> DelaunayRestoration
+where
+    { POINT_STORAGE_WORDS % POINT_WORDS == 0 },
+    { TRIANGLE_STORAGE_WORDS % TRIANGLE_WORDS == 0 },
+    { TWIN_STORAGE_WORDS == TRIANGLE_STORAGE_WORDS / TRIANGLE_WORDS * TOPOLOGY_TWIN_WORDS_PER_TRIANGLE }
+{
+    let point_capacity: u32 = (POINT_STORAGE_WORDS / POINT_WORDS).downcast_truncate()
+    let triangle_capacity: u32 = (TRIANGLE_STORAGE_WORDS / TRIANGLE_WORDS).downcast_truncate()
+    let flip_limit: u32 = FLIP_LIMIT.downcast_truncate()
+    let mut invariant_failures: u32 = 0
+    if !source_valid || resident_points > point_capacity || resident_triangles > triangle_capacity {
+        invariant_failures = invariant_failures + 1
+    }
+    let mut face: u32 = 0
+    while face < resident_triangles {
+        let triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, face)
+        if !triangle.valid
+            || triangle.first >= resident_points
+            || triangle.second >= resident_points
+            || triangle.third >= resident_points
+            || triangle.first == triangle.second
+            || triangle.first == triangle.third
+            || triangle.second == triangle.third {
+            invariant_failures = invariant_failures + 1
+        } else if orientation(
+                point_load<POINT_STORAGE_WORDS>(points, triangle.first),
+                point_load<POINT_STORAGE_WORDS>(points, triangle.second),
+                point_load<POINT_STORAGE_WORDS>(points, triangle.third),
+            )
+            <= 0 {
+            invariant_failures = invariant_failures + 1
+        }
+        face = face + 1
+    }
+    if invariant_failures == 0 {
+        invariant_failures = invariant_failures + initialize_resident_twins<
+            TRIANGLE_STORAGE_WORDS,
+            TWIN_STORAGE_WORDS,
+        >(key, resident_triangles, triangles, twins)
+    }
+
+    let half_edges = resident_triangles * TOPOLOGY_TWIN_WORDS_PER_TRIANGLE.downcast_truncate()
+    let mut flips: u32 = 0
+    let mut searching = invariant_failures == 0
+    let mut converged = false
+    while searching && flips < flip_limit {
+        let mut found = false
+        let mut best = invalid_flip_proposal()
+        let mut best_first_face: u32 = 0
+        let mut best_second_face: u32 = 0
+        let mut best_pair = invalid_triangle_pair()
+        let mut slot: u32 = 0
+        while slot < half_edges {
+            let twin = twins.load(index: slot)
+            if twin != INVALID_VERTEX && slot < twin && twin < half_edges {
+                let first_face = half_edge_face(slot)
+                let first_edge = half_edge_local(slot)
+                let second_face = half_edge_face(twin)
+                let second_edge = half_edge_local(twin)
+                let first_triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, first_face)
+                let second_triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, second_face)
+                let first = triangle_directed_edge(
+                    key,
+                    first_triangle,
+                    first_face,
+                    first_edge,
+                )
+                let second = triangle_directed_edge(
+                    key,
+                    second_triangle,
+                    second_face,
+                    second_edge,
+                )
+                let pair = flippable_pair_with_policy<P, POINT_STORAGE_WORDS>(
+                    key,
+                    policy,
+                    points,
+                    first_triangle,
+                    first_face,
+                    first_edge,
+                    second_triangle,
+                    second_face,
+                    second_edge,
+                )
+                if pair.valid {
+                    let proposal = flip_proposal_for_edges(first, second)
+                    if !found || flip_proposal_precedes(proposal, best) {
+                        found = true
+                        best = proposal
+                        best_first_face = first_face
+                        best_second_face = second_face
+                        best_pair = pair
+                    }
+                }
+            }
+            slot = slot + 1
+        }
+        if found {
+            disconnect_resident_face<TWIN_STORAGE_WORDS>(best_first_face, twins)
+            disconnect_resident_face<TWIN_STORAGE_WORDS>(best_second_face, twins)
+            triangle_store<TRIANGLE_STORAGE_WORDS>(triangles, best_first_face, best_pair.first)
+            triangle_store<TRIANGLE_STORAGE_WORDS>(triangles, best_second_face, best_pair.second)
+            invariant_failures = invariant_failures + reconnect_resident_face<
+                TRIANGLE_STORAGE_WORDS,
+                TWIN_STORAGE_WORDS,
+            >(key, best_first_face, resident_triangles, triangles, twins)
+            invariant_failures = invariant_failures + reconnect_resident_face<
+                TRIANGLE_STORAGE_WORDS,
+                TWIN_STORAGE_WORDS,
+            >(key, best_second_face, resident_triangles, triangles, twins)
+            flips = flips + 1
+            if invariant_failures != 0 {
+                searching = false
+            }
+        } else {
+            converged = true
+            searching = false
+        }
+    }
+
+    let mut remaining: u32 = 0
+    if invariant_failures == 0 {
+        let mut slot: u32 = 0
+        while slot < half_edges {
+            let twin = twins.load(index: slot)
+            if twin != INVALID_VERTEX && slot < twin && twin < half_edges {
+                let first_face = half_edge_face(slot)
+                let first_edge = half_edge_local(slot)
+                let second_face = half_edge_face(twin)
+                let second_edge = half_edge_local(twin)
+                let pair = flippable_pair_with_policy<P, POINT_STORAGE_WORDS>(
+                    key,
+                    policy,
+                    points,
+                    triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, first_face),
+                    first_face,
+                    first_edge,
+                    triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, second_face),
+                    second_face,
+                    second_edge,
+                )
+                if pair.valid {
+                    remaining = remaining + 1
+                }
+            }
+            slot = slot + 1
+        }
+    }
+    if remaining == 0 && invariant_failures == 0 {
+        converged = true
+    }
+    DelaunayRestoration {
+        valid: source_valid && converged && remaining == 0 && invariant_failures == 0,
+        converged: converged,
+        resident_points: resident_points,
+        resident_triangles: resident_triangles,
+        flips: flips,
+        remaining_violations: remaining,
+        invariant_failures: invariant_failures,
     }
 }
 

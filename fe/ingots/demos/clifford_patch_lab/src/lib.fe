@@ -36,6 +36,7 @@ use quilting_atlas_webgpu::{
     SAMPLING_PROGRESS_WORDS,
     SAMPLING_WORDS_PER_CANDIDATE,
     TRIANGLE_WORDS,
+    TOPOLOGY_TWIN_WORDS_PER_TRIANGLE,
     advance_candidate_generation,
     compact_candidate_points,
     construct_constrained_triangles,
@@ -43,7 +44,7 @@ use quilting_atlas_webgpu::{
     propose_candidate_lane_with_policy,
     resident_point,
     resident_triangle,
-    restore_constrained_delaunay_with_policy,
+    restore_indexed_constrained_delaunay_with_policy,
     retire_candidate_lane_with_policy,
 }
 use quilting_clifford_bezier::{
@@ -153,6 +154,7 @@ const DEFORMED_POINTS: usize = 64
 const DEFORMED_POINT_WORDS: usize = DEFORMED_POINTS * 3
 const DEFORMED_TRIANGLES: usize = 116
 const DEFORMED_TRIANGLE_WORDS: usize = DEFORMED_TRIANGLES * TRIANGLE_WORDS
+const DEFORMED_TWIN_WORDS: usize = DEFORMED_TRIANGLES * TOPOLOGY_TWIN_WORDS_PER_TRIANGLE
 const DEFORMED_SAMPLE_LANES: usize = 6
 const DEFORMED_SAMPLE_WORDS: usize = DEFORMED_CANDIDATES * DEFORMED_SAMPLE_LANES
 const DEFORMED_POINT_SAMPLE_WORDS: usize = DEFORMED_POINTS * DEFORMED_SAMPLE_LANES
@@ -397,12 +399,14 @@ fn restore_deformed_topology(
     _ receipt: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
     _ points: StorageBuffer<u32, DEFORMED_POINT_WORDS>,
     _ triangles: StorageBuffer<u32, DEFORMED_TRIANGLE_WORDS>,
+    _ twins: StorageBuffer<u32, DEFORMED_TWIN_WORDS>,
 ) {
     let policy = SurfaceInteriorEdgeFlip { samples: samples }
-    let restored = restore_constrained_delaunay_with_policy<
+    let restored = restore_indexed_constrained_delaunay_with_policy<
         SurfaceInteriorEdgeFlip<DEFORMED_POINT_SAMPLE_WORDS>,
         DEFORMED_POINT_WORDS,
         DEFORMED_TRIANGLE_WORDS,
+        DEFORMED_TWIN_WORDS,
         DEFORMED_FLIP_LIMIT,
     >(
         deformed_key(),
@@ -412,6 +416,7 @@ fn restore_deformed_topology(
         receipt.load(index: 4),
         points,
         triangles,
+        twins,
     )
     receipt.store(index: 5, value: if restored.valid { 1 } else { 0 })
     receipt.store(index: 6, value: restored.flips)
@@ -1317,6 +1322,8 @@ actor CliffordPatchLab uses (
     point_samples_1: StorageBuffer<f32, DEFORMED_POINT_SAMPLE_WORDS>,
     triangles_0: StorageBuffer<u32, DEFORMED_TRIANGLE_WORDS>,
     triangles_1: StorageBuffer<u32, DEFORMED_TRIANGLE_WORDS>,
+    twins_0: StorageBuffer<u32, DEFORMED_TWIN_WORDS>,
+    twins_1: StorageBuffer<u32, DEFORMED_TWIN_WORDS>,
     receipt_0: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
     receipt_1: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
     p00_x: f32,
@@ -1710,7 +1717,11 @@ actor CliffordPatchLab uses (
     {
         if self.sampler_mode < 2.5 { return }
         restore_deformed_topology(
-            self.point_samples_0, self.receipt_0, self.points_0, self.triangles_0,
+            self.point_samples_0,
+            self.receipt_0,
+            self.points_0,
+            self.triangles_0,
+            self.twins_0,
         )
     }
 
@@ -1722,7 +1733,11 @@ actor CliffordPatchLab uses (
     {
         if self.sampler_mode < 2.5 { return }
         restore_deformed_topology(
-            self.point_samples_1, self.receipt_1, self.points_1, self.triangles_1,
+            self.point_samples_1,
+            self.receipt_1,
+            self.points_1,
+            self.triangles_1,
+            self.twins_1,
         )
     }
 
