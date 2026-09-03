@@ -2,9 +2,11 @@
 //!
 //! A deterministic blue-noise/Delaunay macro mesh forms one continuous sheet.
 //! Every triangle is an instance of a bounded atlas draw. Projected focus is
-//! evaluated at shared vertices, symmetric endpoint demands determine edges,
-//! and the three edges determine a triangle's exact atlas key. The canonical
-//! Quilting atlas supplies topology and Fe restores the requested permutation.
+//! evaluated on the complete simplex hierarchy: vertices, edge barycenters,
+//! and face barycenters. A GPU prepass reconciles both incident face requests
+//! onto every shared edge before the three edges select an exact atlas key.
+//! The canonical Quilting atlas supplies topology through LoD 8 and Fe restores
+//! the requested permutation without repeating LoD policy per output vertex.
 //!
 //! Geometry, noise differentials, edge LoD, cursor reaction, orbit camera,
 //! OKLCH heat mapping, lighting, and analytic wire coverage are all Fe. The
@@ -23,6 +25,7 @@ use classic_quilting_lod::{
     fixture_triangle_index,
     patch_first_triangle,
     patch_triangle_count,
+    MAX_PATCH_VERTEX_COUNT,
 }
 use fmath::{TAU, abs, clamp, clamp01, cos, fract, max, mix, sin, smoothstep, wrap_pi}
 use quilting_atlas::{AtlasKey, canonical_key_ordinal, canonicalize, edge_permutation_index}
@@ -65,7 +68,13 @@ use std::web::view::{
 }
 use std::webgpu::{
     ClipPosition,
+    AllShaderStages,
+    ActorResident,
+    ComputeInvocation,
+    ComputeSurface as Kernel,
     Depth24LessEqualMsaa4,
+    DynamicStorageBuffer,
+    FixedDispatch as Once,
     FragmentStage,
     FragmentSurface,
     GpuProgram,
@@ -74,7 +83,9 @@ use std::webgpu::{
     RasterConfiguration,
     RasterPlan,
     RasterVertex,
+    ReadWrite,
     ResponsiveBacking,
+    ReplayRecipe,
     StandardSurfaceRecovery,
     SurfacePointerMotion,
     SurfaceQuality,
@@ -84,6 +95,8 @@ use std::webgpu::{
     TriangleList,
     VertexStage,
     WebGpuBackend,
+    Workgroup as Threads,
+    Zeroed,
     raster_plan,
 }
 
@@ -94,10 +107,24 @@ extern {
 const BASE_ATLAS_LOD: u32 = 2
 const BASE_TRIANGLES_PER_HALF: u32 = 24
 const PATCH_INSTANCES: usize = 48
-const ATLAS_MAX_LOD: u32 = 5
-const ATLAS_VERTEX_LIMIT: usize = 4926
+const LOD_SELECTION_LANES: usize = 64
+const ATLAS_MAX_LOD: u32 = 8
+const ATLAS_VERTEX_LIMIT: usize = MAX_PATCH_VERTEX_COUNT
+const PATCH_INDEX_MASK: u32 = 255
+const PERMUTATION_SHIFT: u32 = 8
+const PERMUTATION_MASK: u32 = 7
+const TRIANGLE_COUNT_SHIFT: u32 = 11
 const SHEET_WIDTH: f32 = 5.6
 const SHEET_DEPTH: f32 = 3.8
+
+type LodBuffer = DynamicStorageBuffer<
+    ReadWrite,
+    Zeroed,
+    ReplayRecipe,
+    AllShaderStages,
+    PATCH_INSTANCES,
+    u32,
+>
 
 pub struct TerrainVarying {
     pub edge_seed: Bary3F,
@@ -203,7 +230,7 @@ const fn mesh_lab_params() -> MeshLabParams {
         focus_radius: Param::range(min: 0.08, max: 0.72, init: 0.34),
         focus_softness: Param::unit(init: 0.62),
         base_lod: Param::int(min: 0.0, max: 3.0, init: 1.0),
-        focus_lod: Param::int(min: 2.0, max: 5.0, init: 5.0),
+        focus_lod: Param::int(min: 2.0, max: 8.0, init: 7.0),
         lod_smoothing: Param::unit(init: 0.55),
         wire_enabled: Param::toggle(init: true),
         wire_px: Param::range(min: 0.1, max: 1.6, init: 0.38),
@@ -334,25 +361,32 @@ fn sheet_half(_ half: u32) -> MacroTriangle {
 fn macro_triangle(_ fixture: FixtureBuffer, _ instance_index: u32) -> MacroTriangle {
     let half = instance_index / BASE_TRIANGLES_PER_HALF
     let local_triangle = instance_index % BASE_TRIANGLES_PER_HALF
-    let base_patch = canonical_key_ordinal(AtlasKey {
-        a: BASE_ATLAS_LOD,
-        b: BASE_ATLAS_LOD,
-        c: BASE_ATLAS_LOD,
-    })
+    let base_patch = canonical_key_ordinal(
+        AtlasKey { a: BASE_ATLAS_LOD, b: BASE_ATLAS_LOD, c: BASE_ATLAS_LOD },
+    )
     let source_triangle = patch_first_triangle(fixture, base_patch) + local_triangle
     let chart = sheet_half(half)
     MacroTriangle {
         p0: map_parameter(
             chart,
-            fixture_barycentric(fixture, fixture_triangle_index(fixture, source_triangle, 0)),
+            fixture_barycentric(
+                fixture,
+                fixture_triangle_index(fixture, source_triangle, 0),
+            ),
         ),
         p1: map_parameter(
             chart,
-            fixture_barycentric(fixture, fixture_triangle_index(fixture, source_triangle, 1)),
+            fixture_barycentric(
+                fixture,
+                fixture_triangle_index(fixture, source_triangle, 1),
+            ),
         ),
         p2: map_parameter(
             chart,
-            fixture_barycentric(fixture, fixture_triangle_index(fixture, source_triangle, 2)),
+            fixture_barycentric(
+                fixture,
+                fixture_triangle_index(fixture, source_triangle, 2),
+            ),
         ),
     }
 }
@@ -596,7 +630,11 @@ fn lod_dither(_ parameter: Vec2F) -> f32 {
 
 fn quantized_lod(_ continuous: f32, _ parameter: Vec2F, _ smoothing: f32) -> u32 {
     let admitted = clamp(continuous, 0.0, as_f32(ATLAS_MAX_LOD))
-    let threshold = mix(0.5, 0.18 + 0.64 * lod_dither(parameter), clamp01(smoothing))
+    let threshold = mix(
+        0.5,
+        0.18 + 0.64 * lod_dither(parameter),
+        clamp01(smoothing),
+    )
     let mut lod: u32 = 0
     while lod < ATLAS_MAX_LOD {
         if admitted < as_f32(lod) + threshold {
@@ -629,11 +667,7 @@ fn edge_lod(
         vertex_lod(left, controls, noise, camera),
         vertex_lod(right, controls, noise, camera),
     )
-    quantized_lod(
-        demand,
-        midpoint(left, right),
-        controls.lod_smoothing,
-    )
+    quantized_lod(demand, midpoint(left, right), controls.lod_smoothing)
 }
 
 /// Atlas lanes are BC, CA, AB, matching the opposite macro-corner pairs.
@@ -648,27 +682,9 @@ fn requested_key(
     _ camera: CameraFrame,
 ) -> AtlasKey {
     AtlasKey {
-        a: edge_lod(
-            triangle.p1,
-            triangle.p2,
-            controls,
-            noise,
-            camera,
-        ),
-        b: edge_lod(
-            triangle.p2,
-            triangle.p0,
-            controls,
-            noise,
-            camera,
-        ),
-        c: edge_lod(
-            triangle.p0,
-            triangle.p1,
-            controls,
-            noise,
-            camera,
-        ),
+        a: edge_lod(triangle.p1, triangle.p2, controls, noise, camera),
+        b: edge_lod(triangle.p2, triangle.p0, controls, noise, camera),
+        c: edge_lod(triangle.p0, triangle.p1, controls, noise, camera),
     }
 }
 
