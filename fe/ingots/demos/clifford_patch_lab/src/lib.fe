@@ -113,6 +113,7 @@ use std::webgpu::{
     GpuProgram,
     Instanced,
     LatestPerFrame,
+    PassActivation,
     RasterConfiguration,
     RasterPlan,
     RasterVertex,
@@ -447,7 +448,7 @@ struct CliffordLabParams {
     orbiting: Param,
 }
 
-struct CliffordLabState {
+pub struct CliffordLabState {
     p00_x: f32,
     p00_y: f32,
     p00_z: f32,
@@ -476,6 +477,45 @@ struct CliffordLabState {
     selected: f32,
     dragging: f32,
     orbiting: f32,
+}
+
+/// The user-facing scalar remains compact browser/GPU state, while the mode
+/// semantics are a proper Fe sum at the effect boundary.
+enum SamplingPipeline {
+    AnalyticAtlas,
+    PullbackBlueNoise,
+}
+
+impl Copy for SamplingPipeline {}
+
+fn sampling_pipeline(_ mode: f32) -> SamplingPipeline {
+    if mode < 2.5 {
+        SamplingPipeline::AnalyticAtlas
+    } else {
+        SamplingPipeline::PullbackBlueNoise
+    }
+}
+
+struct AnalyticPatchPipeline {}
+
+impl AnalyticPatchPipeline {
+    pub fn active(_ state: CliffordLabState) -> bool {
+        match sampling_pipeline(state.sampler_mode) {
+            SamplingPipeline::AnalyticAtlas => true,
+            SamplingPipeline::PullbackBlueNoise => false,
+        }
+    }
+}
+
+struct PullbackPatchPipeline {}
+
+impl PullbackPatchPipeline {
+    pub fn active(_ state: CliffordLabState) -> bool {
+        match sampling_pipeline(state.sampler_mode) {
+            SamplingPipeline::AnalyticAtlas => false,
+            SamplingPipeline::PullbackBlueNoise => true,
+        }
+    }
 }
 
 impl SurfaceState for CliffordLabState {
@@ -1313,7 +1353,8 @@ actor CliffordPatchLab uses (
             ComputeSurface<
                 Workgroup<DEFORMED_THREADS, 1, 1>,
                 FixedDispatch<DEFORMED_WORKGROUPS, 2, 1>,
-            >
+            >,
+            PassActivation<PullbackPatchPipeline>,
         )
     {
         if self.sampler_mode < 2.5 {
@@ -1350,7 +1391,8 @@ actor CliffordPatchLab uses (
             ComputeSurface<
                 Workgroup<DEFORMED_THREADS, 1, 1>,
                 FixedDispatch<DEFORMED_WORKGROUPS, 2, 1>,
-            >
+            >,
+            PassActivation<PullbackPatchPipeline>,
         )
     {
         if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
@@ -1412,7 +1454,8 @@ actor CliffordPatchLab uses (
                     FixedDispatch<DEFORMED_WORKGROUPS, 2, 1>,
                     DEFORMED_SAMPLING_ROUNDS,
                 >,
-            >
+            >,
+            PassActivation<PullbackPatchPipeline>,
         )
     {
         if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
@@ -1469,7 +1512,8 @@ actor CliffordPatchLab uses (
                     FixedDispatch<DEFORMED_WORKGROUPS, 2, 1>,
                     DEFORMED_SAMPLING_ROUNDS,
                 >,
-            >
+            >,
+            PassActivation<PullbackPatchPipeline>,
         )
     {
         if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
@@ -1526,7 +1570,8 @@ actor CliffordPatchLab uses (
                     FixedDispatch<DEFORMED_WORKGROUPS, 2, 1>,
                     DEFORMED_SAMPLING_ROUNDS,
                 >,
-            >
+            >,
+            PassActivation<PullbackPatchPipeline>,
         )
     {
         if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
@@ -1546,7 +1591,10 @@ actor CliffordPatchLab uses (
     }
 
     fn deformed_sampling_compact(self, invocation: ComputeInvocation)
-        uses (ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 2, 1>>)
+        uses (
+            ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 2, 1>>,
+            PassActivation<PullbackPatchPipeline>,
+        )
     {
         if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
             return
@@ -1573,7 +1621,10 @@ actor CliffordPatchLab uses (
     }
 
     fn deformed_point_samples(self, invocation: ComputeInvocation)
-        uses (ComputeSurface<Workgroup<DEFORMED_THREADS, 1, 1>, FixedDispatch<1, 2, 1>>)
+        uses (
+            ComputeSurface<Workgroup<DEFORMED_THREADS, 1, 1>, FixedDispatch<1, 2, 1>>,
+            PassActivation<PullbackPatchPipeline>,
+        )
     {
         if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
             return
@@ -1611,7 +1662,10 @@ actor CliffordPatchLab uses (
     }
 
     fn deformed_topology_construct(self, invocation: ComputeInvocation)
-        uses (ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 2, 1>>)
+        uses (
+            ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 2, 1>>,
+            PassActivation<PullbackPatchPipeline>,
+        )
     {
         if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
             return
@@ -1649,7 +1703,10 @@ actor CliffordPatchLab uses (
     // the portable per-stage storage-binding budget. A runtime chart branch
     // would make both disjoint resource sets reachable from one shader.
     fn deformed_topology_restore_0(self, invocation: ComputeInvocation)
-        uses (ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>)
+        uses (
+            ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>,
+            PassActivation<PullbackPatchPipeline>,
+        )
     {
         if self.sampler_mode < 2.5 { return }
         restore_deformed_topology(
@@ -1658,7 +1715,10 @@ actor CliffordPatchLab uses (
     }
 
     fn deformed_topology_restore_1(self, invocation: ComputeInvocation)
-        uses (ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>)
+        uses (
+            ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>,
+            PassActivation<PullbackPatchPipeline>,
+        )
     {
         if self.sampler_mode < 2.5 { return }
         restore_deformed_topology(
@@ -1776,7 +1836,8 @@ actor CliffordPatchLab uses (
             VertexStage<
                 PatchVarying,
                 Instanced<TriangleList<VERTICES_PER_INSTANCE>, INSTANCE_COUNT>,
-            >
+            >,
+            PassActivation<AnalyticPatchPipeline>,
         )
     {
         let state = CliffordLabState {
@@ -1902,7 +1963,10 @@ actor CliffordPatchLab uses (
     }
 
     fn patch_fragment(self, varying: PatchVarying) -> i32
-        uses (FragmentStage<PatchVarying>)
+        uses (
+            FragmentStage<PatchVarying>,
+            PassActivation<AnalyticPatchPipeline>,
+        )
     {
         let edge_pixels = minimum3(varying.edge_seed) / varying.view_depth
         let feather = AnalyticDepthWire::feather_pixels()
@@ -1921,7 +1985,10 @@ actor CliffordPatchLab uses (
     }
 
     fn deformed_vertices(self, vertex_index: u32) -> RasterVertex<PatchVarying>
-        uses (VertexStage<PatchVarying, TriangleList<DEFORMED_RENDER_VERTICES>>)
+        uses (
+            VertexStage<PatchVarying, TriangleList<DEFORMED_RENDER_VERTICES>>,
+            PassActivation<PullbackPatchPipeline>,
+        )
     {
         let chart_vertices: u32 = (DEFORMED_TRIANGLES * 3).downcast_truncate()
         let chart = vertex_index / chart_vertices
@@ -1995,7 +2062,10 @@ actor CliffordPatchLab uses (
     }
 
     fn deformed_fragment(self, varying: PatchVarying) -> i32
-        uses (FragmentStage<PatchVarying>)
+        uses (
+            FragmentStage<PatchVarying>,
+            PassActivation<PullbackPatchPipeline>,
+        )
     {
         let edge_pixels = minimum3(varying.edge_seed) / varying.view_depth
         let feather = AnalyticDepthWire::feather_pixels()
