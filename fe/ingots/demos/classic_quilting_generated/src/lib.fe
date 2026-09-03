@@ -508,7 +508,7 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
                     position: ClipPosition {
                         x: differential.sample.position.x * 0.75,
                         y: differential.sample.position.y * 0.75,
-                        z: differential.sample.position.z * 0.12,
+                        z: 0.5 + differential.sample.position.z * 0.05,
                         w: 1.0,
                     },
                     varying: MeshVarying {
