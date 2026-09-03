@@ -1,0 +1,9 @@
+[ingot]
+name = "quilting_clifford_bezier"
+version = "0.1.0"
+
+[dependencies]
+core = true
+ga_expr = true
+quilting_domain = true
+quilting_hyperpatch = true

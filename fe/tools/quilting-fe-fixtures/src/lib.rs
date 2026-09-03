@@ -6,6 +6,9 @@
 
 use std::fmt;
 
+#[cfg(test)]
+mod clifford_oracle;
+
 pub mod fixed_raster_source;
 
 #[cfg(feature = "quilting-export")]

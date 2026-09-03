@@ -1,0 +1,318 @@
+//! Sparse Clifford-Bezier patch denotation for isotropic three-space.
+//!
+//! The first family follows Krasauskas, Zube, and Cacciola's bilinear patch
+//! in Cl(2, 0, 1):
+//!
+//!     P(s, t) = F(s, t) W(s, t)^-1
+//!
+//! where points are grade-one vectors and weights belong to the even
+//! subalgebra. The sparse Clifford expressions below are type data consumed by
+//! Fe's FCO compiler. Runtime Wasm and shader code contain only the resulting
+//! straight-line scalar arithmetic: no blade arrays, masks, loops, or AST.
+//!
+//! This isotropic algebra is intentionally not called standard conformal GA.
+//! A future CGA authoring layer is a separate peer over Cl(4, 1).
+
+use core::marker::Copy
+use ga_expr::{
+    CompileGaF32,
+    EvaluateGaF32,
+    GaProgram,
+    Geometric,
+    MultivectorInput,
+    Reverse,
+    ScalarProduct,
+    SignedOrthogonalMetric,
+    Strict,
+}
+use quilting_domain::{Vec2F, Vec3F, absf, vec3f}
+use quilting_hyperpatch::{
+    DenotationSample,
+    Euclidean3Points,
+    HyperPatch,
+    HyperPatchKernel,
+    UnitSquare,
+    denotation_sample,
+    hyperpatch,
+}
+
+/// A weight in Cl(2, 0, 1)'s even subalgebra E0 + E2.
+pub struct IsotropicEvenF { pub scalar: f32, pub e12: f32, pub e13: f32, pub e23: f32 }
+impl Copy for IsotropicEvenF {}
+
+/// The odd carrier reached by vector-even and odd-even products.
+/// A genuine Euclidean-valued patch has zero `e123` residual.
+pub struct IsotropicOddF { pub e1: f32, pub e2: f32, pub e3: f32, pub e123: f32 }
+impl Copy for IsotropicOddF {}
+
+pub struct IsotropicControl { pub point: Vec3F, pub weight: IsotropicEvenF }
+impl Copy for IsotropicControl {}
+
+/// Control order is the bilinear Bernstein order 00, 10, 01, 11.
+pub struct IsotropicBilinearPatch {
+    pub p00: IsotropicControl,
+    pub p10: IsotropicControl,
+    pub p01: IsotropicControl,
+    pub p11: IsotropicControl,
+}
+impl Copy for IsotropicBilinearPatch {}
+
+pub struct IsotropicSample {
+    pub position: Vec3F,
+    pub homogeneous: IsotropicOddF,
+    pub denominator_norm_squared: f32,
+    pub trivector_residual: f32,
+    pub conditioned: bool,
+    pub vector_valued: bool,
+}
+impl Copy for IsotropicSample {}
+
+pub struct IsotropicPolicy {
+    pub minimum_denominator_norm_squared: f32,
+    pub maximum_trivector_residual: f32,
+}
+impl Copy for IsotropicPolicy {}
+
+pub struct FourthWeightReconciliation {
+    pub patch: IsotropicBilinearPatch,
+    pub scale: f32,
+    pub conditioned: bool,
+}
+impl Copy for FourthWeightReconciliation {}
+
+pub struct IsotropicBilinearKernel {}
+impl Copy for IsotropicBilinearKernel {}
+
+// Basis masks are e1=1, e2=2, e3=4. A support is a bitset over
+// those blade-mask ordinals, hence vector support 2|4|16 and even support
+// 1|8|32|64. Only e1 and e2 have nonzero positive squares.
+struct PointCoefficients { e1: f32, e2: f32, e3: f32 }
+struct WeightCoefficients { scalar: f32, e12: f32, e13: f32, e23: f32 }
+struct OddCoefficients { e1: f32, e2: f32, e3: f32, e123: f32 }
+
+type PointMv = MultivectorInput<PointCoefficients, 22>
+type WeightMv = MultivectorInput<WeightCoefficients, 105>
+type OddMv = MultivectorInput<OddCoefficients, 150>
+type IsotropicMetric = SignedOrthogonalMetric<3, 3, 0>
+
+type WeightedPointExpression = Geometric<PointMv, WeightMv>
+struct WeightedPointOperands { point: PointCoefficients, weight: WeightCoefficients }
+derive EvaluateGaF32 for WeightedPointOperands using CompileGaF32<
+    GaProgram<WeightedPointExpression, IsotropicMetric, Strict>,
+>
+
+type OddTimesReverseWeightExpression = Geometric<OddMv, Reverse<WeightMv>>
+struct OddTimesReverseWeightOperands { odd: OddCoefficients, weight: WeightCoefficients }
+derive EvaluateGaF32 for OddTimesReverseWeightOperands using CompileGaF32<
+    GaProgram<OddTimesReverseWeightExpression, IsotropicMetric, Strict>,
+>
+
+type WeightNormExpression = ScalarProduct<WeightMv, Reverse<WeightMv>>
+struct WeightNormOperands { weight: WeightCoefficients }
+derive EvaluateGaF32 for WeightNormOperands using CompileGaF32<
+    GaProgram<WeightNormExpression, IsotropicMetric, Strict>,
+>
+
+pub fn even(_ scalar: f32, _ e12: f32, _ e13: f32, _ e23: f32) -> IsotropicEvenF {
+    IsotropicEvenF { scalar: scalar, e12: e12, e13: e13, e23: e23 }
+}
+
+pub fn control(_ point: Vec3F, _ weight: IsotropicEvenF) -> IsotropicControl {
+    IsotropicControl { point: point, weight: weight }
+}
+
+pub fn patch(
+    _ p00: IsotropicControl,
+    _ p10: IsotropicControl,
+    _ p01: IsotropicControl,
+    _ p11: IsotropicControl,
+) -> IsotropicBilinearPatch {
+    IsotropicBilinearPatch { p00: p00, p10: p10, p01: p01, p11: p11 }
+}
+
+fn weight_coefficients(_ value: IsotropicEvenF) -> WeightCoefficients {
+    WeightCoefficients { scalar: value.scalar, e12: value.e12, e13: value.e13, e23: value.e23 }
+}
+
+fn odd_coefficients(_ value: IsotropicOddF) -> OddCoefficients {
+    OddCoefficients { e1: value.e1, e2: value.e2, e3: value.e3, e123: value.e123 }
+}
+
+/// Evaluate `point * weight` through the statically compiled sparse product.
+pub fn weighted_point(_ value: IsotropicControl) -> IsotropicOddF {
+    let output = <WeightedPointOperands as EvaluateGaF32>::evaluate(
+        WeightedPointOperands {
+            point: PointCoefficients { e1: value.point.x, e2: value.point.y, e3: value.point.z },
+            weight: weight_coefficients(value.weight),
+        },
+    )
+    IsotropicOddF { e1: output.0, e2: output.1, e3: output.2, e123: output.3 }
+}
+
+fn odd_times_reverse_weight(_ value: IsotropicOddF, _ weight: IsotropicEvenF) -> IsotropicOddF {
+    let output = <OddTimesReverseWeightOperands as EvaluateGaF32>::evaluate(
+        OddTimesReverseWeightOperands {
+            odd: odd_coefficients(value),
+            weight: weight_coefficients(weight),
+        },
+    )
+    IsotropicOddF { e1: output.0, e2: output.1, e3: output.2, e123: output.3 }
+}
+
+pub fn weight_norm_squared(_ value: IsotropicEvenF) -> f32 {
+    let output = <WeightNormOperands as EvaluateGaF32>::evaluate(
+        WeightNormOperands { weight: weight_coefficients(value) },
+    )
+    output.0
+}
+
+fn blend_scalar(_ p00: f32, _ p10: f32, _ p01: f32, _ p11: f32, _ parameter: Vec2F) -> f32 {
+    let one_minus_s = 1.0 - parameter.x
+    let one_minus_t = 1.0 - parameter.y
+    p00 * one_minus_s * one_minus_t
+        + p10 * parameter.x * one_minus_t
+        + p01 * one_minus_s * parameter.y
+        + p11 * parameter.x * parameter.y
+}
+
+fn blend_even(
+    _ p00: IsotropicEvenF,
+    _ p10: IsotropicEvenF,
+    _ p01: IsotropicEvenF,
+    _ p11: IsotropicEvenF,
+    _ parameter: Vec2F,
+) -> IsotropicEvenF {
+    even(
+        blend_scalar(p00.scalar, p10.scalar, p01.scalar, p11.scalar, parameter),
+        blend_scalar(p00.e12, p10.e12, p01.e12, p11.e12, parameter),
+        blend_scalar(p00.e13, p10.e13, p01.e13, p11.e13, parameter),
+        blend_scalar(p00.e23, p10.e23, p01.e23, p11.e23, parameter),
+    )
+}
+
+fn blend_odd(
+    _ p00: IsotropicOddF,
+    _ p10: IsotropicOddF,
+    _ p01: IsotropicOddF,
+    _ p11: IsotropicOddF,
+    _ parameter: Vec2F,
+) -> IsotropicOddF {
+    IsotropicOddF {
+        e1: blend_scalar(p00.e1, p10.e1, p01.e1, p11.e1, parameter),
+        e2: blend_scalar(p00.e2, p10.e2, p01.e2, p11.e2, parameter),
+        e3: blend_scalar(p00.e3, p10.e3, p01.e3, p11.e3, parameter),
+        e123: blend_scalar(p00.e123, p10.e123, p01.e123, p11.e123, parameter),
+    }
+}
+
+pub fn evaluate(
+    _ value: IsotropicBilinearPatch,
+    _ parameter: Vec2F,
+    _ policy: IsotropicPolicy,
+) -> IsotropicSample {
+    let numerator = blend_odd(
+        weighted_point(value.p00),
+        weighted_point(value.p10),
+        weighted_point(value.p01),
+        weighted_point(value.p11),
+        parameter,
+    )
+    let denominator = blend_even(
+        value.p00.weight,
+        value.p10.weight,
+        value.p01.weight,
+        value.p11.weight,
+        parameter,
+    )
+    let denominator_norm_squared = weight_norm_squared(denominator)
+    let conditioned = denominator_norm_squared >= policy.minimum_denominator_norm_squared
+    if !conditioned {
+        return IsotropicSample {
+            position: vec3f(0.0, 0.0, 0.0),
+            homogeneous: IsotropicOddF { e1: 0.0, e2: 0.0, e3: 0.0, e123: 0.0 },
+            denominator_norm_squared: denominator_norm_squared,
+            trivector_residual: 0.0,
+            conditioned: false,
+            vector_valued: false,
+        }
+    }
+    let homogeneous = odd_times_reverse_weight(numerator, denominator)
+    let inverse_norm = 1.0 / denominator_norm_squared
+    let trivector_residual = homogeneous.e123 * inverse_norm
+    IsotropicSample {
+        position: vec3f(
+            homogeneous.e1 * inverse_norm,
+            homogeneous.e2 * inverse_norm,
+            homogeneous.e3 * inverse_norm,
+        ),
+        homogeneous: homogeneous,
+        denominator_norm_squared: denominator_norm_squared,
+        trivector_residual: trivector_residual,
+        conditioned: true,
+        vector_valued: absf(trivector_residual) <= policy.maximum_trivector_residual,
+    }
+}
+
+fn scale_even(_ value: IsotropicEvenF, _ scale: f32) -> IsotropicEvenF {
+    even(
+        value.scalar * scale,
+        value.e12 * scale,
+        value.e13 * scale,
+        value.e23 * scale,
+    )
+}
+
+fn cross_grade_three(_ left: IsotropicControl, _ right: IsotropicControl) -> f32 {
+    odd_times_reverse_weight(weighted_point(left), right.weight).e123
+        + odd_times_reverse_weight(weighted_point(right), left.weight).e123
+}
+
+/// Apply the paper's unique fourth-weight scale when its grade-three
+/// denominator is sufficiently conditioned. The returned patch is unchanged
+/// on failure; this function never silently substitutes an arbitrary scale.
+pub fn reconcile_fourth_weight(
+    _ value: IsotropicBilinearPatch,
+    _ minimum_absolute_grade_three: f32,
+) -> FourthWeightReconciliation {
+    let numerator = cross_grade_three(value.p10, value.p01)
+    let denominator = cross_grade_three(value.p00, value.p11)
+    if absf(denominator) < minimum_absolute_grade_three {
+        return FourthWeightReconciliation { patch: value, scale: 1.0, conditioned: false }
+    }
+    let lambda = -numerator / denominator
+    FourthWeightReconciliation {
+        patch: patch(
+            value.p00,
+            value.p10,
+            value.p01,
+            control(value.p11.point, scale_even(value.p11.weight, lambda)),
+        ),
+        scale: lambda,
+        conditioned: true,
+    }
+}
+
+impl HyperPatchKernel for IsotropicBilinearKernel {
+    type Controls = IsotropicBilinearPatch
+    type Domain = UnitSquare
+    type Codomain = Euclidean3Points
+    type Policy = IsotropicPolicy
+    const CONTROL_COUNT: usize = 4
+
+    fn denote(
+        self,
+        _ controls: IsotropicBilinearPatch,
+        _ parameter: Vec2F,
+        _ policy: IsotropicPolicy,
+    ) -> DenotationSample<Euclidean3Points> {
+        let sample = evaluate(controls, parameter, policy)
+        denotation_sample<Euclidean3Points>(
+            sample.position,
+            sample.conditioned && sample.vector_valued,
+        )
+    }
+}
+
+pub fn as_hyperpatch(_ value: IsotropicBilinearPatch) -> HyperPatch<IsotropicBilinearKernel> {
+    hyperpatch(IsotropicBilinearKernel {}, value)
+}

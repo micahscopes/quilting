@@ -6,6 +6,7 @@ members = [
   { path = "ingots/algebra/quilting_quaternion", name = "quilting_quaternion" },
   { path = "ingots/geometry/quilting_hyperpatch", name = "quilting_hyperpatch" },
   { path = "ingots/geometry/quilting_qb", name = "quilting_qb" },
+  { path = "ingots/geometry/quilting_clifford_bezier", name = "quilting_clifford_bezier" },
   { path = "ingots/geometry/quilting_atlas", name = "quilting_atlas" },
   { path = "ingots/gpu/quilting_atlas_webgpu", name = "quilting_atlas_webgpu" },
   { path = "ingots/validation/classic_quilting_oracle", name = "classic_quilting_oracle" },
@@ -19,6 +20,7 @@ default-members = [
   "ingots/algebra/quilting_quaternion",
   "ingots/geometry/quilting_hyperpatch",
   "ingots/geometry/quilting_qb",
+  "ingots/geometry/quilting_clifford_bezier",
   "ingots/geometry/quilting_atlas",
   "ingots/gpu/quilting_atlas_webgpu",
   "ingots/validation/classic_quilting_oracle",
@@ -31,6 +33,7 @@ default-members = [
 [dependencies]
 core = { path = "../.toolchains/fe/ingots/core" }
 std = { path = "../.toolchains/fe/ingots/std" }
+ga_expr = { path = "../.toolchains/fe/ingots/ga_expr" }
 
 [metadata]
 purpose = "Classic Quilting mathematics, validation oracles, and teaching demos in Fe"
