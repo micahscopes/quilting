@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" href="data:,">
-  <title>Classic Quilting · Fe</title>
+  <title>Interactive Quilting · Fe</title>
   <style>
     :root {
       color-scheme: dark;
@@ -15,13 +15,15 @@
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      min-height: 100svh;
+      height: 100svh;
+      overflow: hidden;
       background: #111318;
     }
     main {
       display: grid;
       grid-template-rows: 38px minmax(0, 1fr);
-      min-height: 100svh;
+      height: 100svh;
+      min-height: 0;
     }
     header {
       display: flex;
@@ -38,10 +40,12 @@
       place-items: center;
       min-height: 0;
       padding: 12px;
+      overflow: hidden;
     }
     fe-surface {
       display: block;
-      width: min(100%, calc(100svh - 62px));
+      --fe-surface-window-inline-margin: 24px;
+      --fe-surface-window-block-margin: 140px;
     }
     fe-surface::part(canvas) {
       width: 100%;
@@ -59,13 +63,12 @@
 <body>
   <main>
     <header>
-      <strong>classic quilting</strong>
-      <span>M2 frozen atlas · canonical [2,4,8] · 21 samples · 26 triangles · WebGPU</span>
+      <strong>interactive quilting</strong>
+      <span>pointer: radial + triangular field · wheel: atlas depth · LoD 0–8 + S₃ · WebGPU</span>
     </header>
     <section class="stage" aria-label="Classic Quilting WebGPU demonstration">
       <script type="application/fe"
-              data-fe-src="../../ingots/demos/classic_quilting_fixed_raster"
-              data-fe-entry="shade"
+              data-fe-src="../../ingots/demos/classic_quilting_lod"
               data-fe-render></script>
     </section>
   </main>

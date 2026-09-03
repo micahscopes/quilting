@@ -41,6 +41,10 @@ pub fn bary3f(_ a: f32, _ b: f32, _ c: f32) -> Bary3F {
     Bary3F { a: a, b: b, c: c }
 }
 
+pub fn length2(_ value: Vec2F) -> f32 {
+    __sqrt_f32(value.x * value.x + value.y * value.y)
+}
+
 pub fn vertex_a() -> Vec2F {
     vec2f(0.0, 1.0)
 }

@@ -16,6 +16,10 @@ use core::execution::Compute
 use core::marker::Copy
 use core::pending::Pending
 
+extern {
+    const fn __f32_from_i32(_: i32) -> f32
+}
+
 pub use sampling
 pub use topology
 pub use triangulation
@@ -143,6 +147,23 @@ pub const fn edge_resolution(_ lod: u32) -> u32 {
     1 << lod
 }
 
+/// Convert an admitted LoD exponent for continuous policy calculations.
+pub fn lod_as_f32(_ lod: u32) -> f32 {
+    __f32_from_i32(lod.downcast_unchecked())
+}
+
+/// Stable numeric witness for the shared Rust/Fe S3 ordering.
+pub const fn edge_permutation_index(_ permutation: EdgePermutation) -> u32 {
+    match permutation {
+        EdgePermutation::ABC => 0,
+        EdgePermutation::ACB => 1,
+        EdgePermutation::BAC => 2,
+        EdgePermutation::BCA => 3,
+        EdgePermutation::CAB => 4,
+        EdgePermutation::CBA => 5,
+    }
+}
+
 /// Resolve a canonical triple from its lexicographic rank without storing a
 /// generated lookup table.
 pub const fn canonical_key_at(_ ordinal: usize) -> AtlasKey {
@@ -190,41 +211,95 @@ const fn choose3(_ n: u32) -> u32 {
     n * (n - 1) * (n - 2) / 6
 }
 
-/// Canonicalize a requested key and retain the exact lane permutation.
-pub const fn canonicalize(_ key: AtlasKey) -> CanonicalKey {
-    if key.a <= key.b && key.a <= key.c {
-        if key.b <= key.c {
-            CanonicalKey { key: key, permutation: EdgePermutation::ABC }
-        } else {
-            CanonicalKey {
-                key: AtlasKey { a: key.a, b: key.c, c: key.b },
-                permutation: EdgePermutation::ACB,
-            }
-        }
-    } else if key.b <= key.a && key.b <= key.c {
-        if key.a <= key.c {
-            CanonicalKey {
-                key: AtlasKey { a: key.b, b: key.a, c: key.c },
-                permutation: EdgePermutation::BAC,
-            }
-        } else {
-            CanonicalKey {
-                key: AtlasKey { a: key.b, b: key.c, c: key.a },
-                permutation: EdgePermutation::BCA,
-            }
-        }
-    } else if key.a <= key.b {
-        CanonicalKey {
-            key: AtlasKey { a: key.c, b: key.a, c: key.b },
-            permutation: EdgePermutation::CAB,
-        }
-    } else {
-        CanonicalKey {
-            key: AtlasKey { a: key.c, b: key.b, c: key.a },
-            permutation: EdgePermutation::CBA,
-        }
+pub const fn permute_key(_ key: AtlasKey, _ permutation: EdgePermutation) -> AtlasKey {
+    match permutation {
+        EdgePermutation::ABC => AtlasKey { a: key.a, b: key.b, c: key.c },
+        EdgePermutation::ACB => AtlasKey { a: key.a, b: key.c, c: key.b },
+        EdgePermutation::BAC => AtlasKey { a: key.b, b: key.a, c: key.c },
+        EdgePermutation::BCA => AtlasKey { a: key.b, b: key.c, c: key.a },
+        EdgePermutation::CAB => AtlasKey { a: key.c, b: key.a, c: key.b },
+        EdgePermutation::CBA => AtlasKey { a: key.c, b: key.b, c: key.a },
     }
 }
+
+const fn keys_equal(_ left: AtlasKey, _ right: AtlasKey) -> bool {
+    left.a == right.a && left.b == right.b && left.c == right.c
+}
+
+const fn sorted_key(_ key: AtlasKey) -> AtlasKey {
+    let mut a = key.a
+    let mut b = key.b
+    let mut c = key.c
+    if b < a {
+        let exchange = a
+        a = b
+        b = exchange
+    }
+    if c < b {
+        let exchange = b
+        b = c
+        c = exchange
+    }
+    if b < a {
+        let exchange = a
+        a = b
+        b = exchange
+    }
+    AtlasKey { a: a, b: b, c: c }
+}
+
+/// Canonicalize a requested key and retain the first exact S3 witness in the
+/// shared Rust/Fe order. Selecting by the denotation of `permute_key` matters
+/// when two lanes are equal: branch-order sorting can return a different
+/// geometric symmetry even though it returns the same canonical triple.
+pub const fn canonicalize(_ requested: AtlasKey) -> CanonicalKey {
+    let key = sorted_key(requested)
+    if keys_equal(permute_key(key, EdgePermutation::ABC), requested) {
+        CanonicalKey { key: key, permutation: EdgePermutation::ABC }
+    } else if keys_equal(permute_key(key, EdgePermutation::ACB), requested) {
+        CanonicalKey { key: key, permutation: EdgePermutation::ACB }
+    } else if keys_equal(permute_key(key, EdgePermutation::BAC), requested) {
+        CanonicalKey { key: key, permutation: EdgePermutation::BAC }
+    } else if keys_equal(permute_key(key, EdgePermutation::BCA), requested) {
+        CanonicalKey { key: key, permutation: EdgePermutation::BCA }
+    } else if keys_equal(permute_key(key, EdgePermutation::CAB), requested) {
+        CanonicalKey { key: key, permutation: EdgePermutation::CAB }
+    } else {
+        CanonicalKey { key: key, permutation: EdgePermutation::CBA }
+    }
+}
+
+const fn canonicalization_round_trips() -> bool {
+    let mut a: u32 = MIN_LOD
+    while a <= MAX_LOD {
+        let mut b: u32 = MIN_LOD
+        while b <= MAX_LOD {
+            let mut c: u32 = MIN_LOD
+            while c <= MAX_LOD {
+                let requested = AtlasKey { a: a, b: b, c: c }
+                let canonical = canonicalize(requested)
+                if !keys_equal(permute_key(canonical.key, canonical.permutation), requested) {
+                    return false
+                }
+                c = c + 1
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+    true
+}
+
+static_assert(canonicalization_round_trips())
+static_assert(edge_permutation_index(
+    canonicalize(AtlasKey { a: 8, b: 0, c: 0 }).permutation,
+) == 4)
+static_assert(edge_permutation_index(
+    canonicalize(AtlasKey { a: 0, b: 8, c: 0 }).permutation,
+) == 1)
+static_assert(edge_permutation_index(
+    canonicalize(AtlasKey { a: 8, b: 8, c: 0 }).permutation,
+) == 3)
 
 pub const fn hierarchy_root(_ key: AtlasKey) -> AtlasKey {
     AtlasKey { a: key.a - key.a, b: key.b - key.a, c: key.c - key.a }

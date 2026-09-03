@@ -5,6 +5,7 @@ version = "0.1.0"
 [dependencies]
 core = true
 std = true
+quilting_atlas = true
 quilting_domain = true
 quilting_quaternion = true
 quilting_qb = true
