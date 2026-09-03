@@ -6,5 +6,7 @@ version = "0.1.0"
 core = true
 std = true
 fmath = true
+classic_quilting_lod = true
+quilting_atlas = true
 quilting_clifford_bezier = true
 quilting_domain = true

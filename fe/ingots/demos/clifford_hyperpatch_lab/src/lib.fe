@@ -12,7 +12,15 @@
 //! shader, where one smooth coverage ramp supplies a constant-pixel feather.
 
 use core::marker::Copy
+use classic_quilting_lod::{
+    FixtureBuffer,
+    fixture_barycentric,
+    fixture_triangle_index,
+    patch_first_triangle,
+    patch_triangle_count,
+}
 use fmath::{TAU, abs, clamp, clamp01, cos, mix, rgba, sin, smoothstep, wrap_pi}
+use quilting_atlas::{AtlasKey, canonical_key_ordinal}
 use quilting_clifford_bezier::{
     IsotropicBilinearPatch,
     IsotropicDifferential,
@@ -53,6 +61,7 @@ use std::webgpu::{
     FragmentStage,
     FragmentSurface,
     GpuProgram,
+    Instanced,
     LatestPerFrame,
     RasterConfiguration,
     RasterPlan,
@@ -74,7 +83,14 @@ extern {
 }
 
 const GRID: u32 = 56
-const VERTICES: usize = 18816
+const GRID_VERTICES: u32 = 18816
+const GRID_VERTICES_PER_INSTANCE: u32 = 2352
+const ATLAS_MAX_LOD: u32 = 5
+const ATLAS_TRIANGLES_PER_MACRO: u32 = 1642
+const ATLAS_VERTICES_PER_MACRO: u32 = ATLAS_TRIANGLES_PER_MACRO * 3
+const MAX_MACRO_TRIANGLES: u32 = 8
+const VERTICES_PER_INSTANCE: usize = 4926
+const INSTANCE_COUNT: usize = 8
 
 /// The chosen visual policy is compile-time data. Changing the policy creates
 /// a different specialized shader; no per-fragment quality branch survives.
@@ -127,6 +143,9 @@ impl Copy for CameraFrame {}
 struct Projection { clip: ClipPosition, depth: f32, view_x: f32, view_y: f32 }
 impl Copy for Projection {}
 
+struct ParameterTriangle { p0: Vec2F, p1: Vec2F, p2: Vec2F, valid: bool }
+impl Copy for ParameterTriangle {}
+
 struct Rgb { red: f32, green: f32, blue: f32 }
 impl Copy for Rgb {}
 
@@ -152,6 +171,8 @@ struct CliffordLabParams {
     orbit_distance: Param,
     wire_px: Param,
     depth_cue: Param,
+    sampler_mode: Param,
+    atlas_lod: Param,
     res_x: Param,
     res_y: Param,
     selected: Param,
@@ -181,6 +202,8 @@ struct CliffordLabState {
     orbit_distance: f32,
     wire_px: f32,
     depth_cue: f32,
+    sampler_mode: f32,
+    atlas_lod: f32,
     res_x: f32,
     res_y: f32,
     selected: f32,
@@ -220,6 +243,9 @@ const fn lab_params() -> CliffordLabParams {
         orbit_distance: Param::log(min: 2.5, max: 16.0, init: 6.2),
         wire_px: Param::range(min: 0.0, max: 2.5, init: 0.72),
         depth_cue: Param::unit(init: 0.82),
+        // 0 = regular UV grid, 1 = two atlas charts, 2 = eight-chart fan.
+        sampler_mode: Param::int(min: 0.0, max: 2.0, init: 1.0),
+        atlas_lod: Param::int(min: 0.0, max: 5.0, init: 4.0),
         res_x: Param::extent_x(),
         res_y: Param::extent_y(),
         selected: Param::fixed(-1.0),
@@ -465,6 +491,87 @@ fn grid_parameter(_ vertex_index: u32) -> Vec2F {
     )
 }
 
+fn invalid_parameter_triangle() -> ParameterTriangle {
+    ParameterTriangle {
+        p0: vec2f(0.0, 0.0),
+        p1: vec2f(0.0, 0.0),
+        p2: vec2f(0.0, 0.0),
+        valid: false,
+    }
+}
+
+fn split_parameter_triangle(_ triangle: u32) -> ParameterTriangle {
+    if triangle == 0 {
+        ParameterTriangle {
+            p0: vec2f(0.0, 0.0),
+            p1: vec2f(1.0, 0.0),
+            p2: vec2f(0.0, 1.0),
+            valid: true,
+        }
+    } else if triangle == 1 {
+        ParameterTriangle {
+            p0: vec2f(1.0, 0.0),
+            p1: vec2f(1.0, 1.0),
+            p2: vec2f(0.0, 1.0),
+            valid: true,
+        }
+    } else {
+        invalid_parameter_triangle()
+    }
+}
+
+fn midpoint_parameter(_ first: Vec2F, _ second: Vec2F) -> Vec2F {
+    vec2f((first.x + second.x) * 0.5, (first.y + second.y) * 0.5)
+}
+
+fn child_parameter_triangle(_ parent: ParameterTriangle, _ child: u32) -> ParameterTriangle {
+    let midpoint01 = midpoint_parameter(parent.p0, parent.p1)
+    let midpoint12 = midpoint_parameter(parent.p1, parent.p2)
+    let midpoint20 = midpoint_parameter(parent.p2, parent.p0)
+    if child == 0 {
+        ParameterTriangle { p0: parent.p0, p1: midpoint01, p2: midpoint20, valid: parent.valid }
+    } else if child == 1 {
+        ParameterTriangle { p0: midpoint01, p1: parent.p1, p2: midpoint12, valid: parent.valid }
+    } else if child == 2 {
+        ParameterTriangle { p0: midpoint20, p1: midpoint12, p2: parent.p2, valid: parent.valid }
+    } else {
+        ParameterTriangle { p0: midpoint01, p1: midpoint12, p2: midpoint20, valid: parent.valid }
+    }
+}
+
+fn refined_parameter_triangle(_ triangle: u32) -> ParameterTriangle {
+    if triangle >= MAX_MACRO_TRIANGLES {
+        return invalid_parameter_triangle()
+    }
+    child_parameter_triangle(split_parameter_triangle(triangle / 4), triangle % 4)
+}
+
+fn macro_parameter_triangle(_ sampler_mode: f32, _ triangle: u32) -> ParameterTriangle {
+    if sampler_mode < 1.5 {
+        split_parameter_triangle(triangle)
+    } else {
+        refined_parameter_triangle(triangle)
+    }
+}
+
+fn map_macro_parameter(_ triangle: ParameterTriangle, _ bary: Bary3F) -> Vec2F {
+    vec2f(
+        triangle.p0.x * bary.a + triangle.p1.x * bary.b + triangle.p2.x * bary.c,
+        triangle.p0.y * bary.a + triangle.p1.y * bary.b + triangle.p2.y * bary.c,
+    )
+}
+
+fn admitted_atlas_lod(_ value: f32) -> u32 {
+    let mut lod: u32 = 0
+    while lod < ATLAS_MAX_LOD {
+        if value < as_f32(lod) + 0.5 {
+            return lod
+        }
+        lod = lod + 1
+    }
+    ATLAS_MAX_LOD
+}
+
 /// Pixel altitude at the current triangle vertex. The two dyadic triangles
 /// share one Jacobian parallelogram; their six altitudes reduce to three edge
 /// lengths, selected here without sampling neighboring surface points.
@@ -493,9 +600,73 @@ fn pixel_altitude(
     twice_area / (opposite_length + 0.00001)
 }
 
+fn parameter_screen_delta(
+    _ tangent_s: Vec2F,
+    _ tangent_t: Vec2F,
+    _ origin: Vec2F,
+    _ target: Vec2F,
+) -> Vec2F {
+    let ds = target.x - origin.x
+    let dt = target.y - origin.y
+    vec2f(
+        tangent_s.x * ds + tangent_t.x * dt,
+        tangent_s.y * ds + tangent_t.y * dt,
+    )
+}
+
+/// First-order screen-space altitude for an arbitrary atlas microtriangle.
+/// The exact Clifford differential supplies the pullback metric at this
+/// vertex; topology remains in parameter space while wire width is measured
+/// in physical backing pixels.
+fn atlas_pixel_altitude(
+    _ differential: IsotropicDifferential,
+    _ projection: Projection,
+    _ camera: CameraFrame,
+    _ p0: Vec2F,
+    _ p1: Vec2F,
+    _ p2: Vec2F,
+    _ corner: u32,
+    _ res_x: f32,
+    _ res_y: f32,
+) -> f32 {
+    let mut origin = p0
+    let mut first = p1
+    let mut second = p2
+    if corner == 1 {
+        origin = p1
+        first = p2
+        second = p0
+    } else if corner == 2 {
+        origin = p2
+        first = p0
+        second = p1
+    }
+    let tangent_s = screen_tangent(camera, projection, differential.tangent_s, res_x, res_y)
+    let tangent_t = screen_tangent(camera, projection, differential.tangent_t, res_x, res_y)
+    let edge_first = parameter_screen_delta(tangent_s, tangent_t, origin, first)
+    let edge_second = parameter_screen_delta(tangent_s, tangent_t, origin, second)
+    let opposite = vec2f(edge_second.x - edge_first.x, edge_second.y - edge_first.y)
+    let twice_area = abs(
+        edge_first.x * edge_second.y - edge_first.y * edge_second.x,
+    )
+    twice_area / (length2(opposite) + 0.00001)
+}
+
 fn edge_seed(_ local: Bary3F, _ altitude_pixels: f32, _ view_depth: f32) -> Bary3F {
     let seed = altitude_pixels * view_depth
     bary3f(local.a * seed, local.b * seed, local.c * seed)
+}
+
+fn invalid_patch_vertex() -> RasterVertex<PatchVarying> {
+    RasterVertex {
+        position: ClipPosition { x: 2.0, y: 2.0, z: 0.0, w: 1.0 },
+        varying: PatchVarying {
+            edge_seed: bary3f(0.0, 0.0, 0.0),
+            normal: vec3f(0.0, 0.0, 1.0),
+            residual: 0.0,
+            view_depth: 1.0,
+        },
+    }
 }
 
 fn minimum3(_ value: Bary3F) -> f32 {
@@ -703,9 +874,6 @@ fn depth_surface_color(
     _ residual: f32,
     _ depth_cue: f32,
 ) -> Rgb {
-    if residual < -0.00001 || residual > 0.00001 {
-        return Rgb { red: 0.10, green: 0.30, blue: 0.92 }
-    }
     let depth_t = clamp01(
         (view_depth - AnalyticDepthWire::near_depth())
             / (AnalyticDepthWire::far_depth() - AnalyticDepthWire::near_depth()),
@@ -729,6 +897,7 @@ actor CliffordHyperpatchLab uses (
     SurfaceQuality<ResponsiveBacking>,
     SurfaceRecovery<StandardSurfaceRecovery>,
 ) {
+    fixture: FixtureBuffer,
     p00_x: f32,
     p00_y: f32,
     p00_z: f32,
@@ -750,6 +919,8 @@ actor CliffordHyperpatchLab uses (
     orbit_distance: f32,
     wire_px: f32,
     depth_cue: f32,
+    sampler_mode: f32,
+    atlas_lod: f32,
     res_x: f32,
     res_y: f32,
     selected: f32,
@@ -789,6 +960,8 @@ actor CliffordHyperpatchLab uses (
             orbit_distance: self.orbit_distance,
             wire_px: self.wire_px,
             depth_cue: self.depth_cue,
+            sampler_mode: self.sampler_mode,
+            atlas_lod: self.atlas_lod,
             res_x: self.res_x,
             res_y: self.res_y,
             selected: self.selected,
@@ -855,8 +1028,17 @@ actor CliffordHyperpatchLab uses (
         -15396337
     }
 
-    fn patch_vertices(self, vertex_index: u32) -> RasterVertex<PatchVarying>
-        uses (VertexStage<PatchVarying, TriangleList<VERTICES>>)
+    fn patch_vertices(
+        self,
+        vertex_index: u32,
+        instance_index: u32,
+    ) -> RasterVertex<PatchVarying>
+        uses (
+            VertexStage<
+                PatchVarying,
+                Instanced<TriangleList<VERTICES_PER_INSTANCE>, INSTANCE_COUNT>,
+            >
+        )
     {
         let state = CliffordLabState {
             p00_x: self.p00_x,
@@ -880,33 +1062,99 @@ actor CliffordHyperpatchLab uses (
             orbit_distance: self.orbit_distance,
             wire_px: self.wire_px,
             depth_cue: self.depth_cue,
+            sampler_mode: self.sampler_mode,
+            atlas_lod: self.atlas_lod,
             res_x: self.res_x,
             res_y: self.res_y,
             selected: self.selected,
             dragging: self.dragging,
             orbiting: self.orbiting,
         }
-        let parameter = grid_parameter(vertex_index)
-        let differential = evaluate_differential(
-            controlled_patch(positions(state), weights(state)),
-            parameter,
-            policy(),
-            0.000000000001,
-        )
+        let patch_value = controlled_patch(positions(state), weights(state))
         let camera = camera_frame(state)
-        let projected = project(camera, differential.sample.position)
-        let local = local_barycentric(vertex_index % 6)
-        let altitude = pixel_altitude(
-            differential, projected, camera, vertex_index % 6, self.res_x, self.res_y,
-        )
-        RasterVertex {
-            position: projected.clip,
-            varying: PatchVarying {
-                edge_seed: edge_seed(local, altitude, projected.depth),
-                normal: differential.normal,
-                residual: differential.sample.trivector_residual,
-                view_depth: projected.depth,
-            },
+        if self.sampler_mode < 0.5 {
+            let grid_vertex = instance_index * GRID_VERTICES_PER_INSTANCE + vertex_index
+            if vertex_index >= GRID_VERTICES_PER_INSTANCE || grid_vertex >= GRID_VERTICES {
+                invalid_patch_vertex()
+            } else {
+                let parameter = grid_parameter(grid_vertex)
+                let differential = evaluate_differential(
+                    patch_value, parameter, policy(), 0.000000000001,
+                )
+                let projected = project(camera, differential.sample.position)
+                let local_vertex = grid_vertex % 6
+                let altitude = pixel_altitude(
+                    differential, projected, camera, local_vertex, self.res_x, self.res_y,
+                )
+                RasterVertex {
+                    position: projected.clip,
+                    varying: PatchVarying {
+                        edge_seed: edge_seed(
+                            local_barycentric(local_vertex), altitude, projected.depth,
+                        ),
+                        normal: differential.normal,
+                        residual: differential.sample.trivector_residual,
+                        view_depth: projected.depth,
+                    },
+                }
+            }
+        } else {
+            let chart = macro_parameter_triangle(self.sampler_mode, instance_index)
+            let lod = admitted_atlas_lod(self.atlas_lod)
+            let atlas_key = AtlasKey { a: lod, b: lod, c: lod }
+            let patch_index = canonical_key_ordinal(atlas_key)
+            let local_triangle = vertex_index / 3
+            if !chart.valid || local_triangle >= patch_triangle_count(self.fixture, patch_index) {
+                invalid_patch_vertex()
+            } else {
+                let corner = vertex_index % 3
+                let source_triangle = patch_first_triangle(self.fixture, patch_index) + local_triangle
+                let point0 = fixture_triangle_index(self.fixture, source_triangle, 0)
+                let point1 = fixture_triangle_index(self.fixture, source_triangle, 1)
+                let point2 = fixture_triangle_index(self.fixture, source_triangle, 2)
+                let parameter0 = map_macro_parameter(
+                    chart, fixture_barycentric(self.fixture, point0),
+                )
+                let parameter1 = map_macro_parameter(
+                    chart, fixture_barycentric(self.fixture, point1),
+                )
+                let parameter2 = map_macro_parameter(
+                    chart, fixture_barycentric(self.fixture, point2),
+                )
+                let parameter = if corner == 0 {
+                    parameter0
+                } else if corner == 1 {
+                    parameter1
+                } else {
+                    parameter2
+                }
+                let differential = evaluate_differential(
+                    patch_value, parameter, policy(), 0.000000000001,
+                )
+                let projected = project(camera, differential.sample.position)
+                let altitude = atlas_pixel_altitude(
+                    differential,
+                    projected,
+                    camera,
+                    parameter0,
+                    parameter1,
+                    parameter2,
+                    corner,
+                    self.res_x,
+                    self.res_y,
+                )
+                RasterVertex {
+                    position: projected.clip,
+                    varying: PatchVarying {
+                        edge_seed: edge_seed(
+                            local_barycentric(corner), altitude, projected.depth,
+                        ),
+                        normal: differential.normal,
+                        residual: differential.sample.trivector_residual,
+                        view_depth: projected.depth,
+                    },
+                }
+            }
         }
     }
 
@@ -954,6 +1202,8 @@ actor CliffordHyperpatchLab uses (
             orbit_distance: self.orbit_distance,
             wire_px: self.wire_px,
             depth_cue: self.depth_cue,
+            sampler_mode: self.sampler_mode,
+            atlas_lod: self.atlas_lod,
             res_x: self.res_x,
             res_y: self.res_y,
             selected: self.selected,
