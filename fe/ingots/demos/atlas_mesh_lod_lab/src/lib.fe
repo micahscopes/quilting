@@ -1,0 +1,920 @@
+//! Cursor-local adaptive tessellation of a procedural Fe terrain.
+//!
+//! Ninety-six triangular macro patches form one continuous sheet. Every patch
+//! is an instance of a bounded atlas draw; its three edge demands are sampled
+//! at the corresponding projected edge midpoints, so neighbours independently
+//! choose exactly the same dyadic boundary density. The canonical Quilting
+//! atlas supplies topology and Fe restores the requested edge permutation.
+//!
+//! Geometry, noise differentials, edge LoD, cursor reaction, orbit camera,
+//! OKLCH heat mapping, lighting, and analytic wire coverage are all Fe. The
+//! browser transports typed facts and realizes the compile-time WebGPU plan.
+//! Four-sample rasterization handles silhouettes; a perspective-correct pixel
+//! altitude gives every internal edge a constant-width analytic AA feather.
+//!
+//! `animation_clock` is the deliberately isolated clock seam. It accepts typed
+//! animation-frame timestamps now, while also advancing on interaction. The
+//! current resident surface host only presents frames backed by queued input,
+//! so idle continuous animation awaits its planned zero-input frame contract;
+//! no browser-side timer or policy is substituted here.
+
+use core::marker::Copy
+use classic_quilting_lod::{
+    FixtureBuffer,
+    fixture_barycentric,
+    fixture_triangle_index,
+    patch_first_triangle,
+    patch_triangle_count,
+}
+use fmath::{TAU, abs, clamp, clamp01, cos, max, mix, sin, smoothstep, wrap_pi}
+use quilting_atlas::{AtlasKey, canonical_key_ordinal, canonicalize, edge_permutation_index}
+use quilting_domain::{
+    Bary3F,
+    Vec2F,
+    Vec3F,
+    add3,
+    bary3f,
+    cross3,
+    dot3,
+    length2,
+    normalize3_or,
+    scale3,
+    sub3,
+    vec2f,
+    vec3f,
+}
+use quilting_oklch::{
+    DisplayRgb,
+    HuePath,
+    display_rgb,
+    mix_display_rgb,
+    oklch,
+    pack_oklch,
+    pack_rgba8,
+    scale_lightness_chroma,
+    three_stop_ramp,
+    to_display_rgb,
+}
+use quilting_qb::remap_barycentric
+use std::web::view::{
+    ApplyParamBindings,
+    Extent,
+    Param,
+    ParamBindingsProvider,
+    Surface,
+    SurfaceEvent,
+    SurfaceState,
+}
+use std::webgpu::{
+    ClipPosition,
+    Depth24LessEqualMsaa4,
+    FragmentStage,
+    FragmentSurface,
+    GpuProgram,
+    Instanced,
+    LatestPerFrame,
+    RasterConfiguration,
+    RasterPlan,
+    RasterVertex,
+    ResponsiveBacking,
+    StandardSurfaceRecovery,
+    SurfacePointerMotion,
+    SurfaceQuality,
+    SurfaceRecovery,
+    SurfaceScheduling,
+    SurfaceTransition,
+    TriangleList,
+    VertexStage,
+    WebGpuBackend,
+    raster_plan,
+}
+
+extern {
+    const fn __f32_from_i32(_: i32) -> f32
+}
+
+const PATCH_COLUMNS: u32 = 8
+const PATCH_ROWS: u32 = 6
+const PATCH_INSTANCES: usize = 96
+const ATLAS_MAX_LOD: u32 = 5
+const ATLAS_VERTEX_LIMIT: usize = 4926
+const SHEET_WIDTH: f32 = 5.6
+const SHEET_DEPTH: f32 = 3.8
+
+pub struct TerrainVarying {
+    pub edge_seed: Bary3F,
+    pub normal: Vec3F,
+    pub heat: f32,
+    pub focus: f32,
+    pub view_depth: f32,
+}
+
+impl Copy for TerrainVarying {}
+
+struct MeshLabParams {
+    pointer_x: Param,
+    pointer_y: Param,
+    clock_seconds: Param,
+    dragging: Param,
+    animate: Param,
+    noise_amplitude: Param,
+    noise_frequency: Param,
+    noise_warp: Param,
+    noise_detail: Param,
+    noise_speed: Param,
+    phase_offset: Param,
+    focus_radius: Param,
+    focus_softness: Param,
+    base_lod: Param,
+    focus_lod: Param,
+    wire_px: Param,
+    low_hue: Param,
+    middle_hue: Param,
+    high_hue: Param,
+    palette_lightness: Param,
+    palette_chroma: Param,
+    heat_bias: Param,
+    heat_contrast: Param,
+    hue_path: Param,
+    depth_cue: Param,
+    orbit_yaw: Param,
+    orbit_pitch: Param,
+    orbit_distance: Param,
+    res_x: Param,
+    res_y: Param,
+}
+
+struct MeshLabState {
+    pointer_x: f32,
+    pointer_y: f32,
+    clock_seconds: f32,
+    dragging: f32,
+    animate: f32,
+    noise_amplitude: f32,
+    noise_frequency: f32,
+    noise_warp: f32,
+    noise_detail: f32,
+    noise_speed: f32,
+    phase_offset: f32,
+    focus_radius: f32,
+    focus_softness: f32,
+    base_lod: f32,
+    focus_lod: f32,
+    wire_px: f32,
+    low_hue: f32,
+    middle_hue: f32,
+    high_hue: f32,
+    palette_lightness: f32,
+    palette_chroma: f32,
+    heat_bias: f32,
+    heat_contrast: f32,
+    hue_path: f32,
+    depth_cue: f32,
+    orbit_yaw: f32,
+    orbit_pitch: f32,
+    orbit_distance: f32,
+    res_x: f32,
+    res_y: f32,
+}
+
+impl SurfaceState for MeshLabState {
+    type Params = MeshLabParams
+}
+
+derive ApplyParamBindings for MeshLabState using ParamBindingsProvider
+
+const fn mesh_lab_params() -> MeshLabParams {
+    MeshLabParams {
+        pointer_x: Param::fixed(0.0),
+        pointer_y: Param::fixed(0.0),
+        clock_seconds: Param::fixed(0.0),
+        dragging: Param::fixed(0.0),
+        animate: Param::toggle(init: true),
+        noise_amplitude: Param::range(min: 0.0, max: 0.72, init: 0.34),
+        noise_frequency: Param::range(min: 0.55, max: 5.5, init: 2.05),
+        noise_warp: Param::unit(init: 0.44),
+        noise_detail: Param::unit(init: 0.68),
+        noise_speed: Param::range(min: 0.0, max: 2.5, init: 0.72),
+        phase_offset: Param::angle(init: 0.0),
+        focus_radius: Param::range(min: 0.08, max: 0.72, init: 0.34),
+        focus_softness: Param::unit(init: 0.62),
+        base_lod: Param::int(min: 0.0, max: 3.0, init: 1.0),
+        focus_lod: Param::int(min: 2.0, max: 5.0, init: 5.0),
+        wire_px: Param::range(min: 0.0, max: 2.2, init: 0.68),
+        low_hue: Param::angle(init: 4.58),
+        middle_hue: Param::angle(init: 2.72),
+        high_hue: Param::angle(init: 0.58),
+        palette_lightness: Param::range(min: 0.46, max: 0.86, init: 0.70),
+        palette_chroma: Param::range(min: 0.02, max: 0.30, init: 0.19),
+        heat_bias: Param::range(min: -0.42, max: 0.42, init: 0.0),
+        heat_contrast: Param::range(min: 0.45, max: 3.2, init: 1.35),
+        hue_path: Param::int(min: 0.0, max: 3.0, init: 0.0),
+        depth_cue: Param::unit(init: 0.68),
+        orbit_yaw: Param::range(min: -3.14159265, max: 3.14159265, init: -0.46),
+        orbit_pitch: Param::range(min: 0.16, max: 1.18, init: 0.55),
+        orbit_distance: Param::log(min: 4.2, max: 13.0, init: 7.2),
+        res_x: Param::extent_x(),
+        res_y: Param::extent_y(),
+    }
+}
+
+struct NoiseControls { amplitude: f32, frequency: f32, warp: f32, detail: f32, phase: f32 }
+
+struct NoiseDifferential { value: f32, du: f32, dv: f32 }
+
+struct SurfaceDifferential {
+    position: Vec3F,
+    tangent_u: Vec3F,
+    tangent_v: Vec3F,
+    normal: Vec3F,
+    noise: f32,
+    slope: f32,
+}
+
+struct CameraFrame {
+    eye: Vec3F,
+    right: Vec3F,
+    up: Vec3F,
+    forward: Vec3F,
+    focal: f32,
+    aspect: f32,
+    near: f32,
+    far: f32,
+}
+
+struct Projection { clip: ClipPosition, depth: f32, view_x: f32, view_y: f32 }
+
+struct MacroTriangle { p0: Vec2F, p1: Vec2F, p2: Vec2F }
+
+struct RenderControls {
+    pointer_x: f32,
+    pointer_y: f32,
+    clock_seconds: f32,
+    noise_amplitude: f32,
+    noise_frequency: f32,
+    noise_warp: f32,
+    noise_detail: f32,
+    noise_speed: f32,
+    phase_offset: f32,
+    focus_radius: f32,
+    focus_softness: f32,
+    base_lod: f32,
+    focus_lod: f32,
+    orbit_yaw: f32,
+    orbit_pitch: f32,
+    orbit_distance: f32,
+    res_x: f32,
+    res_y: f32,
+}
+
+impl Copy for NoiseControls {}
+impl Copy for NoiseDifferential {}
+impl Copy for SurfaceDifferential {}
+impl Copy for CameraFrame {}
+impl Copy for Projection {}
+impl Copy for MacroTriangle {}
+impl Copy for RenderControls {}
+
+fn as_f32(_ value: u32) -> f32 {
+    __f32_from_i32(value.downcast_unchecked())
+}
+
+fn midpoint(_ left: Vec2F, _ right: Vec2F) -> Vec2F {
+    vec2f((left.x + right.x) * 0.5, (left.y + right.y) * 0.5)
+}
+
+fn local_corner(_ corner: u32) -> Bary3F {
+    if corner == 0 {
+        bary3f(1.0, 0.0, 0.0)
+    } else if corner == 1 {
+        bary3f(0.0, 1.0, 0.0)
+    } else {
+        bary3f(0.0, 0.0, 1.0)
+    }
+}
+
+fn minimum3(_ value: Bary3F) -> f32 {
+    let mut result = value.a
+    if value.b < result {
+        result = value.b
+    }
+    if value.c < result {
+        result = value.c
+    }
+    result
+}
+
+fn map_parameter(_ triangle: MacroTriangle, _ bary: Bary3F) -> Vec2F {
+    vec2f(
+        triangle.p0.x * bary.a + triangle.p1.x * bary.b + triangle.p2.x * bary.c,
+        triangle.p0.y * bary.a + triangle.p1.y * bary.b + triangle.p2.y * bary.c,
+    )
+}
+
+fn macro_triangle(_ instance_index: u32) -> MacroTriangle {
+    let cell = instance_index / 2
+    let half = instance_index % 2
+    let column = cell % PATCH_COLUMNS
+    let row = cell / PATCH_COLUMNS
+    let u0 = as_f32(column) / as_f32(PATCH_COLUMNS)
+    let u1 = as_f32(column + 1) / as_f32(PATCH_COLUMNS)
+    let v0 = as_f32(row) / as_f32(PATCH_ROWS)
+    let v1 = as_f32(row + 1) / as_f32(PATCH_ROWS)
+    if half == 0 {
+        MacroTriangle { p0: vec2f(u0, v0), p1: vec2f(u1, v0), p2: vec2f(u0, v1) }
+    } else {
+        MacroTriangle { p0: vec2f(u1, v0), p1: vec2f(u1, v1), p2: vec2f(u0, v1) }
+    }
+}
+
+fn noise_controls(_ controls: RenderControls) -> NoiseControls {
+    NoiseControls {
+        amplitude: controls.noise_amplitude,
+        frequency: controls.noise_frequency,
+        warp: controls.noise_warp * 0.34,
+        detail: controls.noise_detail,
+        phase: controls.clock_seconds * controls.noise_speed + controls.phase_offset,
+    }
+}
+
+/// A compact analytic domain-warped wave field. It is texture-like without a
+/// sampled texture resource, and supplies exact parameter derivatives for
+/// stable normals and the pullback metric used by wire antialiasing.
+fn procedural_noise(_ parameter: Vec2F, _ controls: NoiseControls) -> NoiseDifferential {
+    let phase = controls.phase
+    let warp_u_angle = TAU * (0.73 * parameter.y + 0.11 * phase)
+    let warp_v_angle = TAU * (0.61 * parameter.x - 0.09 * phase)
+    let warped_u = parameter.x + controls.warp * sin(warp_u_angle)
+    let warped_v = parameter.y + controls.warp * sin(warp_v_angle)
+
+    let warped_u_du = 1.0
+    let warped_u_dv = controls.warp * cos(warp_u_angle) * TAU * 0.73
+    let warped_v_du = controls.warp * cos(warp_v_angle) * TAU * 0.61
+    let warped_v_dv = 1.0
+
+    let frequency = TAU * controls.frequency
+    let first = frequency * (0.83 * warped_u + 0.24 * warped_v) + phase * 1.10
+    let second = frequency * (-0.31 * warped_u + 0.71 * warped_v) - phase * 1.37
+    let third = frequency * 1.91 * (0.52 * warped_u - 0.48 * warped_v) + phase * 0.73
+
+    let first_du = frequency * (0.83 * warped_u_du + 0.24 * warped_v_du)
+    let first_dv = frequency * (0.83 * warped_u_dv + 0.24 * warped_v_dv)
+    let second_du = frequency * (-0.31 * warped_u_du + 0.71 * warped_v_du)
+    let second_dv = frequency * (-0.31 * warped_u_dv + 0.71 * warped_v_dv)
+    let third_du = frequency * 1.91 * (0.52 * warped_u_du - 0.48 * warped_v_du)
+    let third_dv = frequency * 1.91 * (0.52 * warped_u_dv - 0.48 * warped_v_dv)
+
+    let second_weight = 0.24 + controls.detail * 0.42
+    let third_weight = 0.08 + controls.detail * 0.30
+    let normalization = 1.0 / (1.0 + second_weight + third_weight)
+    NoiseDifferential {
+        value: (sin(first) + second_weight * sin(second) + third_weight * sin(third))
+            * normalization,
+        du: (cos(first) * first_du
+                + second_weight * cos(second) * second_du
+                + third_weight * cos(third) * third_du)
+            * normalization,
+        dv: (cos(first) * first_dv
+                + second_weight * cos(second) * second_dv
+                + third_weight * cos(third) * third_dv)
+            * normalization,
+    }
+}
+
+fn evaluate_surface(_ parameter: Vec2F, _ controls: NoiseControls) -> SurfaceDifferential {
+    let noise = procedural_noise(parameter, controls)
+    let height = controls.amplitude * noise.value
+    let height_du = controls.amplitude * noise.du
+    let height_dv = controls.amplitude * noise.dv
+    let tangent_u = vec3f(SHEET_WIDTH, height_du, 0.0)
+    let tangent_v = vec3f(0.0, height_dv, SHEET_DEPTH)
+    let normal = normalize3_or(
+        cross3(tangent_v, tangent_u),
+        vec3f(0.0, 1.0, 0.0),
+        0.00000001,
+    )
+    SurfaceDifferential {
+        position: vec3f(
+            (parameter.x - 0.5) * SHEET_WIDTH,
+            height,
+            (parameter.y - 0.5) * SHEET_DEPTH,
+        ),
+        tangent_u: tangent_u,
+        tangent_v: tangent_v,
+        normal: normal,
+        noise: noise.value,
+        slope: length2(vec2f(height_du / SHEET_WIDTH, height_dv / SHEET_DEPTH)),
+    }
+}
+
+fn camera_frame(_ controls: RenderControls) -> CameraFrame {
+    let cos_pitch = cos(controls.orbit_pitch)
+    let offset = vec3f(
+        cos_pitch * sin(controls.orbit_yaw),
+        sin(controls.orbit_pitch),
+        cos_pitch * cos(controls.orbit_yaw),
+    )
+    let target = vec3f(0.0, 0.0, 0.0)
+    let eye = add3(target, scale3(offset, controls.orbit_distance))
+    let forward = normalize3_or(sub3(target, eye), vec3f(0.0, 0.0, -1.0), 0.00000001)
+    let right = normalize3_or(
+        cross3(forward, vec3f(0.0, 1.0, 0.0)),
+        vec3f(1.0, 0.0, 0.0),
+        0.00000001,
+    )
+    let up = normalize3_or(cross3(right, forward), vec3f(0.0, 1.0, 0.0), 0.00000001)
+    CameraFrame {
+        eye: eye,
+        right: right,
+        up: up,
+        forward: forward,
+        focal: 1.72,
+        aspect: if controls.res_y > 0.0 {
+            controls.res_x / controls.res_y
+        } else {
+            1.0
+        },
+        near: 0.08,
+        far: 40.0,
+    }
+}
+
+fn project(_ camera: CameraFrame, _ position: Vec3F) -> Projection {
+    let relative = sub3(position, camera.eye)
+    let view_x = dot3(relative, camera.right)
+    let view_y = dot3(relative, camera.up)
+    let depth = dot3(relative, camera.forward)
+    let depth_scale = camera.far / (camera.far - camera.near)
+    Projection {
+        clip: ClipPosition {
+            x: camera.focal * view_x / camera.aspect,
+            y: camera.focal * view_y,
+            z: depth_scale * depth - depth_scale * camera.near,
+            w: depth,
+        },
+        depth: depth,
+        view_x: view_x,
+        view_y: view_y,
+    }
+}
+
+fn screen_tangent(
+    _ camera: CameraFrame,
+    _ projection: Projection,
+    _ tangent: Vec3F,
+    _ res_x: f32,
+    _ res_y: f32,
+) -> Vec2F {
+    let tangent_x = dot3(tangent, camera.right)
+    let tangent_y = dot3(tangent, camera.up)
+    let tangent_z = dot3(tangent, camera.forward)
+    let inverse_depth_squared = 1.0 / (projection.depth * projection.depth)
+    vec2f(
+        0.5
+            * res_x
+            * camera.focal
+            / camera.aspect
+            * (tangent_x * projection.depth - projection.view_x * tangent_z)
+            * inverse_depth_squared,
+        0.5
+            * res_y
+            * camera.focal
+            * (tangent_y * projection.depth - projection.view_y * tangent_z)
+            * inverse_depth_squared,
+    )
+}
+
+fn parameter_screen_delta(
+    _ tangent_u: Vec2F,
+    _ tangent_v: Vec2F,
+    _ origin: Vec2F,
+    _ target: Vec2F,
+) -> Vec2F {
+    let du = target.x - origin.x
+    let dv = target.y - origin.y
+    vec2f(
+        tangent_u.x * du + tangent_v.x * dv,
+        tangent_u.y * du + tangent_v.y * dv,
+    )
+}
+
+fn atlas_pixel_altitude(
+    _ differential: SurfaceDifferential,
+    _ projection: Projection,
+    _ camera: CameraFrame,
+    _ p0: Vec2F,
+    _ p1: Vec2F,
+    _ p2: Vec2F,
+    _ corner: u32,
+    _ res_x: f32,
+    _ res_y: f32,
+) -> f32 {
+    let mut origin = p0
+    let mut first = p1
+    let mut second = p2
+    if corner == 1 {
+        origin = p1
+        first = p2
+        second = p0
+    } else if corner == 2 {
+        origin = p2
+        first = p0
+        second = p1
+    }
+    let tangent_u = screen_tangent(camera, projection, differential.tangent_u, res_x, res_y)
+    let tangent_v = screen_tangent(camera, projection, differential.tangent_v, res_x, res_y)
+    let edge_first = parameter_screen_delta(tangent_u, tangent_v, origin, first)
+    let edge_second = parameter_screen_delta(tangent_u, tangent_v, origin, second)
+    let opposite = vec2f(edge_second.x - edge_first.x, edge_second.y - edge_first.y)
+    let twice_area = abs(
+        edge_first.x * edge_second.y - edge_first.y * edge_second.x,
+    )
+    twice_area / (length2(opposite) + 0.00001)
+}
+
+fn edge_seed(_ corner: u32, _ altitude_pixels: f32, _ depth: f32) -> Bary3F {
+    let local = local_corner(corner)
+    let seed = altitude_pixels * depth
+    bary3f(local.a * seed, local.b * seed, local.c * seed)
+}
+
+fn focus_at_parameter(
+    _ parameter: Vec2F,
+    _ controls: RenderControls,
+    _ noise: NoiseControls,
+    _ camera: CameraFrame,
+) -> f32 {
+    let position = evaluate_surface(parameter, noise).position
+    let clip = project(camera, position).clip
+    let aspect_correction = if controls.res_y > 0.0 {
+        controls.res_x / controls.res_y
+    } else {
+        1.0
+    }
+    let dx = (clip.x / clip.w - controls.pointer_x) * aspect_correction
+    let dy = clip.y / clip.w - controls.pointer_y
+    let distance = length2(vec2f(dx, dy))
+    let inner = controls.focus_radius * (1.0 - 0.86 * controls.focus_softness)
+    1.0 - smoothstep(inner, controls.focus_radius, distance)
+}
+
+fn quantized_lod(_ continuous: f32) -> u32 {
+    let admitted = clamp(continuous, 0.0, as_f32(ATLAS_MAX_LOD))
+    let mut lod: u32 = 0
+    while lod < ATLAS_MAX_LOD {
+        if admitted < as_f32(lod) + 0.5 {
+            return lod
+        }
+        lod = lod + 1
+    }
+    ATLAS_MAX_LOD
+}
+
+fn edge_lod(
+    _ parameter: Vec2F,
+    _ controls: RenderControls,
+    _ noise: NoiseControls,
+    _ camera: CameraFrame,
+) -> u32 {
+    let focus = focus_at_parameter(parameter, controls, noise, camera)
+    let high = max(controls.base_lod, controls.focus_lod)
+    quantized_lod(mix(controls.base_lod, high, focus))
+}
+
+/// Atlas lanes are BC, CA, AB: edge midpoints use the matching macro corners.
+/// This edge-local rule is conforming because both incident patches evaluate
+/// the same world-space midpoint and the same Fe quantizer.
+fn requested_key(
+    _ triangle: MacroTriangle,
+    _ controls: RenderControls,
+    _ noise: NoiseControls,
+    _ camera: CameraFrame,
+) -> AtlasKey {
+    AtlasKey {
+        a: edge_lod(
+            midpoint(triangle.p1, triangle.p2),
+            controls,
+            noise,
+            camera,
+        ),
+        b: edge_lod(
+            midpoint(triangle.p2, triangle.p0),
+            controls,
+            noise,
+            camera,
+        ),
+        c: edge_lod(
+            midpoint(triangle.p0, triangle.p1),
+            controls,
+            noise,
+            camera,
+        ),
+    }
+}
+
+fn invalid_vertex() -> RasterVertex<TerrainVarying> {
+    RasterVertex {
+        position: ClipPosition { x: 2.0, y: 2.0, z: 0.0, w: 1.0 },
+        varying: TerrainVarying {
+            edge_seed: bary3f(0.0, 0.0, 0.0),
+            normal: vec3f(0.0, 1.0, 0.0),
+            heat: 0.0,
+            focus: 0.0,
+            view_depth: 1.0,
+        },
+    }
+}
+
+fn heat_value(_ differential: SurfaceDifferential, _ bias: f32, _ contrast: f32) -> f32 {
+    let raw = 0.5 + differential.noise * 0.46 + clamp01(differential.slope * 1.8) * 0.08
+    clamp01((raw + bias - 0.5) * contrast + 0.5)
+}
+
+fn selected_hue_path(_ value: f32) -> HuePath {
+    if value < 0.5 {
+        HuePath::Shorter
+    } else if value < 1.5 {
+        HuePath::Longer
+    } else if value < 2.5 {
+        HuePath::Increasing
+    } else {
+        HuePath::Decreasing
+    }
+}
+
+fn heat_surface_color(
+    _ heat: f32,
+    _ normal: Vec3F,
+    _ view_depth: f32,
+    _ low_hue: f32,
+    _ middle_hue: f32,
+    _ high_hue: f32,
+    _ palette_lightness: f32,
+    _ palette_chroma: f32,
+    _ hue_path: f32,
+    _ depth_cue: f32,
+) -> DisplayRgb {
+    let low = oklch(palette_lightness * 0.72, palette_chroma * 0.78, low_hue)
+    let middle = oklch(palette_lightness, palette_chroma * 0.92, middle_hue)
+    let high = oklch(palette_lightness * 1.16, palette_chroma, high_hue)
+    let ramp = three_stop_ramp(low, middle, high, heat, selected_hue_path(hue_path))
+    let unit_normal = normalize3_or(normal, vec3f(0.0, 1.0, 0.0), 0.00000001)
+    let light = normalize3_or(vec3f(-0.42, 0.78, 0.46), vec3f(0.0, 1.0, 0.0), 0.00000001)
+    let diffuse = max(dot3(unit_normal, light), 0.0)
+    let depth = clamp01((view_depth - 4.0) / 8.5)
+    let depth_scale = mix(1.0, 0.72, depth * depth_cue)
+    let lit = scale_lightness_chroma(
+        ramp,
+        (0.62 + 0.42 * diffuse) * depth_scale,
+        0.82 + 0.18 * diffuse,
+    )
+    to_display_rgb(lit)
+}
+
+fn animation_clock(_ current: f32, _ event: SurfaceEvent, _ animate: f32) -> f32 {
+    if animate < 0.5 {
+        return current
+    }
+    if event.is_animation_frame()
+        || event.is_param_edit()
+        || event.is_pointer_down()
+        || event.is_pointer_move()
+        || event.is_pointer_up() {
+        return event.timestamp * 0.001
+    }
+    current
+}
+
+actor AtlasMeshLodLab uses (
+    GpuProgram<WebGpuBackend>,
+    SurfaceQuality<ResponsiveBacking>,
+    SurfaceRecovery<StandardSurfaceRecovery>,
+    SurfacePointerMotion,
+) {
+    fixture: FixtureBuffer,
+    pointer_x: f32,
+    pointer_y: f32,
+    clock_seconds: f32,
+    dragging: f32,
+    animate: f32,
+    noise_amplitude: f32,
+    noise_frequency: f32,
+    noise_warp: f32,
+    noise_detail: f32,
+    noise_speed: f32,
+    phase_offset: f32,
+    focus_radius: f32,
+    focus_softness: f32,
+    base_lod: f32,
+    focus_lod: f32,
+    wire_px: f32,
+    low_hue: f32,
+    middle_hue: f32,
+    high_hue: f32,
+    palette_lightness: f32,
+    palette_chroma: f32,
+    heat_bias: f32,
+    heat_contrast: f32,
+    hue_path: f32,
+    depth_cue: f32,
+    orbit_yaw: f32,
+    orbit_pitch: f32,
+    orbit_distance: f32,
+    res_x: f32,
+    res_y: f32,
+
+    const fn raster() -> RasterPlan uses (RasterConfiguration) {
+        raster_plan<Depth24LessEqualMsaa4>()
+    }
+
+    const fn view() -> Surface<MeshLabParams> {
+        Surface { extent: Extent::square(900), params: mesh_lab_params() }
+    }
+
+    fn navigate(self, event: own SurfaceEvent) -> MeshLabState
+        uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>)
+    {
+        let mut state = MeshLabState {
+            pointer_x: self.pointer_x,
+            pointer_y: self.pointer_y,
+            clock_seconds: self.clock_seconds,
+            dragging: self.dragging,
+            animate: self.animate,
+            noise_amplitude: self.noise_amplitude,
+            noise_frequency: self.noise_frequency,
+            noise_warp: self.noise_warp,
+            noise_detail: self.noise_detail,
+            noise_speed: self.noise_speed,
+            phase_offset: self.phase_offset,
+            focus_radius: self.focus_radius,
+            focus_softness: self.focus_softness,
+            base_lod: self.base_lod,
+            focus_lod: self.focus_lod,
+            wire_px: self.wire_px,
+            low_hue: self.low_hue,
+            middle_hue: self.middle_hue,
+            high_hue: self.high_hue,
+            palette_lightness: self.palette_lightness,
+            palette_chroma: self.palette_chroma,
+            heat_bias: self.heat_bias,
+            heat_contrast: self.heat_contrast,
+            hue_path: self.hue_path,
+            depth_cue: self.depth_cue,
+            orbit_yaw: self.orbit_yaw,
+            orbit_pitch: self.orbit_pitch,
+            orbit_distance: self.orbit_distance,
+            res_x: self.res_x,
+            res_y: self.res_y,
+        }.apply_param_bindings(mesh_lab_params(), event)
+
+        state.clock_seconds = animation_clock(state.clock_seconds, event, state.animate)
+
+        if event.is_pointer_down() {
+            state.dragging = 1.0
+        }
+        if event.is_pointer_move() || event.is_pointer_down() {
+            if event.width > 0.0 && event.height > 0.0 {
+                state.pointer_x = event.pointer_x * 2.0 / event.width - 1.0
+                state.pointer_y = 1.0 - event.pointer_y * 2.0 / event.height
+            }
+        }
+        if event.is_pointer_move() && event.buttons != 0 && state.dragging > 0.5 {
+            state.orbit_yaw = wrap_pi(state.orbit_yaw - event.delta_x * 0.007)
+            state.orbit_pitch = clamp(
+                state.orbit_pitch - event.delta_y * 0.006, 0.16, 1.18,
+            )
+        }
+        if event.is_pointer_up() {
+            state.dragging = 0.0
+        }
+        if event.wheel_delta < 0.0 {
+            state.orbit_distance = clamp(state.orbit_distance * 0.90, 4.2, 13.0)
+        } else if event.wheel_delta > 0.0 {
+            state.orbit_distance = clamp(state.orbit_distance * 1.10, 4.2, 13.0)
+        }
+        state
+    }
+
+    fn background(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        pack_oklch(oklch(0.105, 0.025, 4.62))
+    }
+
+    fn terrain_vertices(
+        self,
+        vertex_index: u32,
+        instance_index: u32,
+    ) -> RasterVertex<TerrainVarying>
+        uses (
+            VertexStage<
+                TerrainVarying,
+                Instanced<TriangleList<ATLAS_VERTEX_LIMIT>, PATCH_INSTANCES>,
+            >,
+        )
+    {
+        let controls = RenderControls {
+            pointer_x: self.pointer_x,
+            pointer_y: self.pointer_y,
+            clock_seconds: self.clock_seconds,
+            noise_amplitude: self.noise_amplitude,
+            noise_frequency: self.noise_frequency,
+            noise_warp: self.noise_warp,
+            noise_detail: self.noise_detail,
+            noise_speed: self.noise_speed,
+            phase_offset: self.phase_offset,
+            focus_radius: self.focus_radius,
+            focus_softness: self.focus_softness,
+            base_lod: self.base_lod,
+            focus_lod: self.focus_lod,
+            orbit_yaw: self.orbit_yaw,
+            orbit_pitch: self.orbit_pitch,
+            orbit_distance: self.orbit_distance,
+            res_x: self.res_x,
+            res_y: self.res_y,
+        }
+        let noise = noise_controls(controls)
+        let camera = camera_frame(controls)
+        let triangle = macro_triangle(instance_index)
+        let canonical = canonicalize(requested_key(triangle, controls, noise, camera))
+        let patch_index = canonical_key_ordinal(canonical.key)
+        let permutation = edge_permutation_index(canonical.permutation)
+        let local_triangle = vertex_index / 3
+        if local_triangle >= patch_triangle_count(self.fixture, patch_index) {
+            invalid_vertex()
+        } else {
+        let corner = vertex_index % 3
+        let source_triangle = patch_first_triangle(self.fixture, patch_index) + local_triangle
+        let point0 = fixture_triangle_index(self.fixture, source_triangle, 0)
+        let point1 = fixture_triangle_index(self.fixture, source_triangle, 1)
+        let point2 = fixture_triangle_index(self.fixture, source_triangle, 2)
+        let parameter0 = map_parameter(
+            triangle,
+            remap_barycentric(permutation, fixture_barycentric(self.fixture, point0)),
+        )
+        let parameter1 = map_parameter(
+            triangle,
+            remap_barycentric(permutation, fixture_barycentric(self.fixture, point1)),
+        )
+        let parameter2 = map_parameter(
+            triangle,
+            remap_barycentric(permutation, fixture_barycentric(self.fixture, point2)),
+        )
+        let parameter = if corner == 0 {
+            parameter0
+        } else if corner == 1 {
+            parameter1
+        } else {
+            parameter2
+        }
+        let differential = evaluate_surface(parameter, noise)
+        let projection = project(camera, differential.position)
+        let altitude = atlas_pixel_altitude(
+            differential,
+            projection,
+            camera,
+            parameter0,
+            parameter1,
+            parameter2,
+            corner,
+            self.res_x,
+            self.res_y,
+        )
+        RasterVertex {
+            position: projection.clip,
+            varying: TerrainVarying {
+                edge_seed: edge_seed(corner, altitude, projection.depth),
+                normal: differential.normal,
+                heat: heat_value(differential, self.heat_bias, self.heat_contrast),
+                focus: focus_at_parameter(parameter, controls, noise, camera),
+                view_depth: projection.depth,
+            },
+        }
+        }
+    }
+
+    fn terrain_fragment(self, varying: TerrainVarying) -> i32
+        uses (FragmentStage<TerrainVarying>)
+    {
+        let edge_pixels = minimum3(varying.edge_seed) / varying.view_depth
+        let feather: f32 = 0.72
+        let wire_coverage = 1.0 - smoothstep(
+            self.wire_px - feather,
+            self.wire_px + feather,
+            edge_pixels,
+        )
+        let focus_lift = 0.06 * varying.focus
+        let surface = heat_surface_color(
+            clamp01(varying.heat + focus_lift),
+            varying.normal,
+            varying.view_depth,
+            self.low_hue,
+            self.middle_hue,
+            self.high_hue,
+            self.palette_lightness,
+            self.palette_chroma,
+            self.hue_path,
+            self.depth_cue,
+        )
+        let wire = display_rgb(0.012, 0.018, 0.030)
+        pack_rgba8(mix_display_rgb(surface, wire, wire_coverage))
+    }
+}

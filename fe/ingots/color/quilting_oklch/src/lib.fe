@@ -1,0 +1,258 @@
+//! Perceptual OKLCH ramps and gamut-safe display colour for Fe renderers.
+//!
+//! The public path is intentionally explicit:
+//!
+//! `Oklch` -> hue-aware interpolation -> chroma-preserving gamut map ->
+//! linear sRGB -> display sRGB -> packed RGBA8.
+//!
+//! Interpolation never treats hue as an unqualified scalar. Callers choose a
+//! CSS Color 4-style arc with `HuePath`; achromatic endpoints retain the hue
+//! of their chromatic neighbour. Gamut mapping holds OKLab lightness and hue
+//! fixed while a bounded search reduces chroma, so display conversion cannot
+//! turn a smooth perceptual ramp into channel clipping.
+
+use core::marker::Copy
+use fmath::{PI, TAU, clamp01, cos, floor, mix, sin, sqrt}
+
+extern {
+    fn __i32_from_f32(_: f32) -> i32
+}
+
+/// A perceptual cylindrical colour. Hue is stored in radians and normalized
+/// by the constructor; lightness is in `[0, 1]`, chroma is non-negative.
+pub struct Oklch { pub lightness: f32, pub chroma: f32, pub hue: f32 }
+
+/// Linear-light sRGB, useful when a caller needs to perform light transport
+/// before the display transfer function.
+pub struct LinearRgb { pub red: f32, pub green: f32, pub blue: f32 }
+
+/// Non-linear display sRGB in the unit cube.
+pub struct DisplayRgb { pub red: f32, pub green: f32, pub blue: f32 }
+
+/// The four unambiguous hue interpolation arcs from CSS Color 4.
+pub enum HuePath {
+    Shorter,
+    Longer,
+    Increasing,
+    Decreasing,
+}
+
+impl Copy for Oklch {}
+impl Copy for LinearRgb {}
+impl Copy for DisplayRgb {}
+impl Copy for HuePath {}
+
+fn positive(_ value: f32) -> f32 {
+    if value > 0.0 { value } else { 0.0 }
+}
+
+fn wrap_tau(_ angle: f32) -> f32 {
+    angle - TAU * floor(angle / TAU)
+}
+
+fn wrap_pi(_ angle: f32) -> f32 {
+    angle - TAU * floor((angle + PI) / TAU)
+}
+
+/// Construct a bounded OKLCH colour and canonicalize hue to `[0, TAU)`.
+pub fn oklch(_ lightness: f32, _ chroma: f32, _ hue: f32) -> Oklch {
+    Oklch { lightness: clamp01(lightness), chroma: positive(chroma), hue: wrap_tau(hue) }
+}
+
+/// Construct already-encoded display sRGB while enforcing the display cube.
+pub fn display_rgb(_ red: f32, _ green: f32, _ blue: f32) -> DisplayRgb {
+    DisplayRgb { red: clamp01(red), green: clamp01(green), blue: clamp01(blue) }
+}
+
+fn hue_delta(_ left: f32, _ right: f32, _ path: HuePath) -> f32 {
+    let shorter = wrap_pi(right - left)
+    let increasing = wrap_tau(right - left)
+    match path {
+        HuePath::Shorter => shorter,
+        HuePath::Longer => {
+            if shorter >= 0.0 {
+                shorter - TAU
+            } else {
+                shorter + TAU
+            }
+        },
+        HuePath::Increasing => increasing,
+        HuePath::Decreasing => {
+            if increasing > 0.0 {
+                increasing - TAU
+            } else {
+                0.0
+            }
+        },
+    }
+}
+
+fn endpoint_hue(_ left: Oklch, _ right: Oklch, _ use_left: bool) -> f32 {
+    if use_left {
+        if left.chroma > 0.000001 {
+            left.hue
+        } else {
+            right.hue
+        }
+    } else {
+        if right.chroma > 0.000001 {
+            right.hue
+        } else {
+            left.hue
+        }
+    }
+}
+
+/// Interpolate lightness and chroma linearly in OKLCH while following the
+/// caller-selected hue arc. `amount` is clamped to the segment.
+pub fn interpolate(_ left: Oklch, _ right: Oklch, _ amount: f32, _ path: HuePath) -> Oklch {
+    let t = clamp01(amount)
+    let left_hue = endpoint_hue(left, right, true)
+    let right_hue = endpoint_hue(left, right, false)
+    oklch(
+        mix(left.lightness, right.lightness, t),
+        mix(left.chroma, right.chroma, t),
+        left_hue + hue_delta(left_hue, right_hue, path) * t,
+    )
+}
+
+/// Sample a piecewise perceptual heat ramp. The midpoint is reached exactly
+/// at `amount == 0.5`; each half independently follows the chosen hue path.
+pub fn three_stop_ramp(
+    _ low: Oklch,
+    _ middle: Oklch,
+    _ high: Oklch,
+    _ amount: f32,
+    _ path: HuePath,
+) -> Oklch {
+    let t = clamp01(amount)
+    if t < 0.5 {
+        interpolate(low, middle, t * 2.0, path)
+    } else {
+        interpolate(middle, high, (t - 0.5) * 2.0, path)
+    }
+}
+
+/// Scale perceptual lightness and chroma without changing hue.
+pub fn scale_lightness_chroma(
+    _ color: Oklch,
+    _ lightness_scale: f32,
+    _ chroma_scale: f32,
+) -> Oklch {
+    oklch(
+        color.lightness * lightness_scale,
+        color.chroma * positive(chroma_scale),
+        color.hue,
+    )
+}
+
+fn raw_linear_srgb(_ color: Oklch) -> LinearRgb {
+    let lab_a = color.chroma * cos(color.hue)
+    let lab_b = color.chroma * sin(color.hue)
+
+    let l_root = color.lightness + 0.39633778 * lab_a + 0.21580376 * lab_b
+    let m_root = color.lightness - 0.10556135 * lab_a - 0.06385417 * lab_b
+    let s_root = color.lightness - 0.08948418 * lab_a - 1.29148555 * lab_b
+
+    let l = l_root * l_root * l_root
+    let m = m_root * m_root * m_root
+    let s = s_root * s_root * s_root
+
+    LinearRgb {
+        red: 4.07674166 * l - 3.30771159 * m + 0.23096993 * s,
+        green: -1.26843800 * l + 2.60975740 * m - 0.34131940 * s,
+        blue: -0.00419609 * l - 0.70341861 * m + 1.70761470 * s,
+    }
+}
+
+fn in_display_gamut(_ color: LinearRgb) -> bool {
+    color.red >= 0.0
+        && color.red <= 1.0
+        && color.green >= 0.0
+        && color.green <= 1.0
+        && color.blue >= 0.0
+        && color.blue <= 1.0
+}
+
+fn clamp_linear(_ color: LinearRgb) -> LinearRgb {
+    LinearRgb { red: clamp01(color.red), green: clamp01(color.green), blue: clamp01(color.blue) }
+}
+
+/// Convert OKLCH to in-gamut linear sRGB. Out-of-gamut colours are mapped by
+/// an eight-step bounded chroma search at fixed lightness and hue. The final
+/// clamp absorbs only matrix-rounding residue; it is not the gamut strategy.
+pub fn to_gamut_mapped_linear_srgb(_ color: Oklch) -> LinearRgb {
+    let direct = raw_linear_srgb(color)
+    if in_display_gamut(direct) {
+        direct
+    } else {
+        let mut lower: f32 = 0.0
+        let mut upper: f32 = color.chroma
+        let mut iteration: u32 = 0
+        while iteration < 8 {
+            let middle = (lower + upper) * 0.5
+            let candidate = raw_linear_srgb(oklch(color.lightness, middle, color.hue))
+            if in_display_gamut(candidate) {
+                lower = middle
+            } else {
+                upper = middle
+            }
+            iteration = iteration + 1
+        }
+        clamp_linear(raw_linear_srgb(oklch(color.lightness, lower, color.hue)))
+    }
+}
+
+/// Approximate the IEC sRGB display transfer using square-root refinements.
+/// The linear toe is exact; the bounded high branch avoids a general `pow`
+/// intrinsic while meeting at black/white and remaining monotone on `[0, 1]`.
+fn encode_display_channel(_ linear: f32) -> f32 {
+    let value = clamp01(linear)
+    if value <= 0.0031308 {
+        value * 12.92
+    } else {
+        let root = sqrt(value)
+        let fourth_root = sqrt(root)
+        let eighth_root = sqrt(fourth_root)
+        clamp01(
+            0.66200269 * root
+                + 0.68412206 * fourth_root
+                + (-0.32358360) * eighth_root
+                + (-0.02254115) * value,
+        )
+    }
+}
+
+/// Convert OKLCH through chroma-preserving gamut mapping to display sRGB.
+pub fn to_display_rgb(_ color: Oklch) -> DisplayRgb {
+    let linear = to_gamut_mapped_linear_srgb(color)
+    display_rgb(
+        encode_display_channel(linear.red),
+        encode_display_channel(linear.green),
+        encode_display_channel(linear.blue),
+    )
+}
+
+/// Interpolate two already-encoded display colours, useful for analytic edge
+/// coverage after the perceptual surface colour has been resolved.
+pub fn mix_display_rgb(_ left: DisplayRgb, _ right: DisplayRgb, _ amount: f32) -> DisplayRgb {
+    let t = clamp01(amount)
+    display_rgb(
+        mix(left.red, right.red, t),
+        mix(left.green, right.green, t),
+        mix(left.blue, right.blue, t),
+    )
+}
+
+/// Pack opaque display sRGB as little-endian RGBA8 in one signed word.
+pub fn pack_rgba8(_ color: DisplayRgb) -> i32 {
+    let red = __i32_from_f32(clamp01(color.red) * 255.0 + 0.5)
+    let green = __i32_from_f32(clamp01(color.green) * 255.0 + 0.5)
+    let blue = __i32_from_f32(clamp01(color.blue) * 255.0 + 0.5)
+    red + green * 256 + blue * 65536 + -16777216
+}
+
+/// The complete safe path for renderers that do not need intermediate RGB.
+pub fn pack_oklch(_ color: Oklch) -> i32 {
+    pack_rgba8(to_display_rgb(color))
+}

@@ -1,0 +1,7 @@
+[ingot]
+name = "quilting_oklch"
+version = "0.1.0"
+
+[dependencies]
+core = { path = "../../../../.toolchains/fe/ingots/core" }
+fmath = { path = "../../../../.toolchains/fe/demos/sketches/fmath" }
