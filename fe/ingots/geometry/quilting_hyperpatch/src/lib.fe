@@ -6,7 +6,7 @@
 //! this common surface promises only a partial typed point.
 
 use core::marker::Copy
-use quilting_domain::{Bary3F, Vec2F, Vec3F}
+use quilting_domain::{Bary3F, Vec2F, Vec3F, length3, sub3}
 
 /// A nominal parameter domain associates one coordinate representation.
 pub trait ParameterDomain {
@@ -106,6 +106,85 @@ pub fn denote<K: HyperPatchKernel>(
     _ policy: K::Policy,
 ) -> DenotationSample<K::Codomain> {
     value.kernel.denote(value.controls, parameter, policy)
+}
+
+// ---------------------------------------------------------------------------
+// Metric-parametric sampling
+// ---------------------------------------------------------------------------
+
+/// A metric belongs to a codomain, not to a parameter chart.
+///
+/// The same sampler can therefore measure a QB, Clifford, CGA, PGA, QCGA, or
+/// genuinely hyperbolic HyperPatch without treating its UV coordinates as
+/// geometric distance. Fe specializes the selected metric and kernel together.
+pub trait CodomainMetric<C: Codomain>: Copy {
+    fn distance(
+        self,
+        _ left: <C as Codomain>::Value,
+        _ right: <C as Codomain>::Value,
+    ) -> f32
+}
+
+/// Ordinary chord distance in the admitted Euclidean chart.
+pub struct Euclidean3Metric {}
+impl Copy for Euclidean3Metric {}
+
+impl CodomainMetric<Euclidean3Points> for Euclidean3Metric {
+    fn distance(self, _ left: Vec3F, _ right: Vec3F) -> f32 {
+        length3(sub3(right, left))
+    }
+}
+
+/// Three-point image of one parameter edge under a HyperPatch.
+///
+/// `arc_length` is the two-chord length through the mapped midpoint. It reacts
+/// to projective stretching and to first-order bending while remaining exact
+/// at the three samples. More elaborate samplers may recurse using the same
+/// metric contract without changing a patch family.
+pub struct HyperPatchEdgeMeasure {
+    pub chord_length: f32,
+    pub arc_length: f32,
+    pub midpoint_excess: f32,
+    pub defined: bool,
+}
+impl Copy for HyperPatchEdgeMeasure {}
+
+pub fn measure_codomain_edge<C: Codomain, M: CodomainMetric<C>>(
+    _ left: DenotationSample<C>,
+    _ midpoint: DenotationSample<C>,
+    _ right: DenotationSample<C>,
+    _ metric: M,
+) -> HyperPatchEdgeMeasure {
+    let chord_length = metric.distance(left.value, right.value)
+    let arc_length = metric.distance(left.value, midpoint.value)
+        + metric.distance(midpoint.value, right.value)
+    HyperPatchEdgeMeasure {
+        chord_length: chord_length,
+        arc_length: arc_length,
+        midpoint_excess: if arc_length > chord_length {
+            arc_length - chord_length
+        } else {
+            0.0
+        },
+        defined: left.defined && midpoint.defined && right.defined,
+    }
+}
+
+pub fn measure_hyperpatch_edge<
+    K: HyperPatchKernel,
+    M: CodomainMetric<K::Codomain>,
+>(
+    _ value: HyperPatch<K>,
+    _ left: <K::Domain as ParameterDomain>::Parameter,
+    _ midpoint: <K::Domain as ParameterDomain>::Parameter,
+    _ right: <K::Domain as ParameterDomain>::Parameter,
+    _ policy: K::Policy,
+    _ metric: M,
+) -> HyperPatchEdgeMeasure {
+    let left_sample = denote(value, left, policy)
+    let midpoint_sample = denote(value, midpoint, policy)
+    let right_sample = denote(value, right, policy)
+    measure_codomain_edge(left_sample, midpoint_sample, right_sample, metric)
 }
 
 // ---------------------------------------------------------------------------

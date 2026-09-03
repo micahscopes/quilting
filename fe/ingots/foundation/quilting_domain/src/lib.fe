@@ -45,6 +45,10 @@ pub fn length2(_ value: Vec2F) -> f32 {
     __sqrt_f32(value.x * value.x + value.y * value.y)
 }
 
+pub fn length3(_ value: Vec3F) -> f32 {
+    __sqrt_f32(value.x * value.x + value.y * value.y + value.z * value.z)
+}
+
 pub fn vertex_a() -> Vec2F {
     vec2f(0.0, 1.0)
 }
