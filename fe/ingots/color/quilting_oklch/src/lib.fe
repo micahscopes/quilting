@@ -116,6 +116,26 @@ pub fn interpolate(_ left: Oklch, _ right: Oklch, _ amount: f32, _ path: HuePath
     )
 }
 
+/// Bilinearly interpolate four perceptual corner colours. Both axes use the
+/// same explicit hue path, so a surface palette never falls back to scalar hue
+/// arithmetic or display-RGB interpolation.
+pub fn bilinear(
+    _ c00: Oklch,
+    _ c10: Oklch,
+    _ c01: Oklch,
+    _ c11: Oklch,
+    _ s: f32,
+    _ t: f32,
+    _ path: HuePath,
+) -> Oklch {
+    interpolate(
+        interpolate(c00, c10, s, path),
+        interpolate(c01, c11, s, path),
+        t,
+        path,
+    )
+}
+
 /// Sample a piecewise perceptual heat ramp. The midpoint is reached exactly
 /// at `amount == 0.5`; each half independently follows the chosen hue path.
 pub fn three_stop_ramp(

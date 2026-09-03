@@ -4,38 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="../demo-shell.css" data-fe-publish>
   <title>Clifford HyperPatch · Fe</title>
-  <style>
-    :root {
-      color-scheme: dark;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      background: #111318;
-      color: #c7cbd2;
-    }
-    * { box-sizing: border-box; }
-    body { margin: 0; height: 100svh; overflow: hidden; background: #111318; }
-    main { display: grid; grid-template-rows: 38px minmax(0, 1fr); height: 100svh; min-height: 0; }
-    header {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-      padding: 0 12px;
-      border-bottom: 1px solid #2b2f37;
-      color: #858b95;
-      font-size: 11px;
-    }
-    header strong { color: #d6d9df; font-weight: 500; }
-    .stage { display: grid; place-items: center; min-height: 0; padding: 12px; overflow: hidden; }
-    fe-surface {
-      display: block;
-      --fe-surface-window-inline-margin: 24px;
-      --fe-surface-window-block-margin: 140px;
-    }
-    fe-surface::part(canvas) { width: 100%; aspect-ratio: 1; background: #090a0d; }
-    fe-surface::part(panel) { gap: 6px; }
-    fe-surface::part(badge) { border-radius: 2px; letter-spacing: 0; }
-    fe-surface::part(meta) { color: #737984; }
-  </style>
 </head>
 <body>
   <main>

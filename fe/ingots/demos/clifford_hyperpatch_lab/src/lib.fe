@@ -19,7 +19,7 @@ use classic_quilting_lod::{
     patch_first_triangle,
     patch_triangle_count,
 }
-use fmath::{TAU, abs, clamp, clamp01, cos, mix, rgba, sin, smoothstep, wrap_pi}
+use fmath::{TAU, abs, clamp, clamp01, cos, mix, sin, smoothstep, wrap_pi}
 use quilting_atlas::{AtlasKey, canonical_key_ordinal}
 use quilting_clifford_bezier::{
     IsotropicBilinearPatch,
@@ -45,6 +45,17 @@ use quilting_domain::{
     sub3,
     vec2f,
     vec3f,
+}
+use quilting_oklch::{
+    DisplayRgb,
+    HuePath,
+    bilinear,
+    display_rgb,
+    mix_display_rgb,
+    oklch,
+    pack_rgba8,
+    scale_lightness_chroma,
+    to_display_rgb,
 }
 use std::web::view::{
     ApplyParamBindings,
@@ -115,6 +126,7 @@ pub struct PatchVarying {
     pub edge_seed: Bary3F,
     pub normal: Vec3F,
     pub residual: f32,
+    pub parameter: Vec2F,
     pub view_depth: f32,
 }
 impl Copy for PatchVarying {}
@@ -145,9 +157,6 @@ impl Copy for Projection {}
 
 struct ParameterTriangle { p0: Vec2F, p1: Vec2F, p2: Vec2F, valid: bool }
 impl Copy for ParameterTriangle {}
-
-struct Rgb { red: f32, green: f32, blue: f32 }
-impl Copy for Rgb {}
 
 struct CliffordLabParams {
     p00_x: Param,
@@ -664,6 +673,7 @@ fn invalid_patch_vertex() -> RasterVertex<PatchVarying> {
             edge_seed: bary3f(0.0, 0.0, 0.0),
             normal: vec3f(0.0, 0.0, 1.0),
             residual: 0.0,
+            parameter: vec2f(0.0, 0.0),
             view_depth: 1.0,
         },
     }
@@ -856,40 +866,38 @@ fn selected_point(_ state: CliffordLabState) -> Vec3F {
     }
 }
 
-fn mix_rgb(_ left: Rgb, _ right: Rgb, _ amount: f32) -> Rgb {
-    Rgb {
-        red: mix(left.red, right.red, amount),
-        green: mix(left.green, right.green, amount),
-        blue: mix(left.blue, right.blue, amount),
-    }
-}
-
-fn scale_rgb(_ value: Rgb, _ scale: f32) -> Rgb {
-    Rgb { red: value.red * scale, green: value.green * scale, blue: value.blue * scale }
-}
-
 fn depth_surface_color(
+    _ parameter: Vec2F,
     _ view_depth: f32,
     _ normal: Vec3F,
     _ residual: f32,
     _ depth_cue: f32,
-) -> Rgb {
+) -> DisplayRgb {
     let depth_t = clamp01(
         (view_depth - AnalyticDepthWire::near_depth())
             / (AnalyticDepthWire::far_depth() - AnalyticDepthWire::near_depth()),
     )
-    let near = Rgb { red: 0.93, green: 0.57, blue: 0.25 }
-    let far = Rgb { red: 0.16, green: 0.33, blue: 0.76 }
-    let neutral = Rgb { red: 0.28, green: 0.43, blue: 0.78 }
-    let depth_color = mix_rgb(near, far, smoothstep(0.0, 1.0, depth_t))
-    let base = mix_rgb(neutral, depth_color, depth_cue)
+    let base = bilinear(
+        oklch(0.78, 0.095, 0.42),
+        oklch(0.82, 0.082, 0.92),
+        oklch(0.76, 0.070, 5.92),
+        oklch(0.73, 0.078, 5.28),
+        parameter.x,
+        parameter.y,
+        HuePath::Shorter,
+    )
     let unit_normal = normalize3_or(normal, vec3f(0.0, 0.0, 1.0), 0.0000001)
     let light = normalize3_or(vec3f(-0.35, 0.48, 0.82), vec3f(0.0, 0.0, 1.0), 0.0000001)
     let diffuse = abs(dot3(unit_normal, light))
     // A continuous low-frequency depth wave is intentionally below Nyquist;
     // it reads depth without introducing another aliased contour edge.
     let depth_wave = 0.94 + 0.06 * cos(TAU * view_depth * AnalyticDepthWire::depth_frequency())
-    scale_rgb(base, (0.55 + 0.45 * diffuse) * depth_wave)
+    let depth_scale = mix(1.0, 0.84, smoothstep(0.0, 1.0, depth_t) * depth_cue)
+    to_display_rgb(scale_lightness_chroma(
+        base,
+        (0.72 + 0.30 * diffuse) * depth_wave * depth_scale,
+        mix(1.0, 0.82, depth_t * depth_cue),
+    ))
 }
 
 actor CliffordHyperpatchLab uses (
@@ -1094,6 +1102,7 @@ actor CliffordHyperpatchLab uses (
                         ),
                         normal: differential.normal,
                         residual: differential.sample.trivector_residual,
+                        parameter: parameter,
                         view_depth: projected.depth,
                     },
                 }
@@ -1151,6 +1160,7 @@ actor CliffordHyperpatchLab uses (
                         ),
                         normal: differential.normal,
                         residual: differential.sample.trivector_residual,
+                        parameter: parameter,
                         view_depth: projected.depth,
                     },
                 }
@@ -1167,11 +1177,14 @@ actor CliffordHyperpatchLab uses (
             self.wire_px - feather, self.wire_px + feather, edge_pixels,
         )
         let surface = depth_surface_color(
-            varying.view_depth, varying.normal, varying.residual, self.depth_cue,
+            varying.parameter,
+            varying.view_depth,
+            varying.normal,
+            varying.residual,
+            self.depth_cue,
         )
-        let wire = Rgb { red: 0.018, green: 0.025, blue: 0.043 }
-        let color = mix_rgb(surface, wire, wire_coverage)
-        rgba(color.red, color.green, color.blue)
+        let wire = display_rgb(0.018, 0.025, 0.043)
+        pack_rgba8(mix_display_rgb(surface, wire, wire_coverage))
     }
 
     fn handle_vertices(self, vertex_index: u32) -> RasterVertex<HandleVarying>
