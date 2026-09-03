@@ -87,3 +87,59 @@ the feared shader-size regression.
   benchmark harness can retain timestamp-query and receipt evidence.
 - Canonicalize equivalent resource-binding identifiers during shader emission;
   the two chart restoration shaders remain structurally duplicated.
+
+## Interactive follow-up
+
+Commit `6374c7c` adds a resident illegal-edge proposal cache and separates the
+pullback raster effect from topology settling. A control drag now deforms the
+last valid parameter-space topology immediately; sampling and Delaunay repair
+run once the gesture ends.
+
+One scripted `p10.x = 0.05` browser transition measured 5.2 ms while dragging
+and 122.7 ms when released. The drag preserved both valid topology receipts.
+The settled state retained 64 and 26 points rather than collapsing to the 24
+locked boundary points, which had been the earlier behavior whenever a free
+edit introduced a grade-three Clifford residual.
+
+An isolated warm pass observation for that edited state was:
+
+| Pass or phase | Time |
+| --- | ---: |
+| Candidate pullback samples | 2.9 ms |
+| Sampling initialization | 2.5 ms |
+| 64 proposal/retire/advance cycles | 7.8 ms |
+| Point compaction | 2.4 ms |
+| Resident point samples | 2.4 ms |
+| Initial constrained topology | 2.4 ms |
+| Chart 0 Delaunay restoration | 171.4 ms |
+| Chart 1 Delaunay restoration | 29.0 ms |
+
+These remain single-run wall-clock observations under concurrent GPU use. The
+dominant remaining runtime cost is the sequential, deterministic flip chain,
+not candidate sampling, command encoding, or transfer. Submitting the 64
+sampling cycles separately measured 6.0 ms versus 3.4 ms in one command
+buffer, too small a difference to explain the complete frame.
+
+The same gesture also exposed a distinct correctness failure: chart 0 admitted
+66 points into a 64-point resident buffer. Compaction correctly reported
+overflow, but presentation then suppressed the whole chart. The resident
+capacity is now 128 points, with triangle capacity derived from the 24-vertex
+boundary ring by Euler's disk relation. The formerly failing state now reports
+`[1, 66, 24, 1, 106, 1, 213, 0]`. A wider control-displacement sweep admitted
+58–71 points and kept both charts valid with zero invariant failures. Ordinary
+loops still use the actual resident counts; the additional capacity is storage
+headroom, not mandatory work.
+
+The default state retained the exact validated triangle prefixes above after
+the capacity increase. Its 1,856-byte prefixes hash to the same
+`76ee7da40367b5874cee998f561cd90e2f9b9dad5e95dd479209a2e7a30ad859`
+and `d632ed56f8b984d159a678f67c42c859f7b5ef8e36f9bf94dd69d7f9b9ca0efe`
+values.
+
+The final fresh release-server build reported 14 passes, 35,256 Wasm bytes,
+660,039 WGSL bytes, and 880,304 emitted bytes in 348,792 ms. The manifest
+reports 659,239 bytes across 14 shaders. The compiler process reached roughly
+11 GB resident memory during repeated builds, and restarting `fe web dev`
+missed the populated render cache. Persistent cross-process cache reuse and
+incremental pass-level lowering are therefore separate, measured authoring
+toolchain needs.
