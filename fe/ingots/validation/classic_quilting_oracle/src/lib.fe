@@ -37,7 +37,7 @@ use quilting_domain::{
     vec2f,
     vec3f,
 }
-use quilting_patch::{DenotationSample, Euclidean3Points, denote}
+use quilting_patch::{BilinearCornerScales, DenotationSample, Euclidean3Points, denote, measure_tangent_triangle3}
 use quilting_quaternion::{QuatF, inverse_bounded, multiply, quatf, zero}
 use quilting_qb::{
     QbPolicy,
@@ -51,8 +51,34 @@ use quilting_qb::{
     remap_barycentric,
 }
 
+pub fn resolved_corner_scale(
+    _ a: f32, _ b: f32, _ c: f32, _ d: f32, _ index: i32,
+) -> f32 {
+    let weights = BilinearCornerScales { w00: a, w10: b, w01: c, w11: d }.separable()
+    if index == 0 { weights.w00 } else if index == 1 { weights.w10 }
+    else if index == 2 { weights.w01 } else { weights.w11 }
+}
+
 fn input_bary(_ a: f32, _ b: f32, _ c: f32) -> Bary3F {
     bary3f(a, b, c)
+}
+
+pub fn tangent_triangle_quality(
+    _ bx: f32, _ by: f32, _ bz: f32, _ cx: f32, _ cy: f32, _ cz: f32,
+) -> f32 {
+    measure_tangent_triangle3(vec3f(bx, by, bz), vec3f(cx, cy, cz)).quality
+}
+
+pub fn tangent_triangle_area(
+    _ bx: f32, _ by: f32, _ bz: f32, _ cx: f32, _ cy: f32, _ cz: f32,
+) -> f32 {
+    measure_tangent_triangle3(vec3f(bx, by, bz), vec3f(cx, cy, cz)).area
+}
+
+pub fn tangent_triangle_defined(
+    _ bx: f32, _ by: f32, _ bz: f32, _ cx: f32, _ cy: f32, _ cz: f32,
+) -> i32 {
+    if measure_tangent_triangle3(vec3f(bx, by, bz), vec3f(cx, cy, cz)).defined { 1 } else { 0 }
 }
 
 pub fn domain_cartesian_x(_ a: f32, _ b: f32, _ c: f32) -> f32 {

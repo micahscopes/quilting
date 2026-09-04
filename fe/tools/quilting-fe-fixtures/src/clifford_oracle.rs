@@ -562,6 +562,87 @@ fn neighboring_fan_patches_share_the_surface_tangent_plane() {
 }
 
 #[test]
+fn exact_restriction_reduces_local_display_error_on_regular_twisted_regions() {
+    let saddle = [
+        Control { point: Multivector::vector(0.0, 0.0, 0.0), weight: Multivector::scalar(1.0) },
+        Control { point: Multivector::vector(1.0, 0.0, 0.0), weight: Multivector::scalar(1.0) },
+        Control { point: Multivector::vector(0.0, 1.0, 0.0), weight: Multivector::scalar(1.0) },
+        Control { point: Multivector::vector(1.0, 1.0, 8.0), weight: Multivector::scalar(1.0) },
+    ];
+    // Rank-one scaling keeps the squeezed example vector-valued. It isolates
+    // difficult parameterization from the separately tested invalid weights.
+    let cases = [
+        ("saddle", saddle),
+        ("paper", paper_example(false)),
+        ("squeezed-valid", scaled_paper_example([0.02, 0.4, 0.4, 8.0])),
+    ];
+    let root_domain = triangle_domains([0.5, 0.5])[0];
+    let anchor = triangle_parameter(root_domain, [1.0 / 3.0; 3]);
+    for (name, controls) in cases {
+        let mut errors = Vec::new();
+        let mut normal_spreads = Vec::new();
+        for level in 0..=6 {
+            let scale = 2.0_f64.powi(-level);
+            let shrink = |point: [f64; 2]| {
+                [
+                    anchor[0] + scale * (point[0] - anchor[0]),
+                    anchor[1] + scale * (point[1] - anchor[1]),
+                ]
+            };
+            let domain = TriangleDomain {
+                a: shrink(root_domain.a),
+                b: shrink(root_domain.b),
+                c: shrink(root_domain.c),
+            };
+            let corners = [
+                evaluate_triangle(controls, domain, [1.0, 0.0, 0.0]),
+                evaluate_triangle(controls, domain, [0.0, 1.0, 0.0]),
+                evaluate_triangle(controls, domain, [0.0, 0.0, 1.0]),
+            ];
+            let center = evaluate_triangle_differential(controls, domain, [1.0 / 3.0; 3]);
+            let normal = triangle_normal(center).expect("regular region at anchor");
+            let mut error = 0.0_f64;
+            let mut normal_spread = 0.0_f64;
+            // Interior checks avoid boundary singularities of the paper's
+            // authored patch; this gate concerns regular regions only.
+            for b_step in 1..8 {
+                for c_step in 1..(8 - b_step) {
+                    let b = f64::from(b_step) / 8.0;
+                    let c = f64::from(c_step) / 8.0;
+                    let bary = [1.0 - b - c, b, c];
+                    let actual = evaluate_triangle_differential(controls, domain, bary);
+                    assert_close(actual.value.0[7], 0.0, 1.0e-10);
+                    let flat = corners[0].scale(bary[0])
+                        .add(corners[1].scale(bary[1]))
+                        .add(corners[2].scale(bary[2]));
+                    let difference = actual.value.add(flat.scale(-1.0));
+                    let distance = (difference.0[1].powi(2)
+                        + difference.0[2].powi(2) + difference.0[4].powi(2)).sqrt();
+                    error = error.max(distance);
+                    let actual_normal = triangle_normal(actual).expect("regular interior sample");
+                    let cosine: f64 = normal.iter().zip(actual_normal).map(|(a, b)| a * b).sum();
+                    normal_spread = normal_spread.max(1.0 - cosine);
+                }
+            }
+            errors.push(error);
+            normal_spreads.push(normal_spread);
+        }
+        eprintln!("{name}: local chord error by restriction depth {errors:?}");
+        eprintln!("{name}: local normal spread (1-cos) {normal_spreads:?}");
+        assert!(errors[6] < errors[0] / 100.0, "{name}: refinement failed to reduce local error");
+        assert!(normal_spreads[6] < normal_spreads[0] / 100.0,
+            "{name}: refinement failed to reduce local normal variation");
+        if name == "saddle" {
+            // For X(u,v)=(u,v,8uv), affine restriction scales the quadratic
+            // departure from a chord exactly by scale squared.
+            for level in 1..errors.len() {
+                assert_close(errors[level] / errors[level - 1], 0.25, 1.0e-8);
+            }
+        }
+    }
+}
+
+#[test]
 fn even_euclidean_clifford_subalgebra_is_hamilton_quaternions() {
     let metric = [1.0, 1.0, 1.0];
     let left = [0.7, -1.1, 0.4, 2.3];

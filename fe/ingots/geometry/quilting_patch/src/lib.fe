@@ -21,6 +21,36 @@ use quilting_domain::{
     vec3f,
 }
 
+/// Positive scalar factors in tensor corner order 00, 10, 01, 11.
+/// Separability is a scalar property, not a general GA surface-admission test.
+pub struct BilinearCornerScales {
+    pub w00: f32, pub w10: f32, pub w01: f32, pub w11: f32,
+}
+impl Copy for BilinearCornerScales {}
+
+impl BilinearCornerScales {
+    /// Resolve w00*w11 = w10*w01 with the smallest squared change in log
+    /// weights. This treats all corners symmetrically. Requires positive finite
+    /// inputs and representable intermediate products/ratios.
+    pub fn separable(self) -> BilinearCornerScales {
+        let correction = sqrt(sqrt((self.w10 * self.w01) / (self.w00 * self.w11)))
+        BilinearCornerScales {
+            w00: self.w00 * correction,
+            w10: self.w10 / correction,
+            w01: self.w01 / correction,
+            w11: self.w11 * correction,
+        }
+    }
+
+    /// Choose a common projective scale without altering the relative factors.
+    pub fn scaled(self, _ factor: f32) -> BilinearCornerScales {
+        BilinearCornerScales {
+            w00: self.w00 * factor, w10: self.w10 * factor,
+            w01: self.w01 * factor, w11: self.w11 * factor,
+        }
+    }
+}
+
 /// A nominal parameter domain associates one coordinate representation.
 pub trait ParameterDomain {
     type Parameter: Copy
@@ -311,6 +341,44 @@ pub struct QuadDiagonalProfile2 {
     pub defined: bool,
 }
 impl Copy for QuadDiagonalProfile2 {}
+
+/// Local area and shape of a triangle in an admitted Euclidean 3D chart.
+/// These are facts about a differential at one point, not bounds over a patch.
+pub struct TangentTriangleMeasure3 {
+    pub area: f32,
+    pub quality: f32,
+    pub defined: bool,
+}
+impl Copy for TangentTriangleMeasure3 {}
+
+/// `b` and `c` are the two tangent directions from a triangle's first corner.
+/// Quality is 4*sqrt(3)*area / sum(edge_length_squared): one for equilateral,
+/// zero at rank loss. Unlike shortest/longest edge ratios it detects a flat
+/// triangle whose three edges all have appreciable length.
+///
+/// Normalize before products so uniform scaling cannot overflow the shape
+/// computation. Area is restored in world units; nonrepresentable areas and
+/// nonfinite inputs are explicitly unadmitted.
+pub fn measure_tangent_triangle3(_ b: Vec3F, _ c: Vec3F) -> TangentTriangleMeasure3 {
+    let scale = maximum6(abs(b.x), abs(b.y), abs(b.z), abs(c.x), abs(c.y), abs(c.z))
+    let invalid = TangentTriangleMeasure3 { area: 0.0, quality: 0.0, defined: false }
+    if !(scale > 0.0) { return invalid }
+    let first = vec3f(b.x / scale, b.y / scale, b.z / scale)
+    let second = vec3f(c.x / scale, c.y / scale, c.z / scale)
+    let third = sub3(second, first)
+    let twice_area = length3(cross3(first, second))
+    let sum = dot3(first, first) + dot3(second, second) + dot3(third, third)
+    let area = (0.5 * twice_area * scale) * scale
+    if !(twice_area > 0.0) || !(sum > 0.0) || !(area > 0.0)
+        || !(area <= 340282340000000000000000000000000000000.0) {
+        return invalid
+    }
+    TangentTriangleMeasure3 {
+        area: area,
+        quality: minimum_f32(1.0, 3.4641016 * twice_area / sum),
+        defined: true,
+    }
+}
 
 fn triangle_quality_from_lengths(_ edge0: f32, _ edge1: f32, _ edge2: f32) -> f32 {
     let edge0_squared = edge0 * edge0

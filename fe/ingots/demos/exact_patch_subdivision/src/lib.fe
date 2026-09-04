@@ -8,11 +8,10 @@
 //! optional wireframe is only a temporary mesh used to display them.
 
 use core::marker::Copy
-use fmath::{clamp, smoothstep, wrap_pi}
+use fmath::{clamp, min, max, smoothstep, wrap_pi}
 use quilting_clifford_bezier::{
     IsotropicBilinearPatch,
     IsotropicPolicy,
-    IsotropicSample,
     control,
     even,
     evaluate_differential,
@@ -25,7 +24,6 @@ use quilting_clifford_bezier::{
 use quilting_demo_view::{
     CameraFrame,
     OrbitCamera,
-    Projection,
     ScreenExtent,
     orbit_camera,
     project,
@@ -37,26 +35,21 @@ use quilting_domain::{
     Vec3F,
     absf,
     bary3f,
-    cross3,
     dot3,
-    length3,
     normalize3_or,
-    sub3,
     vec2f,
     vec3f,
 }
 use quilting_oklch::{
     DisplayRgb,
-    HuePath,
     display_rgb,
-    interpolate,
     mix_display_rgb,
     oklch,
     pack_rgba8,
     scale_lightness_chroma,
     to_display_rgb,
 }
-use quilting_patch::TriangleDomain2
+use quilting_patch::{BilinearCornerScales, TriangleDomain2, measure_tangent_triangle3}
 use std::web::view::{
     ApplyParamBindings,
     ChoiceOptions,
@@ -94,8 +87,6 @@ extern {
 }
 
 const MAX_MESH_LOD: u32 = 5
-const MAX_MESH_SIDE: u32 = 32
-const MAX_TRIANGLES_PER_PATCH: u32 = 1024
 const VERTICES_PER_PATCH: u32 = 3072
 const MAX_SURFACE_VERTICES: usize = 12288
 
@@ -108,6 +99,7 @@ struct PatchSubdivisionParams {
     split_threshold: Param,
     mesh_lod: Param,
     show_triangles: Param,
+    resolve_weight_constraint: Param,
     w00: Param,
     w10: Param,
     w01: Param,
@@ -132,6 +124,7 @@ struct PatchSubdivisionState {
     split_threshold: f32,
     mesh_lod: f32,
     show_triangles: f32,
+    resolve_weight_constraint: f32,
     w00: f32,
     w10: f32,
     w01: f32,
@@ -159,7 +152,7 @@ const fn patch_subdivision_params() -> PatchSubdivisionParams {
         split_mode: Param::choice(
             options: ChoiceOptions::three(
                 first: "always use four",
-                second: "decide from shape",
+                second: "estimate need to split",
                 third: "do not subdivide",
             ),
             init: 0.0,
@@ -171,16 +164,17 @@ const fn patch_subdivision_params() -> PatchSubdivisionParams {
         center_goal: Param::choice(
             options: ChoiceOptions::three(
                 first: "avoid skinny pieces",
-                second: "balance surface area",
+                second: "balance estimated area",
                 third: "balance both",
             ),
             init: 2.0,
         ),
-        center_u: Param::unit(init: 0.5),
-        center_v: Param::unit(init: 0.5),
+        center_u: Param::range(min: 0.001, max: 0.999, init: 0.5),
+        center_v: Param::range(min: 0.001, max: 0.999, init: 0.5),
         split_threshold: Param::unit(init: 0.32),
         mesh_lod: Param::int(min: 0.0, max: 5.0, init: 3.0),
         show_triangles: Param::toggle(init: true),
+        resolve_weight_constraint: Param::toggle(init: true),
         w00: Param::log(min: 0.02, max: 8.0, init: 1.0),
         w10: Param::log(min: 0.02, max: 8.0, init: 1.0),
         w01: Param::log(min: 0.02, max: 8.0, init: 1.0),
@@ -206,6 +200,7 @@ fn state(
     _ split_threshold: f32,
     _ mesh_lod: f32,
     _ show_triangles: f32,
+    _ resolve_weight_constraint: f32,
     _ w00: f32,
     _ w10: f32,
     _ w01: f32,
@@ -229,6 +224,7 @@ fn state(
         split_threshold: split_threshold,
         mesh_lod: mesh_lod,
         show_triangles: show_triangles,
+        resolve_weight_constraint: resolve_weight_constraint,
         w00: w00,
         w10: w10,
         w01: w01,
@@ -243,6 +239,29 @@ fn state(
         difficulty: difficulty,
         center_score: center_score,
     }
+}
+
+/// For this fixed authored patch, separable positive scales cancel the extra
+/// Clifford component. The correction belongs to input state, not each vertex.
+fn resolve_weights(_ state: own PatchSubdivisionState) -> PatchSubdivisionState {
+    let mut next = state
+    if next.resolve_weight_constraint > 0.5 {
+        let weights = BilinearCornerScales {
+            w00: clamp(next.w00, 0.02, 8.0), w10: clamp(next.w10, 0.02, 8.0),
+            w01: clamp(next.w01, 0.02, 8.0), w11: clamp(next.w11, 0.02, 8.0),
+        }.separable()
+        // Projection cannot increase the log span beyond the original bounds.
+        // A common scale brings the representative back inside slider limits;
+        // separately clamping the corrected corners would break the constraint.
+        let low = min(min(weights.w00, weights.w10), min(weights.w01, weights.w11))
+        let high = max(max(weights.w00, weights.w10), max(weights.w01, weights.w11))
+        let fitted = weights.scaled(clamp(1.0, 0.02 / low, 8.0 / high))
+        next.w00 = fitted.w00
+        next.w10 = fitted.w10
+        next.w01 = fitted.w01
+        next.w11 = fitted.w11
+    }
+    next
 }
 
 fn patch_value(_ state: PatchSubdivisionState) -> IsotropicBilinearPatch {
@@ -328,32 +347,45 @@ struct ChildMeasure {
 }
 impl Copy for ChildMeasure {}
 
-/// Measure an exact child patch at its center. The three tangent directions
-/// are intrinsic to that child, so the score responds to stretching of the
-/// actual surface rather than to the square UV chart alone.
+/// Four equal-area subtriangles' centers, in parent barycentric coordinates.
+/// Their Jacobians provide a quadrature estimate, not a surface-area bound.
+fn child_probe(_ index: u32) -> Bary3F {
+    if index == 0 {
+        bary3f(0.66666667, 0.16666667, 0.16666667)
+    } else if index == 1 {
+        bary3f(0.16666667, 0.66666667, 0.16666667)
+    } else if index == 2 {
+        bary3f(0.16666667, 0.16666667, 0.66666667)
+    } else {
+        bary3f(0.33333334, 0.33333334, 0.33333334)
+    }
+}
+
+/// Estimate area across each exact child and retain the worst sampled shape.
+/// Finite sampling can miss narrow hazards; this never certifies a leaf.
 fn child_measure(
     _ value: IsotropicBilinearPatch,
     _ domain: TriangleDomain2,
 ) -> ChildMeasure {
     let controls = triangular_projective_controls(value, domain)
-    let differential = evaluate_triangular_projective_differential(
-        controls,
-        bary3f(0.33333334, 0.33333334, 0.33333334),
-        policy(),
-        0.000000000001,
-    )
-    if !differential.sample.conditioned || !differential.sample.vector_valued {
-        return ChildMeasure { area: 0.0, shape: 0.0, valid: false }
+    let mut area: f32 = 0.0
+    let mut worst_shape: f32 = 1.0
+    let mut probe: u32 = 0
+    while probe < 4 {
+        let differential = evaluate_triangular_projective_differential(
+            controls, child_probe(probe), policy(), 0.000000000001,
+        )
+        let measure = measure_tangent_triangle3(differential.tangent_b, differential.tangent_c)
+        if !differential.sample.conditioned || !differential.sample.vector_valued || !measure.defined {
+            return ChildMeasure { area: 0.0, shape: 0.0, valid: false }
+        }
+        area = area + measure.area * 0.25
+        worst_shape = minimum(worst_shape, measure.quality)
+        probe = probe + 1
     }
-    let third_direction = sub3(differential.tangent_c, differential.tangent_b)
-    let first_length = length3(differential.tangent_b)
-    let second_length = length3(differential.tangent_c)
-    let third_length = length3(third_direction)
-    let shortest = minimum(first_length, minimum(second_length, third_length))
-    let longest = maximum(first_length, maximum(second_length, third_length))
     ChildMeasure {
-        area: 0.5 * length3(cross3(differential.tangent_b, differential.tangent_c)),
-        shape: shortest / (longest + 0.0000001),
+        area: area,
+        shape: worst_shape,
         valid: true,
     }
 }
@@ -386,7 +418,7 @@ fn fan_measure(_ value: IsotropicBilinearPatch, _ center: Vec2F) -> FanMeasure {
     }
     FanMeasure {
         worst_shape: worst_shape,
-        area_balance: smallest_area / (largest_area + 0.0000001),
+        area_balance: smallest_area / largest_area,
         valid: true,
     }
 }
@@ -453,17 +485,10 @@ fn find_center(_ value: IsotropicBilinearPatch, _ goal: f32) -> CenterSearch {
 }
 
 fn local_shape(_ tangent_u: Vec3F, _ tangent_v: Vec3F) -> f32 {
-    let diagonal = sub3(tangent_v, tangent_u)
-    let shortest = minimum(
-        length3(tangent_u), minimum(length3(tangent_v), length3(diagonal)),
-    )
-    let longest = maximum(
-        length3(tangent_u), maximum(length3(tangent_v), length3(diagonal)),
-    )
-    shortest / (longest + 0.0000001)
+    measure_tangent_triangle3(tangent_u, tangent_v).quality
 }
 
-/// A deliberately small one-step split certificate. It combines the worst
+/// A one-step split heuristic, not a certificate. It combines the worst
 /// local stretch shape with the largest normal change at four interior probes.
 /// Later hierarchy levels can reuse the same policy independently per child.
 fn patch_difficulty(_ value: IsotropicBilinearPatch) -> f32 {
@@ -684,7 +709,7 @@ fn diagram_clip(
     ClipPosition {
         x: -0.93 + parameter.x * 0.34,
         y: -0.91 + parameter.y * 0.34 * aspect,
-        z: 0.0,
+        z: 0.002,
         w: 1.0,
     }
 }
@@ -702,7 +727,7 @@ fn marker_clip(
     let mut dy: f32 = -0.010
     if corner == 1 || corner == 2 || corner == 4 { dx = 0.010 }
     if corner == 2 || corner == 3 || corner == 4 { dy = 0.010 }
-    ClipPosition { x: base.x + dx, y: base.y + dy, z: -0.0001, w: 1.0 }
+    ClipPosition { x: base.x + dx, y: base.y + dy, z: 0.001, w: 1.0 }
 }
 
 actor ExactPatchSubdivision uses (
@@ -718,6 +743,7 @@ actor ExactPatchSubdivision uses (
     split_threshold: f32,
     mesh_lod: f32,
     show_triangles: f32,
+    resolve_weight_constraint: f32,
     w00: f32,
     w10: f32,
     w01: f32,
@@ -752,6 +778,7 @@ actor ExactPatchSubdivision uses (
             self.split_threshold,
             self.mesh_lod,
             self.show_triangles,
+            self.resolve_weight_constraint,
             self.w00,
             self.w10,
             self.w01,
@@ -766,7 +793,19 @@ actor ExactPatchSubdivision uses (
             self.difficulty,
             self.center_score,
         ).apply_param_bindings(patch_subdivision_params(), event)
-        if event.is_param_edit() { next = analyze(next) }
+        let constraint_changed = next.resolve_weight_constraint != self.resolve_weight_constraint
+        let weights_changed = next.w00 != self.w00 || next.w10 != self.w10
+            || next.w01 != self.w01 || next.w11 != self.w11
+        if event.is_param_edit() && (weights_changed || constraint_changed) {
+            next = resolve_weights(next)
+        }
+        let geometry_changed = next.w00 != self.w00 || next.w10 != self.w10
+            || next.w01 != self.w01 || next.w11 != self.w11
+        let center_changed = next.center_u != self.center_u || next.center_v != self.center_v
+            || next.center_mode != self.center_mode || next.center_goal != self.center_goal
+        if event.is_param_edit() && (geometry_changed || center_changed || next.split_mode != self.split_mode) {
+            next = analyze(next)
+        }
         if event.is_pointer_down() { next.orbiting = 1.0 }
         if event.is_pointer_move() && event.buttons != 0 && next.orbiting > 0.5 {
             next.orbit_yaw = wrap_pi(next.orbit_yaw - event.delta_x * 0.008)
@@ -797,6 +836,7 @@ actor ExactPatchSubdivision uses (
             self.split_threshold,
             self.mesh_lod,
             self.show_triangles,
+            self.resolve_weight_constraint,
             self.w00,
             self.w10,
             self.w01,
@@ -906,6 +946,7 @@ actor ExactPatchSubdivision uses (
             self.split_threshold,
             self.mesh_lod,
             self.show_triangles,
+            self.resolve_weight_constraint,
             self.w00,
             self.w10,
             self.w01,
@@ -969,6 +1010,7 @@ actor ExactPatchSubdivision uses (
             self.split_threshold,
             self.mesh_lod,
             self.show_triangles,
+            self.resolve_weight_constraint,
             self.w00,
             self.w10,
             self.w01,

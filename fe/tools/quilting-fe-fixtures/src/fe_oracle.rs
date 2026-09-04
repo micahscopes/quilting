@@ -158,6 +158,80 @@ fn assert_close(actual: f32, expected: f32, tolerance: f32, context: &str) {
 }
 
 #[test]
+fn separable_corner_weights_wasm_resolve_symmetrically() {
+    let (mut store, instance) = instantiate();
+    let resolve = function::<(f32, f32, f32, f32, i32), f32>(
+        &mut store, &instance, "resolved_corner_scale",
+    );
+    let values = [0.02_f32, 0.1, 0.4, 1.0, 3.0, 8.0];
+    for a in values { for b in values { for c in values { for d in values {
+        let inputs = [a, b, c, d];
+        let mut output = [0.0_f32; 4];
+        let logs = inputs.map(|x| f64::from(x).ln());
+        let residual = (logs[0] - logs[1] - logs[2] + logs[3]) / 4.0;
+        for i in 0..4 {
+            output[i] = resolve.call(&mut store, (a, b, c, d, i as i32)).unwrap();
+            let expected = (logs[i] + if i == 0 || i == 3 { -residual } else { residual }).exp();
+            assert!((f64::from(output[i]) / expected - 1.0).abs() < 4.0e-7);
+        }
+        assert!((output[0] * output[3] / (output[1] * output[2]) - 1.0).abs() < 8.0e-7);
+        let low = output.iter().copied().fold(f32::INFINITY, f32::min);
+        let high = output.iter().copied().fold(0.0, f32::max);
+        assert!(high / low <= 400.001, "a common scale must fit the slider range");
+        for i in 0..4 {
+            let again = resolve.call(&mut store, (output[0], output[1], output[2], output[3], i as i32)).unwrap();
+            assert!((again / output[i] - 1.0).abs() < 4.0e-7, "idempotent correction");
+        }
+    }}}}
+    for (i, expected) in [0.02_f32, 0.4, 0.4, 8.0].into_iter().enumerate() {
+        let actual = resolve.call(&mut store, (0.02, 0.4, 0.4, 8.0, i as i32)).unwrap();
+        assert!((actual / expected - 1.0).abs() < 4.0e-7, "retain compatible extreme weights");
+    }
+}
+
+#[test]
+fn tangent_triangle_wasm_detects_flattening_and_preserves_scale() {
+    let (mut store, instance) = instantiate();
+    type Tangents = (f32, f32, f32, f32, f32, f32);
+    let quality = function::<Tangents, f32>(&mut store, &instance, "tangent_triangle_quality");
+    let area = function::<Tangents, f32>(&mut store, &instance, "tangent_triangle_area");
+    let defined = function::<Tangents, i32>(&mut store, &instance, "tangent_triangle_defined");
+
+    // The prior shortest/longest rule scores (1,0,0),(2,epsilon,0) near 1/2
+    // even as area vanishes. Verify the production Fe operation reaches zero.
+    for height in [1.0_f32, 0.01, 0.0001, 0.000001] {
+        let input = (1.0, 0.0, 0.0, 2.0, height, 0.0);
+        let expected = 2.0 * 3.0_f64.sqrt() * f64::from(height)
+            / (6.0 + 2.0 * f64::from(height).powi(2));
+        let actual = quality.call(&mut store, input).unwrap();
+        assert_close(actual, expected as f32, 1.0e-7, "near-collinear quality");
+        assert_eq!(defined.call(&mut store, input).unwrap(), 1);
+    }
+    // A rigid axis permutation and 24 orders of uniform scale must not
+    // change quality. Area must retain its ordinary square-scale law.
+    for scale in [1.0e-12_f32, 1.0, 1.0e12] {
+        let height = scale * (3.0_f32.sqrt() * 0.5);
+        let input = (0.0, scale, 0.0, 0.0, 0.5 * scale, height);
+        assert_close(quality.call(&mut store, input).unwrap(), 1.0, 3.0e-7, "equilateral quality");
+        let actual_area = f64::from(area.call(&mut store, input).unwrap());
+        let expected_area = 0.5 * f64::from(scale) * f64::from(height);
+        assert!((actual_area / expected_area - 1.0).abs() < 3.0e-7);
+        assert_eq!(defined.call(&mut store, input).unwrap(), 1);
+    }
+    for input in [
+        (1.0, 0.0, 0.0, 2.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        (f32::INFINITY, 0.0, 0.0, 0.0, 1.0, 0.0),
+        (1.0, 0.0, 0.0, 0.0, f32::NAN, 0.0),
+        (1.0e30, 0.0, 0.0, 0.0, 1.0e30, 0.0),
+    ] {
+        assert_eq!(defined.call(&mut store, input).unwrap(), 0);
+        assert_eq!(quality.call(&mut store, input).unwrap(), 0.0);
+        assert_eq!(area.call(&mut store, input).unwrap(), 0.0);
+    }
+}
+
+#[test]
 fn sparse_clifford_patch_wasm_matches_the_independent_dense_oracle() {
     let (mut store, instance) = instantiate();
     let position_exports = [

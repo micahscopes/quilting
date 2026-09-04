@@ -48,7 +48,7 @@ use quilting_oklch::{
     scale_lightness_chroma,
     to_display_rgb,
 }
-use quilting_patch::denote
+use quilting_patch::{BilinearCornerScales, denote}
 use std::web::view::{
     ApplyParamBindings,
     ChoiceOptions,
@@ -159,8 +159,7 @@ fn selected_weight_space(_ value: f32) -> WeightSpace {
     }
 }
 
-struct CornerScales { w00: f32, w10: f32, w01: f32, w11: f32 }
-impl Copy for CornerScales {}
+type CornerScales = BilinearCornerScales
 
 /// Construct positive corner scales from two separable factors. The admitted
 /// branch satisfies w00*w11 = w10*w01 by construction. Only the explicitly
