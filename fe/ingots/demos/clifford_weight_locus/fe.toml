@@ -1,0 +1,12 @@
+[ingot]
+name = "clifford_weight_locus"
+version = "0.1.0"
+
+[dependencies]
+core = true
+std = true
+fmath = true
+quilting_clifford_bezier = true
+quilting_domain = true
+quilting_oklch = { path = "../../color/quilting_oklch" }
+quilting_patch = true

@@ -1,0 +1,576 @@
+//! The valid scalar-weight locus of the paper Clifford-Bezier cyclide.
+//!
+//! `u_bias` and `v_bias` construct a rank-one corner scale, so the admitted
+//! mode changes only the rational parameterization of one bounded cyclide.
+//! The ambient diagnostic mode deliberately multiplies the fourth scale by
+//! `locus_departure`, leaves the vector-valued locus, and renders the
+//! grade-one shadow with its grade-three residual made visible. The contrast
+//! is intentional: one UI cannot silently conflate a Euclidean patch with an
+//! ambient Clifford quotient.
+
+use core::marker::Copy
+use fmath::{abs, clamp, cos, mix, sin, smoothstep, wrap_pi}
+use quilting_clifford_bezier::{
+    IsotropicBilinearPatch,
+    IsotropicDifferential,
+    IsotropicPolicy,
+    as_patch,
+    control,
+    evaluate_differential,
+    even,
+    patch,
+    scale_weight,
+}
+use quilting_domain::{
+    Bary3F,
+    Vec2F,
+    Vec3F,
+    add3,
+    bary3f,
+    cross3,
+    dot3,
+    length2,
+    normalize3_or,
+    scale3,
+    sub3,
+    vec2f,
+    vec3f,
+}
+use quilting_oklch::{
+    DisplayRgb,
+    HuePath,
+    bilinear,
+    display_rgb,
+    interpolate,
+    mix_display_rgb,
+    oklch,
+    pack_rgba8,
+    scale_lightness_chroma,
+    to_display_rgb,
+}
+use quilting_patch::denote
+use std::web::view::{
+    ApplyParamBindings,
+    ChoiceOptions,
+    Extent,
+    Param,
+    ParamBindingsProvider,
+    Surface,
+    SurfaceEvent,
+    SurfaceState,
+}
+use std::webgpu::{
+    ClipPosition,
+    Depth24LessEqualMsaa4,
+    FragmentStage,
+    FragmentSurface,
+    GpuProgram,
+    LatestPerFrame,
+    RasterConfiguration,
+    RasterPlan,
+    RasterVertex,
+    ResponsiveBacking,
+    StandardSurfaceRecovery,
+    SurfaceQuality,
+    SurfaceRecovery,
+    SurfaceScheduling,
+    SurfaceTransition,
+    TriangleList,
+    VertexStage,
+    WebGpuBackend,
+    raster_plan,
+}
+
+extern {
+    const fn __f32_from_i32(_: i32) -> f32
+}
+
+const GRID: u32 = 48
+const GRID_VERTICES: usize = 13824
+
+struct LocusParams {
+    weight_space: Param,
+    u_bias: Param,
+    v_bias: Param,
+    locus_departure: Param,
+    orbit_yaw: Param,
+    orbit_pitch: Param,
+    orbit_distance: Param,
+    wire_px: Param,
+    depth_cue: Param,
+    res_x: Param,
+    res_y: Param,
+    orbiting: Param,
+}
+
+struct LocusState {
+    weight_space: f32,
+    u_bias: f32,
+    v_bias: f32,
+    locus_departure: f32,
+    orbit_yaw: f32,
+    orbit_pitch: f32,
+    orbit_distance: f32,
+    wire_px: f32,
+    depth_cue: f32,
+    res_x: f32,
+    res_y: f32,
+    orbiting: f32,
+}
+
+impl SurfaceState for LocusState {
+    type Params = LocusParams
+}
+
+derive ApplyParamBindings for LocusState using ParamBindingsProvider
+
+const fn locus_params() -> LocusParams {
+    LocusParams {
+        weight_space: Param::choice(
+            options: ChoiceOptions::two(first: "admitted surface", second: "ambient diagnostic"),
+            init: 0.0,
+        ),
+        u_bias: Param::log(min: 0.02, max: 12.0, init: 1.0),
+        v_bias: Param::log(min: 0.02, max: 12.0, init: 1.0),
+        locus_departure: Param::log(min: 0.02, max: 12.0, init: 4.0),
+        orbit_yaw: Param::range(min: -3.14159265, max: 3.14159265, init: -0.72),
+        orbit_pitch: Param::range(min: -1.35, max: 1.35, init: 0.12),
+        orbit_distance: Param::log(min: 3.0, max: 18.0, init: 6.2),
+        wire_px: Param::range(min: 0.0, max: 2.0, init: 0.58),
+        depth_cue: Param::unit(init: 0.72),
+        res_x: Param::extent_x(),
+        res_y: Param::extent_y(),
+        orbiting: Param::fixed(0.0),
+    }
+}
+
+enum WeightSpace {
+    AdmittedSurface,
+    AmbientDiagnostic,
+}
+
+impl Copy for WeightSpace {}
+
+fn selected_weight_space(_ value: f32) -> WeightSpace {
+    if value < 0.5 {
+        WeightSpace::AdmittedSurface
+    } else {
+        WeightSpace::AmbientDiagnostic
+    }
+}
+
+struct CornerScales { w00: f32, w10: f32, w01: f32, w11: f32 }
+impl Copy for CornerScales {}
+
+/// Construct positive corner scales from two separable factors. The admitted
+/// branch satisfies w00*w11 = w10*w01 by construction. Only the explicitly
+/// named diagnostic branch may introduce a non-rank-one fourth factor.
+fn corner_scales(
+    _ u_bias: f32,
+    _ v_bias: f32,
+    _ locus_departure: f32,
+    _ space: WeightSpace,
+) -> CornerScales {
+    let w00 = 1.0
+    let w10 = u_bias
+    let w01 = v_bias
+    let w11 = u_bias
+        * v_bias
+        * match space {
+            WeightSpace::AdmittedSurface => 1.0,
+            WeightSpace::AmbientDiagnostic => locus_departure,
+        }
+    let normalization = 4.0 / (w00 + w10 + w01 + w11)
+    CornerScales {
+        w00: w00 * normalization,
+        w10: w10 * normalization,
+        w01: w01 * normalization,
+        w11: w11 * normalization,
+    }
+}
+
+fn paper_patch(_ scales: CornerScales) -> IsotropicBilinearPatch {
+    patch(
+        control(
+            vec3f(0.0, 2.0, 0.0),
+            scale_weight(even(1.0, 0.0, 0.0, 0.0), scales.w00),
+        ),
+        control(
+            vec3f(0.0, 1.0, 0.0),
+            scale_weight(even(0.0, 1.0, 0.0, -1.0), scales.w10),
+        ),
+        control(
+            vec3f(0.0, -2.0, 0.0),
+            scale_weight(even(0.0, 2.0, 0.0, 1.0), scales.w01),
+        ),
+        control(
+            vec3f(0.0, -1.0, 0.0),
+            scale_weight(even(-6.0, 0.0, -3.0, 0.0), scales.w11),
+        ),
+    )
+}
+
+fn policy() -> IsotropicPolicy {
+    IsotropicPolicy {
+        minimum_denominator_norm_squared: 0.000000000001,
+        maximum_trivector_residual: 0.00001,
+    }
+}
+
+struct CameraFrame {
+    eye: Vec3F,
+    right: Vec3F,
+    up: Vec3F,
+    forward: Vec3F,
+    focal: f32,
+    aspect: f32,
+    near: f32,
+    far: f32,
+}
+impl Copy for CameraFrame {}
+
+struct Projection { clip: ClipPosition, depth: f32, view_x: f32, view_y: f32 }
+impl Copy for Projection {}
+
+fn camera_frame(_ state: LocusState) -> CameraFrame {
+    let cp = cos(state.orbit_pitch)
+    let offset = vec3f(
+        cp * sin(state.orbit_yaw),
+        sin(state.orbit_pitch),
+        cp * cos(state.orbit_yaw),
+    )
+    let target = vec3f(1.1, 0.0, 0.0)
+    let eye = add3(target, scale3(offset, state.orbit_distance))
+    let forward = normalize3_or(sub3(target, eye), vec3f(0.0, 0.0, -1.0), 0.00000001)
+    let right = normalize3_or(
+        cross3(forward, vec3f(0.0, 1.0, 0.0)),
+        vec3f(1.0, 0.0, 0.0),
+        0.00000001,
+    )
+    let up = normalize3_or(cross3(right, forward), vec3f(0.0, 1.0, 0.0), 0.00000001)
+    CameraFrame {
+        eye: eye,
+        right: right,
+        up: up,
+        forward: forward,
+        focal: 1.75,
+        aspect: if state.res_y > 0.0 {
+            state.res_x / state.res_y
+        } else {
+            1.0
+        },
+        near: 0.05,
+        far: 80.0,
+    }
+}
+
+fn project(_ camera: CameraFrame, _ position: Vec3F) -> Projection {
+    let relative = sub3(position, camera.eye)
+    let view_x = dot3(relative, camera.right)
+    let view_y = dot3(relative, camera.up)
+    let depth = dot3(relative, camera.forward)
+    let depth_scale = camera.far / (camera.far - camera.near)
+    Projection {
+        clip: ClipPosition {
+            x: camera.focal * view_x / camera.aspect,
+            y: camera.focal * view_y,
+            z: depth_scale * depth - depth_scale * camera.near,
+            w: depth,
+        },
+        depth: depth,
+        view_x: view_x,
+        view_y: view_y,
+    }
+}
+
+fn screen_tangent(
+    _ camera: CameraFrame,
+    _ projection: Projection,
+    _ tangent: Vec3F,
+    _ res_x: f32,
+    _ res_y: f32,
+) -> Vec2F {
+    let tangent_x = dot3(tangent, camera.right)
+    let tangent_y = dot3(tangent, camera.up)
+    let tangent_z = dot3(tangent, camera.forward)
+    let inverse_depth_squared = 1.0 / (projection.depth * projection.depth)
+    vec2f(
+        0.5
+            * res_x
+            * camera.focal
+            / camera.aspect
+            * (tangent_x * projection.depth - projection.view_x * tangent_z)
+            * inverse_depth_squared,
+        0.5
+            * res_y
+            * camera.focal
+            * (tangent_y * projection.depth - projection.view_y * tangent_z)
+            * inverse_depth_squared,
+    )
+}
+
+fn as_f32(_ value: u32) -> f32 {
+    __f32_from_i32(value.downcast_unchecked())
+}
+
+fn corner_parameter(_ local_vertex: u32) -> Vec2F {
+    if local_vertex == 0 {
+        vec2f(0.0, 0.0)
+    } else if local_vertex == 1 {
+        vec2f(1.0, 0.0)
+    } else if local_vertex == 2 {
+        vec2f(0.0, 1.0)
+    } else if local_vertex == 3 {
+        vec2f(1.0, 0.0)
+    } else if local_vertex == 4 {
+        vec2f(1.0, 1.0)
+    } else {
+        vec2f(0.0, 1.0)
+    }
+}
+
+fn local_barycentric(_ local_vertex: u32) -> Bary3F {
+    if local_vertex == 0 || local_vertex == 3 {
+        bary3f(1.0, 0.0, 0.0)
+    } else if local_vertex == 1 || local_vertex == 4 {
+        bary3f(0.0, 1.0, 0.0)
+    } else {
+        bary3f(0.0, 0.0, 1.0)
+    }
+}
+
+fn grid_parameter(_ vertex_index: u32) -> Vec2F {
+    let cell = vertex_index / 6
+    let local_vertex = vertex_index % 6
+    let x = cell % GRID
+    let y = cell / GRID
+    let corner = corner_parameter(local_vertex)
+    vec2f(
+        (as_f32(x) + corner.x) / as_f32(GRID),
+        (as_f32(y) + corner.y) / as_f32(GRID),
+    )
+}
+
+fn minimum3(_ value: Bary3F) -> f32 {
+    let mut result = value.a
+    if value.b < result {
+        result = value.b
+    }
+    if value.c < result {
+        result = value.c
+    }
+    result
+}
+
+fn pixel_altitude(
+    _ differential: IsotropicDifferential,
+    _ projection: Projection,
+    _ camera: CameraFrame,
+    _ local_vertex: u32,
+    _ res_x: f32,
+    _ res_y: f32,
+) -> f32 {
+    let inverse_grid = 1.0 / as_f32(GRID)
+    let ds = screen_tangent(camera, projection, differential.tangent_s, res_x, res_y)
+    let dt = screen_tangent(camera, projection, differential.tangent_t, res_x, res_y)
+    let s = vec2f(ds.x * inverse_grid, ds.y * inverse_grid)
+    let t = vec2f(dt.x * inverse_grid, dt.y * inverse_grid)
+    let diagonal = vec2f(t.x - s.x, t.y - s.y)
+    let twice_area = abs(s.x * t.y - s.y * t.x)
+    let opposite_length = if local_vertex == 0 || local_vertex == 4 {
+        length2(diagonal)
+    } else if local_vertex == 1 || local_vertex == 5 {
+        length2(t)
+    } else {
+        length2(s)
+    }
+    twice_area / (opposite_length + 0.00001)
+}
+
+pub struct LocusVarying {
+    pub edge_seed: Bary3F,
+    pub normal: Vec3F,
+    pub parameter: Vec2F,
+    pub residual: f32,
+    pub rank_error: f32,
+    pub view_depth: f32,
+}
+impl Copy for LocusVarying {}
+
+fn invalid_vertex() -> RasterVertex<LocusVarying> {
+    RasterVertex {
+        position: ClipPosition { x: 2.0, y: 2.0, z: 0.0, w: 1.0 },
+        varying: LocusVarying {
+            edge_seed: bary3f(0.0, 0.0, 0.0),
+            normal: vec3f(0.0, 0.0, 1.0),
+            parameter: vec2f(0.0, 0.0),
+            residual: 0.0,
+            rank_error: 0.0,
+            view_depth: 1.0,
+        },
+    }
+}
+
+fn surface_color(_ varying: LocusVarying, _ depth_cue: f32) -> DisplayRgb {
+    let base = bilinear(
+        oklch(0.78, 0.090, 0.45),
+        oklch(0.82, 0.075, 0.95),
+        oklch(0.75, 0.065, 5.90),
+        oklch(0.72, 0.080, 5.32),
+        varying.parameter.x,
+        varying.parameter.y,
+        HuePath::Shorter,
+    )
+    let failure = smoothstep(0.00001, 0.08, abs(varying.residual) + varying.rank_error)
+    let diagnosed = interpolate(base, oklch(0.67, 0.13, 4.75), failure, HuePath::Shorter)
+    let normal = normalize3_or(varying.normal, vec3f(0.0, 0.0, 1.0), 0.0000001)
+    let light = normalize3_or(vec3f(-0.35, 0.48, 0.82), vec3f(0.0, 0.0, 1.0), 0.0000001)
+    let diffuse = abs(dot3(normal, light))
+    let depth = smoothstep(2.0, 13.0, varying.view_depth) * depth_cue
+    to_display_rgb(
+        scale_lightness_chroma(
+            diagnosed,
+            (0.72 + 0.30 * diffuse) * mix(1.0, 0.82, depth),
+            mix(1.0, 0.84, depth),
+        ),
+    )
+}
+
+actor CliffordWeightLocus uses (
+    GpuProgram<WebGpuBackend>,
+    SurfaceQuality<ResponsiveBacking>,
+    SurfaceRecovery<StandardSurfaceRecovery>,
+) {
+    weight_space: f32,
+    u_bias: f32,
+    v_bias: f32,
+    locus_departure: f32,
+    orbit_yaw: f32,
+    orbit_pitch: f32,
+    orbit_distance: f32,
+    wire_px: f32,
+    depth_cue: f32,
+    res_x: f32,
+    res_y: f32,
+    orbiting: f32,
+
+    const fn raster() -> RasterPlan uses (RasterConfiguration) {
+        raster_plan<Depth24LessEqualMsaa4>()
+    }
+
+    const fn view() -> Surface<LocusParams> {
+        Surface { extent: Extent::square(768), params: locus_params() }
+    }
+
+    fn navigate(self, event: own SurfaceEvent) -> LocusState
+        uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>)
+    {
+        let mut state = LocusState {
+            weight_space: self.weight_space,
+            u_bias: self.u_bias,
+            v_bias: self.v_bias,
+            locus_departure: self.locus_departure,
+            orbit_yaw: self.orbit_yaw,
+            orbit_pitch: self.orbit_pitch,
+            orbit_distance: self.orbit_distance,
+            wire_px: self.wire_px,
+            depth_cue: self.depth_cue,
+            res_x: self.res_x,
+            res_y: self.res_y,
+            orbiting: self.orbiting,
+        }.apply_param_bindings(locus_params(), event)
+        if event.is_pointer_down() {
+            state.orbiting = 1.0
+        }
+        if event.is_pointer_move() && event.buttons != 0 && state.orbiting > 0.5 {
+            state.orbit_yaw = wrap_pi(state.orbit_yaw - event.delta_x * 0.008)
+            state.orbit_pitch = clamp(state.orbit_pitch - event.delta_y * 0.008, -1.35, 1.35)
+        }
+        if event.is_pointer_up() {
+            state.orbiting = 0.0
+        }
+        if event.wheel_delta < 0.0 {
+            state.orbit_distance = clamp(state.orbit_distance * 0.90, 3.0, 18.0)
+        } else if event.wheel_delta > 0.0 {
+            state.orbit_distance = clamp(state.orbit_distance * 1.10, 3.0, 18.0)
+        }
+        state
+    }
+
+    fn background(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        -15396337
+    }
+
+    fn patch_vertices(self, vertex_index: u32) -> RasterVertex<LocusVarying>
+        uses (VertexStage<LocusVarying, TriangleList<GRID_VERTICES>>)
+    {
+        let space = selected_weight_space(self.weight_space)
+        let scales = corner_scales(self.u_bias, self.v_bias, self.locus_departure, space)
+        let patch_value = paper_patch(scales)
+        let parameter = grid_parameter(vertex_index)
+        let differential = evaluate_differential(
+            patch_value, parameter, policy(), 0.000000000001,
+        )
+        let admitted = denote(as_patch(patch_value), parameter, policy())
+        let defined = match space {
+            WeightSpace::AdmittedSurface => admitted.defined,
+            WeightSpace::AmbientDiagnostic => differential.sample.conditioned,
+        }
+        let position = match space {
+            WeightSpace::AdmittedSurface => admitted.value,
+            WeightSpace::AmbientDiagnostic => differential.sample.position,
+        }
+        let camera = camera_frame(LocusState {
+            weight_space: self.weight_space,
+            u_bias: self.u_bias,
+            v_bias: self.v_bias,
+            locus_departure: self.locus_departure,
+            orbit_yaw: self.orbit_yaw,
+            orbit_pitch: self.orbit_pitch,
+            orbit_distance: self.orbit_distance,
+            wire_px: self.wire_px,
+            depth_cue: self.depth_cue,
+            res_x: self.res_x,
+            res_y: self.res_y,
+            orbiting: self.orbiting,
+        })
+        let projected = project(camera, position)
+        if !defined || projected.depth <= camera.near {
+            invalid_vertex()
+        } else {
+            let local_vertex = vertex_index % 6
+            let altitude = pixel_altitude(
+                differential, projected, camera, local_vertex, self.res_x, self.res_y,
+            )
+            RasterVertex {
+                position: projected.clip,
+                varying: LocusVarying {
+                    edge_seed: bary3f(
+                        local_barycentric(local_vertex).a * altitude * projected.depth,
+                        local_barycentric(local_vertex).b * altitude * projected.depth,
+                        local_barycentric(local_vertex).c * altitude * projected.depth,
+                    ),
+                    normal: differential.normal,
+                    parameter: parameter,
+                    residual: differential.sample.trivector_residual,
+                    rank_error: abs(scales.w00 * scales.w11 - scales.w10 * scales.w01),
+                    view_depth: projected.depth,
+                },
+            }
+        }
+    }
+
+    fn patch_fragment(self, varying: LocusVarying) -> i32
+        uses (FragmentStage<LocusVarying>)
+    {
+        let edge_pixels = minimum3(varying.edge_seed) / varying.view_depth
+        let wire_coverage = 1.0 - smoothstep(
+            self.wire_px - 0.72,
+            self.wire_px + 0.72,
+            edge_pixels,
+        )
+        let surface = surface_color(varying, self.depth_cue)
+        let wire = display_rgb(0.018, 0.025, 0.043)
+        pack_rgba8(mix_display_rgb(surface, wire, wire_coverage))
+    }
+}
