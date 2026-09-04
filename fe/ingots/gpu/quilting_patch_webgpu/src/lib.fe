@@ -1,0 +1,256 @@
+//! GPU-resident work placement for adaptive Quilting patch frontiers.
+//!
+//! Geometry decides whether a compact cell is terminal or needs one
+//! directional bisection. This ingot gives that decision a stable buffer
+//! denotation shared by WebGPU compute, a future worker backend, and a scalar
+//! oracle. The initial placement intentionally uses one invocation and a
+//! bounded loop; a prefix-scan implementation may replace the physical work
+//! once it proves the same ordered cell prefix and receipt.
+
+use core::marker::Copy
+use quilting_patch::{
+    AnisotropicPatchCell2,
+    ProjectivePatchFrontierDecision2,
+    bisect_anisotropic_patch_u2,
+    bisect_anisotropic_patch_v2,
+}
+use std::webgpu::StorageBuffer
+
+pub const PROJECTIVE_FRONTIER_CELL_WORDS: usize = 4
+pub const PROJECTIVE_FRONTIER_RECEIPT_WORDS: usize = 4
+
+/// Geometry/model policy supplied to the backend-neutral frontier placement.
+pub trait ProjectivePatchFrontierClassifier2: Copy {
+    fn classify(self, _ cell: AnisotropicPatchCell2) -> ProjectivePatchFrontierDecision2
+}
+
+pub struct ProjectivePatchFrontierReceipt {
+    pub active_cells: u32,
+    pub rounds: u32,
+    pub overflowed: bool,
+    pub converged: bool,
+}
+impl Copy for ProjectivePatchFrontierReceipt {}
+
+fn cell_offset(_ index: u32) -> u32 {
+    index * PROJECTIVE_FRONTIER_CELL_WORDS.downcast_truncate()
+}
+
+fn store_frontier_cell<const WORDS: usize>(
+    _ cells: StorageBuffer<u32, WORDS>,
+    _ index: u32,
+    _ cell: AnisotropicPatchCell2,
+) {
+    let offset = cell_offset(index)
+    cells.store(index: offset, value: cell.u_depth)
+    cells.store(index: offset + 1, value: cell.v_depth)
+    cells.store(index: offset + 2, value: cell.u_index)
+    cells.store(index: offset + 3, value: cell.v_index)
+}
+
+fn load_frontier_cell<const WORDS: usize>(
+    _ cells: StorageBuffer<u32, WORDS>,
+    _ index: u32,
+) -> AnisotropicPatchCell2 {
+    let offset = cell_offset(index)
+    AnisotropicPatchCell2 {
+        u_depth: cells.load(index: offset),
+        v_depth: cells.load(index: offset + 1),
+        u_index: cells.load(index: offset + 2),
+        v_index: cells.load(index: offset + 3),
+    }
+}
+
+fn source_frontier_cell<const WORDS: usize>(
+    _ first: StorageBuffer<u32, WORDS>,
+    _ second: StorageBuffer<u32, WORDS>,
+    _ parity: u32,
+    _ index: u32,
+) -> AnisotropicPatchCell2 {
+    if parity == 0 {
+        load_frontier_cell<WORDS>(first, index)
+    } else {
+        load_frontier_cell<WORDS>(second, index)
+    }
+}
+
+fn store_next_frontier_cell<const WORDS: usize>(
+    _ first: StorageBuffer<u32, WORDS>,
+    _ second: StorageBuffer<u32, WORDS>,
+    _ parity: u32,
+    _ index: u32,
+    _ cell: AnisotropicPatchCell2,
+) {
+    if parity == 0 {
+        store_frontier_cell<WORDS>(second, index, cell)
+    } else {
+        store_frontier_cell<WORDS>(first, index, cell)
+    }
+}
+
+pub fn initialize_projective_patch_frontier<
+    const CELL_WORDS: usize,
+    const RECEIPT_WORDS: usize,
+>(
+    _ first: StorageBuffer<u32, CELL_WORDS>,
+    _ receipt: StorageBuffer<u32, RECEIPT_WORDS>,
+)
+where { CELL_WORDS % PROJECTIVE_FRONTIER_CELL_WORDS == 0 },
+    { RECEIPT_WORDS == PROJECTIVE_FRONTIER_RECEIPT_WORDS }
+{
+    store_frontier_cell<CELL_WORDS>(
+        first,
+        0,
+        AnisotropicPatchCell2 { u_depth: 0, v_depth: 0, u_index: 0, v_index: 0 },
+    )
+    receipt.store(index: 0, value: 1)
+    receipt.store(index: 1, value: 0)
+    receipt.store(index: 2, value: 0)
+    receipt.store(index: 3, value: 0)
+}
+
+fn append_next_cell<const CELL_WORDS: usize>(
+    _ first: StorageBuffer<u32, CELL_WORDS>,
+    _ second: StorageBuffer<u32, CELL_WORDS>,
+    _ parity: u32,
+    _ capacity: u32,
+    _ write: u32,
+    _ cell: AnisotropicPatchCell2,
+) -> bool {
+    if write >= capacity {
+        false
+    } else {
+        store_next_frontier_cell<CELL_WORDS>(first, second, parity, write, cell)
+        true
+    }
+}
+
+/// Advance one immutable frontier generation.
+///
+/// Stable source order and lower-child-before-upper-child order make the
+/// result byte-deterministic across placements. Rejected cells disappear;
+/// drawn cells remain in the frontier; a split replaces its parent with two
+/// children. Overflow is explicit and prevents the receipt from claiming
+/// convergence.
+pub fn advance_projective_patch_frontier<
+    C: ProjectivePatchFrontierClassifier2,
+    const CAPACITY: usize,
+    const CELL_WORDS: usize,
+    const RECEIPT_WORDS: usize,
+>(
+    _ classifier: C,
+    _ first: StorageBuffer<u32, CELL_WORDS>,
+    _ second: StorageBuffer<u32, CELL_WORDS>,
+    _ receipt: StorageBuffer<u32, RECEIPT_WORDS>,
+)
+where { CELL_WORDS == CAPACITY * PROJECTIVE_FRONTIER_CELL_WORDS },
+    { RECEIPT_WORDS == PROJECTIVE_FRONTIER_RECEIPT_WORDS }
+{
+    if receipt.load(index: 3) != 0 || receipt.load(index: 2) != 0 {
+        return
+    }
+    let capacity: u32 = CAPACITY.downcast_truncate()
+    let source_count = receipt.load(index: 0)
+    let parity = receipt.load(index: 1) % 2
+    let mut source: u32 = 0
+    let mut write: u32 = 0
+    let mut split = false
+    let mut overflowed = source_count > capacity
+    while source < source_count && source < capacity {
+        let cell = source_frontier_cell<CELL_WORDS>(first, second, parity, source)
+        match classifier.classify(cell) {
+            ProjectivePatchFrontierDecision2::Reject => {}
+            ProjectivePatchFrontierDecision2::Draw => {
+                if append_next_cell<CELL_WORDS>(
+                    first, second, parity, capacity, write, cell,
+                ) {
+                    write = write + 1
+                } else {
+                    overflowed = true
+                }
+            }
+            ProjectivePatchFrontierDecision2::BisectU => {
+                split = true
+                if write + 1 < capacity {
+                    append_next_cell<CELL_WORDS>(
+                        first,
+                        second,
+                        parity,
+                        capacity,
+                        write,
+                        bisect_anisotropic_patch_u2(cell, false),
+                    )
+                    append_next_cell<CELL_WORDS>(
+                        first,
+                        second,
+                        parity,
+                        capacity,
+                        write + 1,
+                        bisect_anisotropic_patch_u2(cell, true),
+                    )
+                    write = write + 2
+                } else {
+                    overflowed = true
+                }
+            }
+            ProjectivePatchFrontierDecision2::BisectV => {
+                split = true
+                if write + 1 < capacity {
+                    append_next_cell<CELL_WORDS>(
+                        first,
+                        second,
+                        parity,
+                        capacity,
+                        write,
+                        bisect_anisotropic_patch_v2(cell, false),
+                    )
+                    append_next_cell<CELL_WORDS>(
+                        first,
+                        second,
+                        parity,
+                        capacity,
+                        write + 1,
+                        bisect_anisotropic_patch_v2(cell, true),
+                    )
+                    write = write + 2
+                } else {
+                    overflowed = true
+                }
+            }
+        }
+        source = source + 1
+    }
+    receipt.store(index: 0, value: write)
+    receipt.store(index: 1, value: receipt.load(index: 1) + 1)
+    receipt.store(index: 2, value: if overflowed { 1 } else { 0 })
+    receipt.store(index: 3, value: if !split && !overflowed { 1 } else { 0 })
+}
+
+pub fn projective_patch_frontier_receipt<const RECEIPT_WORDS: usize>(
+    _ receipt: StorageBuffer<u32, RECEIPT_WORDS>,
+) -> ProjectivePatchFrontierReceipt
+where { RECEIPT_WORDS == PROJECTIVE_FRONTIER_RECEIPT_WORDS }
+{
+    ProjectivePatchFrontierReceipt {
+        active_cells: receipt.load(index: 0),
+        rounds: receipt.load(index: 1),
+        overflowed: receipt.load(index: 2) != 0,
+        converged: receipt.load(index: 3) != 0,
+    }
+}
+
+pub fn projective_patch_frontier_cell<
+    const CELL_WORDS: usize,
+    const RECEIPT_WORDS: usize,
+>(
+    _ first: StorageBuffer<u32, CELL_WORDS>,
+    _ second: StorageBuffer<u32, CELL_WORDS>,
+    _ receipt: StorageBuffer<u32, RECEIPT_WORDS>,
+    _ index: u32,
+) -> AnisotropicPatchCell2
+where { CELL_WORDS % PROJECTIVE_FRONTIER_CELL_WORDS == 0 },
+    { RECEIPT_WORDS == PROJECTIVE_FRONTIER_RECEIPT_WORDS }
+{
+    let parity = receipt.load(index: 1) % 2
+    source_frontier_cell<CELL_WORDS>(first, second, parity, index)
+}

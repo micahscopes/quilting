@@ -1,0 +1,8 @@
+[ingot]
+name = "quilting_patch_webgpu"
+version = "0.1.0"
+
+[dependencies]
+core = true
+std = true
+quilting_patch = true
