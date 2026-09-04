@@ -66,6 +66,24 @@ fn assert_close(actual: f64, expected: f64) {
     );
 }
 
+fn distance(left: [f64; 3], right: [f64; 3]) -> f64 {
+    ((right[0] - left[0]).powi(2) + (right[1] - left[1]).powi(2) + (right[2] - left[2]).powi(2))
+        .sqrt()
+}
+
+fn triangle_quality(edge0: f64, edge1: f64, edge2: f64) -> f64 {
+    let a = edge0 * edge0;
+    let b = edge1 * edge1;
+    let c = edge2 * edge2;
+    let sixteen_area_squared = (2.0 * (a * b + b * c + c * a) - a * a - b * b - c * c).max(0.0);
+    (3.0 * sixteen_area_squared).sqrt() / (a + b + c)
+}
+
+fn center_excess(first: [f64; 3], center: [f64; 3], second: [f64; 3]) -> f64 {
+    let diagonal = distance(first, second);
+    (distance(first, center) + distance(center, second) - diagonal).max(0.0) / diagonal
+}
+
 #[test]
 fn pullback_spectrum_recovers_principal_stretches() {
     let identity = spectrum(
@@ -146,6 +164,48 @@ fn degenerate_or_unadmitted_metrics_fail_closed() {
     );
     assert!(!collapsed.defined);
     assert!(!rejected.defined);
+}
+
+#[test]
+fn square_diagonals_are_an_exact_stable_tie() {
+    let p00 = [0.0, 0.0, 0.0];
+    let p10 = [1.0, 0.0, 0.0];
+    let p01 = [0.0, 1.0, 0.0];
+    let p11 = [1.0, 1.0, 0.0];
+    let center = [0.5, 0.5, 0.0];
+    let main_quality = triangle_quality(distance(p00, p10), distance(p10, p11), distance(p00, p11));
+    let cross_quality =
+        triangle_quality(distance(p00, p10), distance(p10, p01), distance(p00, p01));
+    assert_close(main_quality, 3.0_f64.sqrt() * 0.5);
+    assert_close(cross_quality, main_quality);
+    assert_close(center_excess(p00, center, p11), 0.0);
+    assert_close(center_excess(p10, center, p01), 0.0);
+}
+
+#[test]
+fn twisted_quad_exposes_quality_and_curvature_as_distinct_facts() {
+    let p00 = [0.0, 0.0, 0.0];
+    let p10 = [1.0, 0.0, 0.0];
+    let p01 = [0.0, 1.0, 0.0];
+    let p11 = [1.0, 1.0, 5.0];
+    let center = [0.5, 0.5, 1.25];
+    let bottom = distance(p00, p10);
+    let right = distance(p10, p11);
+    let top = distance(p11, p01);
+    let left = distance(p01, p00);
+    let main = distance(p00, p11);
+    let cross = distance(p10, p01);
+    let main_quality = triangle_quality(bottom, right, main).min(triangle_quality(main, top, left));
+    let cross_quality =
+        triangle_quality(bottom, cross, left).min(triangle_quality(right, top, cross));
+    let main_excess = center_excess(p00, center, p11);
+    let cross_excess = center_excess(p10, center, p01);
+
+    // The cross diagonal makes better chord triangles, but follows the much
+    // more strongly curved parameter diagonal. Policy needs both facts rather
+    // than hiding one inside a magic score.
+    assert!(cross_quality > main_quality);
+    assert!(cross_excess > main_excess * 50.0);
 }
 
 #[test]

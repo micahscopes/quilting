@@ -215,6 +215,143 @@ pub fn measure_patch_edge<K: PatchKernel, M: CodomainMetric<K::Codomain>>(
     measure_codomain_edge(left_sample, midpoint_sample, right_sample, metric)
 }
 
+/// The two possible diagonals of one oriented parameter-space quad.
+pub enum QuadDiagonal2 {
+    Corner00To11,
+    Corner10To01,
+}
+impl Copy for QuadDiagonal2 {}
+
+/// Metric-only evidence for choosing a quad diagonal.
+///
+/// Triangle quality is the standard dimensionless `4*sqrt(3)*area/sum(e^2)`
+/// score, reduced to the worse of the two triangles. Relative center excess
+/// measures how much longer the mapped diagonal is when routed through the
+/// true patch center. Both are invariant under uniform scale; neither assumes
+/// a Euclidean coordinate representation.
+pub struct QuadDiagonalProfile2 {
+    pub corner00_to_11_quality: f32,
+    pub corner10_to_01_quality: f32,
+    pub corner00_to_11_center_excess: f32,
+    pub corner10_to_01_center_excess: f32,
+    pub defined: bool,
+}
+impl Copy for QuadDiagonalProfile2 {}
+
+fn triangle_quality_from_lengths(_ edge0: f32, _ edge1: f32, _ edge2: f32) -> f32 {
+    let edge0_squared = edge0 * edge0
+    let edge1_squared = edge1 * edge1
+    let edge2_squared = edge2 * edge2
+    let edge_sum = edge0_squared + edge1_squared + edge2_squared
+    let doubled_products = 2.0
+        * (edge0_squared * edge1_squared
+            + edge1_squared * edge2_squared
+            + edge2_squared * edge0_squared)
+    let fourth_powers = edge0_squared * edge0_squared
+        + edge1_squared * edge1_squared
+        + edge2_squared * edge2_squared
+    let sixteen_area_squared = nonnegative(doubled_products - fourth_powers)
+    if edge_sum > 0.0 {
+        sqrt(3.0 * sixteen_area_squared) / edge_sum
+    } else {
+        0.0
+    }
+}
+
+fn relative_center_excess(
+    _ first_to_center: f32,
+    _ center_to_second: f32,
+    _ diagonal: f32,
+    _ minimum_length: f32,
+) -> f32 {
+    if diagonal < minimum_length {
+        0.0
+    } else {
+        nonnegative(first_to_center + center_to_second - diagonal) / diagonal
+    }
+}
+
+pub fn quad_diagonal_profile2<C: Codomain, M: CodomainMetric<C>>(
+    _ corner00: DenotationSample<C>,
+    _ corner10: DenotationSample<C>,
+    _ corner01: DenotationSample<C>,
+    _ corner11: DenotationSample<C>,
+    _ center: DenotationSample<C>,
+    _ metric: M,
+    _ minimum_length: f32,
+) -> QuadDiagonalProfile2 {
+    let defined = corner00.defined
+        && corner10.defined
+        && corner01.defined
+        && corner11.defined
+        && center.defined
+    if !defined {
+        return QuadDiagonalProfile2 {
+            corner00_to_11_quality: 0.0,
+            corner10_to_01_quality: 0.0,
+            corner00_to_11_center_excess: 0.0,
+            corner10_to_01_center_excess: 0.0,
+            defined: false,
+        }
+    }
+    let edge_bottom = metric.distance(corner00.value, corner10.value)
+    let edge_right = metric.distance(corner10.value, corner11.value)
+    let edge_top = metric.distance(corner11.value, corner01.value)
+    let edge_left = metric.distance(corner01.value, corner00.value)
+    let diagonal00_11 = metric.distance(corner00.value, corner11.value)
+    let diagonal10_01 = metric.distance(corner10.value, corner01.value)
+    let center00 = metric.distance(corner00.value, center.value)
+    let center10 = metric.distance(corner10.value, center.value)
+    let center01 = metric.distance(corner01.value, center.value)
+    let center11 = metric.distance(corner11.value, center.value)
+    let quality00_10_11 = triangle_quality_from_lengths(edge_bottom, edge_right, diagonal00_11)
+    let quality00_11_01 = triangle_quality_from_lengths(diagonal00_11, edge_top, edge_left)
+    let quality00_10_01 = triangle_quality_from_lengths(edge_bottom, diagonal10_01, edge_left)
+    let quality10_11_01 = triangle_quality_from_lengths(edge_right, edge_top, diagonal10_01)
+    QuadDiagonalProfile2 {
+        corner00_to_11_quality: minimum_f32(quality00_10_11, quality00_11_01),
+        corner10_to_01_quality: minimum_f32(quality00_10_01, quality10_11_01),
+        corner00_to_11_center_excess: relative_center_excess(
+            center00,
+            center11,
+            diagonal00_11,
+            minimum_length,
+        ),
+        corner10_to_01_center_excess: relative_center_excess(
+            center10,
+            center01,
+            diagonal10_01,
+            minimum_length,
+        ),
+        defined: diagonal00_11 >= minimum_length && diagonal10_01 >= minimum_length,
+    }
+}
+
+/// Apply an explicit, scale-free topology policy to measured diagonal facts.
+/// Exact or near ties retain `00 -> 11`, giving every dyadic leaf a stable
+/// answer instead of allowing floating-point noise to chatter its topology.
+pub fn choose_quad_diagonal2(
+    _ profile: QuadDiagonalProfile2,
+    _ quality_weight: f32,
+    _ center_excess_weight: f32,
+    _ tie_band: f32,
+) -> QuadDiagonal2 {
+    if !profile.defined {
+        return QuadDiagonal2::Corner00To11
+    }
+    let quality00_11 = quality_weight * profile.corner00_to_11_quality
+    let penalty00_11 = center_excess_weight * profile.corner00_to_11_center_excess
+    let quality10_01 = quality_weight * profile.corner10_to_01_quality
+    let penalty10_01 = center_excess_weight * profile.corner10_to_01_center_excess
+    let diagonal00_11 = quality00_11 - penalty00_11
+    let diagonal10_01 = quality10_01 - penalty10_01
+    if diagonal10_01 > diagonal00_11 + tie_band {
+        QuadDiagonal2::Corner10To01
+    } else {
+        QuadDiagonal2::Corner00To11
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Pullback metrics and deformation-aware triangulation
 // ---------------------------------------------------------------------------
