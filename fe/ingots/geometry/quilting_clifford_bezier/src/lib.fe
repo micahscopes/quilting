@@ -14,6 +14,7 @@
 //! A future CGA authoring layer is a separate peer over Cl(4, 1).
 
 use core::marker::Copy
+use fmath::sqrt
 use ga_expr::{
     CompileGaF32,
     EvaluateGaF32,
@@ -44,6 +45,8 @@ use quilting_patch::{
     patch as typed_patch,
     projective_control,
     projective_patch,
+    pullback_metric2,
+    PullbackMetric2,
 }
 
 /// A weight in Cl(2, 0, 1)'s even subalgebra E0 + E2.
@@ -77,6 +80,39 @@ pub struct IsotropicSample {
 }
 impl Copy for IsotropicSample {}
 
+/// One normalized representative of the authored homogeneous Clifford map.
+///
+/// The first four lanes are the odd weighted numerator and the final four are
+/// the even denominator. Keeping the pair, rather than the affine quotient,
+/// makes points at infinity ordinary finite values and makes global rescaling
+/// of every control weight observationally irrelevant. Antipodal values name
+/// the same real-projective point.
+pub struct IsotropicProjectiveF {
+    pub numerator_e1: f32,
+    pub numerator_e2: f32,
+    pub numerator_e3: f32,
+    pub numerator_e123: f32,
+    pub denominator_scalar: f32,
+    pub denominator_e12: f32,
+    pub denominator_e13: f32,
+    pub denominator_e23: f32,
+}
+impl Copy for IsotropicProjectiveF {}
+
+pub struct IsotropicProjectiveSample {
+    pub representative: IsotropicProjectiveF,
+    pub lift_norm_squared: f32,
+    pub conditioned: bool,
+}
+impl Copy for IsotropicProjectiveSample {}
+
+pub struct IsotropicProjectiveDifferential {
+    pub sample: IsotropicProjectiveSample,
+    pub tangent_s: IsotropicProjectiveF,
+    pub tangent_t: IsotropicProjectiveF,
+}
+impl Copy for IsotropicProjectiveDifferential {}
+
 pub struct IsotropicDifferential {
     pub sample: IsotropicSample,
     pub tangent_s: Vec3F,
@@ -84,6 +120,13 @@ pub struct IsotropicDifferential {
     pub normal: Vec3F,
 }
 impl Copy for IsotropicDifferential {}
+
+struct IsotropicProjectiveLift {
+    value: IsotropicProjectiveF,
+    tangent_s: IsotropicProjectiveF,
+    tangent_t: IsotropicProjectiveF,
+}
+impl Copy for IsotropicProjectiveLift {}
 
 struct EvaluationFrame {
     sample: IsotropicSample,
@@ -376,6 +419,240 @@ fn tangent_even_t(
         left.e12 + right.e12,
         left.e13 + right.e13,
         left.e23 + right.e23,
+    )
+}
+
+fn projective_value(
+    _ numerator: IsotropicOddF,
+    _ denominator: IsotropicEvenF,
+) -> IsotropicProjectiveF {
+    IsotropicProjectiveF {
+        numerator_e1: numerator.e1,
+        numerator_e2: numerator.e2,
+        numerator_e3: numerator.e3,
+        numerator_e123: numerator.e123,
+        denominator_scalar: denominator.scalar,
+        denominator_e12: denominator.e12,
+        denominator_e13: denominator.e13,
+        denominator_e23: denominator.e23,
+    }
+}
+
+fn projective_zero() -> IsotropicProjectiveF {
+    projective_value(
+        IsotropicOddF { e1: 0.0, e2: 0.0, e3: 0.0, e123: 0.0 },
+        even(0.0, 0.0, 0.0, 0.0),
+    )
+}
+
+pub fn projective_dot(_ left: IsotropicProjectiveF, _ right: IsotropicProjectiveF) -> f32 {
+    left.numerator_e1 * right.numerator_e1
+        + left.numerator_e2 * right.numerator_e2
+        + left.numerator_e3 * right.numerator_e3
+        + left.numerator_e123 * right.numerator_e123
+        + left.denominator_scalar * right.denominator_scalar
+        + left.denominator_e12 * right.denominator_e12
+        + left.denominator_e13 * right.denominator_e13
+        + left.denominator_e23 * right.denominator_e23
+}
+
+fn scale_projective(
+    _ value: IsotropicProjectiveF,
+    _ scale: f32,
+) -> IsotropicProjectiveF {
+    IsotropicProjectiveF {
+        numerator_e1: value.numerator_e1 * scale,
+        numerator_e2: value.numerator_e2 * scale,
+        numerator_e3: value.numerator_e3 * scale,
+        numerator_e123: value.numerator_e123 * scale,
+        denominator_scalar: value.denominator_scalar * scale,
+        denominator_e12: value.denominator_e12 * scale,
+        denominator_e13: value.denominator_e13 * scale,
+        denominator_e23: value.denominator_e23 * scale,
+    }
+}
+
+fn sub_projective(
+    _ left: IsotropicProjectiveF,
+    _ right: IsotropicProjectiveF,
+) -> IsotropicProjectiveF {
+    IsotropicProjectiveF {
+        numerator_e1: left.numerator_e1 - right.numerator_e1,
+        numerator_e2: left.numerator_e2 - right.numerator_e2,
+        numerator_e3: left.numerator_e3 - right.numerator_e3,
+        numerator_e123: left.numerator_e123 - right.numerator_e123,
+        denominator_scalar: left.denominator_scalar - right.denominator_scalar,
+        denominator_e12: left.denominator_e12 - right.denominator_e12,
+        denominator_e13: left.denominator_e13 - right.denominator_e13,
+        denominator_e23: left.denominator_e23 - right.denominator_e23,
+    }
+}
+
+fn projective_lift(
+    _ value: IsotropicBilinearPatch,
+    _ parameter: Vec2F,
+) -> IsotropicProjectiveLift {
+    let f00 = weighted_isotropic_point(value.p00)
+    let f10 = weighted_isotropic_point(value.p10)
+    let f01 = weighted_isotropic_point(value.p01)
+    let f11 = weighted_isotropic_point(value.p11)
+    IsotropicProjectiveLift {
+        value: projective_value(
+            blend_odd(f00, f10, f01, f11, parameter),
+            blend_even(
+                value.p00.weight,
+                value.p10.weight,
+                value.p01.weight,
+                value.p11.weight,
+                parameter,
+            ),
+        ),
+        tangent_s: projective_value(
+            tangent_odd_s(f00, f10, f01, f11, parameter.y),
+            tangent_even_s(
+                value.p00.weight,
+                value.p10.weight,
+                value.p01.weight,
+                value.p11.weight,
+                parameter.y,
+            ),
+        ),
+        tangent_t: projective_value(
+            tangent_odd_t(f00, f10, f01, f11, parameter.x),
+            tangent_even_t(
+                value.p00.weight,
+                value.p10.weight,
+                value.p01.weight,
+                value.p11.weight,
+                parameter.x,
+            ),
+        ),
+    }
+}
+
+/// Evaluate the compact real-projective lift `[F(s,t) : W(s,t)]`.
+///
+/// Unlike the affine quotient this remains finite at a denominator zero. The
+/// representative is normalized only to choose a stable metric carrier; its
+/// sign has no meaning.
+pub fn evaluate_projective(
+    _ value: IsotropicBilinearPatch,
+    _ parameter: Vec2F,
+    _ minimum_lift_norm_squared: f32,
+) -> IsotropicProjectiveSample {
+    let lift = projective_lift(value, parameter)
+    let norm_squared = projective_dot(lift.value, lift.value)
+    let conditioned = norm_squared >= minimum_lift_norm_squared
+    IsotropicProjectiveSample {
+        representative: if conditioned {
+            scale_projective(lift.value, 1.0 / sqrt(norm_squared))
+        } else {
+            projective_zero()
+        },
+        lift_norm_squared: norm_squared,
+        conditioned: conditioned,
+    }
+}
+
+/// Differential of the normalized homogeneous lift. Radial scale is removed,
+/// leaving exactly the tangent seen by the round metric on real projective
+/// space.
+pub fn evaluate_projective_differential(
+    _ value: IsotropicBilinearPatch,
+    _ parameter: Vec2F,
+    _ minimum_lift_norm_squared: f32,
+) -> IsotropicProjectiveDifferential {
+    let lift = projective_lift(value, parameter)
+    let norm_squared = projective_dot(lift.value, lift.value)
+    let conditioned = norm_squared >= minimum_lift_norm_squared
+    if !conditioned {
+        return IsotropicProjectiveDifferential {
+            sample: IsotropicProjectiveSample {
+                representative: projective_zero(),
+                lift_norm_squared: norm_squared,
+                conditioned: false,
+            },
+            tangent_s: projective_zero(),
+            tangent_t: projective_zero(),
+        }
+    }
+    let inverse_norm = 1.0 / sqrt(norm_squared)
+    let representative = scale_projective(lift.value, inverse_norm)
+    let tangent_s = scale_projective(
+        sub_projective(
+            lift.tangent_s,
+            scale_projective(
+                representative,
+                projective_dot(representative, lift.tangent_s),
+            ),
+        ),
+        inverse_norm,
+    )
+    let tangent_t = scale_projective(
+        sub_projective(
+            lift.tangent_t,
+            scale_projective(
+                representative,
+                projective_dot(representative, lift.tangent_t),
+            ),
+        ),
+        inverse_norm,
+    )
+    IsotropicProjectiveDifferential {
+        sample: IsotropicProjectiveSample {
+            representative: representative,
+            lift_norm_squared: norm_squared,
+            conditioned: true,
+        },
+        tangent_s: tangent_s,
+        tangent_t: tangent_t,
+    }
+}
+
+/// Squared chord distance on the unit-sphere cover of real projective space.
+/// The absolute dot product makes antipodal representatives identical.
+pub fn projective_distance_squared(
+    _ left: IsotropicProjectiveF,
+    _ right: IsotropicProjectiveF,
+) -> f32 {
+    let raw = projective_dot(left, right)
+    let aligned = if raw < 0.0 { -raw } else { raw }
+    let bounded = if aligned > 1.0 { 1.0 } else { aligned }
+    2.0 - 2.0 * bounded
+}
+
+/// Chordal area of three normalized representatives in the locally aligned
+/// sphere chart. This is finite across the affine pole and scale invariant.
+pub fn projective_triangle_area(
+    _ first: IsotropicProjectiveF,
+    _ second: IsotropicProjectiveF,
+    _ third: IsotropicProjectiveF,
+) -> f32 {
+    let aligned_second = if projective_dot(first, second) < 0.0 {
+        scale_projective(second, -1.0)
+    } else {
+        second
+    }
+    let aligned_third = if projective_dot(first, third) < 0.0 {
+        scale_projective(third, -1.0)
+    } else {
+        third
+    }
+    let edge_s = sub_projective(aligned_second, first)
+    let edge_t = sub_projective(aligned_third, first)
+    let determinant = projective_dot(edge_s, edge_s) * projective_dot(edge_t, edge_t) -
+        projective_dot(edge_s, edge_t) * projective_dot(edge_s, edge_t)
+    if determinant > 0.0 { sqrt(determinant) * 0.5 } else { 0.0 }
+}
+
+pub fn projective_pullback_metric(
+    _ differential: IsotropicProjectiveDifferential,
+) -> PullbackMetric2 {
+    pullback_metric2(
+        projective_dot(differential.tangent_s, differential.tangent_s),
+        projective_dot(differential.tangent_s, differential.tangent_t),
+        projective_dot(differential.tangent_t, differential.tangent_t),
+        differential.sample.conditioned,
     )
 }
 

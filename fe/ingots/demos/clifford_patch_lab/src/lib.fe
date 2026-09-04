@@ -19,7 +19,7 @@ use classic_quilting_lod::{
     patch_first_triangle,
     patch_triangle_count,
 }
-use fmath::{TAU, abs, clamp, clamp01, cos, mix, sin, smoothstep, wrap_pi}
+use fmath::{TAU, abs, clamp, clamp01, cos, mix, sin, smoothstep, sqrt, wrap_pi}
 use quilting_atlas::{AtlasKey, boundary_vertices, canonical_key_ordinal, edge_resolution}
 use quilting_atlas::sampling::{
     BARYCENTRIC_SCALE,
@@ -54,13 +54,19 @@ use quilting_atlas_webgpu::{
 use quilting_clifford_bezier::{
     IsotropicBilinearPatch,
     IsotropicDifferential,
+    IsotropicProjectiveF,
     IsotropicPolicy,
     control,
     evaluate,
     evaluate_differential,
+    evaluate_projective,
+    evaluate_projective_differential,
     even,
     parameter_triangle_conditioned,
     patch,
+    projective_distance_squared,
+    projective_pullback_metric,
+    projective_triangle_area,
     scale_weight,
 }
 use quilting_domain::{
@@ -94,9 +100,7 @@ use quilting_oklch::{
 use quilting_patch::{
     PullbackMetric2,
     PullbackSample2,
-    euclidean3_pullback_metric,
     pullback_metric2,
-    pullback_poisson_conflict,
     pullback_sample2,
     varying_pullback_incircle_value,
 }
@@ -174,7 +178,7 @@ const DEFORMED_TRIANGLE_WORDS: usize = DEFORMED_TRIANGLES * TRIANGLE_WORDS
 const DEFORMED_TWIN_WORDS: usize = DEFORMED_TRIANGLES * TOPOLOGY_TWIN_WORDS_PER_TRIANGLE
 const DEFORMED_EDGE_INDEX_WORDS: usize = DEFORMED_POINTS + DEFORMED_TWIN_WORDS
 const DEFORMED_PROPOSAL_WORDS: usize = (DEFORMED_TWIN_WORDS + 31) / 32
-const DEFORMED_SAMPLE_LANES: usize = 6
+const DEFORMED_SAMPLE_LANES: usize = 14
 const DEFORMED_SAMPLE_SLOTS: usize = DEFORMED_CANDIDATES + DEFORMED_BOUNDARY_POINTS
 const DEFORMED_SAMPLE_WORDS: usize = DEFORMED_SAMPLE_SLOTS * DEFORMED_SAMPLE_LANES
 const DEFORMED_CANDIDATE_LANES: usize = 6
@@ -188,7 +192,6 @@ const DEFORMED_FLIP_LIMIT: usize = 256
 const DEFORMED_IMPORTANCE_DEPTH: usize = 10
 const DEFORMED_BOUNDARY_ARC_DEPTH: usize = 12
 
-const DEFORMED_RADIUS_SQUARED: f32 = 0.18
 const DEFORMED_RECEIPT_WORDS: usize = 8
 
 pub struct DeformedSamplingRound {}
@@ -274,8 +277,14 @@ struct FixedParameterTriangle {
 }
 impl Copy for FixedParameterTriangle {}
 
-struct SurfacePoint { position: Vec3F, defined: bool }
+struct SurfacePoint { position: IsotropicProjectiveF, defined: bool }
 impl Copy for SurfacePoint {}
+
+struct SurfacePullbackSample {
+    pullback: PullbackSample2,
+    representative: IsotropicProjectiveF,
+}
+impl Copy for SurfacePullbackSample {}
 
 struct SurfaceCandidateConflict<const WORDS: usize> {
     samples: StorageBuffer<f32, WORDS>,
@@ -318,8 +327,12 @@ fn surface_point(
     _ chart: u32,
     _ point: FixedBarycentric,
 ) -> SurfacePoint {
-    let sample = evaluate(patch, fixed_parameter(chart, point), policy())
-    SurfacePoint { position: sample.position, defined: sample.conditioned }
+    let sample = evaluate_projective(
+        patch,
+        fixed_parameter(chart, point),
+        policy().minimum_denominator_norm_squared,
+    )
+    SurfacePoint { position: sample.representative, defined: sample.conditioned }
 }
 
 fn chord_triangle_area(
@@ -330,10 +343,7 @@ fn chord_triangle_area(
     if !first.defined || !second.defined || !third.defined {
         0.0
     } else {
-        length3(cross3(
-            sub3(second.position, first.position),
-            sub3(third.position, first.position),
-        )) * 0.5
+        projective_triangle_area(first.position, second.position, third.position)
     }
 }
 
@@ -468,12 +478,12 @@ fn surface_boundary_point(
         let center = surface_point(patch, chart, boundary_edge_point(boundary.edge, middle))
         let last = surface_point(patch, chart, boundary_edge_point(boundary.edge, upper))
         let left = if first.defined && center.defined {
-            length3(sub3(center.position, first.position))
+            sqrt(projective_distance_squared(center.position, first.position))
         } else {
             0.0
         }
         let right = if center.defined && last.defined {
-            length3(sub3(last.position, center.position))
+            sqrt(projective_distance_squared(last.position, center.position))
         } else {
             0.0
         }
@@ -569,31 +579,41 @@ impl BoundaryPointPolicy for SurfaceBoundaryPoints {
     }
 }
 
-fn patch_pullback_sample(_ patch: IsotropicBilinearPatch, _ parameter: Vec2F) -> PullbackSample2 {
-    let differential = evaluate_differential(patch, parameter, policy(), 0.000000000001)
-    let raw = euclidean3_pullback_metric(differential.tangent_s, differential.tangent_t)
-    pullback_sample2(
+fn projective_poisson_radius_squared() -> f32 {
+    let density = as_f32(edge_resolution(deformed_key().a))
+    let angular_radius = TAU * 0.25 / density
+    2.0 - 2.0 * cos(angular_radius)
+}
+
+fn patch_pullback_sample(
+    _ patch: IsotropicBilinearPatch,
+    _ parameter: Vec2F,
+) -> SurfacePullbackSample {
+    let differential = evaluate_projective_differential(
+        patch,
         parameter,
-        pullback_metric2(
-            raw.uu,
-            raw.uv,
-            raw.vv,
-            // A free editor gesture may leave the exact grade-one Clifford
-            // locus while the right quotient and its Euclidean projection
-            // remain perfectly conditioned. The lab renders that projection
-            // as an explicit residual diagnostic, so its pullback sampler must
-            // measure the same denotation instead of collapsing to boundary
-            // points merely because a grade-three component is present.
-            differential.sample.conditioned,
-        ),
+        policy().minimum_denominator_norm_squared,
     )
+    let raw = projective_pullback_metric(differential)
+    SurfacePullbackSample {
+        pullback: pullback_sample2(
+            parameter,
+            pullback_metric2(
+                raw.uu,
+                raw.uv,
+                raw.vv,
+                differential.sample.conditioned,
+            ),
+        ),
+        representative: differential.sample.representative,
+    }
 }
 
 fn fixed_pullback_sample(
     _ patch: IsotropicBilinearPatch,
     _ chart: u32,
     _ point: FixedBarycentric,
-) -> PullbackSample2 {
+) -> SurfacePullbackSample {
     patch_pullback_sample(patch, fixed_parameter(chart, point))
 }
 
@@ -609,54 +629,84 @@ fn deformed_boundary_slot(_ ordinal: u32) -> u32 {
 fn store_pullback_sample<const WORDS: usize>(
     _ samples: StorageBuffer<f32, WORDS>,
     _ ordinal: u32,
-    _ sample: PullbackSample2,
+    _ sample: SurfacePullbackSample,
 ) {
     let offset = sample_offset(ordinal)
-    samples.store(index: offset, value: sample.parameter.x)
-    samples.store(index: offset + 1, value: sample.parameter.y)
-    samples.store(index: offset + 2, value: sample.metric.uu)
-    samples.store(index: offset + 3, value: sample.metric.uv)
-    samples.store(index: offset + 4, value: sample.metric.vv)
+    samples.store(index: offset, value: sample.pullback.parameter.x)
+    samples.store(index: offset + 1, value: sample.pullback.parameter.y)
+    samples.store(index: offset + 2, value: sample.pullback.metric.uu)
+    samples.store(index: offset + 3, value: sample.pullback.metric.uv)
+    samples.store(index: offset + 4, value: sample.pullback.metric.vv)
+    samples.store(index: offset + 5, value: sample.representative.numerator_e1)
+    samples.store(index: offset + 6, value: sample.representative.numerator_e2)
+    samples.store(index: offset + 7, value: sample.representative.numerator_e3)
+    samples.store(index: offset + 8, value: sample.representative.numerator_e123)
+    samples.store(index: offset + 9, value: sample.representative.denominator_scalar)
+    samples.store(index: offset + 10, value: sample.representative.denominator_e12)
+    samples.store(index: offset + 11, value: sample.representative.denominator_e13)
+    samples.store(index: offset + 12, value: sample.representative.denominator_e23)
     samples.store(
-            index: offset + 5,
-            value: if sample.metric.defined { 1.0 } else { 0.0 },
+            index: offset + 13,
+            value: if sample.pullback.metric.defined { 1.0 } else { 0.0 },
         )
 }
 
 fn load_pullback_sample<const WORDS: usize>(
     _ samples: StorageBuffer<f32, WORDS>,
     _ ordinal: u32,
-) -> PullbackSample2 {
+) -> SurfacePullbackSample {
     let offset = sample_offset(ordinal)
-    pullback_sample2(
-        vec2f(
-            samples.load(index: offset),
-            samples.load(index: offset + 1),
+    SurfacePullbackSample {
+        pullback: pullback_sample2(
+            vec2f(
+                samples.load(index: offset),
+                samples.load(index: offset + 1),
+            ),
+            pullback_metric2(
+                samples.load(index: offset + 2),
+                samples.load(index: offset + 3),
+                samples.load(index: offset + 4),
+                samples.load(index: offset + 13) > 0.5,
+            ),
         ),
-        pullback_metric2(
-            samples.load(index: offset + 2),
-            samples.load(index: offset + 3),
-            samples.load(index: offset + 4),
-            samples.load(index: offset + 5) > 0.5,
-        ),
-    )
+        representative: IsotropicProjectiveF {
+            numerator_e1: samples.load(index: offset + 5),
+            numerator_e2: samples.load(index: offset + 6),
+            numerator_e3: samples.load(index: offset + 7),
+            numerator_e123: samples.load(index: offset + 8),
+            denominator_scalar: samples.load(index: offset + 9),
+            denominator_e12: samples.load(index: offset + 10),
+            denominator_e13: samples.load(index: offset + 11),
+            denominator_e23: samples.load(index: offset + 12),
+        },
+    }
+}
+
+fn projective_samples_conflict(
+    _ first: SurfacePullbackSample,
+    _ second: SurfacePullbackSample,
+) -> bool {
+    // Admission is measured in the compact codomain itself; the pullback
+    // tensor below remains reserved for intrinsic edge-flip decisions.
+    first.pullback.metric.defined
+        && second.pullback.metric.defined
+        && projective_distance_squared(first.representative, second.representative) <
+            projective_poisson_radius_squared()
 }
 
 impl<const WORDS: usize> CandidateConflictPolicy for SurfaceCandidateConflict<WORDS> {
     fn conflicts_boundary(self, _ key: AtlasKey, _ candidate: InteriorCandidate) -> bool {
         let candidate_sample = load_pullback_sample(self.samples, candidate.slot)
-        let mut conflict = !candidate.valid || !candidate_sample.metric.defined
+        let mut conflict = !candidate.valid || !candidate_sample.pullback.metric.defined
         let mut ordinal: u32 = 0
         let count = boundary_vertices(key)
         while ordinal < count {
-            if pullback_poisson_conflict(
+            if projective_samples_conflict(
                     candidate_sample,
-                    DEFORMED_RADIUS_SQUARED,
                     load_pullback_sample(
                         self.samples,
                         deformed_boundary_slot(ordinal),
                     ),
-                    DEFORMED_RADIUS_SQUARED,
                 ) {
                     conflict = true
             }
@@ -666,11 +716,9 @@ impl<const WORDS: usize> CandidateConflictPolicy for SurfaceCandidateConflict<WO
     }
 
     fn conflicts(self, _ left: InteriorCandidate, _ right: InteriorCandidate) -> bool {
-        pullback_poisson_conflict(
+        projective_samples_conflict(
             load_pullback_sample(self.samples, left.slot),
-            DEFORMED_RADIUS_SQUARED,
             load_pullback_sample(self.samples, right.slot),
-            DEFORMED_RADIUS_SQUARED,
         )
     }
 }
@@ -701,10 +749,10 @@ impl<const WORDS: usize> InteriorEdgeFlipPolicy for SurfaceInteriorEdgeFlip<WORD
             return chart_decision
         }
         let value = varying_pullback_incircle_value(
-            load_pullback_sample(self.samples, u_id),
-            load_pullback_sample(self.samples, v_id),
-            load_pullback_sample(self.samples, first_opposite_id),
-            load_pullback_sample(self.samples, second_opposite_id),
+            load_pullback_sample(self.samples, u_id).pullback,
+            load_pullback_sample(self.samples, v_id).pullback,
+            load_pullback_sample(self.samples, first_opposite_id).pullback,
+            load_pullback_sample(self.samples, second_opposite_id).pullback,
         )
         let sign: i32 = if value > 0.0000001 {
             1
