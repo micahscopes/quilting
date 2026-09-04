@@ -141,7 +141,7 @@ use quilting_patch::{
     fractal_patch_leaf_decision3,
     patch_transform_profile3,
     patch_transform_sample3,
-    projective_patch_cell_profile2,
+    projective_patch_cell_profile2_with_lower_bound,
     projective_patch_frontier_decision2,
     quad_diagonal_profile2,
     ranked_quantized_position,
@@ -480,9 +480,18 @@ fn projective_frontier_policy() -> ProjectivePatchFrontierPolicy2 {
 impl ProjectivePatchFrontierClassifier2 for CliffordProjectiveFrontier {
     fn classify(self, _ cell: AnisotropicPatchCell2) -> ProjectivePatchFrontierDecision2 {
         let parameters = anisotropic_cell_parameters(cell)
-        let intrinsic = projective_patch_cell_profile2(
+        let chart = denominator_cell_profile(
+            self.patch,
+            parameters.p00,
+            parameters.p10,
+            parameters.p01,
+            parameters.p11,
+            policy(),
+        )
+        let intrinsic = projective_patch_cell_profile2_with_lower_bound(
             anisotropic_quadratic_tensor_cell(self.quotient, cell),
             policy().minimum_denominator_norm_squared,
+            chart.minimum_measure_bound,
         )
         let bottom = projected_edge_score(
             self.patch,

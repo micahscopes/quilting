@@ -1378,15 +1378,25 @@ fn denominator_delta<T: HomogeneousQuotientElement>(_ a: T, _ b: T) -> f32 {
     abs(b.denominator() - a.denominator())
 }
 
-/// Profile a local exact quotient net without performing affine division.
-pub fn projective_patch_cell_profile2<T: HomogeneousQuotientElement>(
+/// Profile a local exact quotient net without performing affine division,
+/// combining its Bernstein-hull denominator bound with an independent
+/// conservative lower bound supplied by the patch family.  Taking the larger
+/// of two proven lower bounds is still conservative and can be dramatically
+/// tighter for a sum of squares whose expanded Bernstein coefficients lose
+/// correlation between the original components.
+pub fn projective_patch_cell_profile2_with_lower_bound<T: HomogeneousQuotientElement>(
     _ value: QuadraticTensorPatch<T>,
     _ minimum_admitted_denominator: f32,
+    _ independent_denominator_lower_bound: f32,
 ) -> ProjectivePatchCellProfile2 {
-    let minimum_denominator = minimum9(
+    let bernstein_minimum_denominator = minimum9(
         value.p00.denominator(), value.p10.denominator(), value.p20.denominator(),
         value.p01.denominator(), value.p11.denominator(), value.p21.denominator(),
         value.p02.denominator(), value.p12.denominator(), value.p22.denominator(),
+    )
+    let minimum_denominator = maximum_f32(
+        bernstein_minimum_denominator,
+        independent_denominator_lower_bound,
     )
     let maximum_denominator = maximum9(
         value.p00.denominator(), value.p10.denominator(), value.p20.denominator(),
@@ -1444,6 +1454,18 @@ pub fn projective_patch_cell_profile2<T: HomogeneousQuotientElement>(
         projective_variation_v: 2.0 * sqrt(separation_v) * inverse_denominator_squared,
         certified: certified,
     }
+}
+
+/// Profile a local exact quotient net using its own Bernstein-hull proof.
+pub fn projective_patch_cell_profile2<T: HomogeneousQuotientElement>(
+    _ value: QuadraticTensorPatch<T>,
+    _ minimum_admitted_denominator: f32,
+) -> ProjectivePatchCellProfile2 {
+    projective_patch_cell_profile2_with_lower_bound<T>(
+        value,
+        minimum_admitted_denominator,
+        0.0,
+    )
 }
 
 /// Intrinsic and view-dependent evidence are kept separate until policy.
