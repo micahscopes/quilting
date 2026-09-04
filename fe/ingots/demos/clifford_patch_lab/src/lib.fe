@@ -20,7 +20,7 @@ use classic_quilting_lod::{
     patch_triangle_count,
 }
 use fmath::{TAU, abs, clamp, clamp01, cos, mix, sin, smoothstep, sqrt, wrap_pi}
-use quilting_atlas::{AtlasKey, boundary_vertices, canonical_key_ordinal, edge_resolution}
+use quilting_atlas::{AtlasKey, MAX_LOD, boundary_vertices, canonical_key_ordinal, edge_resolution}
 use quilting_atlas::sampling::{
     BARYCENTRIC_SCALE,
     BoundarySeed,
@@ -119,7 +119,6 @@ use std::webgpu::{
     FragmentSurface,
     GpuProgram,
     IndirectTriangleList,
-    Instanced,
     LatestPerFrame,
     PassActivation,
     PassPreparation,
@@ -148,12 +147,7 @@ extern {
 const GRID: u32 = 56
 const GRID_VERTICES: u32 = 18816
 const GRID_VERTICES_PER_INSTANCE: u32 = 2352
-const ATLAS_MAX_LOD: u32 = 5
-const ATLAS_TRIANGLES_PER_MACRO: u32 = 1642
-const ATLAS_VERTICES_PER_MACRO: u32 = ATLAS_TRIANGLES_PER_MACRO * 3
 const MAX_MACRO_TRIANGLES: u32 = 8
-const VERTICES_PER_INSTANCE: usize = 4926
-const INSTANCE_COUNT: usize = 8
 
 
 const DEFORMED_CANDIDATES: usize = 272
@@ -191,12 +185,15 @@ const DEFORMED_FLIP_LIMIT: usize = 256
 const DEFORMED_IMPORTANCE_DEPTH: usize = 10
 const DEFORMED_BOUNDARY_ARC_DEPTH: usize = 12
 
-const DEFORMED_RECEIPT_WORDS: usize = 8
+// Construction/restoration occupy words 0--7. The draw-preparation pass
+// materializes its density-balanced micro-LoD in word 8 for the vertex stage.
+const DEFORMED_RECEIPT_WORDS: usize = 9
 
 pub struct DeformedSamplingRound {}
 
 /// Nominal identities keep the two independently produced chart commands
 /// exact even though their four-word WebGPU representation is identical.
+struct AnalyticAtlasDraw {}
 struct DeformedChart0Draw {}
 struct DeformedChart1Draw {}
 
@@ -1022,7 +1019,10 @@ const fn lab_params() -> CliffordLabParams {
             ),
             init: 1.0,
         ),
-        atlas_lod: Param::int(min: 0.0, max: 5.0, init: 4.0),
+        // The shared permutation atlas is complete through LoD 8. The
+        // analytic path uses an indirect draw, so exposing that complete range
+        // no longer pays the maximum vertex envelope at every lower level.
+        atlas_lod: Param::int(min: 0.0, max: 8.0, init: 7.0),
         res_x: Param::extent_x(),
         res_y: Param::extent_y(),
         selected: Param::fixed(-1.0),
@@ -1356,13 +1356,79 @@ fn map_macro_parameter(_ triangle: ParameterTriangle, _ bary: Bary3F) -> Vec2F {
 
 fn admitted_atlas_lod(_ value: f32) -> u32 {
     let mut lod: u32 = 0
-    while lod < ATLAS_MAX_LOD {
+    while lod < MAX_LOD {
         if value < as_f32(lod) + 0.5 {
             return lod
         }
         lod = lod + 1
     }
-    ATLAS_MAX_LOD
+    MAX_LOD
+}
+
+fn atlas_triangle_count_at_lod(_ fixture: FixtureBuffer, _ lod: u32) -> u32 {
+    patch_triangle_count(
+        fixture,
+        canonical_key_ordinal(AtlasKey { a: lod, b: lod, c: lod }),
+    )
+}
+
+/// Choose the finest dyadic micro-patch that keeps a macro triangulation under
+/// one explicit triangle budget. This makes the UI's LoD a property of the
+/// complete represented surface rather than a multiplier accidentally applied
+/// to every resident macro triangle.
+fn atlas_lod_for_triangle_budget(
+    _ fixture: FixtureBuffer,
+    _ macro_triangles: u32,
+    _ target_triangles: u32,
+) -> u32 {
+    if macro_triangles == 0 {
+        return 0
+    }
+    let mut lod: u32 = 0
+    while lod < MAX_LOD {
+        let next = lod + 1
+        if atlas_triangle_count_at_lod(fixture, next) * macro_triangles > target_triangles {
+            return lod
+        }
+        lod = next
+    }
+    MAX_LOD
+}
+
+fn analytic_macro_triangles(_ sampler_mode: f32) -> u32 {
+    if sampler_mode < 1.5 { 2 } else { MAX_MACRO_TRIANGLES }
+}
+
+fn analytic_atlas_lod(
+    _ fixture: FixtureBuffer,
+    _ sampler_mode: f32,
+    _ requested: f32,
+) -> u32 {
+    let target_lod = admitted_atlas_lod(requested)
+    if sampler_mode < 1.5 {
+        target_lod
+    } else {
+        // Eight quarter-size macro triangles cover the same square as two
+        // canonical triangular patches.
+        atlas_lod_for_triangle_budget(
+            fixture,
+            MAX_MACRO_TRIANGLES,
+            atlas_triangle_count_at_lod(fixture, target_lod) * 2,
+        )
+    }
+}
+
+fn deformed_atlas_lod(
+    _ fixture: FixtureBuffer,
+    _ receipt: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
+    _ requested: f32,
+) -> u32 {
+    let target_lod = admitted_atlas_lod(requested)
+    atlas_lod_for_triangle_budget(
+        fixture,
+        receipt.load(index: 4),
+        atlas_triangle_count_at_lod(fixture, target_lod),
+    )
 }
 
 /// Pixel altitude at the current triangle vertex. The two dyadic triangles
@@ -1481,10 +1547,13 @@ fn prepare_deformed_draw<Brand>(
     let mut vertices: u32 = 0
     let mut instances: u32 = 0
     if deformed_topology_drawable(receipt) {
-        let lod = admitted_atlas_lod(atlas_lod)
+        let lod = deformed_atlas_lod(fixture, receipt, atlas_lod)
         let patch_index = canonical_key_ordinal(AtlasKey { a: lod, b: lod, c: lod })
         vertices = patch_triangle_count(fixture, patch_index) * 3
         instances = receipt.load(index: 4)
+        receipt.store(index: 8, value: lod)
+    } else {
+        receipt.store(index: 8, value: 0)
     }
     draw.store(index: 0, value: vertices)
     draw.store(index: 1, value: instances)
@@ -1518,7 +1587,7 @@ fn deformed_atlas_raster_vertex(
     if face >= receipt.load(index: 4) {
         return invalid_patch_vertex()
     }
-    let lod = admitted_atlas_lod(atlas_lod)
+    let lod = receipt.load(index: 8)
     let patch_index = canonical_key_ordinal(AtlasKey { a: lod, b: lod, c: lod })
     let local_triangle = vertex_index / 3
     if local_triangle >= patch_triangle_count(fixture, patch_index) {
@@ -1896,6 +1965,8 @@ actor CliffordPatchLab uses (
     proposals_1: StorageBuffer<u32, DEFORMED_PROPOSAL_WORDS>,
     receipt_0: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
     receipt_1: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
+    analytic_lod: StorageBuffer<u32, 1>,
+    analytic_draw: DrawIndirectBuffer<AnalyticAtlasDraw>,
     deformed_draw_0: DrawIndirectBuffer<DeformedChart0Draw>,
     deformed_draw_1: DrawIndirectBuffer<DeformedChart1Draw>,
     p00_x: f32,
@@ -2372,6 +2443,36 @@ actor CliffordPatchLab uses (
         }
     }
 
+    /// Materialize only the selected canonical atlas patch. The previous
+    /// direct draw invoked the largest declared vertex envelope for all eight
+    /// macro triangles even when a much smaller LoD was selected.
+    fn prepare_analytic_draw(self, invocation: ComputeInvocation)
+        uses (
+            ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>,
+            PassActivation<AnalyticPatchPipeline>,
+    )
+    {
+        if invocation.global.x == 0 {
+            let mut vertices = GRID_VERTICES_PER_INSTANCE
+            let mut instances: u32 = 8
+            if self.sampler_mode >= 0.5 {
+                let lod = analytic_atlas_lod(self.fixture, self.sampler_mode, self.atlas_lod)
+                vertices = atlas_triangle_count_at_lod(self.fixture, lod) * 3
+                instances = analytic_macro_triangles(self.sampler_mode)
+                self.analytic_lod.store(index: 0, value: lod)
+            } else {
+                self.analytic_lod.store(index: 0, value: 0)
+            }
+            self.analytic_draw.store(
+                index: 0,
+                value: vertices,
+            )
+            self.analytic_draw.store(index: 1, value: instances)
+            self.analytic_draw.store(index: 2, value: 0)
+            self.analytic_draw.store(index: 3, value: 0)
+        }
+    }
+
     const fn raster() -> RasterPlan uses (RasterConfiguration) {
         raster_plan<Depth24LessEqualMsaa4>()
     }
@@ -2481,7 +2582,7 @@ actor CliffordPatchLab uses (
         uses (
             VertexStage<
                 PatchVarying,
-                Instanced<TriangleList<VERTICES_PER_INSTANCE>, INSTANCE_COUNT>,
+                IndirectTriangleList<DrawIndirectBuffer<AnalyticAtlasDraw>>,
             >,
             PassActivation<AnalyticPatchPipeline>,
         )
@@ -2559,7 +2660,7 @@ actor CliffordPatchLab uses (
             }
         } else {
             let chart = macro_parameter_triangle(self.sampler_mode, instance_index)
-            let lod = admitted_atlas_lod(self.atlas_lod)
+            let lod = self.analytic_lod.load(index: 0)
             let atlas_key = AtlasKey { a: lod, b: lod, c: lod }
             let patch_index = canonical_key_ordinal(atlas_key)
             let local_triangle = vertex_index / 3

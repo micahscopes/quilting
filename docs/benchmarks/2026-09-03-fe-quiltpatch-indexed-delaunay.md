@@ -444,3 +444,53 @@ crossed the nominal reference-chart neighborhood; the largest accepted conflict
 test separation was approximately 0.102 in chart coordinates. This is class-level
 evidence against folded-sheet starvation, not a replacement for the pending live
 GPU receipt.
+
+## Density-budgeted atlas composition through LoD 8
+
+The Patch Lab's analytic raster originally declared a fixed 4,926-vertex draw
+for each of eight instances. That envelope was the LoD-5 equal-edge patch, so
+lower LoDs still invoked all 39,408 vertex lanes and LoDs 6--8 could not be
+selected at all. Simply enlarging the declaration to the LoD-8 maximum would
+have made every frame invoke 2,558,400 vertices regardless of its selected LoD.
+
+The analytic path now has one Fe-authored preparation pass and one nominal
+`DrawIndirectBuffer`. Regular-grid mode prepares its exact `2,352 x 8` draw;
+two-chart mode prepares two instances of the requested canonical patch; and the
+eight-chart fan selects the finest micro-patch whose eight instances fit the
+triangle budget of the two canonical triangles they cover. The vertex stage
+loads the prepared micro-LoD from one resident word rather than repeating the
+budget search and fixture reads per vertex.
+
+The deformation-aware path uses the same rule against each chart's actual
+resident macro-triangle count. Its preparation pass writes the chosen micro-LoD
+into receipt word 8 beside the indirect command. Thus the user-facing LoD is a
+budget for the represented surface, not a multiplier independently applied to
+every macro triangle. The captured folded-sheet prediction of 96 and 69 points
+implies 166 and 112 macro triangles by Euler's disk relation. The exact atlas
+counts then produce:
+
+| requested LoD | canonical triangles | two-chart total | eight-chart micro / total | folded `166 + 112` micro / total |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 1 | 2 | 0 / 8 | `0 + 0` / 278 |
+| 1 | 4 | 8 | 0 / 8 | `0 + 0` / 278 |
+| 2 | 24 | 48 | 1 / 32 | `0 + 0` / 278 |
+| 3 | 100 | 200 | 2 / 192 | `0 + 0` / 278 |
+| 4 | 408 | 816 | 3 / 800 | `0 + 0` / 278 |
+| 5 | 1,642 | 3,284 | 4 / 3,264 | `1 + 1` / 1,112 |
+| 6 | 6,600 | 13,200 | 5 / 13,136 | `2 + 2` / 6,672 |
+| 7 | 26,548 | 53,096 | 6 / 52,800 | `3 + 3` / 27,800 |
+| 8 | 106,600 | 213,200 | 7 / 212,384 | `4 + 4` / 113,424 |
+
+The projective topology remains the irreducible carrier at low requested LoD;
+it cannot draw fewer than its resident 278 triangles without a separate macro
+decimation policy. At high LoD the dyadic choice is deliberately conservative:
+the next micro level must not overshoot the explicit budget.
+
+The exact release lowering emitted 19 passes, 35,364 Wasm bytes, 781,808 WGSL
+bytes, and 1,055,571 total bytes. Lowering took 467,086 ms and complete site
+publication took 491,128 ms. The emitted manifest contains the three compact
+draw-preparation passes before their raster consumers, exact compute/vertex
+visibility, and at most eight bindings on any pass. A second independent
+process reused the persistent bundle in 367 ms. Live image/performance evidence
+remains pending the same browser WebGPU-adapter recovery as the folded-sheet
+acceptance receipt.
