@@ -96,6 +96,23 @@ impl CandidateConflictPolicy for AtlasCandidateConflict {
     }
 }
 
+/// Static provider for the locked, ordered boundary ring compacted ahead of
+/// interior candidates. A surface may redistribute points along each edge in
+/// its own geometric measure while retaining the shared point ordering and
+/// constrained-topology machinery.
+pub trait BoundaryPointPolicy: core::marker::Copy {
+    fn point(self, _ key: AtlasKey, _ ordinal: u32) -> FixedBarycentric
+}
+
+pub struct AtlasBoundaryPoints {}
+impl core::marker::Copy for AtlasBoundaryPoints {}
+
+impl BoundaryPointPolicy for AtlasBoundaryPoints {
+    fn point(self, _ key: AtlasKey, _ ordinal: u32) -> FixedBarycentric {
+        boundary_seed(key, ordinal).point
+    }
+}
+
 /// Static diagonal policy over a convex chart quadrilateral.
 pub trait InteriorEdgeFlipPolicy: core::marker::Copy {
     fn decision(
@@ -1631,8 +1648,51 @@ where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WOR
         return
     }
     let candidate = interior_candidate_at_slot(key, patch_ordinal, seed, slot)
+    initialize_materialized_candidate_lane_with_policy<P, CAPACITY, WORDS>(
+        key,
+        candidate,
+        policy,
+        workspace,
+        invocation,
+    )
+}
+
+/// Initialize one deterministic MIS lane from a provider-materialized point.
+///
+/// The ordinary atlas provider above owns a uniform parameter-domain grid.
+/// Surface renderers may instead materialize the same stable slot in a
+/// codomain-aware measure (for example, by recursively allocating parameter
+/// cells according to their mapped area) and retain the shared conflict,
+/// generation, compaction, and topology machinery. The slot identity remains
+/// compiler-visible and exact; no host-side candidate rewrite is admitted.
+pub fn initialize_materialized_candidate_lane_with_policy<
+    P: CandidateConflictPolicy,
+    const CAPACITY: usize,
+    const WORDS: usize,
+>(
+    _ key: AtlasKey,
+    _ candidate: InteriorCandidate,
+    _ policy: P,
+    _ workspace: StorageBuffer<u32, WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WORDS }
+{
+    let slot = invocation.global.x
+    if slot >= CAPACITY.downcast_truncate() {
+        return
+    }
     store_candidate<WORDS>(workspace, candidate, slot)
-    let state = initial_candidate_state(candidate.valid, policy.conflicts_boundary(key, candidate))
+    let coherent = candidate.slot == slot
+    let boundary_conflict = if candidate.valid && coherent {
+        policy.conflicts_boundary(key, candidate)
+    } else {
+        false
+    }
+    let state = initial_candidate_state(
+        candidate.valid && coherent,
+        boundary_conflict,
+    )
     workspace.store(
             index: candidate_state_a_offset<CAPACITY>(slot),
             value: state,
@@ -1861,6 +1921,38 @@ where
         POINT_STORAGE_WORDS % POINT_WORDS == 0
     }
 {
+    compact_candidate_points_with_boundary<
+        AtlasBoundaryPoints,
+        CAPACITY,
+        WORDS,
+        POINT_STORAGE_WORDS,
+    >(key, AtlasBoundaryPoints {}, workspace, points)
+}
+
+/// Stable-prefix compaction with a provider-authored boundary measure.
+///
+/// The policy changes only boundary coordinates. Ordering, candidate state,
+/// overflow accounting, and the resident prefix remain the same contract as
+/// `compact_candidate_points`.
+pub fn compact_candidate_points_with_boundary<
+    P: BoundaryPointPolicy,
+    const CAPACITY: usize,
+    const WORDS: usize,
+    const POINT_STORAGE_WORDS: usize,
+>(
+    _ key: AtlasKey,
+    _ boundary_points: P,
+    _ workspace: StorageBuffer<u32, WORDS>,
+    _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
+) -> CandidateCompaction
+where
+    {
+        WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WORDS
+    },
+    {
+        POINT_STORAGE_WORDS % POINT_WORDS == 0
+    }
+{
     let requested_slots = candidate_slot_count(key)
     let slots = resident_candidate_slots<CAPACITY>(key)
     let boundary = boundary_vertices(key)
@@ -1873,7 +1965,7 @@ where
             point_store<POINT_STORAGE_WORDS>(
                 points,
                 resident,
-                boundary_seed(key, boundary_ordinal).point,
+                boundary_points.point(key, boundary_ordinal),
             )
         } else {
             overflowed = true

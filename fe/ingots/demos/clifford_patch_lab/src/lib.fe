@@ -20,17 +20,21 @@ use classic_quilting_lod::{
     patch_triangle_count,
 }
 use fmath::{TAU, abs, clamp, clamp01, cos, mix, sin, smoothstep, wrap_pi}
-use quilting_atlas::{AtlasKey, boundary_vertices, canonical_key_ordinal}
+use quilting_atlas::{AtlasKey, boundary_vertices, canonical_key_ordinal, edge_resolution}
 use quilting_atlas::sampling::{
     BARYCENTRIC_SCALE,
+    BoundarySeed,
     FixedBarycentric,
     InteriorCandidate,
     boundary_seed,
-    interior_candidate_at_slot,
+    candidate_priority,
+    mix32,
+    poisson_radius_squared,
 }
 use quilting_atlas::topology::{FlipDecision, interior_edge_flip_decision}
 use quilting_atlas::triangulation::should_flip_edge
 use quilting_atlas_webgpu::{
+    BoundaryPointPolicy,
     CandidateConflictPolicy,
     InteriorEdgeFlipPolicy,
     SAMPLING_PROGRESS_WORDS,
@@ -38,9 +42,9 @@ use quilting_atlas_webgpu::{
     TRIANGLE_WORDS,
     TOPOLOGY_TWIN_WORDS_PER_TRIANGLE,
     advance_candidate_generation,
-    compact_candidate_points,
+    compact_candidate_points_with_boundary,
     construct_constrained_triangles,
-    initialize_candidate_lane_with_policy,
+    initialize_materialized_candidate_lane_with_policy,
     propose_candidate_lane_with_policy,
     resident_point,
     resident_triangle,
@@ -52,6 +56,7 @@ use quilting_clifford_bezier::{
     IsotropicDifferential,
     IsotropicPolicy,
     control,
+    evaluate,
     evaluate_differential,
     even,
     parameter_triangle_conditioned,
@@ -67,6 +72,7 @@ use quilting_domain::{
     cross3,
     dot3,
     length2,
+    length3,
     normalize3_or,
     scale3,
     sub3,
@@ -110,10 +116,12 @@ use std::webgpu::{
     ComputeSurface,
     CycledDispatch,
     Depth24LessEqualMsaa4,
+    DrawIndirectBuffer,
     FixedDispatch,
     FragmentStage,
     FragmentSurface,
     GpuProgram,
+    IndirectTriangleList,
     Instanced,
     LatestPerFrame,
     PassActivation,
@@ -167,18 +175,28 @@ const DEFORMED_TWIN_WORDS: usize = DEFORMED_TRIANGLES * TOPOLOGY_TWIN_WORDS_PER_
 const DEFORMED_EDGE_INDEX_WORDS: usize = DEFORMED_POINTS + DEFORMED_TWIN_WORDS
 const DEFORMED_PROPOSAL_WORDS: usize = (DEFORMED_TWIN_WORDS + 31) / 32
 const DEFORMED_SAMPLE_LANES: usize = 6
-const DEFORMED_SAMPLE_WORDS: usize = DEFORMED_CANDIDATES * DEFORMED_SAMPLE_LANES
+const DEFORMED_SAMPLE_SLOTS: usize = DEFORMED_CANDIDATES + DEFORMED_BOUNDARY_POINTS
+const DEFORMED_SAMPLE_WORDS: usize = DEFORMED_SAMPLE_SLOTS * DEFORMED_SAMPLE_LANES
+const DEFORMED_CANDIDATE_LANES: usize = 6
+const DEFORMED_CANDIDATE_SLOTS: usize = DEFORMED_CANDIDATES + DEFORMED_BOUNDARY_POINTS
+const DEFORMED_CANDIDATE_WORDS: usize = DEFORMED_CANDIDATE_SLOTS * DEFORMED_CANDIDATE_LANES
 const DEFORMED_POINT_SAMPLE_WORDS: usize = DEFORMED_POINTS * DEFORMED_SAMPLE_LANES
-const DEFORMED_RENDER_VERTICES: usize = DEFORMED_TRIANGLES * 2 * 3
 const DEFORMED_THREADS: usize = 128
 const DEFORMED_WORKGROUPS: usize = 3
 const DEFORMED_SAMPLING_ROUNDS: usize = 64
 const DEFORMED_FLIP_LIMIT: usize = 256
+const DEFORMED_IMPORTANCE_DEPTH: usize = 10
+const DEFORMED_BOUNDARY_ARC_DEPTH: usize = 12
 
 const DEFORMED_RADIUS_SQUARED: f32 = 0.18
 const DEFORMED_RECEIPT_WORDS: usize = 8
 
 pub struct DeformedSamplingRound {}
+
+/// Nominal identities keep the two independently produced chart commands
+/// exact even though their four-word WebGPU representation is identical.
+struct DeformedChart0Draw {}
+struct DeformedChart1Draw {}
 
 const fn deformed_key() -> AtlasKey {
     AtlasKey { a: 3, b: 3, c: 3 }
@@ -249,10 +267,18 @@ impl Copy for Projection {}
 struct ParameterTriangle { p0: Vec2F, p1: Vec2F, p2: Vec2F, valid: bool }
 impl Copy for ParameterTriangle {}
 
+struct FixedParameterTriangle {
+    p0: FixedBarycentric,
+    p1: FixedBarycentric,
+    p2: FixedBarycentric,
+}
+impl Copy for FixedParameterTriangle {}
+
+struct SurfacePoint { position: Vec3F, defined: bool }
+impl Copy for SurfacePoint {}
+
 struct SurfaceCandidateConflict<const WORDS: usize> {
     samples: StorageBuffer<f32, WORDS>,
-    patch: IsotropicBilinearPatch,
-    chart: u32,
 }
 impl<const WORDS: usize> Copy for SurfaceCandidateConflict<WORDS> {}
 
@@ -269,6 +295,278 @@ fn fixed_parameter(_ chart: u32, _ point: FixedBarycentric) -> Vec2F {
             as_f32(point.c) / scale,
         ),
     )
+}
+
+fn fixed_midpoint(_ first: FixedBarycentric, _ second: FixedBarycentric) -> FixedBarycentric {
+    FixedBarycentric {
+        a: (first.a + second.a) / 2,
+        b: (first.b + second.b) / 2,
+        c: (first.c + second.c) / 2,
+    }
+}
+
+fn root_fixed_triangle() -> FixedParameterTriangle {
+    FixedParameterTriangle {
+        p0: FixedBarycentric { a: BARYCENTRIC_SCALE, b: 0, c: 0 },
+        p1: FixedBarycentric { a: 0, b: BARYCENTRIC_SCALE, c: 0 },
+        p2: FixedBarycentric { a: 0, b: 0, c: BARYCENTRIC_SCALE },
+    }
+}
+
+fn surface_point(
+    _ patch: IsotropicBilinearPatch,
+    _ chart: u32,
+    _ point: FixedBarycentric,
+) -> SurfacePoint {
+    let sample = evaluate(patch, fixed_parameter(chart, point), policy())
+    SurfacePoint { position: sample.position, defined: sample.conditioned }
+}
+
+fn chord_triangle_area(
+    _ first: SurfacePoint,
+    _ second: SurfacePoint,
+    _ third: SurfacePoint,
+) -> f32 {
+    if !first.defined || !second.defined || !third.defined {
+        0.0
+    } else {
+        length3(cross3(
+            sub3(second.position, first.position),
+            sub3(third.position, first.position),
+        )) * 0.5
+    }
+}
+
+/// Descend one equal-reference-area four-way split according to the actual
+/// chordal areas of its mapped children. Repeating this construction is an
+/// inverse area sampler: the fixed chart remains the exact topology carrier,
+/// while proposal density follows the patch rather than its UV coordinates.
+fn surface_area_child(
+    _ patch: IsotropicBilinearPatch,
+    _ chart: u32,
+    _ triangle: FixedParameterTriangle,
+    _ fraction: f32,
+    _ fallback: u32,
+) -> FixedParameterTriangle {
+    let m01 = fixed_midpoint(triangle.p0, triangle.p1)
+    let m12 = fixed_midpoint(triangle.p1, triangle.p2)
+    let m20 = fixed_midpoint(triangle.p2, triangle.p0)
+    let p0 = surface_point(patch, chart, triangle.p0)
+    let p1 = surface_point(patch, chart, triangle.p1)
+    let p2 = surface_point(patch, chart, triangle.p2)
+    let q01 = surface_point(patch, chart, m01)
+    let q12 = surface_point(patch, chart, m12)
+    let q20 = surface_point(patch, chart, m20)
+    let area0 = chord_triangle_area(p0, q01, q20)
+    let area1 = chord_triangle_area(q01, p1, q12)
+    let area2 = chord_triangle_area(q20, q12, p2)
+    let area3 = chord_triangle_area(q01, q12, q20)
+    let total = area0 + area1 + area2 + area3
+    let choice = if total > 0.000000000001 {
+        let target = fraction * total
+        if target < area0 {
+            0
+        } else if target < area0 + area1 {
+            1
+        } else if target < area0 + area1 + area2 { 2 } else { 3 }
+    } else {
+        fallback % 4
+    }
+    if choice == 0 {
+        FixedParameterTriangle { p0: triangle.p0, p1: m01, p2: m20 }
+    } else if choice == 1 {
+        FixedParameterTriangle { p0: m01, p1: triangle.p1, p2: m12 }
+    } else if choice == 2 {
+        FixedParameterTriangle { p0: m20, p1: m12, p2: triangle.p2 }
+    } else {
+        FixedParameterTriangle { p0: m01, p1: m12, p2: m20 }
+    }
+}
+
+fn surface_area_candidate(
+    _ patch: IsotropicBilinearPatch,
+    _ chart: u32,
+    _ slot: u32,
+) -> InteriorCandidate {
+    let seed = deformed_seed(chart)
+    let ordinal = deformed_patch_ordinal(chart)
+    let priority = candidate_priority(seed, ordinal, slot)
+    let mut triangle = root_fixed_triangle()
+    let mut depth: u32 = 0
+    while depth < DEFORMED_IMPORTANCE_DEPTH.downcast_truncate() {
+        let random = mix32(priority ^ mix32(depth + 1))
+        let fraction = as_f32(random % 16777216) / 16777216.0
+        triangle = surface_area_child(patch, chart, triangle, fraction, random)
+        depth = depth + 1
+    }
+    let b = (triangle.p0.b + triangle.p1.b + triangle.p2.b) / 3
+    let c = (triangle.p0.c + triangle.p1.c + triangle.p2.c) / 3
+    let point = FixedBarycentric { a: BARYCENTRIC_SCALE - b - c, b: b, c: c }
+    InteriorCandidate {
+        point: point,
+        radius_squared: poisson_radius_squared(deformed_key(), point),
+        priority: priority,
+        slot: slot,
+        valid: point.a > 0 && point.b > 0 && point.c > 0,
+    }
+}
+
+fn boundary_edge_point(_ edge: u32, _ distance: u32) -> FixedBarycentric {
+    if edge == 2 {
+        FixedBarycentric {
+            a: BARYCENTRIC_SCALE - distance,
+            b: distance,
+            c: 0,
+        }
+    } else if edge == 1 {
+        FixedBarycentric {
+            a: BARYCENTRIC_SCALE - distance,
+            b: 0,
+            c: distance,
+        }
+    } else {
+        FixedBarycentric {
+            a: 0,
+            b: BARYCENTRIC_SCALE - distance,
+            c: distance,
+        }
+    }
+}
+
+fn boundary_edge_resolution(_ key: AtlasKey, _ edge: u32) -> u32 {
+    if edge == 0 {
+        edge_resolution(key.a)
+    } else if edge == 1 {
+        edge_resolution(key.b)
+    } else {
+        edge_resolution(key.c)
+    }
+}
+
+/// Invert a recursively measured chord-length CDF on one mapped chart edge.
+/// Endpoints remain exact and shared edges receive the same orientation in
+/// both square charts, so redistributing their interior points cannot crack.
+fn surface_boundary_point(
+    _ patch: IsotropicBilinearPatch,
+    _ chart: u32,
+    _ boundary: BoundarySeed,
+) -> FixedBarycentric {
+    if !boundary.valid {
+        return boundary.point
+    }
+    let resolution = boundary_edge_resolution(deformed_key(), boundary.edge)
+    if boundary.step == 0 || boundary.step >= resolution {
+        return boundary.point
+    }
+    let mut fraction = as_f32(boundary.step) / as_f32(resolution)
+    let mut lower: u32 = 0
+    let mut upper: u32 = BARYCENTRIC_SCALE
+    let mut depth: u32 = 0
+    while depth < DEFORMED_BOUNDARY_ARC_DEPTH.downcast_truncate() {
+        let middle = (lower + upper) / 2
+        let first = surface_point(patch, chart, boundary_edge_point(boundary.edge, lower))
+        let center = surface_point(patch, chart, boundary_edge_point(boundary.edge, middle))
+        let last = surface_point(patch, chart, boundary_edge_point(boundary.edge, upper))
+        let left = if first.defined && center.defined {
+            length3(sub3(center.position, first.position))
+        } else {
+            0.0
+        }
+        let right = if center.defined && last.defined {
+            length3(sub3(last.position, center.position))
+        } else {
+            0.0
+        }
+        let total = left + right
+        if total > 0.000000000001 {
+            let target = fraction * total
+            if target < left {
+                upper = middle
+                fraction = if left > 0.000000000001 { target / left } else { 0.5 }
+            } else {
+                lower = middle
+                fraction = if right > 0.000000000001 {
+                    (target - left) / right
+                } else {
+                    0.5
+                }
+            }
+        } else if fraction < 0.5 {
+            upper = middle
+            fraction = fraction * 2.0
+        } else {
+            lower = middle
+            fraction = (fraction - 0.5) * 2.0
+        }
+        depth = depth + 1
+    }
+    boundary_edge_point(boundary.edge, (lower + upper) / 2)
+}
+
+fn surface_boundary_candidate(
+    _ patch: IsotropicBilinearPatch,
+    _ chart: u32,
+    _ ordinal: u32,
+) -> InteriorCandidate {
+    let boundary = boundary_seed(deformed_key(), ordinal)
+    let point = surface_boundary_point(patch, chart, boundary)
+    let slot = deformed_boundary_slot(ordinal)
+    InteriorCandidate {
+        point: point,
+        radius_squared: poisson_radius_squared(deformed_key(), point),
+        priority: candidate_priority(deformed_seed(chart), deformed_patch_ordinal(chart), slot),
+        slot: slot,
+        valid: boundary.valid,
+    }
+}
+
+fn candidate_offset(_ slot: u32) -> u32 {
+    slot * DEFORMED_CANDIDATE_LANES.downcast_truncate()
+}
+
+fn store_surface_candidate(
+    _ candidates: StorageBuffer<u32, DEFORMED_CANDIDATE_WORDS>,
+    _ candidate: InteriorCandidate,
+) {
+    let offset = candidate_offset(candidate.slot)
+    candidates.store(index: offset, value: candidate.point.a)
+    candidates.store(index: offset + 1, value: candidate.point.b)
+    candidates.store(index: offset + 2, value: candidate.point.c)
+    candidates.store(index: offset + 3, value: candidate.radius_squared)
+    candidates.store(index: offset + 4, value: candidate.priority)
+    candidates.store(index: offset + 5, value: if candidate.valid { 1 } else { 0 })
+}
+
+fn load_surface_candidate(
+    _ candidates: StorageBuffer<u32, DEFORMED_CANDIDATE_WORDS>,
+    _ slot: u32,
+) -> InteriorCandidate {
+    let offset = candidate_offset(slot)
+    InteriorCandidate {
+        point: FixedBarycentric {
+            a: candidates.load(index: offset),
+            b: candidates.load(index: offset + 1),
+            c: candidates.load(index: offset + 2),
+        },
+        radius_squared: candidates.load(index: offset + 3),
+        priority: candidates.load(index: offset + 4),
+        slot: slot,
+        valid: candidates.load(index: offset + 5) != 0,
+    }
+}
+
+struct SurfaceBoundaryPoints {
+    candidates: StorageBuffer<u32, DEFORMED_CANDIDATE_WORDS>,
+}
+impl Copy for SurfaceBoundaryPoints {}
+
+impl BoundaryPointPolicy for SurfaceBoundaryPoints {
+    fn point(self, _ key: AtlasKey, _ ordinal: u32) -> FixedBarycentric {
+        load_surface_candidate(
+            self.candidates,
+            deformed_boundary_slot(ordinal),
+        ).point
+    }
 }
 
 fn patch_pullback_sample(_ patch: IsotropicBilinearPatch, _ parameter: Vec2F) -> PullbackSample2 {
@@ -301,6 +599,11 @@ fn fixed_pullback_sample(
 
 fn sample_offset(_ ordinal: u32) -> u32 {
     ordinal * DEFORMED_SAMPLE_LANES.downcast_truncate()
+}
+
+fn deformed_boundary_slot(_ ordinal: u32) -> u32 {
+    let base: u32 = DEFORMED_CANDIDATES.downcast_truncate()
+    base + ordinal
 }
 
 fn store_pullback_sample<const WORDS: usize>(
@@ -346,15 +649,16 @@ impl<const WORDS: usize> CandidateConflictPolicy for SurfaceCandidateConflict<WO
         let mut ordinal: u32 = 0
         let count = boundary_vertices(key)
         while ordinal < count {
-            let boundary = boundary_seed(key, ordinal)
-            if boundary.valid
-                && pullback_poisson_conflict(
+            if pullback_poisson_conflict(
                     candidate_sample,
                     DEFORMED_RADIUS_SQUARED,
-                    fixed_pullback_sample(self.patch, self.chart, boundary.point),
+                    load_pullback_sample(
+                        self.samples,
+                        deformed_boundary_slot(ordinal),
+                    ),
                     DEFORMED_RADIUS_SQUARED,
                 ) {
-                conflict = true
+                    conflict = true
             }
             ordinal = ordinal + 1
         }
@@ -748,14 +1052,20 @@ fn camera_target() -> Vec3F {
     vec3f(1.1, 0.0, 0.0)
 }
 
-fn camera_frame(_ state: CliffordLabState) -> CameraFrame {
-    let cp = cos(state.orbit_pitch)
-    let sp = sin(state.orbit_pitch)
-    let cy = cos(state.orbit_yaw)
-    let sy = sin(state.orbit_yaw)
+fn orbit_camera_frame(
+    _ yaw: f32,
+    _ pitch: f32,
+    _ distance: f32,
+    _ res_x: f32,
+    _ res_y: f32,
+) -> CameraFrame {
+    let cp = cos(pitch)
+    let sp = sin(pitch)
+    let cy = cos(yaw)
+    let sy = sin(yaw)
     let offset = vec3f(cp * sy, sp, cp * cy)
     let target = camera_target()
-    let eye = add3(target, scale3(offset, state.orbit_distance))
+    let eye = add3(target, scale3(offset, distance))
     let forward = normalize3_or(sub3(target, eye), vec3f(0.0, 0.0, -1.0), 0.00000001)
     let right = normalize3_or(
         cross3(forward, vec3f(0.0, 1.0, 0.0)),
@@ -763,8 +1073,8 @@ fn camera_frame(_ state: CliffordLabState) -> CameraFrame {
         0.00000001,
     )
     let up = normalize3_or(cross3(right, forward), vec3f(0.0, 1.0, 0.0), 0.00000001)
-    let aspect = if state.res_y > 0.0 {
-        state.res_x / state.res_y
+    let aspect = if res_y > 0.0 {
+        res_x / res_y
     } else {
         1.0
     }
@@ -778,6 +1088,16 @@ fn camera_frame(_ state: CliffordLabState) -> CameraFrame {
         near: 0.05,
         far: 80.0,
     }
+}
+
+fn camera_frame(_ state: CliffordLabState) -> CameraFrame {
+    orbit_camera_frame(
+        state.orbit_yaw,
+        state.orbit_pitch,
+        state.orbit_distance,
+        state.res_x,
+        state.res_y,
+    )
 }
 
 fn project(_ camera: CameraFrame, _ position: Vec3F) -> Projection {
@@ -1044,12 +1364,39 @@ fn invalid_patch_vertex() -> RasterVertex<PatchVarying> {
     }
 }
 
-fn deformed_raster_vertex(
+fn prepare_deformed_draw<Brand>(
+    _ draw: DrawIndirectBuffer<Brand>,
+    _ receipt: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
+    _ fixture: FixtureBuffer,
+    _ atlas_lod: f32,
+) {
+    let mut vertices: u32 = 0
+    let mut instances: u32 = 0
+    if receipt.load(index: 5) != 0 {
+        let lod = admitted_atlas_lod(atlas_lod)
+        let patch_index = canonical_key_ordinal(AtlasKey { a: lod, b: lod, c: lod })
+        vertices = patch_triangle_count(fixture, patch_index) * 3
+        instances = receipt.load(index: 4)
+    }
+    draw.store(index: 0, value: vertices)
+    draw.store(index: 1, value: instances)
+    draw.store(index: 2, value: 0)
+    draw.store(index: 3, value: 0)
+}
+
+/// Evaluate one atlas microtriangle inside one deformation-aware Delaunay
+/// macro-triangle. The topology is resident GPU state; the canonical atlas
+/// supplies a crack-free local refinement without reconstructing or reading
+/// either structure on the host.
+fn deformed_atlas_raster_vertex(
     _ points: StorageBuffer<u32, DEFORMED_POINT_WORDS>,
     _ triangles: StorageBuffer<u32, DEFORMED_TRIANGLE_WORDS>,
     _ receipt: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
+    _ fixture: FixtureBuffer,
     _ chart: u32,
-    _ local_vertex: u32,
+    _ vertex_index: u32,
+    _ instance_index: u32,
+    _ atlas_lod: f32,
     _ patch: IsotropicBilinearPatch,
     _ camera: CameraFrame,
     _ res_x: f32,
@@ -1058,9 +1405,15 @@ fn deformed_raster_vertex(
     if receipt.load(index: 5) == 0 {
         return invalid_patch_vertex()
     }
-    let face = local_vertex / 3
-    let corner = local_vertex % 3
+    let face = instance_index
+    let corner = vertex_index % 3
     if face >= receipt.load(index: 4) {
+        return invalid_patch_vertex()
+    }
+    let lod = admitted_atlas_lod(atlas_lod)
+    let patch_index = canonical_key_ordinal(AtlasKey { a: lod, b: lod, c: lod })
+    let local_triangle = vertex_index / 3
+    if local_triangle >= patch_triangle_count(fixture, patch_index) {
         return invalid_patch_vertex()
     }
     let triangle = resident_triangle(triangles, face)
@@ -1070,9 +1423,25 @@ fn deformed_raster_vertex(
     let point0 = resident_point(points, triangle.first)
     let point1 = resident_point(points, triangle.second)
     let point2 = resident_point(points, triangle.third)
-    let parameter0 = fixed_parameter(chart, point0)
-    let parameter1 = fixed_parameter(chart, point1)
-    let parameter2 = fixed_parameter(chart, point2)
+    let macro_triangle = ParameterTriangle {
+        p0: fixed_parameter(chart, point0),
+        p1: fixed_parameter(chart, point1),
+        p2: fixed_parameter(chart, point2),
+        valid: true,
+    }
+    let source_triangle = patch_first_triangle(fixture, patch_index) + local_triangle
+    let source0 = fixture_triangle_index(fixture, source_triangle, 0)
+    let source1 = fixture_triangle_index(fixture, source_triangle, 1)
+    let source2 = fixture_triangle_index(fixture, source_triangle, 2)
+    let parameter0 = map_macro_parameter(
+        macro_triangle, fixture_barycentric(fixture, source0),
+    )
+    let parameter1 = map_macro_parameter(
+        macro_triangle, fixture_barycentric(fixture, source1),
+    )
+    let parameter2 = map_macro_parameter(
+        macro_triangle, fixture_barycentric(fixture, source2),
+    )
     if !parameter_triangle_conditioned(patch, parameter0, parameter1, parameter2, policy()) {
         return invalid_patch_vertex()
     }
@@ -1344,6 +1713,23 @@ fn depth_surface_color(
     )
 }
 
+fn shade_patch(_ varying: PatchVarying, _ wire_px: f32, _ depth_cue: f32) -> i32 {
+    let edge_pixels = minimum3(varying.edge_seed) / varying.view_depth
+    let feather = AnalyticDepthWire::feather_pixels()
+    let wire_coverage = 1.0 - smoothstep(
+        wire_px - feather, wire_px + feather, edge_pixels,
+    )
+    let surface = depth_surface_color(
+        varying.parameter,
+        varying.view_depth,
+        varying.normal,
+        varying.residual,
+        depth_cue,
+    )
+    let wire = display_rgb(0.018, 0.025, 0.043)
+    pack_rgba8(mix_display_rgb(surface, wire, wire_coverage))
+}
+
 /// Project the browser-facing scalar uniform record into the shared patch
 /// denotation. Actor stage methods are independent entry points, so this pure
 /// module function is their common semantic boundary.
@@ -1384,6 +1770,8 @@ actor CliffordPatchLab uses (
     fixture: FixtureBuffer,
     sampling_workspace_0: StorageBuffer<u32, DEFORMED_SAMPLING_WORDS>,
     sampling_workspace_1: StorageBuffer<u32, DEFORMED_SAMPLING_WORDS>,
+    surface_candidates_0: StorageBuffer<u32, DEFORMED_CANDIDATE_WORDS>,
+    surface_candidates_1: StorageBuffer<u32, DEFORMED_CANDIDATE_WORDS>,
     candidate_samples_0: StorageBuffer<f32, DEFORMED_SAMPLE_WORDS>,
     candidate_samples_1: StorageBuffer<f32, DEFORMED_SAMPLE_WORDS>,
     points_0: StorageBuffer<u32, DEFORMED_POINT_WORDS>,
@@ -1400,6 +1788,8 @@ actor CliffordPatchLab uses (
     proposals_1: StorageBuffer<u32, DEFORMED_PROPOSAL_WORDS>,
     receipt_0: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
     receipt_1: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
+    deformed_draw_0: DrawIndirectBuffer<DeformedChart0Draw>,
+    deformed_draw_1: DrawIndirectBuffer<DeformedChart1Draw>,
     p00_x: f32,
     p00_y: f32,
     p00_z: f32,
@@ -1447,12 +1837,6 @@ actor CliffordPatchLab uses (
         if slot >= DEFORMED_CANDIDATES.downcast_truncate() || chart >= 2 {
             return
         }
-        let candidate = interior_candidate_at_slot(
-            deformed_key(),
-            deformed_patch_ordinal(chart),
-            deformed_seed(chart),
-            slot,
-        )
         let patch = patch_from_uniforms(
             self.p00_x, self.p00_y, self.p00_z,
             self.p10_x, self.p10_y, self.p10_z,
@@ -1460,11 +1844,33 @@ actor CliffordPatchLab uses (
             self.p11_x, self.p11_y, self.p11_z,
             self.w00, self.w10, self.w01, self.w11,
         )
+        let candidate = surface_area_candidate(patch, chart, slot)
         let sample = fixed_pullback_sample(patch, chart, candidate.point)
         if chart == 0 {
+            store_surface_candidate(self.surface_candidates_0, candidate)
             store_pullback_sample(self.candidate_samples_0, slot, sample)
         } else {
+            store_surface_candidate(self.surface_candidates_1, candidate)
             store_pullback_sample(self.candidate_samples_1, slot, sample)
+        }
+        if slot < DEFORMED_BOUNDARY_POINTS.downcast_truncate() {
+            let boundary = surface_boundary_candidate(patch, chart, slot)
+            let boundary_sample = fixed_pullback_sample(patch, chart, boundary.point)
+            if chart == 0 {
+                store_surface_candidate(self.surface_candidates_0, boundary)
+                store_pullback_sample(
+                    self.candidate_samples_0,
+                    deformed_boundary_slot(slot),
+                    boundary_sample,
+                )
+            } else {
+                store_surface_candidate(self.surface_candidates_1, boundary)
+                store_pullback_sample(
+                    self.candidate_samples_1,
+                    deformed_boundary_slot(slot),
+                    boundary_sample,
+                )
+            }
         }
     }
 
@@ -1482,27 +1888,17 @@ actor CliffordPatchLab uses (
             return
         }
         let chart = invocation.global.y
-        let patch = patch_from_uniforms(
-            self.p00_x, self.p00_y, self.p00_z,
-            self.p10_x, self.p10_y, self.p10_z,
-            self.p01_x, self.p01_y, self.p01_z,
-            self.p11_x, self.p11_y, self.p11_z,
-            self.w00, self.w10, self.w01, self.w11,
-        )
         if chart == 0 {
             let policy = SurfaceCandidateConflict {
                 samples: self.candidate_samples_0,
-                patch: patch,
-                chart: chart,
             }
-            initialize_candidate_lane_with_policy<
+            initialize_materialized_candidate_lane_with_policy<
                 SurfaceCandidateConflict<DEFORMED_SAMPLE_WORDS>,
                 DEFORMED_CANDIDATES,
                 DEFORMED_SAMPLING_WORDS,
             >(
                 deformed_key(),
-                deformed_patch_ordinal(chart),
-                deformed_seed(chart),
+                load_surface_candidate(self.surface_candidates_0, invocation.global.x),
                 policy,
                 self.sampling_workspace_0,
                 invocation,
@@ -1510,17 +1906,14 @@ actor CliffordPatchLab uses (
         } else {
             let policy = SurfaceCandidateConflict {
                 samples: self.candidate_samples_1,
-                patch: patch,
-                chart: chart,
             }
-            initialize_candidate_lane_with_policy<
+            initialize_materialized_candidate_lane_with_policy<
                 SurfaceCandidateConflict<DEFORMED_SAMPLE_WORDS>,
                 DEFORMED_CANDIDATES,
                 DEFORMED_SAMPLING_WORDS,
             >(
                 deformed_key(),
-                deformed_patch_ordinal(chart),
-                deformed_seed(chart),
+                load_surface_candidate(self.surface_candidates_1, invocation.global.x),
                 policy,
                 self.sampling_workspace_1,
                 invocation,
@@ -1545,18 +1938,9 @@ actor CliffordPatchLab uses (
         if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
             return
         }
-        let patch = patch_from_uniforms(
-            self.p00_x, self.p00_y, self.p00_z,
-            self.p10_x, self.p10_y, self.p10_z,
-            self.p01_x, self.p01_y, self.p01_z,
-            self.p11_x, self.p11_y, self.p11_z,
-            self.w00, self.w10, self.w01, self.w11,
-        )
         if invocation.global.y == 0 {
             let policy = SurfaceCandidateConflict {
                 samples: self.candidate_samples_0,
-                patch: patch,
-                chart: 0,
             }
             propose_candidate_lane_with_policy<
                 SurfaceCandidateConflict<DEFORMED_SAMPLE_WORDS>,
@@ -1571,8 +1955,6 @@ actor CliffordPatchLab uses (
         } else {
             let policy = SurfaceCandidateConflict {
                 samples: self.candidate_samples_1,
-                patch: patch,
-                chart: 1,
             }
             propose_candidate_lane_with_policy<
                 SurfaceCandidateConflict<DEFORMED_SAMPLE_WORDS>,
@@ -1604,18 +1986,9 @@ actor CliffordPatchLab uses (
         if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
             return
         }
-        let patch = patch_from_uniforms(
-            self.p00_x, self.p00_y, self.p00_z,
-            self.p10_x, self.p10_y, self.p10_z,
-            self.p01_x, self.p01_y, self.p01_z,
-            self.p11_x, self.p11_y, self.p11_z,
-            self.w00, self.w10, self.w01, self.w11,
-        )
         if invocation.global.y == 0 {
             let policy = SurfaceCandidateConflict {
                 samples: self.candidate_samples_0,
-                patch: patch,
-                chart: 0,
             }
             retire_candidate_lane_with_policy<
                 SurfaceCandidateConflict<DEFORMED_SAMPLE_WORDS>,
@@ -1630,8 +2003,6 @@ actor CliffordPatchLab uses (
         } else {
             let policy = SurfaceCandidateConflict {
                 samples: self.candidate_samples_1,
-                patch: patch,
-                chart: 1,
             }
             retire_candidate_lane_with_policy<
                 SurfaceCandidateConflict<DEFORMED_SAMPLE_WORDS>,
@@ -1676,35 +2047,56 @@ actor CliffordPatchLab uses (
         }
     }
 
-    fn deformed_sampling_compact(self, invocation: ComputeInvocation)
+    fn deformed_sampling_compact_0(self, invocation: ComputeInvocation)
         uses (
-            ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 2, 1>>,
+            ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>,
             PassActivation<PullbackPatchTopology>,
             PassPreparation<PullbackPipelinePreparation>,
         )
     {
-        if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
+        if self.sampler_mode < 2.5 || invocation.global.x != 0 {
             return
         }
-        if invocation.global.y == 0 {
-            let compacted = compact_candidate_points<
-                DEFORMED_CANDIDATES,
-                DEFORMED_SAMPLING_WORDS,
-                DEFORMED_POINT_WORDS,
-            >(deformed_key(), self.sampling_workspace_0, self.points_0)
-            self.receipt_0.store(index: 0, value: if compacted.valid { 1 } else { 0 })
-            self.receipt_0.store(index: 1, value: compacted.resident_points)
-            self.receipt_0.store(index: 2, value: compacted.boundary_points)
-        } else {
-            let compacted = compact_candidate_points<
-                DEFORMED_CANDIDATES,
-                DEFORMED_SAMPLING_WORDS,
-                DEFORMED_POINT_WORDS,
-            >(deformed_key(), self.sampling_workspace_1, self.points_1)
-            self.receipt_1.store(index: 0, value: if compacted.valid { 1 } else { 0 })
-            self.receipt_1.store(index: 1, value: compacted.resident_points)
-            self.receipt_1.store(index: 2, value: compacted.boundary_points)
+        let compacted = compact_candidate_points_with_boundary<
+            SurfaceBoundaryPoints,
+            DEFORMED_CANDIDATES,
+            DEFORMED_SAMPLING_WORDS,
+            DEFORMED_POINT_WORDS,
+        >(
+            deformed_key(),
+            SurfaceBoundaryPoints { candidates: self.surface_candidates_0 },
+            self.sampling_workspace_0,
+            self.points_0,
+        )
+        self.receipt_0.store(index: 0, value: if compacted.valid { 1 } else { 0 })
+        self.receipt_0.store(index: 1, value: compacted.resident_points)
+        self.receipt_0.store(index: 2, value: compacted.boundary_points)
+    }
+
+    fn deformed_sampling_compact_1(self, invocation: ComputeInvocation)
+        uses (
+            ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>,
+            PassActivation<PullbackPatchTopology>,
+            PassPreparation<PullbackPipelinePreparation>,
+        )
+    {
+        if self.sampler_mode < 2.5 || invocation.global.x != 0 {
+            return
         }
+        let compacted = compact_candidate_points_with_boundary<
+            SurfaceBoundaryPoints,
+            DEFORMED_CANDIDATES,
+            DEFORMED_SAMPLING_WORDS,
+            DEFORMED_POINT_WORDS,
+        >(
+            deformed_key(),
+            SurfaceBoundaryPoints { candidates: self.surface_candidates_1 },
+            self.sampling_workspace_1,
+            self.points_1,
+        )
+        self.receipt_1.store(index: 0, value: if compacted.valid { 1 } else { 0 })
+        self.receipt_1.store(index: 1, value: compacted.resident_points)
+        self.receipt_1.store(index: 2, value: compacted.boundary_points)
     }
 
     fn deformed_point_samples(self, invocation: ComputeInvocation)
@@ -1827,6 +2219,40 @@ actor CliffordPatchLab uses (
             self.edge_index_1,
             self.proposals_1,
         )
+    }
+
+    fn prepare_deformed_draw_0(self, invocation: ComputeInvocation)
+        uses (
+            ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>,
+            PassActivation<PullbackPatchTopology>,
+            PassPreparation<PullbackPipelinePreparation>,
+        )
+    {
+        if invocation.global.x == 0 {
+            prepare_deformed_draw(
+                self.deformed_draw_0,
+                self.receipt_0,
+                self.fixture,
+                self.atlas_lod,
+            )
+        }
+    }
+
+    fn prepare_deformed_draw_1(self, invocation: ComputeInvocation)
+        uses (
+            ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>,
+            PassActivation<PullbackPatchTopology>,
+            PassPreparation<PullbackPipelinePreparation>,
+        )
+    {
+        if invocation.global.x == 0 {
+            prepare_deformed_draw(
+                self.deformed_draw_1,
+                self.receipt_1,
+                self.fixture,
+                self.atlas_lod,
+            )
+        }
     }
 
     const fn raster() -> RasterPlan uses (RasterConfiguration) {
@@ -2087,32 +2513,23 @@ actor CliffordPatchLab uses (
             PassActivation<AnalyticPatchPipeline>,
         )
     {
-        let edge_pixels = minimum3(varying.edge_seed) / varying.view_depth
-        let feather = AnalyticDepthWire::feather_pixels()
-        let wire_coverage = 1.0 - smoothstep(
-            self.wire_px - feather, self.wire_px + feather, edge_pixels,
-        )
-        let surface = depth_surface_color(
-            varying.parameter,
-            varying.view_depth,
-            varying.normal,
-            varying.residual,
-            self.depth_cue,
-        )
-        let wire = display_rgb(0.018, 0.025, 0.043)
-        pack_rgba8(mix_display_rgb(surface, wire, wire_coverage))
+        shade_patch(varying, self.wire_px, self.depth_cue)
     }
 
-    fn deformed_vertices(self, vertex_index: u32) -> RasterVertex<PatchVarying>
+    fn deformed_vertices_0(
+        self,
+        vertex_index: u32,
+        instance_index: u32,
+    ) -> RasterVertex<PatchVarying>
         uses (
-            VertexStage<PatchVarying, TriangleList<DEFORMED_RENDER_VERTICES>>,
+            VertexStage<
+                PatchVarying,
+                IndirectTriangleList<DrawIndirectBuffer<DeformedChart0Draw>>,
+            >,
             PassActivation<PullbackPatchPipeline>,
             PassPreparation<PullbackPipelinePreparation>,
         )
     {
-        let chart_vertices: u32 = (DEFORMED_TRIANGLES * 3).downcast_truncate()
-        let chart = vertex_index / chart_vertices
-        let local_vertex = vertex_index % chart_vertices
         let patch = patch_from_uniforms(
             self.p00_x, self.p00_y, self.p00_z,
             self.p10_x, self.p10_y, self.p10_z,
@@ -2120,88 +2537,97 @@ actor CliffordPatchLab uses (
             self.p11_x, self.p11_y, self.p11_z,
             self.w00, self.w10, self.w01, self.w11,
         )
-        let state = CliffordLabState {
-            p00_x: self.p00_x,
-            p00_y: self.p00_y,
-            p00_z: self.p00_z,
-            p10_x: self.p10_x,
-            p10_y: self.p10_y,
-            p10_z: self.p10_z,
-            p01_x: self.p01_x,
-            p01_y: self.p01_y,
-            p01_z: self.p01_z,
-            p11_x: self.p11_x,
-            p11_y: self.p11_y,
-            p11_z: self.p11_z,
-            w00: self.w00,
-            w10: self.w10,
-            w01: self.w01,
-            w11: self.w11,
-            orbit_yaw: self.orbit_yaw,
-            orbit_pitch: self.orbit_pitch,
-            orbit_distance: self.orbit_distance,
-            wire_px: self.wire_px,
-            depth_cue: self.depth_cue,
-            sampler_mode: self.sampler_mode,
-            atlas_lod: self.atlas_lod,
-            res_x: self.res_x,
-            res_y: self.res_y,
-            selected: self.selected,
-            dragging: self.dragging,
-            orbiting: self.orbiting,
-        }
         if self.sampler_mode < 2.5 {
             invalid_patch_vertex()
-        } else if chart == 0 {
-            deformed_raster_vertex(
+        } else {
+            deformed_atlas_raster_vertex(
                 self.points_0,
                 self.triangles_0,
                 self.receipt_0,
-                chart,
-                local_vertex,
+                self.fixture,
+                0,
+                vertex_index,
+                instance_index,
+                self.atlas_lod,
                 patch,
-                camera_frame(state),
+                orbit_camera_frame(
+                    self.orbit_yaw,
+                    self.orbit_pitch,
+                    self.orbit_distance,
+                    self.res_x,
+                    self.res_y,
+                ),
                 self.res_x,
                 self.res_y,
             )
-        } else if chart == 1 {
-            deformed_raster_vertex(
-                self.points_1,
-                self.triangles_1,
-                self.receipt_1,
-                chart,
-                local_vertex,
-                patch,
-                camera_frame(state),
-                self.res_x,
-                self.res_y,
-            )
-        } else {
-            invalid_patch_vertex()
         }
     }
 
-    fn deformed_fragment(self, varying: PatchVarying) -> i32
+    fn deformed_fragment_0(self, varying: PatchVarying) -> i32
         uses (
             FragmentStage<PatchVarying>,
             PassActivation<PullbackPatchPipeline>,
             PassPreparation<PullbackPipelinePreparation>,
         )
     {
-        let edge_pixels = minimum3(varying.edge_seed) / varying.view_depth
-        let feather = AnalyticDepthWire::feather_pixels()
-        let wire_coverage = 1.0 - smoothstep(
-            self.wire_px - feather, self.wire_px + feather, edge_pixels,
+        shade_patch(varying, self.wire_px, self.depth_cue)
+    }
+
+    fn deformed_vertices_1(
+        self,
+        vertex_index: u32,
+        instance_index: u32,
+    ) -> RasterVertex<PatchVarying>
+        uses (
+            VertexStage<
+                PatchVarying,
+                IndirectTriangleList<DrawIndirectBuffer<DeformedChart1Draw>>,
+            >,
+            PassActivation<PullbackPatchPipeline>,
+            PassPreparation<PullbackPipelinePreparation>,
         )
-        let surface = depth_surface_color(
-            varying.parameter,
-            varying.view_depth,
-            varying.normal,
-            varying.residual,
-            self.depth_cue,
+    {
+        let patch = patch_from_uniforms(
+            self.p00_x, self.p00_y, self.p00_z,
+            self.p10_x, self.p10_y, self.p10_z,
+            self.p01_x, self.p01_y, self.p01_z,
+            self.p11_x, self.p11_y, self.p11_z,
+            self.w00, self.w10, self.w01, self.w11,
         )
-        let wire = display_rgb(0.018, 0.025, 0.043)
-        pack_rgba8(mix_display_rgb(surface, wire, wire_coverage))
+        if self.sampler_mode < 2.5 {
+            invalid_patch_vertex()
+        } else {
+            deformed_atlas_raster_vertex(
+                self.points_1,
+                self.triangles_1,
+                self.receipt_1,
+                self.fixture,
+                1,
+                vertex_index,
+                instance_index,
+                self.atlas_lod,
+                patch,
+                orbit_camera_frame(
+                    self.orbit_yaw,
+                    self.orbit_pitch,
+                    self.orbit_distance,
+                    self.res_x,
+                    self.res_y,
+                ),
+                self.res_x,
+                self.res_y,
+            )
+        }
+    }
+
+    fn deformed_fragment_1(self, varying: PatchVarying) -> i32
+        uses (
+            FragmentStage<PatchVarying>,
+            PassActivation<PullbackPatchPipeline>,
+            PassPreparation<PullbackPipelinePreparation>,
+        )
+    {
+        shade_patch(varying, self.wire_px, self.depth_cue)
     }
 
     fn handle_vertices(self, vertex_index: u32) -> RasterVertex<HandleVarying>
