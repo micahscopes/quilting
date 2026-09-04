@@ -736,6 +736,74 @@ pub const fn dyadic_patch_parent2(_ child: DyadicPatchCell2) -> DyadicPatchCell2
     }
 }
 
+/// Number of breadth-addressed cells in a complete quadtree through `depth`.
+/// This CTFE value sizes every backend realization from the same topology
+/// contract; renderers do not maintain handwritten node-count tables.
+pub const fn dyadic_patch_node_count(_ depth: usize) -> usize {
+    let mut level: usize = 0
+    let mut width: usize = 1
+    let mut total: usize = 0
+    while level <= depth {
+        total = total + width
+        width = width * 4
+        level = level + 1
+    }
+    total
+}
+
+/// Side length of the finest dyadic occupancy lattice.
+pub const fn dyadic_patch_fine_side(_ depth: usize) -> usize {
+    1 << depth
+}
+
+/// First breadth-addressed node at one runtime depth.
+pub const fn dyadic_patch_level_offset(_ depth: u32) -> u32 {
+    let mut level: u32 = 0
+    let mut width: u32 = 1
+    let mut offset: u32 = 0
+    while level < depth {
+        offset = offset + width
+        width = width * 4
+        level = level + 1
+    }
+    offset
+}
+
+/// Stable breadth/Morton identity of one cell.
+pub const fn dyadic_patch_node_index(_ cell: DyadicPatchCell2) -> u32 {
+    let mut morton: u32 = 0
+    let mut bit: u32 = 0
+    while bit < cell.depth {
+        morton = morton
+            | ((cell.x >> bit) & 1) << (2 * bit)
+            | ((cell.y >> bit) & 1) << (2 * bit + 1)
+        bit = bit + 1
+    }
+    dyadic_patch_level_offset(cell.depth) + morton
+}
+
+/// Recover a dyadic cell from its breadth/Morton identity.
+pub const fn dyadic_patch_cell_at_node(_ node: u32) -> DyadicPatchCell2 {
+    let mut depth: u32 = 0
+    let mut width: u32 = 1
+    let mut offset: u32 = 0
+    while node >= offset + width {
+        offset = offset + width
+        width = width * 4
+        depth = depth + 1
+    }
+    let morton = node - offset
+    let mut x: u32 = 0
+    let mut y: u32 = 0
+    let mut bit: u32 = 0
+    while bit < depth {
+        x = x | ((morton >> (2 * bit)) & 1) << bit
+        y = y | ((morton >> (2 * bit + 1)) & 1) << bit
+        bit = bit + 1
+    }
+    DyadicPatchCell2 { depth: depth, x: x, y: y }
+}
+
 static_assert(dyadic_patch_child2(dyadic_patch_root2(), 3).depth == 1)
 static_assert(dyadic_patch_child2(dyadic_patch_root2(), 3).x == 1)
 static_assert(dyadic_patch_child2(dyadic_patch_root2(), 3).y == 1)
@@ -744,6 +812,14 @@ static_assert(dyadic_patch_parent2(
     )
         .x
     == 0)
+static_assert(dyadic_patch_node_count(0) == 1)
+static_assert(dyadic_patch_node_count(4) == 341)
+static_assert(dyadic_patch_node_count(6) == 5461)
+static_assert(dyadic_patch_fine_side(6) == 64)
+static_assert(dyadic_patch_node_index(DyadicPatchCell2 { depth: 3, x: 5, y: 2 }) == 46)
+static_assert(dyadic_patch_cell_at_node(46).depth == 3)
+static_assert(dyadic_patch_cell_at_node(46).x == 5)
+static_assert(dyadic_patch_cell_at_node(46).y == 2)
 
 /// Evidence consumed by recursive patch LoD.
 ///
