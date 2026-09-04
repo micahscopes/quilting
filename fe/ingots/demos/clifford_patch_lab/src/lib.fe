@@ -160,10 +160,10 @@ const DEFORMED_CANDIDATES: usize = 272
 const DEFORMED_SAMPLING_WORDS: usize = DEFORMED_CANDIDATES * SAMPLING_WORDS_PER_CANDIDATE
     + SAMPLING_PROGRESS_WORDS
 const DEFORMED_BOUNDARY_POINTS: usize = 24
-// The two-chart surface sampler can legitimately admit more than 64 points
-// after a small control edit. Keep enough resident headroom that an ordinary
-// gesture cannot invalidate and erase an otherwise well-defined chart.
-const DEFORMED_POINTS: usize = 128
+// Compaction must be total for every legal MIS result. This is the semantic
+// maximum, not a tuned observation: every proposal may be accepted and every
+// locked boundary point remains resident.
+const DEFORMED_POINTS: usize = DEFORMED_CANDIDATES + DEFORMED_BOUNDARY_POINTS
 const DEFORMED_POINT_WORDS: usize = DEFORMED_POINTS * 3
 // Euler's disk relation with one locked triangular boundary ring.
 const DEFORMED_TRIANGLES: usize = DEFORMED_POINTS * 2 - DEFORMED_BOUNDARY_POINTS - 2
@@ -184,6 +184,8 @@ const DEFORMED_CANDIDATE_WORDS: usize = DEFORMED_CANDIDATE_SLOTS * DEFORMED_CAND
 const DEFORMED_POINT_SAMPLE_WORDS: usize = DEFORMED_POINTS * DEFORMED_SAMPLE_LANES
 const DEFORMED_THREADS: usize = 128
 const DEFORMED_WORKGROUPS: usize = 3
+const DEFORMED_POINT_WORKGROUPS: usize =
+    (DEFORMED_POINTS + DEFORMED_THREADS - 1) / DEFORMED_THREADS
 const DEFORMED_SAMPLING_ROUNDS: usize = 64
 const DEFORMED_FLIP_LIMIT: usize = 256
 const DEFORMED_IMPORTANCE_DEPTH: usize = 10
@@ -203,6 +205,8 @@ const fn deformed_key() -> AtlasKey {
 }
 
 static_assert(boundary_vertices(deformed_key()) == DEFORMED_BOUNDARY_POINTS.downcast_truncate())
+static_assert(DEFORMED_POINT_WORKGROUPS * DEFORMED_THREADS >= DEFORMED_POINTS)
+static_assert((DEFORMED_POINT_WORKGROUPS - 1) * DEFORMED_THREADS < DEFORMED_POINTS)
 
 fn deformed_seed(_ chart: u32) -> u32 {
     if chart == 0 { 0x51c32a97 } else { 0xc87a4d31 }
@@ -2205,7 +2209,10 @@ actor CliffordPatchLab uses (
 
     fn deformed_point_samples(self, invocation: ComputeInvocation)
         uses (
-            ComputeSurface<Workgroup<DEFORMED_THREADS, 1, 1>, FixedDispatch<1, 2, 1>>,
+            ComputeSurface<
+                Workgroup<DEFORMED_THREADS, 1, 1>,
+                FixedDispatch<DEFORMED_POINT_WORKGROUPS, 2, 1>,
+            >,
             PassActivation<PullbackPatchTopology>,
             PassPreparation<PullbackPipelinePreparation>,
         )

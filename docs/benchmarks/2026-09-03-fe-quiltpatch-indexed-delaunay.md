@@ -419,3 +419,14 @@ counts as acceptance evidence.
 The exact release development build emitted 18 passes, 35,362 Wasm bytes,
 775,720 compiler-reported WGSL bytes, and 1,038,458 total bytes. Lowering took
 370,258 ms and the complete fresh build took 393,211 ms.
+
+The original 128-point resident arena was only an empirical ceiling. The
+covered sampler can legally accept every one of its 272 proposals in addition
+to 24 locked boundary points, so a sufficiently stretched valid patch could
+still overflow and disappear. The arena now derives its exact 296-point bound
+from those two semantic counts; Euler's disk relation derives 566 triangle
+slots, and compile-time assertions derive the three point-sampling workgroups
+needed to cover the arena. Ordinary states still draw only their receipt's
+resident prefix. The exact release rebuild retained 18 passes and 35,362 Wasm
+bytes, emitted 775,728 WGSL bytes and 1,038,472 total bytes, and completed in
+378,063 ms.
