@@ -104,7 +104,26 @@ use quilting_oklch::{
     scale_lightness_chroma,
     to_display_rgb,
 }
-use quilting_patch::ranked_quantized_position
+use quilting_patch::{
+    DyadicPatchCell2,
+    Euclidean3Metric,
+    Euclidean3Points,
+    FractalPatchEvidence3,
+    FractalPatchLeafDecision,
+    FractalPatchLodPolicy3,
+    PatchTransformProfile3,
+    QuadDiagonal2,
+    QuadDiagonalProfile2,
+    choose_quad_diagonal2,
+    denotation_sample,
+    dyadic_patch_child2,
+    dyadic_patch_root2,
+    fractal_patch_leaf_decision3,
+    patch_transform_profile3,
+    patch_transform_sample3,
+    quad_diagonal_profile2,
+    ranked_quantized_position,
+}
 use quilting_qb::{permutation_parity, remap_barycentric}
 use std::web::view::{
     ApplyParamBindings,
@@ -156,7 +175,24 @@ extern {
 const GRID: u32 = 56
 const GRID_VERTICES: u32 = 18816
 const GRID_VERTICES_PER_INSTANCE: u32 = 2352
-const MAX_MACRO_TRIANGLES: u32 = 8
+
+// A bounded breadth-first quadtree turns every accepted leaf into either one
+// atlas-backed quilt or four further measured quilts. Refinement remains
+// dyadic, so neighboring leaf boundaries are samples of the same canonical
+// edge. Four levels are enough to expose severe projective twist without
+// making direct manipulation rebuild an unbounded topology.
+const FRACTAL_MAX_DEPTH: u32 = 4
+const FRACTAL_MAX_LEAVES: usize = 256
+const FRACTAL_MAX_NODES: usize = 341
+const FRACTAL_MAX_FACES: usize = FRACTAL_MAX_LEAVES * 2
+const FRACTAL_FACE_PLAN_LANES: usize = 7
+const FRACTAL_FACE_PLAN_ENTRY_WORDS: usize = FRACTAL_MAX_FACES * FRACTAL_FACE_PLAN_LANES
+const FRACTAL_QUEUE_LANES: usize = 3
+const FRACTAL_QUEUE_WORDS: usize = FRACTAL_MAX_NODES * FRACTAL_QUEUE_LANES
+const FRACTAL_FACE_PLAN_META_WORDS: usize = 3
+const FRACTAL_FACE_PLAN_WORDS: usize = FRACTAL_FACE_PLAN_ENTRY_WORDS
+    + FRACTAL_QUEUE_WORDS
+    + FRACTAL_FACE_PLAN_META_WORDS
 
 const DEFORMED_CANDIDATES: usize = 272
 const DEFORMED_SAMPLING_WORDS: usize = DEFORMED_CANDIDATES * SAMPLING_WORDS_PER_CANDIDATE
@@ -292,6 +328,19 @@ impl Copy for ScreenSample {}
 
 struct ParameterTriangle { p0: Vec2F, p1: Vec2F, p2: Vec2F, valid: bool }
 impl Copy for ParameterTriangle {}
+
+struct FractalCellParameters { p00: Vec2F, p10: Vec2F, p01: Vec2F, p11: Vec2F, center: Vec2F }
+impl Copy for FractalCellParameters {}
+
+struct FractalCellEvidence {
+    transform: PatchTransformProfile3,
+    diagonal: QuadDiagonalProfile2,
+    screen_error: f32,
+}
+impl Copy for FractalCellEvidence {}
+
+struct FractalPlanCursor { faces: u32, micro_triangles: u32 }
+impl Copy for FractalPlanCursor {}
 
 struct FixedParameterTriangle { p0: FixedBarycentric, p1: FixedBarycentric, p2: FixedBarycentric }
 impl Copy for FixedParameterTriangle {}
@@ -1038,14 +1087,15 @@ const fn lab_params() -> CliffordLabParams {
         orbit_distance: Param::log(min: 2.5, max: 16.0, init: 6.2),
         wire_px: Param::range(min: 0.0, max: 2.5, init: 0.72),
         depth_cue: Param::unit(init: 0.82),
-        // 0 = regular UV grid, 1 = two atlas charts, 2 = eight-chart fan,
-        // 3 = projective-blue-noise points with terminating constrained
-        // short-edge restoration in each parameter chart.
+        // 0 = regular UV grid, 1 = two atlas charts, 2 = recursively measured
+        // dyadic QuiltPatch leaves, 3 = projective-blue-noise points with
+        // terminating constrained short-edge restoration in each parameter
+        // chart.
         sampler_mode: Param::choice(
             options: ChoiceOptions::four(
                 first: "regular grid",
                 second: "atlas charts",
-                third: "eight-chart fan",
+                third: "twist-aware quilt",
                 fourth: "projective blue noise",
             ),
             init: 1.0,
@@ -1344,36 +1394,6 @@ fn midpoint_parameter(_ first: Vec2F, _ second: Vec2F) -> Vec2F {
     vec2f((first.x + second.x) * 0.5, (first.y + second.y) * 0.5)
 }
 
-fn child_parameter_triangle(_ parent: ParameterTriangle, _ child: u32) -> ParameterTriangle {
-    let midpoint01 = midpoint_parameter(parent.p0, parent.p1)
-    let midpoint12 = midpoint_parameter(parent.p1, parent.p2)
-    let midpoint20 = midpoint_parameter(parent.p2, parent.p0)
-    if child == 0 {
-        ParameterTriangle { p0: parent.p0, p1: midpoint01, p2: midpoint20, valid: parent.valid }
-    } else if child == 1 {
-        ParameterTriangle { p0: midpoint01, p1: parent.p1, p2: midpoint12, valid: parent.valid }
-    } else if child == 2 {
-        ParameterTriangle { p0: midpoint20, p1: midpoint12, p2: parent.p2, valid: parent.valid }
-    } else {
-        ParameterTriangle { p0: midpoint01, p1: midpoint12, p2: midpoint20, valid: parent.valid }
-    }
-}
-
-fn refined_parameter_triangle(_ triangle: u32) -> ParameterTriangle {
-    if triangle >= MAX_MACRO_TRIANGLES {
-        return invalid_parameter_triangle()
-    }
-    child_parameter_triangle(split_parameter_triangle(triangle / 4), triangle % 4)
-}
-
-fn macro_parameter_triangle(_ sampler_mode: f32, _ triangle: u32) -> ParameterTriangle {
-    if sampler_mode < 1.5 {
-        split_parameter_triangle(triangle)
-    } else {
-        refined_parameter_triangle(triangle)
-    }
-}
-
 fn map_macro_parameter(_ triangle: ParameterTriangle, _ bary: Bary3F) -> Vec2F {
     vec2f(
         triangle.p0.x * bary.a + triangle.p1.x * bary.b + triangle.p2.x * bary.c,
@@ -1396,66 +1416,6 @@ fn atlas_triangle_count_at_lod(_ fixture: FixtureBuffer, _ lod: u32) -> u32 {
     patch_triangle_count(
         fixture,
         canonical_key_ordinal(AtlasKey { a: lod, b: lod, c: lod }),
-    )
-}
-
-/// Choose the finest dyadic micro-patch that keeps a macro triangulation under
-/// one explicit triangle budget. This makes the UI's LoD a property of the
-/// complete represented surface rather than a multiplier accidentally applied
-/// to every resident macro triangle.
-fn atlas_lod_for_triangle_budget(
-    _ fixture: FixtureBuffer,
-    _ macro_triangles: u32,
-    _ target_triangles: u32,
-) -> u32 {
-    if macro_triangles == 0 {
-        return 0
-    }
-    let mut lod: u32 = 0
-    while lod < MAX_LOD {
-        let next = lod + 1
-        if atlas_triangle_count_at_lod(fixture, next) * macro_triangles > target_triangles {
-            return lod
-        }
-        lod = next
-    }
-    MAX_LOD
-}
-
-fn analytic_macro_triangles(_ sampler_mode: f32) -> u32 {
-    if sampler_mode < 1.5 {
-        2
-    } else {
-        MAX_MACRO_TRIANGLES
-    }
-}
-
-fn analytic_atlas_lod(_ fixture: FixtureBuffer, _ sampler_mode: f32, _ requested: f32) -> u32 {
-    let target_lod = admitted_atlas_lod(requested)
-    if sampler_mode < 1.5 {
-        target_lod
-    } else {
-        // Eight quarter-size macro triangles cover the same square as two
-        // canonical triangular patches.
-        atlas_lod_for_triangle_budget(
-            fixture,
-            MAX_MACRO_TRIANGLES,
-            atlas_triangle_count_at_lod(fixture, target_lod) * 2,
-        )
-    }
-}
-
-fn deformed_atlas_lod(
-    _ fixture: FixtureBuffer,
-    _ macro_triangles: u32,
-    _ active_charts: u32,
-    _ requested: f32,
-) -> u32 {
-    let target_lod = admitted_atlas_lod(requested)
-    atlas_lod_for_triangle_budget(
-        fixture,
-        macro_triangles,
-        atlas_triangle_count_at_lod(fixture, target_lod) * active_charts,
     )
 }
 
@@ -1633,6 +1593,377 @@ fn projected_edge_score(
             ),
         )
     if chord > bend { chord } else { bend }
+}
+
+fn fractal_cell_parameters(_ cell: DyadicPatchCell2) -> FractalCellParameters {
+    let divisions = as_f32(1 << cell.depth)
+    let u0 = as_f32(cell.x) / divisions
+    let v0 = as_f32(cell.y) / divisions
+    let u1 = as_f32(cell.x + 1) / divisions
+    let v1 = as_f32(cell.y + 1) / divisions
+    FractalCellParameters {
+        p00: vec2f(u0, v0),
+        p10: vec2f(u1, v0),
+        p01: vec2f(u0, v1),
+        p11: vec2f(u1, v1),
+        center: vec2f((u0 + u1) * 0.5, (v0 + v1) * 0.5),
+    }
+}
+
+fn maximum4(_ first: f32, _ second: f32, _ third: f32, _ fourth: f32) -> f32 {
+    let first_pair = if first > second { first } else { second }
+    let second_pair = if third > fourth { third } else { fourth }
+    if first_pair > second_pair {
+        first_pair
+    } else {
+        second_pair
+    }
+}
+
+fn fractal_cell_evidence(
+    _ patch: IsotropicBilinearPatch,
+    _ cell: DyadicPatchCell2,
+    _ camera: CameraFrame,
+    _ res_x: f32,
+    _ res_y: f32,
+) -> FractalCellEvidence {
+    let parameters = fractal_cell_parameters(cell)
+    let differential00 = evaluate_differential(patch, parameters.p00, policy(), 0.000000000001)
+    let differential10 = evaluate_differential(patch, parameters.p10, policy(), 0.000000000001)
+    let differential01 = evaluate_differential(patch, parameters.p01, policy(), 0.000000000001)
+    let differential11 = evaluate_differential(patch, parameters.p11, policy(), 0.000000000001)
+    let differential_center = evaluate_differential(
+        patch,
+        parameters.center,
+        policy(),
+        0.000000000001,
+    )
+    let transform = patch_transform_profile3(
+        patch_transform_sample3(
+            differential00.tangent_s,
+            differential00.tangent_t,
+            0.000000000001,
+            differential00.sample.conditioned,
+        ),
+        patch_transform_sample3(
+            differential10.tangent_s,
+            differential10.tangent_t,
+            0.000000000001,
+            differential10.sample.conditioned,
+        ),
+        patch_transform_sample3(
+            differential01.tangent_s,
+            differential01.tangent_t,
+            0.000000000001,
+            differential01.sample.conditioned,
+        ),
+        patch_transform_sample3(
+            differential11.tangent_s,
+            differential11.tangent_t,
+            0.000000000001,
+            differential11.sample.conditioned,
+        ),
+        patch_transform_sample3(
+            differential_center.tangent_s,
+            differential_center.tangent_t,
+            0.000000000001,
+            differential_center.sample.conditioned,
+        ),
+        0.000000000001,
+    )
+    let diagonal = quad_diagonal_profile2<Euclidean3Points, Euclidean3Metric>(
+        denotation_sample<Euclidean3Points>(
+            differential00.sample.position,
+            differential00.sample.conditioned,
+        ),
+        denotation_sample<Euclidean3Points>(
+            differential10.sample.position,
+            differential10.sample.conditioned,
+        ),
+        denotation_sample<Euclidean3Points>(
+            differential01.sample.position,
+            differential01.sample.conditioned,
+        ),
+        denotation_sample<Euclidean3Points>(
+            differential11.sample.position,
+            differential11.sample.conditioned,
+        ),
+        denotation_sample<Euclidean3Points>(
+            differential_center.sample.position,
+            differential_center.sample.conditioned,
+        ),
+        Euclidean3Metric {},
+        0.0000001,
+    )
+    let boundary_error = maximum4(
+        projected_edge_score(
+            patch,
+            parameters.p00,
+            parameters.p10,
+            camera,
+            res_x,
+            res_y,
+        ),
+        projected_edge_score(
+            patch,
+            parameters.p10,
+            parameters.p11,
+            camera,
+            res_x,
+            res_y,
+        ),
+        projected_edge_score(
+            patch,
+            parameters.p11,
+            parameters.p01,
+            camera,
+            res_x,
+            res_y,
+        ),
+        projected_edge_score(
+            patch,
+            parameters.p01,
+            parameters.p00,
+            camera,
+            res_x,
+            res_y,
+        ),
+    )
+    let diagonal_error = projected_edge_score(
+        patch,
+        parameters.p00,
+        parameters.p11,
+        camera,
+        res_x,
+        res_y,
+    )
+    let alternate_error = projected_edge_score(
+        patch,
+        parameters.p10,
+        parameters.p01,
+        camera,
+        res_x,
+        res_y,
+    )
+    FractalCellEvidence {
+        transform: transform,
+        diagonal: diagonal,
+        screen_error: maximum4(boundary_error, diagonal_error, alternate_error, 0.0),
+    }
+}
+
+fn fractal_lod_policy(_ requested_lod: u32) -> FractalPatchLodPolicy3 {
+    let maximum_depth = if requested_lod < FRACTAL_MAX_DEPTH {
+        requested_lod
+    } else {
+        FRACTAL_MAX_DEPTH
+    }
+    FractalPatchLodPolicy3 {
+        maximum_depth: maximum_depth,
+        maximum_screen_error: 420.0,
+        maximum_stretch_variation: 2.8,
+        maximum_area_variation: 3.6,
+        maximum_anisotropy: 8.0,
+        maximum_metric_shape_variation: 0.24,
+        maximum_normal_turn: 0.32,
+        maximum_mixed_turn: 0.48,
+    }
+}
+
+fn fractal_face_plan_offset(_ face: u32) -> u32 {
+    face * FRACTAL_FACE_PLAN_LANES.downcast_truncate()
+}
+
+fn fractal_face_plan_meta_offset(_ lane: u32) -> u32 {
+    let base: u32 = (FRACTAL_FACE_PLAN_ENTRY_WORDS + FRACTAL_QUEUE_WORDS).downcast_truncate()
+    base + lane
+}
+
+fn fractal_queue_offset(_ node: u32) -> u32 {
+    let base: u32 = FRACTAL_FACE_PLAN_ENTRY_WORDS.downcast_truncate()
+    base + node * FRACTAL_QUEUE_LANES.downcast_truncate()
+}
+
+fn store_fractal_queue_cell(
+    _ plan: StorageBuffer<u32, FRACTAL_FACE_PLAN_WORDS>,
+    _ node: u32,
+    _ cell: DyadicPatchCell2,
+) {
+    let offset = fractal_queue_offset(node)
+    plan.store(index: offset, value: cell.depth)
+    plan.store(index: offset + 1, value: cell.x)
+    plan.store(index: offset + 2, value: cell.y)
+}
+
+fn load_fractal_queue_cell(
+    _ plan: StorageBuffer<u32, FRACTAL_FACE_PLAN_WORDS>,
+    _ node: u32,
+) -> DyadicPatchCell2 {
+    let offset = fractal_queue_offset(node)
+    DyadicPatchCell2 {
+        depth: plan.load(index: offset),
+        x: plan.load(index: offset + 1),
+        y: plan.load(index: offset + 2),
+    }
+}
+
+fn fractal_diagonal_code(_ diagonal: QuadDiagonal2) -> u32 {
+    match diagonal {
+        QuadDiagonal2::Corner00To11 => 0,
+        QuadDiagonal2::Corner10To01 => 1,
+    }
+}
+
+fn append_fractal_leaf(
+    _ plan: StorageBuffer<u32, FRACTAL_FACE_PLAN_WORDS>,
+    _ fixture: FixtureBuffer,
+    _ cursor: FractalPlanCursor,
+    _ cell: DyadicPatchCell2,
+    _ evidence: FractalCellEvidence,
+    _ requested_lod: u32,
+) -> FractalPlanCursor {
+    let mut result = cursor
+    let local_lod = if requested_lod > cell.depth {
+        requested_lod - cell.depth
+    } else {
+        0
+    }
+    let patch_index = canonical_key_ordinal(AtlasKey { a: local_lod, b: local_lod, c: local_lod })
+    let micro_triangles = patch_triangle_count(fixture, patch_index)
+    let diagonal = fractal_diagonal_code(choose_quad_diagonal2(evidence.diagonal, 1.0, 0.18, 0.001))
+    let mut local_triangle: u32 = 0
+    while local_triangle < 2 {
+        result.micro_triangles = result.micro_triangles + micro_triangles
+        let offset = fractal_face_plan_offset(result.faces)
+        plan.store(index: offset, value: result.micro_triangles)
+        plan.store(index: offset + 1, value: patch_index)
+        plan.store(index: offset + 2, value: cell.depth)
+        plan.store(index: offset + 3, value: cell.x)
+        plan.store(index: offset + 4, value: cell.y)
+        plan.store(index: offset + 5, value: diagonal)
+        plan.store(index: offset + 6, value: local_triangle)
+        result.faces = result.faces + 1
+        local_triangle = local_triangle + 1
+    }
+    result
+}
+
+fn prepare_fractal_patch_plan(
+    _ plan: StorageBuffer<u32, FRACTAL_FACE_PLAN_WORDS>,
+    _ fixture: FixtureBuffer,
+    _ patch: IsotropicBilinearPatch,
+    _ camera: CameraFrame,
+    _ res_x: f32,
+    _ res_y: f32,
+    _ atlas_lod: f32,
+) {
+    let requested_lod = admitted_atlas_lod(atlas_lod)
+    let policy = fractal_lod_policy(requested_lod)
+    let mut cursor = FractalPlanCursor { faces: 0, micro_triangles: 0 }
+    let mut head: u32 = 0
+    let mut tail: u32 = 1
+    store_fractal_queue_cell(plan, 0, dyadic_patch_root2())
+    while head < tail && head < FRACTAL_MAX_NODES.downcast_truncate() {
+        let cell = load_fractal_queue_cell(plan, head)
+        let evidence = fractal_cell_evidence(patch, cell, camera, res_x, res_y)
+        match fractal_patch_leaf_decision3(
+            cell,
+            FractalPatchEvidence3 {
+                transform: evidence.transform,
+                screen_error: evidence.screen_error,
+            },
+            policy,
+        ) {
+            FractalPatchLeafDecision::Reject => {},
+            FractalPatchLeafDecision::Draw => {
+                cursor = append_fractal_leaf(plan, fixture, cursor, cell, evidence, requested_lod)
+            },
+            FractalPatchLeafDecision::Refine => {
+                if tail + 4 <= FRACTAL_MAX_NODES.downcast_truncate() {
+                    let mut child_index: u32 = 0
+                    while child_index < 4 {
+                        store_fractal_queue_cell(plan, tail, dyadic_patch_child2(cell, child_index))
+                        tail = tail + 1
+                        child_index = child_index + 1
+                    }
+                }
+            },
+        }
+        head = head + 1
+    }
+    plan.store(
+        index: fractal_face_plan_meta_offset(0),
+        value: cursor.faces,
+    )
+    plan.store(
+        index: fractal_face_plan_meta_offset(1),
+        value: cursor.micro_triangles,
+    )
+    plan.store(index: fractal_face_plan_meta_offset(2), value: head)
+}
+
+fn fractal_face_for_micro_triangle(
+    _ plan: StorageBuffer<u32, FRACTAL_FACE_PLAN_WORDS>,
+    _ face_count: u32,
+    _ triangle: u32,
+) -> u32 {
+    let mut lower: u32 = 0
+    let mut upper = face_count
+    while lower < upper {
+        let middle = (lower + upper) / 2
+        if triangle < plan.load(index: fractal_face_plan_offset(middle)) {
+            upper = middle
+        } else {
+            lower = middle + 1
+        }
+    }
+    lower
+}
+
+fn fractal_parameter_triangle(
+    _ plan: StorageBuffer<u32, FRACTAL_FACE_PLAN_WORDS>,
+    _ face: u32,
+) -> ParameterTriangle {
+    let offset = fractal_face_plan_offset(face)
+    let cell = DyadicPatchCell2 {
+        depth: plan.load(index: offset + 2),
+        x: plan.load(index: offset + 3),
+        y: plan.load(index: offset + 4),
+    }
+    let diagonal = plan.load(index: offset + 5)
+    let local_triangle = plan.load(index: offset + 6)
+    let parameters = fractal_cell_parameters(cell)
+    if diagonal == 0 {
+        if local_triangle == 0 {
+            ParameterTriangle {
+                p0: parameters.p00,
+                p1: parameters.p10,
+                p2: parameters.p11,
+                valid: true,
+            }
+        } else {
+            ParameterTriangle {
+                p0: parameters.p00,
+                p1: parameters.p11,
+                p2: parameters.p01,
+                valid: true,
+            }
+        }
+    } else if local_triangle == 0 {
+        ParameterTriangle {
+            p0: parameters.p00,
+            p1: parameters.p10,
+            p2: parameters.p01,
+            valid: true,
+        }
+    } else {
+        ParameterTriangle {
+            p0: parameters.p10,
+            p1: parameters.p11,
+            p2: parameters.p01,
+            valid: true,
+        }
+    }
 }
 
 fn macro_face_scores(
@@ -2299,6 +2630,7 @@ actor CliffordPatchLab uses (
     deformed_face_scores_0: StorageBuffer<f32, DEFORMED_FACE_SCORE_WORDS>,
     deformed_face_scores_1: StorageBuffer<f32, DEFORMED_FACE_SCORE_WORDS>,
     deformed_face_plan: StorageBuffer<u32, DEFORMED_FACE_PLAN_WORDS>,
+    fractal_face_plan: StorageBuffer<u32, FRACTAL_FACE_PLAN_WORDS>,
     analytic_lod: StorageBuffer<u32, 1>,
     analytic_draw: DrawIndirectBuffer<AnalyticAtlasDraw>,
     deformed_draw: DrawIndirectBuffer<DeformedAtlasDraw>,
@@ -2842,6 +3174,45 @@ actor CliffordPatchLab uses (
         }
     }
 
+    /// Materialize the bounded recursive quilt before its indirect raster
+    /// command. One invocation walks the small breadth-first tree in stable
+    /// order; the leaf policy remains backend-neutral and can be parallelized
+    /// without changing its meaning when scene-scale patch counts warrant it.
+    fn prepare_fractal_patch(self, invocation: ComputeInvocation)
+        uses (
+            ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>,
+            PassActivation<AnalyticPatchPipeline>,
+        )
+    {
+        if invocation.global.x == 0
+            && self.sampler_mode >= 1.5
+            && self.sampler_mode < 2.5
+        {
+            let patch = patch_from_uniforms(
+                self.p00_x, self.p00_y, self.p00_z,
+                self.p10_x, self.p10_y, self.p10_z,
+                self.p01_x, self.p01_y, self.p01_z,
+                self.p11_x, self.p11_y, self.p11_z,
+                self.w00, self.w10, self.w01, self.w11,
+            )
+            prepare_fractal_patch_plan(
+                self.fractal_face_plan,
+                self.fixture,
+                patch,
+                orbit_camera_frame(
+                    self.orbit_yaw,
+                    self.orbit_pitch,
+                    self.orbit_distance,
+                    self.res_x,
+                    self.res_y,
+                ),
+                self.res_x,
+                self.res_y,
+                self.atlas_lod,
+            )
+        }
+    }
+
     /// Materialize only the selected canonical atlas patch. The previous
     /// direct draw invoked the largest declared vertex envelope for all eight
     /// macro triangles even when a much smaller LoD was selected.
@@ -2854,10 +3225,16 @@ actor CliffordPatchLab uses (
         if invocation.global.x == 0 {
             let mut vertices = GRID_VERTICES_PER_INSTANCE
             let mut instances: u32 = 8
-            if self.sampler_mode >= 0.5 {
-                let lod = analytic_atlas_lod(self.fixture, self.sampler_mode, self.atlas_lod)
+            if self.sampler_mode >= 1.5 && self.sampler_mode < 2.5 {
+                vertices = 3
+                instances = self.fractal_face_plan.load(
+                    index: fractal_face_plan_meta_offset(1),
+                )
+                self.analytic_lod.store(index: 0, value: 0)
+            } else if self.sampler_mode >= 0.5 {
+                let lod = admitted_atlas_lod(self.atlas_lod)
                 vertices = atlas_triangle_count_at_lod(self.fixture, lod) * 3
-                instances = analytic_macro_triangles(self.sampler_mode)
+                instances = 2
                 self.analytic_lod.store(index: 0, value: lod)
             } else {
                 self.analytic_lod.store(index: 0, value: 0)
@@ -3058,12 +3435,51 @@ actor CliffordPatchLab uses (
                 }
             }
         } else {
-            let chart = macro_parameter_triangle(self.sampler_mode, instance_index)
-            let lod = self.analytic_lod.load(index: 0)
-            let atlas_key = AtlasKey { a: lod, b: lod, c: lod }
-            let patch_index = canonical_key_ordinal(atlas_key)
-            let local_triangle = vertex_index / 3
-            if !chart.valid || local_triangle >= patch_triangle_count(self.fixture, patch_index) {
+            let mut chart = invalid_parameter_triangle()
+            let mut patch_index: u32 = 0
+            let mut local_triangle: u32 = 0
+            let mut available = false
+            if self.sampler_mode < 1.5 {
+                chart = split_parameter_triangle(instance_index)
+                let lod = self.analytic_lod.load(index: 0)
+                patch_index = canonical_key_ordinal(
+                    AtlasKey { a: lod, b: lod, c: lod },
+                )
+                local_triangle = vertex_index / 3
+                available = chart.valid
+                    && local_triangle < patch_triangle_count(self.fixture, patch_index)
+            } else {
+                let face_count = self.fractal_face_plan.load(
+                    index: fractal_face_plan_meta_offset(0),
+                )
+                let micro_triangles = self.fractal_face_plan.load(
+                    index: fractal_face_plan_meta_offset(1),
+                )
+                if instance_index < micro_triangles {
+                    let face = fractal_face_for_micro_triangle(
+                        self.fractal_face_plan,
+                        face_count,
+                        instance_index,
+                    )
+                    if face < face_count {
+                        let offset = fractal_face_plan_offset(face)
+                        let prefix = if face == 0 {
+                            0
+                        } else {
+                            self.fractal_face_plan.load(
+                                index: fractal_face_plan_offset(face - 1),
+                            )
+                        }
+                        chart = fractal_parameter_triangle(self.fractal_face_plan, face)
+                        patch_index = self.fractal_face_plan.load(index: offset + 1)
+                        local_triangle = instance_index - prefix
+                        available = chart.valid
+                            && (local_triangle
+                                < patch_triangle_count(self.fixture, patch_index))
+                    }
+                }
+            }
+            if !available {
                 invalid_patch_vertex()
             } else {
                 let corner = vertex_index % 3
