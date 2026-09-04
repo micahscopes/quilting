@@ -852,13 +852,50 @@ static_assert(dyadic_patch_cell_at_node(46).depth == 3)
 static_assert(dyadic_patch_cell_at_node(46).x == 5)
 static_assert(dyadic_patch_cell_at_node(46).y == 2)
 
+/// A conservative chart-admission proof over one parameter cell.
+///
+/// Patch families choose the measure: a rational patch normally supplies a
+/// lower and upper bound on its denominator norm, while an affine patch can
+/// supply the constant profile `(1, 1)`.  `defined` means the lower bound is
+/// wholly inside the admitted chart; it is deliberately stronger than a few
+/// successful point samples.
+pub struct PatchChartProfile {
+    pub minimum_measure_bound: f32,
+    pub maximum_measure_bound: f32,
+    pub measure_variation: f32,
+    pub defined: bool,
+}
+impl Copy for PatchChartProfile {}
+
+pub fn patch_chart_profile(
+    _ minimum_measure_bound: f32,
+    _ maximum_measure_bound: f32,
+    _ minimum_admitted_measure: f32,
+) -> PatchChartProfile {
+    let defined = minimum_measure_bound >= minimum_admitted_measure
+    PatchChartProfile {
+        minimum_measure_bound: minimum_measure_bound,
+        maximum_measure_bound: maximum_measure_bound,
+        measure_variation: if defined {
+            maximum_measure_bound / minimum_measure_bound
+        } else {
+            0.0
+        },
+        defined: defined,
+    }
+}
+
 /// Evidence consumed by recursive patch LoD.
 ///
 /// `screen_error` is deliberately supplied by the renderer: the intrinsic
 /// transformation profile is reusable across views, while projected demand
 /// changes with camera and viewport. Keeping them distinct also permits an
 /// offline topology bake to omit screen error entirely.
-pub struct FractalPatchEvidence3 { pub transform: PatchTransformProfile3, pub screen_error: f32 }
+pub struct FractalPatchEvidence3 {
+    pub transform: PatchTransformProfile3,
+    pub chart: PatchChartProfile,
+    pub screen_error: f32,
+}
 impl Copy for FractalPatchEvidence3 {}
 
 /// Explicit policy for deciding whether one measured square is terminal.
@@ -871,6 +908,7 @@ pub struct FractalPatchLodPolicy3 {
     pub maximum_area_variation: f32,
     pub maximum_anisotropy: f32,
     pub maximum_metric_shape_variation: f32,
+    pub maximum_chart_measure_variation: f32,
     pub maximum_normal_turn: f32,
     pub maximum_mixed_turn: f32,
 }
@@ -892,7 +930,7 @@ pub fn fractal_patch_leaf_decision3(
     _ evidence: FractalPatchEvidence3,
     _ policy: FractalPatchLodPolicy3,
 ) -> FractalPatchLeafDecision {
-    if !evidence.transform.defined {
+    if !evidence.transform.defined || !evidence.chart.defined {
         if cell.depth < policy.maximum_depth {
             FractalPatchLeafDecision::Refine
         } else {
@@ -905,6 +943,7 @@ pub fn fractal_patch_leaf_decision3(
             || evidence.transform.pullback.maximum_anisotropy > policy.maximum_anisotropy
             || evidence.transform.pullback.metric_shape_variation
                 > policy.maximum_metric_shape_variation
+            || evidence.chart.measure_variation > policy.maximum_chart_measure_variation
             || evidence.transform.normal_turn > policy.maximum_normal_turn
             || evidence.transform.mixed_turn > policy.maximum_mixed_turn) {
         FractalPatchLeafDecision::Refine

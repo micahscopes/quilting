@@ -33,6 +33,7 @@ use quilting_patch::{
     DenotationSample,
     Euclidean3Points,
     Patch,
+    PatchChartProfile,
     PatchKernel,
     LinearElement,
     ProjectiveAdmission,
@@ -43,6 +44,7 @@ use quilting_patch::{
     bilinear_projective_controls,
     denotation_sample,
     patch as typed_patch,
+    patch_chart_profile,
     projective_control,
     projective_patch,
     pullback_metric2,
@@ -266,6 +268,90 @@ pub fn denominator_norm_squared_at(_ value: IsotropicBilinearPatch, _ parameter:
             value.p11.weight,
             parameter,
         ),
+    )
+}
+
+fn minimum4f(_ a: f32, _ b: f32, _ c: f32, _ d: f32) -> f32 {
+    let ab = if a < b { a } else { b }
+    let cd = if c < d { c } else { d }
+    if ab < cd { ab } else { cd }
+}
+
+fn maximum4f(_ a: f32, _ b: f32, _ c: f32, _ d: f32) -> f32 {
+    let ab = if a > b { a } else { b }
+    let cd = if c > d { c } else { d }
+    if ab > cd { ab } else { cd }
+}
+
+fn interval_absolute_lower_bound(_ minimum: f32, _ maximum: f32) -> f32 {
+    if minimum > 0.0 {
+        minimum
+    } else if maximum < 0.0 {
+        -maximum
+    } else {
+        0.0
+    }
+}
+
+/// Certify the denominator over a complete axis-aligned parameter cell.
+///
+/// Every component of a bilinear Bernstein field stays within the convex
+/// hull of its four cell-corner values.  In this isotropic algebra the
+/// invertibility measure is `scalar^2 + e12^2`; the `e13` and `e23` moment
+/// lanes are null.  Distance from the origin to the resulting coefficient
+/// box is therefore a conservative lower bound everywhere in the cell, not
+/// another sampling heuristic.
+pub fn denominator_cell_profile(
+    _ value: IsotropicBilinearPatch,
+    _ p00: Vec2F,
+    _ p10: Vec2F,
+    _ p01: Vec2F,
+    _ p11: Vec2F,
+    _ policy: IsotropicPolicy,
+) -> PatchChartProfile {
+    let w00 = blend_even(
+        value.p00.weight,
+        value.p10.weight,
+        value.p01.weight,
+        value.p11.weight,
+        p00,
+    )
+    let w10 = blend_even(
+        value.p00.weight,
+        value.p10.weight,
+        value.p01.weight,
+        value.p11.weight,
+        p10,
+    )
+    let w01 = blend_even(
+        value.p00.weight,
+        value.p10.weight,
+        value.p01.weight,
+        value.p11.weight,
+        p01,
+    )
+    let w11 = blend_even(
+        value.p00.weight,
+        value.p10.weight,
+        value.p01.weight,
+        value.p11.weight,
+        p11,
+    )
+    let minimum_scalar = minimum4f(w00.scalar, w10.scalar, w01.scalar, w11.scalar)
+    let maximum_scalar = maximum4f(w00.scalar, w10.scalar, w01.scalar, w11.scalar)
+    let minimum_e12 = minimum4f(w00.e12, w10.e12, w01.e12, w11.e12)
+    let maximum_e12 = maximum4f(w00.e12, w10.e12, w01.e12, w11.e12)
+    let scalar_lower = interval_absolute_lower_bound(minimum_scalar, maximum_scalar)
+    let e12_lower = interval_absolute_lower_bound(minimum_e12, maximum_e12)
+    patch_chart_profile(
+        scalar_lower * scalar_lower + e12_lower * e12_lower,
+        maximum4f(
+            weight_norm_squared(w00),
+            weight_norm_squared(w10),
+            weight_norm_squared(w01),
+            weight_norm_squared(w11),
+        ),
+        policy.minimum_denominator_norm_squared,
     )
 }
 

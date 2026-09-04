@@ -66,6 +66,7 @@ use quilting_clifford_bezier::{
     IsotropicProjectiveF,
     IsotropicPolicy,
     control,
+    denominator_cell_profile,
     evaluate,
     evaluate_differential,
     evaluate_projective,
@@ -112,6 +113,7 @@ use quilting_patch::{
     FractalPatchLeafDecision,
     FractalPatchLodPolicy3,
     PatchTransformProfile3,
+    PatchChartProfile,
     QuadDiagonal2,
     QuadDiagonalProfile2,
     QuadPatchDensity2,
@@ -360,6 +362,7 @@ impl Copy for FractalCellParameters {}
 
 struct FractalCellEvidence {
     transform: PatchTransformProfile3,
+    chart: PatchChartProfile,
     diagonal: QuadDiagonalProfile2,
     bottom_score: f32,
     right_score: f32,
@@ -1698,6 +1701,14 @@ fn fractal_cell_evidence(
         ),
         0.000000000001,
     )
+    let chart = denominator_cell_profile(
+        patch,
+        parameters.p00,
+        parameters.p10,
+        parameters.p01,
+        parameters.p11,
+        policy(),
+    )
     let diagonal = quad_diagonal_profile2<Euclidean3Points, Euclidean3Metric>(
         denotation_sample<Euclidean3Points>(
             differential00.sample.position,
@@ -1770,15 +1781,26 @@ fn fractal_cell_evidence(
         res_x,
         res_y,
     )
+    // A chart can be geometrically violent between otherwise innocent point
+    // samples.  Its certified norm variation becomes an atlas demand at a
+    // terminal leaf, so the depth bound never silently turns a missed narrow
+    // feature into a giant triangle fan.
+    let chart_score = if chart.defined { 12.0 * chart.measure_variation } else { 0.0 }
     FractalCellEvidence {
         transform: transform,
+        chart: chart,
         diagonal: diagonal,
-        bottom_score: bottom_score,
-        right_score: right_score,
-        top_score: top_score,
-        left_score: left_score,
+        bottom_score: if bottom_score > chart_score { bottom_score } else { chart_score },
+        right_score: if right_score > chart_score { right_score } else { chart_score },
+        top_score: if top_score > chart_score { top_score } else { chart_score },
+        left_score: if left_score > chart_score { left_score } else { chart_score },
         screen_error: maximum4(
-            maximum4(bottom_score, right_score, top_score, left_score),
+            maximum4(
+                if bottom_score > chart_score { bottom_score } else { chart_score },
+                if right_score > chart_score { right_score } else { chart_score },
+                if top_score > chart_score { top_score } else { chart_score },
+                if left_score > chart_score { left_score } else { chart_score },
+            ),
             diagonal00_11_score,
             diagonal10_01_score,
             0.0,
@@ -1797,6 +1819,7 @@ fn fractal_lod_policy(_ requested_lod: u32) -> FractalPatchLodPolicy3 {
         maximum_area_variation: 3.6,
         maximum_anisotropy: 8.0,
         maximum_metric_shape_variation: 0.24,
+        maximum_chart_measure_variation: 4.0,
         maximum_normal_turn: 0.32,
         maximum_mixed_turn: 0.48,
     }
@@ -1882,6 +1905,7 @@ fn classify_fractal_node(
         cell,
         FractalPatchEvidence3 {
             transform: evidence.transform,
+            chart: evidence.chart,
             screen_error: fractal_effective_screen_error(
                 evidence.screen_error,
                 requested_lod,
