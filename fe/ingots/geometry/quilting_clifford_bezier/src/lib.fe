@@ -123,6 +123,16 @@ pub struct IsotropicQuotientHomogeneousF {
 }
 impl Copy for IsotropicQuotientHomogeneousF {}
 
+/// Exact value and parameter derivatives of the affine quotient's homogeneous
+/// carrier.  No division occurs here: finite points, near-pole points, and
+/// points at projective infinity all inhabit the same representation.
+pub struct IsotropicQuotientHomogeneousDifferential {
+    pub value: IsotropicQuotientHomogeneousF,
+    pub tangent_s: IsotropicQuotientHomogeneousF,
+    pub tangent_t: IsotropicQuotientHomogeneousF,
+}
+impl Copy for IsotropicQuotientHomogeneousDifferential {}
+
 pub type IsotropicQuotientControlNet = QuadraticTensorPatch<IsotropicQuotientHomogeneousF>
 
 pub struct IsotropicProjectiveSample {
@@ -439,6 +449,78 @@ pub fn quotient_control_net(_ value: IsotropicBilinearPatch) -> IsotropicQuotien
         average2_quotient_homogeneous(h01_11, h11_01),
         h11_11,
     )
+}
+
+/// Evaluate the exact degree-(2,2) homogeneous affine quotient directly from
+/// the authored bilinear fields.  This is observationally the same polynomial
+/// represented by `quotient_control_net`, without first entering an affine
+/// chart and without a fit or sampling approximation.
+pub fn evaluate_quotient_homogeneous(
+    _ value: IsotropicBilinearPatch,
+    _ parameter: Vec2F,
+) -> IsotropicQuotientHomogeneousF {
+    let f00 = weighted_isotropic_point(value.p00)
+    let f10 = weighted_isotropic_point(value.p10)
+    let f01 = weighted_isotropic_point(value.p01)
+    let f11 = weighted_isotropic_point(value.p11)
+    let numerator = blend_odd(f00, f10, f01, f11, parameter)
+    let denominator = blend_even(
+        value.p00.weight,
+        value.p10.weight,
+        value.p01.weight,
+        value.p11.weight,
+        parameter,
+    )
+    quotient_homogeneous_product(numerator, denominator, denominator)
+}
+
+/// Evaluate the exact homogeneous quotient together with its two polynomial
+/// derivatives.  The product rule is expressed in the same sparse Clifford
+/// operations as the denotation, so shader and Wasm backends inherit one
+/// meaning and never differentiate an already-divided affine value.
+pub fn evaluate_quotient_homogeneous_differential(
+    _ value: IsotropicBilinearPatch,
+    _ parameter: Vec2F,
+) -> IsotropicQuotientHomogeneousDifferential {
+    let f00 = weighted_isotropic_point(value.p00)
+    let f10 = weighted_isotropic_point(value.p10)
+    let f01 = weighted_isotropic_point(value.p01)
+    let f11 = weighted_isotropic_point(value.p11)
+    let numerator = blend_odd(f00, f10, f01, f11, parameter)
+    let denominator = blend_even(
+        value.p00.weight,
+        value.p10.weight,
+        value.p01.weight,
+        value.p11.weight,
+        parameter,
+    )
+    let numerator_s = tangent_odd_s(f00, f10, f01, f11, parameter.y)
+    let numerator_t = tangent_odd_t(f00, f10, f01, f11, parameter.x)
+    let denominator_s = tangent_even_s(
+        value.p00.weight,
+        value.p10.weight,
+        value.p01.weight,
+        value.p11.weight,
+        parameter.y,
+    )
+    let denominator_t = tangent_even_t(
+        value.p00.weight,
+        value.p10.weight,
+        value.p01.weight,
+        value.p11.weight,
+        parameter.x,
+    )
+    IsotropicQuotientHomogeneousDifferential {
+        value: quotient_homogeneous_product(numerator, denominator, denominator),
+        tangent_s: add_quotient_homogeneous(
+            quotient_homogeneous_product(numerator_s, denominator_s, denominator),
+            quotient_homogeneous_product(numerator, denominator, denominator_s),
+        ),
+        tangent_t: add_quotient_homogeneous(
+            quotient_homogeneous_product(numerator_t, denominator_t, denominator),
+            quotient_homogeneous_product(numerator, denominator, denominator_t),
+        ),
+    }
 }
 
 /// Recover the exact local quotient net named by one compact anisotropic cell.
