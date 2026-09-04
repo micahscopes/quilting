@@ -535,8 +535,8 @@ This consolidation needs exactly eight raster storage bindings: the immutable
 atlas fixture, two point arenas, two triangle arenas, two receipts, and the
 surface state. The exact release manifest proves that no unrelated actor
 resource leaked into that portable-limit layout. Preparation precedes the
-raster consumer, both receipts retain their nine-word layout, and the indirect
-resource remains a compiler-derived four-word command buffer.
+raster consumer, both receipts retain their construction/restoration layout,
+and the indirect resource remains a compiler-derived four-word command buffer.
 
 The cache-disabled release build produced 17 passes, 35,363 Wasm bytes,
 741,777 compiler-reported WGSL bytes, and 997,798 emitted bytes. Complete site
@@ -590,3 +590,59 @@ outside actor derivation and those traced GPU batches. A process sample during
 that tail reached approximately 11.8 GB resident memory. That is a cold
 compiler lifetime/retention target; it is not Patch GPU residency. A separate
 process reused the exact persistent bundle and published the site in 335 ms.
+
+## Tiny-corner projection mismatch and dyadic budget underfill
+
+A second live control-cage state demonstrated that valid parameter topology is
+not sufficient evidence for visually uniform refinement. Its exact resident
+surface state is:
+
+```text
+p00 = [ 0.1412448585,  3.1525890827,  2.1264503002]
+p10 = [-0.4224028289, -0.0331433266,  5.8927483559]
+p01 = [-0.0783118457, -1.0058749914, -4.0005083084]
+p11 = [ 0.9491089582, -1.0036970377, -1.6084830761]
+w   = [ 0.4885654449,  0.0098537095,  0.4885654449, 3.0130152702]
+camera = { yaw: -1.1362584, pitch: 0.40350512, distance: 16.0 }
+presentation = { wire_px: 0.72, depth_cue: 0.82,
+                 sampler_mode: projective_blue_noise, atlas_lod: 4 }
+```
+
+The current 17-pass artifact reproduced the state without a host-side state
+translation. A DevTools-only storage-copy probe reported receipts
+`[1,81,24,1,136,1,184,0]` and `[1,66,24,1,106,1,145,0]`: both charts sampled,
+constructed, and converged with zero invariant failures. Their 242 macro
+triangles therefore form a legal one-cover of the parameter square. The
+prepared raster certificate was `[136,242,0]` and its draw was `[3,242,0,0]`.
+The requested LoD-4 budget is 816 triangles, but promoting every macro face to
+micro-LoD 1 would require 968. The conservative shared-level rule consequently
+selected micro-LoD 0 and used only 29.7% of the requested budget. The older
+two-draw artifact selected micro-LoD 1 for each chart and emitted
+`[12,136,0,0]` plus `[12,106,0,0]`; that hid some carrier coarseness by
+overshooting the aggregate budget by 18.6%.
+
+An independent dense f64 Clifford mirror found a deeper metric mismatch. On a
+200-by-200 parameter partition, the one percent of cells with greatest area in
+the displayed grade-one quotient contained approximately 98.75% of that
+displayed area, but only 4.36% of the normalized projective lift's chordal
+area. Log-area correlation between the two measures was approximately 0.062.
+The maximum grade-three residual was approximately 523.7, so this freely edited
+state is not a Euclidean-point-valued Clifford patch: the raster displays its
+grade-one projection while the macro sampler measures the complete normalized
+projective representative. Both calculations are internally coherent, but
+they are not measuring the same denotation.
+
+This case therefore requires two explicit policies rather than another global
+sampling constant:
+
+1. projective macro topology continues to preserve a finite, scale-invariant
+   cover across affine poles; and
+2. atlas refinement is allocated per macro face/edge from error in the actual
+   raster projection, with shared-edge reconciliation and a compact GPU-resident
+   triangle stream.
+
+A single shared dyadic micro-LoD cannot fill an arbitrary budget closely, and
+uniform projective samples cannot by themselves make a non-isometric grade-one
+projection visually uniform. The complete permutation atlas is the intended
+mechanism for the heterogeneous second stage; suppressing or globally
+over-refining the valid macro carrier is not.
