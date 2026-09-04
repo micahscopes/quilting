@@ -427,6 +427,12 @@ still overflow and disappear. The arena now derives its exact 296-point bound
 from those two semantic counts; Euler's disk relation derives 566 triangle
 slots, and compile-time assertions derive the three point-sampling workgroups
 needed to cover the arena. Ordinary states still draw only their receipt's
-resident prefix. The exact release rebuild retained 18 passes and 35,362 Wasm
-bytes, emitted 775,728 WGSL bytes and 1,038,472 total bytes, and completed in
-378,063 ms.
+resident prefix. The exact committed-source release rebuild retained 18 passes
+and 35,362 Wasm bytes, emitted 775,728 WGSL bytes and 1,038,472 total bytes, and
+took 416,491 ms in lowering, 440,125 ms through render-bundle cache population,
+and 440,402 ms through complete development-site publication. A second
+independent process reused that persistent bundle in 374 ms. Chromium fetched
+the exact publication successfully and reported the committed `b5ac3934…`
+source digest plus the derived `[3, 2, 1]` point-sampling dispatch; live GPU
+execution remains pending because that long-lived browser process returned no
+WebGPU adapter after its GPU-process crash quarantine.
