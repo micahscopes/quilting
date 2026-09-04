@@ -494,3 +494,49 @@ visibility, and at most eight bindings on any pass. A second independent
 process reused the persistent bundle in 367 ms. Live image/performance evidence
 remains pending the same browser WebGPU-adapter recovery as the folded-sheet
 acceptance receipt.
+
+## One density decision and draw across both pullback charts
+
+The first indirect version still prepared and rendered the two projective
+charts independently. That duplicated one draw-preparation shader and the
+complete deformation-aware raster shader, and it allowed two halves of the
+same Patch to select different micro-LoDs when their resident macro counts
+differed.
+
+The pullback renderer now treats both charts as one represented surface. One
+Fe-authored preparation pass counts the drawable macro triangles across both
+receipts, scales the canonical triangle budget by the number of valid charts,
+chooses one shared micro-LoD, and emits one indirect command. The raster maps
+the command's contiguous instance range to chart zero and then chart one. A
+failed chart contributes neither instances nor budget, so the other chart can
+remain independently drawable without an oversized fixed envelope.
+
+This consolidation needs exactly eight raster storage bindings: the immutable
+atlas fixture, two point arenas, two triangle arenas, two receipts, and the
+surface state. The exact release manifest proves that no unrelated actor
+resource leaked into that portable-limit layout. Preparation precedes the
+raster consumer, both receipts retain their nine-word layout, and the indirect
+resource remains a compiler-derived four-word command buffer.
+
+The cache-disabled release build produced 17 passes, 35,363 Wasm bytes,
+741,777 compiler-reported WGSL bytes, and 997,798 emitted bytes. Complete site
+publication took 395,332 ms, down from 491,128 ms for the two-draw version.
+The unified deformed raster is 117,414 bytes rather than two 76,832-byte
+shaders, and the unified preparation shader is 7,009 bytes rather than two
+5,395-byte shaders. Together they remove 40,031 compiler-reported WGSL bytes
+and also remove the chart-to-chart micro-LoD seam by construction.
+
+Stage tracing attributed 156,720 ms to the nine independent GPU compilation
+batches, including 66,233 ms for the analytic/deformed raster pair. Roughly
+213 seconds of the reported lowering interval remained outside those traced
+stage batches. That remainder, rather than small pass compilation, is now the
+next cold-compiler measurement target. The two 92,232-byte topology-restoration
+passes also remain structurally identical apart from chart resource identity;
+packing chart-indexed topology storage is the principled route to sharing that
+work while retaining exact logical identities.
+
+A separate default-cache process reproduced the 17-pass artifact in 375,896
+ms and populated the persistent bundle. A third process then reused that exact
+bundle and published the complete site in 286 ms. Thus the cold figures above
+do not hide cache reuse, while ordinary edit-free restarts retain sub-second
+startup.

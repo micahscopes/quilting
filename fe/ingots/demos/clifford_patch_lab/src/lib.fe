@@ -194,8 +194,7 @@ pub struct DeformedSamplingRound {}
 /// Nominal identities keep the two independently produced chart commands
 /// exact even though their four-word WebGPU representation is identical.
 struct AnalyticAtlasDraw {}
-struct DeformedChart0Draw {}
-struct DeformedChart1Draw {}
+struct DeformedAtlasDraw {}
 
 const fn deformed_key() -> AtlasKey {
     AtlasKey { a: 3, b: 3, c: 3 }
@@ -1420,14 +1419,15 @@ fn analytic_atlas_lod(
 
 fn deformed_atlas_lod(
     _ fixture: FixtureBuffer,
-    _ receipt: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
+    _ macro_triangles: u32,
+    _ active_charts: u32,
     _ requested: f32,
 ) -> u32 {
     let target_lod = admitted_atlas_lod(requested)
     atlas_lod_for_triangle_budget(
         fixture,
-        receipt.load(index: 4),
-        atlas_triangle_count_at_lod(fixture, target_lod),
+        macro_triangles,
+        atlas_triangle_count_at_lod(fixture, target_lod) * active_charts,
     )
 }
 
@@ -1538,22 +1538,34 @@ fn deformed_topology_drawable(
     receipt.load(index: 3) != 0 && receipt.load(index: 7) == 0
 }
 
-fn prepare_deformed_draw<Brand>(
-    _ draw: DrawIndirectBuffer<Brand>,
-    _ receipt: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
+fn prepare_deformed_atlas_draw(
+    _ draw: DrawIndirectBuffer<DeformedAtlasDraw>,
+    _ receipt_0: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
+    _ receipt_1: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
     _ fixture: FixtureBuffer,
     _ atlas_lod: f32,
 ) {
     let mut vertices: u32 = 0
     let mut instances: u32 = 0
-    if deformed_topology_drawable(receipt) {
-        let lod = deformed_atlas_lod(fixture, receipt, atlas_lod)
+    let drawable_0 = deformed_topology_drawable(receipt_0)
+    let drawable_1 = deformed_topology_drawable(receipt_1)
+    let macro_triangles_0 = if drawable_0 { receipt_0.load(index: 4) } else { 0 }
+    let macro_triangles_1 = if drawable_1 { receipt_1.load(index: 4) } else { 0 }
+    let active_charts = (if drawable_0 { 1 } else { 0 })
+        + (if drawable_1 { 1 } else { 0 })
+    let macro_triangles = macro_triangles_0 + macro_triangles_1
+    if active_charts > 0 && macro_triangles > 0 {
+        let lod = deformed_atlas_lod(
+            fixture, macro_triangles, active_charts, atlas_lod,
+        )
         let patch_index = canonical_key_ordinal(AtlasKey { a: lod, b: lod, c: lod })
         vertices = patch_triangle_count(fixture, patch_index) * 3
-        instances = receipt.load(index: 4)
-        receipt.store(index: 8, value: lod)
+        instances = macro_triangles
+        receipt_0.store(index: 8, value: if drawable_0 { lod } else { 0 })
+        receipt_1.store(index: 8, value: if drawable_1 { lod } else { 0 })
     } else {
-        receipt.store(index: 8, value: 0)
+        receipt_0.store(index: 8, value: 0)
+        receipt_1.store(index: 8, value: 0)
     }
     draw.store(index: 0, value: vertices)
     draw.store(index: 1, value: instances)
@@ -1573,7 +1585,6 @@ fn deformed_atlas_raster_vertex(
     _ chart: u32,
     _ vertex_index: u32,
     _ instance_index: u32,
-    _ atlas_lod: f32,
     _ patch: IsotropicBilinearPatch,
     _ camera: CameraFrame,
     _ res_x: f32,
@@ -1967,8 +1978,7 @@ actor CliffordPatchLab uses (
     receipt_1: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
     analytic_lod: StorageBuffer<u32, 1>,
     analytic_draw: DrawIndirectBuffer<AnalyticAtlasDraw>,
-    deformed_draw_0: DrawIndirectBuffer<DeformedChart0Draw>,
-    deformed_draw_1: DrawIndirectBuffer<DeformedChart1Draw>,
+    deformed_draw: DrawIndirectBuffer<DeformedAtlasDraw>,
     p00_x: f32,
     p00_y: f32,
     p00_z: f32,
@@ -2409,7 +2419,7 @@ actor CliffordPatchLab uses (
         )
     }
 
-    fn prepare_deformed_draw_0(self, invocation: ComputeInvocation)
+    fn prepare_deformed_draw(self, invocation: ComputeInvocation)
         uses (
             ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>,
             PassActivation<PullbackPatchTopology>,
@@ -2417,25 +2427,9 @@ actor CliffordPatchLab uses (
         )
     {
         if invocation.global.x == 0 {
-            prepare_deformed_draw(
-                self.deformed_draw_0,
+            prepare_deformed_atlas_draw(
+                self.deformed_draw,
                 self.receipt_0,
-                self.fixture,
-                self.atlas_lod,
-            )
-        }
-    }
-
-    fn prepare_deformed_draw_1(self, invocation: ComputeInvocation)
-        uses (
-            ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>,
-            PassActivation<PullbackPatchTopology>,
-            PassPreparation<PullbackPipelinePreparation>,
-        )
-    {
-        if invocation.global.x == 0 {
-            prepare_deformed_draw(
-                self.deformed_draw_1,
                 self.receipt_1,
                 self.fixture,
                 self.atlas_lod,
@@ -2734,7 +2728,7 @@ actor CliffordPatchLab uses (
         shade_patch(varying, self.wire_px, self.depth_cue)
     }
 
-    fn deformed_vertices_0(
+    fn deformed_vertices(
         self,
         vertex_index: u32,
         instance_index: u32,
@@ -2742,7 +2736,7 @@ actor CliffordPatchLab uses (
         uses (
             VertexStage<
                 PatchVarying,
-                IndirectTriangleList<DrawIndirectBuffer<DeformedChart0Draw>>,
+                IndirectTriangleList<DrawIndirectBuffer<DeformedAtlasDraw>>,
             >,
             PassActivation<PullbackPatchPipeline>,
             PassPreparation<PullbackPipelinePreparation>,
@@ -2755,9 +2749,15 @@ actor CliffordPatchLab uses (
             self.p11_x, self.p11_y, self.p11_z,
             self.w00, self.w10, self.w01, self.w11,
         )
-        if self.sampler_mode < 2.5 {
+        let drawable_0 = deformed_topology_drawable(self.receipt_0)
+        let drawable_1 = deformed_topology_drawable(self.receipt_1)
+        let macro_triangles_0 = if drawable_0 { self.receipt_0.load(index: 4) } else { 0 }
+        let macro_triangles_1 = if drawable_1 { self.receipt_1.load(index: 4) } else { 0 }
+        if self.sampler_mode < 2.5
+            || instance_index >= macro_triangles_0 + macro_triangles_1
+        {
             invalid_patch_vertex()
-        } else {
+        } else if instance_index < macro_triangles_0 {
             deformed_atlas_raster_vertex(
                 self.points_0,
                 self.triangles_0,
@@ -2766,7 +2766,6 @@ actor CliffordPatchLab uses (
                 0,
                 vertex_index,
                 instance_index,
-                self.atlas_lod,
                 patch,
                 orbit_camera_frame(
                     self.orbit_yaw,
@@ -2778,42 +2777,6 @@ actor CliffordPatchLab uses (
                 self.res_x,
                 self.res_y,
             )
-        }
-    }
-
-    fn deformed_fragment_0(self, varying: PatchVarying) -> i32
-        uses (
-            FragmentStage<PatchVarying>,
-            PassActivation<PullbackPatchPipeline>,
-            PassPreparation<PullbackPipelinePreparation>,
-        )
-    {
-        shade_patch(varying, self.wire_px, self.depth_cue)
-    }
-
-    fn deformed_vertices_1(
-        self,
-        vertex_index: u32,
-        instance_index: u32,
-    ) -> RasterVertex<PatchVarying>
-        uses (
-            VertexStage<
-                PatchVarying,
-                IndirectTriangleList<DrawIndirectBuffer<DeformedChart1Draw>>,
-            >,
-            PassActivation<PullbackPatchPipeline>,
-            PassPreparation<PullbackPipelinePreparation>,
-        )
-    {
-        let patch = patch_from_uniforms(
-            self.p00_x, self.p00_y, self.p00_z,
-            self.p10_x, self.p10_y, self.p10_z,
-            self.p01_x, self.p01_y, self.p01_z,
-            self.p11_x, self.p11_y, self.p11_z,
-            self.w00, self.w10, self.w01, self.w11,
-        )
-        if self.sampler_mode < 2.5 {
-            invalid_patch_vertex()
         } else {
             deformed_atlas_raster_vertex(
                 self.points_1,
@@ -2822,8 +2785,7 @@ actor CliffordPatchLab uses (
                 self.fixture,
                 1,
                 vertex_index,
-                instance_index,
-                self.atlas_lod,
+                instance_index - macro_triangles_0,
                 patch,
                 orbit_camera_frame(
                     self.orbit_yaw,
@@ -2838,7 +2800,7 @@ actor CliffordPatchLab uses (
         }
     }
 
-    fn deformed_fragment_1(self, varying: PatchVarying) -> i32
+    fn deformed_fragment(self, varying: PatchVarying) -> i32
         uses (
             FragmentStage<PatchVarying>,
             PassActivation<PullbackPatchPipeline>,
