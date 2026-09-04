@@ -161,6 +161,26 @@ fn paper_example(unscaled_fourth_weight: bool) -> [Control; 4] {
     ]
 }
 
+fn scaled_paper_example(scales: [f64; 4]) -> [Control; 4] {
+    std::array::from_fn(|index| {
+        let control = paper_example(false)[index];
+        Control {
+            point: control.point,
+            weight: control.weight.scale(scales[index]),
+        }
+    })
+}
+
+fn denominator_norm_squared(controls: [Control; 4], s: f64, t: f64) -> f64 {
+    let metric = [1.0, 1.0, 0.0];
+    let denominator = bilinear(controls.map(|control| control.weight), s, t);
+    denominator.product(denominator.reverse(), metric).0[0]
+}
+
+fn reparameterize(value: f64, first: f64, second: f64) -> f64 {
+    second * value / (first * (1.0 - value) + second * value)
+}
+
 pub(crate) fn paper_sample(s: f64, t: f64) -> ([f64; 3], f64) {
     let value = evaluate(paper_example(false), s, t);
     ([value.0[1], value.0[2], value.0[4]], value.0[7])
@@ -195,6 +215,103 @@ fn paper_patch_is_vector_valued_and_lies_on_its_quartic() {
             let implicit =
                 radius_squared * radius_squared - 8.0 * x * x - 5.0 * y * y + 12.0 * z * z + 4.0;
             assert_close(implicit, 0.0, 2.0e-9);
+        }
+    }
+}
+
+#[test]
+fn rank_one_corner_scaling_only_reparameterizes_the_paper_patch() {
+    // A separable corner scale a_ij = lambda_i * mu_j is exactly the
+    // rank-one relation a00*a11 = a10*a01. Bilinear interpolation factors
+    // into a positive scalar times the original homogeneous patch at the two
+    // rationally reparameterized coordinates below.
+    let scales = [2.807_198_5, 0.140_730_57, 0.096_135_378, 0.0];
+    let scales = [
+        scales[0],
+        scales[1],
+        scales[2],
+        scales[1] * scales[2] / scales[0],
+    ];
+    assert_close(scales[0] * scales[3], scales[1] * scales[2], 1.0e-14);
+
+    let scaled = scaled_paper_example(scales);
+    let lambda_0 = 1.0;
+    let lambda_1 = scales[1] / scales[0];
+    let mu_0 = scales[0];
+    let mu_1 = scales[2];
+    for s_step in 0..=16 {
+        for t_step in 0..=16 {
+            let s = f64::from(s_step) / 16.0;
+            let t = f64::from(t_step) / 16.0;
+            let mapped_s = reparameterize(s, lambda_0, lambda_1);
+            let mapped_t = reparameterize(t, mu_0, mu_1);
+            let actual = evaluate(scaled, s, t);
+            let expected = evaluate(paper_example(false), mapped_s, mapped_t);
+            for blade in 0..8 {
+                assert_close(actual.0[blade], expected.0[blade], 2.0e-9);
+            }
+        }
+    }
+}
+
+#[test]
+fn captured_independent_weights_leave_the_vector_valued_locus() {
+    let cases: [[f64; 4]; 2] = [
+        [2.807_198_5, 0.140_730_57, 0.096_135_378, 0.955_935_66],
+        [0.055_783_328, 0.024_856_215, 3.487_446_8, 0.431_913_82],
+    ];
+    for scales in cases {
+        assert!(
+            (scales[0] * scales[3] - scales[1] * scales[2]).abs() > 1.0e-3,
+            "captured state unexpectedly satisfies the rank-one relation"
+        );
+        let controls = scaled_paper_example(scales);
+        let mut maximum_grade_three = 0.0_f64;
+        for s_step in 0..=256 {
+            for t_step in 0..=256 {
+                let sample = evaluate(
+                    controls,
+                    f64::from(s_step) / 256.0,
+                    f64::from(t_step) / 256.0,
+                );
+                maximum_grade_three = maximum_grade_three.max(sample.0[7].abs());
+            }
+        }
+        assert!(
+            maximum_grade_three > 0.1,
+            "captured state should expose a material grade-three residual; got {maximum_grade_three}"
+        );
+    }
+}
+
+#[test]
+fn positive_paper_weight_scales_have_no_affine_pole() {
+    // For the paper weights, |W|^2 = a^2 + b^2 with
+    //   a = w00(1-s)(1-t) - 6*w11*s*t
+    //   b = w10*s(1-t) + 2*w01*(1-s)*t.
+    // With positive scales, b can vanish on the closed square only at (0,0)
+    // and (1,1); a is respectively w00 and -6*w11 there. Thus the norm has no
+    // zero even though it may become small enough to magnify an invalid
+    // grade-one projection dramatically.
+    let cases: [[f64; 4]; 4] = [
+        [1.0, 1.0, 1.0, 1.0],
+        [2.807_198_5, 0.140_730_57, 0.096_135_378, 0.955_935_66],
+        [0.055_783_328, 0.024_856_215, 3.487_446_8, 0.431_913_82],
+        [1.9, 1.9, 0.001, 0.001],
+    ];
+    for scales in cases {
+        let controls = scaled_paper_example(scales);
+        for s_step in 0..=128 {
+            for t_step in 0..=128 {
+                let s = f64::from(s_step) / 128.0;
+                let t = f64::from(t_step) / 128.0;
+                let scalar = scales[0] * (1.0 - s) * (1.0 - t) - 6.0 * scales[3] * s * t;
+                let e12 = scales[1] * s * (1.0 - t) + 2.0 * scales[2] * (1.0 - s) * t;
+                let expected = scalar * scalar + e12 * e12;
+                let actual = denominator_norm_squared(controls, s, t);
+                assert_close(actual, expected, 2.0e-12);
+                assert!(actual > 0.0, "positive scales reached a denominator pole");
+            }
         }
     }
 }
