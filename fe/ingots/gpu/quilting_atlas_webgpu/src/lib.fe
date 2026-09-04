@@ -524,6 +524,28 @@ where { POINT_STORAGE_WORDS % POINT_WORDS == 0 }
     point_load<POINT_STORAGE_WORDS>(points, point)
 }
 
+/// Write one fixed-point resident without exposing the packed point ABI.
+///
+/// Atlas MIS compaction, an adaptive patch frontier, and future worker/GPU
+/// placements can therefore share the constrained triangulator without
+/// duplicating its storage layout. A false result is an explicit capacity
+/// failure; no partial point is published.
+pub fn store_resident_point<const POINT_STORAGE_WORDS: usize>(
+    _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
+    _ point: u32,
+    _ value: FixedBarycentric,
+) -> bool
+where { POINT_STORAGE_WORDS % POINT_WORDS == 0 }
+{
+    let capacity: u32 = (POINT_STORAGE_WORDS / POINT_WORDS).downcast_truncate()
+    if point >= capacity {
+        false
+    } else {
+        point_store<POINT_STORAGE_WORDS>(points, point, value)
+        true
+    }
+}
+
 /// Read one triangle from the currently published immutable generation.
 pub fn parallel_topology_triangle<
     const POINT_CAPACITY: usize,
