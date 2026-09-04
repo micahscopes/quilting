@@ -185,9 +185,10 @@ const DEFORMED_FLIP_LIMIT: usize = 256
 const DEFORMED_IMPORTANCE_DEPTH: usize = 10
 const DEFORMED_BOUNDARY_ARC_DEPTH: usize = 12
 
-// Construction/restoration occupy words 0--7. The draw-preparation pass
-// materializes its density-balanced micro-LoD in word 8 for the vertex stage.
-const DEFORMED_RECEIPT_WORDS: usize = 9
+const DEFORMED_RECEIPT_WORDS: usize = 8
+// Draw preparation proves chart admission once, then exposes only the facts
+// the raster needs: chart-zero faces, total faces, and the shared micro-LoD.
+const DEFORMED_RASTER_WORDS: usize = 3
 
 pub struct DeformedSamplingRound {}
 
@@ -1540,6 +1541,7 @@ fn deformed_topology_drawable(
 
 fn prepare_deformed_atlas_draw(
     _ draw: DrawIndirectBuffer<DeformedAtlasDraw>,
+    _ raster: StorageBuffer<u32, DEFORMED_RASTER_WORDS>,
     _ receipt_0: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
     _ receipt_1: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
     _ fixture: FixtureBuffer,
@@ -1551,8 +1553,10 @@ fn prepare_deformed_atlas_draw(
     let drawable_1 = deformed_topology_drawable(receipt_1)
     let macro_triangles_0 = if drawable_0 { receipt_0.load(index: 4) } else { 0 }
     let macro_triangles_1 = if drawable_1 { receipt_1.load(index: 4) } else { 0 }
-    let active_charts = (if drawable_0 { 1 } else { 0 })
-        + (if drawable_1 { 1 } else { 0 })
+    let active_0 = drawable_0 && macro_triangles_0 > 0
+    let active_1 = drawable_1 && macro_triangles_1 > 0
+    let active_charts = (if active_0 { 1 } else { 0 })
+        + (if active_1 { 1 } else { 0 })
     let macro_triangles = macro_triangles_0 + macro_triangles_1
     if active_charts > 0 && macro_triangles > 0 {
         let lod = deformed_atlas_lod(
@@ -1561,11 +1565,13 @@ fn prepare_deformed_atlas_draw(
         let patch_index = canonical_key_ordinal(AtlasKey { a: lod, b: lod, c: lod })
         vertices = patch_triangle_count(fixture, patch_index) * 3
         instances = macro_triangles
-        receipt_0.store(index: 8, value: if drawable_0 { lod } else { 0 })
-        receipt_1.store(index: 8, value: if drawable_1 { lod } else { 0 })
+        raster.store(index: 0, value: macro_triangles_0)
+        raster.store(index: 1, value: macro_triangles)
+        raster.store(index: 2, value: lod)
     } else {
-        receipt_0.store(index: 8, value: 0)
-        receipt_1.store(index: 8, value: 0)
+        raster.store(index: 0, value: 0)
+        raster.store(index: 1, value: 0)
+        raster.store(index: 2, value: 0)
     }
     draw.store(index: 0, value: vertices)
     draw.store(index: 1, value: instances)
@@ -1580,26 +1586,25 @@ fn prepare_deformed_atlas_draw(
 fn deformed_atlas_raster_vertex(
     _ points: StorageBuffer<u32, DEFORMED_POINT_WORDS>,
     _ triangles: StorageBuffer<u32, DEFORMED_TRIANGLE_WORDS>,
-    _ receipt: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
     _ fixture: FixtureBuffer,
     _ chart: u32,
     _ vertex_index: u32,
     _ instance_index: u32,
+    _ face_count: u32,
+    _ atlas_lod: u32,
     _ patch: IsotropicBilinearPatch,
     _ camera: CameraFrame,
     _ res_x: f32,
     _ res_y: f32,
 ) -> RasterVertex<PatchVarying> {
-    if !deformed_topology_drawable(receipt) {
-        return invalid_patch_vertex()
-    }
     let face = instance_index
     let corner = vertex_index % 3
-    if face >= receipt.load(index: 4) {
+    if face >= face_count {
         return invalid_patch_vertex()
     }
-    let lod = receipt.load(index: 8)
-    let patch_index = canonical_key_ordinal(AtlasKey { a: lod, b: lod, c: lod })
+    let patch_index = canonical_key_ordinal(
+        AtlasKey { a: atlas_lod, b: atlas_lod, c: atlas_lod },
+    )
     let local_triangle = vertex_index / 3
     if local_triangle >= patch_triangle_count(fixture, patch_index) {
         return invalid_patch_vertex()
@@ -1976,6 +1981,7 @@ actor CliffordPatchLab uses (
     proposals_1: StorageBuffer<u32, DEFORMED_PROPOSAL_WORDS>,
     receipt_0: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
     receipt_1: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
+    deformed_raster: StorageBuffer<u32, DEFORMED_RASTER_WORDS>,
     analytic_lod: StorageBuffer<u32, 1>,
     analytic_draw: DrawIndirectBuffer<AnalyticAtlasDraw>,
     deformed_draw: DrawIndirectBuffer<DeformedAtlasDraw>,
@@ -2429,6 +2435,7 @@ actor CliffordPatchLab uses (
         if invocation.global.x == 0 {
             prepare_deformed_atlas_draw(
                 self.deformed_draw,
+                self.deformed_raster,
                 self.receipt_0,
                 self.receipt_1,
                 self.fixture,
@@ -2749,23 +2756,21 @@ actor CliffordPatchLab uses (
             self.p11_x, self.p11_y, self.p11_z,
             self.w00, self.w10, self.w01, self.w11,
         )
-        let drawable_0 = deformed_topology_drawable(self.receipt_0)
-        let drawable_1 = deformed_topology_drawable(self.receipt_1)
-        let macro_triangles_0 = if drawable_0 { self.receipt_0.load(index: 4) } else { 0 }
-        let macro_triangles_1 = if drawable_1 { self.receipt_1.load(index: 4) } else { 0 }
-        if self.sampler_mode < 2.5
-            || instance_index >= macro_triangles_0 + macro_triangles_1
-        {
+        let macro_triangles_0 = self.deformed_raster.load(index: 0)
+        let macro_triangles = self.deformed_raster.load(index: 1)
+        let lod = self.deformed_raster.load(index: 2)
+        if self.sampler_mode < 2.5 || instance_index >= macro_triangles {
             invalid_patch_vertex()
         } else if instance_index < macro_triangles_0 {
             deformed_atlas_raster_vertex(
                 self.points_0,
                 self.triangles_0,
-                self.receipt_0,
                 self.fixture,
                 0,
                 vertex_index,
                 instance_index,
+                macro_triangles_0,
+                lod,
                 patch,
                 orbit_camera_frame(
                     self.orbit_yaw,
@@ -2781,11 +2786,12 @@ actor CliffordPatchLab uses (
             deformed_atlas_raster_vertex(
                 self.points_1,
                 self.triangles_1,
-                self.receipt_1,
                 self.fixture,
                 1,
                 vertex_index,
                 instance_index - macro_triangles_0,
+                macro_triangles - macro_triangles_0,
+                lod,
                 patch,
                 orbit_camera_frame(
                     self.orbit_yaw,

@@ -540,3 +540,33 @@ ms and populated the persistent bundle. A third process then reused that exact
 bundle and published the complete site in 286 ms. Thus the cold figures above
 do not hide cache reuse, while ordinary edit-free restarts retain sub-second
 startup.
+
+## Raster certificate instead of per-vertex topology receipts
+
+The unified raster initially bound both mutable topology receipts and repeated
+their construction-validity checks for every invoked vertex. Draw preparation
+already had to establish those facts before emitting the indirect command, so
+the raster had no reason to reinterpret the construction protocol.
+
+Preparation now writes a three-word typed raster certificate containing the
+chart-zero face count, total face count, and shared micro-LoD. The indirect
+command and certificate are produced by the same Fe pass. The raster consumes
+that certificate with the two point and triangle arenas, but no longer binds
+either receipt. Receipts return to their eight construction/restoration words;
+their protocol does not grow merely to serve presentation.
+
+The release manifest retains 17 passes and lowers the deformed raster from
+eight to seven storage bindings. The preparation pass has six exact bindings,
+the raster certificate is a three-word storage resource, and the indirect
+command remains four words with `storage,indirect` usage. The raster shader
+fell from 117,414 to 111,953 bytes. Preparation grew from 7,009 to 7,337 bytes,
+for a net reduction of 5,133 compiler-reported WGSL bytes.
+
+The default-cache release build emitted 35,364 Wasm bytes, 736,644
+compiler-reported WGSL bytes, and 993,155 total bytes. Lowering took 344,454 ms
+and complete publication took 365,593 ms. Its nine GPU compilation batches
+totaled 149,645 ms, leaving approximately 192 seconds of the lowering interval
+outside actor derivation and those traced GPU batches. A process sample during
+that tail reached approximately 11.8 GB resident memory. That is a cold
+compiler lifetime/retention target; it is not Patch GPU residency. A separate
+process reused the exact persistent bundle and published the site in 335 ms.
