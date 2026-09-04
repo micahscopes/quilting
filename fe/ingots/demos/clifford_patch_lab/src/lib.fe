@@ -148,12 +148,17 @@ use quilting_patch::{
 }
 use quilting_patch_webgpu::{
     PROJECTIVE_FRONTIER_CELL_WORDS,
+    PROJECTIVE_FRONTIER_PLAN_META_WORDS,
+    PROJECTIVE_FRONTIER_PLAN_WORDS_PER_CELL,
     PROJECTIVE_FRONTIER_RECEIPT_WORDS,
     ProjectivePatchFrontierClassifier2,
-    advance_projective_patch_frontier,
+    classify_projective_patch_frontier_lane,
+    commit_projective_patch_frontier_round,
     initialize_projective_patch_frontier,
+    prefix_projective_patch_frontier,
     projective_patch_frontier_cell,
     projective_patch_frontier_receipt,
+    scatter_projective_patch_frontier_lane,
 }
 use quilting_qb::{permutation_parity, remap_barycentric}
 use std::web::view::{
@@ -283,8 +288,21 @@ const DEFORMED_FACE_WORKGROUPS: usize = (DEFORMED_TRIANGLES + DEFORMED_THREADS -
 const PROJECTIVE_FRONTIER_CAPACITY: usize = 2048
 const PROJECTIVE_FRONTIER_WORDS: usize = PROJECTIVE_FRONTIER_CAPACITY
     * PROJECTIVE_FRONTIER_CELL_WORDS
+const PROJECTIVE_FRONTIER_PLAN_WORDS: usize = PROJECTIVE_FRONTIER_CAPACITY
+    * PROJECTIVE_FRONTIER_PLAN_WORDS_PER_CELL
+    + PROJECTIVE_FRONTIER_PLAN_META_WORDS
 const PROJECTIVE_FRONTIER_ROUNDS: usize = 16
-const PROJECTIVE_FRONTIER_MAX_AXIS_DEPTH: u32 = 7
+const PROJECTIVE_FRONTIER_MAX_AXIS_DEPTH_WORDS: usize = 7
+const PROJECTIVE_FRONTIER_MAX_AXIS_DEPTH: u32 =
+    PROJECTIVE_FRONTIER_MAX_AXIS_DEPTH_WORDS.downcast_truncate()
+const PROJECTIVE_FRONTIER_THREADS: usize = 128
+const PROJECTIVE_FRONTIER_WORKGROUPS: usize =
+    (PROJECTIVE_FRONTIER_CAPACITY + PROJECTIVE_FRONTIER_THREADS - 1)
+        / PROJECTIVE_FRONTIER_THREADS
+const PROJECTIVE_HAZARD_CELL_WORDS: usize = 4
+const PROJECTIVE_HAZARD_WORDS: usize =
+    PROJECTIVE_FRONTIER_CAPACITY * PROJECTIVE_HAZARD_CELL_WORDS
+const PROJECTIVE_HAZARD_RECEIPT_WORDS: usize = 1
 
 // One score per edge, followed by one compact prefix/atlas/permutation plan
 // per possible macro face across the two projective charts.
@@ -882,6 +900,68 @@ fn materialize_frontier_chart_points(
     receipt.store(index: 5, value: 0)
     receipt.store(index: 6, value: 0)
     receipt.store(index: 7, value: 0)
+}
+
+fn projective_hazard_cell_offset(_ index: u32) -> u32 {
+    index * PROJECTIVE_HAZARD_CELL_WORDS.downcast_truncate()
+}
+
+fn store_projective_hazard_cell(
+    _ hazards: StorageBuffer<u32, PROJECTIVE_HAZARD_WORDS>,
+    _ index: u32,
+    _ cell: AnisotropicPatchCell2,
+) {
+    let offset = projective_hazard_cell_offset(index)
+    hazards.store(index: offset, value: cell.u_depth)
+    hazards.store(index: offset + 1, value: cell.u_index)
+    hazards.store(index: offset + 2, value: cell.v_depth)
+    hazards.store(index: offset + 3, value: cell.v_index)
+}
+
+fn projective_hazard_cell(
+    _ hazards: StorageBuffer<u32, PROJECTIVE_HAZARD_WORDS>,
+    _ index: u32,
+) -> AnisotropicPatchCell2 {
+    let offset = projective_hazard_cell_offset(index)
+    AnisotropicPatchCell2 {
+        u_depth: hazards.load(index: offset),
+        u_index: hazards.load(index: offset + 1),
+        v_depth: hazards.load(index: offset + 2),
+        v_index: hazards.load(index: offset + 3),
+    }
+}
+
+/// Compact the rejected projective leaves in stable frontier order. The
+/// frontier capacity is also the hazard-list capacity, so a valid frontier can
+/// never overflow this representation.
+fn materialize_projective_hazards(
+    _ frontier_first: StorageBuffer<u32, PROJECTIVE_FRONTIER_WORDS>,
+    _ frontier_second: StorageBuffer<u32, PROJECTIVE_FRONTIER_WORDS>,
+    _ frontier_receipt: StorageBuffer<u32, PROJECTIVE_FRONTIER_RECEIPT_WORDS>,
+    _ hazards: StorageBuffer<u32, PROJECTIVE_HAZARD_WORDS>,
+    _ hazard_receipt: StorageBuffer<u32, PROJECTIVE_HAZARD_RECEIPT_WORDS>,
+) {
+    let receipt = projective_patch_frontier_receipt(frontier_receipt)
+    if !receipt.converged || receipt.overflowed {
+        hazard_receipt.store(index: 0, value: 0)
+        return
+    }
+    let mut source: u32 = 0
+    let mut resident: u32 = 0
+    while source < receipt.active_cells {
+        let frontier_cell = projective_patch_frontier_cell(
+            frontier_first,
+            frontier_second,
+            frontier_receipt,
+            source,
+        )
+        if frontier_cell.rejected {
+            store_projective_hazard_cell(hazards, resident, frontier_cell.cell)
+            resident = resident + 1
+        }
+        source = source + 1
+    }
+    hazard_receipt.store(index: 0, value: resident)
 }
 
 fn candidate_offset(_ slot: u32) -> u32 {
@@ -2600,25 +2680,18 @@ fn parameter_triangle_overlaps_cell(
 /// bounding boxes overlap. A future constrained-hole triangulator can consume
 /// the same hazard frontier while preserving triangles tangent to its boundary.
 fn parameter_triangle_overlaps_frontier_hazard(
-    _ frontier_first: StorageBuffer<u32, PROJECTIVE_FRONTIER_WORDS>,
-    _ frontier_second: StorageBuffer<u32, PROJECTIVE_FRONTIER_WORDS>,
-    _ frontier_receipt: StorageBuffer<u32, PROJECTIVE_FRONTIER_RECEIPT_WORDS>,
+    _ hazards: StorageBuffer<u32, PROJECTIVE_HAZARD_WORDS>,
+    _ hazard_receipt: StorageBuffer<u32, PROJECTIVE_HAZARD_RECEIPT_WORDS>,
     _ p0: Vec2F,
     _ p1: Vec2F,
     _ p2: Vec2F,
 ) -> bool {
-    let receipt = projective_patch_frontier_receipt(frontier_receipt)
+    let count = hazard_receipt.load(index: 0)
     let mut overlaps = false
     let mut index: u32 = 0
-    while index < receipt.active_cells {
-        let resident = projective_patch_frontier_cell(
-            frontier_first,
-            frontier_second,
-            frontier_receipt,
-            index,
-        )
-        if resident.rejected
-            && parameter_triangle_overlaps_cell(p0, p1, p2, resident.cell) {
+    while index < count {
+        let cell = projective_hazard_cell(hazards, index)
+        if parameter_triangle_overlaps_cell(p0, p1, p2, cell) {
             overlaps = true
         }
         index = index + 1
@@ -2629,9 +2702,8 @@ fn parameter_triangle_overlaps_frontier_hazard(
 fn macro_face_scores(
     _ points: StorageBuffer<u32, DEFORMED_POINT_WORDS>,
     _ triangles: StorageBuffer<u32, DEFORMED_TRIANGLE_WORDS>,
-    _ frontier_first: StorageBuffer<u32, PROJECTIVE_FRONTIER_WORDS>,
-    _ frontier_second: StorageBuffer<u32, PROJECTIVE_FRONTIER_WORDS>,
-    _ frontier_receipt: StorageBuffer<u32, PROJECTIVE_FRONTIER_RECEIPT_WORDS>,
+    _ hazards: StorageBuffer<u32, PROJECTIVE_HAZARD_WORDS>,
+    _ hazard_receipt: StorageBuffer<u32, PROJECTIVE_HAZARD_RECEIPT_WORDS>,
     _ chart: u32,
     _ face: u32,
     _ patch: IsotropicBilinearPatch,
@@ -2643,13 +2715,15 @@ fn macro_face_scores(
     if !triangle.valid {
         return bary3f(0.0, 0.0, 0.0)
     }
-    let p0 = fixed_parameter(chart, resident_point(points, triangle.first))
-    let p1 = fixed_parameter(chart, resident_point(points, triangle.second))
-    let p2 = fixed_parameter(chart, resident_point(points, triangle.third))
+    let point0 = resident_point(points, triangle.first)
+    let point1 = resident_point(points, triangle.second)
+    let point2 = resident_point(points, triangle.third)
+    let p0 = fixed_parameter(chart, point0)
+    let p1 = fixed_parameter(chart, point1)
+    let p2 = fixed_parameter(chart, point2)
     if parameter_triangle_overlaps_frontier_hazard(
-        frontier_first,
-        frontier_second,
-        frontier_receipt,
+        hazards,
+        hazard_receipt,
         p0,
         p1,
         p2,
@@ -3297,6 +3371,9 @@ actor CliffordPatchLab uses (
     projective_frontier_0: StorageBuffer<u32, PROJECTIVE_FRONTIER_WORDS>,
     projective_frontier_1: StorageBuffer<u32, PROJECTIVE_FRONTIER_WORDS>,
     projective_frontier_receipt: StorageBuffer<u32, PROJECTIVE_FRONTIER_RECEIPT_WORDS>,
+    projective_frontier_plan: StorageBuffer<u32, PROJECTIVE_FRONTIER_PLAN_WORDS>,
+    projective_hazards: StorageBuffer<u32, PROJECTIVE_HAZARD_WORDS>,
+    projective_hazard_receipt: StorageBuffer<u32, PROJECTIVE_HAZARD_RECEIPT_WORDS>,
     sampling_workspace_0: StorageBuffer<u32, DEFORMED_SAMPLING_WORDS>,
     sampling_workspace_1: StorageBuffer<u32, DEFORMED_SAMPLING_WORDS>,
     surface_candidates_0: StorageBuffer<u32, DEFORMED_CANDIDATE_WORDS>,
@@ -3375,13 +3452,13 @@ actor CliffordPatchLab uses (
         }
     }
 
-    fn advance_adaptive_projective_frontier(self, invocation: ComputeInvocation)
+    fn classify_adaptive_projective_frontier(self, invocation: ComputeInvocation)
         uses (
             ComputeSurface<
-                Workgroup<1, 1, 1>,
+                Workgroup<PROJECTIVE_FRONTIER_THREADS, 1, 1>,
                 CycledDispatch<
                     ProjectiveFrontierRound,
-                    FixedDispatch<1, 1, 1>,
+                    FixedDispatch<PROJECTIVE_FRONTIER_WORKGROUPS, 1, 1>,
                     PROJECTIVE_FRONTIER_ROUNDS,
                 >,
             >,
@@ -3389,8 +3466,7 @@ actor CliffordPatchLab uses (
             PassPreparation<PullbackPipelinePreparation>,
         )
     {
-        if self.sampler_mode >= 2.5 && self.sampler_mode < 3.5
-            && invocation.global.x == 0 {
+        if self.sampler_mode >= 2.5 && self.sampler_mode < 3.5 {
             let patch = patch_from_uniforms(
                 self.p00_x, self.p00_y, self.p00_z,
                 self.p10_x, self.p10_y, self.p10_z,
@@ -3398,11 +3474,12 @@ actor CliffordPatchLab uses (
                 self.p11_x, self.p11_y, self.p11_z,
                 self.w00, self.w10, self.w01, self.w11,
             )
-            advance_projective_patch_frontier<
+            classify_projective_patch_frontier_lane<
                 CliffordProjectiveFrontier,
                 PROJECTIVE_FRONTIER_CAPACITY,
                 PROJECTIVE_FRONTIER_WORDS,
                 PROJECTIVE_FRONTIER_RECEIPT_WORDS,
+                PROJECTIVE_FRONTIER_PLAN_WORDS,
             >(
                 CliffordProjectiveFrontier {
                     patch: patch,
@@ -3420,6 +3497,114 @@ actor CliffordPatchLab uses (
                 self.projective_frontier_0,
                 self.projective_frontier_1,
                 self.projective_frontier_receipt,
+                self.projective_frontier_plan,
+                invocation.global.x,
+            )
+        }
+    }
+
+    fn prefix_adaptive_projective_frontier(self, invocation: ComputeInvocation)
+        uses (
+            ComputeSurface<
+                Workgroup<1, 1, 1>,
+                CycledDispatch<
+                    ProjectiveFrontierRound,
+                    FixedDispatch<1, 1, 1>,
+                    PROJECTIVE_FRONTIER_ROUNDS,
+                >,
+            >,
+            PassActivation<PullbackPatchTopology>,
+            PassPreparation<PullbackPipelinePreparation>,
+        )
+    {
+        if self.sampler_mode >= 2.5 && self.sampler_mode < 3.5
+            && invocation.global.x == 0 {
+            prefix_projective_patch_frontier<
+                PROJECTIVE_FRONTIER_CAPACITY,
+                PROJECTIVE_FRONTIER_RECEIPT_WORDS,
+                PROJECTIVE_FRONTIER_PLAN_WORDS,
+            >(
+                self.projective_frontier_receipt,
+                self.projective_frontier_plan,
+            )
+        }
+    }
+
+    fn scatter_adaptive_projective_frontier(self, invocation: ComputeInvocation)
+        uses (
+            ComputeSurface<
+                Workgroup<PROJECTIVE_FRONTIER_THREADS, 1, 1>,
+                CycledDispatch<
+                    ProjectiveFrontierRound,
+                    FixedDispatch<PROJECTIVE_FRONTIER_WORKGROUPS, 1, 1>,
+                    PROJECTIVE_FRONTIER_ROUNDS,
+                >,
+            >,
+            PassActivation<PullbackPatchTopology>,
+            PassPreparation<PullbackPipelinePreparation>,
+        )
+    {
+        if self.sampler_mode >= 2.5 && self.sampler_mode < 3.5 {
+            scatter_projective_patch_frontier_lane<
+                PROJECTIVE_FRONTIER_CAPACITY,
+                PROJECTIVE_FRONTIER_WORDS,
+                PROJECTIVE_FRONTIER_RECEIPT_WORDS,
+                PROJECTIVE_FRONTIER_PLAN_WORDS,
+            >(
+                self.projective_frontier_0,
+                self.projective_frontier_1,
+                self.projective_frontier_receipt,
+                self.projective_frontier_plan,
+                invocation.global.x,
+            )
+        }
+    }
+
+    fn commit_adaptive_projective_frontier(self, invocation: ComputeInvocation)
+        uses (
+            ComputeSurface<
+                Workgroup<1, 1, 1>,
+                CycledDispatch<
+                    ProjectiveFrontierRound,
+                    FixedDispatch<1, 1, 1>,
+                    PROJECTIVE_FRONTIER_ROUNDS,
+                >,
+            >,
+            PassActivation<PullbackPatchTopology>,
+            PassPreparation<PullbackPipelinePreparation>,
+        )
+    {
+        if self.sampler_mode >= 2.5 && self.sampler_mode < 3.5
+            && invocation.global.x == 0 {
+            commit_projective_patch_frontier_round<
+                PROJECTIVE_FRONTIER_CAPACITY,
+                PROJECTIVE_FRONTIER_RECEIPT_WORDS,
+                PROJECTIVE_FRONTIER_PLAN_WORDS,
+            >(
+                self.projective_frontier_receipt,
+                self.projective_frontier_plan,
+            )
+        }
+    }
+
+    fn materialize_adaptive_projective_hazards(self, invocation: ComputeInvocation)
+        uses (
+            ComputeSurface<
+                Workgroup<1, 1, 1>,
+                FixedDispatch<1, 1, 1>,
+            >,
+            PassActivation<PullbackPatchTopology>,
+            PassPreparation<PullbackPipelinePreparation>,
+        )
+    {
+        if self.sampler_mode >= 2.5 && self.sampler_mode < 3.5
+            && invocation.global.x == 0 {
+            materialize_projective_hazards(
+                self.projective_frontier_0,
+                self.projective_frontier_1,
+                self.projective_frontier_receipt,
+                self.projective_hazards,
+                self.projective_hazard_receipt,
             )
         }
     }
@@ -3903,9 +4088,8 @@ actor CliffordPatchLab uses (
             macro_face_scores(
                 self.points_0,
                 self.triangles_0,
-                self.projective_frontier_0,
-                self.projective_frontier_1,
-                self.projective_frontier_receipt,
+                self.projective_hazards,
+                self.projective_hazard_receipt,
                 0,
                 face,
                 patch,
@@ -3953,9 +4137,8 @@ actor CliffordPatchLab uses (
             macro_face_scores(
                 self.points_1,
                 self.triangles_1,
-                self.projective_frontier_0,
-                self.projective_frontier_1,
-                self.projective_frontier_receipt,
+                self.projective_hazards,
+                self.projective_hazard_receipt,
                 1,
                 face,
                 patch,

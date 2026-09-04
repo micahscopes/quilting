@@ -18,6 +18,14 @@ use std::webgpu::StorageBuffer
 
 pub const PROJECTIVE_FRONTIER_CELL_WORDS: usize = 5
 pub const PROJECTIVE_FRONTIER_RECEIPT_WORDS: usize = 4
+pub const PROJECTIVE_FRONTIER_PLAN_WORDS_PER_CELL: usize = 2
+pub const PROJECTIVE_FRONTIER_PLAN_META_WORDS: usize = 2
+
+const FRONTIER_INACTIVE: u32 = 0
+const FRONTIER_REJECT: u32 = 1
+const FRONTIER_DRAW: u32 = 2
+const FRONTIER_BISECT_U: u32 = 3
+const FRONTIER_BISECT_V: u32 = 4
 
 /// Geometry/model policy supplied to the backend-neutral frontier placement.
 pub trait ProjectivePatchFrontierClassifier2: Copy {
@@ -44,6 +52,14 @@ impl Copy for ProjectivePatchFrontierCell2 {}
 
 fn cell_offset(_ index: u32) -> u32 {
     index * PROJECTIVE_FRONTIER_CELL_WORDS.downcast_truncate()
+}
+
+fn plan_offset(_ index: u32) -> u32 {
+    index * PROJECTIVE_FRONTIER_PLAN_WORDS_PER_CELL.downcast_truncate()
+}
+
+fn plan_meta_offset(_ capacity: u32, _ lane: u32) -> u32 {
+    capacity * PROJECTIVE_FRONTIER_PLAN_WORDS_PER_CELL.downcast_truncate() + lane
 }
 
 fn store_frontier_cell<const WORDS: usize>(
@@ -146,6 +162,233 @@ fn append_next_cell<const CELL_WORDS: usize>(
         store_next_frontier_cell<CELL_WORDS>(first, second, parity, write, cell)
         true
     }
+}
+
+fn frontier_decision_code<C: ProjectivePatchFrontierClassifier2>(
+    _ classifier: C,
+    _ resident: ProjectivePatchFrontierCell2,
+) -> u32 {
+    if resident.rejected {
+        FRONTIER_REJECT
+    } else {
+        match classifier.classify(resident.cell) {
+            ProjectivePatchFrontierDecision2::Reject => FRONTIER_REJECT,
+            ProjectivePatchFrontierDecision2::Draw => FRONTIER_DRAW,
+            ProjectivePatchFrontierDecision2::BisectU => FRONTIER_BISECT_U,
+            ProjectivePatchFrontierDecision2::BisectV => FRONTIER_BISECT_V,
+        }
+    }
+}
+
+fn frontier_decision_output_count(_ decision: u32) -> u32 {
+    if decision == FRONTIER_BISECT_U || decision == FRONTIER_BISECT_V {
+        2
+    } else if decision == FRONTIER_INACTIVE { 0 } else { 1 }
+}
+
+/// Classify one source cell independently for a deterministic parallel round.
+/// The plan retains the semantic decision and reserves a second word for the
+/// stable exclusive prefix assigned by `prefix_projective_patch_frontier`.
+pub fn classify_projective_patch_frontier_lane<
+    C: ProjectivePatchFrontierClassifier2,
+    const CAPACITY: usize,
+    const CELL_WORDS: usize,
+    const RECEIPT_WORDS: usize,
+    const PLAN_WORDS: usize,
+>(
+    _ classifier: C,
+    _ first: StorageBuffer<u32, CELL_WORDS>,
+    _ second: StorageBuffer<u32, CELL_WORDS>,
+    _ receipt: StorageBuffer<u32, RECEIPT_WORDS>,
+    _ plan: StorageBuffer<u32, PLAN_WORDS>,
+    _ index: u32,
+)
+where { CELL_WORDS == CAPACITY * PROJECTIVE_FRONTIER_CELL_WORDS },
+    { RECEIPT_WORDS == PROJECTIVE_FRONTIER_RECEIPT_WORDS },
+    { PLAN_WORDS == CAPACITY * PROJECTIVE_FRONTIER_PLAN_WORDS_PER_CELL
+        + PROJECTIVE_FRONTIER_PLAN_META_WORDS }
+{
+    let capacity: u32 = CAPACITY.downcast_truncate()
+    if receipt.load(index: 3) != 0
+        || receipt.load(index: 2) != 0
+        || index >= capacity {
+        return
+    }
+    let source_count = receipt.load(index: 0)
+    let decision = if index < source_count {
+        frontier_decision_code<C>(
+            classifier,
+            source_frontier_cell<CELL_WORDS>(
+                first,
+                second,
+                receipt.load(index: 1) % 2,
+                index,
+            ),
+        )
+    } else {
+        FRONTIER_INACTIVE
+    }
+    plan.store(index: plan_offset(index), value: decision)
+    plan.store(index: plan_offset(index) + 1, value: 0)
+}
+
+/// Assign byte-deterministic output positions to the parallel decisions.
+/// This scalar scan is deliberately cheap: expensive exact quotient
+/// classification is parallel, while one ordered O(capacity) pass preserves
+/// the scalar oracle's canonical lower-child-before-upper-child frontier.
+pub fn prefix_projective_patch_frontier<
+    const CAPACITY: usize,
+    const RECEIPT_WORDS: usize,
+    const PLAN_WORDS: usize,
+>(
+    _ receipt: StorageBuffer<u32, RECEIPT_WORDS>,
+    _ plan: StorageBuffer<u32, PLAN_WORDS>,
+)
+where { RECEIPT_WORDS == PROJECTIVE_FRONTIER_RECEIPT_WORDS },
+    { PLAN_WORDS == CAPACITY * PROJECTIVE_FRONTIER_PLAN_WORDS_PER_CELL
+        + PROJECTIVE_FRONTIER_PLAN_META_WORDS }
+{
+    if receipt.load(index: 3) != 0 || receipt.load(index: 2) != 0 {
+        return
+    }
+    let capacity: u32 = CAPACITY.downcast_truncate()
+    let source_count = receipt.load(index: 0)
+    let mut prefix: u32 = 0
+    let mut split = false
+    let mut index: u32 = 0
+    while index < source_count && index < capacity {
+        let offset = plan_offset(index)
+        let decision = plan.load(index: offset)
+        plan.store(index: offset + 1, value: prefix)
+        prefix = prefix + frontier_decision_output_count(decision)
+        if decision == FRONTIER_BISECT_U || decision == FRONTIER_BISECT_V {
+            split = true
+        }
+        index = index + 1
+    }
+    plan.store(index: plan_meta_offset(capacity, 0), value: prefix)
+    plan.store(index: plan_meta_offset(capacity, 1), value: if split { 1 } else { 0 })
+}
+
+/// Scatter one classified cell into its stable next-generation slots.
+pub fn scatter_projective_patch_frontier_lane<
+    const CAPACITY: usize,
+    const CELL_WORDS: usize,
+    const RECEIPT_WORDS: usize,
+    const PLAN_WORDS: usize,
+>(
+    _ first: StorageBuffer<u32, CELL_WORDS>,
+    _ second: StorageBuffer<u32, CELL_WORDS>,
+    _ receipt: StorageBuffer<u32, RECEIPT_WORDS>,
+    _ plan: StorageBuffer<u32, PLAN_WORDS>,
+    _ index: u32,
+)
+where { CELL_WORDS == CAPACITY * PROJECTIVE_FRONTIER_CELL_WORDS },
+    { RECEIPT_WORDS == PROJECTIVE_FRONTIER_RECEIPT_WORDS },
+    { PLAN_WORDS == CAPACITY * PROJECTIVE_FRONTIER_PLAN_WORDS_PER_CELL
+        + PROJECTIVE_FRONTIER_PLAN_META_WORDS }
+{
+    let capacity: u32 = CAPACITY.downcast_truncate()
+    if receipt.load(index: 3) != 0
+        || receipt.load(index: 2) != 0
+        || index >= receipt.load(index: 0)
+        || index >= capacity {
+        return
+    }
+    let parity = receipt.load(index: 1) % 2
+    let resident = source_frontier_cell<CELL_WORDS>(first, second, parity, index)
+    let offset = plan_offset(index)
+    let decision = plan.load(index: offset)
+    let output = plan.load(index: offset + 1)
+    if output >= capacity {
+        return
+    }
+    if decision == FRONTIER_REJECT {
+        store_next_frontier_cell<CELL_WORDS>(
+            first,
+            second,
+            parity,
+            output,
+            ProjectivePatchFrontierCell2 { cell: resident.cell, rejected: true },
+        )
+    } else if decision == FRONTIER_DRAW {
+        store_next_frontier_cell<CELL_WORDS>(first, second, parity, output, resident)
+    } else if decision == FRONTIER_BISECT_U && output + 1 < capacity {
+        store_next_frontier_cell<CELL_WORDS>(
+            first,
+            second,
+            parity,
+            output,
+            ProjectivePatchFrontierCell2 {
+                cell: bisect_anisotropic_patch_u2(resident.cell, false),
+                rejected: false,
+            },
+        )
+        store_next_frontier_cell<CELL_WORDS>(
+            first,
+            second,
+            parity,
+            output + 1,
+            ProjectivePatchFrontierCell2 {
+                cell: bisect_anisotropic_patch_u2(resident.cell, true),
+                rejected: false,
+            },
+        )
+    } else if decision == FRONTIER_BISECT_V && output + 1 < capacity {
+        store_next_frontier_cell<CELL_WORDS>(
+            first,
+            second,
+            parity,
+            output,
+            ProjectivePatchFrontierCell2 {
+                cell: bisect_anisotropic_patch_v2(resident.cell, false),
+                rejected: false,
+            },
+        )
+        store_next_frontier_cell<CELL_WORDS>(
+            first,
+            second,
+            parity,
+            output + 1,
+            ProjectivePatchFrontierCell2 {
+                cell: bisect_anisotropic_patch_v2(resident.cell, true),
+                rejected: false,
+            },
+        )
+    }
+}
+
+/// Publish one completed parallel generation only after every scatter has
+/// been submitted ahead of this pass in the typed cycle body.
+pub fn commit_projective_patch_frontier_round<
+    const CAPACITY: usize,
+    const RECEIPT_WORDS: usize,
+    const PLAN_WORDS: usize,
+>(
+    _ receipt: StorageBuffer<u32, RECEIPT_WORDS>,
+    _ plan: StorageBuffer<u32, PLAN_WORDS>,
+)
+where { RECEIPT_WORDS == PROJECTIVE_FRONTIER_RECEIPT_WORDS },
+    { PLAN_WORDS == CAPACITY * PROJECTIVE_FRONTIER_PLAN_WORDS_PER_CELL
+        + PROJECTIVE_FRONTIER_PLAN_META_WORDS }
+{
+    if receipt.load(index: 3) != 0 || receipt.load(index: 2) != 0 {
+        return
+    }
+    let capacity: u32 = CAPACITY.downcast_truncate()
+    let output = plan.load(index: plan_meta_offset(capacity, 0))
+    let overflowed = output > capacity
+    receipt.store(index: 0, value: if overflowed { capacity } else { output })
+    receipt.store(index: 1, value: receipt.load(index: 1) + 1)
+    receipt.store(index: 2, value: if overflowed { 1 } else { 0 })
+    receipt.store(
+        index: 3,
+        value: if !overflowed && plan.load(index: plan_meta_offset(capacity, 1)) == 0 {
+            1
+        } else {
+            0
+        },
+    )
 }
 
 /// Advance one immutable frontier generation.
