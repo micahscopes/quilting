@@ -382,3 +382,26 @@ nonzero double area was 2.
 The final release development build emitted 18 passes, 35,362 Wasm bytes,
 748,310 compiler-reported WGSL bytes, and 1,011,048 total bytes. Lowering took
 422,875 ms and the complete rebuild took 427,463 ms.
+
+## Folded-sheet exclusion regression
+
+A further live control-cage state exposed a distinction not covered by the
+construction and restoration stress gate. The normalized weights were only
+`[16, 0.72, 0.82, 3.8502095]`, but the four moved controls formed a strongly
+folded projective surface. Direct ambient projective-chord exclusion treated
+different sheets as neighbors when their images passed close. An independent
+CPU audit of the exact captured state found that 412 of 2,782 chart-0
+candidate conflicts and 1,046 of 5,224 chart-1 conflicts joined parameter
+points more than `0.25` UV units apart. Conflicting pairs reached parameter
+separations of `1.045` and `1.187`; chart 1 retained only approximately two
+interior seeds despite remaining structurally valid.
+
+The sampler now composes two facts. Projective chord distance remains a cheap
+necessary lower bound, while the first fundamental form of the normalized
+homogeneous lift supplies the intrinsic exclusion decision. Thus nearby points
+on one sheet still repel, but an extrinsic self-approach does not delete a
+distant sheet. This is deliberately not the old affine-quotient pullback: the
+normalized projective differential is finite across affine poles and invariant
+under common scaling of all four weights. The terminating short-edge
+restoration objective remains unchanged, so reintroducing the intrinsic metric
+for sampling cannot reintroduce the former edge-flip cycle.
