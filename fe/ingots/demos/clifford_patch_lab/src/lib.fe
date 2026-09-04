@@ -20,7 +20,15 @@ use classic_quilting_lod::{
     patch_triangle_count,
 }
 use fmath::{TAU, abs, clamp, clamp01, cos, mix, sin, smoothstep, sqrt, wrap_pi}
-use quilting_atlas::{AtlasKey, MAX_LOD, boundary_vertices, canonical_key_ordinal, edge_resolution}
+use quilting_atlas::{
+    AtlasKey,
+    MAX_LOD,
+    boundary_vertices,
+    canonical_key_ordinal,
+    canonicalize,
+    edge_permutation_index,
+    edge_resolution,
+}
 use quilting_atlas::sampling::{
     BARYCENTRIC_SCALE,
     BoundarySeed,
@@ -97,6 +105,7 @@ use quilting_oklch::{
     to_display_rgb,
 }
 use quilting_patch::ranked_quantized_position
+use quilting_qb::{permutation_parity, remap_barycentric}
 use std::web::view::{
     ApplyParamBindings,
     ChoiceOptions,
@@ -149,7 +158,6 @@ const GRID_VERTICES: u32 = 18816
 const GRID_VERTICES_PER_INSTANCE: u32 = 2352
 const MAX_MACRO_TRIANGLES: u32 = 8
 
-
 const DEFORMED_CANDIDATES: usize = 272
 const DEFORMED_SAMPLING_WORDS: usize = DEFORMED_CANDIDATES * SAMPLING_WORDS_PER_CANDIDATE
     + SAMPLING_PROGRESS_WORDS
@@ -178,17 +186,29 @@ const DEFORMED_CANDIDATE_WORDS: usize = DEFORMED_CANDIDATE_SLOTS * DEFORMED_CAND
 const DEFORMED_POINT_SAMPLE_WORDS: usize = DEFORMED_POINTS * DEFORMED_SAMPLE_LANES
 const DEFORMED_THREADS: usize = 128
 const DEFORMED_WORKGROUPS: usize = 3
-const DEFORMED_POINT_WORKGROUPS: usize =
-    (DEFORMED_POINTS + DEFORMED_THREADS - 1) / DEFORMED_THREADS
+const DEFORMED_POINT_WORKGROUPS: usize = (DEFORMED_POINTS + DEFORMED_THREADS - 1) / DEFORMED_THREADS
 const DEFORMED_SAMPLING_ROUNDS: usize = 64
 const DEFORMED_FLIP_LIMIT: usize = 256
 const DEFORMED_IMPORTANCE_DEPTH: usize = 10
 const DEFORMED_BOUNDARY_ARC_DEPTH: usize = 12
+const DEFORMED_FACE_WORKGROUPS: usize = (DEFORMED_TRIANGLES + DEFORMED_THREADS - 1)
+    / DEFORMED_THREADS
+
+// One score per edge, followed by one compact prefix/atlas/permutation plan
+// per possible macro face across the two projective charts.
+const DEFORMED_FACE_SCORE_WORDS: usize = DEFORMED_TRIANGLES * 3
+const DEFORMED_FACE_PLAN_LANES: usize = 3
+const DEFORMED_FACE_PLAN_ENTRY_WORDS: usize = DEFORMED_TRIANGLES * 2 * DEFORMED_FACE_PLAN_LANES
+// The plan owns the complete draw certificate: chart-zero macro faces, total
+// macro faces, and total atlas microtriangles. Keeping these words beside the
+// prefix stream lets planning and indirect-command emission remain separate,
+// portable passes without a redundant raster metadata resource.
+const DEFORMED_FACE_PLAN_META_WORDS: usize = 3
+const DEFORMED_FACE_PLAN_WORDS: usize = DEFORMED_FACE_PLAN_ENTRY_WORDS
+    + DEFORMED_FACE_PLAN_META_WORDS
+const DEFORMED_BUDGET_SEARCH_STEPS: usize = 20
 
 const DEFORMED_RECEIPT_WORDS: usize = 8
-// Draw preparation proves chart admission once, then exposes only the facts
-// the raster needs: chart-zero faces, total faces, and the shared micro-LoD.
-const DEFORMED_RASTER_WORDS: usize = 3
 
 pub struct DeformedSamplingRound {}
 
@@ -204,6 +224,8 @@ const fn deformed_key() -> AtlasKey {
 static_assert(boundary_vertices(deformed_key()) == DEFORMED_BOUNDARY_POINTS.downcast_truncate())
 static_assert(DEFORMED_POINT_WORKGROUPS * DEFORMED_THREADS >= DEFORMED_POINTS)
 static_assert((DEFORMED_POINT_WORKGROUPS - 1) * DEFORMED_THREADS < DEFORMED_POINTS)
+static_assert(DEFORMED_FACE_WORKGROUPS * DEFORMED_THREADS >= DEFORMED_TRIANGLES)
+static_assert((DEFORMED_FACE_WORKGROUPS - 1) * DEFORMED_THREADS < DEFORMED_TRIANGLES)
 
 fn deformed_seed(_ chart: u32) -> u32 {
     if chart == 0 { 0x51c32a97 } else { 0xc87a4d31 }
@@ -265,14 +287,13 @@ impl Copy for CameraFrame {}
 struct Projection { clip: ClipPosition, depth: f32, view_x: f32, view_y: f32 }
 impl Copy for Projection {}
 
+struct ScreenSample { position: Vec2F, defined: bool }
+impl Copy for ScreenSample {}
+
 struct ParameterTriangle { p0: Vec2F, p1: Vec2F, p2: Vec2F, valid: bool }
 impl Copy for ParameterTriangle {}
 
-struct FixedParameterTriangle {
-    p0: FixedBarycentric,
-    p1: FixedBarycentric,
-    p2: FixedBarycentric,
-}
+struct FixedParameterTriangle { p0: FixedBarycentric, p1: FixedBarycentric, p2: FixedBarycentric }
 impl Copy for FixedParameterTriangle {}
 
 struct SurfacePoint { position: IsotropicProjectiveF, defined: bool }
@@ -285,14 +306,10 @@ struct SurfaceProjectiveSample {
 }
 impl Copy for SurfaceProjectiveSample {}
 
-struct SurfaceCandidateConflict<const WORDS: usize> {
-    samples: StorageBuffer<f32, WORDS>,
-}
+struct SurfaceCandidateConflict<const WORDS: usize> { samples: StorageBuffer<f32, WORDS> }
 impl<const WORDS: usize> Copy for SurfaceCandidateConflict<WORDS> {}
 
-struct SurfaceShortEdgeFlip<const WORDS: usize> {
-    samples: StorageBuffer<f32, WORDS>,
-}
+struct SurfaceShortEdgeFlip<const WORDS: usize> { samples: StorageBuffer<f32, WORDS> }
 impl<const WORDS: usize> Copy for SurfaceShortEdgeFlip<WORDS> {}
 
 fn fixed_parameter(_ chart: u32, _ point: FixedBarycentric) -> Vec2F {
@@ -449,23 +466,11 @@ fn covered_surface_candidate(
 
 fn boundary_edge_point(_ edge: u32, _ distance: u32) -> FixedBarycentric {
     if edge == 2 {
-        FixedBarycentric {
-            a: BARYCENTRIC_SCALE - distance,
-            b: distance,
-            c: 0,
-        }
+        FixedBarycentric { a: BARYCENTRIC_SCALE - distance, b: distance, c: 0 }
     } else if edge == 1 {
-        FixedBarycentric {
-            a: BARYCENTRIC_SCALE - distance,
-            b: 0,
-            c: distance,
-        }
+        FixedBarycentric { a: BARYCENTRIC_SCALE - distance, b: 0, c: distance }
     } else {
-        FixedBarycentric {
-            a: 0,
-            b: BARYCENTRIC_SCALE - distance,
-            c: distance,
-        }
+        FixedBarycentric { a: 0, b: BARYCENTRIC_SCALE - distance, c: distance }
     }
 }
 
@@ -504,12 +509,16 @@ fn surface_boundary_point(
         let center = surface_point(patch, chart, boundary_edge_point(boundary.edge, middle))
         let last = surface_point(patch, chart, boundary_edge_point(boundary.edge, upper))
         let left = if first.defined && center.defined {
-            sqrt(projective_distance_squared(center.position, first.position))
+            sqrt(
+                projective_distance_squared(center.position, first.position),
+            )
         } else {
             0.0
         }
         let right = if center.defined && last.defined {
-            sqrt(projective_distance_squared(last.position, center.position))
+            sqrt(
+                projective_distance_squared(last.position, center.position),
+            )
         } else {
             0.0
         }
@@ -518,7 +527,11 @@ fn surface_boundary_point(
             let target = fraction * total
             if target < left {
                 upper = middle
-                fraction = if left > 0.000000000001 { target / left } else { 0.5 }
+                fraction = if left > 0.000000000001 {
+                    target / left
+                } else {
+                    0.5
+                }
             } else {
                 lower = middle
                 fraction = if right > 0.000000000001 {
@@ -578,7 +591,10 @@ fn store_surface_candidate(
     candidates.store(index: offset + 2, value: candidate.point.c)
     candidates.store(index: offset + 3, value: candidate.radius_squared)
     candidates.store(index: offset + 4, value: candidate.priority)
-    candidates.store(index: offset + 5, value: if candidate.valid { 1 } else { 0 })
+    candidates.store(
+            index: offset + 5,
+            value: if candidate.valid { 1 } else { 0 },
+        )
 }
 
 fn load_surface_candidate(
@@ -599,17 +615,12 @@ fn load_surface_candidate(
     }
 }
 
-struct SurfaceBoundaryPoints {
-    candidates: StorageBuffer<u32, DEFORMED_CANDIDATE_WORDS>,
-}
+struct SurfaceBoundaryPoints { candidates: StorageBuffer<u32, DEFORMED_CANDIDATE_WORDS> }
 impl Copy for SurfaceBoundaryPoints {}
 
 impl BoundaryPointPolicy for SurfaceBoundaryPoints {
     fn point(self, _ key: AtlasKey, _ ordinal: u32) -> FixedBarycentric {
-        load_surface_candidate(
-            self.candidates,
-            deformed_boundary_slot(ordinal),
-        ).point
+        load_surface_candidate(self.candidates, deformed_boundary_slot(ordinal)).point
     }
 }
 
@@ -660,14 +671,38 @@ fn store_projective_sample<const WORDS: usize>(
     let offset = sample_offset(ordinal)
     samples.store(index: offset, value: sample.parameter.x)
     samples.store(index: offset + 1, value: sample.parameter.y)
-    samples.store(index: offset + 2, value: sample.representative.numerator_e1)
-    samples.store(index: offset + 3, value: sample.representative.numerator_e2)
-    samples.store(index: offset + 4, value: sample.representative.numerator_e3)
-    samples.store(index: offset + 5, value: sample.representative.numerator_e123)
-    samples.store(index: offset + 6, value: sample.representative.denominator_scalar)
-    samples.store(index: offset + 7, value: sample.representative.denominator_e12)
-    samples.store(index: offset + 8, value: sample.representative.denominator_e13)
-    samples.store(index: offset + 9, value: sample.representative.denominator_e23)
+    samples.store(
+            index: offset + 2,
+            value: sample.representative.numerator_e1,
+        )
+    samples.store(
+            index: offset + 3,
+            value: sample.representative.numerator_e2,
+        )
+    samples.store(
+            index: offset + 4,
+            value: sample.representative.numerator_e3,
+        )
+    samples.store(
+            index: offset + 5,
+            value: sample.representative.numerator_e123,
+        )
+    samples.store(
+            index: offset + 6,
+            value: sample.representative.denominator_scalar,
+        )
+    samples.store(
+            index: offset + 7,
+            value: sample.representative.denominator_e12,
+        )
+    samples.store(
+            index: offset + 8,
+            value: sample.representative.denominator_e13,
+        )
+    samples.store(
+            index: offset + 9,
+            value: sample.representative.denominator_e23,
+        )
     samples.store(
             index: offset + 10,
             value: if sample.defined { 1.0 } else { 0.0 },
@@ -700,8 +735,9 @@ fn load_projective_sample<const WORDS: usize>(
 
 fn reference_poisson_radius_squared() -> f32 {
     let scale = as_f32(BARYCENTRIC_SCALE)
-    as_f32(poisson_radius_squared(deformed_key(), root_fixed_triangle().p0)) /
-        (scale * scale)
+    as_f32(
+            poisson_radius_squared(deformed_key(), root_fixed_triangle().p0),
+        ) / (scale * scale)
 }
 
 /// Ambient distance does not encode whether two images belong to the same
@@ -735,13 +771,10 @@ impl<const WORDS: usize> CandidateConflictPolicy for SurfaceCandidateConflict<WO
         let count = boundary_vertices(key)
         while ordinal < count {
             if projective_samples_conflict(
-                    candidate_sample,
-                    load_projective_sample(
-                        self.samples,
-                        deformed_boundary_slot(ordinal),
-                    ),
-                ) {
-                    conflict = true
+                candidate_sample,
+                load_projective_sample(self.samples, deformed_boundary_slot(ordinal)),
+            ) {
+                conflict = true
             }
             ordinal = ordinal + 1
         }
@@ -796,17 +829,15 @@ impl<const WORDS: usize> InteriorEdgeFlipPolicy for SurfaceShortEdgeFlip<WORDS> 
         let tolerance = 0.0000001
         let sign: i32 = if current > alternate + tolerance {
             1
-        } else if alternate > current + tolerance { -1 } else { 0 }
+        } else if alternate > current + tolerance {
+            -1
+        } else {
+            0
+        }
         FlipDecision {
             incircle: sign,
             convex: true,
-            flip: should_flip_edge(
-                u_id,
-                v_id,
-                first_opposite_id,
-                second_opposite_id,
-                sign,
-            ),
+            flip: should_flip_edge(u_id, v_id, first_opposite_id, second_opposite_id, sign),
         }
     }
 }
@@ -1172,11 +1203,7 @@ fn orbit_camera_frame(
         0.00000001,
     )
     let up = normalize3_or(cross3(right, forward), vec3f(0.0, 1.0, 0.0), 0.00000001)
-    let aspect = if res_y > 0.0 {
-        res_x / res_y
-    } else {
-        1.0
-    }
+    let aspect = if res_y > 0.0 { res_x / res_y } else { 1.0 }
     CameraFrame {
         eye: eye,
         right: right,
@@ -1396,14 +1423,14 @@ fn atlas_lod_for_triangle_budget(
 }
 
 fn analytic_macro_triangles(_ sampler_mode: f32) -> u32 {
-    if sampler_mode < 1.5 { 2 } else { MAX_MACRO_TRIANGLES }
+    if sampler_mode < 1.5 {
+        2
+    } else {
+        MAX_MACRO_TRIANGLES
+    }
 }
 
-fn analytic_atlas_lod(
-    _ fixture: FixtureBuffer,
-    _ sampler_mode: f32,
-    _ requested: f32,
-) -> u32 {
+fn analytic_atlas_lod(_ fixture: FixtureBuffer, _ sampler_mode: f32, _ requested: f32) -> u32 {
     let target_lod = admitted_atlas_lod(requested)
     if sampler_mode < 1.5 {
         target_lod
@@ -1530,51 +1557,331 @@ fn invalid_patch_vertex() -> RasterVertex<PatchVarying> {
     }
 }
 
+fn face_score_offset(_ face: u32, _ edge: u32) -> u32 {
+    face * 3 + edge
+}
+
+fn face_plan_offset(_ face: u32) -> u32 {
+    face * DEFORMED_FACE_PLAN_LANES.downcast_truncate()
+}
+
+fn face_plan_meta_offset(_ lane: u32) -> u32 {
+    let base: u32 = DEFORMED_FACE_PLAN_ENTRY_WORDS.downcast_truncate()
+    base + lane
+}
+
+fn raster_screen_sample(
+    _ patch: IsotropicBilinearPatch,
+    _ parameter: Vec2F,
+    _ camera: CameraFrame,
+    _ res_x: f32,
+    _ res_y: f32,
+) -> ScreenSample {
+    let sample = evaluate(patch, parameter, policy())
+    if !sample.conditioned {
+        return ScreenSample { position: vec2f(0.0, 0.0), defined: false }
+    }
+    let projected = project(camera, sample.position)
+    if projected.depth <= camera.near {
+        return ScreenSample { position: vec2f(0.0, 0.0), defined: false }
+    }
+    ScreenSample {
+        position: vec2f(
+            0.5 * res_x * clamp(projected.clip.x / projected.clip.w, -2.0, 2.0),
+            0.5 * res_y * clamp(projected.clip.y / projected.clip.w, -2.0, 2.0),
+        ),
+        defined: true,
+    }
+}
+
+/// Screen-space edge demand in physical backing pixels.
+///
+/// Chord length controls ordinary projected density. Four times the midpoint
+/// deviation catches a curved edge whose endpoints happen to project close
+/// together. The finite guard band makes offscreen geometry cheap while a
+/// near-plane crossing receives the maximum visible demand.
+fn projected_edge_score(
+    _ patch: IsotropicBilinearPatch,
+    _ first: Vec2F,
+    _ second: Vec2F,
+    _ camera: CameraFrame,
+    _ res_x: f32,
+    _ res_y: f32,
+) -> f32 {
+    let middle = midpoint_parameter(first, second)
+    let p0 = raster_screen_sample(patch, first, camera, res_x, res_y)
+    let p1 = raster_screen_sample(patch, second, camera, res_x, res_y)
+    let pm = raster_screen_sample(patch, middle, camera, res_x, res_y)
+    if !p0.defined || !p1.defined || !pm.defined {
+        let extent = if res_x > res_y { res_x } else { res_y }
+        return extent * 2.0
+    }
+    let chord = length2(
+        vec2f(
+            p1.position.x - p0.position.x,
+            p1.position.y - p0.position.y,
+        ),
+    )
+    let chord_middle = vec2f(
+        (p0.position.x + p1.position.x) * 0.5,
+        (p0.position.y + p1.position.y) * 0.5,
+    )
+    let bend = 4.0 * length2(
+            vec2f(
+                pm.position.x - chord_middle.x,
+                pm.position.y - chord_middle.y,
+            ),
+        )
+    if chord > bend { chord } else { bend }
+}
+
+fn macro_face_scores(
+    _ points: StorageBuffer<u32, DEFORMED_POINT_WORDS>,
+    _ triangles: StorageBuffer<u32, DEFORMED_TRIANGLE_WORDS>,
+    _ chart: u32,
+    _ face: u32,
+    _ patch: IsotropicBilinearPatch,
+    _ camera: CameraFrame,
+    _ res_x: f32,
+    _ res_y: f32,
+) -> Bary3F {
+    let triangle = resident_triangle(triangles, face)
+    if !triangle.valid {
+        return bary3f(0.0, 0.0, 0.0)
+    }
+    let p0 = fixed_parameter(chart, resident_point(points, triangle.first))
+    let p1 = fixed_parameter(chart, resident_point(points, triangle.second))
+    let p2 = fixed_parameter(chart, resident_point(points, triangle.third))
+    // Atlas lane a lies opposite p0, b opposite p1, and c opposite p2.
+    bary3f(
+        projected_edge_score(patch, p1, p2, camera, res_x, res_y),
+        projected_edge_score(patch, p2, p0, camera, res_x, res_y),
+        projected_edge_score(patch, p0, p1, camera, res_x, res_y),
+    )
+}
+
+fn store_face_scores(
+    _ scores: StorageBuffer<f32, DEFORMED_FACE_SCORE_WORDS>,
+    _ face: u32,
+    _ value: Bary3F,
+) {
+    scores.store(index: face_score_offset(face, 0), value: value.a)
+    scores.store(index: face_score_offset(face, 1), value: value.b)
+    scores.store(index: face_score_offset(face, 2), value: value.c)
+}
+
+fn load_face_scores(
+    _ scores: StorageBuffer<f32, DEFORMED_FACE_SCORE_WORDS>,
+    _ face: u32,
+) -> Bary3F {
+    bary3f(
+        scores.load(index: face_score_offset(face, 0)),
+        scores.load(index: face_score_offset(face, 1)),
+        scores.load(index: face_score_offset(face, 2)),
+    )
+}
+
+fn score_lod(_ score: f32, _ threshold: f32) -> u32 {
+    let mut lod: u32 = 0
+    let mut span = threshold
+    while lod < MAX_LOD && score > span {
+        lod = lod + 1
+        span = span * 2.0
+    }
+    lod
+}
+
+fn score_key(_ scores: Bary3F, _ threshold: f32) -> AtlasKey {
+    AtlasKey {
+        a: score_lod(scores.a, threshold),
+        b: score_lod(scores.b, threshold),
+        c: score_lod(scores.c, threshold),
+    }
+}
+
+fn planned_chart_triangles(
+    _ scores: StorageBuffer<f32, DEFORMED_FACE_SCORE_WORDS>,
+    _ faces: u32,
+    _ fixture: FixtureBuffer,
+    _ threshold: f32,
+) -> u32 {
+    let mut total: u32 = 0
+    let mut face: u32 = 0
+    while face < faces {
+        let canonical = canonicalize(score_key(load_face_scores(scores, face), threshold))
+        total = total + patch_triangle_count(fixture, canonical_key_ordinal(canonical.key))
+        face = face + 1
+    }
+    total
+}
+
+fn planned_triangles(
+    _ scores_0: StorageBuffer<f32, DEFORMED_FACE_SCORE_WORDS>,
+    _ scores_1: StorageBuffer<f32, DEFORMED_FACE_SCORE_WORDS>,
+    _ faces_0: u32,
+    _ faces_1: u32,
+    _ fixture: FixtureBuffer,
+    _ threshold: f32,
+) -> u32 {
+    planned_chart_triangles(scores_0, faces_0, fixture, threshold)
+        + planned_chart_triangles(scores_1, faces_1, fixture, threshold)
+}
+
+fn maximum_chart_score(
+    _ scores: StorageBuffer<f32, DEFORMED_FACE_SCORE_WORDS>,
+    _ faces: u32,
+) -> f32 {
+    let mut result = 0.0
+    let mut face: u32 = 0
+    while face < faces {
+        let value = load_face_scores(scores, face)
+        if value.a > result {
+            result = value.a
+        }
+        if value.b > result {
+            result = value.b
+        }
+        if value.c > result {
+            result = value.c
+        }
+        face = face + 1
+    }
+    result
+}
+
+fn append_face_plans(
+    _ scores: StorageBuffer<f32, DEFORMED_FACE_SCORE_WORDS>,
+    _ faces: u32,
+    _ fixture: FixtureBuffer,
+    _ plan: StorageBuffer<u32, DEFORMED_FACE_PLAN_WORDS>,
+    _ face_base: u32,
+    _ prefix_base: u32,
+    _ threshold: f32,
+) -> u32 {
+    let mut prefix = prefix_base
+    let mut face: u32 = 0
+    while face < faces {
+        let canonical = canonicalize(score_key(load_face_scores(scores, face), threshold))
+        let patch_index = canonical_key_ordinal(canonical.key)
+        prefix = prefix + patch_triangle_count(fixture, patch_index)
+        let offset = face_plan_offset(face_base + face)
+        plan.store(index: offset, value: prefix)
+        plan.store(index: offset + 1, value: patch_index)
+        plan.store(
+            index: offset + 2,
+            value: edge_permutation_index(canonical.permutation),
+        )
+        face = face + 1
+    }
+    prefix
+}
+
+fn face_for_micro_triangle(
+    _ plan: StorageBuffer<u32, DEFORMED_FACE_PLAN_WORDS>,
+    _ face_count: u32,
+    _ triangle: u32,
+) -> u32 {
+    let mut lower: u32 = 0
+    let mut upper = face_count
+    while lower < upper {
+        let middle = (lower + upper) / 2
+        if triangle < plan.load(index: face_plan_offset(middle)) {
+            upper = middle
+        } else {
+            lower = middle + 1
+        }
+    }
+    lower
+}
+
 /// Construction validity and invariant safety admit a resident topology for
 /// drawing. Receipt word 5 separately reports whether topology optimization
 /// reached its fixed point; optimization convergence is not a safety gate.
-fn deformed_topology_drawable(
-    _ receipt: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
-) -> bool {
+fn deformed_topology_drawable(_ receipt: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>) -> bool {
     receipt.load(index: 3) != 0 && receipt.load(index: 7) == 0
 }
 
-fn prepare_deformed_atlas_draw(
-    _ draw: DrawIndirectBuffer<DeformedAtlasDraw>,
-    _ raster: StorageBuffer<u32, DEFORMED_RASTER_WORDS>,
+fn prepare_deformed_atlas_plan(
+    _ plan: StorageBuffer<u32, DEFORMED_FACE_PLAN_WORDS>,
+    _ scores_0: StorageBuffer<f32, DEFORMED_FACE_SCORE_WORDS>,
+    _ scores_1: StorageBuffer<f32, DEFORMED_FACE_SCORE_WORDS>,
     _ receipt_0: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
     _ receipt_1: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
     _ fixture: FixtureBuffer,
     _ atlas_lod: f32,
 ) {
-    let mut vertices: u32 = 0
-    let mut instances: u32 = 0
     let drawable_0 = deformed_topology_drawable(receipt_0)
     let drawable_1 = deformed_topology_drawable(receipt_1)
-    let macro_triangles_0 = if drawable_0 { receipt_0.load(index: 4) } else { 0 }
-    let macro_triangles_1 = if drawable_1 { receipt_1.load(index: 4) } else { 0 }
+    let macro_triangles_0 = if drawable_0 {
+        receipt_0.load(index: 4)
+    } else {
+        0
+    }
+    let macro_triangles_1 = if drawable_1 {
+        receipt_1.load(index: 4)
+    } else {
+        0
+    }
     let active_0 = drawable_0 && macro_triangles_0 > 0
     let active_1 = drawable_1 && macro_triangles_1 > 0
-    let active_charts = (if active_0 { 1 } else { 0 })
-        + (if active_1 { 1 } else { 0 })
+    let active_charts = (if active_0 { 1 } else { 0 }) + (if active_1 { 1 } else { 0 })
     let macro_triangles = macro_triangles_0 + macro_triangles_1
+    let mut instances: u32 = 0
     if active_charts > 0 && macro_triangles > 0 {
-        let lod = deformed_atlas_lod(
-            fixture, macro_triangles, active_charts, atlas_lod,
+        let target_lod = admitted_atlas_lod(atlas_lod)
+        let target = atlas_triangle_count_at_lod(fixture, target_lod) * active_charts
+        let maximum_0 = maximum_chart_score(scores_0, macro_triangles_0)
+        let maximum_1 = maximum_chart_score(scores_1, macro_triangles_1)
+        let maximum = if maximum_0 > maximum_1 {
+            maximum_0
+        } else {
+            maximum_1
+        }
+        let mut lower = 0.0
+        let mut upper = maximum + 1.0
+        let mut step: u32 = 0
+        while step < DEFORMED_BUDGET_SEARCH_STEPS.downcast_truncate() {
+            let middle = (lower + upper) * 0.5
+            let triangles = planned_triangles(
+                scores_0,
+                scores_1,
+                macro_triangles_0,
+                macro_triangles_1,
+                fixture,
+                middle,
+            )
+            if triangles > target {
+                lower = middle
+            } else {
+                upper = middle
+            }
+            step = step + 1
+        }
+        let after_0 = append_face_plans(scores_0, macro_triangles_0, fixture, plan, 0, 0, upper)
+        instances = append_face_plans(
+            scores_1,
+            macro_triangles_1,
+            fixture,
+            plan,
+            macro_triangles_0,
+            after_0,
+            upper,
         )
-        let patch_index = canonical_key_ordinal(AtlasKey { a: lod, b: lod, c: lod })
-        vertices = patch_triangle_count(fixture, patch_index) * 3
-        instances = macro_triangles
-        raster.store(index: 0, value: macro_triangles_0)
-        raster.store(index: 1, value: macro_triangles)
-        raster.store(index: 2, value: lod)
-    } else {
-        raster.store(index: 0, value: 0)
-        raster.store(index: 1, value: 0)
-        raster.store(index: 2, value: 0)
     }
-    draw.store(index: 0, value: vertices)
-    draw.store(index: 1, value: instances)
+    plan.store(index: face_plan_meta_offset(0), value: macro_triangles_0)
+    plan.store(index: face_plan_meta_offset(1), value: macro_triangles)
+    plan.store(index: face_plan_meta_offset(2), value: instances)
+}
+
+fn prepare_deformed_indirect_draw(
+    _ draw: DrawIndirectBuffer<DeformedAtlasDraw>,
+    _ plan: StorageBuffer<u32, DEFORMED_FACE_PLAN_WORDS>,
+) {
+    draw.store(index: 0, value: 3)
+    draw.store(
+        index: 1,
+        value: plan.load(index: face_plan_meta_offset(2)),
+    )
     draw.store(index: 2, value: 0)
     draw.store(index: 3, value: 0)
 }
@@ -1587,25 +1894,31 @@ fn deformed_atlas_raster_vertex(
     _ points: StorageBuffer<u32, DEFORMED_POINT_WORDS>,
     _ triangles: StorageBuffer<u32, DEFORMED_TRIANGLE_WORDS>,
     _ fixture: FixtureBuffer,
+    _ plan: StorageBuffer<u32, DEFORMED_FACE_PLAN_WORDS>,
     _ chart: u32,
+    _ plan_face: u32,
+    _ face: u32,
     _ vertex_index: u32,
-    _ instance_index: u32,
+    _ triangle_instance: u32,
     _ face_count: u32,
-    _ atlas_lod: u32,
     _ patch: IsotropicBilinearPatch,
     _ camera: CameraFrame,
     _ res_x: f32,
     _ res_y: f32,
 ) -> RasterVertex<PatchVarying> {
-    let face = instance_index
     let corner = vertex_index % 3
     if face >= face_count {
         return invalid_patch_vertex()
     }
-    let patch_index = canonical_key_ordinal(
-        AtlasKey { a: atlas_lod, b: atlas_lod, c: atlas_lod },
-    )
-    let local_triangle = vertex_index / 3
+    let plan_offset = face_plan_offset(plan_face)
+    let patch_index = plan.load(index: plan_offset + 1)
+    let permutation = plan.load(index: plan_offset + 2)
+    let prefix = if plan_face == 0 {
+        0
+    } else {
+        plan.load(index: face_plan_offset(plan_face - 1))
+    }
+    let local_triangle = triangle_instance - prefix
     if local_triangle >= patch_triangle_count(fixture, patch_index) {
         return invalid_patch_vertex()
     }
@@ -1624,16 +1937,24 @@ fn deformed_atlas_raster_vertex(
     }
     let source_triangle = patch_first_triangle(fixture, patch_index) + local_triangle
     let source0 = fixture_triangle_index(fixture, source_triangle, 0)
-    let source1 = fixture_triangle_index(fixture, source_triangle, 1)
-    let source2 = fixture_triangle_index(fixture, source_triangle, 2)
+    let mut source1 = fixture_triangle_index(fixture, source_triangle, 1)
+    let mut source2 = fixture_triangle_index(fixture, source_triangle, 2)
+    if permutation_parity(permutation) < 0.0 {
+        let exchange = source1
+        source1 = source2
+        source2 = exchange
+    }
     let parameter0 = map_macro_parameter(
-        macro_triangle, fixture_barycentric(fixture, source0),
+        macro_triangle,
+        remap_barycentric(permutation, fixture_barycentric(fixture, source0)),
     )
     let parameter1 = map_macro_parameter(
-        macro_triangle, fixture_barycentric(fixture, source1),
+        macro_triangle,
+        remap_barycentric(permutation, fixture_barycentric(fixture, source1)),
     )
     let parameter2 = map_macro_parameter(
-        macro_triangle, fixture_barycentric(fixture, source2),
+        macro_triangle,
+        remap_barycentric(permutation, fixture_barycentric(fixture, source2)),
     )
     if !parameter_triangle_conditioned(patch, parameter0, parameter1, parameter2, policy()) {
         return invalid_patch_vertex()
@@ -1879,11 +2200,7 @@ fn depth_surface_color(
     // Free control editing can intentionally leave the exactly vector-valued
     // Clifford locus. Preserve the projected surface while making that
     // algebraic residual legible instead of silently presenting it as exact.
-    let residual_amount = smoothstep(
-        policy().maximum_trivector_residual,
-        0.05,
-        abs(residual),
-    )
+    let residual_amount = smoothstep(policy().maximum_trivector_residual, 0.05, abs(residual))
     let diagnostic = interpolate(
         base,
         oklch(0.70, 0.105, 4.55),
@@ -1909,9 +2226,7 @@ fn depth_surface_color(
 fn shade_patch(_ varying: PatchVarying, _ wire_px: f32, _ depth_cue: f32) -> i32 {
     let edge_pixels = minimum3(varying.edge_seed) / varying.view_depth
     let feather = AnalyticDepthWire::feather_pixels()
-    let wire_coverage = 1.0 - smoothstep(
-        wire_px - feather, wire_px + feather, edge_pixels,
-    )
+    let wire_coverage = 1.0 - smoothstep(wire_px - feather, wire_px + feather, edge_pixels)
     let surface = depth_surface_color(
         varying.parameter,
         varying.view_depth,
@@ -1981,7 +2296,9 @@ actor CliffordPatchLab uses (
     proposals_1: StorageBuffer<u32, DEFORMED_PROPOSAL_WORDS>,
     receipt_0: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
     receipt_1: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
-    deformed_raster: StorageBuffer<u32, DEFORMED_RASTER_WORDS>,
+    deformed_face_scores_0: StorageBuffer<f32, DEFORMED_FACE_SCORE_WORDS>,
+    deformed_face_scores_1: StorageBuffer<f32, DEFORMED_FACE_SCORE_WORDS>,
+    deformed_face_plan: StorageBuffer<u32, DEFORMED_FACE_PLAN_WORDS>,
     analytic_lod: StorageBuffer<u32, 1>,
     analytic_draw: DrawIndirectBuffer<AnalyticAtlasDraw>,
     deformed_draw: DrawIndirectBuffer<DeformedAtlasDraw>,
@@ -2425,6 +2742,91 @@ actor CliffordPatchLab uses (
         )
     }
 
+    fn measure_deformed_faces(self, invocation: ComputeInvocation)
+        uses (
+            ComputeSurface<
+                Workgroup<DEFORMED_THREADS, 1, 1>,
+                FixedDispatch<DEFORMED_FACE_WORKGROUPS, 2, 1>,
+            >,
+            PassActivation<PullbackPatchTopology>,
+            PassPreparation<PullbackPipelinePreparation>,
+        )
+    {
+        if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
+            return
+        }
+        let face = invocation.global.x
+        let chart = invocation.global.y
+        let patch = patch_from_uniforms(
+            self.p00_x, self.p00_y, self.p00_z,
+            self.p10_x, self.p10_y, self.p10_z,
+            self.p01_x, self.p01_y, self.p01_z,
+            self.p11_x, self.p11_y, self.p11_z,
+            self.w00, self.w10, self.w01, self.w11,
+        )
+        let camera = orbit_camera_frame(
+            self.orbit_yaw,
+            self.orbit_pitch,
+            self.orbit_distance,
+            self.res_x,
+            self.res_y,
+        )
+        if face >= DEFORMED_TRIANGLES.downcast_truncate() {
+            return
+        }
+        if chart == 0 {
+            store_face_scores(
+                self.deformed_face_scores_0,
+                face,
+                macro_face_scores(
+                    self.points_0,
+                    self.triangles_0,
+                    chart,
+                    face,
+                    patch,
+                    camera,
+                    self.res_x,
+                    self.res_y,
+                ),
+            )
+        } else {
+            store_face_scores(
+                self.deformed_face_scores_1,
+                face,
+                macro_face_scores(
+                    self.points_1,
+                    self.triangles_1,
+                    chart,
+                    face,
+                    patch,
+                    camera,
+                    self.res_x,
+                    self.res_y,
+                ),
+            )
+        }
+    }
+
+    fn prepare_deformed_plan(self, invocation: ComputeInvocation)
+        uses (
+            ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>,
+            PassActivation<PullbackPatchTopology>,
+            PassPreparation<PullbackPipelinePreparation>,
+        )
+    {
+        if invocation.global.x == 0 {
+            prepare_deformed_atlas_plan(
+                self.deformed_face_plan,
+                self.deformed_face_scores_0,
+                self.deformed_face_scores_1,
+                self.receipt_0,
+                self.receipt_1,
+                self.fixture,
+                self.atlas_lod,
+            )
+        }
+    }
+
     fn prepare_deformed_draw(self, invocation: ComputeInvocation)
         uses (
             ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>,
@@ -2433,13 +2835,9 @@ actor CliffordPatchLab uses (
         )
     {
         if invocation.global.x == 0 {
-            prepare_deformed_atlas_draw(
+            prepare_deformed_indirect_draw(
                 self.deformed_draw,
-                self.deformed_raster,
-                self.receipt_0,
-                self.receipt_1,
-                self.fixture,
-                self.atlas_lod,
+                self.deformed_face_plan,
             )
         }
     }
@@ -2756,21 +3154,36 @@ actor CliffordPatchLab uses (
             self.p11_x, self.p11_y, self.p11_z,
             self.w00, self.w10, self.w01, self.w11,
         )
-        let macro_triangles_0 = self.deformed_raster.load(index: 0)
-        let macro_triangles = self.deformed_raster.load(index: 1)
-        let lod = self.deformed_raster.load(index: 2)
-        if self.sampler_mode < 2.5 || instance_index >= macro_triangles {
+        let macro_triangles_0 = self.deformed_face_plan.load(
+            index: face_plan_meta_offset(0),
+        )
+        let macro_triangles = self.deformed_face_plan.load(
+            index: face_plan_meta_offset(1),
+        )
+        let micro_triangles = self.deformed_face_plan.load(
+            index: face_plan_meta_offset(2),
+        )
+        let plan_face = face_for_micro_triangle(
+            self.deformed_face_plan,
+            macro_triangles,
+            instance_index,
+        )
+        if self.sampler_mode < 2.5
+            || instance_index >= micro_triangles
+            || plan_face >= macro_triangles {
             invalid_patch_vertex()
-        } else if instance_index < macro_triangles_0 {
+        } else if plan_face < macro_triangles_0 {
             deformed_atlas_raster_vertex(
                 self.points_0,
                 self.triangles_0,
                 self.fixture,
+                self.deformed_face_plan,
                 0,
+                plan_face,
+                plan_face,
                 vertex_index,
                 instance_index,
                 macro_triangles_0,
-                lod,
                 patch,
                 orbit_camera_frame(
                     self.orbit_yaw,
@@ -2787,11 +3200,13 @@ actor CliffordPatchLab uses (
                 self.points_1,
                 self.triangles_1,
                 self.fixture,
+                self.deformed_face_plan,
                 1,
+                plan_face,
+                plan_face - macro_triangles_0,
                 vertex_index,
-                instance_index - macro_triangles_0,
+                instance_index,
                 macro_triangles - macro_triangles_0,
-                lod,
                 patch,
                 orbit_camera_frame(
                     self.orbit_yaw,

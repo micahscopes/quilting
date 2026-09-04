@@ -285,15 +285,6 @@ pub fn quad_diagonal_profile2<C: Codomain, M: CodomainMetric<C>>(
         && corner01.defined
         && corner11.defined
         && center.defined
-    if !defined {
-        return QuadDiagonalProfile2 {
-            corner00_to_11_quality: 0.0,
-            corner10_to_01_quality: 0.0,
-            corner00_to_11_center_excess: 0.0,
-            corner10_to_01_center_excess: 0.0,
-            defined: false,
-        }
-    }
     let edge_bottom = metric.distance(corner00.value, corner10.value)
     let edge_right = metric.distance(corner10.value, corner11.value)
     let edge_top = metric.distance(corner11.value, corner01.value)
@@ -308,22 +299,32 @@ pub fn quad_diagonal_profile2<C: Codomain, M: CodomainMetric<C>>(
     let quality00_11_01 = triangle_quality_from_lengths(diagonal00_11, edge_top, edge_left)
     let quality00_10_01 = triangle_quality_from_lengths(edge_bottom, diagonal10_01, edge_left)
     let quality10_11_01 = triangle_quality_from_lengths(edge_right, edge_top, diagonal10_01)
-    QuadDiagonalProfile2 {
-        corner00_to_11_quality: minimum_f32(quality00_10_11, quality00_11_01),
-        corner10_to_01_quality: minimum_f32(quality00_10_01, quality10_11_01),
-        corner00_to_11_center_excess: relative_center_excess(
-            center00,
-            center11,
-            diagonal00_11,
-            minimum_length,
-        ),
-        corner10_to_01_center_excess: relative_center_excess(
-            center10,
-            center01,
-            diagonal10_01,
-            minimum_length,
-        ),
-        defined: diagonal00_11 >= minimum_length && diagonal10_01 >= minimum_length,
+    if defined && diagonal00_11 >= minimum_length && diagonal10_01 >= minimum_length {
+        QuadDiagonalProfile2 {
+            corner00_to_11_quality: minimum_f32(quality00_10_11, quality00_11_01),
+            corner10_to_01_quality: minimum_f32(quality00_10_01, quality10_11_01),
+            corner00_to_11_center_excess: relative_center_excess(
+                center00,
+                center11,
+                diagonal00_11,
+                minimum_length,
+            ),
+            corner10_to_01_center_excess: relative_center_excess(
+                center10,
+                center01,
+                diagonal10_01,
+                minimum_length,
+            ),
+            defined: true,
+        }
+    } else {
+        QuadDiagonalProfile2 {
+            corner00_to_11_quality: 0.0,
+            corner10_to_01_quality: 0.0,
+            corner00_to_11_center_excess: 0.0,
+            corner10_to_01_center_excess: 0.0,
+            defined: false,
+        }
     }
 }
 
@@ -336,17 +337,18 @@ pub fn choose_quad_diagonal2(
     _ center_excess_weight: f32,
     _ tie_band: f32,
 ) -> QuadDiagonal2 {
-    if !profile.defined {
-        return QuadDiagonal2::Corner00To11
-    }
-    let quality00_11 = quality_weight * profile.corner00_to_11_quality
-    let penalty00_11 = center_excess_weight * profile.corner00_to_11_center_excess
-    let quality10_01 = quality_weight * profile.corner10_to_01_quality
-    let penalty10_01 = center_excess_weight * profile.corner10_to_01_center_excess
-    let diagonal00_11 = quality00_11 - penalty00_11
-    let diagonal10_01 = quality10_01 - penalty10_01
-    if diagonal10_01 > diagonal00_11 + tie_band {
-        QuadDiagonal2::Corner10To01
+    if profile.defined {
+        let quality00_11 = quality_weight * profile.corner00_to_11_quality
+        let penalty00_11 = center_excess_weight * profile.corner00_to_11_center_excess
+        let quality10_01 = quality_weight * profile.corner10_to_01_quality
+        let penalty10_01 = center_excess_weight * profile.corner10_to_01_center_excess
+        let diagonal00_11 = quality00_11 - penalty00_11
+        let diagonal10_01 = quality10_01 - penalty10_01
+        if diagonal10_01 > diagonal00_11 + tie_band {
+            QuadDiagonal2::Corner10To01
+        } else {
+            QuadDiagonal2::Corner00To11
+        }
     } else {
         QuadDiagonal2::Corner00To11
     }
@@ -426,23 +428,24 @@ pub fn pullback_spectrum2(
         && minimum_eigen >= minimum_eigenvalue
         && maximum_eigen >= minimum_eigen
         && determinant > 0.0
-    if !defined {
-        return PullbackSpectrum2 {
+    if defined {
+        let minimum_stretch = sqrt(minimum_eigen)
+        let maximum_stretch = sqrt(maximum_eigen)
+        PullbackSpectrum2 {
+            minimum_stretch: minimum_stretch,
+            maximum_stretch: maximum_stretch,
+            area_scale: sqrt(determinant),
+            anisotropy: maximum_stretch / minimum_stretch,
+            defined: true,
+        }
+    } else {
+        PullbackSpectrum2 {
             minimum_stretch: 0.0,
             maximum_stretch: 0.0,
             area_scale: 0.0,
             anisotropy: 0.0,
             defined: false,
         }
-    }
-    let minimum_stretch = sqrt(minimum_eigen)
-    let maximum_stretch = sqrt(maximum_eigen)
-    PullbackSpectrum2 {
-        minimum_stretch: minimum_stretch,
-        maximum_stretch: maximum_stretch,
-        area_scale: sqrt(determinant),
-        anisotropy: maximum_stretch / minimum_stretch,
-        defined: true,
     }
 }
 
