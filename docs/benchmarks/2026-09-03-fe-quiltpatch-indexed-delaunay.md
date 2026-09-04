@@ -345,3 +345,37 @@ parameter and three pullback-tensor lanes were removed. The resulting release
 development build still has 18 passes and 35,362 Wasm bytes, but falls to
 747,779 compiler-reported WGSL bytes and 1,010,517 emitted bytes. Lowering took
 396,308 ms; the complete build took 424,472 ms.
+
+## Ranked boundary quantization stress gate
+
+A deterministic `0x6d2b79f5` sweep exercised 64 independently twisted control
+cages and normalized positive weight vectors ranging through approximately
+`17.8 million:1`. Under the first terminating-restoration artifact, 48 cases
+failed during constrained construction. Every failed chart contained duplicate
+locked boundary points; no construction failed without a duplicate. One
+reduced `562:1` case mapped consecutive boundary ranks to
+`[16382,2,0]`, `[16382,2,0]`, then `[16378,6,0]`, `[16378,6,0]`.
+
+The projective arc inverse itself is monotone, but independent Q14 rounding
+could collapse adjacent quantiles. The fixed mapping reserves one integer lane
+per requested rank while allowing the measured inverse to occupy every
+remaining lane:
+
+`q(rank) = rank + floor(q_raw * (16384 - resolution) / 16384)`.
+
+Endpoints remain exact. For monotone `q_raw`, consecutive ranks are strictly
+ordered even when several raw quantiles round to the same coordinate; the
+maximum displacement at resolution eight is eight Q14 lanes.
+
+Replaying the identical sweep produced zero duplicate boundary points, zero
+construction failures, zero restoration failures, and zero dead indirect
+draws. All 128 charts converged; the largest restoration used 117 of 256
+permitted flips. Complete GPU frames averaged 4.205 ms and reached 7.9 ms at
+maximum. A second readback audited all 4,156 resident triangles: every index
+was legal and distinct, every winding was positive, and every chart's signed
+and absolute Q14 double-area sums were exactly `268435456`. The smallest
+nonzero double area was 2.
+
+The final release development build emitted 18 passes, 35,362 Wasm bytes,
+748,310 compiler-reported WGSL bytes, and 1,011,048 total bytes. Lowering took
+422,875 ms and the complete rebuild took 427,463 ms.
