@@ -1,0 +1,158 @@
+//! Shared camera and screen-space measurements for QuiltPatch explorers.
+//!
+//! This ingot contains geometry, not application state or browser policy.
+//! A demo supplies an orbit specification and backing extent; the same pure
+//! projection and triangle-altitude operations then serve rasterization,
+//! screen-error evidence, parameter-space comparison, and CPU/Wasm oracles.
+
+use core::marker::Copy
+use fmath::{cos, sin}
+use quilting_domain::{
+    Vec2F,
+    Vec3F,
+    add3,
+    cross3,
+    dot3,
+    length2,
+    normalize3_or,
+    scale3,
+    sub3,
+    vec2f,
+    vec3f,
+}
+use std::webgpu::ClipPosition
+
+pub struct ScreenExtent { pub width: f32, pub height: f32 }
+impl Copy for ScreenExtent {}
+
+impl ScreenExtent {
+    pub fn aspect(self) -> f32 {
+        if self.height > 0.0 { self.width / self.height } else { 1.0 }
+    }
+}
+
+pub struct OrbitCamera {
+    pub target: Vec3F,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub distance: f32,
+    pub focal: f32,
+    pub near: f32,
+    pub far: f32,
+}
+impl Copy for OrbitCamera {}
+
+pub struct CameraFrame {
+    pub eye: Vec3F,
+    pub right: Vec3F,
+    pub up: Vec3F,
+    pub forward: Vec3F,
+    pub focal: f32,
+    pub aspect: f32,
+    pub near: f32,
+    pub far: f32,
+}
+impl Copy for CameraFrame {}
+
+pub fn orbit_camera(_ camera: OrbitCamera, _ extent: ScreenExtent) -> CameraFrame {
+    let cp = cos(camera.pitch)
+    let offset = vec3f(cp * sin(camera.yaw), sin(camera.pitch), cp * cos(camera.yaw))
+    let eye = add3(camera.target, scale3(offset, camera.distance))
+    let forward = normalize3_or(
+        sub3(camera.target, eye),
+        vec3f(0.0, 0.0, -1.0),
+        0.00000001,
+    )
+    let right = normalize3_or(
+        cross3(forward, vec3f(0.0, 1.0, 0.0)),
+        vec3f(1.0, 0.0, 0.0),
+        0.00000001,
+    )
+    let up = normalize3_or(
+        cross3(right, forward),
+        vec3f(0.0, 1.0, 0.0),
+        0.00000001,
+    )
+    CameraFrame {
+        eye: eye,
+        right: right,
+        up: up,
+        forward: forward,
+        focal: camera.focal,
+        aspect: extent.aspect(),
+        near: camera.near,
+        far: camera.far,
+    }
+}
+
+pub struct Projection { pub clip: ClipPosition, pub depth: f32 }
+impl Copy for Projection {}
+
+pub fn project(_ camera: CameraFrame, _ position: Vec3F) -> Projection {
+    let relative = sub3(position, camera.eye)
+    let view_x = dot3(relative, camera.right)
+    let view_y = dot3(relative, camera.up)
+    let depth = dot3(relative, camera.forward)
+    let depth_scale = camera.far / (camera.far - camera.near)
+    Projection {
+        clip: ClipPosition {
+            x: camera.focal * view_x / camera.aspect,
+            y: camera.focal * view_y,
+            z: depth_scale * depth - depth_scale * camera.near,
+            w: depth,
+        },
+        depth: depth,
+    }
+}
+
+/// Present a unit-square parameter domain through the same projection record
+/// used by the three-dimensional view, so wire coverage has one API.
+pub fn parameter_projection(_ parameter: Vec2F, _ margin: f32) -> Projection {
+    Projection {
+        clip: ClipPosition {
+            x: (parameter.x * 2.0 - 1.0) * margin,
+            y: (parameter.y * 2.0 - 1.0) * margin,
+            z: 0.5,
+            w: 1.0,
+        },
+        depth: 1.0,
+    }
+}
+
+pub fn projected_screen(_ value: Projection, _ extent: ScreenExtent) -> Vec2F {
+    vec2f(
+        0.5 * extent.width * value.clip.x / value.clip.w,
+        0.5 * extent.height * value.clip.y / value.clip.w,
+    )
+}
+
+/// Exact screen-space altitude of one projected triangle corner.
+/// Multiplying its local barycentric coordinate by this value gives an
+/// antialiased wire-distance seed that perspective interpolation preserves.
+pub fn triangle_pixel_altitude(
+    _ p0: Projection,
+    _ p1: Projection,
+    _ p2: Projection,
+    _ local_vertex: u32,
+    _ extent: ScreenExtent,
+) -> f32 {
+    let s0 = projected_screen(p0, extent)
+    let s1 = projected_screen(p1, extent)
+    let s2 = projected_screen(p2, extent)
+    let e01 = vec2f(s1.x - s0.x, s1.y - s0.y)
+    let e02 = vec2f(s2.x - s0.x, s2.y - s0.y)
+    let signed_twice_area = e01.x * e02.y - e01.y * e02.x
+    let twice_area = if signed_twice_area < 0.0 {
+        0.0 - signed_twice_area
+    } else {
+        signed_twice_area
+    }
+    let opposite = if local_vertex == 0 || local_vertex == 3 {
+        length2(vec2f(s2.x - s1.x, s2.y - s1.y))
+    } else if local_vertex == 1 || local_vertex == 4 {
+        length2(vec2f(s0.x - s2.x, s0.y - s2.y))
+    } else {
+        length2(vec2f(s1.x - s0.x, s1.y - s0.y))
+    }
+    twice_area / (opposite + 0.00001)
+}

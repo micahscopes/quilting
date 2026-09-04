@@ -1225,6 +1225,38 @@ pub fn quadratic_tensor_patch<T: LinearElement>(
     }
 }
 
+fn quadratic_bernstein_value<T: LinearElement>(
+    _ p0: T,
+    _ p1: T,
+    _ p2: T,
+    _ parameter: f32,
+) -> T {
+    let complement = 1.0 - parameter
+    p0.scaled(complement * complement)
+        .plus(p1.scaled(2.0 * complement * parameter))
+        .plus(p2.scaled(parameter * parameter))
+}
+
+/// Evaluate a degree-(2,2) Bernstein net in its own unit-square coordinates.
+///
+/// This is the denotational counterpart of exact de Casteljau restriction:
+/// renderers may evaluate a retained child net locally instead of recovering
+/// a global UV and sampling the root through a separate implementation.
+/// Consequently a subdivision explorer can compare both routes as a real
+/// composition law, and sparse Clifford carriers specialize through the same
+/// `LinearElement` interface without dynamic blade machinery.
+pub fn evaluate_quadratic_tensor<T: LinearElement>(
+    _ value: QuadraticTensorPatch<T>,
+    _ parameter: Vec2F,
+) -> T {
+    quadratic_bernstein_value<T>(
+        quadratic_bernstein_value<T>(value.p00, value.p10, value.p20, parameter.x),
+        quadratic_bernstein_value<T>(value.p01, value.p11, value.p21, parameter.x),
+        quadratic_bernstein_value<T>(value.p02, value.p12, value.p22, parameter.x),
+        parameter.y,
+    )
+}
+
 /// The two exact degree-two Bezier halves produced by one binary split.
 pub struct QuadraticTensorSplit<T: LinearElement> {
     pub first: QuadraticTensorPatch<T>,

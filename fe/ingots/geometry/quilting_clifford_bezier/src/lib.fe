@@ -48,6 +48,7 @@ use quilting_patch::{
     bilinear_projective_controls,
     anisotropic_quadratic_tensor_cell,
     denotation_sample,
+    evaluate_quadratic_tensor,
     patch as typed_patch,
     patch_chart_profile,
     projective_control,
@@ -531,6 +532,65 @@ pub fn quotient_cell_control_net(
     anisotropic_quadratic_tensor_cell<IsotropicQuotientHomogeneousF>(
         quotient_control_net(value),
         cell,
+    )
+}
+
+/// Evaluate one exact homogeneous quotient net and admit its affine chart.
+///
+/// Root and de Casteljau-child control nets share this operation. A renderer
+/// can therefore test the subdivision law by evaluating a child in local
+/// coordinates and comparing it with the original patch at the corresponding
+/// global coordinate; neither side is a fitted or sampled surrogate.
+pub fn evaluate_quotient_control_net(
+    _ value: IsotropicQuotientControlNet,
+    _ parameter: Vec2F,
+    _ policy: IsotropicPolicy,
+) -> IsotropicSample {
+    let homogeneous = evaluate_quadratic_tensor<IsotropicQuotientHomogeneousF>(value, parameter)
+    let denominator = homogeneous.denominator
+    if denominator < policy.minimum_denominator_norm_squared {
+        IsotropicSample {
+            position: vec3f(0.0, 0.0, 0.0),
+            homogeneous: IsotropicOddF { e1: 0.0, e2: 0.0, e3: 0.0, e123: 0.0 },
+            denominator_norm_squared: denominator,
+            trivector_residual: 0.0,
+            conditioned: false,
+            vector_valued: false,
+        }
+    } else {
+        let inverse_denominator = 1.0 / denominator
+        let residual = homogeneous.numerator_e123 * inverse_denominator
+        IsotropicSample {
+            position: vec3f(
+                homogeneous.numerator_e1 * inverse_denominator,
+                homogeneous.numerator_e2 * inverse_denominator,
+                homogeneous.numerator_e3 * inverse_denominator,
+            ),
+            homogeneous: IsotropicOddF {
+                e1: homogeneous.numerator_e1,
+                e2: homogeneous.numerator_e2,
+                e3: homogeneous.numerator_e3,
+                e123: homogeneous.numerator_e123,
+            },
+            denominator_norm_squared: denominator,
+            trivector_residual: residual,
+            conditioned: true,
+            vector_valued: absf(residual) <= policy.maximum_trivector_residual,
+        }
+    }
+}
+
+/// Evaluate the exact child named by `cell` in child-local coordinates.
+pub fn evaluate_quotient_cell(
+    _ value: IsotropicBilinearPatch,
+    _ cell: AnisotropicPatchCell2,
+    _ local_parameter: Vec2F,
+    _ policy: IsotropicPolicy,
+) -> IsotropicSample {
+    evaluate_quotient_control_net(
+        quotient_cell_control_net(value, cell),
+        local_parameter,
+        policy,
     )
 }
 

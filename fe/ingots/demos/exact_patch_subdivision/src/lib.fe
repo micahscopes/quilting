@@ -1,0 +1,615 @@
+//! Exact patch-to-patch subdivision, presented as a composition law.
+//!
+//! Every displayed child is reconstructed from its compact anisotropic cell
+//! identity by exact de Casteljau restriction, then evaluated in child-local
+//! coordinates. The comparison route evaluates the authored root patch at the
+//! corresponding global coordinate. Color exposes their numerical difference;
+//! topology never becomes the definition of the surface.
+
+use core::marker::Copy
+use fmath::{clamp, smoothstep, wrap_pi}
+use quilting_clifford_bezier::{
+    IsotropicBilinearPatch,
+    IsotropicPolicy,
+    IsotropicSample,
+    control,
+    even,
+    evaluate,
+    evaluate_differential,
+    evaluate_quotient_cell,
+    patch,
+    scale_weight,
+}
+use quilting_demo_view::{
+    CameraFrame,
+    OrbitCamera,
+    Projection,
+    ScreenExtent,
+    orbit_camera,
+    parameter_projection,
+    project,
+    triangle_pixel_altitude,
+}
+use quilting_domain::{
+    Bary3F,
+    Vec2F,
+    Vec3F,
+    bary3f,
+    dot3,
+    length3,
+    normalize3_or,
+    sub3,
+    vec2f,
+    vec3f,
+}
+use quilting_oklch::{
+    DisplayRgb,
+    HuePath,
+    bilinear,
+    display_rgb,
+    interpolate,
+    mix_display_rgb,
+    oklch,
+    pack_rgba8,
+    scale_lightness_chroma,
+    to_display_rgb,
+}
+use quilting_patch::AnisotropicPatchCell2
+use std::web::view::{
+    ApplyParamBindings,
+    ChoiceOptions,
+    Extent,
+    Param,
+    ParamBindingsProvider,
+    Surface,
+    SurfaceEvent,
+    SurfaceState,
+}
+use std::webgpu::{
+    ClipPosition,
+    Depth24LessEqualMsaa4,
+    FragmentStage,
+    FragmentSurface,
+    GpuProgram,
+    LatestPerFrame,
+    RasterConfiguration,
+    RasterPlan,
+    RasterVertex,
+    ResponsiveBacking,
+    StandardSurfaceRecovery,
+    SurfaceQuality,
+    SurfaceRecovery,
+    SurfaceScheduling,
+    SurfaceTransition,
+    TriangleList,
+    VertexStage,
+    WebGpuBackend,
+    raster_plan,
+}
+
+extern {
+    const fn __f32_from_i32(_: i32) -> f32
+}
+
+const MAX_CHILD_DEPTH: u32 = 4
+const MAX_CHILD_SIDE: u32 = 16
+const MAX_LOCAL_LOD: u32 = 3
+const MAX_LOCAL_SIDE: u32 = 8
+const MAX_CHILD_SLOTS: usize = 256
+const MAX_LOCAL_CELL_SLOTS: usize = 64
+const VERTICES_PER_TRIANGLE_PAIR: usize = 6
+const VERTICES_PER_CHILD: u32 = 384
+const MAX_VERTICES: usize = MAX_CHILD_SLOTS
+    * MAX_LOCAL_CELL_SLOTS
+    * VERTICES_PER_TRIANGLE_PAIR
+
+struct SubdivisionParams {
+    evaluation: Param,
+    view_space: Param,
+    u_depth: Param,
+    v_depth: Param,
+    child_lod: Param,
+    w00: Param,
+    w10: Param,
+    w01: Param,
+    w11: Param,
+    orbit_yaw: Param,
+    orbit_pitch: Param,
+    orbit_distance: Param,
+    wire_px: Param,
+    error_gain: Param,
+    res_x: Param,
+    res_y: Param,
+    orbiting: Param,
+}
+
+struct SubdivisionState {
+    evaluation: f32,
+    view_space: f32,
+    u_depth: f32,
+    v_depth: f32,
+    child_lod: f32,
+    w00: f32,
+    w10: f32,
+    w01: f32,
+    w11: f32,
+    orbit_yaw: f32,
+    orbit_pitch: f32,
+    orbit_distance: f32,
+    wire_px: f32,
+    error_gain: f32,
+    res_x: f32,
+    res_y: f32,
+    orbiting: f32,
+}
+
+impl SurfaceState for SubdivisionState {
+    type Params = SubdivisionParams
+}
+
+derive ApplyParamBindings for SubdivisionState using ParamBindingsProvider
+
+const fn subdivision_params() -> SubdivisionParams {
+    SubdivisionParams {
+        evaluation: Param::choice(
+            options: ChoiceOptions::two(first: "exact child net", second: "authored root"),
+            init: 0.0,
+        ),
+        view_space: Param::choice(
+            options: ChoiceOptions::two(first: "surface", second: "parameter domain"),
+            init: 0.0,
+        ),
+        u_depth: Param::int(min: 0.0, max: 4.0, init: 2.0),
+        v_depth: Param::int(min: 0.0, max: 4.0, init: 2.0),
+        child_lod: Param::int(min: 0.0, max: 3.0, init: 1.0),
+        w00: Param::log(min: 0.02, max: 8.0, init: 1.0),
+        w10: Param::log(min: 0.02, max: 8.0, init: 1.0),
+        w01: Param::log(min: 0.02, max: 8.0, init: 1.0),
+        w11: Param::log(min: 0.02, max: 8.0, init: 1.0),
+        orbit_yaw: Param::range(min: -3.14159265, max: 3.14159265, init: -0.72),
+        orbit_pitch: Param::range(min: -1.35, max: 1.35, init: 0.12),
+        orbit_distance: Param::log(min: 2.5, max: 16.0, init: 6.2),
+        wire_px: Param::range(min: 0.0, max: 2.0, init: 0.55),
+        error_gain: Param::log(min: 1.0, max: 1000000.0, init: 10000.0),
+        res_x: Param::extent_x(),
+        res_y: Param::extent_y(),
+        orbiting: Param::fixed(0.0),
+    }
+}
+
+fn subdivision_state(
+    _ evaluation: f32,
+    _ view_space: f32,
+    _ u_depth: f32,
+    _ v_depth: f32,
+    _ child_lod: f32,
+    _ w00: f32,
+    _ w10: f32,
+    _ w01: f32,
+    _ w11: f32,
+    _ orbit_yaw: f32,
+    _ orbit_pitch: f32,
+    _ orbit_distance: f32,
+    _ wire_px: f32,
+    _ error_gain: f32,
+    _ res_x: f32,
+    _ res_y: f32,
+    _ orbiting: f32,
+) -> SubdivisionState {
+    SubdivisionState {
+        evaluation: evaluation,
+        view_space: view_space,
+        u_depth: u_depth,
+        v_depth: v_depth,
+        child_lod: child_lod,
+        w00: w00,
+        w10: w10,
+        w01: w01,
+        w11: w11,
+        orbit_yaw: orbit_yaw,
+        orbit_pitch: orbit_pitch,
+        orbit_distance: orbit_distance,
+        wire_px: wire_px,
+        error_gain: error_gain,
+        res_x: res_x,
+        res_y: res_y,
+        orbiting: orbiting,
+    }
+}
+
+fn as_f32(_ value: u32) -> f32 {
+    __f32_from_i32(value.downcast_unchecked())
+}
+
+fn admitted_level(_ value: f32, _ maximum: u32) -> u32 {
+    let mut level: u32 = 0
+    while level < maximum && value >= as_f32(level) + 0.5 {
+        level = level + 1
+    }
+    level
+}
+
+fn resolution(_ level: u32) -> u32 {
+    1 << level
+}
+
+fn patch_value(_ state: SubdivisionState) -> IsotropicBilinearPatch {
+    patch(
+        control(
+            vec3f(0.0, 2.0, 0.0),
+            scale_weight(even(1.0, 0.0, 0.0, 0.0), state.w00),
+        ),
+        control(
+            vec3f(0.0, 1.0, 0.0),
+            scale_weight(even(0.0, 1.0, 0.0, -1.0), state.w10),
+        ),
+        control(
+            vec3f(0.0, -2.0, 0.0),
+            scale_weight(even(0.0, 2.0, 0.0, 1.0), state.w01),
+        ),
+        control(
+            vec3f(0.0, -1.0, 0.0),
+            scale_weight(even(-6.0, 0.0, -3.0, 0.0), state.w11),
+        ),
+    )
+}
+
+fn policy() -> IsotropicPolicy {
+    IsotropicPolicy {
+        minimum_denominator_norm_squared: 0.000000000001,
+        maximum_trivector_residual: 0.00001,
+    }
+}
+
+fn extent(_ state: SubdivisionState) -> ScreenExtent {
+    ScreenExtent { width: state.res_x, height: state.res_y }
+}
+
+fn camera(_ state: SubdivisionState) -> CameraFrame {
+    orbit_camera(
+        OrbitCamera {
+            target: vec3f(1.1, 0.0, 0.0),
+            yaw: state.orbit_yaw,
+            pitch: state.orbit_pitch,
+            distance: state.orbit_distance,
+            focal: 1.62,
+            near: 0.05,
+            far: 100.0,
+        },
+        extent(state),
+    )
+}
+
+fn local_corner(_ vertex: u32) -> Vec2F {
+    let corner = vertex % 6
+    if corner == 0 || corner == 3 {
+        vec2f(0.0, 0.0)
+    } else if corner == 1 {
+        vec2f(1.0, 0.0)
+    } else if corner == 2 || corner == 4 {
+        vec2f(1.0, 1.0)
+    } else {
+        vec2f(0.0, 1.0)
+    }
+}
+
+fn local_barycentric(_ vertex: u32) -> Bary3F {
+    let corner = vertex % 3
+    if corner == 0 {
+        bary3f(1.0, 0.0, 0.0)
+    } else if corner == 1 {
+        bary3f(0.0, 1.0, 0.0)
+    } else {
+        bary3f(0.0, 0.0, 1.0)
+    }
+}
+
+fn child_local_parameter(
+    _ local_cell_x: u32,
+    _ local_cell_y: u32,
+    _ local_resolution: u32,
+    _ vertex: u32,
+) -> Vec2F {
+    let corner = local_corner(vertex)
+    vec2f(
+        (as_f32(local_cell_x) + corner.x) / as_f32(local_resolution),
+        (as_f32(local_cell_y) + corner.y) / as_f32(local_resolution),
+    )
+}
+
+fn root_parameter(
+    _ cell: AnisotropicPatchCell2,
+    _ local: Vec2F,
+) -> Vec2F {
+    vec2f(
+        (as_f32(cell.u_index) + local.x) / as_f32(resolution(cell.u_depth)),
+        (as_f32(cell.v_index) + local.y) / as_f32(resolution(cell.v_depth)),
+    )
+}
+
+struct EvaluatedVertex {
+    child: IsotropicSample,
+    root: IsotropicSample,
+    parameter: Vec2F,
+}
+impl Copy for EvaluatedVertex {}
+
+fn evaluate_vertex(
+    _ value: IsotropicBilinearPatch,
+    _ cell: AnisotropicPatchCell2,
+    _ local: Vec2F,
+) -> EvaluatedVertex {
+    let parameter = root_parameter(cell, local)
+    EvaluatedVertex {
+        child: evaluate_quotient_cell(value, cell, local, policy()),
+        root: evaluate(value, parameter, policy()),
+        parameter: parameter,
+    }
+}
+
+fn selected_sample(_ evaluated: EvaluatedVertex, _ evaluation: f32) -> IsotropicSample {
+    if evaluation < 0.5 { evaluated.child } else { evaluated.root }
+}
+
+fn vertex_projection(
+    _ evaluated: EvaluatedVertex,
+    _ state: SubdivisionState,
+    _ camera: CameraFrame,
+) -> Projection {
+    if state.view_space < 0.5 {
+        project(camera, selected_sample(evaluated, state.evaluation).position)
+    } else {
+        parameter_projection(evaluated.parameter, 0.86)
+    }
+}
+
+pub struct SubdivisionVarying {
+    pub edge_seed: Bary3F,
+    pub normal: Vec3F,
+    pub parameter: Vec2F,
+    pub child_center: Vec2F,
+    pub composition_error: f32,
+    pub view_depth: f32,
+}
+impl Copy for SubdivisionVarying {}
+
+fn invalid_vertex() -> RasterVertex<SubdivisionVarying> {
+    RasterVertex {
+        position: ClipPosition { x: 2.0, y: 2.0, z: 0.0, w: 1.0 },
+        varying: SubdivisionVarying {
+            edge_seed: bary3f(0.0, 0.0, 0.0),
+            normal: vec3f(0.0, 0.0, 1.0),
+            parameter: vec2f(0.0, 0.0),
+            child_center: vec2f(0.0, 0.0),
+            composition_error: 0.0,
+            view_depth: 1.0,
+        },
+    }
+}
+
+fn minimum_barycentric(_ value: Bary3F) -> f32 {
+    let mut result = value.a
+    if value.b < result { result = value.b }
+    if value.c < result { result = value.c }
+    result
+}
+
+fn surface_color(_ varying: SubdivisionVarying, _ error_gain: f32) -> DisplayRgb {
+    let base = bilinear(
+        oklch(0.78, 0.085, 0.42),
+        oklch(0.81, 0.075, 0.98),
+        oklch(0.76, 0.068, 5.90),
+        oklch(0.73, 0.080, 5.30),
+        varying.child_center.x,
+        varying.child_center.y,
+        HuePath::Shorter,
+    )
+    let error = smoothstep(0.0, 1.0, varying.composition_error * error_gain)
+    let diagnostic = interpolate(base, oklch(0.67, 0.18, 0.34), error, HuePath::Shorter)
+    let normal = normalize3_or(varying.normal, vec3f(0.0, 0.0, 1.0), 0.0000001)
+    let light = normalize3_or(vec3f(-0.35, 0.48, 0.82), vec3f(0.0, 0.0, 1.0), 0.0000001)
+    let diffuse = if dot3(normal, light) < 0.0 { -dot3(normal, light) } else { dot3(normal, light) }
+    to_display_rgb(scale_lightness_chroma(diagnostic, 0.72 + 0.30 * diffuse, 1.0))
+}
+
+actor ExactPatchSubdivision uses (
+    GpuProgram<WebGpuBackend>,
+    SurfaceQuality<ResponsiveBacking>,
+    SurfaceRecovery<StandardSurfaceRecovery>,
+) {
+    evaluation: f32,
+    view_space: f32,
+    u_depth: f32,
+    v_depth: f32,
+    child_lod: f32,
+    w00: f32,
+    w10: f32,
+    w01: f32,
+    w11: f32,
+    orbit_yaw: f32,
+    orbit_pitch: f32,
+    orbit_distance: f32,
+    wire_px: f32,
+    error_gain: f32,
+    res_x: f32,
+    res_y: f32,
+    orbiting: f32,
+
+    const fn raster() -> RasterPlan uses (RasterConfiguration) {
+        raster_plan<Depth24LessEqualMsaa4>()
+    }
+
+    const fn view() -> Surface<SubdivisionParams> {
+        Surface { extent: Extent::square(768), params: subdivision_params() }
+    }
+
+    fn navigate(self, event: own SurfaceEvent) -> SubdivisionState
+        uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>)
+    {
+        let mut state = subdivision_state(
+            self.evaluation,
+            self.view_space,
+            self.u_depth,
+            self.v_depth,
+            self.child_lod,
+            self.w00,
+            self.w10,
+            self.w01,
+            self.w11,
+            self.orbit_yaw,
+            self.orbit_pitch,
+            self.orbit_distance,
+            self.wire_px,
+            self.error_gain,
+            self.res_x,
+            self.res_y,
+            self.orbiting,
+        ).apply_param_bindings(subdivision_params(), event)
+        if event.is_pointer_down() { state.orbiting = 1.0 }
+        if event.is_pointer_move() && event.buttons != 0 && state.orbiting > 0.5 {
+            state.orbit_yaw = wrap_pi(state.orbit_yaw - event.delta_x * 0.008)
+            state.orbit_pitch = clamp(state.orbit_pitch - event.delta_y * 0.008, -1.35, 1.35)
+        }
+        if event.is_pointer_up() { state.orbiting = 0.0 }
+        if event.wheel_delta < 0.0 {
+            state.orbit_distance = clamp(state.orbit_distance * 0.90, 2.5, 16.0)
+        } else if event.wheel_delta > 0.0 {
+            state.orbit_distance = clamp(state.orbit_distance * 1.10, 2.5, 16.0)
+        }
+        state
+    }
+
+    fn background(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        -15396337
+    }
+
+    fn subdivision_vertices(self, vertex_index: u32) -> RasterVertex<SubdivisionVarying>
+        uses (VertexStage<SubdivisionVarying, TriangleList<MAX_VERTICES>>)
+    {
+        let state = subdivision_state(
+            self.evaluation,
+            self.view_space,
+            self.u_depth,
+            self.v_depth,
+            self.child_lod,
+            self.w00,
+            self.w10,
+            self.w01,
+            self.w11,
+            self.orbit_yaw,
+            self.orbit_pitch,
+            self.orbit_distance,
+            self.wire_px,
+            self.error_gain,
+            self.res_x,
+            self.res_y,
+            self.orbiting,
+        )
+        let u_depth = admitted_level(state.u_depth, MAX_CHILD_DEPTH)
+        let v_depth = admitted_level(state.v_depth, MAX_CHILD_DEPTH)
+        let local_lod = admitted_level(state.child_lod, MAX_LOCAL_LOD)
+        let u_resolution = resolution(u_depth)
+        let v_resolution = resolution(v_depth)
+        let local_resolution = resolution(local_lod)
+        let child_index = vertex_index / VERTICES_PER_CHILD
+        let child_x = child_index % MAX_CHILD_SIDE
+        let child_y = child_index / MAX_CHILD_SIDE
+        let child_vertex = vertex_index % VERTICES_PER_CHILD
+        let local_cell = child_vertex / 6
+        let local_cell_x = local_cell % MAX_LOCAL_SIDE
+        let local_cell_y = local_cell / MAX_LOCAL_SIDE
+        let active = child_x < u_resolution
+            && child_y < v_resolution
+            && local_cell_x < local_resolution
+            && local_cell_y < local_resolution
+        if !active {
+            invalid_vertex()
+        } else {
+            let cell = AnisotropicPatchCell2 {
+                u_depth: u_depth,
+                v_depth: v_depth,
+                u_index: child_x,
+                v_index: child_y,
+            }
+            let triangle_start = (child_vertex % 6) / 3 * 3
+            let local = child_local_parameter(
+                local_cell_x, local_cell_y, local_resolution, child_vertex,
+            )
+            let local0 = child_local_parameter(
+                local_cell_x, local_cell_y, local_resolution, triangle_start,
+            )
+            let local1 = child_local_parameter(
+                local_cell_x, local_cell_y, local_resolution, triangle_start + 1,
+            )
+            let local2 = child_local_parameter(
+                local_cell_x, local_cell_y, local_resolution, triangle_start + 2,
+            )
+            let value = patch_value(state)
+            let evaluated = evaluate_vertex(value, cell, local)
+            let evaluated0 = evaluate_vertex(value, cell, local0)
+            let evaluated1 = evaluate_vertex(value, cell, local1)
+            let evaluated2 = evaluate_vertex(value, cell, local2)
+            let camera_value = camera(state)
+            let projected = vertex_projection(evaluated, state, camera_value)
+            let projected0 = vertex_projection(evaluated0, state, camera_value)
+            let projected1 = vertex_projection(evaluated1, state, camera_value)
+            let projected2 = vertex_projection(evaluated2, state, camera_value)
+            let altitude = triangle_pixel_altitude(
+                projected0,
+                projected1,
+                projected2,
+                child_vertex % 6,
+                extent(state),
+            )
+            let barycentric = local_barycentric(child_vertex)
+            let differential = evaluate_differential(
+                value, evaluated.parameter, policy(), 0.000000000001,
+            )
+            let error = if evaluated.child.conditioned && evaluated.root.conditioned {
+                length3(sub3(evaluated.child.position, evaluated.root.position))
+            } else {
+                1.0
+            }
+            if projected.depth > 0.05 {
+                RasterVertex {
+                    position: projected.clip,
+                    varying: SubdivisionVarying {
+                        edge_seed: bary3f(
+                            barycentric.a * altitude * projected.depth,
+                            barycentric.b * altitude * projected.depth,
+                            barycentric.c * altitude * projected.depth,
+                        ),
+                        normal: if state.view_space < 0.5 {
+                            differential.normal
+                        } else {
+                            vec3f(0.0, 0.0, 1.0)
+                        },
+                        parameter: evaluated.parameter,
+                        child_center: vec2f(
+                            (as_f32(child_x) + 0.5) / as_f32(u_resolution),
+                            (as_f32(child_y) + 0.5) / as_f32(v_resolution),
+                        ),
+                        composition_error: error,
+                        view_depth: projected.depth,
+                    },
+                }
+            } else {
+                invalid_vertex()
+            }
+        }
+    }
+
+    fn subdivision_fragment(self, varying: SubdivisionVarying) -> i32
+        uses (FragmentStage<SubdivisionVarying>)
+    {
+        let edge_pixels = minimum_barycentric(varying.edge_seed) / varying.view_depth
+        let wire_coverage = 1.0 - smoothstep(
+            self.wire_px - 0.72,
+            self.wire_px + 0.72,
+            edge_pixels,
+        )
+        let surface = surface_color(varying, self.error_gain)
+        let wire = display_rgb(0.018, 0.025, 0.043)
+        pack_rgba8(mix_display_rgb(surface, wire, wire_coverage))
+    }
+}

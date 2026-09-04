@@ -1,0 +1,13 @@
+[ingot]
+name = "exact_patch_subdivision"
+version = "0.1.0"
+
+[dependencies]
+core = true
+std = true
+fmath = true
+quilting_clifford_bezier = true
+quilting_demo_view = true
+quilting_domain = true
+quilting_oklch = { path = "../../color/quilting_oklch" }
+quilting_patch = true
