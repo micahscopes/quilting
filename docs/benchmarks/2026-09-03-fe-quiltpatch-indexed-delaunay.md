@@ -436,3 +436,11 @@ the exact publication successfully and reported the committed `b5ac3934…`
 source digest plus the derived `[3, 2, 1]` point-sampling dispatch; live GPU
 execution remains pending because that long-lived browser process returned no
 WebGPU adapter after its GPU-process crash quarantine.
+
+A disposable analytical mirror then swept two displaced/folded control nets,
+balanced weights, and each possible tiny corner at a `1.33 million:1` weight
+ratio. Both charts retained 60–93 total points in every case. No exclusion pair
+crossed the nominal reference-chart neighborhood; the largest accepted conflict
+test separation was approximately 0.102 in chart coordinates. This is class-level
+evidence against folded-sheet starvation, not a replacement for the pending live
+GPU receipt.
