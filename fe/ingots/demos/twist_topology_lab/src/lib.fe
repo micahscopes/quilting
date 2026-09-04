@@ -1,0 +1,787 @@
+//! A focused bake-off for stable macro topology on a twisted patch.
+//!
+//! This example intentionally excludes Clifford admission, stochastic point
+//! generation, Delaunay restoration, and atlas microtriangles. It asks one
+//! smaller question: given an always-defined analytic surface and one dyadic
+//! macro cell, which diagonal is supported by cheap geometric evidence?
+//! Parameter and surface views use exactly the same cell identities and
+//! connectivity. The next rung can therefore fill these leaves from the
+//! Quilting atlas without changing their topology contract.
+
+use core::marker::Copy
+use fmath::{clamp, cos, mix, sin, smoothstep, wrap_pi}
+use quilting_domain::{
+    Bary3F,
+    Vec2F,
+    Vec3F,
+    add3,
+    bary3f,
+    cross3,
+    dot3,
+    length2,
+    normalize3_or,
+    scale3,
+    sub3,
+    vec2f,
+    vec3f,
+}
+use quilting_oklch::{
+    DisplayRgb,
+    HuePath,
+    display_rgb,
+    interpolate,
+    mix_display_rgb,
+    oklch,
+    pack_rgba8,
+    scale_lightness_chroma,
+    to_display_rgb,
+}
+use quilting_patch::{
+    Euclidean3Metric,
+    Euclidean3Points,
+    PatchTransformProfile3,
+    QuadDiagonal2,
+    QuadDiagonalProfile2,
+    choose_quad_diagonal2,
+    denotation_sample,
+    patch_transform_profile3,
+    patch_transform_sample3,
+    quad_diagonal_profile2,
+}
+use std::web::view::{
+    ApplyParamBindings,
+    ChoiceOptions,
+    Extent,
+    Param,
+    ParamBindingsProvider,
+    Surface,
+    SurfaceEvent,
+    SurfaceState,
+}
+use std::webgpu::{
+    ClipPosition,
+    Depth24LessEqualMsaa4,
+    FragmentStage,
+    FragmentSurface,
+    GpuProgram,
+    LatestPerFrame,
+    RasterConfiguration,
+    RasterPlan,
+    RasterVertex,
+    ResponsiveBacking,
+    StandardSurfaceRecovery,
+    SurfaceQuality,
+    SurfaceRecovery,
+    SurfaceScheduling,
+    SurfaceTransition,
+    TriangleList,
+    VertexStage,
+    WebGpuBackend,
+    raster_plan,
+}
+
+extern {
+    const fn __f32_from_i32(_: i32) -> f32
+}
+
+const MAX_GRID: u32 = 32
+const MAX_VERTICES: usize = 6144
+
+struct TopologyParams {
+    topology: Param,
+    view_space: Param,
+    grid_level: Param,
+    u_stretch: Param,
+    v_stretch: Param,
+    twist: Param,
+    skew: Param,
+    quality_weight: Param,
+    curvature_weight: Param,
+    tie_band: Param,
+    orbit_yaw: Param,
+    orbit_pitch: Param,
+    orbit_distance: Param,
+    wire_px: Param,
+    heat_gain: Param,
+    res_x: Param,
+    res_y: Param,
+    orbiting: Param,
+}
+
+struct TopologyState {
+    topology: f32,
+    view_space: f32,
+    grid_level: f32,
+    u_stretch: f32,
+    v_stretch: f32,
+    twist: f32,
+    skew: f32,
+    quality_weight: f32,
+    curvature_weight: f32,
+    tie_band: f32,
+    orbit_yaw: f32,
+    orbit_pitch: f32,
+    orbit_distance: f32,
+    wire_px: f32,
+    heat_gain: f32,
+    res_x: f32,
+    res_y: f32,
+    orbiting: f32,
+}
+
+impl SurfaceState for TopologyState {
+    type Params = TopologyParams
+}
+
+derive ApplyParamBindings for TopologyState using ParamBindingsProvider
+
+const fn topology_params() -> TopologyParams {
+    TopologyParams {
+        topology: Param::choice(
+            options: ChoiceOptions::four(
+                first: "fixed 00 to 11",
+                second: "fixed 10 to 01",
+                third: "alternating diamonds",
+                fourth: "measured diagonal",
+            ),
+            init: 3.0,
+        ),
+        view_space: Param::choice(
+            options: ChoiceOptions::two(first: "surface", second: "parameter domain"),
+            init: 0.0,
+        ),
+        grid_level: Param::int(min: 0.0, max: 5.0, init: 3.0),
+        u_stretch: Param::log(min: 0.05, max: 20.0, init: 2.4),
+        v_stretch: Param::log(min: 0.05, max: 20.0, init: 1.1),
+        twist: Param::range(min: -14.0, max: 14.0, init: 6.5),
+        skew: Param::range(min: -10.0, max: 10.0, init: 2.8),
+        quality_weight: Param::range(min: 0.0, max: 2.0, init: 1.0),
+        curvature_weight: Param::range(min: 0.0, max: 2.0, init: 0.12),
+        tie_band: Param::log(min: 0.000001, max: 0.2, init: 0.002),
+        orbit_yaw: Param::range(min: -3.14159265, max: 3.14159265, init: -0.72),
+        orbit_pitch: Param::range(min: -1.35, max: 1.35, init: 0.28),
+        orbit_distance: Param::log(min: 2.5, max: 24.0, init: 8.4),
+        wire_px: Param::range(min: 0.0, max: 2.0, init: 0.68),
+        heat_gain: Param::range(min: 0.0, max: 3.0, init: 1.0),
+        res_x: Param::extent_x(),
+        res_y: Param::extent_y(),
+        orbiting: Param::fixed(0.0),
+    }
+}
+
+fn as_f32(_ value: u32) -> f32 {
+    __f32_from_i32(value.downcast_unchecked())
+}
+
+fn grid_resolution(_ level: f32) -> u32 {
+    if level < 0.5 {
+        1
+    } else if level < 1.5 {
+        2
+    } else if level < 2.5 {
+        4
+    } else if level < 3.5 {
+        8
+    } else if level < 4.5 { 16 } else { 32 }
+}
+
+struct SurfaceDifferential { position: Vec3F, tangent_u: Vec3F, tangent_v: Vec3F, normal: Vec3F }
+impl Copy for SurfaceDifferential {}
+
+/// A polynomial saddle with independently controllable u/v scale and an
+/// asymmetric mixed term. It remains finite and admitted for every UI state,
+/// making it a clean topology oracle rather than another chart-validity test.
+fn surface_differential(
+    _ parameter: Vec2F,
+    _ u_stretch: f32,
+    _ v_stretch: f32,
+    _ twist: f32,
+    _ skew: f32,
+) -> SurfaceDifferential {
+    let u = parameter.x - 0.5
+    let v = parameter.y - 0.5
+    let height = twist * u * v + skew * (u * u * v - u * v * v)
+    let height_u = twist * v + skew * (2.0 * u * v - v * v)
+    let height_v = twist * u + skew * (u * u - 2.0 * u * v)
+    let tangent_u = vec3f(u_stretch, height_u, 0.0)
+    let tangent_v = vec3f(0.0, height_v, v_stretch)
+    SurfaceDifferential {
+        position: vec3f(u * u_stretch, height, v * v_stretch),
+        tangent_u: tangent_u,
+        tangent_v: tangent_v,
+        normal: normalize3_or(
+            cross3(tangent_u, tangent_v),
+            vec3f(0.0, 1.0, 0.0),
+            0.0000000001,
+        ),
+    }
+}
+
+struct CellParameters { p00: Vec2F, p10: Vec2F, p01: Vec2F, p11: Vec2F, center: Vec2F }
+impl Copy for CellParameters {}
+
+fn cell_parameters(_ x: u32, _ y: u32, _ resolution: u32) -> CellParameters {
+    let inverse = 1.0 / as_f32(resolution)
+    let u0 = as_f32(x) * inverse
+    let v0 = as_f32(y) * inverse
+    let u1 = as_f32(x + 1) * inverse
+    let v1 = as_f32(y + 1) * inverse
+    CellParameters {
+        p00: vec2f(u0, v0),
+        p10: vec2f(u1, v0),
+        p01: vec2f(u0, v1),
+        p11: vec2f(u1, v1),
+        center: vec2f((u0 + u1) * 0.5, (v0 + v1) * 0.5),
+    }
+}
+
+struct CellEvidence { transform: PatchTransformProfile3, diagonal: QuadDiagonalProfile2 }
+impl Copy for CellEvidence {}
+
+fn cell_evidence(_ cell: CellParameters, _ state: TopologyState) -> CellEvidence {
+    let p00 = surface_differential(
+        cell.p00,
+        state.u_stretch,
+        state.v_stretch,
+        state.twist,
+        state.skew,
+    )
+    let p10 = surface_differential(
+        cell.p10,
+        state.u_stretch,
+        state.v_stretch,
+        state.twist,
+        state.skew,
+    )
+    let p01 = surface_differential(
+        cell.p01,
+        state.u_stretch,
+        state.v_stretch,
+        state.twist,
+        state.skew,
+    )
+    let p11 = surface_differential(
+        cell.p11,
+        state.u_stretch,
+        state.v_stretch,
+        state.twist,
+        state.skew,
+    )
+    let center = surface_differential(
+        cell.center,
+        state.u_stretch,
+        state.v_stretch,
+        state.twist,
+        state.skew,
+    )
+    CellEvidence {
+        transform: patch_transform_profile3(
+            patch_transform_sample3(p00.tangent_u, p00.tangent_v, 0.0000000001, true),
+            patch_transform_sample3(p10.tangent_u, p10.tangent_v, 0.0000000001, true),
+            patch_transform_sample3(p01.tangent_u, p01.tangent_v, 0.0000000001, true),
+            patch_transform_sample3(p11.tangent_u, p11.tangent_v, 0.0000000001, true),
+            patch_transform_sample3(center.tangent_u, center.tangent_v, 0.0000000001, true),
+            0.0000000001,
+        ),
+        diagonal: quad_diagonal_profile2<Euclidean3Points, Euclidean3Metric>(
+            denotation_sample<Euclidean3Points>(p00.position, true),
+            denotation_sample<Euclidean3Points>(p10.position, true),
+            denotation_sample<Euclidean3Points>(p01.position, true),
+            denotation_sample<Euclidean3Points>(p11.position, true),
+            denotation_sample<Euclidean3Points>(center.position, true),
+            Euclidean3Metric {},
+            0.0000001,
+        ),
+    }
+}
+
+fn cell_diagonal(
+    _ x: u32,
+    _ y: u32,
+    _ state: TopologyState,
+    _ evidence: CellEvidence,
+) -> QuadDiagonal2 {
+    if state.topology < 0.5 {
+        QuadDiagonal2::Corner00To11
+    } else if state.topology < 1.5 {
+        QuadDiagonal2::Corner10To01
+    } else if state.topology < 2.5 {
+        if (x + y) % 2 == 0 {
+            QuadDiagonal2::Corner00To11
+        } else {
+            QuadDiagonal2::Corner10To01
+        }
+    } else {
+        choose_quad_diagonal2(
+            evidence.diagonal,
+            state.quality_weight,
+            state.curvature_weight,
+            state.tie_band,
+        )
+    }
+}
+
+fn local_parameter(_ diagonal: QuadDiagonal2, _ local_vertex: u32) -> Vec2F {
+    match diagonal {
+        QuadDiagonal2::Corner00To11 => {
+            if local_vertex == 0 || local_vertex == 3 {
+                vec2f(0.0, 0.0)
+            } else if local_vertex == 1 {
+                vec2f(1.0, 0.0)
+            } else if local_vertex == 2 || local_vertex == 4 {
+                vec2f(1.0, 1.0)
+            } else {
+                vec2f(0.0, 1.0)
+            }
+        },
+        QuadDiagonal2::Corner10To01 => {
+            if local_vertex == 0 {
+                vec2f(0.0, 0.0)
+            } else if local_vertex == 1 || local_vertex == 3 {
+                vec2f(1.0, 0.0)
+            } else if local_vertex == 2 || local_vertex == 5 {
+                vec2f(0.0, 1.0)
+            } else {
+                vec2f(1.0, 1.0)
+            }
+        },
+    }
+}
+
+fn local_barycentric(_ local_vertex: u32) -> Bary3F {
+    if local_vertex == 0 || local_vertex == 3 {
+        bary3f(1.0, 0.0, 0.0)
+    } else if local_vertex == 1 || local_vertex == 4 {
+        bary3f(0.0, 1.0, 0.0)
+    } else {
+        bary3f(0.0, 0.0, 1.0)
+    }
+}
+
+fn parameter_in_cell(_ cell: CellParameters, _ local: Vec2F) -> Vec2F {
+    vec2f(
+        mix(cell.p00.x, cell.p11.x, local.x),
+        mix(cell.p00.y, cell.p11.y, local.y),
+    )
+}
+
+struct CameraFrame {
+    eye: Vec3F,
+    right: Vec3F,
+    up: Vec3F,
+    forward: Vec3F,
+    focal: f32,
+    aspect: f32,
+    near: f32,
+    far: f32,
+}
+impl Copy for CameraFrame {}
+
+fn camera_frame(_ state: TopologyState) -> CameraFrame {
+    let cp = cos(state.orbit_pitch)
+    let offset = vec3f(
+        cp * sin(state.orbit_yaw),
+        sin(state.orbit_pitch),
+        cp * cos(state.orbit_yaw),
+    )
+    let target = vec3f(0.0, 0.0, 0.0)
+    let eye = add3(target, scale3(offset, state.orbit_distance))
+    let forward = normalize3_or(sub3(target, eye), vec3f(0.0, 0.0, -1.0), 0.00000001)
+    let right = normalize3_or(
+        cross3(forward, vec3f(0.0, 1.0, 0.0)),
+        vec3f(1.0, 0.0, 0.0),
+        0.00000001,
+    )
+    let up = normalize3_or(cross3(right, forward), vec3f(0.0, 1.0, 0.0), 0.00000001)
+    CameraFrame {
+        eye: eye,
+        right: right,
+        up: up,
+        forward: forward,
+        focal: 1.62,
+        aspect: if state.res_y > 0.0 {
+            state.res_x / state.res_y
+        } else {
+            1.0
+        },
+        near: 0.05,
+        far: 100.0,
+    }
+}
+
+struct Projection { clip: ClipPosition, depth: f32 }
+impl Copy for Projection {}
+
+fn project(_ camera: CameraFrame, _ position: Vec3F) -> Projection {
+    let relative = sub3(position, camera.eye)
+    let view_x = dot3(relative, camera.right)
+    let view_y = dot3(relative, camera.up)
+    let depth = dot3(relative, camera.forward)
+    let depth_scale = camera.far / (camera.far - camera.near)
+    Projection {
+        clip: ClipPosition {
+            x: camera.focal * view_x / camera.aspect,
+            y: camera.focal * view_y,
+            z: depth_scale * depth - depth_scale * camera.near,
+            w: depth,
+        },
+        depth: depth,
+    }
+}
+
+fn parameter_projection(_ parameter: Vec2F) -> Projection {
+    Projection {
+        clip: ClipPosition {
+            x: (parameter.x * 2.0 - 1.0) * 0.86,
+            y: (parameter.y * 2.0 - 1.0) * 0.86,
+            z: 0.5,
+            w: 1.0,
+        },
+        depth: 1.0,
+    }
+}
+
+fn projected_screen(_ value: Projection, _ res_x: f32, _ res_y: f32) -> Vec2F {
+    vec2f(
+        0.5 * res_x * value.clip.x / value.clip.w,
+        0.5 * res_y * value.clip.y / value.clip.w,
+    )
+}
+
+fn triangle_pixel_altitude(
+    _ p0: Projection,
+    _ p1: Projection,
+    _ p2: Projection,
+    _ local_vertex: u32,
+    _ res_x: f32,
+    _ res_y: f32,
+) -> f32 {
+    let s0 = projected_screen(p0, res_x, res_y)
+    let s1 = projected_screen(p1, res_x, res_y)
+    let s2 = projected_screen(p2, res_x, res_y)
+    let e01 = vec2f(s1.x - s0.x, s1.y - s0.y)
+    let e02 = vec2f(s2.x - s0.x, s2.y - s0.y)
+    let twice_area = if e01.x * e02.y - e01.y * e02.x < 0.0 {
+        -(e01.x * e02.y - e01.y * e02.x)
+    } else {
+        e01.x * e02.y - e01.y * e02.x
+    }
+    let opposite = if local_vertex == 0 || local_vertex == 3 {
+        length2(vec2f(s2.x - s1.x, s2.y - s1.y))
+    } else if local_vertex == 1 || local_vertex == 4 {
+        length2(vec2f(s0.x - s2.x, s0.y - s2.y))
+    } else {
+        length2(vec2f(s1.x - s0.x, s1.y - s0.y))
+    }
+    twice_area / (opposite + 0.00001)
+}
+
+pub struct TopologyVarying {
+    pub edge_seed: Bary3F,
+    pub normal: Vec3F,
+    pub heat: f32,
+    pub diagonal: f32,
+    pub quality_delta: f32,
+    pub view_depth: f32,
+}
+impl Copy for TopologyVarying {}
+
+fn invalid_vertex() -> RasterVertex<TopologyVarying> {
+    RasterVertex {
+        position: ClipPosition { x: 2.0, y: 2.0, z: 0.0, w: 1.0 },
+        varying: TopologyVarying {
+            edge_seed: bary3f(0.0, 0.0, 0.0),
+            normal: vec3f(0.0, 1.0, 0.0),
+            heat: 0.0,
+            diagonal: 0.0,
+            quality_delta: 0.0,
+            view_depth: 1.0,
+        },
+    }
+}
+
+fn topology_state(
+    _ topology: f32,
+    _ view_space: f32,
+    _ grid_level: f32,
+    _ u_stretch: f32,
+    _ v_stretch: f32,
+    _ twist: f32,
+    _ skew: f32,
+    _ quality_weight: f32,
+    _ curvature_weight: f32,
+    _ tie_band: f32,
+    _ orbit_yaw: f32,
+    _ orbit_pitch: f32,
+    _ orbit_distance: f32,
+    _ wire_px: f32,
+    _ heat_gain: f32,
+    _ res_x: f32,
+    _ res_y: f32,
+    _ orbiting: f32,
+) -> TopologyState {
+    TopologyState {
+        topology: topology,
+        view_space: view_space,
+        grid_level: grid_level,
+        u_stretch: u_stretch,
+        v_stretch: v_stretch,
+        twist: twist,
+        skew: skew,
+        quality_weight: quality_weight,
+        curvature_weight: curvature_weight,
+        tie_band: tie_band,
+        orbit_yaw: orbit_yaw,
+        orbit_pitch: orbit_pitch,
+        orbit_distance: orbit_distance,
+        wire_px: wire_px,
+        heat_gain: heat_gain,
+        res_x: res_x,
+        res_y: res_y,
+        orbiting: orbiting,
+    }
+}
+
+fn topology_color(_ varying: TopologyVarying) -> DisplayRgb {
+    let main = oklch(0.77, 0.095, 0.62)
+    let cross = oklch(0.75, 0.095, 4.55)
+    let selected = interpolate(main, cross, varying.diagonal, HuePath::Shorter)
+    let stressed = interpolate(
+        selected,
+        oklch(0.68, 0.16, 0.28),
+        varying.heat,
+        HuePath::Shorter,
+    )
+    let normal = normalize3_or(varying.normal, vec3f(0.0, 1.0, 0.0), 0.0000001)
+    let light = normalize3_or(vec3f(-0.35, 0.75, 0.58), vec3f(0.0, 1.0, 0.0), 0.0000001)
+    let diffuse = if dot3(normal, light) < 0.0 {
+        -dot3(normal, light)
+    } else {
+        dot3(normal, light)
+    }
+    to_display_rgb(
+        scale_lightness_chroma(
+            stressed,
+            0.74 + 0.28 * diffuse,
+            0.90 + 0.10 * smoothstep(0.0, 0.15, varying.quality_delta),
+        ),
+    )
+}
+
+actor TwistTopologyLab uses (
+    GpuProgram<WebGpuBackend>,
+    SurfaceQuality<ResponsiveBacking>,
+    SurfaceRecovery<StandardSurfaceRecovery>,
+) {
+    topology: f32,
+    view_space: f32,
+    grid_level: f32,
+    u_stretch: f32,
+    v_stretch: f32,
+    twist: f32,
+    skew: f32,
+    quality_weight: f32,
+    curvature_weight: f32,
+    tie_band: f32,
+    orbit_yaw: f32,
+    orbit_pitch: f32,
+    orbit_distance: f32,
+    wire_px: f32,
+    heat_gain: f32,
+    res_x: f32,
+    res_y: f32,
+    orbiting: f32,
+
+    const fn raster() -> RasterPlan uses (RasterConfiguration) {
+        raster_plan<Depth24LessEqualMsaa4>()
+    }
+
+    const fn view() -> Surface<TopologyParams> {
+        Surface { extent: Extent::square(768), params: topology_params() }
+    }
+
+    fn navigate(self, event: own SurfaceEvent) -> TopologyState
+        uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>)
+    {
+        let mut state = topology_state(
+            self.topology,
+            self.view_space,
+            self.grid_level,
+            self.u_stretch,
+            self.v_stretch,
+            self.twist,
+            self.skew,
+            self.quality_weight,
+            self.curvature_weight,
+            self.tie_band,
+            self.orbit_yaw,
+            self.orbit_pitch,
+            self.orbit_distance,
+            self.wire_px,
+            self.heat_gain,
+            self.res_x,
+            self.res_y,
+            self.orbiting,
+        ).apply_param_bindings(topology_params(), event)
+        if event.is_pointer_down() {
+            state.orbiting = 1.0
+        }
+        if event.is_pointer_move() && event.buttons != 0 && state.orbiting > 0.5 {
+            state.orbit_yaw = wrap_pi(state.orbit_yaw - event.delta_x * 0.008)
+            state.orbit_pitch = clamp(state.orbit_pitch - event.delta_y * 0.008, -1.35, 1.35)
+        }
+        if event.is_pointer_up() {
+            state.orbiting = 0.0
+        }
+        if event.wheel_delta < 0.0 {
+            state.orbit_distance = clamp(state.orbit_distance * 0.90, 2.5, 24.0)
+        } else if event.wheel_delta > 0.0 {
+            state.orbit_distance = clamp(state.orbit_distance * 1.10, 2.5, 24.0)
+        }
+        state
+    }
+
+    fn background(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        -15396337
+    }
+
+    fn topology_vertices(self, vertex_index: u32) -> RasterVertex<TopologyVarying>
+        uses (VertexStage<TopologyVarying, TriangleList<MAX_VERTICES>>)
+    {
+        let state = topology_state(
+            self.topology,
+            self.view_space,
+            self.grid_level,
+            self.u_stretch,
+            self.v_stretch,
+            self.twist,
+            self.skew,
+            self.quality_weight,
+            self.curvature_weight,
+            self.tie_band,
+            self.orbit_yaw,
+            self.orbit_pitch,
+            self.orbit_distance,
+            self.wire_px,
+            self.heat_gain,
+            self.res_x,
+            self.res_y,
+            self.orbiting,
+        )
+        let resolution = grid_resolution(state.grid_level)
+        let cell_index = vertex_index / 6
+        let cell_x = cell_index % MAX_GRID
+        let cell_y = cell_index / MAX_GRID
+        let active = cell_x < resolution && cell_y < resolution
+        let local_vertex = vertex_index % 6
+        let cell = cell_parameters(cell_x, cell_y, resolution)
+        let evidence = cell_evidence(cell, state)
+        let diagonal = cell_diagonal(cell_x, cell_y, state, evidence)
+        let local = local_parameter(diagonal, local_vertex)
+        let parameter = parameter_in_cell(cell, local)
+        let differential = surface_differential(
+            parameter, state.u_stretch, state.v_stretch, state.twist, state.skew,
+        )
+        let local0 = local_parameter(diagonal, (local_vertex / 3) * 3)
+        let local1 = local_parameter(diagonal, (local_vertex / 3) * 3 + 1)
+        let local2 = local_parameter(diagonal, (local_vertex / 3) * 3 + 2)
+        let parameter0 = parameter_in_cell(cell, local0)
+        let parameter1 = parameter_in_cell(cell, local1)
+        let parameter2 = parameter_in_cell(cell, local2)
+        let surface0 = surface_differential(
+            parameter0, state.u_stretch, state.v_stretch, state.twist, state.skew,
+        )
+        let surface1 = surface_differential(
+            parameter1, state.u_stretch, state.v_stretch, state.twist, state.skew,
+        )
+        let surface2 = surface_differential(
+            parameter2, state.u_stretch, state.v_stretch, state.twist, state.skew,
+        )
+        let camera = camera_frame(state)
+        let projected = if state.view_space < 0.5 {
+            project(camera, differential.position)
+        } else {
+            parameter_projection(parameter)
+        }
+        let projected0 = if state.view_space < 0.5 {
+            project(camera, surface0.position)
+        } else {
+            parameter_projection(parameter0)
+        }
+        let projected1 = if state.view_space < 0.5 {
+            project(camera, surface1.position)
+        } else {
+            parameter_projection(parameter1)
+        }
+        let projected2 = if state.view_space < 0.5 {
+            project(camera, surface2.position)
+        } else {
+            parameter_projection(parameter2)
+        }
+        let altitude = triangle_pixel_altitude(
+            projected0, projected1, projected2, local_vertex,
+            state.res_x, state.res_y,
+        )
+        let barycentric = local_barycentric(local_vertex)
+        let heat_signal = evidence.transform.normal_turn
+            + 0.28 * evidence.transform.mixed_turn
+            + evidence.transform.pullback.metric_shape_variation
+            + 0.16 * (evidence.transform.pullback.area_variation - 1.0)
+        let diagonal_value = match diagonal {
+            QuadDiagonal2::Corner00To11 => 0.0,
+            QuadDiagonal2::Corner10To01 => 1.0,
+        }
+        let quality_delta = if evidence.diagonal.corner00_to_11_quality
+                > evidence.diagonal.corner10_to_01_quality {
+            evidence.diagonal.corner00_to_11_quality -
+                evidence.diagonal.corner10_to_01_quality
+        } else {
+            evidence.diagonal.corner10_to_01_quality -
+                evidence.diagonal.corner00_to_11_quality
+        }
+        if active && projected.depth > camera.near {
+            RasterVertex {
+                position: projected.clip,
+                varying: TopologyVarying {
+                    edge_seed: bary3f(
+                        barycentric.a * altitude * projected.depth,
+                        barycentric.b * altitude * projected.depth,
+                        barycentric.c * altitude * projected.depth,
+                    ),
+                    normal: if state.view_space < 0.5 {
+                        differential.normal
+                    } else {
+                        vec3f(0.0, 1.0, 0.0)
+                    },
+                    heat: smoothstep(0.0, 1.35, heat_signal * state.heat_gain),
+                    diagonal: diagonal_value,
+                    quality_delta: quality_delta,
+                    view_depth: projected.depth,
+                },
+            }
+        } else {
+            invalid_vertex()
+        }
+    }
+
+    fn topology_fragment(self, varying: TopologyVarying) -> i32
+        uses (FragmentStage<TopologyVarying>)
+    {
+        let mut minimum_edge = varying.edge_seed.a
+        if varying.edge_seed.b < minimum_edge {
+            minimum_edge = varying.edge_seed.b
+        }
+        if varying.edge_seed.c < minimum_edge {
+            minimum_edge = varying.edge_seed.c
+        }
+        let edge_pixels = minimum_edge / varying.view_depth
+        let wire_coverage = 1.0 - smoothstep(
+            self.wire_px - 0.72,
+            self.wire_px + 0.72,
+            edge_pixels,
+        )
+        let surface = topology_color(varying)
+        let wire = display_rgb(0.018, 0.025, 0.043)
+        pack_rgba8(mix_display_rgb(surface, wire, wire_coverage))
+    }
+}
