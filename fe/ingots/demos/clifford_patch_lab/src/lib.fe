@@ -28,6 +28,7 @@ use quilting_atlas::sampling::{
     InteriorCandidate,
     boundary_seed,
     candidate_priority,
+    interior_candidate_at_slot,
     mix32,
     poisson_radius_squared,
 }
@@ -60,12 +61,10 @@ use quilting_clifford_bezier::{
     evaluate,
     evaluate_differential,
     evaluate_projective,
-    evaluate_projective_differential,
     even,
     parameter_triangle_conditioned,
     patch,
     projective_distance_squared,
-    projective_pullback_metric,
     projective_triangle_area,
     scale_weight,
 }
@@ -97,13 +96,7 @@ use quilting_oklch::{
     scale_lightness_chroma,
     to_display_rgb,
 }
-use quilting_patch::{
-    PullbackSample2,
-    pullback_metric2,
-    pullback_poisson_conflict,
-    pullback_sample2,
-    ranked_quantized_position,
-}
+use quilting_patch::ranked_quantized_position
 use std::web::view::{
     ApplyParamBindings,
     ChoiceOptions,
@@ -178,11 +171,11 @@ const DEFORMED_TRIANGLE_WORDS: usize = DEFORMED_TRIANGLES * TRIANGLE_WORDS
 const DEFORMED_TWIN_WORDS: usize = DEFORMED_TRIANGLES * TOPOLOGY_TWIN_WORDS_PER_TRIANGLE
 const DEFORMED_EDGE_INDEX_WORDS: usize = DEFORMED_POINTS + DEFORMED_TWIN_WORDS
 const DEFORMED_PROPOSAL_WORDS: usize = (DEFORMED_TWIN_WORDS + 31) / 32
-// One chart parameter, its normalized-projective pullback tensor, one
-// normalized projective representative, and the shared conditioning bit.
-// The parameter and tensor keep exclusion intrinsic when distinct folded
-// sheets happen to pass close in the ambient projective embedding.
-const DEFORMED_SAMPLE_LANES: usize = 14
+// One chart parameter, one normalized projective representative, and the
+// shared conditioning bit. Chart locality and ambient projective distance are
+// complementary facts: the former prevents unrelated folded sheets from
+// excluding one another, while the latter supplies the actual local metric.
+const DEFORMED_SAMPLE_LANES: usize = 11
 const DEFORMED_SAMPLE_SLOTS: usize = DEFORMED_CANDIDATES + DEFORMED_BOUNDARY_POINTS
 const DEFORMED_SAMPLE_WORDS: usize = DEFORMED_SAMPLE_SLOTS * DEFORMED_SAMPLE_LANES
 const DEFORMED_CANDIDATE_LANES: usize = 6
@@ -284,11 +277,12 @@ impl Copy for FixedParameterTriangle {}
 struct SurfacePoint { position: IsotropicProjectiveF, defined: bool }
 impl Copy for SurfacePoint {}
 
-struct SurfacePullbackSample {
-    pullback: PullbackSample2,
+struct SurfaceProjectiveSample {
+    parameter: Vec2F,
     representative: IsotropicProjectiveF,
+    defined: bool,
 }
-impl Copy for SurfacePullbackSample {}
+impl Copy for SurfaceProjectiveSample {}
 
 struct SurfaceCandidateConflict<const WORDS: usize> {
     samples: StorageBuffer<f32, WORDS>,
@@ -424,6 +418,31 @@ fn surface_area_candidate(
         priority: priority,
         slot: slot,
         valid: point.a > 0 && point.b > 0 && point.c > 0,
+    }
+}
+
+/// Preserve one coarse chart-covering stream while a second stream follows
+/// projective surface area.
+///
+/// The shared atlas sampler assigns two deterministic trials to every stable
+/// slot pair. Even slots use the deformation-aware inverse-area construction;
+/// odd slots retain the stratified chart proposal. The former spends detail
+/// where the patch stretches, while the latter prevents a sharply concentrated
+/// measure from starving an otherwise valid part of the topology.
+fn covered_surface_candidate(
+    _ patch: IsotropicBilinearPatch,
+    _ chart: u32,
+    _ slot: u32,
+) -> InteriorCandidate {
+    if slot % 2 == 0 {
+        surface_area_candidate(patch, chart, slot)
+    } else {
+        interior_candidate_at_slot(
+            deformed_key(),
+            deformed_patch_ordinal(chart),
+            deformed_seed(chart),
+            slot,
+        )
     }
 }
 
@@ -602,24 +621,16 @@ fn projective_poisson_radius_squared() -> f32 {
 fn patch_projective_sample(
     _ patch: IsotropicBilinearPatch,
     _ parameter: Vec2F,
-) -> SurfacePullbackSample {
-    let differential = evaluate_projective_differential(
+) -> SurfaceProjectiveSample {
+    let sample = evaluate_projective(
         patch,
         parameter,
         policy().minimum_denominator_norm_squared,
     )
-    let metric = projective_pullback_metric(differential)
-    SurfacePullbackSample {
-        pullback: pullback_sample2(
-            parameter,
-            pullback_metric2(
-                metric.uu,
-                metric.uv,
-                metric.vv,
-                differential.sample.conditioned,
-            ),
-        ),
-        representative: differential.sample.representative,
+    SurfaceProjectiveSample {
+        parameter: parameter,
+        representative: sample.representative,
+        defined: sample.conditioned,
     }
 }
 
@@ -627,7 +638,7 @@ fn fixed_projective_sample(
     _ patch: IsotropicBilinearPatch,
     _ chart: u32,
     _ point: FixedBarycentric,
-) -> SurfacePullbackSample {
+) -> SurfaceProjectiveSample {
     patch_projective_sample(patch, fixed_parameter(chart, point))
 }
 
@@ -643,83 +654,82 @@ fn deformed_boundary_slot(_ ordinal: u32) -> u32 {
 fn store_projective_sample<const WORDS: usize>(
     _ samples: StorageBuffer<f32, WORDS>,
     _ ordinal: u32,
-    _ sample: SurfacePullbackSample,
+    _ sample: SurfaceProjectiveSample,
 ) {
     let offset = sample_offset(ordinal)
-    samples.store(index: offset, value: sample.pullback.parameter.x)
-    samples.store(index: offset + 1, value: sample.pullback.parameter.y)
-    samples.store(index: offset + 2, value: sample.pullback.metric.uu)
-    samples.store(index: offset + 3, value: sample.pullback.metric.uv)
-    samples.store(index: offset + 4, value: sample.pullback.metric.vv)
-    samples.store(index: offset + 5, value: sample.representative.numerator_e1)
-    samples.store(index: offset + 6, value: sample.representative.numerator_e2)
-    samples.store(index: offset + 7, value: sample.representative.numerator_e3)
-    samples.store(index: offset + 8, value: sample.representative.numerator_e123)
-    samples.store(index: offset + 9, value: sample.representative.denominator_scalar)
-    samples.store(index: offset + 10, value: sample.representative.denominator_e12)
-    samples.store(index: offset + 11, value: sample.representative.denominator_e13)
-    samples.store(index: offset + 12, value: sample.representative.denominator_e23)
+    samples.store(index: offset, value: sample.parameter.x)
+    samples.store(index: offset + 1, value: sample.parameter.y)
+    samples.store(index: offset + 2, value: sample.representative.numerator_e1)
+    samples.store(index: offset + 3, value: sample.representative.numerator_e2)
+    samples.store(index: offset + 4, value: sample.representative.numerator_e3)
+    samples.store(index: offset + 5, value: sample.representative.numerator_e123)
+    samples.store(index: offset + 6, value: sample.representative.denominator_scalar)
+    samples.store(index: offset + 7, value: sample.representative.denominator_e12)
+    samples.store(index: offset + 8, value: sample.representative.denominator_e13)
+    samples.store(index: offset + 9, value: sample.representative.denominator_e23)
     samples.store(
-            index: offset + 13,
-            value: if sample.pullback.metric.defined { 1.0 } else { 0.0 },
+            index: offset + 10,
+            value: if sample.defined { 1.0 } else { 0.0 },
         )
 }
 
 fn load_projective_sample<const WORDS: usize>(
     _ samples: StorageBuffer<f32, WORDS>,
     _ ordinal: u32,
-) -> SurfacePullbackSample {
+) -> SurfaceProjectiveSample {
     let offset = sample_offset(ordinal)
-    SurfacePullbackSample {
-        pullback: pullback_sample2(
-            vec2f(
-                samples.load(index: offset),
-                samples.load(index: offset + 1),
-            ),
-            pullback_metric2(
-                samples.load(index: offset + 2),
-                samples.load(index: offset + 3),
-                samples.load(index: offset + 4),
-                samples.load(index: offset + 13) > 0.5,
-            ),
+    SurfaceProjectiveSample {
+        parameter: vec2f(
+            samples.load(index: offset),
+            samples.load(index: offset + 1),
         ),
         representative: IsotropicProjectiveF {
-            numerator_e1: samples.load(index: offset + 5),
-            numerator_e2: samples.load(index: offset + 6),
-            numerator_e3: samples.load(index: offset + 7),
-            numerator_e123: samples.load(index: offset + 8),
-            denominator_scalar: samples.load(index: offset + 9),
-            denominator_e12: samples.load(index: offset + 10),
-            denominator_e13: samples.load(index: offset + 11),
-            denominator_e23: samples.load(index: offset + 12),
+            numerator_e1: samples.load(index: offset + 2),
+            numerator_e2: samples.load(index: offset + 3),
+            numerator_e3: samples.load(index: offset + 4),
+            numerator_e123: samples.load(index: offset + 5),
+            denominator_scalar: samples.load(index: offset + 6),
+            denominator_e12: samples.load(index: offset + 7),
+            denominator_e13: samples.load(index: offset + 8),
+            denominator_e23: samples.load(index: offset + 9),
         },
+        defined: samples.load(index: offset + 10) > 0.5,
     }
 }
 
+fn reference_poisson_radius_squared() -> f32 {
+    let scale = as_f32(BARYCENTRIC_SCALE)
+    as_f32(poisson_radius_squared(deformed_key(), root_fixed_triangle().p0)) /
+        (scale * scale)
+}
+
+/// Ambient distance does not encode whether two images belong to the same
+/// local sheet. Bound exclusion to one nominal topology neighborhood so two
+/// distant folded sheets can never participate in one Poisson comparison.
+fn parameters_are_local(
+    _ first: SurfaceProjectiveSample,
+    _ second: SurfaceProjectiveSample,
+) -> bool {
+    let ds = second.parameter.x - first.parameter.x
+    let dt = second.parameter.y - first.parameter.y
+    3.0 * (ds * ds + dt * dt + ds * dt) < reference_poisson_radius_squared()
+}
+
 fn projective_samples_conflict(
-    _ first: SurfacePullbackSample,
-    _ second: SurfacePullbackSample,
+    _ first: SurfaceProjectiveSample,
+    _ second: SurfaceProjectiveSample,
 ) -> bool {
     let radius_squared = projective_poisson_radius_squared()
-    // Ambient chord distance is a necessary cheap lower bound. The pullback
-    // estimate then decides whether the two nearby images are also nearby on
-    // the parameterized surface; separate folded sheets no longer erase one
-    // another merely because their images cross.
-    first.pullback.metric.defined
-        && second.pullback.metric.defined
+    first.defined
+        && second.defined
+        && parameters_are_local(first, second)
         && projective_distance_squared(first.representative, second.representative) < radius_squared
-        && pullback_poisson_conflict(
-            first.pullback,
-            radius_squared,
-            second.pullback,
-            radius_squared,
-        )
 }
 
 impl<const WORDS: usize> CandidateConflictPolicy for SurfaceCandidateConflict<WORDS> {
     fn conflicts_boundary(self, _ key: AtlasKey, _ candidate: InteriorCandidate) -> bool {
         let candidate_sample = load_projective_sample(self.samples, candidate.slot)
-        let mut conflict = !candidate.valid || !candidate_sample.pullback.metric.defined
+        let mut conflict = !candidate.valid || !candidate_sample.defined
         let mut ordinal: u32 = 0
         let count = boundary_vertices(key)
         while ordinal < count {
@@ -1938,7 +1948,7 @@ actor CliffordPatchLab uses (
             self.p11_x, self.p11_y, self.p11_z,
             self.w00, self.w10, self.w01, self.w11,
         )
-        let candidate = surface_area_candidate(patch, chart, slot)
+        let candidate = covered_surface_candidate(patch, chart, slot)
         let sample = fixed_projective_sample(patch, chart, candidate.point)
         if chart == 0 {
             store_surface_candidate(self.surface_candidates_0, candidate)

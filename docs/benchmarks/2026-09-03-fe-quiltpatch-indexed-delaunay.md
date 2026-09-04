@@ -386,22 +386,36 @@ The final release development build emitted 18 passes, 35,362 Wasm bytes,
 ## Folded-sheet exclusion regression
 
 A further live control-cage state exposed a distinction not covered by the
-construction and restoration stress gate. The normalized weights were only
-`[16, 0.72, 0.82, 3.8502095]`, but the four moved controls formed a strongly
-folded projective surface. Direct ambient projective-chord exclusion treated
-different sheets as neighbors when their images passed close. An independent
-CPU audit of the exact captured state found that 412 of 2,782 chart-0
-candidate conflicts and 1,046 of 5,224 chart-1 conflicts joined parameter
-points more than `0.25` UV units apart. Conflicting pairs reached parameter
-separations of `1.045` and `1.187`; chart 1 retained only approximately two
-interior seeds despite remaining structurally valid.
+construction and restoration stress gate. Its exact normalized corner scales
+were `[0.0035487253, 0.10787770, 0.03836406, 3.8502095]`, a ratio of
+approximately `1084.96:1`; `p01` and `p11` had also moved. Direct ambient
+projective-chord exclusion treated distant sheets as neighbors when their
+images passed close. The live GPU receipts before this fix retained only
+`40/24` total points across the two charts, including the 24 mandatory boundary
+points in each chart.
 
-The sampler now composes two facts. Projective chord distance remains a cheap
-necessary lower bound, while the first fundamental form of the normalized
-homogeneous lift supplies the intrinsic exclusion decision. Thus nearby points
-on one sheet still repel, but an extrinsic self-approach does not delete a
-distant sheet. This is deliberately not the old affine-quotient pullback: the
-normalized projective differential is finite across affine poles and invariant
-under common scaling of all four weights. The terminating short-edge
-restoration objective remains unchanged, so reintroducing the intrinsic metric
-for sampling cannot reintroduce the former edge-flip cycle.
+An independent double-precision mirror of the exact Fe proposal law reproduced
+`40/24` points for that old policy. Adding an endpoint-averaged pullback test
+alone predicted only `47/25`: it reduced false conflicts but was still a local
+linearization applied globally, and therefore did not restore meaningful
+coverage to the second chart.
+
+The sampler now expresses the intended two-scale construction directly. One
+of each pair of deterministic proposal slots follows projective surface area;
+the other remains stratified over the topology chart, preserving a coarse
+cover before atlas refinement. Ambient projective Poisson exclusion is allowed
+only inside one nominal reference-chart neighborhood. The reference bound is
+derived from the same dyadic key and Q14 metric as the atlas sampler rather
+than being a new tuning constant. The analytical mirror predicts `96/69`
+resident points for the captured case, below the 128-point capacity on both
+charts, with no exclusion comparison spanning unrelated sheets.
+
+This also removes the provisional pullback tensor from resident candidate
+storage. The terminating short-edge restoration objective remains unchanged,
+so the coverage fix cannot reintroduce the former varying-metric edge-flip
+cycle. A live browser receipt remains required before treating the analytical
+counts as acceptance evidence.
+
+The exact release development build emitted 18 passes, 35,362 Wasm bytes,
+775,720 compiler-reported WGSL bytes, and 1,038,458 total bytes. Lowering took
+370,258 ms and the complete fresh build took 393,211 ms.
