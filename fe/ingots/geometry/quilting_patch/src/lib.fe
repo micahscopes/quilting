@@ -629,6 +629,109 @@ pub struct PatchTransformProfile3 {
 }
 impl Copy for PatchTransformProfile3 {}
 
+/// Stable address of one square in a dyadic QuiltPatch hierarchy.
+///
+/// The address is geometry-neutral: a patch family supplies measurements for
+/// the represented square, while this value supplies ancestry and boundary
+/// identity. A terminal square can therefore be rendered by one pair of
+/// Quilting atlas patches or replaced by its four children without changing
+/// the meaning of the patch denotation.
+pub struct DyadicPatchCell2 { pub depth: u32, pub x: u32, pub y: u32 }
+impl Copy for DyadicPatchCell2 {}
+
+pub const fn dyadic_patch_root2() -> DyadicPatchCell2 {
+    DyadicPatchCell2 { depth: 0, x: 0, y: 0 }
+}
+
+/// Child order is lower-left, lower-right, upper-left, upper-right. The same
+/// order is used by CPU, worker, and GPU planners so a leaf keeps one identity
+/// when its realization backend changes.
+pub const fn dyadic_patch_child2(_ parent: DyadicPatchCell2, _ child: u32) -> DyadicPatchCell2 {
+    DyadicPatchCell2 {
+        depth: parent.depth + 1,
+        x: parent.x * 2 + child % 2,
+        y: parent.y * 2 + child / 2,
+    }
+}
+
+pub const fn dyadic_patch_parent2(_ child: DyadicPatchCell2) -> DyadicPatchCell2 {
+    if child.depth == 0 {
+        child
+    } else {
+        DyadicPatchCell2 { depth: child.depth - 1, x: child.x / 2, y: child.y / 2 }
+    }
+}
+
+static_assert(dyadic_patch_child2(dyadic_patch_root2(), 3).depth == 1)
+static_assert(dyadic_patch_child2(dyadic_patch_root2(), 3).x == 1)
+static_assert(dyadic_patch_child2(dyadic_patch_root2(), 3).y == 1)
+static_assert(dyadic_patch_parent2(
+        dyadic_patch_child2(dyadic_patch_child2(dyadic_patch_root2(), 2), 1),
+    )
+        .x
+    == 0)
+
+/// Evidence consumed by recursive patch LoD.
+///
+/// `screen_error` is deliberately supplied by the renderer: the intrinsic
+/// transformation profile is reusable across views, while projected demand
+/// changes with camera and viewport. Keeping them distinct also permits an
+/// offline topology bake to omit screen error entirely.
+pub struct FractalPatchEvidence3 { pub transform: PatchTransformProfile3, pub screen_error: f32 }
+impl Copy for FractalPatchEvidence3 {}
+
+/// Explicit policy for deciding whether one measured square is terminal.
+/// Every threshold is dimensionless except `maximum_screen_error`, whose unit
+/// is chosen by the supplying renderer (normally physical backing pixels).
+pub struct FractalPatchLodPolicy3 {
+    pub maximum_depth: u32,
+    pub maximum_screen_error: f32,
+    pub maximum_stretch_variation: f32,
+    pub maximum_area_variation: f32,
+    pub maximum_anisotropy: f32,
+    pub maximum_metric_shape_variation: f32,
+    pub maximum_normal_turn: f32,
+    pub maximum_mixed_turn: f32,
+}
+impl Copy for FractalPatchLodPolicy3 {}
+
+/// A recursive QuiltPatch leaf is either rejected, drawn by an atlas pair, or
+/// replaced by four measured children. This sum is the common contract for a
+/// CPU tree, a worker planner, and a WebGPU work graph; no backend-specific
+/// sentinel value leaks into topology policy.
+pub enum FractalPatchLeafDecision {
+    Reject,
+    Draw,
+    Refine,
+}
+impl Copy for FractalPatchLeafDecision {}
+
+pub fn fractal_patch_leaf_decision3(
+    _ cell: DyadicPatchCell2,
+    _ evidence: FractalPatchEvidence3,
+    _ policy: FractalPatchLodPolicy3,
+) -> FractalPatchLeafDecision {
+    if !evidence.transform.defined {
+        if cell.depth < policy.maximum_depth {
+            FractalPatchLeafDecision::Refine
+        } else {
+            FractalPatchLeafDecision::Reject
+        }
+    } else if cell.depth < policy.maximum_depth
+        && (evidence.screen_error > policy.maximum_screen_error
+            || evidence.transform.pullback.stretch_variation > policy.maximum_stretch_variation
+            || evidence.transform.pullback.area_variation > policy.maximum_area_variation
+            || evidence.transform.pullback.maximum_anisotropy > policy.maximum_anisotropy
+            || evidence.transform.pullback.metric_shape_variation
+                > policy.maximum_metric_shape_variation
+            || evidence.transform.normal_turn > policy.maximum_normal_turn
+            || evidence.transform.mixed_turn > policy.maximum_mixed_turn) {
+        FractalPatchLeafDecision::Refine
+    } else {
+        FractalPatchLeafDecision::Draw
+    }
+}
+
 fn average3(_ left: Vec3F, _ right: Vec3F) -> Vec3F {
     scale3(add3(left, right), 0.5)
 }
