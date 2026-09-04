@@ -1182,6 +1182,168 @@ pub trait LinearElement: Copy {
     fn scaled(self, _ scale: f32) -> Self
 }
 
+/// A degree-(1,1) field over the unit square.
+///
+/// This is intentionally just linear patch data. A Clifford patch can use
+/// one field for weighted points and another for weights; a Euclidean patch
+/// can use a point carrier directly. Subdivision therefore does not depend on
+/// the later choice of projection or rendering backend.
+pub struct BilinearPatch<T: LinearElement> {
+    pub p00: T,
+    pub p10: T,
+    pub p01: T,
+    pub p11: T,
+}
+impl<T: LinearElement> Copy for BilinearPatch<T> {}
+
+pub fn bilinear_patch<T: LinearElement>(
+    _ p00: T,
+    _ p10: T,
+    _ p01: T,
+    _ p11: T,
+) -> BilinearPatch<T> {
+    BilinearPatch<T> { p00: p00, p10: p10, p01: p01, p11: p11 }
+}
+
+pub fn evaluate_bilinear_patch<T: LinearElement>(
+    _ value: BilinearPatch<T>,
+    _ parameter: Vec2F,
+) -> T {
+    let u0 = 1.0 - parameter.x
+    let v0 = 1.0 - parameter.y
+    value.p00.scaled(u0 * v0)
+        .plus(value.p10.scaled(parameter.x * v0))
+        .plus(value.p01.scaled(u0 * parameter.y))
+        .plus(value.p11.scaled(parameter.x * parameter.y))
+}
+
+/// One oriented triangle inside the square parameter domain.
+pub struct TriangleDomain2 { pub a: Vec2F, pub b: Vec2F, pub c: Vec2F }
+impl Copy for TriangleDomain2 {}
+
+pub fn triangle_parameter(_ domain: TriangleDomain2, _ bary: Bary3F) -> Vec2F {
+    Vec2F {
+        x: domain.a.x * bary.a + domain.b.x * bary.b + domain.c.x * bary.c,
+        y: domain.a.y * bary.a + domain.b.y * bary.b + domain.c.y * bary.c,
+    }
+}
+
+fn midpoint2(_ first: Vec2F, _ second: Vec2F) -> Vec2F {
+    Vec2F { x: (first.x + second.x) * 0.5, y: (first.y + second.y) * 0.5 }
+}
+
+/// Six controls for a quadratic triangle.
+///
+/// `aa`, `bb`, and `cc` are its corners. The other three controls belong to
+/// the named edges. Keeping edge controls explicit lets adjacent child
+/// patches share one canonical edge value rather than repair a seam later.
+pub struct QuadraticTrianglePatch<T: LinearElement> {
+    pub aa: T,
+    pub ab: T,
+    pub bb: T,
+    pub ac: T,
+    pub bc: T,
+    pub cc: T,
+}
+impl<T: LinearElement> Copy for QuadraticTrianglePatch<T> {}
+
+pub fn quadratic_triangle_patch<T: LinearElement>(
+    _ aa: T,
+    _ ab: T,
+    _ bb: T,
+    _ ac: T,
+    _ bc: T,
+    _ cc: T,
+) -> QuadraticTrianglePatch<T> {
+    QuadraticTrianglePatch<T> { aa: aa, ab: ab, bb: bb, ac: ac, bc: bc, cc: cc }
+}
+
+fn quadratic_edge_control<T: LinearElement>(
+    _ first: T,
+    _ midpoint: T,
+    _ second: T,
+) -> T {
+    midpoint.scaled(2.0)
+        .plus(first.scaled(-0.5))
+        .plus(second.scaled(-0.5))
+}
+
+/// Restrict a square bilinear field to an arbitrary triangle exactly.
+///
+/// Composing a bilinear field with the triangle's affine coordinates produces
+/// a quadratic triangle. The six controls below are recovered by exact
+/// Bernstein identities; no surface samples are fitted.
+pub fn restrict_bilinear_patch_to_triangle<T: LinearElement>(
+    _ value: BilinearPatch<T>,
+    _ domain: TriangleDomain2,
+) -> QuadraticTrianglePatch<T> {
+    let aa = evaluate_bilinear_patch<T>(value, domain.a)
+    let bb = evaluate_bilinear_patch<T>(value, domain.b)
+    let cc = evaluate_bilinear_patch<T>(value, domain.c)
+    quadratic_triangle_patch<T>(
+        aa,
+        quadratic_edge_control<T>(
+            aa,
+            evaluate_bilinear_patch<T>(value, midpoint2(domain.a, domain.b)),
+            bb,
+        ),
+        bb,
+        quadratic_edge_control<T>(
+            aa,
+            evaluate_bilinear_patch<T>(value, midpoint2(domain.a, domain.c)),
+            cc,
+        ),
+        quadratic_edge_control<T>(
+            bb,
+            evaluate_bilinear_patch<T>(value, midpoint2(domain.b, domain.c)),
+            cc,
+        ),
+        cc,
+    )
+}
+
+pub fn evaluate_quadratic_triangle<T: LinearElement>(
+    _ value: QuadraticTrianglePatch<T>,
+    _ bary: Bary3F,
+) -> T {
+    value.aa.scaled(bary.a * bary.a)
+        .plus(value.ab.scaled(2.0 * bary.a * bary.b))
+        .plus(value.bb.scaled(bary.b * bary.b))
+        .plus(value.ac.scaled(2.0 * bary.a * bary.c))
+        .plus(value.bc.scaled(2.0 * bary.b * bary.c))
+        .plus(value.cc.scaled(bary.c * bary.c))
+}
+
+/// Value and two local derivatives of a quadratic triangle. The derivative
+/// directions point from corner `a` toward corners `b` and `c`.
+pub struct QuadraticTriangleDifferential<T: LinearElement> {
+    pub value: T,
+    pub tangent_b: T,
+    pub tangent_c: T,
+}
+impl<T: LinearElement> Copy for QuadraticTriangleDifferential<T> {}
+
+pub fn evaluate_quadratic_triangle_differential<T: LinearElement>(
+    _ value: QuadraticTrianglePatch<T>,
+    _ bary: Bary3F,
+) -> QuadraticTriangleDifferential<T> {
+    let tangent_b = value.aa.scaled(-2.0 * bary.a)
+        .plus(value.ab.scaled(2.0 * (bary.a - bary.b)))
+        .plus(value.bb.scaled(2.0 * bary.b))
+        .plus(value.ac.scaled(-2.0 * bary.c))
+        .plus(value.bc.scaled(2.0 * bary.c))
+    let tangent_c = value.aa.scaled(-2.0 * bary.a)
+        .plus(value.ab.scaled(-2.0 * bary.b))
+        .plus(value.ac.scaled(2.0 * (bary.a - bary.c)))
+        .plus(value.bc.scaled(2.0 * bary.b))
+        .plus(value.cc.scaled(2.0 * bary.c))
+    QuadraticTriangleDifferential<T> {
+        value: evaluate_quadratic_triangle<T>(value, bary),
+        tangent_b: tangent_b,
+        tangent_c: tangent_c,
+    }
+}
+
 /// Degree-(2,2) tensor-product Bernstein control net.
 ///
 /// The nine controls are geometric data, not a sampled UV grid.  Convex-hull
@@ -1328,6 +1490,90 @@ pub fn anisotropic_quadratic_tensor_cell<T: LinearElement>(
         value = if (cell.v_index >> bit) & 1 == 0 { split.first } else { split.second }
     }
     value
+}
+
+/// One exact child patch, kept separate from any triangles used to display it.
+///
+/// `control_net` is obtained only by de Casteljau restriction of its parent.
+/// It is therefore another patch in the same linear carrier, not a fit to
+/// sampled points and not a view of an already tessellated mesh. `cell` gives
+/// the child a stable place in the anisotropic patch tree.
+pub struct ExactQuadraticPatchPiece<T: LinearElement> {
+    pub cell: AnisotropicPatchCell2,
+    pub control_net: QuadraticTensorPatch<T>,
+}
+impl<T: LinearElement> Copy for ExactQuadraticPatchPiece<T> {}
+
+pub struct ExactQuadraticPatchPieceSplit<T: LinearElement> {
+    pub first: ExactQuadraticPatchPiece<T>,
+    pub second: ExactQuadraticPatchPiece<T>,
+}
+impl<T: LinearElement> Copy for ExactQuadraticPatchPieceSplit<T> {}
+
+/// Regard an authored quadratic patch as the root of an exact patch tree.
+pub fn exact_quadratic_patch_root<T: LinearElement>(
+    _ control_net: QuadraticTensorPatch<T>,
+) -> ExactQuadraticPatchPiece<T> {
+    ExactQuadraticPatchPiece<T> {
+        cell: anisotropic_patch_root2(),
+        control_net: control_net,
+    }
+}
+
+/// Recover one exact tree child from the root without sampling the surface.
+pub fn exact_quadratic_patch_piece<T: LinearElement>(
+    _ root: QuadraticTensorPatch<T>,
+    _ cell: AnisotropicPatchCell2,
+) -> ExactQuadraticPatchPiece<T> {
+    ExactQuadraticPatchPiece<T> {
+        cell: cell,
+        control_net: anisotropic_quadratic_tensor_cell<T>(root, cell),
+    }
+}
+
+/// Split an existing patch piece across its first parameter axis.
+///
+/// Both returned values carry their own exact control nets, so a recursive
+/// frontier can continue entirely in patch space.
+pub fn split_exact_quadratic_patch_piece_u<T: LinearElement>(
+    _ value: ExactQuadraticPatchPiece<T>,
+) -> ExactQuadraticPatchPieceSplit<T> {
+    let split = split_quadratic_tensor_u<T>(value.control_net)
+    ExactQuadraticPatchPieceSplit<T> {
+        first: ExactQuadraticPatchPiece<T> {
+            cell: bisect_anisotropic_patch_u2(value.cell, false),
+            control_net: split.first,
+        },
+        second: ExactQuadraticPatchPiece<T> {
+            cell: bisect_anisotropic_patch_u2(value.cell, true),
+            control_net: split.second,
+        },
+    }
+}
+
+/// Split an existing patch piece across its second parameter axis.
+pub fn split_exact_quadratic_patch_piece_v<T: LinearElement>(
+    _ value: ExactQuadraticPatchPiece<T>,
+) -> ExactQuadraticPatchPieceSplit<T> {
+    let split = split_quadratic_tensor_v<T>(value.control_net)
+    ExactQuadraticPatchPieceSplit<T> {
+        first: ExactQuadraticPatchPiece<T> {
+            cell: bisect_anisotropic_patch_v2(value.cell, false),
+            control_net: split.first,
+        },
+        second: ExactQuadraticPatchPiece<T> {
+            cell: bisect_anisotropic_patch_v2(value.cell, true),
+            control_net: split.second,
+        },
+    }
+}
+
+/// Evaluate a child from its own control data and local coordinates.
+pub fn evaluate_exact_quadratic_patch_piece<T: LinearElement>(
+    _ value: ExactQuadraticPatchPiece<T>,
+    _ local_parameter: Vec2F,
+) -> T {
+    evaluate_quadratic_tensor<T>(value.control_net, local_parameter)
 }
 
 static_assert(bisect_anisotropic_patch_u2(anisotropic_patch_root2(), false).u_depth == 1)
@@ -1839,6 +2085,74 @@ impl<A: ProjectiveAlgebra> ProjectiveInterpolation<
                 controls.p10.weight,
                 controls.p01.weight,
                 controls.p11.weight,
+                parameter,
+            ),
+        }
+    }
+}
+
+/// Exact six-control triangular restriction of a projective bilinear patch.
+///
+/// Numerator and weight fields remain separate until the final division. This
+/// is what lets a four-sided patch become curved triangular patches without
+/// fitting new surface points or losing the original Clifford weights.
+pub struct QuadraticTriangularProjectiveControls<A: ProjectiveAlgebra> {
+    pub numerator: QuadraticTrianglePatch<A::Numerator>,
+    pub denominator: QuadraticTrianglePatch<A::Weight>,
+}
+impl<A: ProjectiveAlgebra> Copy for QuadraticTriangularProjectiveControls<A> {}
+
+pub fn restrict_bilinear_projective_controls_to_triangle<A: ProjectiveAlgebra>(
+    _ algebra: A,
+    _ controls: BilinearProjectiveControls<A>,
+    _ domain: TriangleDomain2,
+) -> QuadraticTriangularProjectiveControls<A> {
+    QuadraticTriangularProjectiveControls<A> {
+        numerator: restrict_bilinear_patch_to_triangle<A::Numerator>(
+            bilinear_patch<A::Numerator>(
+                algebra.weighted_point(controls.p00.point, controls.p00.weight),
+                algebra.weighted_point(controls.p10.point, controls.p10.weight),
+                algebra.weighted_point(controls.p01.point, controls.p01.weight),
+                algebra.weighted_point(controls.p11.point, controls.p11.weight),
+            ),
+            domain,
+        ),
+        denominator: restrict_bilinear_patch_to_triangle<A::Weight>(
+            bilinear_patch<A::Weight>(
+                controls.p00.weight,
+                controls.p10.weight,
+                controls.p01.weight,
+                controls.p11.weight,
+            ),
+            domain,
+        ),
+    }
+}
+
+/// Degree-two barycentric interpolation used by exact triangular children.
+pub struct QuadraticBarycentric {}
+impl Copy for QuadraticBarycentric {}
+
+impl<A: ProjectiveAlgebra> ProjectiveInterpolation<
+    A,
+    QuadraticTriangularProjectiveControls<A>,
+    BarycentricTriangle,
+> for QuadraticBarycentric {
+    const CONTROL_COUNT: usize = 6
+
+    fn frame(
+        self,
+        _ algebra: A,
+        _ controls: QuadraticTriangularProjectiveControls<A>,
+        _ parameter: Bary3F,
+    ) -> RationalFrame<A> {
+        RationalFrame<A> {
+            numerator: evaluate_quadratic_triangle<A::Numerator>(
+                controls.numerator,
+                parameter,
+            ),
+            denominator: evaluate_quadratic_triangle<A::Weight>(
+                controls.denominator,
                 parameter,
             ),
         }

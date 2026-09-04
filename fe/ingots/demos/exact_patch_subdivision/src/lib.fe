@@ -1,10 +1,11 @@
-//! Exact patch-to-patch subdivision, presented as a composition law.
+//! One Clifford patch split into exact curved triangular patches.
 //!
-//! Every displayed child is reconstructed from its compact anisotropic cell
-//! identity by exact de Casteljau restriction, then evaluated in child-local
-//! coordinates. The comparison route evaluates the authored root patch at the
-//! corresponding global coordinate. Color exposes their numerical difference;
-//! topology never becomes the definition of the surface.
+//! The movable center always remains on the authored patch: it is a point in
+//! the patch's parameter domain, never an independently fitted 3D handle.
+//! Restricting the homogeneous numerator and weight fields to each of the four
+//! surrounding triangles produces exact quadratic triangular patches. Their
+//! shared curves and tangent planes therefore agree by construction; the
+//! optional wireframe is only a temporary mesh used to display them.
 
 use core::marker::Copy
 use fmath::{clamp, smoothstep, wrap_pi}
@@ -14,11 +15,12 @@ use quilting_clifford_bezier::{
     IsotropicSample,
     control,
     even,
-    evaluate,
     evaluate_differential,
-    evaluate_quotient_cell,
+    evaluate_triangular_projective_controls,
+    evaluate_triangular_projective_differential,
     patch,
     scale_weight,
+    triangular_projective_controls,
 }
 use quilting_demo_view::{
     CameraFrame,
@@ -26,7 +28,6 @@ use quilting_demo_view::{
     Projection,
     ScreenExtent,
     orbit_camera,
-    parameter_projection,
     project,
     triangle_pixel_altitude,
 }
@@ -34,7 +35,9 @@ use quilting_domain::{
     Bary3F,
     Vec2F,
     Vec3F,
+    absf,
     bary3f,
+    cross3,
     dot3,
     length3,
     normalize3_or,
@@ -45,7 +48,6 @@ use quilting_domain::{
 use quilting_oklch::{
     DisplayRgb,
     HuePath,
-    bilinear,
     display_rgb,
     interpolate,
     mix_display_rgb,
@@ -54,7 +56,7 @@ use quilting_oklch::{
     scale_lightness_chroma,
     to_display_rgb,
 }
-use quilting_patch::AnisotropicPatchCell2
+use quilting_patch::TriangleDomain2
 use std::web::view::{
     ApplyParamBindings,
     ChoiceOptions,
@@ -91,24 +93,21 @@ extern {
     const fn __f32_from_i32(_: i32) -> f32
 }
 
-const MAX_CHILD_DEPTH: u32 = 4
-const MAX_CHILD_SIDE: u32 = 16
-const MAX_LOCAL_LOD: u32 = 3
-const MAX_LOCAL_SIDE: u32 = 8
-const MAX_CHILD_SLOTS: usize = 256
-const MAX_LOCAL_CELL_SLOTS: usize = 64
-const VERTICES_PER_TRIANGLE_PAIR: usize = 6
-const VERTICES_PER_CHILD: u32 = 384
-const MAX_VERTICES: usize = MAX_CHILD_SLOTS
-    * MAX_LOCAL_CELL_SLOTS
-    * VERTICES_PER_TRIANGLE_PAIR
+const MAX_MESH_LOD: u32 = 5
+const MAX_MESH_SIDE: u32 = 32
+const MAX_TRIANGLES_PER_PATCH: u32 = 1024
+const VERTICES_PER_PATCH: u32 = 3072
+const MAX_SURFACE_VERTICES: usize = 12288
 
-struct SubdivisionParams {
-    evaluation: Param,
-    view_space: Param,
-    u_depth: Param,
-    v_depth: Param,
-    child_lod: Param,
+struct PatchSubdivisionParams {
+    split_mode: Param,
+    center_mode: Param,
+    center_goal: Param,
+    center_u: Param,
+    center_v: Param,
+    split_threshold: Param,
+    mesh_lod: Param,
+    show_triangles: Param,
     w00: Param,
     w10: Param,
     w01: Param,
@@ -117,18 +116,22 @@ struct SubdivisionParams {
     orbit_pitch: Param,
     orbit_distance: Param,
     wire_px: Param,
-    error_gain: Param,
     res_x: Param,
     res_y: Param,
     orbiting: Param,
+    difficulty: Param,
+    center_score: Param,
 }
 
-struct SubdivisionState {
-    evaluation: f32,
-    view_space: f32,
-    u_depth: f32,
-    v_depth: f32,
-    child_lod: f32,
+struct PatchSubdivisionState {
+    split_mode: f32,
+    center_mode: f32,
+    center_goal: f32,
+    center_u: f32,
+    center_v: f32,
+    split_threshold: f32,
+    mesh_lod: f32,
+    show_triangles: f32,
     w00: f32,
     w10: f32,
     w01: f32,
@@ -137,31 +140,47 @@ struct SubdivisionState {
     orbit_pitch: f32,
     orbit_distance: f32,
     wire_px: f32,
-    error_gain: f32,
     res_x: f32,
     res_y: f32,
     orbiting: f32,
+    difficulty: f32,
+    center_score: f32,
+}
+impl Copy for PatchSubdivisionState {}
+
+impl SurfaceState for PatchSubdivisionState {
+    type Params = PatchSubdivisionParams
 }
 
-impl SurfaceState for SubdivisionState {
-    type Params = SubdivisionParams
-}
+derive ApplyParamBindings for PatchSubdivisionState using ParamBindingsProvider
 
-derive ApplyParamBindings for SubdivisionState using ParamBindingsProvider
-
-const fn subdivision_params() -> SubdivisionParams {
-    SubdivisionParams {
-        evaluation: Param::choice(
-            options: ChoiceOptions::two(first: "exact child net", second: "authored root"),
+const fn patch_subdivision_params() -> PatchSubdivisionParams {
+    PatchSubdivisionParams {
+        split_mode: Param::choice(
+            options: ChoiceOptions::three(
+                first: "always use four",
+                second: "decide from shape",
+                third: "do not subdivide",
+            ),
             init: 0.0,
         ),
-        view_space: Param::choice(
-            options: ChoiceOptions::two(first: "surface", second: "parameter domain"),
+        center_mode: Param::choice(
+            options: ChoiceOptions::two(first: "place center", second: "find center"),
             init: 0.0,
         ),
-        u_depth: Param::int(min: 0.0, max: 4.0, init: 2.0),
-        v_depth: Param::int(min: 0.0, max: 4.0, init: 2.0),
-        child_lod: Param::int(min: 0.0, max: 3.0, init: 1.0),
+        center_goal: Param::choice(
+            options: ChoiceOptions::three(
+                first: "avoid skinny pieces",
+                second: "balance surface area",
+                third: "balance both",
+            ),
+            init: 2.0,
+        ),
+        center_u: Param::unit(init: 0.5),
+        center_v: Param::unit(init: 0.5),
+        split_threshold: Param::unit(init: 0.32),
+        mesh_lod: Param::int(min: 0.0, max: 5.0, init: 3.0),
+        show_triangles: Param::toggle(init: true),
         w00: Param::log(min: 0.02, max: 8.0, init: 1.0),
         w10: Param::log(min: 0.02, max: 8.0, init: 1.0),
         w01: Param::log(min: 0.02, max: 8.0, init: 1.0),
@@ -169,20 +188,24 @@ const fn subdivision_params() -> SubdivisionParams {
         orbit_yaw: Param::range(min: -3.14159265, max: 3.14159265, init: -0.72),
         orbit_pitch: Param::range(min: -1.35, max: 1.35, init: 0.12),
         orbit_distance: Param::log(min: 2.5, max: 16.0, init: 6.2),
-        wire_px: Param::range(min: 0.0, max: 2.0, init: 0.55),
-        error_gain: Param::log(min: 1.0, max: 1000000.0, init: 10000.0),
+        wire_px: Param::range(min: 0.0, max: 1.6, init: 0.42),
         res_x: Param::extent_x(),
         res_y: Param::extent_y(),
         orbiting: Param::fixed(0.0),
+        difficulty: Param::fixed(1.0),
+        center_score: Param::fixed(0.0),
     }
 }
 
-fn subdivision_state(
-    _ evaluation: f32,
-    _ view_space: f32,
-    _ u_depth: f32,
-    _ v_depth: f32,
-    _ child_lod: f32,
+fn state(
+    _ split_mode: f32,
+    _ center_mode: f32,
+    _ center_goal: f32,
+    _ center_u: f32,
+    _ center_v: f32,
+    _ split_threshold: f32,
+    _ mesh_lod: f32,
+    _ show_triangles: f32,
     _ w00: f32,
     _ w10: f32,
     _ w01: f32,
@@ -191,17 +214,21 @@ fn subdivision_state(
     _ orbit_pitch: f32,
     _ orbit_distance: f32,
     _ wire_px: f32,
-    _ error_gain: f32,
     _ res_x: f32,
     _ res_y: f32,
     _ orbiting: f32,
-) -> SubdivisionState {
-    SubdivisionState {
-        evaluation: evaluation,
-        view_space: view_space,
-        u_depth: u_depth,
-        v_depth: v_depth,
-        child_lod: child_lod,
+    _ difficulty: f32,
+    _ center_score: f32,
+) -> PatchSubdivisionState {
+    PatchSubdivisionState {
+        split_mode: split_mode,
+        center_mode: center_mode,
+        center_goal: center_goal,
+        center_u: center_u,
+        center_v: center_v,
+        split_threshold: split_threshold,
+        mesh_lod: mesh_lod,
+        show_triangles: show_triangles,
         w00: w00,
         w10: w10,
         w01: w01,
@@ -210,30 +237,15 @@ fn subdivision_state(
         orbit_pitch: orbit_pitch,
         orbit_distance: orbit_distance,
         wire_px: wire_px,
-        error_gain: error_gain,
         res_x: res_x,
         res_y: res_y,
         orbiting: orbiting,
+        difficulty: difficulty,
+        center_score: center_score,
     }
 }
 
-fn as_f32(_ value: u32) -> f32 {
-    __f32_from_i32(value.downcast_unchecked())
-}
-
-fn admitted_level(_ value: f32, _ maximum: u32) -> u32 {
-    let mut level: u32 = 0
-    while level < maximum && value >= as_f32(level) + 0.5 {
-        level = level + 1
-    }
-    level
-}
-
-fn resolution(_ level: u32) -> u32 {
-    1 << level
-}
-
-fn patch_value(_ state: SubdivisionState) -> IsotropicBilinearPatch {
+fn patch_value(_ state: PatchSubdivisionState) -> IsotropicBilinearPatch {
     patch(
         control(
             vec3f(0.0, 2.0, 0.0),
@@ -261,11 +273,332 @@ fn policy() -> IsotropicPolicy {
     }
 }
 
-fn extent(_ state: SubdivisionState) -> ScreenExtent {
+fn as_f32(_ value: u32) -> f32 {
+    __f32_from_i32(value.downcast_unchecked())
+}
+
+fn admitted_lod(_ value: f32) -> u32 {
+    let mut lod: u32 = 0
+    while lod < MAX_MESH_LOD && value >= as_f32(lod) + 0.5 {
+        lod = lod + 1
+    }
+    lod
+}
+
+fn minimum(_ first: f32, _ second: f32) -> f32 {
+    if first < second { first } else { second }
+}
+
+fn maximum(_ first: f32, _ second: f32) -> f32 {
+    if first > second { first } else { second }
+}
+
+fn minimum_barycentric(_ value: Bary3F) -> f32 {
+    minimum(value.a, minimum(value.b, value.c))
+}
+
+fn fan_domain(_ child: u32, _ center: Vec2F) -> TriangleDomain2 {
+    if child == 0 {
+        TriangleDomain2 { a: vec2f(0.0, 0.0), b: vec2f(1.0, 0.0), c: center }
+    } else if child == 1 {
+        TriangleDomain2 { a: vec2f(1.0, 0.0), b: vec2f(1.0, 1.0), c: center }
+    } else if child == 2 {
+        TriangleDomain2 { a: vec2f(1.0, 1.0), b: vec2f(0.0, 1.0), c: center }
+    } else {
+        TriangleDomain2 { a: vec2f(0.0, 1.0), b: vec2f(0.0, 0.0), c: center }
+    }
+}
+
+fn whole_patch_domain(_ child: u32) -> TriangleDomain2 {
+    if child == 0 {
+        TriangleDomain2 {
+            a: vec2f(0.0, 0.0), b: vec2f(1.0, 0.0), c: vec2f(1.0, 1.0),
+        }
+    } else {
+        TriangleDomain2 {
+            a: vec2f(0.0, 0.0), b: vec2f(1.0, 1.0), c: vec2f(0.0, 1.0),
+        }
+    }
+}
+
+struct ChildMeasure {
+    area: f32,
+    shape: f32,
+    valid: bool,
+}
+impl Copy for ChildMeasure {}
+
+/// Measure an exact child patch at its center. The three tangent directions
+/// are intrinsic to that child, so the score responds to stretching of the
+/// actual surface rather than to the square UV chart alone.
+fn child_measure(
+    _ value: IsotropicBilinearPatch,
+    _ domain: TriangleDomain2,
+) -> ChildMeasure {
+    let controls = triangular_projective_controls(value, domain)
+    let differential = evaluate_triangular_projective_differential(
+        controls,
+        bary3f(0.33333334, 0.33333334, 0.33333334),
+        policy(),
+        0.000000000001,
+    )
+    if !differential.sample.conditioned || !differential.sample.vector_valued {
+        return ChildMeasure { area: 0.0, shape: 0.0, valid: false }
+    }
+    let third_direction = sub3(differential.tangent_c, differential.tangent_b)
+    let first_length = length3(differential.tangent_b)
+    let second_length = length3(differential.tangent_c)
+    let third_length = length3(third_direction)
+    let shortest = minimum(first_length, minimum(second_length, third_length))
+    let longest = maximum(first_length, maximum(second_length, third_length))
+    ChildMeasure {
+        area: 0.5 * length3(cross3(differential.tangent_b, differential.tangent_c)),
+        shape: shortest / (longest + 0.0000001),
+        valid: true,
+    }
+}
+
+struct FanMeasure {
+    worst_shape: f32,
+    area_balance: f32,
+    valid: bool,
+}
+impl Copy for FanMeasure {}
+
+fn fan_measure(_ value: IsotropicBilinearPatch, _ center: Vec2F) -> FanMeasure {
+    let first = child_measure(value, fan_domain(0, center))
+    if !first.valid {
+        return FanMeasure { worst_shape: 0.0, area_balance: 0.0, valid: false }
+    }
+    let mut smallest_area = first.area
+    let mut largest_area = first.area
+    let mut worst_shape = first.shape
+    let mut child: u32 = 1
+    while child < 4 {
+        let measure = child_measure(value, fan_domain(child, center))
+        if !measure.valid {
+            return FanMeasure { worst_shape: 0.0, area_balance: 0.0, valid: false }
+        }
+        smallest_area = minimum(smallest_area, measure.area)
+        largest_area = maximum(largest_area, measure.area)
+        worst_shape = minimum(worst_shape, measure.shape)
+        child = child + 1
+    }
+    FanMeasure {
+        worst_shape: worst_shape,
+        area_balance: smallest_area / (largest_area + 0.0000001),
+        valid: true,
+    }
+}
+
+fn fan_score(
+    _ value: IsotropicBilinearPatch,
+    _ center: Vec2F,
+    _ goal: f32,
+) -> f32 {
+    let measure = fan_measure(value, center)
+    if !measure.valid {
+        0.0
+    } else if goal < 0.5 {
+        measure.worst_shape
+    } else if goal < 1.5 {
+        measure.area_balance
+    } else {
+        measure.worst_shape * (0.25 + 0.75 * measure.area_balance)
+    }
+}
+
+struct CenterSearch {
+    point: Vec2F,
+    score: f32,
+}
+impl Copy for CenterSearch {}
+
+fn search_offset(_ index: u32) -> f32 {
+    if index == 0 { -1.0 } else if index == 2 { 1.0 } else { 0.0 }
+}
+
+/// Deterministic coarse-to-fine search over the exact analytic patch.
+/// Candidates never leave the patch: each one is a `(u,v)` coordinate and is
+/// assessed through four exact triangular restrictions.
+fn find_center(_ value: IsotropicBilinearPatch, _ goal: f32) -> CenterSearch {
+    let mut best = CenterSearch {
+        point: vec2f(0.5, 0.5),
+        score: fan_score(value, vec2f(0.5, 0.5), goal),
+    }
+    let mut step: f32 = 0.28
+    let mut round: u32 = 0
+    while round < 7 {
+        let anchor = best.point
+        let mut y: u32 = 0
+        while y < 3 {
+            let mut x: u32 = 0
+            while x < 3 {
+                let candidate = vec2f(
+                    clamp(anchor.x + search_offset(x) * step, 0.04, 0.96),
+                    clamp(anchor.y + search_offset(y) * step, 0.04, 0.96),
+                )
+                let score = fan_score(value, candidate, goal)
+                if score > best.score {
+                    best = CenterSearch { point: candidate, score: score }
+                }
+                x = x + 1
+            }
+            y = y + 1
+        }
+        step = step * 0.5
+        round = round + 1
+    }
+    best
+}
+
+fn local_shape(_ tangent_u: Vec3F, _ tangent_v: Vec3F) -> f32 {
+    let diagonal = sub3(tangent_v, tangent_u)
+    let shortest = minimum(
+        length3(tangent_u), minimum(length3(tangent_v), length3(diagonal)),
+    )
+    let longest = maximum(
+        length3(tangent_u), maximum(length3(tangent_v), length3(diagonal)),
+    )
+    shortest / (longest + 0.0000001)
+}
+
+/// A deliberately small one-step split certificate. It combines the worst
+/// local stretch shape with the largest normal change at four interior probes.
+/// Later hierarchy levels can reuse the same policy independently per child.
+fn patch_difficulty(_ value: IsotropicBilinearPatch) -> f32 {
+    let center = evaluate_differential(
+        value, vec2f(0.5, 0.5), policy(), 0.000000000001,
+    )
+    if !center.sample.conditioned || !center.sample.vector_valued { return 1.0 }
+    let mut worst_shape = local_shape(center.tangent_s, center.tangent_t)
+    let mut closest_normal = 1.0
+    let mut probe: u32 = 0
+    while probe < 4 {
+        let u = if probe == 0 || probe == 3 { 0.16 } else { 0.84 }
+        let v = if probe < 2 { 0.16 } else { 0.84 }
+        let sample = evaluate_differential(
+            value, vec2f(u, v), policy(), 0.000000000001,
+        )
+        if !sample.sample.conditioned || !sample.sample.vector_valued { return 1.0 }
+        worst_shape = minimum(worst_shape, local_shape(sample.tangent_s, sample.tangent_t))
+        closest_normal = minimum(closest_normal, dot3(center.normal, sample.normal))
+        probe = probe + 1
+    }
+    let stretch_difficulty = 1.0 - clamp(worst_shape, 0.0, 1.0)
+    let bend_difficulty = 1.0 - clamp(closest_normal, 0.0, 1.0)
+    clamp(maximum(stretch_difficulty, bend_difficulty), 0.0, 1.0)
+}
+
+fn analyze(_ current: PatchSubdivisionState) -> PatchSubdivisionState {
+    let mut next = current
+    let value = patch_value(next)
+    next.difficulty = patch_difficulty(value)
+    if next.center_mode > 0.5 {
+        let found = find_center(value, next.center_goal)
+        next.center_u = found.point.x
+        next.center_v = found.point.y
+        next.center_score = found.score
+    } else {
+        next.center_score = fan_score(
+            value, vec2f(next.center_u, next.center_v), next.center_goal,
+        )
+    }
+    next
+}
+
+fn uses_four_patches(_ state: PatchSubdivisionState) -> bool {
+    if state.split_mode < 0.5 {
+        true
+    } else if state.split_mode < 1.5 {
+        state.difficulty > state.split_threshold
+    } else {
+        false
+    }
+}
+
+fn displayed_domain(
+    _ patch_index: u32,
+    _ state: PatchSubdivisionState,
+) -> TriangleDomain2 {
+    if uses_four_patches(state) {
+        fan_domain(patch_index, vec2f(state.center_u, state.center_v))
+    } else {
+        whole_patch_domain(patch_index)
+    }
+}
+
+fn active_patch_count(_ state: PatchSubdivisionState) -> u32 {
+    if uses_four_patches(state) { 4 } else { 2 }
+}
+
+struct TriangleCell {
+    row: u32,
+    column: u32,
+    upper: bool,
+}
+impl Copy for TriangleCell {}
+
+fn triangle_cell(_ triangle: u32, _ side: u32) -> TriangleCell {
+    let mut remaining = triangle
+    let mut row: u32 = 0
+    while row < side {
+        let count = 2 * (side - row) - 1
+        if remaining < count {
+            return TriangleCell {
+                row: row,
+                column: remaining / 2,
+                upper: remaining % 2 == 1,
+            }
+        }
+        remaining = remaining - count
+        row = row + 1
+    }
+    TriangleCell { row: 0, column: 0, upper: false }
+}
+
+fn grid_barycentric(_ column: u32, _ row: u32, _ side: u32) -> Bary3F {
+    let b = as_f32(column) / as_f32(side)
+    let c = as_f32(row) / as_f32(side)
+    bary3f(1.0 - b - c, b, c)
+}
+
+fn patch_barycentric(_ patch_vertex: u32, _ side: u32) -> Bary3F {
+    let triangle = patch_vertex / 3
+    let corner = patch_vertex % 3
+    let cell = triangle_cell(triangle, side)
+    if !cell.upper {
+        if corner == 0 {
+            grid_barycentric(cell.column, cell.row, side)
+        } else if corner == 1 {
+            grid_barycentric(cell.column + 1, cell.row, side)
+        } else {
+            grid_barycentric(cell.column, cell.row + 1, side)
+        }
+    } else if corner == 0 {
+        grid_barycentric(cell.column + 1, cell.row, side)
+    } else if corner == 1 {
+        grid_barycentric(cell.column + 1, cell.row + 1, side)
+    } else {
+        grid_barycentric(cell.column, cell.row + 1, side)
+    }
+}
+
+fn triangle_corner(_ corner: u32) -> Bary3F {
+    if corner == 0 {
+        bary3f(1.0, 0.0, 0.0)
+    } else if corner == 1 {
+        bary3f(0.0, 1.0, 0.0)
+    } else {
+        bary3f(0.0, 0.0, 1.0)
+    }
+}
+
+fn extent(_ state: PatchSubdivisionState) -> ScreenExtent {
     ScreenExtent { width: state.res_x, height: state.res_y }
 }
 
-fn camera(_ state: SubdivisionState) -> CameraFrame {
+fn camera(_ state: PatchSubdivisionState) -> CameraFrame {
     orbit_camera(
         OrbitCamera {
             target: vec3f(1.1, 0.0, 0.0),
@@ -280,136 +613,96 @@ fn camera(_ state: SubdivisionState) -> CameraFrame {
     )
 }
 
-fn local_corner(_ vertex: u32) -> Vec2F {
-    let corner = vertex % 6
-    if corner == 0 || corner == 3 {
-        vec2f(0.0, 0.0)
-    } else if corner == 1 {
-        vec2f(1.0, 0.0)
-    } else if corner == 2 || corner == 4 {
-        vec2f(1.0, 1.0)
-    } else {
-        vec2f(0.0, 1.0)
-    }
-}
-
-fn local_barycentric(_ vertex: u32) -> Bary3F {
-    let corner = vertex % 3
-    if corner == 0 {
-        bary3f(1.0, 0.0, 0.0)
-    } else if corner == 1 {
-        bary3f(0.0, 1.0, 0.0)
-    } else {
-        bary3f(0.0, 0.0, 1.0)
-    }
-}
-
-fn child_local_parameter(
-    _ local_cell_x: u32,
-    _ local_cell_y: u32,
-    _ local_resolution: u32,
-    _ vertex: u32,
-) -> Vec2F {
-    let corner = local_corner(vertex)
-    vec2f(
-        (as_f32(local_cell_x) + corner.x) / as_f32(local_resolution),
-        (as_f32(local_cell_y) + corner.y) / as_f32(local_resolution),
-    )
-}
-
-fn root_parameter(
-    _ cell: AnisotropicPatchCell2,
-    _ local: Vec2F,
-) -> Vec2F {
-    vec2f(
-        (as_f32(cell.u_index) + local.x) / as_f32(resolution(cell.u_depth)),
-        (as_f32(cell.v_index) + local.y) / as_f32(resolution(cell.v_depth)),
-    )
-}
-
-struct EvaluatedVertex {
-    child: IsotropicSample,
-    root: IsotropicSample,
-    parameter: Vec2F,
-}
-impl Copy for EvaluatedVertex {}
-
-fn evaluate_vertex(
-    _ value: IsotropicBilinearPatch,
-    _ cell: AnisotropicPatchCell2,
-    _ local: Vec2F,
-) -> EvaluatedVertex {
-    let parameter = root_parameter(cell, local)
-    EvaluatedVertex {
-        child: evaluate_quotient_cell(value, cell, local, policy()),
-        root: evaluate(value, parameter, policy()),
-        parameter: parameter,
-    }
-}
-
-fn selected_sample(_ evaluated: EvaluatedVertex, _ evaluation: f32) -> IsotropicSample {
-    if evaluation < 0.5 { evaluated.child } else { evaluated.root }
-}
-
-fn vertex_projection(
-    _ evaluated: EvaluatedVertex,
-    _ state: SubdivisionState,
-    _ camera: CameraFrame,
-) -> Projection {
-    if state.view_space < 0.5 {
-        project(camera, selected_sample(evaluated, state.evaluation).position)
-    } else {
-        parameter_projection(evaluated.parameter, 0.86)
-    }
-}
-
-pub struct SubdivisionVarying {
-    pub edge_seed: Bary3F,
+pub struct SurfaceVarying {
+    pub triangle_edge: Bary3F,
+    pub patch_edge: Bary3F,
     pub normal: Vec3F,
-    pub parameter: Vec2F,
-    pub child_center: Vec2F,
-    pub composition_error: f32,
+    pub patch_index: f32,
     pub view_depth: f32,
+    pub valid: f32,
 }
-impl Copy for SubdivisionVarying {}
+impl Copy for SurfaceVarying {}
 
-fn invalid_vertex() -> RasterVertex<SubdivisionVarying> {
+fn invalid_surface_vertex() -> RasterVertex<SurfaceVarying> {
     RasterVertex {
         position: ClipPosition { x: 2.0, y: 2.0, z: 0.0, w: 1.0 },
-        varying: SubdivisionVarying {
-            edge_seed: bary3f(0.0, 0.0, 0.0),
+        varying: SurfaceVarying {
+            triangle_edge: bary3f(0.0, 0.0, 0.0),
+            patch_edge: bary3f(0.0, 0.0, 0.0),
             normal: vec3f(0.0, 0.0, 1.0),
-            parameter: vec2f(0.0, 0.0),
-            child_center: vec2f(0.0, 0.0),
-            composition_error: 0.0,
+            patch_index: 0.0,
             view_depth: 1.0,
+            valid: 0.0,
         },
     }
 }
 
-fn minimum_barycentric(_ value: Bary3F) -> f32 {
-    let mut result = value.a
-    if value.b < result { result = value.b }
-    if value.c < result { result = value.c }
-    result
+fn patch_color(_ patch_index: f32, _ split: bool) -> DisplayRgb {
+    let base = if !split {
+        if patch_index < 0.5 { oklch(0.74, 0.075, 0.72) } else { oklch(0.72, 0.070, 0.92) }
+    } else if patch_index < 0.5 {
+        oklch(0.75, 0.095, 0.48)
+    } else if patch_index < 1.5 {
+        oklch(0.76, 0.085, 1.38)
+    } else if patch_index < 2.5 {
+        oklch(0.72, 0.080, 5.72)
+    } else {
+        oklch(0.73, 0.090, 4.88)
+    }
+    to_display_rgb(base)
 }
 
-fn surface_color(_ varying: SubdivisionVarying, _ error_gain: f32) -> DisplayRgb {
-    let base = bilinear(
-        oklch(0.78, 0.085, 0.42),
-        oklch(0.81, 0.075, 0.98),
-        oklch(0.76, 0.068, 5.90),
-        oklch(0.73, 0.080, 5.30),
-        varying.child_center.x,
-        varying.child_center.y,
-        HuePath::Shorter,
-    )
-    let error = smoothstep(0.0, 1.0, varying.composition_error * error_gain)
-    let diagnostic = interpolate(base, oklch(0.67, 0.18, 0.34), error, HuePath::Shorter)
+fn shade(_ varying: SurfaceVarying, _ split: bool) -> DisplayRgb {
     let normal = normalize3_or(varying.normal, vec3f(0.0, 0.0, 1.0), 0.0000001)
     let light = normalize3_or(vec3f(-0.35, 0.48, 0.82), vec3f(0.0, 0.0, 1.0), 0.0000001)
-    let diffuse = if dot3(normal, light) < 0.0 { -dot3(normal, light) } else { dot3(normal, light) }
-    to_display_rgb(scale_lightness_chroma(diagnostic, 0.72 + 0.30 * diffuse, 1.0))
+    let facing = absf(dot3(normal, light))
+    let base = if !split {
+        if varying.patch_index < 0.5 { oklch(0.74, 0.075, 0.72) } else { oklch(0.72, 0.070, 0.92) }
+    } else if varying.patch_index < 0.5 {
+        oklch(0.75, 0.095, 0.48)
+    } else if varying.patch_index < 1.5 {
+        oklch(0.76, 0.085, 1.38)
+    } else if varying.patch_index < 2.5 {
+        oklch(0.72, 0.080, 5.72)
+    } else {
+        oklch(0.73, 0.090, 4.88)
+    }
+    to_display_rgb(scale_lightness_chroma(base, 0.72 + 0.30 * facing, 1.0))
+}
+
+pub struct DiagramVarying {
+    pub edge: Bary3F,
+    pub patch_index: f32,
+}
+impl Copy for DiagramVarying {}
+
+fn diagram_clip(
+    _ parameter: Vec2F,
+    _ state: PatchSubdivisionState,
+) -> ClipPosition {
+    let aspect = if state.res_y > 0.0 { state.res_x / state.res_y } else { 1.0 }
+    ClipPosition {
+        x: -0.93 + parameter.x * 0.34,
+        y: -0.91 + parameter.y * 0.34 * aspect,
+        z: 0.0,
+        w: 1.0,
+    }
+}
+
+pub struct MarkerVarying { pub automatic: f32 }
+impl Copy for MarkerVarying {}
+
+fn marker_clip(
+    _ center: Vec2F,
+    _ corner: u32,
+    _ state: PatchSubdivisionState,
+) -> ClipPosition {
+    let base = diagram_clip(center, state)
+    let mut dx: f32 = -0.010
+    let mut dy: f32 = -0.010
+    if corner == 1 || corner == 2 || corner == 4 { dx = 0.010 }
+    if corner == 2 || corner == 3 || corner == 4 { dy = 0.010 }
+    ClipPosition { x: base.x + dx, y: base.y + dy, z: -0.0001, w: 1.0 }
 }
 
 actor ExactPatchSubdivision uses (
@@ -417,11 +710,14 @@ actor ExactPatchSubdivision uses (
     SurfaceQuality<ResponsiveBacking>,
     SurfaceRecovery<StandardSurfaceRecovery>,
 ) {
-    evaluation: f32,
-    view_space: f32,
-    u_depth: f32,
-    v_depth: f32,
-    child_lod: f32,
+    split_mode: f32,
+    center_mode: f32,
+    center_goal: f32,
+    center_u: f32,
+    center_v: f32,
+    split_threshold: f32,
+    mesh_lod: f32,
+    show_triangles: f32,
     w00: f32,
     w10: f32,
     w01: f32,
@@ -430,28 +726,32 @@ actor ExactPatchSubdivision uses (
     orbit_pitch: f32,
     orbit_distance: f32,
     wire_px: f32,
-    error_gain: f32,
     res_x: f32,
     res_y: f32,
     orbiting: f32,
+    difficulty: f32,
+    center_score: f32,
 
     const fn raster() -> RasterPlan uses (RasterConfiguration) {
         raster_plan<Depth24LessEqualMsaa4>()
     }
 
-    const fn view() -> Surface<SubdivisionParams> {
-        Surface { extent: Extent::square(768), params: subdivision_params() }
+    const fn view() -> Surface<PatchSubdivisionParams> {
+        Surface { extent: Extent::square(768), params: patch_subdivision_params() }
     }
 
-    fn navigate(self, event: own SurfaceEvent) -> SubdivisionState
+    fn navigate(self, event: own SurfaceEvent) -> PatchSubdivisionState
         uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>)
     {
-        let mut state = subdivision_state(
-            self.evaluation,
-            self.view_space,
-            self.u_depth,
-            self.v_depth,
-            self.child_lod,
+        let mut next = state(
+            self.split_mode,
+            self.center_mode,
+            self.center_goal,
+            self.center_u,
+            self.center_v,
+            self.split_threshold,
+            self.mesh_lod,
+            self.show_triangles,
             self.w00,
             self.w10,
             self.w01,
@@ -460,38 +760,43 @@ actor ExactPatchSubdivision uses (
             self.orbit_pitch,
             self.orbit_distance,
             self.wire_px,
-            self.error_gain,
             self.res_x,
             self.res_y,
             self.orbiting,
-        ).apply_param_bindings(subdivision_params(), event)
-        if event.is_pointer_down() { state.orbiting = 1.0 }
-        if event.is_pointer_move() && event.buttons != 0 && state.orbiting > 0.5 {
-            state.orbit_yaw = wrap_pi(state.orbit_yaw - event.delta_x * 0.008)
-            state.orbit_pitch = clamp(state.orbit_pitch - event.delta_y * 0.008, -1.35, 1.35)
+            self.difficulty,
+            self.center_score,
+        ).apply_param_bindings(patch_subdivision_params(), event)
+        if event.is_param_edit() { next = analyze(next) }
+        if event.is_pointer_down() { next.orbiting = 1.0 }
+        if event.is_pointer_move() && event.buttons != 0 && next.orbiting > 0.5 {
+            next.orbit_yaw = wrap_pi(next.orbit_yaw - event.delta_x * 0.008)
+            next.orbit_pitch = clamp(next.orbit_pitch - event.delta_y * 0.008, -1.35, 1.35)
         }
-        if event.is_pointer_up() { state.orbiting = 0.0 }
+        if event.is_pointer_up() { next.orbiting = 0.0 }
         if event.wheel_delta < 0.0 {
-            state.orbit_distance = clamp(state.orbit_distance * 0.90, 2.5, 16.0)
+            next.orbit_distance = clamp(next.orbit_distance * 0.90, 2.5, 16.0)
         } else if event.wheel_delta > 0.0 {
-            state.orbit_distance = clamp(state.orbit_distance * 1.10, 2.5, 16.0)
+            next.orbit_distance = clamp(next.orbit_distance * 1.10, 2.5, 16.0)
         }
-        state
+        next
     }
 
     fn background(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
         -15396337
     }
 
-    fn subdivision_vertices(self, vertex_index: u32) -> RasterVertex<SubdivisionVarying>
-        uses (VertexStage<SubdivisionVarying, TriangleList<MAX_VERTICES>>)
+    fn surface_vertices(self, vertex_index: u32) -> RasterVertex<SurfaceVarying>
+        uses (VertexStage<SurfaceVarying, TriangleList<MAX_SURFACE_VERTICES>>)
     {
-        let state = subdivision_state(
-            self.evaluation,
-            self.view_space,
-            self.u_depth,
-            self.v_depth,
-            self.child_lod,
+        let current = state(
+            self.split_mode,
+            self.center_mode,
+            self.center_goal,
+            self.center_u,
+            self.center_v,
+            self.split_threshold,
+            self.mesh_lod,
+            self.show_triangles,
             self.w00,
             self.w10,
             self.w01,
@@ -500,116 +805,203 @@ actor ExactPatchSubdivision uses (
             self.orbit_pitch,
             self.orbit_distance,
             self.wire_px,
-            self.error_gain,
             self.res_x,
             self.res_y,
             self.orbiting,
+            self.difficulty,
+            self.center_score,
         )
-        let u_depth = admitted_level(state.u_depth, MAX_CHILD_DEPTH)
-        let v_depth = admitted_level(state.v_depth, MAX_CHILD_DEPTH)
-        let local_lod = admitted_level(state.child_lod, MAX_LOCAL_LOD)
-        let u_resolution = resolution(u_depth)
-        let v_resolution = resolution(v_depth)
-        let local_resolution = resolution(local_lod)
-        let child_index = vertex_index / VERTICES_PER_CHILD
-        let child_x = child_index % MAX_CHILD_SIDE
-        let child_y = child_index / MAX_CHILD_SIDE
-        let child_vertex = vertex_index % VERTICES_PER_CHILD
-        let local_cell = child_vertex / 6
-        let local_cell_x = local_cell % MAX_LOCAL_SIDE
-        let local_cell_y = local_cell / MAX_LOCAL_SIDE
-        let active = child_x < u_resolution
-            && child_y < v_resolution
-            && local_cell_x < local_resolution
-            && local_cell_y < local_resolution
-        if !active {
-            invalid_vertex()
-        } else {
-            let cell = AnisotropicPatchCell2 {
-                u_depth: u_depth,
-                v_depth: v_depth,
-                u_index: child_x,
-                v_index: child_y,
-            }
-            let triangle_start = (child_vertex % 6) / 3 * 3
-            let local = child_local_parameter(
-                local_cell_x, local_cell_y, local_resolution, child_vertex,
-            )
-            let local0 = child_local_parameter(
-                local_cell_x, local_cell_y, local_resolution, triangle_start,
-            )
-            let local1 = child_local_parameter(
-                local_cell_x, local_cell_y, local_resolution, triangle_start + 1,
-            )
-            let local2 = child_local_parameter(
-                local_cell_x, local_cell_y, local_resolution, triangle_start + 2,
-            )
-            let value = patch_value(state)
-            let evaluated = evaluate_vertex(value, cell, local)
-            let evaluated0 = evaluate_vertex(value, cell, local0)
-            let evaluated1 = evaluate_vertex(value, cell, local1)
-            let evaluated2 = evaluate_vertex(value, cell, local2)
-            let camera_value = camera(state)
-            let projected = vertex_projection(evaluated, state, camera_value)
-            let projected0 = vertex_projection(evaluated0, state, camera_value)
-            let projected1 = vertex_projection(evaluated1, state, camera_value)
-            let projected2 = vertex_projection(evaluated2, state, camera_value)
-            let altitude = triangle_pixel_altitude(
-                projected0,
-                projected1,
-                projected2,
-                child_vertex % 6,
-                extent(state),
-            )
-            let barycentric = local_barycentric(child_vertex)
-            let differential = evaluate_differential(
-                value, evaluated.parameter, policy(), 0.000000000001,
-            )
-            let error = if evaluated.child.conditioned && evaluated.root.conditioned {
-                length3(sub3(evaluated.child.position, evaluated.root.position))
-            } else {
-                1.0
-            }
-            if projected.depth > 0.05 {
-                RasterVertex {
-                    position: projected.clip,
-                    varying: SubdivisionVarying {
-                        edge_seed: bary3f(
-                            barycentric.a * altitude * projected.depth,
-                            barycentric.b * altitude * projected.depth,
-                            barycentric.c * altitude * projected.depth,
-                        ),
-                        normal: if state.view_space < 0.5 {
-                            differential.normal
-                        } else {
-                            vec3f(0.0, 0.0, 1.0)
-                        },
-                        parameter: evaluated.parameter,
-                        child_center: vec2f(
-                            (as_f32(child_x) + 0.5) / as_f32(u_resolution),
-                            (as_f32(child_y) + 0.5) / as_f32(v_resolution),
-                        ),
-                        composition_error: error,
-                        view_depth: projected.depth,
-                    },
-                }
-            } else {
-                invalid_vertex()
-            }
+        let patch_index = vertex_index / VERTICES_PER_PATCH
+        let patch_vertex = vertex_index % VERTICES_PER_PATCH
+        let lod = admitted_lod(current.mesh_lod)
+        let side = 1 << lod
+        let active_vertices = side * side * 3
+        if patch_index >= active_patch_count(current) || patch_vertex >= active_vertices {
+            return invalid_surface_vertex()
+        }
+        let domain = displayed_domain(patch_index, current)
+        let controls = triangular_projective_controls(patch_value(current), domain)
+        let bary = patch_barycentric(patch_vertex, side)
+        let differential = evaluate_triangular_projective_differential(
+            controls, bary, policy(), 0.000000000001,
+        )
+        if !differential.sample.conditioned {
+            return invalid_surface_vertex()
+        }
+        let triangle_start = patch_vertex / 3 * 3
+        let bary0 = patch_barycentric(triangle_start, side)
+        let bary1 = patch_barycentric(triangle_start + 1, side)
+        let bary2 = patch_barycentric(triangle_start + 2, side)
+        let sample0 = evaluate_triangular_projective_controls(controls, bary0, policy())
+        let sample1 = evaluate_triangular_projective_controls(controls, bary1, policy())
+        let sample2 = evaluate_triangular_projective_controls(controls, bary2, policy())
+        let camera_value = camera(current)
+        let projected = project(camera_value, differential.sample.position)
+        let projected0 = project(camera_value, sample0.position)
+        let projected1 = project(camera_value, sample1.position)
+        let projected2 = project(camera_value, sample2.position)
+        if projected.depth <= 0.05 {
+            return invalid_surface_vertex()
+        }
+        let altitude = triangle_pixel_altitude(
+            projected0,
+            projected1,
+            projected2,
+            patch_vertex % 3,
+            extent(current),
+        )
+        let corner = triangle_corner(patch_vertex % 3)
+        RasterVertex {
+            position: projected.clip,
+            varying: SurfaceVarying {
+                triangle_edge: bary3f(
+                    corner.a * altitude * projected.depth,
+                    corner.b * altitude * projected.depth,
+                    corner.c * altitude * projected.depth,
+                ),
+                patch_edge: bary,
+                normal: differential.normal,
+                patch_index: as_f32(patch_index),
+                view_depth: projected.depth,
+                valid: if differential.sample.vector_valued { 1.0 } else { 0.0 },
+            },
         }
     }
 
-    fn subdivision_fragment(self, varying: SubdivisionVarying) -> i32
-        uses (FragmentStage<SubdivisionVarying>)
+    fn surface_fragment(self, varying: SurfaceVarying) -> i32
+        uses (FragmentStage<SurfaceVarying>)
     {
-        let edge_pixels = minimum_barycentric(varying.edge_seed) / varying.view_depth
-        let wire_coverage = 1.0 - smoothstep(
-            self.wire_px - 0.72,
-            self.wire_px + 0.72,
-            edge_pixels,
+        let split = if self.split_mode < 0.5 {
+            true
+        } else if self.split_mode < 1.5 {
+            self.difficulty > self.split_threshold
+        } else {
+            false
+        }
+        let surface = if varying.valid > 0.5 {
+            shade(varying, split)
+        } else {
+            to_display_rgb(oklch(0.64, 0.21, 0.39))
+        }
+        let triangle_pixels = minimum_barycentric(varying.triangle_edge) / varying.view_depth
+        let triangle_line = if self.show_triangles > 0.5 {
+            1.0 - smoothstep(self.wire_px - 0.70, self.wire_px + 0.70, triangle_pixels)
+        } else {
+            0.0
+        }
+        let patch_line = 1.0 - smoothstep(0.0, 0.012, minimum_barycentric(varying.patch_edge))
+        let coverage = maximum(triangle_line * 0.62, patch_line)
+        pack_rgba8(mix_display_rgb(surface, display_rgb(0.018, 0.025, 0.043), coverage))
+    }
+
+    fn diagram_vertices(self, vertex_index: u32) -> RasterVertex<DiagramVarying>
+        uses (VertexStage<DiagramVarying, TriangleList<12>>)
+    {
+        let current = state(
+            self.split_mode,
+            self.center_mode,
+            self.center_goal,
+            self.center_u,
+            self.center_v,
+            self.split_threshold,
+            self.mesh_lod,
+            self.show_triangles,
+            self.w00,
+            self.w10,
+            self.w01,
+            self.w11,
+            self.orbit_yaw,
+            self.orbit_pitch,
+            self.orbit_distance,
+            self.wire_px,
+            self.res_x,
+            self.res_y,
+            self.orbiting,
+            self.difficulty,
+            self.center_score,
         )
-        let surface = surface_color(varying, self.error_gain)
-        let wire = display_rgb(0.018, 0.025, 0.043)
-        pack_rgba8(mix_display_rgb(surface, wire, wire_coverage))
+        let patch_index = vertex_index / 3
+        let corner = vertex_index % 3
+        if patch_index >= active_patch_count(current) {
+            return RasterVertex {
+                position: ClipPosition { x: 2.0, y: 2.0, z: 0.0, w: 1.0 },
+                varying: DiagramVarying { edge: bary3f(0.0, 0.0, 0.0), patch_index: 0.0 },
+            }
+        }
+        let domain = displayed_domain(patch_index, current)
+        let parameter = if corner == 0 { domain.a } else if corner == 1 { domain.b } else { domain.c }
+        RasterVertex {
+            position: diagram_clip(parameter, current),
+            varying: DiagramVarying {
+                edge: triangle_corner(corner),
+                patch_index: as_f32(patch_index),
+            },
+        }
+    }
+
+    fn diagram_fragment(self, varying: DiagramVarying) -> i32
+        uses (FragmentStage<DiagramVarying>)
+    {
+        let split = if self.split_mode < 0.5 {
+            true
+        } else if self.split_mode < 1.5 {
+            self.difficulty > self.split_threshold
+        } else {
+            false
+        }
+        let line = 1.0 - smoothstep(0.0, 0.035, minimum_barycentric(varying.edge))
+        pack_rgba8(mix_display_rgb(
+            patch_color(varying.patch_index, split),
+            display_rgb(0.018, 0.025, 0.043),
+            line,
+        ))
+    }
+
+    fn center_marker_vertices(self, vertex_index: u32) -> RasterVertex<MarkerVarying>
+        uses (VertexStage<MarkerVarying, TriangleList<6>>)
+    {
+        let current = state(
+            self.split_mode,
+            self.center_mode,
+            self.center_goal,
+            self.center_u,
+            self.center_v,
+            self.split_threshold,
+            self.mesh_lod,
+            self.show_triangles,
+            self.w00,
+            self.w10,
+            self.w01,
+            self.w11,
+            self.orbit_yaw,
+            self.orbit_pitch,
+            self.orbit_distance,
+            self.wire_px,
+            self.res_x,
+            self.res_y,
+            self.orbiting,
+            self.difficulty,
+            self.center_score,
+        )
+        if !uses_four_patches(current) {
+            return RasterVertex {
+                position: ClipPosition { x: 2.0, y: 2.0, z: 0.0, w: 1.0 },
+                varying: MarkerVarying { automatic: 0.0 },
+            }
+        }
+        RasterVertex {
+            position: marker_clip(
+                vec2f(current.center_u, current.center_v), vertex_index, current,
+            ),
+            varying: MarkerVarying {
+                automatic: if current.center_mode > 0.5 { 1.0 } else { 0.0 },
+            },
+        }
+    }
+
+    fn center_marker_fragment(self, varying: MarkerVarying) -> i32
+        uses (FragmentStage<MarkerVarying>)
+    {
+        if varying.automatic > 0.5 { -12736273 } else { -3834783 }
     }
 }

@@ -104,6 +104,177 @@ fn bilinear(values: [Multivector; 4], s: f64, t: f64) -> Multivector {
         .add(values[3].scale(s * t))
 }
 
+#[derive(Clone, Copy)]
+struct TriangleDomain {
+    a: [f64; 2],
+    b: [f64; 2],
+    c: [f64; 2],
+}
+
+#[derive(Clone, Copy)]
+struct QuadraticTriangle([Multivector; 6]);
+
+fn midpoint(first: [f64; 2], second: [f64; 2]) -> [f64; 2] {
+    [0.5 * (first[0] + second[0]), 0.5 * (first[1] + second[1])]
+}
+
+fn quadratic_edge_control(
+    first: Multivector,
+    middle: Multivector,
+    second: Multivector,
+) -> Multivector {
+    middle.scale(2.0).add(first.scale(-0.5)).add(second.scale(-0.5))
+}
+
+fn restrict_bilinear(values: [Multivector; 4], domain: TriangleDomain) -> QuadraticTriangle {
+    let at = |point: [f64; 2]| bilinear(values, point[0], point[1]);
+    let aa = at(domain.a);
+    let bb = at(domain.b);
+    let cc = at(domain.c);
+    QuadraticTriangle([
+        aa,
+        quadratic_edge_control(aa, at(midpoint(domain.a, domain.b)), bb),
+        bb,
+        quadratic_edge_control(aa, at(midpoint(domain.a, domain.c)), cc),
+        quadratic_edge_control(bb, at(midpoint(domain.b, domain.c)), cc),
+        cc,
+    ])
+}
+
+fn evaluate_quadratic_triangle(value: QuadraticTriangle, bary: [f64; 3]) -> Multivector {
+    let [a, b, c] = bary;
+    value.0[0]
+        .scale(a * a)
+        .add(value.0[1].scale(2.0 * a * b))
+        .add(value.0[2].scale(b * b))
+        .add(value.0[3].scale(2.0 * a * c))
+        .add(value.0[4].scale(2.0 * b * c))
+        .add(value.0[5].scale(c * c))
+}
+
+#[derive(Clone, Copy)]
+struct QuadraticTriangleDifferential {
+    value: Multivector,
+    tangent_b: Multivector,
+    tangent_c: Multivector,
+}
+
+fn evaluate_quadratic_triangle_differential(
+    value: QuadraticTriangle,
+    bary: [f64; 3],
+) -> QuadraticTriangleDifferential {
+    let [a, b, c] = bary;
+    QuadraticTriangleDifferential {
+        value: evaluate_quadratic_triangle(value, bary),
+        tangent_b: value.0[0]
+            .scale(-2.0 * a)
+            .add(value.0[1].scale(2.0 * (a - b)))
+            .add(value.0[2].scale(2.0 * b))
+            .add(value.0[3].scale(-2.0 * c))
+            .add(value.0[4].scale(2.0 * c)),
+        tangent_c: value.0[0]
+            .scale(-2.0 * a)
+            .add(value.0[1].scale(-2.0 * b))
+            .add(value.0[3].scale(2.0 * (a - c)))
+            .add(value.0[4].scale(2.0 * b))
+            .add(value.0[5].scale(2.0 * c)),
+    }
+}
+
+fn triangle_parameter(domain: TriangleDomain, bary: [f64; 3]) -> [f64; 2] {
+    [
+        domain.a[0] * bary[0] + domain.b[0] * bary[1] + domain.c[0] * bary[2],
+        domain.a[1] * bary[0] + domain.b[1] * bary[1] + domain.c[1] * bary[2],
+    ]
+}
+
+fn triangle_domains(center: [f64; 2]) -> [TriangleDomain; 4] {
+    [
+        TriangleDomain { a: [0.0, 0.0], b: [1.0, 0.0], c: center },
+        TriangleDomain { a: [1.0, 0.0], b: [1.0, 1.0], c: center },
+        TriangleDomain { a: [1.0, 1.0], b: [0.0, 1.0], c: center },
+        TriangleDomain { a: [0.0, 1.0], b: [0.0, 0.0], c: center },
+    ]
+}
+
+fn triangle_fields(
+    controls: [Control; 4],
+    domain: TriangleDomain,
+) -> (QuadraticTriangle, QuadraticTriangle) {
+    let metric = [1.0, 1.0, 0.0];
+    let numerator = controls.map(|control| control.point.product(control.weight, metric));
+    let denominator = controls.map(|control| control.weight);
+    (restrict_bilinear(numerator, domain), restrict_bilinear(denominator, domain))
+}
+
+fn evaluate_triangle(
+    controls: [Control; 4],
+    domain: TriangleDomain,
+    bary: [f64; 3],
+) -> Multivector {
+    let metric = [1.0, 1.0, 0.0];
+    let (numerator, denominator) = triangle_fields(controls, domain);
+    let numerator = evaluate_quadratic_triangle(numerator, bary);
+    let denominator = evaluate_quadratic_triangle(denominator, bary);
+    numerator.product(
+        denominator.inverse_even(metric).expect("conditioned triangular denominator"),
+        metric,
+    )
+}
+
+fn evaluate_triangle_differential(
+    controls: [Control; 4],
+    domain: TriangleDomain,
+    bary: [f64; 3],
+) -> QuadraticTriangleDifferential {
+    let metric = [1.0, 1.0, 0.0];
+    let (numerator, denominator) = triangle_fields(controls, domain);
+    let numerator = evaluate_quadratic_triangle_differential(numerator, bary);
+    let denominator = evaluate_quadratic_triangle_differential(denominator, bary);
+    let denominator_inverse = denominator
+        .value
+        .inverse_even(metric)
+        .expect("conditioned triangular denominator");
+    let value = numerator.value.product(denominator_inverse, metric);
+    let quotient_tangent = |numerator_tangent: Multivector,
+                            denominator_tangent: Multivector| {
+        numerator_tangent
+            .add(value.product(denominator_tangent, metric).scale(-1.0))
+            .product(denominator_inverse, metric)
+    };
+    QuadraticTriangleDifferential {
+        value,
+        tangent_b: quotient_tangent(numerator.tangent_b, denominator.tangent_b),
+        tangent_c: quotient_tangent(numerator.tangent_c, denominator.tangent_c),
+    }
+}
+
+fn triangle_normal(differential: QuadraticTriangleDifferential) -> Option<[f64; 3]> {
+    let b = [
+        differential.tangent_b.0[1],
+        differential.tangent_b.0[2],
+        differential.tangent_b.0[4],
+    ];
+    let c = [
+        differential.tangent_c.0[1],
+        differential.tangent_c.0[2],
+        differential.tangent_c.0[4],
+    ];
+    let cross = [
+        b[1] * c[2] - b[2] * c[1],
+        b[2] * c[0] - b[0] * c[2],
+        b[0] * c[1] - b[1] * c[0],
+    ];
+    let length = (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+    (length > 1.0e-12).then(|| cross.map(|component| component / length))
+}
+
+fn assert_multivector_close(actual: Multivector, expected: Multivector, tolerance: f64) {
+    for blade in 0..8 {
+        assert_close(actual.0[blade], expected.0[blade], tolerance);
+    }
+}
+
 fn evaluate(controls: [Control; 4], s: f64, t: f64) -> Multivector {
     let metric = [1.0, 1.0, 0.0];
     let numerator = bilinear(
@@ -312,6 +483,80 @@ fn positive_paper_weight_scales_have_no_affine_pole() {
                 assert_close(actual, expected, 2.0e-12);
                 assert!(actual > 0.0, "positive scales reached a denominator pole");
             }
+        }
+    }
+}
+
+#[test]
+fn moving_center_four_triangle_fan_is_an_exact_patch_decomposition() {
+    let cases = [
+        ([1.0, 1.0, 1.0, 1.0], [0.5, 0.5]),
+        ([0.02, 8.0, 8.0, 8.0], [0.13, 0.79]),
+        ([8.0, 0.02, 8.0, 8.0], [0.86, 0.18]),
+    ];
+    for (scales, center) in cases {
+        let controls = scaled_paper_example(scales);
+        for domain in triangle_domains(center) {
+            for b_step in 0..=16 {
+                for c_step in 0..=(16 - b_step) {
+                    let b = f64::from(b_step) / 16.0;
+                    let c = f64::from(c_step) / 16.0;
+                    let bary = [1.0 - b - c, b, c];
+                    let parameter = triangle_parameter(domain, bary);
+                    assert_multivector_close(
+                        evaluate_triangle(controls, domain, bary),
+                        evaluate(controls, parameter[0], parameter[1]),
+                        2.0e-9,
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn neighboring_fan_patches_share_the_complete_curved_edge() {
+    let controls = scaled_paper_example([0.02, 8.0, 8.0, 8.0]);
+    let domains = triangle_domains([0.17, 0.83]);
+    for first in 0..4 {
+        let second = (first + 1) % 4;
+        for step in 0..=64 {
+            let t = f64::from(step) / 64.0;
+            // Each neighboring pair shares its first patch's B--C edge and
+            // its second patch's A--C edge, with identical orientation from
+            // their common outer corner toward the movable center.
+            let left = evaluate_triangle(controls, domains[first], [0.0, 1.0 - t, t]);
+            let right = evaluate_triangle(controls, domains[second], [1.0 - t, 0.0, t]);
+            assert_multivector_close(left, right, 2.0e-9);
+        }
+    }
+}
+
+#[test]
+fn neighboring_fan_patches_share_the_surface_tangent_plane() {
+    let controls = paper_example(false);
+    let domains = triangle_domains([0.17, 0.83]);
+    for first in 0..4 {
+        let second = (first + 1) % 4;
+        for step in 1..64 {
+            let t = f64::from(step) / 64.0;
+            let left = evaluate_triangle_differential(
+                controls,
+                domains[first],
+                [0.0, 1.0 - t, t],
+            );
+            let right = evaluate_triangle_differential(
+                controls,
+                domains[second],
+                [1.0 - t, 0.0, t],
+            );
+            assert_multivector_close(left.value, right.value, 2.0e-9);
+            let left_normal = triangle_normal(left).expect("left child has a tangent plane");
+            let right_normal = triangle_normal(right).expect("right child has a tangent plane");
+            let agreement = left_normal[0] * right_normal[0]
+                + left_normal[1] * right_normal[1]
+                + left_normal[2] * right_normal[2];
+            assert_close(agreement, 1.0, 2.0e-10);
         }
     }
 }

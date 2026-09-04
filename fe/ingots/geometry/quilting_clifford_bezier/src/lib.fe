@@ -26,9 +26,11 @@ use ga_expr::{
     SignedOrthogonalMetric,
     Strict,
 }
-use quilting_domain::{Vec2F, Vec3F, absf, cross3, normalize3_or, vec3f}
+use quilting_domain::{Bary3F, Vec2F, Vec3F, absf, cross3, normalize3_or, vec3f}
 use quilting_patch::{
     AnisotropicPatchCell2,
+    BarycentricTriangle,
+    ExactQuadraticPatchPiece,
     BilinearBernstein,
     BilinearProjectiveControls,
     DenotationSample,
@@ -41,6 +43,9 @@ use quilting_patch::{
     ProjectiveAdmission,
     ProjectiveAlgebra,
     ProjectiveKernel,
+    QuadraticBarycentric,
+    QuadraticTriangleDifferential,
+    QuadraticTriangularProjectiveControls,
     QuadraticTensorPatch,
     ProjectivePatchCellProfile2,
     QuotientSample,
@@ -48,11 +53,16 @@ use quilting_patch::{
     bilinear_projective_controls,
     anisotropic_quadratic_tensor_cell,
     denotation_sample,
+    evaluate_quadratic_triangle,
+    evaluate_quadratic_triangle_differential,
     evaluate_quadratic_tensor,
+    exact_quadratic_patch_piece,
     patch as typed_patch,
     patch_chart_profile,
     projective_control,
     projective_patch,
+    restrict_bilinear_projective_controls_to_triangle,
+    TriangleDomain2,
     projective_patch_cell_profile2,
     pullback_metric2,
     quadratic_tensor_patch,
@@ -535,6 +545,18 @@ pub fn quotient_cell_control_net(
     )
 }
 
+/// Restrict the Clifford quotient to one exact child patch before any mesh is
+/// chosen for display.
+pub fn quotient_patch_piece(
+    _ value: IsotropicBilinearPatch,
+    _ cell: AnisotropicPatchCell2,
+) -> ExactQuadraticPatchPiece<IsotropicQuotientHomogeneousF> {
+    exact_quadratic_patch_piece<IsotropicQuotientHomogeneousF>(
+        quotient_control_net(value),
+        cell,
+    )
+}
+
 /// Evaluate one exact homogeneous quotient net and admit its affine chart.
 ///
 /// Root and de Casteljau-child control nets share this operation. A renderer
@@ -587,8 +609,9 @@ pub fn evaluate_quotient_cell(
     _ local_parameter: Vec2F,
     _ policy: IsotropicPolicy,
 ) -> IsotropicSample {
+    let piece = quotient_patch_piece(value, cell)
     evaluate_quotient_control_net(
-        quotient_cell_control_net(value, cell),
+        piece.control_net,
         local_parameter,
         policy,
     )
@@ -1358,6 +1381,141 @@ pub fn as_projective_patch(_ value: IsotropicBilinearPatch) -> Patch<IsotropicPr
         IsotropicVectorAdmission {},
         UnitSquare {},
         controls,
+    )
+}
+
+pub type IsotropicTriangularProjectiveControls =
+    QuadraticTriangularProjectiveControls<IsotropicCliffordAlgebra>
+pub type IsotropicTriangularProjectiveKernel = ProjectiveKernel<
+    IsotropicCliffordAlgebra,
+    QuadraticBarycentric,
+    IsotropicVectorAdmission,
+    IsotropicTriangularProjectiveControls,
+    BarycentricTriangle,
+>
+
+pub struct IsotropicTriangularDifferential {
+    pub sample: IsotropicSample,
+    pub tangent_b: Vec3F,
+    pub tangent_c: Vec3F,
+    pub normal: Vec3F,
+}
+impl Copy for IsotropicTriangularDifferential {}
+
+pub fn triangular_projective_controls(
+    _ value: IsotropicBilinearPatch,
+    _ domain: TriangleDomain2,
+) -> IsotropicTriangularProjectiveControls {
+    let controls: IsotropicProjectiveControls = bilinear_projective_controls(
+        projective_control(value.p00.point, value.p00.weight),
+        projective_control(value.p10.point, value.p10.weight),
+        projective_control(value.p01.point, value.p01.weight),
+        projective_control(value.p11.point, value.p11.weight),
+    )
+    restrict_bilinear_projective_controls_to_triangle<IsotropicCliffordAlgebra>(
+        IsotropicCliffordAlgebra {},
+        controls,
+        domain,
+    )
+}
+
+pub fn evaluate_triangular_projective_controls(
+    _ controls: IsotropicTriangularProjectiveControls,
+    _ bary: Bary3F,
+    _ policy: IsotropicPolicy,
+) -> IsotropicSample {
+    let numerator = evaluate_quadratic_triangle<IsotropicOddF>(controls.numerator, bary)
+    let denominator = evaluate_quadratic_triangle<IsotropicEvenF>(controls.denominator, bary)
+    let denominator_norm_squared = weight_norm_squared(denominator)
+    if denominator_norm_squared < policy.minimum_denominator_norm_squared {
+        return IsotropicSample {
+            position: vec3f(0.0, 0.0, 0.0),
+            homogeneous: IsotropicOddF { e1: 0.0, e2: 0.0, e3: 0.0, e123: 0.0 },
+            denominator_norm_squared: denominator_norm_squared,
+            trivector_residual: 0.0,
+            conditioned: false,
+            vector_valued: false,
+        }
+    }
+    let homogeneous = odd_times_reverse_weight(numerator, denominator)
+    let inverse_norm = 1.0 / denominator_norm_squared
+    let residual = homogeneous.e123 * inverse_norm
+    IsotropicSample {
+        position: vec3f(
+            homogeneous.e1 * inverse_norm,
+            homogeneous.e2 * inverse_norm,
+            homogeneous.e3 * inverse_norm,
+        ),
+        homogeneous: homogeneous,
+        denominator_norm_squared: denominator_norm_squared,
+        trivector_residual: residual,
+        conditioned: true,
+        vector_valued: absf(residual) <= policy.maximum_trivector_residual,
+    }
+}
+
+/// Evaluate one triangular child and its two local surface directions using
+/// only that child's six numerator and six weight controls.
+pub fn evaluate_triangular_projective_differential(
+    _ controls: IsotropicTriangularProjectiveControls,
+    _ bary: Bary3F,
+    _ policy: IsotropicPolicy,
+    _ minimum_tangent_norm_squared: f32,
+) -> IsotropicTriangularDifferential {
+    let numerator: QuadraticTriangleDifferential<IsotropicOddF> =
+        evaluate_quadratic_triangle_differential<IsotropicOddF>(controls.numerator, bary)
+    let denominator: QuadraticTriangleDifferential<IsotropicEvenF> =
+        evaluate_quadratic_triangle_differential<IsotropicEvenF>(controls.denominator, bary)
+    let sample = evaluate_triangular_projective_controls(controls, bary, policy)
+    if !sample.conditioned {
+        return IsotropicTriangularDifferential {
+            sample: sample,
+            tangent_b: vec3f(0.0, 0.0, 0.0),
+            tangent_c: vec3f(0.0, 0.0, 0.0),
+            normal: vec3f(0.0, 0.0, 1.0),
+        }
+    }
+    let inverse_norm = 1.0 / sample.denominator_norm_squared
+    let value = scale_odd(sample.homogeneous, inverse_norm)
+    let derivative_b = quotient_derivative(
+        value,
+        numerator.tangent_b,
+        denominator.value,
+        denominator.tangent_b,
+        inverse_norm,
+    )
+    let derivative_c = quotient_derivative(
+        value,
+        numerator.tangent_c,
+        denominator.value,
+        denominator.tangent_c,
+        inverse_norm,
+    )
+    let tangent_b = vec3f(derivative_b.e1, derivative_b.e2, derivative_b.e3)
+    let tangent_c = vec3f(derivative_c.e1, derivative_c.e2, derivative_c.e3)
+    IsotropicTriangularDifferential {
+        sample: sample,
+        tangent_b: tangent_b,
+        tangent_c: tangent_c,
+        normal: normalize3_or(
+            cross3(tangent_b, tangent_c),
+            vec3f(0.0, 0.0, 1.0),
+            minimum_tangent_norm_squared,
+        ),
+    }
+}
+
+/// Exact curved triangular restriction of the four-sided Clifford patch.
+pub fn as_triangular_projective_patch(
+    _ value: IsotropicBilinearPatch,
+    _ domain: TriangleDomain2,
+) -> Patch<IsotropicTriangularProjectiveKernel> {
+    projective_patch(
+        IsotropicCliffordAlgebra {},
+        QuadraticBarycentric {},
+        IsotropicVectorAdmission {},
+        BarycentricTriangle {},
+        triangular_projective_controls(value, domain),
     )
 }
 
