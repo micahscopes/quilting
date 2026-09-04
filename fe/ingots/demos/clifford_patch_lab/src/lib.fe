@@ -2544,6 +2544,24 @@ fn maximum3f(_ first: f32, _ second: f32, _ third: f32) -> f32 {
     if pair > third { pair } else { third }
 }
 
+fn triangle_axis_separates_cell(
+    _ p0: Vec2F,
+    _ p1: Vec2F,
+    _ p2: Vec2F,
+    _ edge: Vec2F,
+    _ center: Vec2F,
+    _ half_extent: Vec2F,
+) -> bool {
+    let axis = vec2f(-edge.y, edge.x)
+    let projection0 = (p0.x - center.x) * axis.x + (p0.y - center.y) * axis.y
+    let projection1 = (p1.x - center.x) * axis.x + (p1.y - center.y) * axis.y
+    let projection2 = (p2.x - center.x) * axis.x + (p2.y - center.y) * axis.y
+    let minimum = minimum3f(projection0, projection1, projection2)
+    let maximum = maximum3f(projection0, projection1, projection2)
+    let radius = half_extent.x * abs(axis.x) + half_extent.y * abs(axis.y)
+    maximum < -radius || minimum > radius
+}
+
 fn parameter_triangle_overlaps_cell(
     _ p0: Vec2F,
     _ p1: Vec2F,
@@ -2555,17 +2573,32 @@ fn parameter_triangle_overlaps_cell(
     let maximum_u = maximum3f(p0.x, p1.x, p2.x)
     let minimum_v = minimum3f(p0.y, p1.y, p2.y)
     let maximum_v = maximum3f(p0.y, p1.y, p2.y)
-    maximum_u >= bounds.p00.x
+    let box_overlap = maximum_u >= bounds.p00.x
         && minimum_u <= bounds.p11.x
         && maximum_v >= bounds.p00.y
         && minimum_v <= bounds.p11.y
+    if !box_overlap {
+        return false
+    }
+    let center = bounds.center
+    let half_extent = vec2f(
+        (bounds.p11.x - bounds.p00.x) * 0.5,
+        (bounds.p11.y - bounds.p00.y) * 0.5,
+    )
+    let edge0 = vec2f(p1.x - p0.x, p1.y - p0.y)
+    let edge1 = vec2f(p2.x - p1.x, p2.y - p1.y)
+    let edge2 = vec2f(p0.x - p2.x, p0.y - p2.y)
+    !triangle_axis_separates_cell(p0, p1, p2, edge0, center, half_extent)
+        && !triangle_axis_separates_cell(p0, p1, p2, edge1, center, half_extent)
+        && !triangle_axis_separates_cell(p0, p1, p2, edge2, center, half_extent)
 }
 
-/// Conservatively exclude a macro face whenever its parameter-space bounds
-/// meet a frontier cell whose exact quotient could not certify one finite
-/// affine chart. This cannot bridge a projective pole. It may omit additional
-/// nearby area until the future constrained-hole triangulator consumes the
-/// same hazard frontier exactly.
+/// Exclude a macro face whenever its parameter triangle intersects a frontier
+/// cell whose exact quotient could not certify one finite affine chart. The
+/// separating-axis test is exact for the triangle and rectangular cell, so it
+/// cannot bridge a projective pole or discard faces merely because their
+/// bounding boxes overlap. A future constrained-hole triangulator can consume
+/// the same hazard frontier while preserving triangles tangent to its boundary.
 fn parameter_triangle_overlaps_frontier_hazard(
     _ frontier_first: StorageBuffer<u32, PROJECTIVE_FRONTIER_WORDS>,
     _ frontier_second: StorageBuffer<u32, PROJECTIVE_FRONTIER_WORDS>,
