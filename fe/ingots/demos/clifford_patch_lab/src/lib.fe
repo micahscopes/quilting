@@ -156,6 +156,7 @@ use std::webgpu::{
     RasterConfiguration,
     RasterPlan,
     RasterVertex,
+    RepeatedDispatch,
     ResponsiveBacking,
     StandardSurfaceRecovery,
     SurfaceQuality,
@@ -198,6 +199,10 @@ const FRACTAL_FACE_PLAN_WORDS: usize = FRACTAL_FACE_PLAN_ENTRY_WORDS
     + FRACTAL_FACE_PLAN_META_WORDS
 const FRACTAL_OCCUPANCY_WORDS: usize = 4096
 const FRACTAL_OCCUPANCY_EMPTY: u32 = 0xffffffff
+const FRACTAL_THREADS: usize = 64
+const FRACTAL_OCCUPANCY_WORKGROUPS: usize = FRACTAL_OCCUPANCY_WORDS / FRACTAL_THREADS
+const FRACTAL_LEAF_WORKGROUPS: usize = FRACTAL_MAX_LEAVES / FRACTAL_THREADS
+const FRACTAL_RECONCILIATION_PASSES: usize = 6
 
 const DEFORMED_CANDIDATES: usize = 272
 const DEFORMED_SAMPLING_WORDS: usize = DEFORMED_CANDIDATES * SAMPLING_WORDS_PER_CANDIDATE
@@ -1918,11 +1923,12 @@ fn append_fractal_leaf(
     faces + 2
 }
 
-fn initialize_fractal_occupancy(_ occupancy: StorageBuffer<u32, FRACTAL_OCCUPANCY_WORDS>) {
-    let mut index: u32 = 0
-    while index < FRACTAL_OCCUPANCY_WORDS.downcast_truncate() {
+fn initialize_fractal_occupancy_lane(
+    _ occupancy: StorageBuffer<u32, FRACTAL_OCCUPANCY_WORDS>,
+    _ index: u32,
+) {
+    if index < FRACTAL_OCCUPANCY_WORDS.downcast_truncate() {
         occupancy.store(index: index, value: FRACTAL_OCCUPANCY_EMPTY)
-        index = index + 1
     }
 }
 
@@ -2070,7 +2076,6 @@ fn finalize_fractal_faces(
 fn prepare_fractal_patch_plan(
     _ plan: StorageBuffer<u32, FRACTAL_FACE_PLAN_WORDS>,
     _ occupancy: StorageBuffer<u32, FRACTAL_OCCUPANCY_WORDS>,
-    _ fixture: FixtureBuffer,
     _ patch: IsotropicBilinearPatch,
     _ camera: CameraFrame,
     _ res_x: f32,
@@ -2082,7 +2087,6 @@ fn prepare_fractal_patch_plan(
     let mut faces: u32 = 0
     let mut head: u32 = 0
     let mut tail: u32 = 1
-    initialize_fractal_occupancy(occupancy)
     store_fractal_queue_cell(plan, 0, dyadic_patch_root2())
     while head < tail && head < FRACTAL_MAX_NODES.downcast_truncate() {
         let cell = load_fractal_queue_cell(plan, head)
@@ -2127,23 +2131,8 @@ fn prepare_fractal_patch_plan(
         }
         head = head + 1
     }
-    // Propagate a fine neighbor's dyadic edge level across every overlapping
-    // coarse boundary. The atlas then realizes those exact shared samples.
-    let mut reconciliation: u32 = 0
-    while reconciliation < FRACTAL_MAX_DEPTH {
-        let mut face: u32 = 0
-        while face < faces {
-            reconcile_fractal_leaf_edges(plan, occupancy, face)
-            face = face + 2
-        }
-        reconciliation = reconciliation + 1
-    }
-    let micro_triangles = finalize_fractal_faces(plan, fixture, faces, requested_lod)
     plan.store(index: fractal_face_plan_meta_offset(0), value: faces)
-    plan.store(
-        index: fractal_face_plan_meta_offset(1),
-        value: micro_triangles,
-    )
+    plan.store(index: fractal_face_plan_meta_offset(1), value: 0)
     plan.store(index: fractal_face_plan_meta_offset(2), value: head)
 }
 
@@ -3420,10 +3409,28 @@ actor CliffordPatchLab uses (
         }
     }
 
+    /// Clear one fine occupancy lane per invocation. The earlier scalar loop
+    /// accounted for almost half of the recursive planner's fixed frame cost.
+    fn initialize_fractal_patch_occupancy(self, invocation: ComputeInvocation)
+        uses (
+            ComputeSurface<
+                Workgroup<FRACTAL_THREADS, 1, 1>,
+                FixedDispatch<FRACTAL_OCCUPANCY_WORKGROUPS, 1, 1>,
+            >,
+            PassActivation<AnalyticPatchPipeline>,
+        )
+    {
+        if self.sampler_mode >= 1.5 && self.sampler_mode < 2.5 {
+            initialize_fractal_occupancy_lane(
+                self.fractal_occupancy,
+                invocation.global.x,
+            )
+        }
+    }
+
     /// Materialize the bounded recursive quilt before its indirect raster
-    /// command. One invocation walks the small breadth-first tree in stable
-    /// order; the leaf policy remains backend-neutral and can be parallelized
-    /// without changing its meaning when scene-scale patch counts warrant it.
+    /// command. Tree discovery remains scalar in this checkpoint; occupancy
+    /// initialization and boundary reconciliation are parallel GPU stages.
     fn prepare_fractal_patch(self, invocation: ComputeInvocation)
         uses (
             ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>,
@@ -3444,7 +3451,6 @@ actor CliffordPatchLab uses (
             prepare_fractal_patch_plan(
                 self.fractal_face_plan,
                 self.fractal_occupancy,
-                self.fixture,
                 patch,
                 orbit_camera_frame(
                     self.orbit_yaw,
@@ -3456,6 +3462,62 @@ actor CliffordPatchLab uses (
                 self.res_x,
                 self.res_y,
                 self.atlas_lod,
+            )
+        }
+    }
+
+    /// Propagate each shared boundary's maximum absolute dyadic density.
+    /// Dispatch boundaries provide visibility between rounds, while leaves in
+    /// each round are independent. The fixed point is reached in at most the
+    /// maximum dyadic depth.
+    fn reconcile_fractal_patch(self, invocation: ComputeInvocation)
+        uses (
+            ComputeSurface<
+                Workgroup<FRACTAL_THREADS, 1, 1>,
+                RepeatedDispatch<
+                    FRACTAL_LEAF_WORKGROUPS,
+                    1,
+                    1,
+                    FRACTAL_RECONCILIATION_PASSES,
+                >,
+            >,
+            PassActivation<AnalyticPatchPipeline>,
+        )
+    {
+        if self.sampler_mode >= 1.5 && self.sampler_mode < 2.5 {
+            let face = invocation.global.x * 2
+            if face < self.fractal_face_plan.load(index: fractal_face_plan_meta_offset(0)) {
+                reconcile_fractal_leaf_edges(
+                    self.fractal_face_plan,
+                    self.fractal_occupancy,
+                    face,
+                )
+            }
+        }
+    }
+
+    /// Canonicalize reconciled A/B/C/M demands and build the compact triangle
+    /// prefix consumed by the indirect raster pass.
+    fn finalize_fractal_patch(self, invocation: ComputeInvocation)
+        uses (
+            ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>,
+            PassActivation<AnalyticPatchPipeline>,
+        )
+    {
+        if invocation.global.x == 0
+            && self.sampler_mode >= 1.5
+            && self.sampler_mode < 2.5
+        {
+            let faces = self.fractal_face_plan.load(index: fractal_face_plan_meta_offset(0))
+            let micro_triangles = finalize_fractal_faces(
+                self.fractal_face_plan,
+                self.fixture,
+                faces,
+                admitted_atlas_lod(self.atlas_lod),
+            )
+            self.fractal_face_plan.store(
+                index: fractal_face_plan_meta_offset(1),
+                value: micro_triangles,
             )
         }
     }
