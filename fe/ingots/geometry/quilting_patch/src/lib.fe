@@ -1182,6 +1182,138 @@ pub trait LinearElement: Copy {
     fn scaled(self, _ scale: f32) -> Self
 }
 
+/// Degree-(2,2) tensor-product Bernstein control net.
+///
+/// The nine controls are geometric data, not a sampled UV grid.  Convex-hull
+/// bounds and de Casteljau subdivision are therefore exact for any linear
+/// carrier `T`.  Patch families can use a Euclidean, homogeneous, Clifford,
+/// or screen-space carrier without changing the refinement topology.
+pub struct QuadraticTensorPatch<T: LinearElement> {
+    pub p00: T,
+    pub p10: T,
+    pub p20: T,
+    pub p01: T,
+    pub p11: T,
+    pub p21: T,
+    pub p02: T,
+    pub p12: T,
+    pub p22: T,
+}
+impl<T: LinearElement> Copy for QuadraticTensorPatch<T> {}
+
+pub fn quadratic_tensor_patch<T: LinearElement>(
+    _ p00: T,
+    _ p10: T,
+    _ p20: T,
+    _ p01: T,
+    _ p11: T,
+    _ p21: T,
+    _ p02: T,
+    _ p12: T,
+    _ p22: T,
+) -> QuadraticTensorPatch<T> {
+    QuadraticTensorPatch<T> {
+        p00: p00,
+        p10: p10,
+        p20: p20,
+        p01: p01,
+        p11: p11,
+        p21: p21,
+        p02: p02,
+        p12: p12,
+        p22: p22,
+    }
+}
+
+/// The two exact degree-two Bezier halves produced by one binary split.
+pub struct QuadraticTensorSplit<T: LinearElement> {
+    pub first: QuadraticTensorPatch<T>,
+    pub second: QuadraticTensorPatch<T>,
+}
+impl<T: LinearElement> Copy for QuadraticTensorSplit<T> {}
+
+fn linear_midpoint<T: LinearElement>(_ first: T, _ second: T) -> T {
+    first.scaled(0.5).plus(second.scaled(0.5))
+}
+
+/// Exact de Casteljau subdivision at `u = 1/2`.
+pub fn split_quadratic_tensor_u<T: LinearElement>(
+    _ value: QuadraticTensorPatch<T>,
+) -> QuadraticTensorSplit<T> {
+    let a00 = linear_midpoint<T>(value.p00, value.p10)
+    let a10 = linear_midpoint<T>(value.p10, value.p20)
+    let b00 = linear_midpoint<T>(a00, a10)
+    let a01 = linear_midpoint<T>(value.p01, value.p11)
+    let a11 = linear_midpoint<T>(value.p11, value.p21)
+    let b01 = linear_midpoint<T>(a01, a11)
+    let a02 = linear_midpoint<T>(value.p02, value.p12)
+    let a12 = linear_midpoint<T>(value.p12, value.p22)
+    let b02 = linear_midpoint<T>(a02, a12)
+    QuadraticTensorSplit<T> {
+        first: quadratic_tensor_patch<T>(
+            value.p00,
+            a00,
+            b00,
+            value.p01,
+            a01,
+            b01,
+            value.p02,
+            a02,
+            b02,
+        ),
+        second: quadratic_tensor_patch<T>(
+            b00,
+            a10,
+            value.p20,
+            b01,
+            a11,
+            value.p21,
+            b02,
+            a12,
+            value.p22,
+        ),
+    }
+}
+
+/// Exact de Casteljau subdivision at `v = 1/2`.
+pub fn split_quadratic_tensor_v<T: LinearElement>(
+    _ value: QuadraticTensorPatch<T>,
+) -> QuadraticTensorSplit<T> {
+    let a00 = linear_midpoint<T>(value.p00, value.p01)
+    let a01 = linear_midpoint<T>(value.p01, value.p02)
+    let b00 = linear_midpoint<T>(a00, a01)
+    let a10 = linear_midpoint<T>(value.p10, value.p11)
+    let a11 = linear_midpoint<T>(value.p11, value.p12)
+    let b10 = linear_midpoint<T>(a10, a11)
+    let a20 = linear_midpoint<T>(value.p20, value.p21)
+    let a21 = linear_midpoint<T>(value.p21, value.p22)
+    let b20 = linear_midpoint<T>(a20, a21)
+    QuadraticTensorSplit<T> {
+        first: quadratic_tensor_patch<T>(
+            value.p00,
+            value.p10,
+            value.p20,
+            a00,
+            a10,
+            a20,
+            b00,
+            b10,
+            b20,
+        ),
+        second: quadratic_tensor_patch<T>(
+            b00,
+            b10,
+            b20,
+            a01,
+            a11,
+            a21,
+            value.p02,
+            value.p12,
+            value.p22,
+        ),
+    }
+}
+
 /// The algebraic half of a rational/projective patch model.
 ///
 /// `Metric` is static type data. A CGA, PGA, QCGA, or custom model closes this

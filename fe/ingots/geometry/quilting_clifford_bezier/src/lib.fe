@@ -39,6 +39,7 @@ use quilting_patch::{
     ProjectiveAdmission,
     ProjectiveAlgebra,
     ProjectiveKernel,
+    QuadraticTensorPatch,
     QuotientSample,
     UnitSquare,
     bilinear_projective_controls,
@@ -48,6 +49,7 @@ use quilting_patch::{
     projective_control,
     projective_patch,
     pullback_metric2,
+    quadratic_tensor_patch,
     PullbackMetric2,
 }
 
@@ -100,6 +102,23 @@ pub struct IsotropicProjectiveF {
     pub denominator_e23: f32,
 }
 impl Copy for IsotropicProjectiveF {}
+
+/// Exact homogeneous carrier of the affine Clifford quotient.
+///
+/// `numerator / denominator` is the grade-one/grade-three result of
+/// `F(s,t) W(s,t)^-1`.  Unlike sampling the quotient, these five lanes form a
+/// degree-(2,2) Bernstein polynomial and can therefore be bounded and split
+/// exactly before perspective division.
+pub struct IsotropicQuotientHomogeneousF {
+    pub numerator_e1: f32,
+    pub numerator_e2: f32,
+    pub numerator_e3: f32,
+    pub numerator_e123: f32,
+    pub denominator: f32,
+}
+impl Copy for IsotropicQuotientHomogeneousF {}
+
+pub type IsotropicQuotientControlNet = QuadraticTensorPatch<IsotropicQuotientHomogeneousF>
 
 pub struct IsotropicProjectiveSample {
     pub representative: IsotropicProjectiveF,
@@ -161,10 +180,14 @@ impl Copy for IsotropicBilinearKernel {}
 // 1|8|32|64. Only e1 and e2 have nonzero positive squares.
 struct PointCoefficients { e1: f32, e2: f32, e3: f32 }
 struct WeightCoefficients { scalar: f32, e12: f32, e13: f32, e23: f32 }
+struct LeftWeightCoefficients { scalar: f32, e12: f32, e13: f32, e23: f32 }
+struct RightWeightCoefficients { scalar: f32, e12: f32, e13: f32, e23: f32 }
 struct OddCoefficients { e1: f32, e2: f32, e3: f32, e123: f32 }
 
 type PointMv = MultivectorInput<PointCoefficients, 22>
 type WeightMv = MultivectorInput<WeightCoefficients, 105>
+type LeftWeightMv = MultivectorInput<LeftWeightCoefficients, 105>
+type RightWeightMv = MultivectorInput<RightWeightCoefficients, 105>
 type OddMv = MultivectorInput<OddCoefficients, 150>
 pub type IsotropicMetric = SignedOrthogonalMetric<3, 3, 0>
 
@@ -192,6 +215,12 @@ derive EvaluateGaF32 for WeightNormOperands using CompileGaF32<
     GaProgram<WeightNormExpression, IsotropicMetric, Strict>,
 >
 
+type WeightPairScalarExpression = ScalarProduct<LeftWeightMv, Reverse<RightWeightMv>>
+struct WeightPairScalarOperands { left: LeftWeightCoefficients, right: RightWeightCoefficients }
+derive EvaluateGaF32 for WeightPairScalarOperands using CompileGaF32<
+    GaProgram<WeightPairScalarExpression, IsotropicMetric, Strict>,
+>
+
 pub fn even(_ scalar: f32, _ e12: f32, _ e13: f32, _ e23: f32) -> IsotropicEvenF {
     IsotropicEvenF { scalar: scalar, e12: e12, e13: e13, e23: e23 }
 }
@@ -215,6 +244,14 @@ fn weight_coefficients(_ value: IsotropicEvenF) -> WeightCoefficients {
 
 fn odd_coefficients(_ value: IsotropicOddF) -> OddCoefficients {
     OddCoefficients { e1: value.e1, e2: value.e2, e3: value.e3, e123: value.e123 }
+}
+
+fn left_weight_coefficients(_ value: IsotropicEvenF) -> LeftWeightCoefficients {
+    LeftWeightCoefficients { scalar: value.scalar, e12: value.e12, e13: value.e13, e23: value.e23 }
+}
+
+fn right_weight_coefficients(_ value: IsotropicEvenF) -> RightWeightCoefficients {
+    RightWeightCoefficients { scalar: value.scalar, e12: value.e12, e13: value.e13, e23: value.e23 }
 }
 
 /// Evaluate `point * weight` through the statically compiled sparse product.
@@ -255,6 +292,132 @@ pub fn weight_norm_squared(_ value: IsotropicEvenF) -> f32 {
     output.0
 }
 
+fn weight_pair_scalar(_ left: IsotropicEvenF, _ right: IsotropicEvenF) -> f32 {
+    let output = <WeightPairScalarOperands as EvaluateGaF32>::evaluate(
+        WeightPairScalarOperands {
+            left: left_weight_coefficients(left),
+            right: right_weight_coefficients(right),
+        },
+    )
+    output.0
+}
+
+fn quotient_homogeneous_product(
+    _ numerator: IsotropicOddF,
+    _ left_weight: IsotropicEvenF,
+    _ right_weight: IsotropicEvenF,
+) -> IsotropicQuotientHomogeneousF {
+    let product = odd_times_reverse_weight(numerator, right_weight)
+    IsotropicQuotientHomogeneousF {
+        numerator_e1: product.e1,
+        numerator_e2: product.e2,
+        numerator_e3: product.e3,
+        numerator_e123: product.e123,
+        denominator: weight_pair_scalar(left_weight, right_weight),
+    }
+}
+
+fn add_quotient_homogeneous(
+    _ left: IsotropicQuotientHomogeneousF,
+    _ right: IsotropicQuotientHomogeneousF,
+) -> IsotropicQuotientHomogeneousF {
+    IsotropicQuotientHomogeneousF {
+        numerator_e1: left.numerator_e1 + right.numerator_e1,
+        numerator_e2: left.numerator_e2 + right.numerator_e2,
+        numerator_e3: left.numerator_e3 + right.numerator_e3,
+        numerator_e123: left.numerator_e123 + right.numerator_e123,
+        denominator: left.denominator + right.denominator,
+    }
+}
+
+fn scale_quotient_homogeneous(
+    _ value: IsotropicQuotientHomogeneousF,
+    _ scale: f32,
+) -> IsotropicQuotientHomogeneousF {
+    IsotropicQuotientHomogeneousF {
+        numerator_e1: value.numerator_e1 * scale,
+        numerator_e2: value.numerator_e2 * scale,
+        numerator_e3: value.numerator_e3 * scale,
+        numerator_e123: value.numerator_e123 * scale,
+        denominator: value.denominator * scale,
+    }
+}
+
+impl LinearElement for IsotropicQuotientHomogeneousF {
+    fn plus(self, _ right: Self) -> Self {
+        add_quotient_homogeneous(self, right)
+    }
+
+    fn scaled(self, _ scale: f32) -> Self {
+        scale_quotient_homogeneous(self, scale)
+    }
+}
+
+fn average2_quotient_homogeneous(
+    _ first: IsotropicQuotientHomogeneousF,
+    _ second: IsotropicQuotientHomogeneousF,
+) -> IsotropicQuotientHomogeneousF {
+    scale_quotient_homogeneous(add_quotient_homogeneous(first, second), 0.5)
+}
+
+fn average4_quotient_homogeneous(
+    _ first: IsotropicQuotientHomogeneousF,
+    _ second: IsotropicQuotientHomogeneousF,
+    _ third: IsotropicQuotientHomogeneousF,
+    _ fourth: IsotropicQuotientHomogeneousF,
+) -> IsotropicQuotientHomogeneousF {
+    scale_quotient_homogeneous(
+        add_quotient_homogeneous(
+            add_quotient_homogeneous(first, second),
+            add_quotient_homogeneous(third, fourth),
+        ),
+        0.25,
+    )
+}
+
+/// Convert the authored bilinear Clifford patch to its exact degree-(2,2)
+/// homogeneous affine quotient.
+///
+/// Multiplication of two degree-one Bernstein fields raises the degree.  The
+/// mixed coefficients use the binomial product factors 1/2 and 1/4, so this
+/// is an algebraic conversion rather than a nine-point fit.  Subsequent
+/// de Casteljau splits may therefore change mesh connectivity without losing
+/// the denotation or crossing the affine pole by sampling accident.
+pub fn quotient_control_net(_ value: IsotropicBilinearPatch) -> IsotropicQuotientControlNet {
+    let f00 = weighted_isotropic_point(value.p00)
+    let f10 = weighted_isotropic_point(value.p10)
+    let f01 = weighted_isotropic_point(value.p01)
+    let f11 = weighted_isotropic_point(value.p11)
+    let h00_00 = quotient_homogeneous_product(f00, value.p00.weight, value.p00.weight)
+    let h00_10 = quotient_homogeneous_product(f00, value.p00.weight, value.p10.weight)
+    let h10_00 = quotient_homogeneous_product(f10, value.p10.weight, value.p00.weight)
+    let h10_10 = quotient_homogeneous_product(f10, value.p10.weight, value.p10.weight)
+    let h00_01 = quotient_homogeneous_product(f00, value.p00.weight, value.p01.weight)
+    let h01_00 = quotient_homogeneous_product(f01, value.p01.weight, value.p00.weight)
+    let h10_11 = quotient_homogeneous_product(f10, value.p10.weight, value.p11.weight)
+    let h11_10 = quotient_homogeneous_product(f11, value.p11.weight, value.p10.weight)
+    let h01_01 = quotient_homogeneous_product(f01, value.p01.weight, value.p01.weight)
+    let h01_11 = quotient_homogeneous_product(f01, value.p01.weight, value.p11.weight)
+    let h11_01 = quotient_homogeneous_product(f11, value.p11.weight, value.p01.weight)
+    let h11_11 = quotient_homogeneous_product(f11, value.p11.weight, value.p11.weight)
+    quadratic_tensor_patch<IsotropicQuotientHomogeneousF>(
+        h00_00,
+        average2_quotient_homogeneous(h00_10, h10_00),
+        h10_10,
+        average2_quotient_homogeneous(h00_01, h01_00),
+        average4_quotient_homogeneous(
+            quotient_homogeneous_product(f00, value.p00.weight, value.p11.weight),
+            quotient_homogeneous_product(f10, value.p10.weight, value.p01.weight),
+            quotient_homogeneous_product(f01, value.p01.weight, value.p10.weight),
+            quotient_homogeneous_product(f11, value.p11.weight, value.p00.weight),
+        ),
+        average2_quotient_homogeneous(h10_11, h11_10),
+        h01_01,
+        average2_quotient_homogeneous(h01_11, h11_01),
+        h11_11,
+    )
+}
+
 /// Squared norm of the projective denominator at one parameter value. This
 /// is the inexpensive chart-admission measure shared by sampling and raster
 /// topology; callers that only need conditioning do not evaluate the full
@@ -286,11 +449,7 @@ fn maximum4f(_ a: f32, _ b: f32, _ c: f32, _ d: f32) -> f32 {
 fn interval_absolute_lower_bound(_ minimum: f32, _ maximum: f32) -> f32 {
     if minimum > 0.0 {
         minimum
-    } else if maximum < 0.0 {
-        -maximum
-    } else {
-        0.0
-    }
+    } else if maximum < 0.0 { -maximum } else { 0.0 }
 }
 
 /// Certify the denominator over a complete axis-aligned parameter cell.
@@ -542,10 +701,7 @@ pub fn projective_dot(_ left: IsotropicProjectiveF, _ right: IsotropicProjective
         + left.denominator_e23 * right.denominator_e23
 }
 
-fn scale_projective(
-    _ value: IsotropicProjectiveF,
-    _ scale: f32,
-) -> IsotropicProjectiveF {
+fn scale_projective(_ value: IsotropicProjectiveF, _ scale: f32) -> IsotropicProjectiveF {
     IsotropicProjectiveF {
         numerator_e1: value.numerator_e1 * scale,
         numerator_e2: value.numerator_e2 * scale,
@@ -574,10 +730,7 @@ fn sub_projective(
     }
 }
 
-fn projective_lift(
-    _ value: IsotropicBilinearPatch,
-    _ parameter: Vec2F,
-) -> IsotropicProjectiveLift {
+fn projective_lift(_ value: IsotropicBilinearPatch, _ parameter: Vec2F) -> IsotropicProjectiveLift {
     let f00 = weighted_isotropic_point(value.p00)
     let f10 = weighted_isotropic_point(value.p10)
     let f01 = weighted_isotropic_point(value.p01)
@@ -728,7 +881,11 @@ pub fn projective_triangle_area(
     let edge_t = sub_projective(aligned_third, first)
     let determinant = projective_dot(edge_s, edge_s) * projective_dot(edge_t, edge_t) -
         projective_dot(edge_s, edge_t) * projective_dot(edge_s, edge_t)
-    if determinant > 0.0 { sqrt(determinant) * 0.5 } else { 0.0 }
+    if determinant > 0.0 {
+        sqrt(determinant) * 0.5
+    } else {
+        0.0
+    }
 }
 
 pub fn projective_pullback_metric(
