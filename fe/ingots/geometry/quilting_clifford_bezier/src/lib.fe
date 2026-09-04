@@ -28,6 +28,7 @@ use ga_expr::{
 }
 use quilting_domain::{Vec2F, Vec3F, absf, cross3, normalize3_or, vec3f}
 use quilting_patch::{
+    AnisotropicPatchCell2,
     BilinearBernstein,
     BilinearProjectiveControls,
     DenotationSample,
@@ -35,19 +36,23 @@ use quilting_patch::{
     Patch,
     PatchChartProfile,
     PatchKernel,
+    HomogeneousQuotientElement,
     LinearElement,
     ProjectiveAdmission,
     ProjectiveAlgebra,
     ProjectiveKernel,
     QuadraticTensorPatch,
+    ProjectivePatchCellProfile2,
     QuotientSample,
     UnitSquare,
     bilinear_projective_controls,
+    anisotropic_quadratic_tensor_cell,
     denotation_sample,
     patch as typed_patch,
     patch_chart_profile,
     projective_control,
     projective_patch,
+    projective_patch_cell_profile2,
     pullback_metric2,
     quadratic_tensor_patch,
     PullbackMetric2,
@@ -353,6 +358,24 @@ impl LinearElement for IsotropicQuotientHomogeneousF {
     }
 }
 
+impl HomogeneousQuotientElement for IsotropicQuotientHomogeneousF {
+    fn denominator(self) -> f32 {
+        self.denominator
+    }
+
+    fn homogeneous_separation_squared(self, _ right: Self) -> f32 {
+        let e1 = self.numerator_e1 * right.denominator -
+            right.numerator_e1 * self.denominator
+        let e2 = self.numerator_e2 * right.denominator -
+            right.numerator_e2 * self.denominator
+        let e3 = self.numerator_e3 * right.denominator -
+            right.numerator_e3 * self.denominator
+        let e123 = self.numerator_e123 * right.denominator -
+            right.numerator_e123 * self.denominator
+        e1 * e1 + e2 * e2 + e3 * e3 + e123 * e123
+    }
+}
+
 fn average2_quotient_homogeneous(
     _ first: IsotropicQuotientHomogeneousF,
     _ second: IsotropicQuotientHomogeneousF,
@@ -415,6 +438,29 @@ pub fn quotient_control_net(_ value: IsotropicBilinearPatch) -> IsotropicQuotien
         h01_01,
         average2_quotient_homogeneous(h01_11, h11_01),
         h11_11,
+    )
+}
+
+/// Recover the exact local quotient net named by one compact anisotropic cell.
+pub fn quotient_cell_control_net(
+    _ value: IsotropicBilinearPatch,
+    _ cell: AnisotropicPatchCell2,
+) -> IsotropicQuotientControlNet {
+    anisotropic_quadratic_tensor_cell<IsotropicQuotientHomogeneousF>(
+        quotient_control_net(value),
+        cell,
+    )
+}
+
+/// Intrinsic pole/stretch evidence for one compact frontier cell.
+pub fn quotient_cell_profile(
+    _ value: IsotropicBilinearPatch,
+    _ cell: AnisotropicPatchCell2,
+    _ policy: IsotropicPolicy,
+) -> ProjectivePatchCellProfile2 {
+    projective_patch_cell_profile2<IsotropicQuotientHomogeneousF>(
+        quotient_cell_control_net(value, cell),
+        policy.minimum_denominator_norm_squared,
     )
 }
 

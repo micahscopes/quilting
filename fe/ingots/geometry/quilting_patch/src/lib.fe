@@ -6,7 +6,7 @@
 //! this common surface promises only a partial typed point.
 
 use core::marker::Copy
-use fmath::sqrt
+use fmath::{abs, sqrt}
 use quilting_domain::{
     Bary3F,
     Vec2F,
@@ -1229,6 +1229,313 @@ pub fn quadratic_tensor_patch<T: LinearElement>(
 pub struct QuadraticTensorSplit<T: LinearElement> {
     pub first: QuadraticTensorPatch<T>,
     pub second: QuadraticTensorPatch<T>,
+}
+
+/// One independently bisected tensor-product parameter cell.
+///
+/// Unlike `DyadicPatchCell2`, the two axes do not have to share a depth. This
+/// is the compact identity needed by a frontier that follows a thin pole or a
+/// strongly directional stretch without allocating the surrounding `4^d`
+/// square tree.
+pub struct AnisotropicPatchCell2 {
+    pub u_depth: u32,
+    pub v_depth: u32,
+    pub u_index: u32,
+    pub v_index: u32,
+}
+impl Copy for AnisotropicPatchCell2 {}
+
+pub const fn anisotropic_patch_root2() -> AnisotropicPatchCell2 {
+    AnisotropicPatchCell2 { u_depth: 0, v_depth: 0, u_index: 0, v_index: 0 }
+}
+
+pub const fn bisect_anisotropic_patch_u2(
+    _ cell: AnisotropicPatchCell2,
+    _ upper: bool,
+) -> AnisotropicPatchCell2 {
+    AnisotropicPatchCell2 {
+        u_depth: cell.u_depth + 1,
+        v_depth: cell.v_depth,
+        u_index: cell.u_index * 2 + if upper { 1 } else { 0 },
+        v_index: cell.v_index,
+    }
+}
+
+pub const fn bisect_anisotropic_patch_v2(
+    _ cell: AnisotropicPatchCell2,
+    _ upper: bool,
+) -> AnisotropicPatchCell2 {
+    AnisotropicPatchCell2 {
+        u_depth: cell.u_depth,
+        v_depth: cell.v_depth + 1,
+        u_index: cell.u_index,
+        v_index: cell.v_index * 2 + if upper { 1 } else { 0 },
+    }
+}
+
+/// Recover the exact Bernstein net over one anisotropic cell.
+///
+/// De Casteljau subdivision commutes across tensor axes, so a backend only
+/// stores the four integer identity lanes. It may reconstruct the local net
+/// on demand or cache the returned nine controls in a compact GPU frontier.
+pub fn anisotropic_quadratic_tensor_cell<T: LinearElement>(
+    _ root: QuadraticTensorPatch<T>,
+    _ cell: AnisotropicPatchCell2,
+) -> QuadraticTensorPatch<T> {
+    let mut value = root
+    let mut bit = cell.u_depth
+    while bit > 0 {
+        bit = bit - 1
+        let split = split_quadratic_tensor_u<T>(value)
+        value = if (cell.u_index >> bit) & 1 == 0 { split.first } else { split.second }
+    }
+    bit = cell.v_depth
+    while bit > 0 {
+        bit = bit - 1
+        let split = split_quadratic_tensor_v<T>(value)
+        value = if (cell.v_index >> bit) & 1 == 0 { split.first } else { split.second }
+    }
+    value
+}
+
+static_assert(bisect_anisotropic_patch_u2(anisotropic_patch_root2(), false).u_depth == 1)
+static_assert(bisect_anisotropic_patch_u2(anisotropic_patch_root2(), true).u_index == 1)
+static_assert(bisect_anisotropic_patch_v2(
+        bisect_anisotropic_patch_v2(anisotropic_patch_root2(), true),
+        false,
+    )
+        .v_index
+    == 2)
+
+/// Algebra-specific observation of a homogeneous quotient control.
+///
+/// `homogeneous_separation_squared` measures the numerator of the affine
+/// difference without dividing: for scalar denominator `d`, it is
+/// `||n0*d1 - n1*d0||^2`. Concrete GA models derive that expression over
+/// their sparse numerator carrier; the frontier remains metric-parametric.
+pub trait HomogeneousQuotientElement: LinearElement {
+    fn denominator(self) -> f32
+    fn homogeneous_separation_squared(self, _ right: Self) -> f32
+}
+
+/// Conservative intrinsic evidence over one exact degree-(2,2) quotient net.
+///
+/// A positive minimum denominator is certified by the Bernstein convex hull.
+/// Directional variations are upper-envelope control differences used to
+/// choose the next bisection; they do not pretend that a few point samples
+/// bound a rational map near its pole.
+pub struct ProjectivePatchCellProfile2 {
+    pub minimum_denominator_bound: f32,
+    pub maximum_denominator_bound: f32,
+    pub denominator_ratio: f32,
+    pub denominator_variation_u: f32,
+    pub denominator_variation_v: f32,
+    pub projective_variation_u: f32,
+    pub projective_variation_v: f32,
+    pub certified: bool,
+}
+impl Copy for ProjectivePatchCellProfile2 {}
+
+fn minimum9(
+    _ a: f32,
+    _ b: f32,
+    _ c: f32,
+    _ d: f32,
+    _ e: f32,
+    _ f: f32,
+    _ g: f32,
+    _ h: f32,
+    _ i: f32,
+) -> f32 {
+    minimum_f32(
+        minimum_f32(minimum_f32(a, b), minimum_f32(c, d)),
+        minimum_f32(minimum_f32(e, f), minimum_f32(g, minimum_f32(h, i))),
+    )
+}
+
+fn maximum9(
+    _ a: f32,
+    _ b: f32,
+    _ c: f32,
+    _ d: f32,
+    _ e: f32,
+    _ f: f32,
+    _ g: f32,
+    _ h: f32,
+    _ i: f32,
+) -> f32 {
+    maximum_f32(
+        maximum_f32(maximum_f32(a, b), maximum_f32(c, d)),
+        maximum_f32(maximum_f32(e, f), maximum_f32(g, maximum_f32(h, i))),
+    )
+}
+
+fn maximum6(_ a: f32, _ b: f32, _ c: f32, _ d: f32, _ e: f32, _ f: f32) -> f32 {
+    maximum_f32(maximum_f32(maximum_f32(a, b), maximum_f32(c, d)), maximum_f32(e, f))
+}
+
+fn denominator_delta<T: HomogeneousQuotientElement>(_ a: T, _ b: T) -> f32 {
+    abs(b.denominator() - a.denominator())
+}
+
+/// Profile a local exact quotient net without performing affine division.
+pub fn projective_patch_cell_profile2<T: HomogeneousQuotientElement>(
+    _ value: QuadraticTensorPatch<T>,
+    _ minimum_admitted_denominator: f32,
+) -> ProjectivePatchCellProfile2 {
+    let minimum_denominator = minimum9(
+        value.p00.denominator(), value.p10.denominator(), value.p20.denominator(),
+        value.p01.denominator(), value.p11.denominator(), value.p21.denominator(),
+        value.p02.denominator(), value.p12.denominator(), value.p22.denominator(),
+    )
+    let maximum_denominator = maximum9(
+        value.p00.denominator(), value.p10.denominator(), value.p20.denominator(),
+        value.p01.denominator(), value.p11.denominator(), value.p21.denominator(),
+        value.p02.denominator(), value.p12.denominator(), value.p22.denominator(),
+    )
+    let denominator_variation_u = maximum6(
+        denominator_delta<T>(value.p00, value.p10),
+        denominator_delta<T>(value.p10, value.p20),
+        denominator_delta<T>(value.p01, value.p11),
+        denominator_delta<T>(value.p11, value.p21),
+        denominator_delta<T>(value.p02, value.p12),
+        denominator_delta<T>(value.p12, value.p22),
+    )
+    let denominator_variation_v = maximum6(
+        denominator_delta<T>(value.p00, value.p01),
+        denominator_delta<T>(value.p01, value.p02),
+        denominator_delta<T>(value.p10, value.p11),
+        denominator_delta<T>(value.p11, value.p12),
+        denominator_delta<T>(value.p20, value.p21),
+        denominator_delta<T>(value.p21, value.p22),
+    )
+    let separation_u = maximum6(
+        value.p00.homogeneous_separation_squared(value.p10),
+        value.p10.homogeneous_separation_squared(value.p20),
+        value.p01.homogeneous_separation_squared(value.p11),
+        value.p11.homogeneous_separation_squared(value.p21),
+        value.p02.homogeneous_separation_squared(value.p12),
+        value.p12.homogeneous_separation_squared(value.p22),
+    )
+    let separation_v = maximum6(
+        value.p00.homogeneous_separation_squared(value.p01),
+        value.p01.homogeneous_separation_squared(value.p02),
+        value.p10.homogeneous_separation_squared(value.p11),
+        value.p11.homogeneous_separation_squared(value.p12),
+        value.p20.homogeneous_separation_squared(value.p21),
+        value.p21.homogeneous_separation_squared(value.p22),
+    )
+    let certified = minimum_denominator > 0.0
+        && minimum_denominator >= minimum_admitted_denominator
+    let stable_denominator = if certified {
+        minimum_denominator
+    } else {
+        maximum_f32(maximum_f32(abs(minimum_denominator), abs(maximum_denominator)),
+            minimum_admitted_denominator)
+    }
+    let inverse_denominator_squared = 1.0 / (stable_denominator * stable_denominator)
+    ProjectivePatchCellProfile2 {
+        minimum_denominator_bound: minimum_denominator,
+        maximum_denominator_bound: maximum_denominator,
+        denominator_ratio: if certified { maximum_denominator / minimum_denominator } else { 0.0 },
+        denominator_variation_u: denominator_variation_u,
+        denominator_variation_v: denominator_variation_v,
+        projective_variation_u: 2.0 * sqrt(separation_u) * inverse_denominator_squared,
+        projective_variation_v: 2.0 * sqrt(separation_v) * inverse_denominator_squared,
+        certified: certified,
+    }
+}
+
+/// Intrinsic and view-dependent evidence are kept separate until policy.
+pub struct ProjectivePatchFrontierEvidence2 {
+    pub intrinsic: ProjectivePatchCellProfile2,
+    pub screen_variation_u: f32,
+    pub screen_variation_v: f32,
+}
+impl Copy for ProjectivePatchFrontierEvidence2 {}
+
+pub struct ProjectivePatchFrontierPolicy2 {
+    pub maximum_u_depth: u32,
+    pub maximum_v_depth: u32,
+    pub maximum_denominator_ratio: f32,
+    pub maximum_projective_variation: f32,
+    pub maximum_screen_variation: f32,
+}
+impl Copy for ProjectivePatchFrontierPolicy2 {}
+
+/// A compact frontier either draws, isolates a residual pole, or performs one
+/// directional bisection. The explicit axis is the mesh-topological contract
+/// missing from the earlier square QuiltPatch policy.
+pub enum ProjectivePatchFrontierDecision2 {
+    Reject,
+    Draw,
+    BisectU,
+    BisectV,
+}
+impl Copy for ProjectivePatchFrontierDecision2 {}
+
+fn choose_frontier_bisection2(
+    _ cell: AnisotropicPatchCell2,
+    _ u_priority: f32,
+    _ v_priority: f32,
+    _ policy: ProjectivePatchFrontierPolicy2,
+) -> ProjectivePatchFrontierDecision2 {
+    if cell.u_depth >= policy.maximum_u_depth && cell.v_depth >= policy.maximum_v_depth {
+        ProjectivePatchFrontierDecision2::Reject
+    } else if cell.v_depth >= policy.maximum_v_depth
+        || (cell.u_depth < policy.maximum_u_depth && u_priority >= v_priority) {
+        ProjectivePatchFrontierDecision2::BisectU
+    } else {
+        ProjectivePatchFrontierDecision2::BisectV
+    }
+}
+
+fn frontier_priority_ratio(_ value: f32, _ limit: f32) -> f32 {
+    if limit > 0.0 { value / limit } else { value }
+}
+
+pub fn projective_patch_frontier_decision2(
+    _ cell: AnisotropicPatchCell2,
+    _ evidence: ProjectivePatchFrontierEvidence2,
+    _ policy: ProjectivePatchFrontierPolicy2,
+) -> ProjectivePatchFrontierDecision2 {
+    let intrinsic = evidence.intrinsic
+    let denominator_scale = maximum_f32(
+        abs(intrinsic.minimum_denominator_bound),
+        abs(intrinsic.maximum_denominator_bound),
+    )
+    let inverse_denominator_scale = if denominator_scale > 0.0 {
+        1.0 / denominator_scale
+    } else {
+        0.0
+    }
+    let u_priority = intrinsic.denominator_variation_u * inverse_denominator_scale
+        + frontier_priority_ratio(
+            intrinsic.projective_variation_u,
+            policy.maximum_projective_variation,
+        )
+        + frontier_priority_ratio(evidence.screen_variation_u, policy.maximum_screen_variation)
+    let v_priority = intrinsic.denominator_variation_v * inverse_denominator_scale
+        + frontier_priority_ratio(
+            intrinsic.projective_variation_v,
+            policy.maximum_projective_variation,
+        )
+        + frontier_priority_ratio(evidence.screen_variation_v, policy.maximum_screen_variation)
+    if !intrinsic.certified {
+        choose_frontier_bisection2(cell, u_priority, v_priority, policy)
+    } else if intrinsic.denominator_ratio > policy.maximum_denominator_ratio
+        || intrinsic.projective_variation_u > policy.maximum_projective_variation
+        || intrinsic.projective_variation_v > policy.maximum_projective_variation
+        || evidence.screen_variation_u > policy.maximum_screen_variation
+        || evidence.screen_variation_v > policy.maximum_screen_variation {
+        if cell.u_depth >= policy.maximum_u_depth && cell.v_depth >= policy.maximum_v_depth {
+            ProjectivePatchFrontierDecision2::Draw
+        } else {
+            choose_frontier_bisection2(cell, u_priority, v_priority, policy)
+        }
+    } else {
+        ProjectivePatchFrontierDecision2::Draw
+    }
 }
 impl<T: LinearElement> Copy for QuadraticTensorSplit<T> {}
 
