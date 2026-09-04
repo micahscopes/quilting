@@ -394,6 +394,26 @@ images passed close. The live GPU receipts before this fix retained only
 `40/24` total points across the two charts, including the 24 mandatory boundary
 points in each chart.
 
+The complete preserved browser state is:
+
+```text
+p00 = [ 0.0000000000,  2.0000000000,  0.0000000000]
+p10 = [ 0.0000000000,  1.0000000000,  0.0000000000]
+p01 = [-1.1459724903,  0.5661033392, -2.0399546623]
+p11 = [-1.3492025137, -1.5549985170,  1.9530305862]
+w   = [ 0.0035487253,  0.1078777015,  0.0383640602, 3.8502094746]
+camera = { yaw: 0.4467614, pitch: 0.04211542, distance: 16.0 }
+presentation = { wire_px: 0.72, depth_cue: 0.82,
+                 sampler_mode: projective_blue_noise, atlas_lod: 4 }
+```
+
+The long-lived browser tab that retained this state served the older
+18-pass artifact (`fe-render-b7664df5cf3033c2.json`), whose UI still capped
+LoD at 5 and whose two charts retained separate indirect draws. It later lost
+its WebGPU device with `A valid external Instance reference no longer exists`.
+That device-loss frame is useful state capture, but it is not execution evidence
+for the subsequent unified 17-pass renderer.
+
 An independent double-precision mirror of the exact Fe proposal law reproduced
 `40/24` points for that old policy. Adding an endpoint-averaged pullback test
 alone predicted only `47/25`: it reduced false conflicts but was still a local
