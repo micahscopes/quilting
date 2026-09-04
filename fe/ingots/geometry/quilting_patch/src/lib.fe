@@ -222,6 +222,80 @@ pub enum QuadDiagonal2 {
 }
 impl Copy for QuadDiagonal2 {}
 
+/// Subdivision demand for one triangular atlas realization. The lanes follow
+/// the Quilting convention: `a` lies opposite vertex 0, `b` opposite vertex
+/// 1, and `c` opposite vertex 2. Keeping this geometry-level value independent
+/// of an atlas artifact lets CPU, WebGPU, and future procedural realizers share
+/// the same denotation.
+pub struct TrianglePatchDensity3 { pub a: u32, pub b: u32, pub c: u32 }
+impl Copy for TrianglePatchDensity3 {}
+
+/// Five independent density coordinates for one quadrilateral Patch leaf.
+///
+/// The four boundary lanes are reconciled with neighboring leaves. `interior`
+/// is the missing M coordinate: it may increase surface sampling without
+/// forcing an unrelated neighbor to inherit that density. Two ordinary
+/// A/B/C atlas patches realize this value by sharing the selected diagonal.
+pub struct QuadPatchDensity2 {
+    pub bottom: u32,
+    pub right: u32,
+    pub top: u32,
+    pub left: u32,
+    pub interior: u32,
+}
+impl Copy for QuadPatchDensity2 {}
+
+pub struct QuadPatchFaceDensities2 {
+    pub first: TrianglePatchDensity3,
+    pub second: TrianglePatchDensity3,
+}
+impl Copy for QuadPatchFaceDensities2 {}
+
+/// Lower the denotational A/B/C/M quad demand into two A/B/C triangle demands.
+/// The internal M lane appears on both copies of the chosen diagonal, proving
+/// that the two atlas patches request identical shared samples.
+pub const fn quad_patch_face_densities2(
+    _ diagonal: QuadDiagonal2,
+    _ density: QuadPatchDensity2,
+) -> QuadPatchFaceDensities2 {
+    match diagonal {
+        QuadDiagonal2::Corner00To11 => QuadPatchFaceDensities2 {
+            // (00, 10, 11): a=right, b=interior, c=bottom
+            first: TrianglePatchDensity3 {
+                a: density.right,
+                b: density.interior,
+                c: density.bottom,
+            },
+            // (00, 11, 01): a=top, b=left, c=interior
+            second: TrianglePatchDensity3 { a: density.top, b: density.left, c: density.interior },
+        },
+        QuadDiagonal2::Corner10To01 => QuadPatchFaceDensities2 {
+            // (00, 10, 01): a=interior, b=left, c=bottom
+            first: TrianglePatchDensity3 {
+                a: density.interior,
+                b: density.left,
+                c: density.bottom,
+            },
+            // (10, 11, 01): a=top, b=interior, c=right
+            second: TrianglePatchDensity3 { a: density.top, b: density.interior, c: density.right },
+        },
+    }
+}
+
+const DENSITY_WITNESS: QuadPatchDensity2 = QuadPatchDensity2 {
+    bottom: 1,
+    right: 2,
+    top: 3,
+    left: 4,
+    interior: 5,
+}
+static_assert(quad_patch_face_densities2(QuadDiagonal2::Corner00To11, DENSITY_WITNESS).first.b == 5)
+static_assert(quad_patch_face_densities2(QuadDiagonal2::Corner00To11, DENSITY_WITNESS).second.c
+    == 5)
+static_assert(quad_patch_face_densities2(QuadDiagonal2::Corner10To01, DENSITY_WITNESS).first.a == 5)
+static_assert(quad_patch_face_densities2(QuadDiagonal2::Corner10To01, DENSITY_WITNESS).second.b
+    == 5)
+
 /// Metric-only evidence for choosing a quad diagonal.
 ///
 /// Triangle quality is the standard dimensionless `4*sqrt(3)*area/sum(e^2)`
