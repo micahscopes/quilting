@@ -253,3 +253,61 @@ render bundle in 352 ms, establishing that the earlier cross-process cache miss
 is no longer present for this exact source/dependency closure. Incremental
 lowering after a source edit remains unresolved: the two measured fresh
 lowerings took 313.3 and 339.8 seconds.
+
+## Atlas-filled topology and compact projective sampling
+
+Commits `2d55aa7` and `6455863` make the settled pullback topology the macro
+carrier for canonical atlas patches. Two typed indirect draw commands remain
+GPU-resident: the vertex count comes from the selected equal-edge atlas patch,
+and the instance count comes from each chart's topology receipt. There is no
+CPU readback or JavaScript draw scheduler in this path.
+
+The first deformation-aware sampler measured area and exclusion in the
+Euclidean affine quotient. An adversarial normalized weight vector
+`[0.003549, 0.107878, 0.038364, 3.850209]` exposed the resulting coordinate
+singularity: pullback coefficients reached approximately `8.1e5`, proposals
+collapsed into a thin band near the affine pole, and endpoint-averaged
+exclusion rejected most of the band.
+
+The replacement samples the normalized homogeneous Clifford lift
+`[F(s,t) : W(s,t)]` in the round metric on real projective space. The lift
+remains finite when the affine denominator vanishes. Its analytic differential
+supplies the pullback tensor used for Delaunay decisions, while direct
+projective chord distance supplies Poisson exclusion. The exclusion radius is
+derived from the selected atlas edge density and the half-turn diameter of
+real projective space; it is no longer expressed in scene world units.
+
+Two exact browser states were retained as adversarial fixtures. The first uses
+a `333:1` corner-weight ratio; the second combines a roughly `1085:1` ratio
+with displaced, twisting controls. A DevTools-only `COPY_SRC` probe read the
+resident results without changing application source. Both charts in both
+states reported valid sampling, construction, and restoration. Every used
+triangle had legal indices, positive winding, nonzero fixed-point area, and
+the signed and absolute area sums both equaled the Q14 reference area
+`268435456` exactly.
+
+| Stress state | Chart receipts | Complete GPU frame |
+| --- | --- | ---: |
+| `333:1` weights | `[1,43,24,1,60,1,78,0]`, `[1,24,24,1,22,1,51,0]` | 31.1 ms |
+| displaced `1085:1` controls/weights | `[1,40,24,1,54,1,76,0]`, `[1,24,24,1,22,1,57,0]` | 24.6 ms |
+
+The corresponding draw commands were `[1224,60,0,0]` and `[1224,22,0,0]`
+for the first state, then `[1224,54,0,0]` and `[1224,22,0,0]` for the second.
+Solid and wire captures showed coherent surfaces without the earlier oversized
+affine-sampler wedges. Small omitted simplices remain where the visible affine
+quotient itself is undefined; coherent triangle admission prevents those
+points from becoming viewport-sized sentinel triangles.
+
+Multiplying all four weights in the first state by `7.25` preserved both
+receipts, both draw commands, and both triangle prefixes exactly. One locked
+boundary point moved by four Q14 units because a floating-point inverse-arc
+tie took the neighboring bisection branch; topology and presentation were
+unchanged. The denotation is mathematically scale invariant, while exact
+fixed-point tie canonicalization remains a possible determinism refinement.
+
+The final release development build emitted 18 passes, 35,362 Wasm bytes,
+776,403 compiler-reported WGSL bytes, and 1,039,139 total bytes. Lowering took
+426,576 ms and the complete build took 450,327 ms. The projective sample and
+metric machinery added about 18.7 KiB of WGSL relative to the prior atlas-fill
+artifact, but incremental lowering latency and peak compiler memory remain
+material authoring-toolchain problems.
