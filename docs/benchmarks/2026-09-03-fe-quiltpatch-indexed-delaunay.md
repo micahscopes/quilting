@@ -271,11 +271,10 @@ exclusion rejected most of the band.
 
 The replacement samples the normalized homogeneous Clifford lift
 `[F(s,t) : W(s,t)]` in the round metric on real projective space. The lift
-remains finite when the affine denominator vanishes. Its analytic differential
-supplies the pullback tensor used for Delaunay decisions, while direct
-projective chord distance supplies Poisson exclusion. The exclusion radius is
-derived from the selected atlas edge density and the half-turn diameter of
-real projective space; it is no longer expressed in scene world units.
+remains finite when the affine denominator vanishes, while direct projective
+chord distance supplies Poisson exclusion. The exclusion radius is derived
+from the selected atlas edge density and the half-turn diameter of real
+projective space; it is no longer expressed in scene world units.
 
 Two exact browser states were retained as adversarial fixtures. The first uses
 a `333:1` corner-weight ratio; the second combines a roughly `1085:1` ratio
@@ -305,9 +304,44 @@ tie took the neighboring bisection branch; topology and presentation were
 unchanged. The denotation is mathematically scale invariant, while exact
 fixed-point tie canonicalization remains a possible determinism refinement.
 
-The final release development build emitted 18 passes, 35,362 Wasm bytes,
-776,403 compiler-reported WGSL bytes, and 1,039,139 total bytes. Lowering took
-426,576 ms and the complete build took 450,327 ms. The projective sample and
-metric machinery added about 18.7 KiB of WGSL relative to the prior atlas-fill
-artifact, but incremental lowering latency and peak compiler memory remain
-material authoring-toolchain problems.
+That release development build emitted 18 passes, 35,362 Wasm bytes, 776,403
+compiler-reported WGSL bytes, and 1,039,139 total bytes. Lowering took 426,576
+ms and the complete build took 450,327 ms. Incremental lowering latency and
+peak compiler memory remain material authoring-toolchain problems.
+
+## Terminating projective topology restoration
+
+A real pointer gesture exposed a flaw hidden by the two settled-state receipts
+above. With the displaced `1085:1` state, moving `p11` to
+`[-0.860737, -1.189465, 1.702456]` made chart 0 report
+`[1,39,24,1,52,0,256,0]`: construction and every topology invariant remained
+valid, but the varying pullback-metric edge rule oscillated until it exhausted
+the 256-flip budget. The presentation incorrectly treated optimization
+nonconvergence as structural invalidity and suppressed the complete chart.
+
+The replacement separates those meanings. Receipt word 5 reports restoration
+convergence; receipt word 7 reports invariant failure. Presentation requires
+valid construction and zero invariant failures, so a safe topology cannot
+become a black frame merely because an optional optimizer reaches its budget.
+The edge policy itself is now deformation-aware through a terminating global
+objective: a strict flip must replace the current diagonal with a shorter
+chord between normalized projective representatives. Every such flip reduces
+the sum of resident interior-edge chord lengths. A fixed tolerance and the
+canonical atlas diagonal order settle floating ties without reverse flips.
+
+The exact formerly failing state now reports
+`[1,39,24,1,52,1,84,0]` and `[1,24,24,1,22,1,52,0]`, with indirect draws
+`[1224,52,0,0]` and `[1224,22,0,0]`. A larger three-step pointer drag reports
+`[1,38,24,1,50,1,74,0]` and `[1,24,24,1,22,1,53,0]`; both draws remain live.
+For the formerly failing state, every used triangle has legal distinct indices
+and positive winding. Each chart's signed and absolute Q14 double-area sums
+are both exactly `268435456`, proving one-cover topology without overlaps or
+holes in the parameter chart. Chromium reports no WebGPU or runtime error, and
+the previously black user tab renders the preserved state after reload.
+
+Candidate and resident projective samples now store only the normalized
+eight-coordinate representative plus one conditioning bit. The obsolete UV
+parameter and three pullback-tensor lanes were removed. The resulting release
+development build still has 18 passes and 35,362 Wasm bytes, but falls to
+747,779 compiler-reported WGSL bytes and 1,010,517 emitted bytes. Lowering took
+396,308 ms; the complete build took 424,472 ms.
