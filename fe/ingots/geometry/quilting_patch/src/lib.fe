@@ -6,7 +6,20 @@
 //! this common surface promises only a partial typed point.
 
 use core::marker::Copy
-use quilting_domain::{Bary3F, Vec2F, Vec3F, dot3, length3, sub3}
+use fmath::sqrt
+use quilting_domain::{
+    Bary3F,
+    Vec2F,
+    Vec3F,
+    add3,
+    cross3,
+    dot3,
+    length3,
+    normalize3_or,
+    scale3,
+    sub3,
+    vec3f,
+}
 
 /// A nominal parameter domain associates one coordinate representation.
 pub trait ParameterDomain {
@@ -120,12 +133,7 @@ pub fn denote<K: PatchKernel>(
 /// positions coincide. Endpoint ranks preserve the caller's exact endpoint.
 /// Keeping this operation integer makes worker, native, and WebGPU samplers
 /// share the same topology boundary.
-pub const fn ranked_quantized_position(
-    _ raw: u32,
-    _ rank: u32,
-    _ count: u32,
-    _ scale: u32,
-) -> u32 {
+pub const fn ranked_quantized_position(_ raw: u32, _ rank: u32, _ count: u32, _ scale: u32) -> u32 {
     if rank == 0 || rank >= count {
         raw
     } else {
@@ -229,6 +237,319 @@ pub fn pullback_metric2(_ uu: f32, _ uv: f32, _ vv: f32, _ defined: bool) -> Pul
 
 pub fn pullback_sample2(_ parameter: Vec2F, _ metric: PullbackMetric2) -> PullbackSample2 {
     PullbackSample2 { parameter: parameter, metric: metric }
+}
+
+/// Principal local scale factors of one two-dimensional parameter-to-surface
+/// map.
+///
+/// The pullback metric is `J^T J`, so its eigenvalue square roots are exactly
+/// the singular values of the local transformation. This descriptor is small
+/// enough to compute for every resident macro leaf and cache beside its stable
+/// topology identity.
+pub struct PullbackSpectrum2 {
+    pub minimum_stretch: f32,
+    pub maximum_stretch: f32,
+    pub area_scale: f32,
+    pub anisotropy: f32,
+    pub defined: bool,
+}
+impl Copy for PullbackSpectrum2 {}
+
+fn nonnegative(_ value: f32) -> f32 {
+    if value > 0.0 { value } else { 0.0 }
+}
+
+fn minimum_f32(_ left: f32, _ right: f32) -> f32 {
+    if left < right { left } else { right }
+}
+
+fn maximum_f32(_ left: f32, _ right: f32) -> f32 {
+    if left > right { left } else { right }
+}
+
+/// Diagonalize one symmetric 2x2 pullback metric analytically.
+///
+/// `minimum_eigenvalue` is a squared-stretch floor. Degenerate, reflected,
+/// and non-finite family samples should already have `metric.defined = false`;
+/// the eigenvalue floor additionally prevents an unbounded anisotropy from
+/// entering LoD or topology policy.
+pub fn pullback_spectrum2(
+    _ metric: PullbackMetric2,
+    _ minimum_eigenvalue: f32,
+) -> PullbackSpectrum2 {
+    let trace = metric.uu + metric.vv
+    let difference = metric.uu - metric.vv
+    let discriminant = sqrt(
+        nonnegative(difference * difference + 4.0 * metric.uv * metric.uv),
+    )
+    let minimum_eigen = 0.5 * (trace - discriminant)
+    let maximum_eigen = 0.5 * (trace + discriminant)
+    let determinant = pullback_determinant(metric)
+    let defined = metric.defined
+        && minimum_eigen >= minimum_eigenvalue
+        && maximum_eigen >= minimum_eigen
+        && determinant > 0.0
+    if !defined {
+        return PullbackSpectrum2 {
+            minimum_stretch: 0.0,
+            maximum_stretch: 0.0,
+            area_scale: 0.0,
+            anisotropy: 0.0,
+            defined: false,
+        }
+    }
+    let minimum_stretch = sqrt(minimum_eigen)
+    let maximum_stretch = sqrt(maximum_eigen)
+    PullbackSpectrum2 {
+        minimum_stretch: minimum_stretch,
+        maximum_stretch: maximum_stretch,
+        area_scale: sqrt(determinant),
+        anisotropy: maximum_stretch / minimum_stretch,
+        defined: true,
+    }
+}
+
+/// Conservative variation summary over four leaf corners and its center.
+///
+/// The extrema have direct uses: maximum stretch bounds screen-space demand,
+/// minimum stretch detects collapse, area range guides density allocation,
+/// and maximum anisotropy chooses whether a leaf should split preferentially
+/// along one parameter axis.
+pub struct PullbackCellProfile2 {
+    pub minimum_stretch: f32,
+    pub maximum_stretch: f32,
+    pub minimum_area_scale: f32,
+    pub maximum_area_scale: f32,
+    pub maximum_anisotropy: f32,
+    pub stretch_variation: f32,
+    pub area_variation: f32,
+    pub metric_shape_variation: f32,
+    pub defined: bool,
+}
+impl Copy for PullbackCellProfile2 {}
+
+/// Frobenius distance between unit-trace metric shapes. Uniform scale drops
+/// out; shear, anisotropy, and rotation of principal parameter directions do
+/// not. This is the intrinsic twist signal available for every patch family
+/// that can provide a positive tangent metric.
+fn pullback_metric_shape_distance(
+    _ left: PullbackMetric2,
+    _ right: PullbackMetric2,
+    _ minimum_trace: f32,
+) -> f32 {
+    let left_trace = left.uu + left.vv
+    let right_trace = right.uu + right.vv
+    if !left.defined
+        || !right.defined
+        || left_trace < minimum_trace
+        || right_trace < minimum_trace {
+        return 0.0
+    }
+    let delta_uu = left.uu / left_trace - right.uu / right_trace
+    let delta_uv = left.uv / left_trace - right.uv / right_trace
+    let delta_vv = left.vv / left_trace - right.vv / right_trace
+    sqrt(
+        delta_uu * delta_uu + 2.0 * delta_uv * delta_uv + delta_vv * delta_vv,
+    )
+}
+
+pub fn pullback_cell_profile2(
+    _ corner00: PullbackMetric2,
+    _ corner10: PullbackMetric2,
+    _ corner01: PullbackMetric2,
+    _ corner11: PullbackMetric2,
+    _ center: PullbackMetric2,
+    _ minimum_eigenvalue: f32,
+) -> PullbackCellProfile2 {
+    let s00 = pullback_spectrum2(corner00, minimum_eigenvalue)
+    let s10 = pullback_spectrum2(corner10, minimum_eigenvalue)
+    let s01 = pullback_spectrum2(corner01, minimum_eigenvalue)
+    let s11 = pullback_spectrum2(corner11, minimum_eigenvalue)
+    let sc = pullback_spectrum2(center, minimum_eigenvalue)
+    let minimum_stretch = minimum_f32(
+        minimum_f32(
+            minimum_f32(s00.minimum_stretch, s10.minimum_stretch),
+            s01.minimum_stretch,
+        ),
+        minimum_f32(s11.minimum_stretch, sc.minimum_stretch),
+    )
+    let maximum_stretch = maximum_f32(
+        maximum_f32(
+            maximum_f32(s00.maximum_stretch, s10.maximum_stretch),
+            s01.maximum_stretch,
+        ),
+        maximum_f32(s11.maximum_stretch, sc.maximum_stretch),
+    )
+    let minimum_area_scale = minimum_f32(
+        minimum_f32(
+            minimum_f32(s00.area_scale, s10.area_scale),
+            s01.area_scale,
+        ),
+        minimum_f32(s11.area_scale, sc.area_scale),
+    )
+    let maximum_area_scale = maximum_f32(
+        maximum_f32(
+            maximum_f32(s00.area_scale, s10.area_scale),
+            s01.area_scale,
+        ),
+        maximum_f32(s11.area_scale, sc.area_scale),
+    )
+    let maximum_anisotropy = maximum_f32(
+        maximum_f32(
+            maximum_f32(s00.anisotropy, s10.anisotropy),
+            s01.anisotropy,
+        ),
+        maximum_f32(s11.anisotropy, sc.anisotropy),
+    )
+    let metric_shape_variation = maximum_f32(
+        maximum_f32(
+            pullback_metric_shape_distance(corner00, center, minimum_eigenvalue),
+            pullback_metric_shape_distance(corner10, center, minimum_eigenvalue),
+        ),
+        maximum_f32(
+            pullback_metric_shape_distance(corner01, center, minimum_eigenvalue),
+            pullback_metric_shape_distance(corner11, center, minimum_eigenvalue),
+        ),
+    )
+    let defined = s00.defined && s10.defined && s01.defined && s11.defined && sc.defined
+    PullbackCellProfile2 {
+        minimum_stretch: minimum_stretch,
+        maximum_stretch: maximum_stretch,
+        minimum_area_scale: minimum_area_scale,
+        maximum_area_scale: maximum_area_scale,
+        maximum_anisotropy: maximum_anisotropy,
+        stretch_variation: if defined {
+            maximum_stretch / minimum_stretch
+        } else {
+            0.0
+        },
+        area_variation: if defined {
+            maximum_area_scale / minimum_area_scale
+        } else {
+            0.0
+        },
+        metric_shape_variation: if defined {
+            metric_shape_variation
+        } else {
+            0.0
+        },
+        defined: defined,
+    }
+}
+
+/// An oriented Euclidean differential with its already-derived pullback
+/// metric. Patch families convert their native differential into this common
+/// telemetry value without exposing their controls or algebra.
+pub struct PatchTransformSample3 {
+    pub tangent_u: Vec3F,
+    pub tangent_v: Vec3F,
+    pub normal: Vec3F,
+    pub pullback: PullbackMetric2,
+    pub defined: bool,
+}
+impl Copy for PatchTransformSample3 {}
+
+pub fn patch_transform_sample3(
+    _ tangent_u: Vec3F,
+    _ tangent_v: Vec3F,
+    _ minimum_normal_norm_squared: f32,
+    _ defined: bool,
+) -> PatchTransformSample3 {
+    let normal_cross = cross3(tangent_u, tangent_v)
+    let normal_norm_squared = dot3(normal_cross, normal_cross)
+    let admitted = defined && normal_norm_squared >= minimum_normal_norm_squared
+    let pullback = euclidean3_pullback_metric(tangent_u, tangent_v)
+    PatchTransformSample3 {
+        tangent_u: tangent_u,
+        tangent_v: tangent_v,
+        normal: normalize3_or(
+            normal_cross,
+            vec3f(0.0, 0.0, 1.0),
+            minimum_normal_norm_squared,
+        ),
+        pullback: pullback_metric2(pullback.uu, pullback.uv, pullback.vv, admitted),
+        defined: admitted,
+    }
+}
+
+/// Cheap patch-leaf transformation telemetry.
+///
+/// `normal_turn` is zero for a planar consistently oriented leaf, one at a
+/// right-angle turn, and two at an orientation reversal. `mixed_turn` is a
+/// scale-normalized finite-difference estimate of the mixed derivative: it
+/// detects a twisted parameter frame even when the five area scales happen to
+/// agree. Neither quantity chooses topology by itself; they are stable inputs
+/// to refinement and diagonal policies.
+pub struct PatchTransformProfile3 {
+    pub pullback: PullbackCellProfile2,
+    pub minimum_normal_alignment: f32,
+    pub normal_turn: f32,
+    pub mixed_turn: f32,
+    pub defined: bool,
+}
+impl Copy for PatchTransformProfile3 {}
+
+fn average3(_ left: Vec3F, _ right: Vec3F) -> Vec3F {
+    scale3(add3(left, right), 0.5)
+}
+
+pub fn patch_transform_profile3(
+    _ corner00: PatchTransformSample3,
+    _ corner10: PatchTransformSample3,
+    _ corner01: PatchTransformSample3,
+    _ corner11: PatchTransformSample3,
+    _ center: PatchTransformSample3,
+    _ minimum_eigenvalue: f32,
+) -> PatchTransformProfile3 {
+    let pullback = pullback_cell_profile2(
+        corner00.pullback,
+        corner10.pullback,
+        corner01.pullback,
+        corner11.pullback,
+        center.pullback,
+        minimum_eigenvalue,
+    )
+    let minimum_normal_alignment = minimum_f32(
+        minimum_f32(
+            minimum_f32(
+                dot3(center.normal, corner00.normal),
+                dot3(center.normal, corner10.normal),
+            ),
+            dot3(center.normal, corner01.normal),
+        ),
+        dot3(center.normal, corner11.normal),
+    )
+    let tangent_u_change = sub3(
+        average3(corner01.tangent_u, corner11.tangent_u),
+        average3(corner00.tangent_u, corner10.tangent_u),
+    )
+    let tangent_v_change = sub3(
+        average3(corner10.tangent_v, corner11.tangent_v),
+        average3(corner00.tangent_v, corner01.tangent_v),
+    )
+    let scale = center.pullback.uu + center.pullback.vv
+    let defined = pullback.defined
+        && corner00.defined
+        && corner10.defined
+        && corner01.defined
+        && corner11.defined
+        && center.defined
+        && scale > minimum_eigenvalue
+    PatchTransformProfile3 {
+        pullback: pullback,
+        minimum_normal_alignment: minimum_normal_alignment,
+        normal_turn: if defined {
+            1.0 - minimum_normal_alignment
+        } else {
+            0.0
+        },
+        mixed_turn: if defined {
+            (length3(tangent_u_change) + length3(tangent_v_change)) / sqrt(scale)
+        } else {
+            0.0
+        },
+        defined: defined,
+    }
 }
 
 /// Exact first fundamental form for a Euclidean three-space differential.
