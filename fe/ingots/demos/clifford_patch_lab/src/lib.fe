@@ -95,6 +95,7 @@ use quilting_oklch::{
     scale_lightness_chroma,
     to_display_rgb,
 }
+use quilting_patch::ranked_quantized_position
 use std::web::view::{
     ApplyParamBindings,
     ChoiceOptions,
@@ -448,23 +449,6 @@ fn boundary_edge_resolution(_ key: AtlasKey, _ edge: u32) -> u32 {
     }
 }
 
-/// Quantize a monotone boundary CDF without allowing adjacent requested ranks
-/// to collapse onto the same Q14 point. The raw inverse occupies the remaining
-/// `scale - resolution` lanes; adding the rank reserves one distinct lane for
-/// every ordered sample. Endpoints remain the exact atlas corners.
-fn ranked_boundary_distance(
-    _ raw: u32,
-    _ step: u32,
-    _ resolution: u32,
-) -> u32 {
-    if step == 0 || step >= resolution {
-        raw
-    } else {
-        let free = BARYCENTRIC_SCALE - resolution
-        step + raw * free / BARYCENTRIC_SCALE
-    }
-}
-
 /// Invert a recursively measured chord-length CDF on one mapped chart edge.
 /// Endpoints remain exact and shared edges receive the same orientation in
 /// both square charts, so redistributing their interior points cannot crack.
@@ -524,7 +508,12 @@ fn surface_boundary_point(
     }
     boundary_edge_point(
         boundary.edge,
-        ranked_boundary_distance((lower + upper) / 2, boundary.step, resolution),
+        ranked_quantized_position(
+            (lower + upper) / 2,
+            boundary.step,
+            resolution,
+            BARYCENTRIC_SCALE,
+        ),
     )
 }
 

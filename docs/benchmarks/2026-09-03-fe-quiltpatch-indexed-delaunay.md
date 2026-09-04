@@ -366,6 +366,9 @@ remaining lane:
 Endpoints remain exact. For monotone `q_raw`, consecutive ranks are strictly
 ordered even when several raw quantiles round to the same coordinate; the
 maximum displacement at resolution eight is eight Q14 lanes.
+The integer law now lives in `quilting_patch::ranked_quantized_position`, with
+compile-time examples covering the observed collapsed ranks, so native,
+worker, and WebGPU samplers can share it without a host shim.
 
 Replaying the identical sweep produced zero duplicate boundary points, zero
 construction failures, zero restoration failures, and zero dead indirect

@@ -112,6 +112,33 @@ pub fn denote<K: PatchKernel>(
 // Metric-parametric sampling
 // ---------------------------------------------------------------------------
 
+/// Reserve one fixed-point lane for every rank in a monotone sampled CDF.
+///
+/// `raw` values must be nondecreasing, lie in `0..=scale`, and use ranks in
+/// `0..=count`, with `count <= scale`. The result is strictly increasing for
+/// consecutive interior ranks even when their independently rounded `raw`
+/// positions coincide. Endpoint ranks preserve the caller's exact endpoint.
+/// Keeping this operation integer makes worker, native, and WebGPU samplers
+/// share the same topology boundary.
+pub const fn ranked_quantized_position(
+    _ raw: u32,
+    _ rank: u32,
+    _ count: u32,
+    _ scale: u32,
+) -> u32 {
+    if rank == 0 || rank >= count {
+        raw
+    } else {
+        rank + raw * (scale - count) / scale
+    }
+}
+
+static_assert(ranked_quantized_position(0, 0, 8, 16384) == 0)
+static_assert(ranked_quantized_position(2, 1, 8, 16384) == 2)
+static_assert(ranked_quantized_position(2, 2, 8, 16384) == 3)
+static_assert(ranked_quantized_position(6, 3, 8, 16384) == 8)
+static_assert(ranked_quantized_position(16384, 8, 8, 16384) == 16384)
+
 /// A metric belongs to a codomain, not to a parameter chart.
 ///
 /// The same sampler can therefore measure a QB, Clifford, CGA, PGA, QCGA, or
@@ -546,6 +573,10 @@ impl<A: ProjectiveAlgebra> ProjectiveInterpolation<
 /// All four tensors participate symmetrically, so the predicate is unchanged
 /// when the resident and proposed diagonals trade places. The exact chart
 /// topology still decides convexity and boundary constraints separately.
+/// This local symmetry does not provide a global descent measure when the
+/// metric varies between neighboring quadrilaterals. Do not use it alone as
+/// the acceptance rule of an iterative flip loop; pair it with a terminating
+/// potential or a cycle detector.
 pub fn varying_pullback_incircle_value(
     _ first: PullbackSample2,
     _ second: PullbackSample2,
