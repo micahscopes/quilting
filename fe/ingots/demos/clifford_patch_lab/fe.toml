@@ -13,4 +13,5 @@ quilting_clifford_bezier = true
 quilting_domain = true
 quilting_oklch = { path = "../../color/quilting_oklch" }
 quilting_patch = true
+quilting_patch_webgpu = true
 quilting_qb = true

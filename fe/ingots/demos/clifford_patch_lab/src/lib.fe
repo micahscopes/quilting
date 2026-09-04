@@ -59,10 +59,12 @@ use quilting_atlas_webgpu::{
     resident_triangle,
     restore_indexed_constrained_delaunay_with_policy,
     retire_candidate_lane_with_policy,
+    store_resident_point,
 }
 use quilting_clifford_bezier::{
     IsotropicBilinearPatch,
     IsotropicDifferential,
+    IsotropicQuotientControlNet,
     IsotropicProjectiveF,
     IsotropicPolicy,
     control,
@@ -73,6 +75,7 @@ use quilting_clifford_bezier::{
     even,
     parameter_triangle_conditioned,
     patch,
+    quotient_control_net,
     projective_distance_squared,
     projective_triangle_area,
     scale_weight,
@@ -106,6 +109,7 @@ use quilting_oklch::{
     to_display_rgb,
 }
 use quilting_patch::{
+    AnisotropicPatchCell2,
     DyadicPatchCell2,
     Euclidean3Metric,
     Euclidean3Points,
@@ -117,8 +121,12 @@ use quilting_patch::{
     QuadDiagonal2,
     QuadDiagonalProfile2,
     QuadPatchDensity2,
+    ProjectivePatchFrontierDecision2,
+    ProjectivePatchFrontierEvidence2,
+    ProjectivePatchFrontierPolicy2,
     choose_quad_diagonal2,
     denotation_sample,
+    anisotropic_quadratic_tensor_cell,
     dyadic_patch_cell_at_node,
     dyadic_patch_child2,
     dyadic_patch_face_slot_count,
@@ -133,8 +141,19 @@ use quilting_patch::{
     fractal_patch_leaf_decision3,
     patch_transform_profile3,
     patch_transform_sample3,
+    projective_patch_cell_profile2,
+    projective_patch_frontier_decision2,
     quad_diagonal_profile2,
     ranked_quantized_position,
+}
+use quilting_patch_webgpu::{
+    PROJECTIVE_FRONTIER_CELL_WORDS,
+    PROJECTIVE_FRONTIER_RECEIPT_WORDS,
+    ProjectivePatchFrontierClassifier2,
+    advance_projective_patch_frontier,
+    initialize_projective_patch_frontier,
+    projective_patch_frontier_cell,
+    projective_patch_frontier_receipt,
 }
 use quilting_qb::{permutation_parity, remap_barycentric}
 use std::web::view::{
@@ -257,6 +276,16 @@ const DEFORMED_BOUNDARY_ARC_DEPTH: usize = 12
 const DEFORMED_FACE_WORKGROUPS: usize = (DEFORMED_TRIANGLES + DEFORMED_THREADS - 1)
     / DEFORMED_THREADS
 
+// This frontier isolates projective hazards over the complete square; it is
+// not the final Delaunay point set. Seven anisotropic levels locate a pole to
+// a screen-meaningful macro region, after which the resident atlas supplies
+// up to eight further dyadic levels inside each admitted face.
+const PROJECTIVE_FRONTIER_CAPACITY: usize = 2048
+const PROJECTIVE_FRONTIER_WORDS: usize = PROJECTIVE_FRONTIER_CAPACITY
+    * PROJECTIVE_FRONTIER_CELL_WORDS
+const PROJECTIVE_FRONTIER_ROUNDS: usize = 16
+const PROJECTIVE_FRONTIER_MAX_AXIS_DEPTH: u32 = 7
+
 // One score per edge, followed by one compact prefix/atlas/permutation plan
 // per possible macro face across the two projective charts.
 const DEFORMED_FACE_SCORE_WORDS: usize = DEFORMED_TRIANGLES * 3
@@ -275,6 +304,7 @@ const DEFORMED_RECEIPT_WORDS: usize = 8
 
 pub struct DeformedSamplingRound {}
 pub struct FractalFaceScanRound {}
+pub struct ProjectiveFrontierRound {}
 
 /// Nominal identities keep the two independently produced chart commands
 /// exact even though their four-word WebGPU representation is identical.
@@ -390,6 +420,133 @@ impl<const WORDS: usize> Copy for SurfaceCandidateConflict<WORDS> {}
 
 struct SurfaceShortEdgeFlip<const WORDS: usize> { samples: StorageBuffer<f32, WORDS> }
 impl<const WORDS: usize> Copy for SurfaceShortEdgeFlip<WORDS> {}
+
+struct CliffordProjectiveFrontier {
+    patch: IsotropicBilinearPatch,
+    quotient: IsotropicQuotientControlNet,
+    camera: CameraFrame,
+    res_x: f32,
+    res_y: f32,
+}
+impl Copy for CliffordProjectiveFrontier {}
+
+fn anisotropic_cell_parameters(_ cell: AnisotropicPatchCell2) -> FractalCellParameters {
+    let u_divisions = as_f32(1 << cell.u_depth)
+    let v_divisions = as_f32(1 << cell.v_depth)
+    let u0 = as_f32(cell.u_index) / u_divisions
+    let u1 = as_f32(cell.u_index + 1) / u_divisions
+    let v0 = as_f32(cell.v_index) / v_divisions
+    let v1 = as_f32(cell.v_index + 1) / v_divisions
+    FractalCellParameters {
+        p00: vec2f(u0, v0),
+        p10: vec2f(u1, v0),
+        p01: vec2f(u0, v1),
+        p11: vec2f(u1, v1),
+        center: vec2f((u0 + u1) * 0.5, (v0 + v1) * 0.5),
+    }
+}
+
+fn projective_frontier_policy() -> ProjectivePatchFrontierPolicy2 {
+    ProjectivePatchFrontierPolicy2 {
+        maximum_u_depth: PROJECTIVE_FRONTIER_MAX_AXIS_DEPTH,
+        maximum_v_depth: PROJECTIVE_FRONTIER_MAX_AXIS_DEPTH,
+        maximum_denominator_ratio: 4.0,
+        maximum_projective_variation: 32.0,
+        // The atlas owns ordinary pixel density inside each macro face. The
+        // frontier changes connectivity only when a whole face would be a
+        // poor carrier for that atlas detail.
+        maximum_screen_variation: 160.0,
+    }
+}
+
+impl ProjectivePatchFrontierClassifier2 for CliffordProjectiveFrontier {
+    fn classify(self, _ cell: AnisotropicPatchCell2) -> ProjectivePatchFrontierDecision2 {
+        let parameters = anisotropic_cell_parameters(cell)
+        let intrinsic = projective_patch_cell_profile2(
+            anisotropic_quadratic_tensor_cell(self.quotient, cell),
+            policy().minimum_denominator_norm_squared,
+        )
+        let bottom = projected_edge_score(
+            self.patch,
+            parameters.p00,
+            parameters.p10,
+            self.camera,
+            self.res_x,
+            self.res_y,
+        )
+        let top = projected_edge_score(
+            self.patch,
+            parameters.p01,
+            parameters.p11,
+            self.camera,
+            self.res_x,
+            self.res_y,
+        )
+        let left = projected_edge_score(
+            self.patch,
+            parameters.p00,
+            parameters.p01,
+            self.camera,
+            self.res_x,
+            self.res_y,
+        )
+        let right = projected_edge_score(
+            self.patch,
+            parameters.p10,
+            parameters.p11,
+            self.camera,
+            self.res_x,
+            self.res_y,
+        )
+        projective_patch_frontier_decision2(
+            cell,
+            ProjectivePatchFrontierEvidence2 {
+                intrinsic: intrinsic,
+                screen_variation_u: if bottom > top { bottom } else { top },
+                screen_variation_v: if left > right { left } else { right },
+            },
+            projective_frontier_policy(),
+        )
+    }
+}
+
+struct FrontierChartPoint { point: FixedBarycentric, valid: bool }
+impl Copy for FrontierChartPoint {}
+
+fn frontier_cell_center_coordinate(_ index: u32, _ depth: u32) -> u32 {
+    (2 * index + 1) << (13 - depth)
+}
+
+fn stratified_frontier_leaf(_ rank: u32, _ count: u32) -> bool {
+    let budget: u32 = DEFORMED_CANDIDATES.downcast_truncate()
+    count <= budget
+        || (rank + 1) * budget / count > rank * budget / count
+}
+
+fn frontier_chart_point(_ cell: AnisotropicPatchCell2, _ chart: u32) -> FrontierChartPoint {
+    let u = frontier_cell_center_coordinate(cell.u_index, cell.u_depth)
+    let v = frontier_cell_center_coordinate(cell.v_index, cell.v_depth)
+    if chart == 0 && u + v < BARYCENTRIC_SCALE {
+        FrontierChartPoint {
+            point: FixedBarycentric { a: BARYCENTRIC_SCALE - u - v, b: u, c: v },
+            valid: true,
+        }
+    } else if chart == 1 && u + v > BARYCENTRIC_SCALE {
+        FrontierChartPoint {
+            point: FixedBarycentric {
+                a: BARYCENTRIC_SCALE - v,
+                b: u + v - BARYCENTRIC_SCALE,
+                c: BARYCENTRIC_SCALE - u,
+            },
+            valid: true,
+        }
+    } else {
+        FrontierChartPoint {
+            point: FixedBarycentric { a: 0, b: 0, c: 0 },
+            valid: false,
+        }
+    }
+}
 
 fn fixed_parameter(_ chart: u32, _ point: FixedBarycentric) -> Vec2F {
     let scale = as_f32(BARYCENTRIC_SCALE)
@@ -654,6 +811,77 @@ fn surface_boundary_candidate(
         slot: slot,
         valid: boundary.valid,
     }
+}
+
+fn materialize_frontier_chart_points(
+    _ frontier_first: StorageBuffer<u32, PROJECTIVE_FRONTIER_WORDS>,
+    _ frontier_second: StorageBuffer<u32, PROJECTIVE_FRONTIER_WORDS>,
+    _ frontier_receipt: StorageBuffer<u32, PROJECTIVE_FRONTIER_RECEIPT_WORDS>,
+    _ points: StorageBuffer<u32, DEFORMED_POINT_WORDS>,
+    _ receipt: StorageBuffer<u32, DEFORMED_RECEIPT_WORDS>,
+    _ chart: u32,
+) {
+    let frontier = projective_patch_frontier_receipt(frontier_receipt)
+    let mut valid = frontier.converged && !frontier.overflowed
+    let mut resident: u32 = 0
+    let boundary_count = boundary_vertices(deformed_key())
+    let mut boundary: u32 = 0
+    while boundary < boundary_count {
+        let seed = boundary_seed(deformed_key(), boundary)
+        if !seed.valid || !store_resident_point(points, resident, seed.point) {
+            valid = false
+        }
+        resident = resident + 1
+        boundary = boundary + 1
+    }
+    // The exact square frontier can be strongly asymmetric across the two
+    // triangle charts. Count this chart first, then retain one stable leaf
+    // from every equal-rank stratum of its actual point budget. This is a
+    // deterministic placement change; the frontier itself remains intact.
+    let mut chart_leaf_count: u32 = 0
+    let mut leaf: u32 = 0
+    while leaf < frontier.active_cells {
+        let frontier_cell = projective_patch_frontier_cell(
+            frontier_first,
+            frontier_second,
+            frontier_receipt,
+            leaf,
+        )
+        let candidate = frontier_chart_point(frontier_cell.cell, chart)
+        if !frontier_cell.rejected && candidate.valid {
+            chart_leaf_count = chart_leaf_count + 1
+        }
+        leaf = leaf + 1
+    }
+    leaf = 0
+    let mut chart_rank: u32 = 0
+    while leaf < frontier.active_cells {
+        let frontier_cell = projective_patch_frontier_cell(
+            frontier_first,
+            frontier_second,
+            frontier_receipt,
+            leaf,
+        )
+        let candidate = frontier_chart_point(frontier_cell.cell, chart)
+        if !frontier_cell.rejected && candidate.valid {
+            if stratified_frontier_leaf(chart_rank, chart_leaf_count) {
+                if !store_resident_point(points, resident, candidate.point) {
+                    valid = false
+                }
+                resident = resident + 1
+            }
+            chart_rank = chart_rank + 1
+        }
+        leaf = leaf + 1
+    }
+    receipt.store(index: 0, value: if valid { 1 } else { 0 })
+    receipt.store(index: 1, value: resident)
+    receipt.store(index: 2, value: boundary_count)
+    receipt.store(index: 3, value: 0)
+    receipt.store(index: 4, value: 0)
+    receipt.store(index: 5, value: 0)
+    receipt.store(index: 6, value: 0)
+    receipt.store(index: 7, value: 0)
 }
 
 fn candidate_offset(_ slot: u32) -> u32 {
@@ -1022,7 +1250,7 @@ pub struct CliffordLabState {
 /// semantics are a proper Fe sum at the effect boundary.
 enum SamplingPipeline {
     AnalyticAtlas,
-    PullbackBlueNoise,
+    AdaptiveTopology,
 }
 
 impl Copy for SamplingPipeline {}
@@ -1031,7 +1259,7 @@ fn sampling_pipeline(_ mode: f32) -> SamplingPipeline {
     if mode < 2.5 {
         SamplingPipeline::AnalyticAtlas
     } else {
-        SamplingPipeline::PullbackBlueNoise
+        SamplingPipeline::AdaptiveTopology
     }
 }
 
@@ -1041,7 +1269,7 @@ impl AnalyticPatchPipeline {
     pub fn active(_ state: CliffordLabState) -> bool {
         match sampling_pipeline(state.sampler_mode) {
             SamplingPipeline::AnalyticAtlas => true,
-            SamplingPipeline::PullbackBlueNoise => false,
+            SamplingPipeline::AdaptiveTopology => false,
         }
     }
 }
@@ -1052,7 +1280,7 @@ impl PullbackPatchPipeline {
     pub fn active(_ state: CliffordLabState) -> bool {
         match sampling_pipeline(state.sampler_mode) {
             SamplingPipeline::AnalyticAtlas => false,
-            SamplingPipeline::PullbackBlueNoise => true,
+            SamplingPipeline::AdaptiveTopology => true,
         }
     }
 }
@@ -1066,7 +1294,7 @@ impl PullbackPatchTopology {
     pub fn active(_ state: CliffordLabState) -> bool {
         match sampling_pipeline(state.sampler_mode) {
             SamplingPipeline::AnalyticAtlas => false,
-            SamplingPipeline::PullbackBlueNoise => {
+            SamplingPipeline::AdaptiveTopology => {
                 state.dragging < 0.5 && state.orbiting < 0.5
             },
         }
@@ -1118,15 +1346,17 @@ const fn lab_params() -> CliffordLabParams {
         wire_px: Param::range(min: 0.0, max: 2.5, init: 0.72),
         depth_cue: Param::unit(init: 0.82),
         // 0 = regular UV grid, 1 = two atlas charts, 2 = recursively measured
-        // dyadic QuiltPatch leaves, 3 = projective-blue-noise points with
-        // terminating constrained short-edge restoration in each parameter
-        // chart.
+        // dyadic QuiltPatch leaves, 3 = compact exact-quotient frontier whose
+        // leaf centers seed constrained short-edge restoration in each
+        // parameter chart. The former projective-blue-noise placement remains
+        // compiled at scalar mode 4 as a diagnostic comparison while the
+        // control surface is expanded beyond four choices upstream.
         sampler_mode: Param::choice(
             options: ChoiceOptions::four(
                 first: "regular grid",
                 second: "atlas charts",
                 third: "twist-aware quilt",
-                fourth: "projective blue noise",
+                fourth: "adaptive frontier",
             ),
             init: 2.0,
         ),
@@ -2304,9 +2534,71 @@ fn fractal_parameter_triangle(
     }
 }
 
+fn minimum3f(_ first: f32, _ second: f32, _ third: f32) -> f32 {
+    let pair = if first < second { first } else { second }
+    if pair < third { pair } else { third }
+}
+
+fn maximum3f(_ first: f32, _ second: f32, _ third: f32) -> f32 {
+    let pair = if first > second { first } else { second }
+    if pair > third { pair } else { third }
+}
+
+fn parameter_triangle_overlaps_cell(
+    _ p0: Vec2F,
+    _ p1: Vec2F,
+    _ p2: Vec2F,
+    _ cell: AnisotropicPatchCell2,
+) -> bool {
+    let bounds = anisotropic_cell_parameters(cell)
+    let minimum_u = minimum3f(p0.x, p1.x, p2.x)
+    let maximum_u = maximum3f(p0.x, p1.x, p2.x)
+    let minimum_v = minimum3f(p0.y, p1.y, p2.y)
+    let maximum_v = maximum3f(p0.y, p1.y, p2.y)
+    maximum_u >= bounds.p00.x
+        && minimum_u <= bounds.p11.x
+        && maximum_v >= bounds.p00.y
+        && minimum_v <= bounds.p11.y
+}
+
+/// Conservatively exclude a macro face whenever its parameter-space bounds
+/// meet a frontier cell whose exact quotient could not certify one finite
+/// affine chart. This cannot bridge a projective pole. It may omit additional
+/// nearby area until the future constrained-hole triangulator consumes the
+/// same hazard frontier exactly.
+fn parameter_triangle_overlaps_frontier_hazard(
+    _ frontier_first: StorageBuffer<u32, PROJECTIVE_FRONTIER_WORDS>,
+    _ frontier_second: StorageBuffer<u32, PROJECTIVE_FRONTIER_WORDS>,
+    _ frontier_receipt: StorageBuffer<u32, PROJECTIVE_FRONTIER_RECEIPT_WORDS>,
+    _ p0: Vec2F,
+    _ p1: Vec2F,
+    _ p2: Vec2F,
+) -> bool {
+    let receipt = projective_patch_frontier_receipt(frontier_receipt)
+    let mut overlaps = false
+    let mut index: u32 = 0
+    while index < receipt.active_cells {
+        let resident = projective_patch_frontier_cell(
+            frontier_first,
+            frontier_second,
+            frontier_receipt,
+            index,
+        )
+        if resident.rejected
+            && parameter_triangle_overlaps_cell(p0, p1, p2, resident.cell) {
+            overlaps = true
+        }
+        index = index + 1
+    }
+    overlaps
+}
+
 fn macro_face_scores(
     _ points: StorageBuffer<u32, DEFORMED_POINT_WORDS>,
     _ triangles: StorageBuffer<u32, DEFORMED_TRIANGLE_WORDS>,
+    _ frontier_first: StorageBuffer<u32, PROJECTIVE_FRONTIER_WORDS>,
+    _ frontier_second: StorageBuffer<u32, PROJECTIVE_FRONTIER_WORDS>,
+    _ frontier_receipt: StorageBuffer<u32, PROJECTIVE_FRONTIER_RECEIPT_WORDS>,
     _ chart: u32,
     _ face: u32,
     _ patch: IsotropicBilinearPatch,
@@ -2321,6 +2613,16 @@ fn macro_face_scores(
     let p0 = fixed_parameter(chart, resident_point(points, triangle.first))
     let p1 = fixed_parameter(chart, resident_point(points, triangle.second))
     let p2 = fixed_parameter(chart, resident_point(points, triangle.third))
+    if parameter_triangle_overlaps_frontier_hazard(
+        frontier_first,
+        frontier_second,
+        frontier_receipt,
+        p0,
+        p1,
+        p2,
+    ) {
+        return bary3f(-1.0, -1.0, -1.0)
+    }
     // Atlas lane a lies opposite p0, b opposite p1, and c opposite p2.
     bary3f(
         projected_edge_score(patch, p1, p2, camera, res_x, res_y),
@@ -2350,6 +2652,10 @@ fn load_face_scores(
     )
 }
 
+fn face_scores_admitted(_ scores: Bary3F) -> bool {
+    scores.a >= 0.0 && scores.b >= 0.0 && scores.c >= 0.0
+}
+
 fn score_lod(_ score: f32, _ threshold: f32) -> u32 {
     let mut lod: u32 = 0
     let mut span = threshold
@@ -2377,8 +2683,11 @@ fn planned_chart_triangles(
     let mut total: u32 = 0
     let mut face: u32 = 0
     while face < faces {
-        let canonical = canonicalize(score_key(load_face_scores(scores, face), threshold))
-        total = total + patch_triangle_count(fixture, canonical_key_ordinal(canonical.key))
+        let face_scores = load_face_scores(scores, face)
+        if face_scores_admitted(face_scores) {
+            let canonical = canonicalize(score_key(face_scores, threshold))
+            total = total + patch_triangle_count(fixture, canonical_key_ordinal(canonical.key))
+        }
         face = face + 1
     }
     total
@@ -2404,13 +2713,13 @@ fn maximum_chart_score(
     let mut face: u32 = 0
     while face < faces {
         let value = load_face_scores(scores, face)
-        if value.a > result {
+        if face_scores_admitted(value) && value.a > result {
             result = value.a
         }
-        if value.b > result {
+        if face_scores_admitted(value) && value.b > result {
             result = value.b
         }
-        if value.c > result {
+        if face_scores_admitted(value) && value.c > result {
             result = value.c
         }
         face = face + 1
@@ -2430,9 +2739,16 @@ fn append_face_plans(
     let mut prefix = prefix_base
     let mut face: u32 = 0
     while face < faces {
-        let canonical = canonicalize(score_key(load_face_scores(scores, face), threshold))
+        let face_scores = load_face_scores(scores, face)
+        let admitted = face_scores_admitted(face_scores)
+        let canonical = canonicalize(score_key(
+            if admitted { face_scores } else { bary3f(0.0, 0.0, 0.0) },
+            threshold,
+        ))
         let patch_index = canonical_key_ordinal(canonical.key)
-        prefix = prefix + patch_triangle_count(fixture, patch_index)
+        if admitted {
+            prefix = prefix + patch_triangle_count(fixture, patch_index)
+        }
         let offset = face_plan_offset(face_base + face)
         plan.store(index: offset, value: prefix)
         plan.store(index: offset + 1, value: patch_index)
@@ -2945,6 +3261,9 @@ actor CliffordPatchLab uses (
     SurfaceRecovery<StandardSurfaceRecovery>,
 ) {
     fixture: FixtureBuffer,
+    projective_frontier_0: StorageBuffer<u32, PROJECTIVE_FRONTIER_WORDS>,
+    projective_frontier_1: StorageBuffer<u32, PROJECTIVE_FRONTIER_WORDS>,
+    projective_frontier_receipt: StorageBuffer<u32, PROJECTIVE_FRONTIER_RECEIPT_WORDS>,
     sampling_workspace_0: StorageBuffer<u32, DEFORMED_SAMPLING_WORDS>,
     sampling_workspace_1: StorageBuffer<u32, DEFORMED_SAMPLING_WORDS>,
     surface_candidates_0: StorageBuffer<u32, DEFORMED_CANDIDATE_WORDS>,
@@ -3007,6 +3326,102 @@ actor CliffordPatchLab uses (
     dragging: f32,
     orbiting: f32,
 
+    fn initialize_adaptive_projective_frontier(self, invocation: ComputeInvocation)
+        uses (
+            ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 1, 1>>,
+            PassActivation<PullbackPatchTopology>,
+            PassPreparation<PullbackPipelinePreparation>,
+        )
+    {
+        if self.sampler_mode >= 2.5 && self.sampler_mode < 3.5
+            && invocation.global.x == 0 {
+            initialize_projective_patch_frontier(
+                self.projective_frontier_0,
+                self.projective_frontier_receipt,
+            )
+        }
+    }
+
+    fn advance_adaptive_projective_frontier(self, invocation: ComputeInvocation)
+        uses (
+            ComputeSurface<
+                Workgroup<1, 1, 1>,
+                CycledDispatch<
+                    ProjectiveFrontierRound,
+                    FixedDispatch<1, 1, 1>,
+                    PROJECTIVE_FRONTIER_ROUNDS,
+                >,
+            >,
+            PassActivation<PullbackPatchTopology>,
+            PassPreparation<PullbackPipelinePreparation>,
+        )
+    {
+        if self.sampler_mode >= 2.5 && self.sampler_mode < 3.5
+            && invocation.global.x == 0 {
+            let patch = patch_from_uniforms(
+                self.p00_x, self.p00_y, self.p00_z,
+                self.p10_x, self.p10_y, self.p10_z,
+                self.p01_x, self.p01_y, self.p01_z,
+                self.p11_x, self.p11_y, self.p11_z,
+                self.w00, self.w10, self.w01, self.w11,
+            )
+            advance_projective_patch_frontier<
+                CliffordProjectiveFrontier,
+                PROJECTIVE_FRONTIER_CAPACITY,
+                PROJECTIVE_FRONTIER_WORDS,
+                PROJECTIVE_FRONTIER_RECEIPT_WORDS,
+            >(
+                CliffordProjectiveFrontier {
+                    patch: patch,
+                    quotient: quotient_control_net(patch),
+                    camera: orbit_camera_frame(
+                        self.orbit_yaw,
+                        self.orbit_pitch,
+                        self.orbit_distance,
+                        self.res_x,
+                        self.res_y,
+                    ),
+                    res_x: self.res_x,
+                    res_y: self.res_y,
+                },
+                self.projective_frontier_0,
+                self.projective_frontier_1,
+                self.projective_frontier_receipt,
+            )
+        }
+    }
+
+    fn materialize_adaptive_projective_points(self, invocation: ComputeInvocation)
+        uses (
+            ComputeSurface<Workgroup<1, 1, 1>, FixedDispatch<1, 2, 1>>,
+            PassActivation<PullbackPatchTopology>,
+            PassPreparation<PullbackPipelinePreparation>,
+        )
+    {
+        if self.sampler_mode >= 2.5 && self.sampler_mode < 3.5
+            && invocation.global.y < 2 {
+            if invocation.global.y == 0 {
+                materialize_frontier_chart_points(
+                    self.projective_frontier_0,
+                    self.projective_frontier_1,
+                    self.projective_frontier_receipt,
+                    self.points_0,
+                    self.receipt_0,
+                    0,
+                )
+            } else {
+                materialize_frontier_chart_points(
+                    self.projective_frontier_0,
+                    self.projective_frontier_1,
+                    self.projective_frontier_receipt,
+                    self.points_1,
+                    self.receipt_1,
+                    1,
+                )
+            }
+        }
+    }
+
     fn deformed_candidate_samples(self, invocation: ComputeInvocation)
         uses (
             ComputeSurface<
@@ -3017,7 +3432,7 @@ actor CliffordPatchLab uses (
             PassPreparation<PullbackPipelinePreparation>,
         )
     {
-        if self.sampler_mode < 2.5 {
+        if self.sampler_mode < 3.5 {
             return
         }
         let slot = invocation.global.x
@@ -3072,7 +3487,7 @@ actor CliffordPatchLab uses (
             PassPreparation<PullbackPipelinePreparation>,
         )
     {
-        if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
+        if self.sampler_mode < 3.5 || invocation.global.y >= 2 {
             return
         }
         let chart = invocation.global.y
@@ -3123,7 +3538,7 @@ actor CliffordPatchLab uses (
             PassPreparation<PullbackPipelinePreparation>,
         )
     {
-        if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
+        if self.sampler_mode < 3.5 || invocation.global.y >= 2 {
             return
         }
         if invocation.global.y == 0 {
@@ -3171,7 +3586,7 @@ actor CliffordPatchLab uses (
             PassPreparation<PullbackPipelinePreparation>,
         )
     {
-        if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
+        if self.sampler_mode < 3.5 || invocation.global.y >= 2 {
             return
         }
         if invocation.global.y == 0 {
@@ -3219,7 +3634,7 @@ actor CliffordPatchLab uses (
             PassPreparation<PullbackPipelinePreparation>,
         )
     {
-        if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
+        if self.sampler_mode < 3.5 || invocation.global.y >= 2 {
             return
         }
         if invocation.global.y == 0 {
@@ -3242,7 +3657,7 @@ actor CliffordPatchLab uses (
             PassPreparation<PullbackPipelinePreparation>,
         )
     {
-        if self.sampler_mode < 2.5 || invocation.global.x != 0 {
+        if self.sampler_mode < 3.5 || invocation.global.x != 0 {
             return
         }
         let compacted = compact_candidate_points_with_boundary<
@@ -3268,7 +3683,7 @@ actor CliffordPatchLab uses (
             PassPreparation<PullbackPipelinePreparation>,
         )
     {
-        if self.sampler_mode < 2.5 || invocation.global.x != 0 {
+        if self.sampler_mode < 3.5 || invocation.global.x != 0 {
             return
         }
         let compacted = compact_candidate_points_with_boundary<
@@ -3418,21 +3833,20 @@ actor CliffordPatchLab uses (
         )
     }
 
-    fn measure_deformed_faces(self, invocation: ComputeInvocation)
+    fn measure_deformed_faces_0(self, invocation: ComputeInvocation)
         uses (
             ComputeSurface<
                 Workgroup<DEFORMED_THREADS, 1, 1>,
-                FixedDispatch<DEFORMED_FACE_WORKGROUPS, 2, 1>,
+                FixedDispatch<DEFORMED_FACE_WORKGROUPS, 1, 1>,
             >,
             PassActivation<PullbackPatchTopology>,
             PassPreparation<PullbackPipelinePreparation>,
         )
     {
-        if self.sampler_mode < 2.5 || invocation.global.y >= 2 {
+        if self.sampler_mode < 2.5 {
             return
         }
         let face = invocation.global.x
-        let chart = invocation.global.y
         let patch = patch_from_uniforms(
             self.p00_x, self.p00_y, self.p00_z,
             self.p10_x, self.p10_y, self.p10_z,
@@ -3450,37 +3864,73 @@ actor CliffordPatchLab uses (
         if face >= DEFORMED_TRIANGLES.downcast_truncate() {
             return
         }
-        if chart == 0 {
-            store_face_scores(
-                self.deformed_face_scores_0,
+        store_face_scores(
+            self.deformed_face_scores_0,
+            face,
+            macro_face_scores(
+                self.points_0,
+                self.triangles_0,
+                self.projective_frontier_0,
+                self.projective_frontier_1,
+                self.projective_frontier_receipt,
+                0,
                 face,
-                macro_face_scores(
-                    self.points_0,
-                    self.triangles_0,
-                    chart,
-                    face,
-                    patch,
-                    camera,
-                    self.res_x,
-                    self.res_y,
-                ),
-            )
-        } else {
-            store_face_scores(
-                self.deformed_face_scores_1,
-                face,
-                macro_face_scores(
-                    self.points_1,
-                    self.triangles_1,
-                    chart,
-                    face,
-                    patch,
-                    camera,
-                    self.res_x,
-                    self.res_y,
-                ),
-            )
+                patch,
+                camera,
+                self.res_x,
+                self.res_y,
+            ),
+        )
+    }
+
+    fn measure_deformed_faces_1(self, invocation: ComputeInvocation)
+        uses (
+            ComputeSurface<
+                Workgroup<DEFORMED_THREADS, 1, 1>,
+                FixedDispatch<DEFORMED_FACE_WORKGROUPS, 1, 1>,
+            >,
+            PassActivation<PullbackPatchTopology>,
+            PassPreparation<PullbackPipelinePreparation>,
+        )
+    {
+        if self.sampler_mode < 2.5 {
+            return
         }
+        let face = invocation.global.x
+        let patch = patch_from_uniforms(
+            self.p00_x, self.p00_y, self.p00_z,
+            self.p10_x, self.p10_y, self.p10_z,
+            self.p01_x, self.p01_y, self.p01_z,
+            self.p11_x, self.p11_y, self.p11_z,
+            self.w00, self.w10, self.w01, self.w11,
+        )
+        let camera = orbit_camera_frame(
+            self.orbit_yaw,
+            self.orbit_pitch,
+            self.orbit_distance,
+            self.res_x,
+            self.res_y,
+        )
+        if face >= DEFORMED_TRIANGLES.downcast_truncate() {
+            return
+        }
+        store_face_scores(
+            self.deformed_face_scores_1,
+            face,
+            macro_face_scores(
+                self.points_1,
+                self.triangles_1,
+                self.projective_frontier_0,
+                self.projective_frontier_1,
+                self.projective_frontier_receipt,
+                1,
+                face,
+                patch,
+                camera,
+                self.res_x,
+                self.res_y,
+            ),
+        )
     }
 
     fn prepare_deformed_plan(self, invocation: ComputeInvocation)
