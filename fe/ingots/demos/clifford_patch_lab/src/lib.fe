@@ -114,10 +114,12 @@ use quilting_patch::{
     PatchTransformProfile3,
     QuadDiagonal2,
     QuadDiagonalProfile2,
+    QuadPatchDensity2,
     choose_quad_diagonal2,
     denotation_sample,
     dyadic_patch_child2,
     dyadic_patch_root2,
+    quad_patch_face_densities2,
     fractal_patch_leaf_decision3,
     patch_transform_profile3,
     patch_transform_sample3,
@@ -178,14 +180,15 @@ const GRID_VERTICES_PER_INSTANCE: u32 = 2352
 
 // A bounded breadth-first quadtree turns every accepted leaf into either one
 // atlas-backed quilt or four further measured quilts. Refinement remains
-// dyadic, so neighboring leaf boundaries are samples of the same canonical
-// edge. Four levels are enough to expose severe projective twist without
-// making direct manipulation rebuild an unbounded topology.
-const FRACTAL_MAX_DEPTH: u32 = 4
+// dyadic. Independent atlas edge densities reconcile coarse/fine neighbors,
+// so local screen-space refinement does not require globally refining the
+// parameter chart.
+const FRACTAL_MAX_DEPTH: u32 = 6
+const FRACTAL_FINE_SIDE: u32 = 64
 const FRACTAL_MAX_LEAVES: usize = 256
 const FRACTAL_MAX_NODES: usize = 341
 const FRACTAL_MAX_FACES: usize = FRACTAL_MAX_LEAVES * 2
-const FRACTAL_FACE_PLAN_LANES: usize = 7
+const FRACTAL_FACE_PLAN_LANES: usize = 12
 const FRACTAL_FACE_PLAN_ENTRY_WORDS: usize = FRACTAL_MAX_FACES * FRACTAL_FACE_PLAN_LANES
 const FRACTAL_QUEUE_LANES: usize = 3
 const FRACTAL_QUEUE_WORDS: usize = FRACTAL_MAX_NODES * FRACTAL_QUEUE_LANES
@@ -193,6 +196,8 @@ const FRACTAL_FACE_PLAN_META_WORDS: usize = 3
 const FRACTAL_FACE_PLAN_WORDS: usize = FRACTAL_FACE_PLAN_ENTRY_WORDS
     + FRACTAL_QUEUE_WORDS
     + FRACTAL_FACE_PLAN_META_WORDS
+const FRACTAL_OCCUPANCY_WORDS: usize = 4096
+const FRACTAL_OCCUPANCY_EMPTY: u32 = 0xffffffff
 
 const DEFORMED_CANDIDATES: usize = 272
 const DEFORMED_SAMPLING_WORDS: usize = DEFORMED_CANDIDATES * SAMPLING_WORDS_PER_CANDIDATE
@@ -335,12 +340,13 @@ impl Copy for FractalCellParameters {}
 struct FractalCellEvidence {
     transform: PatchTransformProfile3,
     diagonal: QuadDiagonalProfile2,
+    bottom_score: f32,
+    right_score: f32,
+    top_score: f32,
+    left_score: f32,
     screen_error: f32,
 }
 impl Copy for FractalCellEvidence {}
-
-struct FractalPlanCursor { faces: u32, micro_triangles: u32 }
-impl Copy for FractalPlanCursor {}
 
 struct FixedParameterTriangle { p0: FixedBarycentric, p1: FixedBarycentric, p2: FixedBarycentric }
 impl Copy for FixedParameterTriangle {}
@@ -1098,7 +1104,7 @@ const fn lab_params() -> CliffordLabParams {
                 third: "twist-aware quilt",
                 fourth: "projective blue noise",
             ),
-            init: 1.0,
+            init: 2.0,
         ),
         // The shared permutation atlas is complete through LoD 8. The
         // analytic path uses an indirect draw, so exposing that complete range
@@ -1695,41 +1701,39 @@ fn fractal_cell_evidence(
         Euclidean3Metric {},
         0.0000001,
     )
-    let boundary_error = maximum4(
-        projected_edge_score(
-            patch,
-            parameters.p00,
-            parameters.p10,
-            camera,
-            res_x,
-            res_y,
-        ),
-        projected_edge_score(
-            patch,
-            parameters.p10,
-            parameters.p11,
-            camera,
-            res_x,
-            res_y,
-        ),
-        projected_edge_score(
-            patch,
-            parameters.p11,
-            parameters.p01,
-            camera,
-            res_x,
-            res_y,
-        ),
-        projected_edge_score(
-            patch,
-            parameters.p01,
-            parameters.p00,
-            camera,
-            res_x,
-            res_y,
-        ),
+    let bottom_score = projected_edge_score(
+        patch,
+        parameters.p00,
+        parameters.p10,
+        camera,
+        res_x,
+        res_y,
     )
-    let diagonal_error = projected_edge_score(
+    let right_score = projected_edge_score(
+        patch,
+        parameters.p10,
+        parameters.p11,
+        camera,
+        res_x,
+        res_y,
+    )
+    let top_score = projected_edge_score(
+        patch,
+        parameters.p11,
+        parameters.p01,
+        camera,
+        res_x,
+        res_y,
+    )
+    let left_score = projected_edge_score(
+        patch,
+        parameters.p01,
+        parameters.p00,
+        camera,
+        res_x,
+        res_y,
+    )
+    let diagonal00_11_score = projected_edge_score(
         patch,
         parameters.p00,
         parameters.p11,
@@ -1737,7 +1741,7 @@ fn fractal_cell_evidence(
         res_x,
         res_y,
     )
-    let alternate_error = projected_edge_score(
+    let diagonal10_01_score = projected_edge_score(
         patch,
         parameters.p10,
         parameters.p01,
@@ -1748,19 +1752,26 @@ fn fractal_cell_evidence(
     FractalCellEvidence {
         transform: transform,
         diagonal: diagonal,
-        screen_error: maximum4(boundary_error, diagonal_error, alternate_error, 0.0),
+        bottom_score: bottom_score,
+        right_score: right_score,
+        top_score: top_score,
+        left_score: left_score,
+        screen_error: maximum4(
+            maximum4(bottom_score, right_score, top_score, left_score),
+            diagonal00_11_score,
+            diagonal10_01_score,
+            0.0,
+        ),
     }
 }
 
 fn fractal_lod_policy(_ requested_lod: u32) -> FractalPatchLodPolicy3 {
-    let maximum_depth = if requested_lod < FRACTAL_MAX_DEPTH {
-        requested_lod
-    } else {
-        FRACTAL_MAX_DEPTH
-    }
     FractalPatchLodPolicy3 {
-        maximum_depth: maximum_depth,
-        maximum_screen_error: 420.0,
+        // The requested atlas LoD establishes a baseline density; it must not
+        // cap geometric refinement. A locally stretched or twisted region may
+        // descend farther while quiet regions retain a coarser chart.
+        maximum_depth: FRACTAL_MAX_DEPTH,
+        maximum_screen_error: 48.0,
         maximum_stretch_variation: 2.8,
         maximum_area_variation: 3.6,
         maximum_anisotropy: 8.0,
@@ -1768,6 +1779,46 @@ fn fractal_lod_policy(_ requested_lod: u32) -> FractalPatchLodPolicy3 {
         maximum_normal_turn: 0.32,
         maximum_mixed_turn: 0.48,
     }
+}
+
+fn maximum_u32(_ first: u32, _ second: u32) -> u32 {
+    if first > second { first } else { second }
+}
+
+fn minimum_u32(_ first: u32, _ second: u32) -> u32 {
+    if first < second { first } else { second }
+}
+
+fn fractal_local_lod(_ global_lod: u32, _ depth: u32) -> u32 {
+    minimum_u32(
+        MAX_LOD,
+        if global_lod > depth {
+            global_lod - depth
+        } else {
+            0
+        },
+    )
+}
+
+fn fractal_edge_global_lod(_ score: f32, _ requested_lod: u32, _ depth: u32) -> u32 {
+    minimum_u32(
+        MAX_LOD,
+        maximum_u32(requested_lod, depth + score_lod(score, 12.0)),
+    )
+}
+
+fn fractal_interior_local_lod(_ score: f32, _ requested_lod: u32, _ depth: u32) -> u32 {
+    minimum_u32(
+        MAX_LOD,
+        maximum_u32(
+            fractal_local_lod(requested_lod, depth),
+            score_lod(score, 12.0),
+        ),
+    )
+}
+
+fn fractal_effective_screen_error(_ screen_error: f32, _ requested_lod: u32, _ depth: u32) -> f32 {
+    screen_error / as_f32(edge_resolution(MAX_LOD))
 }
 
 fn fractal_face_plan_offset(_ face: u32) -> u32 {
@@ -1816,40 +1867,209 @@ fn fractal_diagonal_code(_ diagonal: QuadDiagonal2) -> u32 {
 
 fn append_fractal_leaf(
     _ plan: StorageBuffer<u32, FRACTAL_FACE_PLAN_WORDS>,
-    _ fixture: FixtureBuffer,
-    _ cursor: FractalPlanCursor,
+    _ occupancy: StorageBuffer<u32, FRACTAL_OCCUPANCY_WORDS>,
+    _ faces: u32,
     _ cell: DyadicPatchCell2,
     _ evidence: FractalCellEvidence,
     _ requested_lod: u32,
-) -> FractalPlanCursor {
-    let mut result = cursor
-    let local_lod = if requested_lod > cell.depth {
-        requested_lod - cell.depth
-    } else {
-        0
+) -> u32 {
+    if faces + 2 > FRACTAL_MAX_FACES.downcast_truncate() {
+        return faces
     }
-    let patch_index = canonical_key_ordinal(AtlasKey { a: local_lod, b: local_lod, c: local_lod })
-    let micro_triangles = patch_triangle_count(fixture, patch_index)
     let diagonal = fractal_diagonal_code(choose_quad_diagonal2(evidence.diagonal, 1.0, 0.18, 0.001))
+    // Boundary requests remain absolute dyadic levels so neighboring leaves
+    // can reconcile them. The interior is local to this leaf: it may consume a
+    // dense resident atlas tile without forcing unrelated outer boundaries to
+    // inherit the same cost.
+    let bottom_lod = fractal_edge_global_lod(evidence.bottom_score, requested_lod, cell.depth)
+    let right_lod = fractal_edge_global_lod(evidence.right_score, requested_lod, cell.depth)
+    let top_lod = fractal_edge_global_lod(evidence.top_score, requested_lod, cell.depth)
+    let left_lod = fractal_edge_global_lod(evidence.left_score, requested_lod, cell.depth)
+    let internal_lod = fractal_interior_local_lod(evidence.screen_error, requested_lod, cell.depth)
     let mut local_triangle: u32 = 0
     while local_triangle < 2 {
-        result.micro_triangles = result.micro_triangles + micro_triangles
-        let offset = fractal_face_plan_offset(result.faces)
-        plan.store(index: offset, value: result.micro_triangles)
-        plan.store(index: offset + 1, value: patch_index)
+        let offset = fractal_face_plan_offset(faces + local_triangle)
+        plan.store(index: offset, value: 0)
+        plan.store(index: offset + 1, value: 0)
         plan.store(index: offset + 2, value: cell.depth)
         plan.store(index: offset + 3, value: cell.x)
         plan.store(index: offset + 4, value: cell.y)
         plan.store(index: offset + 5, value: diagonal)
         plan.store(index: offset + 6, value: local_triangle)
-        result.faces = result.faces + 1
+        plan.store(index: offset + 7, value: internal_lod)
+        plan.store(index: offset + 8, value: bottom_lod)
+        plan.store(index: offset + 9, value: right_lod)
+        plan.store(index: offset + 10, value: top_lod)
+        plan.store(index: offset + 11, value: left_lod)
         local_triangle = local_triangle + 1
     }
-    result
+    let span = 1 << (FRACTAL_MAX_DEPTH - cell.depth)
+    let x0 = cell.x * span
+    let y0 = cell.y * span
+    let mut y = y0
+    while y < y0 + span {
+        let mut x = x0
+        while x < x0 + span {
+            occupancy.store(index: y * FRACTAL_FINE_SIDE + x, value: faces)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    faces + 2
+}
+
+fn initialize_fractal_occupancy(_ occupancy: StorageBuffer<u32, FRACTAL_OCCUPANCY_WORDS>) {
+    let mut index: u32 = 0
+    while index < FRACTAL_OCCUPANCY_WORDS.downcast_truncate() {
+        occupancy.store(index: index, value: FRACTAL_OCCUPANCY_EMPTY)
+        index = index + 1
+    }
+}
+
+fn load_fractal_side(
+    _ plan: StorageBuffer<u32, FRACTAL_FACE_PLAN_WORDS>,
+    _ face: u32,
+    _ lane: u32,
+) -> u32 {
+    plan.load(index: fractal_face_plan_offset(face) + lane)
+}
+
+fn store_fractal_side_pair(
+    _ plan: StorageBuffer<u32, FRACTAL_FACE_PLAN_WORDS>,
+    _ face: u32,
+    _ lane: u32,
+    _ value: u32,
+) {
+    plan.store(index: fractal_face_plan_offset(face) + lane, value: value)
+    plan.store(
+        index: fractal_face_plan_offset(face + 1) + lane,
+        value: value,
+    )
+}
+
+fn reconcile_fractal_leaf_edges(
+    _ plan: StorageBuffer<u32, FRACTAL_FACE_PLAN_WORDS>,
+    _ occupancy: StorageBuffer<u32, FRACTAL_OCCUPANCY_WORDS>,
+    _ face: u32,
+) {
+    let offset = fractal_face_plan_offset(face)
+    let depth = plan.load(index: offset + 2)
+    let cell_x = plan.load(index: offset + 3)
+    let cell_y = plan.load(index: offset + 4)
+    let span = 1 << (FRACTAL_MAX_DEPTH - depth)
+    let x0 = cell_x * span
+    let y0 = cell_y * span
+    let x1 = x0 + span
+    let y1 = y0 + span
+    let mut bottom = plan.load(index: offset + 8)
+    let mut right = plan.load(index: offset + 9)
+    let mut top = plan.load(index: offset + 10)
+    let mut left = plan.load(index: offset + 11)
+    let mut cursor = x0
+    if y0 > 0 {
+        while cursor < x1 {
+            let neighbor = occupancy.load(index: (y0 - 1) * FRACTAL_FINE_SIDE + cursor)
+            if neighbor != FRACTAL_OCCUPANCY_EMPTY {
+                bottom = maximum_u32(bottom, load_fractal_side(plan, neighbor, 10))
+            }
+            cursor = cursor + 1
+        }
+    }
+    cursor = x0
+    if y1 < FRACTAL_FINE_SIDE {
+        while cursor < x1 {
+            let neighbor = occupancy.load(index: y1 * FRACTAL_FINE_SIDE + cursor)
+            if neighbor != FRACTAL_OCCUPANCY_EMPTY {
+                top = maximum_u32(top, load_fractal_side(plan, neighbor, 8))
+            }
+            cursor = cursor + 1
+        }
+    }
+    cursor = y0
+    if x0 > 0 {
+        while cursor < y1 {
+            let neighbor = occupancy.load(index: cursor * FRACTAL_FINE_SIDE + x0 - 1)
+            if neighbor != FRACTAL_OCCUPANCY_EMPTY {
+                left = maximum_u32(left, load_fractal_side(plan, neighbor, 9))
+            }
+            cursor = cursor + 1
+        }
+    }
+    cursor = y0
+    if x1 < FRACTAL_FINE_SIDE {
+        while cursor < y1 {
+            let neighbor = occupancy.load(index: cursor * FRACTAL_FINE_SIDE + x1)
+            if neighbor != FRACTAL_OCCUPANCY_EMPTY {
+                right = maximum_u32(right, load_fractal_side(plan, neighbor, 11))
+            }
+            cursor = cursor + 1
+        }
+    }
+    store_fractal_side_pair(plan, face, 8, bottom)
+    store_fractal_side_pair(plan, face, 9, right)
+    store_fractal_side_pair(plan, face, 10, top)
+    store_fractal_side_pair(plan, face, 11, left)
+}
+
+fn fractal_face_key(
+    _ plan: StorageBuffer<u32, FRACTAL_FACE_PLAN_WORDS>,
+    _ face: u32,
+    _ requested_lod: u32,
+) -> AtlasKey {
+    let offset = fractal_face_plan_offset(face)
+    let depth = plan.load(index: offset + 2)
+    let diagonal_code = plan.load(index: offset + 5)
+    let local_triangle = plan.load(index: offset + 6)
+    let diagonal = if diagonal_code == 0 {
+        QuadDiagonal2::Corner00To11
+    } else {
+        QuadDiagonal2::Corner10To01
+    }
+    let faces = quad_patch_face_densities2(
+        diagonal,
+        QuadPatchDensity2 {
+            bottom: fractal_local_lod(plan.load(index: offset + 8), depth),
+            right: fractal_local_lod(plan.load(index: offset + 9), depth),
+            top: fractal_local_lod(plan.load(index: offset + 10), depth),
+            left: fractal_local_lod(plan.load(index: offset + 11), depth),
+            interior: plan.load(index: offset + 7),
+        },
+    )
+    let density = if local_triangle == 0 {
+        faces.first
+    } else {
+        faces.second
+    }
+    AtlasKey { a: density.a, b: density.b, c: density.c }
+}
+
+fn finalize_fractal_faces(
+    _ plan: StorageBuffer<u32, FRACTAL_FACE_PLAN_WORDS>,
+    _ fixture: FixtureBuffer,
+    _ faces: u32,
+    _ requested_lod: u32,
+) -> u32 {
+    let mut prefix: u32 = 0
+    let mut face: u32 = 0
+    while face < faces {
+        let canonical = canonicalize(fractal_face_key(plan, face, requested_lod))
+        let patch_index = canonical_key_ordinal(canonical.key)
+        prefix = prefix + patch_triangle_count(fixture, patch_index)
+        let offset = fractal_face_plan_offset(face)
+        plan.store(index: offset, value: prefix)
+        plan.store(index: offset + 1, value: patch_index)
+        plan.store(
+            index: offset + 7,
+            value: edge_permutation_index(canonical.permutation),
+        )
+        face = face + 1
+    }
+    prefix
 }
 
 fn prepare_fractal_patch_plan(
     _ plan: StorageBuffer<u32, FRACTAL_FACE_PLAN_WORDS>,
+    _ occupancy: StorageBuffer<u32, FRACTAL_OCCUPANCY_WORDS>,
     _ fixture: FixtureBuffer,
     _ patch: IsotropicBilinearPatch,
     _ camera: CameraFrame,
@@ -1859,9 +2079,10 @@ fn prepare_fractal_patch_plan(
 ) {
     let requested_lod = admitted_atlas_lod(atlas_lod)
     let policy = fractal_lod_policy(requested_lod)
-    let mut cursor = FractalPlanCursor { faces: 0, micro_triangles: 0 }
+    let mut faces: u32 = 0
     let mut head: u32 = 0
     let mut tail: u32 = 1
+    initialize_fractal_occupancy(occupancy)
     store_fractal_queue_cell(plan, 0, dyadic_patch_root2())
     while head < tail && head < FRACTAL_MAX_NODES.downcast_truncate() {
         let cell = load_fractal_queue_cell(plan, head)
@@ -1870,13 +2091,17 @@ fn prepare_fractal_patch_plan(
             cell,
             FractalPatchEvidence3 {
                 transform: evidence.transform,
-                screen_error: evidence.screen_error,
+                screen_error: fractal_effective_screen_error(
+                    evidence.screen_error,
+                    requested_lod,
+                    cell.depth,
+                ),
             },
             policy,
         ) {
             FractalPatchLeafDecision::Reject => {},
             FractalPatchLeafDecision::Draw => {
-                cursor = append_fractal_leaf(plan, fixture, cursor, cell, evidence, requested_lod)
+                faces = append_fractal_leaf(plan, occupancy, faces, cell, evidence, requested_lod)
             },
             FractalPatchLeafDecision::Refine => {
                 if tail + 4 <= FRACTAL_MAX_NODES.downcast_truncate() {
@@ -1886,18 +2111,38 @@ fn prepare_fractal_patch_plan(
                         tail = tail + 1
                         child_index = child_index + 1
                     }
+                } else {
+                    // A bounded planner degrades to the best resident parent;
+                    // exhaustion must never punch a hole into the patch.
+                    faces = append_fractal_leaf(
+                        plan,
+                        occupancy,
+                        faces,
+                        cell,
+                        evidence,
+                        requested_lod,
+                    )
                 }
             },
         }
         head = head + 1
     }
-    plan.store(
-        index: fractal_face_plan_meta_offset(0),
-        value: cursor.faces,
-    )
+    // Propagate a fine neighbor's dyadic edge level across every overlapping
+    // coarse boundary. The atlas then realizes those exact shared samples.
+    let mut reconciliation: u32 = 0
+    while reconciliation < FRACTAL_MAX_DEPTH {
+        let mut face: u32 = 0
+        while face < faces {
+            reconcile_fractal_leaf_edges(plan, occupancy, face)
+            face = face + 2
+        }
+        reconciliation = reconciliation + 1
+    }
+    let micro_triangles = finalize_fractal_faces(plan, fixture, faces, requested_lod)
+    plan.store(index: fractal_face_plan_meta_offset(0), value: faces)
     plan.store(
         index: fractal_face_plan_meta_offset(1),
-        value: cursor.micro_triangles,
+        value: micro_triangles,
     )
     plan.store(index: fractal_face_plan_meta_offset(2), value: head)
 }
@@ -2631,6 +2876,7 @@ actor CliffordPatchLab uses (
     deformed_face_scores_1: StorageBuffer<f32, DEFORMED_FACE_SCORE_WORDS>,
     deformed_face_plan: StorageBuffer<u32, DEFORMED_FACE_PLAN_WORDS>,
     fractal_face_plan: StorageBuffer<u32, FRACTAL_FACE_PLAN_WORDS>,
+    fractal_occupancy: StorageBuffer<u32, FRACTAL_OCCUPANCY_WORDS>,
     analytic_lod: StorageBuffer<u32, 1>,
     analytic_draw: DrawIndirectBuffer<AnalyticAtlasDraw>,
     deformed_draw: DrawIndirectBuffer<DeformedAtlasDraw>,
@@ -3197,6 +3443,7 @@ actor CliffordPatchLab uses (
             )
             prepare_fractal_patch_plan(
                 self.fractal_face_plan,
+                self.fractal_occupancy,
                 self.fixture,
                 patch,
                 orbit_camera_frame(
@@ -3437,6 +3684,7 @@ actor CliffordPatchLab uses (
         } else {
             let mut chart = invalid_parameter_triangle()
             let mut patch_index: u32 = 0
+            let mut permutation: u32 = 0
             let mut local_triangle: u32 = 0
             let mut available = false
             if self.sampler_mode < 1.5 {
@@ -3472,6 +3720,7 @@ actor CliffordPatchLab uses (
                         }
                         chart = fractal_parameter_triangle(self.fractal_face_plan, face)
                         patch_index = self.fractal_face_plan.load(index: offset + 1)
+                        permutation = self.fractal_face_plan.load(index: offset + 7)
                         local_triangle = instance_index - prefix
                         available = chart.valid
                             && (local_triangle
@@ -3488,13 +3737,25 @@ actor CliffordPatchLab uses (
                 let point1 = fixture_triangle_index(self.fixture, source_triangle, 1)
                 let point2 = fixture_triangle_index(self.fixture, source_triangle, 2)
                 let parameter0 = map_macro_parameter(
-                    chart, fixture_barycentric(self.fixture, point0),
+                    chart,
+                    remap_barycentric(
+                        permutation,
+                        fixture_barycentric(self.fixture, point0),
+                    ),
                 )
                 let parameter1 = map_macro_parameter(
-                    chart, fixture_barycentric(self.fixture, point1),
+                    chart,
+                    remap_barycentric(
+                        permutation,
+                        fixture_barycentric(self.fixture, point1),
+                    ),
                 )
                 let parameter2 = map_macro_parameter(
-                    chart, fixture_barycentric(self.fixture, point2),
+                    chart,
+                    remap_barycentric(
+                        permutation,
+                        fixture_barycentric(self.fixture, point2),
+                    ),
                 )
                 if !parameter_triangle_conditioned(
                     patch_value, parameter0, parameter1, parameter2, policy(),
