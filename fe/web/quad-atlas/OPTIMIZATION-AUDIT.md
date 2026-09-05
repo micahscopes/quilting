@@ -91,3 +91,27 @@ a trivial resource wrapper from a loop-bearing helper with transitive resource
 access, preserving existing ABI/control-flow legality checks. Verify emitted
 calls and GPU results before claiming a fix. Riff-cat is not needed to invent
 the helper in this case: the helper already exists before inlining.
+
+## First compiler change: repeated loop helpers
+
+Fe `ad9c8ecc9` adds a cost preference for repeated natural-loop helpers and their
+dependencies. It does not bypass ABI, resource identity, effect or structurizer
+checks. A focused regression emitted two loop copies before the fix and one
+shared helper afterward; a tiny forwarding wrapper still inlines. All 45 release
+actor tests pass.
+
+Fresh Chromium execution preserves all 56 quad cases byte-for-byte in the
+geometry/repair/receipt hash, with selected-point exclusion independently checked.
+`helper-sharing.browser.json` records the cases and per-pass artifact sizes:
+
+| WGSL | Before (bytes) | After (bytes) |
+| --- | ---: | ---: |
+| Proposal | 47,179 | 39,657 |
+| Retirement | 87,378 | 48,149 |
+| Full reported bundle, including repeated pass references | 599,272 | 552,521 |
+
+Other pass sources did not change. This closes part, not all, of the manual
+reference gap. No new GPU timing comparison has been made. The candidate build
+reported 249,703 ms total, slower than the trace baseline's 195,295 ms; these
+single shared-machine runs do not isolate a compiler regression or improvement.
+Triangle-domain execution and broader optimization-pass experiments remain open.
