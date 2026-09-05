@@ -16,13 +16,15 @@ invalidates it. This tests D4 symmetry, not arbitrary permutations of four edges
 
 ```sh
 node --test fe/web/atlas-jobs/verify.test.mjs
-.toolchains/fe/target/release/fe web dev fe/web/atlas-jobs/index.html --port 8783 --no-watch
+/laboratory/fe-stuff/fe-worktrees/mb2/target/release/fe web dev fe/web/atlas-jobs/index.html --port 8783 --no-watch
 ```
 
 Current evidence: the Node tests use synthetic inputs to validate the oracle;
-they are not GPU execution evidence. The GPU build is pending resolution of
-the storage-layout derive-provider ambiguity documented in upstream mailbox
-`FE-QF-COORD-20260905`. Compiler edits are paused for ownership coordination.
+they are not GPU execution evidence. The mixed-library storage-layout reproducer
+passes in the shared mb2 actor suite after the provider identity fix. The real
+GPU fixture still needs rebuilding with the shared release CLI and browser
+verification. Compiler history is consolidated at mb2 merge `272460116`;
+coordination details remain in upstream mailbox `FE-QF-COORD-20260905`.
 Do not claim a browser pass or generation timing until this fixture is actually
 built and the real buffer history passes the independent oracle.
 
