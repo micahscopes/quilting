@@ -24,4 +24,7 @@ test('invalid job and checkpoint requests fail before allocating GPU resources',
   await assert.rejects(replayAtlasTile(null,null,[]),/valid quad job/);
   await assert.rejects(replayAtlasTile(null,null,[0,0,0,8,8,1,1,8,9,9],{rounds:[128,64]}),/checkpoints/);
   await assert.rejects(replayAtlasTile(null,null,[0,0,0,8,8,1,1,8,9,9],{sampleGroups:0}),/sampling dispatch/);
+  await assert.rejects(replayAtlasTile(null,null,[],{shape:'triangle'}),/valid triangle job/);
+  await assert.rejects(replayAtlasTile(null,null,[0,0,8,8,1,1,9],{shape:'triangle',rounds:[2,1]}),/checkpoints/);
+  await assert.rejects(replayAtlasTile(null,null,[],{shape:'hexagon'}),/unknown atlas shape/);
 });

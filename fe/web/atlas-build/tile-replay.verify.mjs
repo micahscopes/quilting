@@ -34,9 +34,12 @@ export function tileReplayBlocks(passes) {
 }
 
 export async function replayAtlasTile(gpu, manifest, activeWords, {rounds = [128,256,512,1024], captureGeometry = false,
-  sampleGroups, captureSampling = false, poisonSampling = false, captureInitialGeometry = false} = {}) {
-  if (activeWords.length !== 10 || !activeWords.every(x => Number.isSafeInteger(x) && x >= 0 && x <= 0xffffffff)
-      || activeWords[5] !== 1) throw Error('expected a recorded valid quad job');
+  sampleGroups, captureSampling = false, poisonSampling = false, captureInitialGeometry = false, shape = 'quad'} = {}) {
+  if (shape !== 'quad' && shape !== 'triangle') throw Error('unknown atlas shape');
+  const keyWords = shape === 'quad' ? 4 : 3;
+  if (activeWords.length !== (shape === 'quad' ? 10 : 7)
+      || !activeWords.every(x => Number.isSafeInteger(x) && x >= 0 && x <= 0xffffffff)
+      || activeWords[keyWords+1] !== 1) throw Error(`expected a recorded valid ${shape} job`);
   if (!rounds.length || rounds.some((n,i) => !Number.isSafeInteger(n) || n < 1 || n > 65535 || (i > 0 && n <= rounds[i-1])))
     throw Error('repair checkpoints must increase within 1..65535');
   if (sampleGroups !== undefined && (!Number.isSafeInteger(sampleGroups) || sampleGroups < 1 || sampleGroups > 65535))
@@ -106,8 +109,11 @@ export async function replayAtlasTile(gpu, manifest, activeWords, {rounds = [128
       device.queue.submit([encoder.finish()]);
       await geometryRead.mapAsync(GPUMapMode.READ);
       const words = new Uint32Array(geometryRead.getMappedRange());
-      const result = {key:activeWords.slice(0,4),receipt:last.receipt,
-        points:Array.from({length:nv},(_,i)=>Array.from(words.slice(i*3,i*3+2))),
+      // Match each Fe PlanarCoordinates instance: quad stores x,y,padding;
+      // triangle stores barycentric a,b,c and its planar chart is (b,c).
+      const coordinateOffset = shape === 'triangle' ? 1 : 0;
+      const result = {key:activeWords.slice(0,keyWords),receipt:last.receipt,
+        points:Array.from({length:nv},(_,i)=>Array.from(words.slice(i*3+coordinateOffset,i*3+coordinateOffset+2))),
         triangles:Array.from({length:nt},(_,i)=>Array.from(words.slice(nv*3+i*4,nv*3+i*4+3)))};
       geometryRead.unmap(); encoder = device.createCommandEncoder();
       return result;
@@ -140,7 +146,7 @@ export async function replayAtlasTile(gpu, manifest, activeWords, {rounds = [128
     const geometry = captureGeometry ? await readGeometry() : undefined;
     const error = await device.popErrorScope(); scopeOpen = false;
     if (error) throw Error(error.message);
-    return {activeWords,rounds,observations,...(poisonSampling?{poisonSampling:true}:{}),...(sampleGroups!==undefined?{sampleGroups}:{}),
+    return {shape,activeWords,rounds,observations,...(poisonSampling?{poisonSampling:true}:{}),...(sampleGroups!==undefined?{sampleGroups}:{}),
       ...(samplingSha256?{samplingSha256}:{}),...(geometry?{geometry}:{}),...(initialGeometry?{initialGeometry}:{}),
       allocatedBytes:[...resources.values()].reduce((sum,b)=>sum+b.size,0)};
   } finally {

@@ -140,6 +140,29 @@ directory entry whose receipt fails or reports different geometry counts.
 The priority-prefilter optimization still needs a controlled GPU equivalence
 comparison: finishing this run does not establish equivalence to its baseline.
 
+An isolated compiled-Fe replay of failed triangle key `(3,3,7)` settles at
+round 134, with 5,098 flips, versus 5,093 flips and three remaining violations
+at round 128. The final certificate is valid and unchanged through 512
+scheduled rounds. An independent BigInt replay reproduces the exact final
+face array, round count and flip count. Evidence:
+`/laboratory/quilting/scratch/atlas-job-state-20260905/triangle-337-repair-replay.json`.
+The replay explicitly uses the equilateral metric `x²+y²+xy` on barycentric
+coordinates `(b,c)`. Initially comparing with the quad's square metric gave
+different faces; coordinate charts alone do not specify a Delaunay metric.
+This small-case agreement does not prove a corpus-wide repair bound.
+
+### Scheduling cost, separately from shader size
+
+The captured quad manifest `fe-render-f3ec742143766412.json` contains 54 pass
+definitions. Multiplying their nested Fe-authored repeats gives 2,047,232
+dispatch commands for all 1,035 keys: 1,059,840 in repair, 728,640 in insertion,
+198,720 in sampling, 31,050 in candidate-index reduction, 28,980 in other
+per-tile work, and two global commands. This is a static schedule census,
+not GPU instruction counts or a measured runtime attribution. Converged
+repair tiles already publish zero-work indirect commands, but the repeated
+commands are still encoded. Raising every tile's repair budget compounds
+that scheduling cost; batching jobs needs investigation alongside shader size.
+
 ### Commands
 
 ```sh

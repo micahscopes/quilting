@@ -9,6 +9,14 @@ test('exact cocircular tie selects the smaller diagonal and terminates',()=>{
     assert.deepEqual(r.triangles,[[0,1,2],[2,3,0]]);
   }
 });
+test('identical coordinate charts can require different Delaunay diagonals',()=>{
+  // The equilateral barycentric chart has squared length x*x+y*y+x*y.
+  // A Cartesian square is therefore not cocircular under that metric.
+  const r=replayRepairOrder(square,{metric:'equilateral'});
+  assert(r.converged);assert.equal(r.flips,0);assert.equal(r.rounds,1);
+  assert.deepEqual(r.triangles,square.triangles);
+  assert.throws(()=>replayRepairOrder(square,{metric:'unspecified'}),/unknown plane metric/);
+});
 test('mixed priorities are repeatable and injective on a bounded slot corpus',()=>{
   // Not a proof over u32: algebraically each xor-shift and odd multiply is
   // invertible, and xor with a fixed round salt is also a permutation.
