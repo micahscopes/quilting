@@ -43,6 +43,38 @@ use quilting_domain::{
 use quilting_patch::{BilinearCornerScales, DenotationSample, Euclidean3Points, TriangleDomain2, denote, measure_tangent_triangle3, triangle_parameter}
 use quilting_patch::barycentric_warp::{ProjectiveTriangleMap, RadialTriangleMap, TriangleFan3}
 use quilting_patch::sampling_warp::{interval_bias,TriangleBoundaryWarp,QuadBoundaryWarp,InteriorTwist,InteriorConcentration}
+use quilting_atlas::quad::{QuadAtlasKey,SquareSymmetry,canonicalize as canonical_quad,boundary_seed as quad_boundary_seed}
+use quilting_atlas::planar::{FixedPoint2,EquilateralMetric,SquareMetric,incircle_sign as planar_incircle}
+
+pub fn quad_key_lane(_ a:u32,_ b:u32,_ c:u32,_ d:u32,_ lane:u32)->u32 {
+    let key=QuadAtlasKey {bottom:a,right:b,top:c,left:d}
+    let canonical=canonical_quad(key)
+    if lane==0 {canonical.key.code()}
+    else if lane==1 {canonical.to_canonical.quarter_turns+if canonical.to_canonical.reflected {4} else {0}}
+    else if lane==2 {key.boundary_count()}
+    else {if canonical.valid {1} else {0}}
+}
+pub fn quad_transformed_key(_ a:u32,_ b:u32,_ c:u32,_ d:u32,_ symmetry:u32)->u32 {
+    SquareSymmetry {quarter_turns:symmetry%4,reflected:symmetry>=4}.key(QuadAtlasKey {bottom:a,right:b,top:c,left:d}).code()
+}
+pub fn quad_transformed_point_lane(_ x:u32,_ y:u32,_ symmetry:u32,_ invert:u32,_ lane:u32)->u32 {
+    let s=SquareSymmetry {quarter_turns:symmetry%4,reflected:symmetry>=4}
+    let p=if invert==0 {s.point(FixedPoint2 {x:x,y:y})} else {s.inverse().point(FixedPoint2 {x:x,y:y})}
+    if lane==0 {p.x} else {p.y}
+}
+pub fn quad_boundary_lane(_ a:u32,_ b:u32,_ c:u32,_ d:u32,_ ordinal:u32,_ lane:u32)->u32 {
+    let seed=quad_boundary_seed(QuadAtlasKey {bottom:a,right:b,top:c,left:d},ordinal)
+    if lane==0 {seed.point.x} else if lane==1 {seed.point.y}
+    else if lane==2 {seed.edge} else if lane==3 {seed.step} else {if seed.valid {1} else {0}}
+}
+pub fn planar_incircle_lane(_ ax:u32,_ ay:u32,_ bx:u32,_ by:u32,_ cx:u32,_ cy:u32,_ dx:u32,_ dy:u32,_ metric:u32)->i32 {
+    let a=FixedPoint2 {x:ax,y:ay}
+    let b=FixedPoint2 {x:bx,y:by}
+    let c=FixedPoint2 {x:cx,y:cy}
+    let d=FixedPoint2 {x:dx,y:dy}
+    if metric==0 {planar_incircle(a,b,c,d,EquilateralMetric {})}
+    else {planar_incircle(a,b,c,d,SquareMetric {})}
+}
 use quilting_quaternion::{QuatF, inverse_bounded, multiply, quatf, zero}
 use quilting_qb::{
     QbPolicy,

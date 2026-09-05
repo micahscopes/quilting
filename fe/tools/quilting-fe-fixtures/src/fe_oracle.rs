@@ -334,6 +334,102 @@ fn projective_interval_inverse_uniformizes_a_rational_line() {
 }
 
 #[test]
+fn quad_atlas_wasm_canonicalizes_d4_and_preserves_exact_boundary_rings() {
+    let (mut store,instance)=instantiate();
+    let canonical=function::<(u32,u32,u32,u32,u32),u32>(&mut store,&instance,"quad_key_lane");
+    let transformed=function::<(u32,u32,u32,u32,u32),u32>(&mut store,&instance,"quad_transformed_key");
+    let point=function::<(u32,u32,u32,u32,u32),u32>(&mut store,&instance,"quad_transformed_point_lane");
+    let boundary=function::<(u32,u32,u32,u32,u32,u32),u32>(&mut store,&instance,"quad_boundary_lane");
+    let decode=|code:u32| [code/729,(code/81)%9,(code/9)%9,code%9];
+    let encode=|k:[u32;4]| ((k[0]*9+k[1])*9+k[2])*9+k[3];
+    let mut classes=std::collections::BTreeSet::new();
+    for code in 0..6561 {
+        let k=decode(code);
+        let [a,b,c,d]=k;
+        // Independent dihedral action on a circular sequence. Reflection
+        // reverses the sequence; rotations select each possible starting edge.
+        let expected=(0..4).flat_map(|r| [std::array::from_fn(|i|k[(r+i)%4]),
+            std::array::from_fn(|i|k[(r+4-i)%4])]).map(encode).min().unwrap();
+        let actual=canonical.call(&mut store,(a,b,c,d,0)).unwrap();
+        assert_eq!(actual,expected,"D4 key class {k:?}");
+        let witness=canonical.call(&mut store,(a,b,c,d,1)).unwrap();
+        assert_eq!(transformed.call(&mut store,(a,b,c,d,witness)).unwrap(),actual);
+        classes.insert(actual);
+    }
+    assert_eq!(classes.len(),1035);
+    assert_ne!(canonical.call(&mut store,(0,0,1,1,0)).unwrap(),canonical.call(&mut store,(0,1,0,1,0)).unwrap(),
+        "adjacent high edges and opposite high edges are different classes");
+    let mut boundary_samples=0;
+    for code in classes {
+        let [a,b,c,d]=decode(code);
+        let counts=[1<<a,1<<b,1<<c,1<<d];
+        let total:u32=counts.iter().sum();
+        assert_eq!(canonical.call(&mut store,(a,b,c,d,2)).unwrap(),total);
+        let mut ordinal=0;
+        let mut ring=Vec::new();
+        for (edge,count) in counts.into_iter().enumerate() {
+            for step in 0..count {
+                let t=step*(16384/count);
+                let expected=match edge {0=>[t,0],1=>[16384,t],2=>[16384-t,16384],_=>[0,16384-t]};
+                let p=std::array::from_fn(|lane|boundary.call(&mut store,(a,b,c,d,ordinal,lane as u32)).unwrap());
+                assert_eq!(p,expected,"canonical ring {code}, edge {edge}, step {step}");
+                ring.push(p);
+                ordinal+=1;
+            }
+        }
+        assert_eq!(ring.iter().copied().collect::<std::collections::BTreeSet<_>>().len(),total as usize);
+        let area:i64=(0..ring.len()).map(|i| {
+            let p=ring[i].map(i64::from);
+            let q=ring[(i+1)%ring.len()].map(i64::from);
+            p[0]*q[1]-p[1]*q[0]
+        }).sum();
+        assert_eq!(area,2*16384_i64.pow(2),"positive full-square boundary area");
+        assert_eq!(boundary.call(&mut store,(a,b,c,d,total,4)).unwrap(),0,"no out-of-range seed");
+        boundary_samples+=total;
+    }
+    for symmetry in 0..8 {
+        for x in [0,1,257,8192,16384] {for y in [0,1,257,8192,16384] {
+            let qx=point.call(&mut store,(x,y,symmetry,0,0)).unwrap();
+            let qy=point.call(&mut store,(x,y,symmetry,0,1)).unwrap();
+            assert_eq!(point.call(&mut store,(qx,qy,symmetry,1,0)).unwrap(),x);
+            assert_eq!(point.call(&mut store,(qx,qy,symmetry,1,1)).unwrap(),y);
+        }}
+    }
+    assert_eq!(canonical.call(&mut store,(0,0,0,9,3)).unwrap(),0,"invalid LoD rejected");
+    eprintln!("6,561 requested quad keys; 1,035 canonical rings; {boundary_samples} exact boundary samples");
+}
+
+#[test]
+fn planar_metric_incircle_wasm_matches_independent_i128() {
+    let (mut store,instance)=instantiate();
+    let predicate=function::<(u32,u32,u32,u32,u32,u32,u32,u32,u32),i32>(&mut store,&instance,"planar_incircle_lane");
+    let expected=|p:[[u32;2];4],metric:u32|->i32 {
+        let d: [[i128;2];3]=std::array::from_fn(|i|std::array::from_fn(|j|p[i][j] as i128-p[3][j] as i128));
+        let lift=|q:[i128;2]| q[0]*q[0]+q[1]*q[1]+if metric==0 {q[0]*q[1]} else {0};
+        let cross=|a:[i128;2],b:[i128;2]| a[0]*b[1]-a[1]*b[0];
+        let determinant=lift(d[0])*cross(d[1],d[2])+lift(d[1])*cross(d[2],d[0])+lift(d[2])*cross(d[0],d[1]);
+        let u=[p[1][0] as i128-p[0][0] as i128,p[1][1] as i128-p[0][1] as i128];
+        let v=[p[2][0] as i128-p[0][0] as i128,p[2][1] as i128-p[0][1] as i128];
+        (determinant.signum()*cross(u,v).signum()) as i32
+    };
+    let mut state=0x921cd61_u64;
+    for index in 0..10000 {
+        let p=if index==0 {[[0,0],[16384,0],[16384,16384],[0,16384]]}
+            else if index==1 {[[0,0],[8192,8192],[16384,16384],[8192,1]]}
+            else {std::array::from_fn(|_|std::array::from_fn(|_| {
+                state=state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                ((state>>32)%16385) as u32
+            }))};
+        for metric in 0..2 {
+            let actual=predicate.call(&mut store,(p[0][0],p[0][1],p[1][0],p[1][1],p[2][0],p[2][1],p[3][0],p[3][1],metric)).unwrap();
+            assert_eq!(actual,expected(p,metric),"metric {metric}, {p:?}");
+            if index==0 && metric==1 {assert_eq!(actual,0,"square corners are cocircular in the square metric");}
+            if index==0 && metric==0 {assert_ne!(actual,0,"equilateral metric must not leak into square triangulation");}
+        }
+    }
+}
+
+#[test]
 fn radial_atlas_fan_wasm_preserves_seams_and_triangle_orientation() {
     let (mut store, instance) = instantiate();
     let warp = function::<(f32,f32,f32,f32,u32),f32>(&mut store,&instance,"radial_warp_lane");

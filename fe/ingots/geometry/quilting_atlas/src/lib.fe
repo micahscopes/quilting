@@ -23,6 +23,8 @@ extern {
 pub use sampling
 pub use topology
 pub use triangulation
+pub use planar
+pub use quad
 
 pub const MIN_LOD: u32 = 0
 pub const MAX_LOD: u32 = 8

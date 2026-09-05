@@ -1,0 +1,162 @@
+//! Square-domain edge keys and canonical boundary rings, separate from S3.
+use core::marker::Copy
+use super::{MAX_LOD, edge_resolution}
+use super::sampling::BARYCENTRIC_SCALE
+use super::planar::FixedPoint2
+
+/// Counterclockwise boundary order: bottom, right, top, left.
+pub struct QuadAtlasKey { pub bottom: u32, pub right: u32, pub top: u32, pub left: u32 }
+impl Copy for QuadAtlasKey {}
+impl QuadAtlasKey {
+    pub const fn valid(self) -> bool {
+        self.bottom <= MAX_LOD
+            && self.right <= MAX_LOD
+            && self.top <= MAX_LOD
+            && self.left <= MAX_LOD
+    }
+    pub const fn edge(self, _ index: u32) -> u32 {
+        if index == 0 {
+            self.bottom
+        } else if index == 1 {
+            self.right
+        } else if index == 2 { self.top } else { self.left }
+    }
+    /// Stable full-key code, not a dense canonical ordinal.
+    pub const fn code(self) -> u32 {
+        let n = MAX_LOD + 1
+        ((self.bottom * n + self.right) * n + self.top) * n + self.left
+    }
+    pub const fn boundary_count(self) -> u32 {
+        if !self.valid() { return 0 }
+        edge_resolution(self.bottom)
+            + edge_resolution(self.right)
+            + edge_resolution(self.top)
+            + edge_resolution(self.left)
+    }
+}
+
+/// Reflection across x=1/2, followed by quarter-turns counterclockwise.
+/// Only D4 is admitted: arbitrary edge permutations change adjacency.
+pub struct SquareSymmetry { pub quarter_turns: u32, pub reflected: bool }
+impl Copy for SquareSymmetry {}
+impl SquareSymmetry {
+    pub const fn edge_target(self, _ source: u32) -> u32 {
+        let r = self.quarter_turns % 4
+        let s = source % 4
+        if self.reflected {
+            (r + 4 - s) % 4
+        } else {
+            (s + r) % 4
+        }
+    }
+    pub const fn inverse(self) -> SquareSymmetry {
+        SquareSymmetry {
+            quarter_turns: if self.reflected {
+                self.quarter_turns % 4
+            } else {
+                (4 - self.quarter_turns % 4) % 4
+            },
+            reflected: self.reflected,
+        }
+    }
+    pub const fn point(self, _ p: FixedPoint2) -> FixedPoint2 {
+        let mut q = FixedPoint2 {
+            x: if self.reflected {
+                BARYCENTRIC_SCALE - p.x
+            } else {
+                p.x
+            },
+            y: p.y,
+        }
+        let mut i: u32 = 0
+        while i < self.quarter_turns % 4 {
+            q = FixedPoint2 { x: BARYCENTRIC_SCALE - q.y, y: q.x }
+            i = i + 1
+        }
+        q
+    }
+    pub const fn key(self, _ k: QuadAtlasKey) -> QuadAtlasKey {
+        let inv = self.inverse()
+        QuadAtlasKey {
+            bottom: k.edge(inv.edge_target(0)),
+            right: k.edge(inv.edge_target(1)),
+            top: k.edge(inv.edge_target(2)),
+            left: k.edge(inv.edge_target(3)),
+        }
+    }
+}
+pub struct CanonicalQuadKey {
+    pub key: QuadAtlasKey,
+    pub to_canonical: SquareSymmetry,
+    pub valid: bool,
+}
+impl Copy for CanonicalQuadKey {}
+
+pub const fn canonicalize(_ key: QuadAtlasKey) -> CanonicalQuadKey {
+    let mut result = CanonicalQuadKey {
+        key: key,
+        to_canonical: SquareSymmetry { quarter_turns: 0, reflected: false },
+        valid: key.valid(),
+    }
+    if !result.valid {
+        return result
+    }
+    let mut i: u32 = 0
+    while i < 8 {
+        let symmetry = SquareSymmetry { quarter_turns: i % 4, reflected: i >= 4 }
+        let candidate = symmetry.key(key)
+        if candidate.code() < result.key.code() {
+            result = CanonicalQuadKey { key: candidate, to_canonical: symmetry, valid: true }
+        }
+        i = i + 1
+    }
+    result
+}
+
+/// Burnside count for n colors on the four edges of a square under D4.
+pub const fn canonical_key_count(_ maximum_lod: u32) -> u32 {
+    if maximum_lod > MAX_LOD {
+        return 0
+    }
+    let n = maximum_lod + 1
+    (n * n * n * n + 2 * n * n * n + 3 * n * n + 2 * n) / 8
+}
+pub const CANONICAL_QUAD_KEY_COUNT: u32 = canonical_key_count(MAX_LOD)
+static_assert(CANONICAL_QUAD_KEY_COUNT == 1035)
+
+pub struct QuadBoundarySeed {
+    pub point: FixedPoint2,
+    pub edge: u32,
+    pub step: u32,
+    pub valid: bool,
+}
+impl Copy for QuadBoundarySeed {}
+/// Each edge owns its starting corner but not its ending corner. The ring is
+/// duplicate-free, counterclockwise, and exactly dyadic through LoD 8.
+pub const fn boundary_seed(_ key: QuadAtlasKey, _ ordinal: u32) -> QuadBoundarySeed {
+    if !key.valid() || ordinal >= key.boundary_count() {
+        return QuadBoundarySeed {
+            point: FixedPoint2 { x: 0, y: 0 },
+            edge: 0xffffffff,
+            step: 0,
+            valid: false,
+        }
+    }
+    let mut edge: u32 = 0
+    let mut step = ordinal
+    while edge < 3 && step >= edge_resolution(key.edge(edge)) {
+        step = step - edge_resolution(key.edge(edge))
+        edge = edge + 1
+    }
+    let t = step * (BARYCENTRIC_SCALE / edge_resolution(key.edge(edge)))
+    let point = if edge == 0 {
+        FixedPoint2 { x: t, y: 0 }
+    } else if edge == 1 {
+        FixedPoint2 { x: BARYCENTRIC_SCALE, y: t }
+    } else if edge == 2 {
+        FixedPoint2 { x: BARYCENTRIC_SCALE - t, y: BARYCENTRIC_SCALE }
+    } else {
+        FixedPoint2 { x: 0, y: BARYCENTRIC_SCALE - t }
+    }
+    QuadBoundarySeed { point: point, edge: edge, step: step, valid: true }
+}

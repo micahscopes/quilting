@@ -10,3 +10,4 @@ quilting_clifford_bezier = true
 quilting_patch = true
 quilting_quaternion = true
 quilting_qb = true
+quilting_atlas = true
