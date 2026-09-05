@@ -11,7 +11,7 @@
   <main>
     <header>
       <strong>tessellation warp</strong>
-      <span title="Triangle edges a/b/c run B→C, C→A, A→B; edge d is unused. Square a/b/c/d are bottom/right/top/left, each in increasing x or y. One is neutral skew/concentration; zero is neutral twist. Click or drag to place the yellow interior focus. Red marks inverted or collapsed rendered triangles, not a surface-family error.">boundary skew · twist · drag focus · concentration · red = folded mesh</span>
+      <span title="Triangle uses the precomputed LoD 0–8 atlas and the lod control. Quad uses a generated resident tile and the separate quad_lod control, temporarily 0–3. Both use the same warp controls. Triangle edges a/b/c run B→C, C→A, A→B; edge d is unused. Quad a/b/c/d are bottom/right/top/left, each in increasing x or y. One is neutral skew/concentration; zero is neutral twist. Drag the yellow focus. Red triangles mean folds; a dark red background means quad generation failed.">triangle + quad atlas · skew · twist · drag focus · concentration</span>
     </header>
     <section class="stage" aria-label="Flat triangular and quadrangular tessellation warps">
       <script type="application/fe" data-fe-src="../../ingots/demos/tessellation_warp" data-fe-render></script>

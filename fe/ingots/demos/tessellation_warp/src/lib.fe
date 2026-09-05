@@ -1,8 +1,28 @@
-//! A flat atlas/grid warp explorer: no surface fitting and no child patches.
+//! A flat triangle/quad atlas warp explorer: no fitting and no child patches.
 use core::marker::Copy
 use fmath::{min, max, clamp, smoothstep, abs}
 use classic_quilting_lod::{FixtureBuffer, patch_triangle_count}
 use quilting_atlas::{AtlasKey, canonical_key_ordinal, lod_as_f32}
+use quilting_atlas::quad::QuadAtlasKey
+use quilting_atlas::quad_sampling::candidate_slot_count
+use quilting_atlas::planar::FixedPoint2
+use quilting_atlas_webgpu::{
+    propose_candidate_lane_with_policy,
+    retire_candidate_lane_with_policy,
+    advance_candidate_generation,
+    compact_candidate_points_with_boundary,
+    construct_planar_triangles,
+    restore_indexed_constrained_delaunay_with_policy,
+    resident_triangle,
+    load_packed_point,
+}
+use quilting_atlas_webgpu::quad::{
+    QuadCandidateConflict,
+    QuadBoundaryPoints,
+    QuadAtlasDomain,
+    QuadInteriorEdgeFlip,
+    initialize_quad_candidate_lane,
+}
 use quilting_patch_view::atlas_barycentric
 use quilting_domain::{Bary3F, Vec2F, bary3f, vec2f, bary_to_cartesian, cartesian_to_bary, length2}
 use quilting_patch::sampling_warp::{
@@ -25,6 +45,9 @@ use std::web::view::{
 use std::webgpu::{
     ClipPosition,
     ComputeInvocation,
+    CycledDispatch,
+    StorageBuffer,
+    PassActivation,
     ComputeSurface,
     Depth24LessEqualMsaa4,
     DrawIndirectBuffer,
@@ -52,6 +75,7 @@ use std::webgpu::{
 struct Params {
     domain: Param,
     lod: Param,
+    quad_lod: Param,
     edge_a: Param,
     edge_b: Param,
     edge_c: Param,
@@ -69,6 +93,7 @@ struct Params {
 struct State {
     domain: f32,
     lod: f32,
+    quad_lod: f32,
     edge_a: f32,
     edge_b: f32,
     edge_c: f32,
@@ -91,10 +116,14 @@ derive ApplyParamBindings for State using ParamBindingsProvider
 const fn params() -> Params {
     Params {
         domain: Param::choice(
-            options: ChoiceOptions::two(first: "triangle atlas", second: "square grid"),
+            options: ChoiceOptions::two(
+                first: "triangle atlas",
+                second: "quad atlas (preview 0–3)",
+            ),
             init: 0.0,
         ),
         lod: Param::int(min: 0.0, max: 8.0, init: 4.0),
+        quad_lod: Param::int(min: 0.0, max: 3.0, init: 3.0),
         edge_a: Param::log(min: 0.0625, max: 16.0, init: 1.0),
         edge_b: Param::log(min: 0.0625, max: 16.0, init: 1.0),
         edge_c: Param::log(min: 0.0625, max: 16.0, init: 1.0),
@@ -130,27 +159,52 @@ fn quad_world(_ p: Vec2F) -> Vec2F {
     vec2f((p.x - 0.5) * 1.5, (p.y - 0.5) * 1.5)
 }
 
-/// A regular fixed-diagonal grid, not a claimed blue-noise quad atlas.
-fn grid_point(_ vertex: u32, _ lod: u32) -> Vec2F {
-    let side = 1 << lod
-    let cell = vertex / 6
-    let x = cell % side
-    let y = cell / side
-    let lane = vertex % 6
-    let u = if lane == 0 || lane == 3 || lane == 5 {
-        0
-    } else {
-        1
+// The bounded resident job uses the same candidate and topology policies as
+// the quad provider. Full 0–8 generation remains a shared scaling task.
+const QUAD_PREVIEW_LOD: u32 = 3
+const MAX_QUAD_KEY: QuadAtlasKey = QuadAtlasKey {
+    bottom: QUAD_PREVIEW_LOD,
+    right: QUAD_PREVIEW_LOD,
+    top: QUAD_PREVIEW_LOD,
+    left: QUAD_PREVIEW_LOD,
+}
+const CANDIDATES: usize = candidate_slot_count(MAX_QUAD_KEY) as usize
+const SAMPLING: usize = CANDIDATES * 8 + 1
+const POINTS: usize = CANDIDATES + (MAX_QUAD_KEY.boundary_count() as usize)
+const POINT_WORDS: usize = POINTS * 3
+const TRIANGLES: usize = POINTS * 2 - (MAX_QUAD_KEY.boundary_count() as usize) - 2
+const TRIANGLE_WORDS: usize = TRIANGLES * 4
+const TWINS: usize = TRIANGLES * 3
+const EDGE_INDEX: usize = POINTS + TWINS
+const PROPOSALS: usize = (TWINS + 31) / 32
+const THREADS: usize = 64
+const GROUPS: usize = (CANDIDATES + THREADS - 1) / THREADS
+pub struct SampleRound {}
+struct QuadTopology {}
+impl QuadTopology {
+    pub fn active(_ state: State) -> bool {
+        state.domain >= 0.5
     }
-    let v = if lane == 0 || lane == 1 || lane == 3 {
-        0
-    } else {
-        1
-    }
-    vec2f(
-        (lod_as_f32(x) + lod_as_f32(u)) / lod_as_f32(side),
-        (lod_as_f32(y) + lod_as_f32(v)) / lod_as_f32(side),
-    )
+}
+fn quad_key(_ value: f32) -> QuadAtlasKey {
+    let lod = level(value)
+    QuadAtlasKey { bottom: lod, right: lod, top: lod, left: lod }
+}
+fn flag(_ value: bool) -> u32 {
+    if value { 1 } else { 0 }
+}
+fn quad_point(
+    _ points: StorageBuffer<u32, POINT_WORDS>,
+    _ triangles: StorageBuffer<u32, TRIANGLE_WORDS>,
+    _ vertex: u32,
+) -> Vec2F {
+    let t = resident_triangle<TRIANGLE_WORDS>(triangles, vertex / 3)
+    let lane = vertex % 3
+    let index = if lane == 0 {
+        t.first
+    } else if lane == 1 { t.second } else { t.third }
+    let p = load_packed_point<FixedPoint2, POINT_WORDS>(points, index)
+    vec2f(lod_as_f32(p.x) / 16384.0, lod_as_f32(p.y) / 16384.0)
 }
 struct Warp {
     a: f32,
@@ -184,6 +238,8 @@ impl Warp {
 }
 fn point(
     _ fixture: FixtureBuffer,
+    _ points: StorageBuffer<u32, POINT_WORDS>,
+    _ triangles: StorageBuffer<u32, TRIANGLE_WORDS>,
     _ domain: f32,
     _ lod: u32,
     _ vertex: u32,
@@ -192,7 +248,7 @@ fn point(
     if domain < 0.5 {
         warp.triangle(atlas_barycentric(fixture, key(lod), vertex))
     } else {
-        warp.quad(grid_point(vertex, lod))
+        warp.quad(quad_point(points, triangles, vertex))
     }
 }
 fn orientation(_ a: Vec2F, _ b: Vec2F, _ c: Vec2F) -> f32 {
@@ -218,14 +274,18 @@ impl Copy for Varying {}
 struct Draw {}
 
 actor TessellationWarp uses (GpuProgram<WebGpuBackend>,SurfaceQuality<ResponsiveBacking>,SurfaceRecovery<StandardSurfaceRecovery>) {
-    domain:f32,lod:f32,edge_a:f32,edge_b:f32,edge_c:f32,edge_d:f32,
+    domain:f32,lod:f32,quad_lod:f32,edge_a:f32,edge_b:f32,edge_c:f32,edge_d:f32,
     twist:f32,focus_x:f32,focus_y:f32,concentration:f32,
     show_wires:f32,wire_px:f32,res_x:f32,res_y:f32,dragging:f32,
     fixture:FixtureBuffer,draw:DrawIndirectBuffer<Draw>,
+    sampling:StorageBuffer<u32,SAMPLING>,points:StorageBuffer<u32,POINT_WORDS>,
+    triangles:StorageBuffer<u32,TRIANGLE_WORDS>,twins:StorageBuffer<u32,TWINS>,
+    edge_index:StorageBuffer<u32,EDGE_INDEX>,proposals:StorageBuffer<u32,PROPOSALS>,
+    receipt:StorageBuffer<u32,19>,
     const fn view()->Surface<Params> {Surface {extent:Extent::square(768),params:params()}}
     const fn raster()->RasterPlan uses (RasterConfiguration) {raster_plan<Depth24LessEqualMsaa4>()}
     fn transition(self,event:SurfaceEvent)->State uses (SurfaceTransition,SurfaceScheduling<LatestPerFrame>) {
-        let mut next=State {domain:self.domain,lod:self.lod,edge_a:self.edge_a,edge_b:self.edge_b,edge_c:self.edge_c,edge_d:self.edge_d,
+        let mut next=State {domain:self.domain,lod:self.lod,quad_lod:self.quad_lod,edge_a:self.edge_a,edge_b:self.edge_b,edge_c:self.edge_c,edge_d:self.edge_d,
             twist:self.twist,focus_x:self.focus_x,focus_y:self.focus_y,concentration:self.concentration,
             show_wires:self.show_wires,wire_px:self.wire_px,res_x:self.res_x,res_y:self.res_y,dragging:self.dragging}
             .apply_param_bindings(params(),event)
@@ -247,25 +307,105 @@ actor TessellationWarp uses (GpuProgram<WebGpuBackend>,SurfaceQuality<Responsive
         if event.is_pointer_up() {next.dragging=0.0}
         next
     }
+    // Storage starts zeroed; code+1 distinguishes the LoD-0 key from cold.
+    // Warping never changes this key and therefore never rebuilds the mesh.
+    fn select_quad(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>,PassActivation<QuadTopology>) {
+        let requested=quad_key(self.quad_lod).code()+1
+        let rebuild=self.receipt.load(index:16)!=requested || self.receipt.load(index:10)==0
+        self.receipt.store(index:17,value:flag(rebuild))
+    }
+    fn initialize(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,FixedDispatch<GROUPS,1,1>>,PassActivation<QuadTopology>) {
+        if self.receipt.load(index:17)==0 {return}
+        initialize_quad_candidate_lane<CANDIDATES,SAMPLING>(
+            quad_key(self.quad_lod),
+            42,self.sampling,i,
+        )
+    }
+    fn propose(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<SampleRound,FixedDispatch<GROUPS,1,1>,64>>,PassActivation<QuadTopology>) {
+        if self.receipt.load(index:17)==0 {return}
+        propose_candidate_lane_with_policy<QuadCandidateConflict,CANDIDATES,SAMPLING>(
+            quad_key(self.quad_lod),
+            QuadCandidateConflict {},self.sampling,i,
+        )
+    }
+    fn retire(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<SampleRound,FixedDispatch<GROUPS,1,1>,64>>,PassActivation<QuadTopology>) {
+        if self.receipt.load(index:17)==0 {return}
+        retire_candidate_lane_with_policy<QuadCandidateConflict,CANDIDATES,SAMPLING>(
+            quad_key(self.quad_lod),
+            QuadCandidateConflict {},self.sampling,i,
+        )
+    }
+    fn advance(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<SampleRound,FixedDispatch<1,1,1>,64>>,PassActivation<QuadTopology>) {
+        if self.receipt.load(index:17)==0 {return}
+        advance_candidate_generation<CANDIDATES,SAMPLING>(self.sampling,i)
+    }
+    fn compact(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>,PassActivation<QuadTopology>) {
+        if self.receipt.load(index:17)==0 {return}
+        let r=compact_candidate_points_with_boundary<QuadBoundaryPoints,CANDIDATES,SAMPLING,POINT_WORDS>(
+            quad_key(self.quad_lod),
+            QuadBoundaryPoints {},self.sampling,self.points,
+        )
+        self.receipt.store(index:0,value:flag(r.valid))
+        self.receipt.store(index:1,value:flag(r.converged))
+        self.receipt.store(index:2,value:flag(r.overflowed))
+        self.receipt.store(index:3,value:r.accepted_candidates)
+        self.receipt.store(index:4,value:r.boundary_points)
+        self.receipt.store(index:5,value:r.resident_points)
+    }
+    fn triangulate(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>,PassActivation<QuadTopology>) {
+        if self.receipt.load(index:17)==0 {return}
+        let r=construct_planar_triangles<QuadAtlasDomain,POINT_WORDS,TRIANGLE_WORDS>(
+            QuadAtlasDomain {},quad_key(self.quad_lod),
+            self.receipt.load(index:0)!=0,self.receipt.load(index:5),self.points,self.triangles,
+        )
+        self.receipt.store(index:6,value:flag(r.valid))
+        self.receipt.store(index:7,value:r.resident_triangles)
+        self.receipt.store(index:8,value:r.location_failures)
+        self.receipt.store(index:9,value:r.invariant_failures)
+    }
+    fn delaunay(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>,PassActivation<QuadTopology>) {
+        if self.receipt.load(index:17)==0 {return}
+        let r=restore_indexed_constrained_delaunay_with_policy<QuadInteriorEdgeFlip,
+            POINT_WORDS,TRIANGLE_WORDS,TWINS,EDGE_INDEX,PROPOSALS,4096>(
+            quad_key(self.quad_lod),
+            QuadInteriorEdgeFlip {},self.receipt.load(index:6)!=0,
+            self.receipt.load(index:5),self.receipt.load(index:7),
+            self.points,self.triangles,self.twins,self.edge_index,self.proposals,
+        )
+        self.receipt.store(index:10,value:flag(r.valid))
+        self.receipt.store(index:11,value:flag(r.converged))
+        self.receipt.store(index:12,value:r.flips)
+        self.receipt.store(index:13,value:r.remaining_violations)
+        self.receipt.store(index:14,value:r.invariant_failures)
+    }
     fn prepare_draw(self,invocation:ComputeInvocation) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
         let lod=level(self.lod)
         let count=if self.domain<0.5 {patch_triangle_count(self.fixture,canonical_key_ordinal(key(lod)))*3}
-            else {6*(1<<lod)*(1<<lod)}
+            else {if self.receipt.load(index:10)!=0 {self.receipt.load(index:7)*3} else {0}}
+        if self.domain>=0.5 && self.receipt.load(index:17)!=0 {
+            self.receipt.store(index:16,value:quad_key(self.quad_lod).code()+1)
+            self.receipt.store(index:18,value:self.receipt.load(index:18)+1)
+        }
         self.draw.store(index:0,value:count)
         self.draw.store(index:1,value:1)
         self.draw.store(index:2,value:0)
         self.draw.store(index:3,value:0)
     }
-    fn background(self,px:i32,py:i32)->i32 uses (FragmentSurface) {pack_rgba8(display_rgb(0.025,0.032,0.045))}
+    fn background(self,px:i32,py:i32)->i32 uses (FragmentSurface) {
+        if self.domain>=0.5 && self.receipt.load(index:10)==0 {
+            return pack_rgba8(display_rgb(0.20,0.035,0.025))
+        }
+        pack_rgba8(display_rgb(0.025,0.032,0.045))
+    }
     fn vertices(self,vertex_index:u32,instance_index:u32)->RasterVertex<Varying>
         uses (VertexStage<Varying,IndirectTriangleList<DrawIndirectBuffer<Draw>>>) {
         let warp=Warp {a:self.edge_a,b:self.edge_b,c:self.edge_c,d:self.edge_d,twist:self.twist,
             focus_x:self.focus_x,focus_y:self.focus_y,concentration:self.concentration}
         let lod=level(self.lod)
         let start=vertex_index/3*3
-        let p0=point(self.fixture,self.domain,lod,start,warp)
-        let p1=point(self.fixture,self.domain,lod,start+1,warp)
-        let p2=point(self.fixture,self.domain,lod,start+2,warp)
+        let p0=point(self.fixture,self.points,self.triangles,self.domain,lod,start,warp)
+        let p1=point(self.fixture,self.points,self.triangles,self.domain,lod,start+1,warp)
+        let p2=point(self.fixture,self.points,self.triangles,self.domain,lod,start+2,warp)
         let lane=vertex_index%3
         let p=if lane==0 {p0} else if lane==1 {p1} else {p2}
         let a=if lane==0 {p1} else if lane==1 {p2} else {p0}
