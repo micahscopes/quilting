@@ -153,6 +153,15 @@ This small-case agreement does not prove a corpus-wide repair bound.
 
 ### Scheduling cost, separately from shader size
 
+The full quad run also terminated without complete certification: 740 ready,
+295 failed, no pending jobs. All 295 failures report unsettled repair, not
+sampling/insertion/invariant errors. Its completion is `[1,740,295,1,0]`;
+directory and receipt consistency checks pass. Saved evidence:
+`/laboratory/quilting/scratch/atlas-job-state-20260905/quad-typed-full-receipts.json`.
+Wall time was 1,547,367.9 ms under contention, including this run's surrounding
+execution/readback overhead; it is not an isolated GPU timer measurement.
+Retained geometry is 19,224,732 bytes, excluding failed tiles and scratch.
+
 The captured quad manifest `fe-render-f3ec742143766412.json` contains 54 pass
 definitions. Multiplying their nested Fe-authored repeats gives 2,047,232
 dispatch commands for all 1,035 keys: 1,059,840 in repair, 728,640 in insertion,
