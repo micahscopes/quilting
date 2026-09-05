@@ -79,7 +79,9 @@ actual emitted 420-byte shader passed ten Chromium contention cases up to
 16,320 invocations, including counter wraparound. The reproducible diagnostic
 and saved receipts are in `fe/web/quad-atlas/atomic-claims.*`.
 This is a compiler prerequisite, **not** an atlas performance measurement.
-Fe resource-family integration is still being checked. Atomic load/store and
+Fe resource-family integration is committed as `4c1dafe2f` on mb2: all 43
+release actor/WebGPU regressions pass, including typed atomic add/min through
+helpers and rejection of mixed ordinary/atomic access. Atomic load/store and
 the claim-based atlas passes remain pending; neither the older core atomic
 provider stubs nor the full atlas pipeline is thereby declared complete.
 
@@ -111,6 +113,12 @@ Claim/planning work becomes O(points + faces), excluding the separate scan and
 rebuild. Atomic contention and required round count still need measurements;
 this work bound is not a throughput guarantee. Atomic read/initialization must
 be real supported operations, not ordinary racing stores or hidden host work.
+
+`face-claims.verify.test.mjs` exhaustively compares the ownership rule against
+the preceding-conflict oracle: 14,641 four-point proposal sets, each in all 24
+arrival orders (351,384 schedules). It checks winners, face ownership, progress,
+and rejection of half-won interior edges. This finite-model test is not evidence
+that the atlas currently runs these claim passes on the GPU.
 
 ## Algorithm references and adaptation boundaries
 
