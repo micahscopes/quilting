@@ -39,8 +39,10 @@ canonical combinations or silently clamp their LoDs.
 - Both domains now share immutable-generation parallel insertion. A pending
   point follows at most six child faces. This relies on split-only insertion:
   edge flips and vertex motion must not occur during that phase.
-- Point arbitration and per-face planning still scan global point lists.
-  Replace these with real conflict-safe claims, not racy ordinary stores.
+- The in-progress triangle and quad sources replace the global arbitration
+  and per-face planning scans with per-face atomic claims. This integration
+  is not yet compiled/browser-verified; the served preview remains the earlier
+  18-pass implementation.
 - Stable compaction and scan placement still need work-efficient parallel
   realizations. Preserve deterministic order and checked capacity overflow.
 - Indexed Delaunay restoration remains serial. Parallel repair needs explicit
@@ -81,9 +83,20 @@ and saved receipts are in `fe/web/quad-atlas/atomic-claims.*`.
 This is a compiler prerequisite, **not** an atlas performance measurement.
 Fe resource-family integration is committed as `4c1dafe2f` on mb2: all 43
 release actor/WebGPU regressions pass, including typed atomic add/min through
-helpers and rejection of mixed ordinary/atomic access. Atomic load/store and
-the claim-based atlas passes remain pending; neither the older core atomic
+helpers and rejection of mixed ordinary/atomic access. The claim-based atlas
+passes remain unverified; neither the older core atomic
 provider stubs nor the full atlas pipeline is thereby declared complete.
+
+Sonatina `69f8c389` completes atomic load/store lowering and preserves unused
+observations in WGSL. All 122 shader-backend regressions, the atomic verifier,
+and the unused-result ADCE regression pass. Fe `08bc4b3dd` is pushed to mb2
+with the corresponding read/store integration. Its two targeted release
+tests and a five-generation Chromium lifecycle gate pass: initialize claims
+on GPU, perform 128 updates from 64 invocations, then observe the completed
+counter/minimum from all 64 lanes in a separate pass. `atomic-actor.*` contains
+the actual compiler output, diagnostic runner, and browser receipts. No shader
+substitution or host-authored claim data is used. This is still a prerequisite
+gate, not proof that the new atlas source has passed its geometry tests.
 
 ### Claim-based insertion phase contract
 
@@ -119,6 +132,18 @@ the preceding-conflict oracle: 14,641 four-point proposal sets, each in all 24
 arrival orders (351,384 schedules). It checks winners, face ownership, progress,
 and rejection of half-won interior edges. This finite-model test is not evidence
 that the atlas currently runs these claim passes on the GPU.
+
+### Parallel repair must also own adjacency writes
+
+The existing `disconnect_resident_face` and `reconnect_resident_face_pair`
+helpers mutate twin entries on neighboring faces, not only the flipped pair.
+Selecting face-disjoint pairs is therefore insufficient to parallelize these
+helpers safely: a neighboring selected pair may read or rewrite those entries.
+Use ownership of the full touched neighborhood, or immutable input adjacency
+with a separately reconciled output generation. Packed proposal bitsets also
+need atomic updates or unique word ownership; concurrent ordinary read/modify/
+write on different bits of one word is still a race. Keep the serial exact
+restoration as an oracle while deriving and testing the parallel phase protocol.
 
 ## Algorithm references and adaptation boundaries
 

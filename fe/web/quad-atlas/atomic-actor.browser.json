@@ -1,0 +1,795 @@
+{
+  "scope": "Fe atomic lifecycle prerequisite; not a geometry or full-atlas performance receipt",
+  "date": "2026-09-05",
+  "feCommit": "08bc4b3dd3675265b62b708b432c0824242cd2d0",
+  "sonatinaCommit": "69f8c3893e3d081e26363e56c6e49d84467df9ac",
+  "fixture": {
+    "passes": [
+      {
+        "declaration": {
+          "dispatch": [
+            1,
+            1,
+            1
+          ],
+          "layout": {
+            "bindings": [
+              {
+                "access": "read_write",
+                "binding": 0,
+                "group": 0,
+                "members": [],
+                "name": "claims",
+                "role": "resource",
+                "shader_stages": [
+                  "compute"
+                ],
+                "span": 4,
+                "stride": 4
+              }
+            ],
+            "builtin_inputs": [],
+            "color_target_format": null,
+            "entry_point": "main",
+            "fragment_entry": null,
+            "mode": "compute",
+            "result": null,
+            "vertex_entry": null,
+            "word": "u32",
+            "word_bytes": 4,
+            "workgroup_size": [
+              1,
+              1,
+              1
+            ]
+          },
+          "shader": "passes/000-compute.wgsl",
+          "shader_bytes": 215,
+          "shader_stages": [
+            "compute"
+          ],
+          "source_entry": "initialize"
+        },
+        "wgsl": "@group(0) @binding(0)\nvar<storage, read_write> claims: array<atomic<u32>>;\n\n@compute @workgroup_size(1, 1, 1)\nfn main() {\n    atomicStore((&claims[i32(0u)]), 0u);\n    atomicStore((&claims[i32(1u)]), 4294967295u);\n}\n"
+      },
+      {
+        "declaration": {
+          "dispatch": [
+            1,
+            1,
+            1
+          ],
+          "layout": {
+            "bindings": [
+              {
+                "access": "read_write",
+                "binding": 0,
+                "group": 0,
+                "members": [],
+                "name": "claims",
+                "role": "resource",
+                "shader_stages": [
+                  "compute"
+                ],
+                "span": 4,
+                "stride": 4
+              },
+              {
+                "access": "read_write",
+                "binding": 1,
+                "group": 0,
+                "members": [],
+                "name": "receipts",
+                "role": "resource",
+                "shader_stages": [
+                  "compute"
+                ],
+                "span": 4,
+                "stride": 4
+              }
+            ],
+            "builtin_inputs": [
+              {
+                "arg_index": 0,
+                "scalar": "i32",
+                "source": "global_invocation_id_x"
+              },
+              {
+                "arg_index": 1,
+                "scalar": "i32",
+                "source": "global_invocation_id_y"
+              },
+              {
+                "arg_index": 2,
+                "scalar": "i32",
+                "source": "global_invocation_id_z"
+              },
+              {
+                "arg_index": 3,
+                "scalar": "i32",
+                "source": "local_invocation_id_x"
+              },
+              {
+                "arg_index": 4,
+                "scalar": "i32",
+                "source": "local_invocation_id_y"
+              },
+              {
+                "arg_index": 5,
+                "scalar": "i32",
+                "source": "local_invocation_id_z"
+              },
+              {
+                "arg_index": 6,
+                "scalar": "i32",
+                "source": "workgroup_id_x"
+              },
+              {
+                "arg_index": 7,
+                "scalar": "i32",
+                "source": "workgroup_id_y"
+              },
+              {
+                "arg_index": 8,
+                "scalar": "i32",
+                "source": "workgroup_id_z"
+              },
+              {
+                "arg_index": 9,
+                "scalar": "i32",
+                "source": "num_workgroups_x"
+              },
+              {
+                "arg_index": 10,
+                "scalar": "i32",
+                "source": "num_workgroups_y"
+              },
+              {
+                "arg_index": 11,
+                "scalar": "i32",
+                "source": "num_workgroups_z"
+              },
+              {
+                "arg_index": 12,
+                "scalar": "i32",
+                "source": "local_invocation_index"
+              }
+            ],
+            "color_target_format": null,
+            "entry_point": "main",
+            "fragment_entry": null,
+            "mode": "compute",
+            "result": null,
+            "vertex_entry": null,
+            "word": "u32",
+            "word_bytes": 4,
+            "workgroup_size": [
+              64,
+              1,
+              1
+            ]
+          },
+          "shader": "passes/001-compute.wgsl",
+          "shader_bytes": 700,
+          "shader_stages": [
+            "compute"
+          ],
+          "source_entry": "claim"
+        },
+        "wgsl": "@group(0) @binding(0)\nvar<storage, read_write> claims: array<atomic<u32>>;\n@group(0) @binding(1)\nvar<storage, read_write> receipts: array<u32>;\n\n@compute @workgroup_size(64, 1, 1)\nfn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>, @builtin(local_invocation_id) local_invocation_id: vec3<u32>, @builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(num_workgroups) num_workgroups: vec3<u32>, @builtin(local_invocation_index) local_invocation_index: u32) {\n    let _e31 = atomicAdd((&claims[i32(0u)]), 1u);\n    let _e36 = atomicAdd((&claims[i32(0u)]), 1u);\n    let _e40 = atomicMin((&claims[i32(1u)]), global_invocation_id.x);\n    receipts[i32(global_invocation_id.x)] = _e40;\n}\n"
+      },
+      {
+        "declaration": {
+          "dispatch": [
+            1,
+            1,
+            1
+          ],
+          "layout": {
+            "bindings": [
+              {
+                "access": "read_write",
+                "binding": 0,
+                "group": 0,
+                "members": [],
+                "name": "claims",
+                "role": "resource",
+                "shader_stages": [
+                  "compute"
+                ],
+                "span": 4,
+                "stride": 4
+              },
+              {
+                "access": "read_write",
+                "binding": 1,
+                "group": 0,
+                "members": [],
+                "name": "receipts",
+                "role": "resource",
+                "shader_stages": [
+                  "compute"
+                ],
+                "span": 4,
+                "stride": 4
+              }
+            ],
+            "builtin_inputs": [
+              {
+                "arg_index": 0,
+                "scalar": "i32",
+                "source": "global_invocation_id_x"
+              },
+              {
+                "arg_index": 1,
+                "scalar": "i32",
+                "source": "global_invocation_id_y"
+              },
+              {
+                "arg_index": 2,
+                "scalar": "i32",
+                "source": "global_invocation_id_z"
+              },
+              {
+                "arg_index": 3,
+                "scalar": "i32",
+                "source": "local_invocation_id_x"
+              },
+              {
+                "arg_index": 4,
+                "scalar": "i32",
+                "source": "local_invocation_id_y"
+              },
+              {
+                "arg_index": 5,
+                "scalar": "i32",
+                "source": "local_invocation_id_z"
+              },
+              {
+                "arg_index": 6,
+                "scalar": "i32",
+                "source": "workgroup_id_x"
+              },
+              {
+                "arg_index": 7,
+                "scalar": "i32",
+                "source": "workgroup_id_y"
+              },
+              {
+                "arg_index": 8,
+                "scalar": "i32",
+                "source": "workgroup_id_z"
+              },
+              {
+                "arg_index": 9,
+                "scalar": "i32",
+                "source": "num_workgroups_x"
+              },
+              {
+                "arg_index": 10,
+                "scalar": "i32",
+                "source": "num_workgroups_y"
+              },
+              {
+                "arg_index": 11,
+                "scalar": "i32",
+                "source": "num_workgroups_z"
+              },
+              {
+                "arg_index": 12,
+                "scalar": "i32",
+                "source": "local_invocation_index"
+              }
+            ],
+            "color_target_format": null,
+            "entry_point": "main",
+            "fragment_entry": null,
+            "mode": "compute",
+            "result": null,
+            "vertex_entry": null,
+            "word": "u32",
+            "word_bytes": 4,
+            "workgroup_size": [
+              64,
+              1,
+              1
+            ]
+          },
+          "shader": "passes/002-compute.wgsl",
+          "shader_bytes": 723,
+          "shader_stages": [
+            "compute"
+          ],
+          "source_entry": "observe"
+        },
+        "wgsl": "@group(0) @binding(0)\nvar<storage, read_write> claims: array<atomic<u32>>;\n@group(0) @binding(1)\nvar<storage, read_write> receipts: array<u32>;\n\n@compute @workgroup_size(64, 1, 1)\nfn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>, @builtin(local_invocation_id) local_invocation_id: vec3<u32>, @builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(num_workgroups) num_workgroups: vec3<u32>, @builtin(local_invocation_index) local_invocation_index: u32) {\n    let atomic_load = atomicLoad((&claims[i32(2u)]));\n    let atomic_load_1 = atomicLoad((&claims[i32(0u)]));\n    let atomic_load_2 = atomicLoad((&claims[i32(1u)]));\n    receipts[i32(global_invocation_id.x)] = (atomic_load_1 + atomic_load_2);\n}\n"
+      },
+      {
+        "declaration": {
+          "layout": {
+            "bindings": [
+              {
+                "access": "read",
+                "binding": 0,
+                "group": 0,
+                "members": [],
+                "name": "receipts",
+                "role": "resource",
+                "shader_stages": [
+                  "fragment"
+                ],
+                "span": 4,
+                "stride": 4
+              }
+            ],
+            "builtin_inputs": [
+              {
+                "arg_index": 0,
+                "scalar": "i32",
+                "source": "fragment_position_x"
+              },
+              {
+                "arg_index": 1,
+                "scalar": "i32",
+                "source": "fragment_position_y"
+              }
+            ],
+            "color_target_format": "rgba8unorm",
+            "entry_point": "fs_main",
+            "fragment_entry": "fs_main",
+            "mode": "render",
+            "result": null,
+            "vertex_entry": "vs_fullscreen",
+            "word": "u32",
+            "word_bytes": 4,
+            "workgroup_size": [
+              0,
+              0,
+              0
+            ]
+          },
+          "shader": "passes/003-fragment.wgsl",
+          "shader_bytes": 395,
+          "shader_stages": [
+            "fragment"
+          ],
+          "source_entry": "paint"
+        },
+        "wgsl": "@group(0) @binding(0)\nvar<storage> receipts: array<u32>;\n\n@vertex\nfn vs_fullscreen(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {\n    return vec4<f32>((f32(((vi & 1u) << 2u)) - 1f), (f32(((vi & 2u) << 1u)) - 1f), 0f, 1f);\n}\n\n@fragment\nfn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {\n    let _e9 = receipts[i32(0u)];\n    return unpack4x8unorm(_e9);\n}\n"
+      }
+    ],
+    "resources": [
+      {
+        "binding": 0,
+        "buffer_usage": [
+          "storage"
+        ],
+        "element": "AtomicU32",
+        "group": 0,
+        "length": 4,
+        "name": "claims",
+        "policy": {
+          "access": "atomic_read_write",
+          "initialization": {
+            "kind": "zeroed"
+          },
+          "kind": "storage",
+          "recovery": "replay_recipe",
+          "residency": "actor_resident",
+          "visibility": "compute"
+        },
+        "span": 4,
+        "stride": 4
+      },
+      {
+        "binding": 1,
+        "buffer_usage": [
+          "storage"
+        ],
+        "element": "U32",
+        "group": 0,
+        "length": 64,
+        "name": "receipts",
+        "policy": {
+          "access": "read_write",
+          "initialization": {
+            "kind": "zeroed"
+          },
+          "kind": "storage",
+          "recovery": "replay_recipe",
+          "residency": "actor_resident",
+          "visibility": "all"
+        },
+        "span": 4,
+        "stride": 4
+      }
+    ]
+  },
+  "browser": {
+    "sameDevice": true,
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+    "shaderBytes": [
+      215,
+      700,
+      723,
+      395
+    ],
+    "observations": [
+      {
+        "generation": 0,
+        "claims": [
+          128,
+          0,
+          0,
+          0
+        ],
+        "receipts": [
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128
+        ]
+      },
+      {
+        "generation": 1,
+        "claims": [
+          128,
+          0,
+          0,
+          0
+        ],
+        "receipts": [
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128
+        ]
+      },
+      {
+        "generation": 2,
+        "claims": [
+          128,
+          0,
+          0,
+          0
+        ],
+        "receipts": [
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128
+        ]
+      },
+      {
+        "generation": 3,
+        "claims": [
+          128,
+          0,
+          0,
+          0
+        ],
+        "receipts": [
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128
+        ]
+      },
+      {
+        "generation": 4,
+        "claims": [
+          128,
+          0,
+          0,
+          0
+        ],
+        "receipts": [
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128,
+          128
+        ]
+      }
+    ]
+  }
+}
