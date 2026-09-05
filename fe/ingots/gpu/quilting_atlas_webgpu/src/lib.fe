@@ -1461,6 +1461,9 @@ where
 
 /// Produce stable face offsets and validate the immutable insertion plan.
 ///
+/// Validate ownership in both directions in O(points + faces), not by scanning
+/// every face for every winner. Each face must name a winning proposer that
+/// requested it; each winner must own its one or two requested faces.
 /// This scalar exclusive scan is the topology oracle. A later parallel scan
 /// may replace its physical work only if it produces the same offsets and
 /// progress receipt byte-for-byte.
@@ -1519,6 +1522,21 @@ where { WORKSPACE_WORDS == POINT_CAPACITY * 7 + TRIANGLE_CAPACITY * 3 + TOPOLOGY
             .load(
                 index: topology_face_expansion_offset<POINT_CAPACITY, TRIANGLE_CAPACITY>(face),
             )
+        let owner=workspace.load(index:topology_face_owner_offset<POINT_CAPACITY>(face))
+        if expansion==1 {
+            if owner!=INVALID_VERTEX {invariant_failures=invariant_failures+1}
+        } else if owner>=POINT_CAPACITY.downcast_truncate() {
+            invariant_failures=invariant_failures+1
+        } else {
+            let kind=topology_proposal_word<POINT_CAPACITY,WORKSPACE_WORDS>(workspace,owner,0)
+            let expected_expansion=if kind==PROPOSAL_STRICT_FACE {3}
+                else if kind==PROPOSAL_EDGE {2} else {0}
+            if expansion!=expected_expansion
+                || workspace.load(index:topology_winner_offset<POINT_CAPACITY>(owner))==0
+                || !topology_proposal_owns_face<POINT_CAPACITY,WORKSPACE_WORDS>(workspace,owner,face) {
+                invariant_failures=invariant_failures+1
+            }
+        }
         if expansion == 0 || expansion > 3 {
             invariant_failures = invariant_failures + 1
         } else if output > triangle_capacity || expansion > triangle_capacity - output {
@@ -1567,16 +1585,15 @@ where { WORKSPACE_WORDS == POINT_CAPACITY * 7 + TRIANGLE_CAPACITY * 3 + TOPOLOGY
                     1
                 }
                 expected_output = expected_output + if boundary_edge { 1 } else { 2 }
-                let mut owned_faces: u32 = 0
-                let mut owned_face: u32 = 0
-                while owned_face < triangle_count {
-                    if workspace.load(
-                                index: topology_face_owner_offset<POINT_CAPACITY>(owned_face),
-                            )
-                        == point_id {
-                        owned_faces = owned_faces + 1
-                    }
-                    owned_face = owned_face + 1
+                let first_face=topology_proposal_word<POINT_CAPACITY,WORKSPACE_WORDS>(workspace,point_id,1)
+                let mut owned_faces:u32=0
+                if first_face<triangle_count
+                    && workspace.load(index:topology_face_owner_offset<POINT_CAPACITY>(first_face))==point_id {
+                    owned_faces=1
+                }
+                if expected_faces==2 && second_face<triangle_count && second_face!=first_face
+                    && workspace.load(index:topology_face_owner_offset<POINT_CAPACITY>(second_face))==point_id {
+                    owned_faces=owned_faces+1
                 }
                 if owned_faces != expected_faces {
                     invariant_failures = invariant_failures + 1

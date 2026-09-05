@@ -1,10 +1,12 @@
 {
-  "fe": "8b7ff12ce",
-  "manifest": "fe-render-55cc5410c2000ad2.json",
+  "fe": "bfd1d9e3c",
+  "manifest": "fe-render-804bb629066462c8.json",
   "passes": 18,
-  "implementation": "parallel insertion with exact child-face relocation; serial indexed Delaunay repair",
+  "implementation": "parallel insertion with exact child-face relocation and linear ownership validation; serial indexed Delaunay repair",
   "cases": [
     {
+      "manifest": "http://127.0.0.1:8781/assets/fe-render-804bb629066462c8.json",
+      "passCount": 18,
       "params": {
         "bottom": 2,
         "right": 3,
@@ -389,6 +391,8 @@
       ]
     },
     {
+      "manifest": "http://127.0.0.1:8781/assets/fe-render-804bb629066462c8.json",
+      "passCount": 18,
       "params": {
         "bottom": 0,
         "right": 0,
@@ -453,6 +457,8 @@
       ]
     },
     {
+      "manifest": "http://127.0.0.1:8781/assets/fe-render-804bb629066462c8.json",
+      "passCount": 18,
       "params": {
         "bottom": 3,
         "right": 3,
@@ -1133,6 +1139,8 @@
       ]
     },
     {
+      "manifest": "http://127.0.0.1:8781/assets/fe-render-804bb629066462c8.json",
+      "passCount": 18,
       "params": {
         "bottom": 0,
         "right": 3,

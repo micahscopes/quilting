@@ -79,16 +79,20 @@ refactoring is **not** a claim that the compiler bug was fixed.
 
 ## Parallel insertion checkpoint, 2026-09-05
 
-The 18-pass release bundle `fe-render-55cc5410c2000ad2.json` replaces scalar
+The 18-pass release bundle replaces scalar
 square insertion with the shared triangle/square insertion provider. After the
 seed round, a pending point checks only the children of its one or two previous
 containing faces (at most six), using the previous immutable face-plan offsets.
 This is valid only during split-only insertion; Delaunay flips remain later.
 No square coordinates are reinterpreted as triangular barycentrics.
 
-`parallel-browser-snapshots.json` records the same four jobs through this new
-pipeline. Their points, triangles, and final receipts match the saved serial
-baseline; the independent crossing/area/incircle oracle also passes. Source
+`parallel-browser-snapshots.json` now records those four jobs from the reconciled
+Fe compiler `bfd1d9e3c`, bundle `fe-render-804bb629066462c8.json`. Point buffers,
+unordered triangle sets, and final receipts match the saved serial baseline;
+triangle buffer ordering differs. This supersedes the earlier overly strong
+byte-identical triangle claim. Each capture now records the actual manifest
+and pass count and rejects a resource-generation change during readback.
+The independent crossing/area/incircle oracle also passes. Source
 checks pass for both demo domains. The release Fe-to-Wasm child-range test
 checks valid, overlapping, out-of-range, and sentinel parent ranges.
 
@@ -96,3 +100,9 @@ The browser needed an explicit reload to pick up this build; the first reads
 still showed the old ten-pass manifest and were not counted as new-path proof.
 The verified page had eighteen passes and eleven allocated logical resources.
 These remain small integration jobs, not a full-atlas startup benchmark.
+
+Ownership validation now checks both directions in O(points + faces): faces
+must name a winning proposer that requested them, and winners must own their
+one or two requested faces. The former scan of every face for every winner is
+removed. The new release bundle passes all four independent geometry checks.
+Arbitration, face planning, compaction, and Delaunay repair still need scaling.

@@ -16,7 +16,15 @@ test('parallel insertion and local relocation preserve checked planar meshes', (
   const evidence = JSON.parse(readFileSync(new URL('./parallel-browser-snapshots.json', import.meta.url), 'utf8'));
   assert.equal(evidence.passes, 18);
   assert.equal(evidence.cases.length, 4);
-  for (const snapshot of evidence.cases) verifyQuadSnapshot(snapshot);
+  const baseline = JSON.parse(readFileSync(new URL('./browser-snapshots.json', import.meta.url), 'utf8'));
+  const topology = triangles => triangles.map(t => [...t].sort((a,b) => a-b).join(',')).sort();
+  for (const [index, snapshot] of evidence.cases.entries()) {
+    assert.equal(snapshot.passCount, evidence.passes);
+    assert.equal(new URL(snapshot.manifest).pathname, `/assets/${evidence.manifest}`);
+    verifyQuadSnapshot(snapshot);
+    assert.deepEqual(snapshot.points, baseline.cases[index].points);
+    assert.deepEqual(topology(snapshot.triangles), topology(baseline.cases[index].triangles));
+  }
 });
 test('both cocircular square diagonals are valid', () => {
   verifyQuadSnapshot(square());
