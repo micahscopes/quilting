@@ -1,4 +1,7 @@
 {
+  "key": [1, 2, 3],
+  "seed": 1371744919,
+  "keySource": "fe/ingots/demos/classic_quilting_generated/src/lib.fe::key and SEED (compile-time constants)",
   "manifest": "http://127.0.0.1:8783/assets/fe-render-ba2a3b53f6002714.json",
   "passCount": 47,
   "params": {},
