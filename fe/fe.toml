@@ -27,6 +27,8 @@ members = [
   { path = "ingots/demos/two_triangle_uniformization", name = "two_triangle_uniformization" },
   { path = "ingots/demos/arc_curve_explorer", name = "arc_curve_explorer" },
   { path = "ingots/demos/quad_atlas_explorer", name = "quad_atlas_explorer" },
+  { path = "ingots/demos/quad_atlas_build", name = "quad_atlas_build" },
+  { path = "ingots/demos/triangle_atlas_build", name = "triangle_atlas_build" },
   { path = "ingots/demos/tessellation_warp", name = "tessellation_warp" },
   { path = "ingots/demos/clifford_weight_locus", name = "clifford_weight_locus" },
   { path = "ingots/demos/twist_topology_lab", name = "twist_topology_lab" },

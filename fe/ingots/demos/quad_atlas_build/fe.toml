@@ -1,0 +1,8 @@
+[ingot]
+name = "quad_atlas_build"
+version = "0.1.0"
+[dependencies]
+core = true
+std = true
+quilting_atlas = true
+quilting_atlas_webgpu = true

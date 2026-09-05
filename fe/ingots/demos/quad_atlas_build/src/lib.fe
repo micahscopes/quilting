@@ -1,0 +1,398 @@
+//! Complete canonical quad atlas construction in GPU storage.
+//! One reusable scratch arena; only certified tiles enter the resident directory.
+//! The nested job schedule is Fe-authored. No host geometry or count readback.
+use core::marker::Copy
+use quilting_atlas::quad::QuadAtlasKey
+use quilting_atlas::quad_sampling::candidate_slot_count
+use quilting_atlas::planar::FixedPoint2
+use quilting_atlas::scan::balanced_block_size
+use quilting_atlas_webgpu::compaction::{rank_candidate_block, prefix_candidate_blocks, scatter_candidate_lane}
+use quilting_atlas_webgpu::topology_scan::{rank_topology_block, prefix_topology_blocks, relocate_topology_offset, SUMMARY_WORDS}
+use quilting_atlas_webgpu::repair
+use quilting_atlas_webgpu::incidence
+use quilting_atlas_webgpu::candidate_index::{self,IndexedConflict}
+use quilting_atlas_webgpu::{
+    propose_candidate_lane_with_policy,
+    retire_candidate_lane_with_policy,
+    advance_candidate_generation,
+    initialize_parallel_topology_lane_with_domain,
+    locate_parallel_topology_point_lane_with_point,
+    arbitrate_parallel_topology_point_lane,
+    initialize_parallel_topology_claim_lane,
+    claim_parallel_topology_point_lane,
+    plan_parallel_topology_face_lane_with_point,
+    rebuild_parallel_topology_face_lane_with_point,
+    retire_parallel_topology_point_lane,
+    advance_parallel_topology_generation,
+    publish_parallel_topology_triangle_lane,
+    parallel_topology_progress,
+}
+use quilting_atlas_webgpu::quad::{
+    QuadCandidateConflict,
+    QuadBoundaryPoints,
+    QuadAtlasDomain,
+    QuadInteriorEdgeFlip,
+    initialize_quad_candidate_lane,
+}
+
+use quilting_atlas_webgpu::{jobs,residency}
+use quilting_atlas_webgpu::jobs::QuadJobState
+use std::webgpu::{GpuProgram,WebGpuBackend,StorageBuffer,AtomicStorageBuffer,
+    DispatchIndirectBuffer,IndirectDispatch,ComputeSurface,ComputeInvocation,
+    Workgroup,FixedDispatch,CycledDispatch,CooperativeDispatch}
+
+// Capacities follow the candidate policy and Euler's disk relation, rather
+// than a handwritten tile table. The complete supported range is allocatable.
+const PREVIEW_LOD: u32 = quilting_atlas::MAX_LOD
+const MAX_KEY: QuadAtlasKey = QuadAtlasKey {
+    bottom: PREVIEW_LOD,
+    right: PREVIEW_LOD,
+    top: PREVIEW_LOD,
+    left: PREVIEW_LOD,
+}
+const CANDIDATE_COUNT: u32 = candidate_slot_count(MAX_KEY)
+const CANDIDATES: usize = CANDIDATE_COUNT as usize
+const SEARCH_LEAVES: usize = quilting_atlas::candidate_index::leaf_count(CANDIDATE_COUNT) as usize
+const SEARCH_LEVELS: usize = quilting_atlas::candidate_index::level_count(quilting_atlas::candidate_index::leaf_count(CANDIDATE_COUNT)) as usize
+const SEARCH_WORDS: usize = quilting_atlas::candidate_index::storage_words(CANDIDATE_COUNT) as usize
+const SEARCH_GROUPS: usize = (SEARCH_LEAVES+63)/64
+const SAMPLING: usize = CANDIDATES * 8 + 1
+const POINTS: usize = CANDIDATES + (MAX_KEY.boundary_count() as usize)
+const POINT_WORDS: usize = POINTS * 3
+const TRIANGLES: usize = POINTS * 2 - (MAX_KEY.boundary_count() as usize) - 2
+const TRIANGLE_WORDS: usize = TRIANGLES * 4
+const TWINS: usize = TRIANGLES * 3
+const EDGE_INDEX: usize = POINTS + 1 + TWINS
+const THREADS: usize = 64
+const GROUPS: usize = (CANDIDATES + THREADS - 1) / THREADS
+const COMPACT_TILE: usize = balanced_block_size(CANDIDATE_COUNT) as usize
+const COMPACT_BLOCKS: usize = (CANDIDATES + COMPACT_TILE - 1) / COMPACT_TILE
+const COMPACT_WORDS: usize = COMPACT_BLOCKS * 3
+const COMPACT_GROUPS: usize = (COMPACT_BLOCKS + THREADS - 1) / THREADS
+const TOPOLOGY_WORDS: usize = POINTS*7+TRIANGLES*3+8
+const TOPOLOGY_GROUPS: usize = (TRIANGLES+THREADS-1)/THREADS
+const SCAN_TILE: usize = balanced_block_size(CANDIDATE_COUNT*2+MAX_KEY.boundary_count()-2) as usize
+const SCAN_BLOCKS: usize = (TRIANGLES+SCAN_TILE-1)/SCAN_TILE
+const SCAN_WORDS: usize = SCAN_BLOCKS*SUMMARY_WORDS
+const SCAN_GROUPS: usize = (SCAN_BLOCKS+THREADS-1)/THREADS
+const REPAIR_TILE: usize = balanced_block_size((CANDIDATE_COUNT*2+MAX_KEY.boundary_count()-2)*3) as usize
+const REPAIR_WORDS: usize = ((TWINS+REPAIR_TILE-1)/REPAIR_TILE)*repair::SUMMARY_WORDS
+const REPAIR_GROUPS: usize = (TWINS+THREADS-1)/THREADS
+const REPAIR_BLOCK_GROUPS: usize = (((TWINS+REPAIR_TILE-1)/REPAIR_TILE)+THREADS-1)/THREADS
+pub struct SampleRound {}
+pub struct CandidateIndexLevel {}
+pub struct InsertionRound {}
+pub struct RepairRound {}
+pub struct RepairFaces {}
+pub struct RepairEdges {}
+pub struct RepairBlocks {}
+pub struct RepairScalar {}
+// This is an explicit exhaustion budget, not a convergence guarantee. Finished
+// rounds publish zero GPU work; certification still rejects unfinished tiles.
+const REPAIR_ROUND_BUDGET:usize=128
+
+const JOBS:usize=quilting_atlas::quad::CANONICAL_QUAD_KEY_COUNT as usize
+const DIRECTORY_WORDS:usize=JOBS*residency::RECORD_WORDS
+const TILE_RECEIPT_WORDS:usize=JOBS*16
+const JOB_GROUPS:usize=(JOBS+63)/64
+// Each resident buffer remains below the portable 128 MiB storage-binding
+// limit. These are explicit memory budgets, not promises of complete coverage.
+// Overflow is recorded per tile and prevents a complete-atlas certificate.
+const RESIDENT_WORDS:usize=(128*1024*1024/12)*3
+const SEED:u32=42
+const EPOCH:u32=1
+pub struct AtlasJob {}
+fn flag(_ value:bool)->u32 {if value {1} else {0}}
+
+actor QuadAtlasBuild uses (GpuProgram<WebGpuBackend>) {
+    sampling:StorageBuffer<u32,SAMPLING>,points:StorageBuffer<u32,POINT_WORDS>,
+    candidate_bounds:StorageBuffer<u32,SEARCH_WORDS>,
+    compaction:StorageBuffer<u32,COMPACT_WORDS>,
+    triangles:StorageBuffer<u32,TRIANGLE_WORDS>,twins:StorageBuffer<u32,TWINS>,
+    triangles_a:StorageBuffer<u32,TRIANGLE_WORDS>,triangles_b:StorageBuffer<u32,TRIANGLE_WORDS>,
+    topology:StorageBuffer<u32,TOPOLOGY_WORDS>,
+    topology_blocks:StorageBuffer<u32,SCAN_WORDS>,
+    face_claims:AtomicStorageBuffer<TRIANGLES>,
+    edge_index:StorageBuffer<u32,EDGE_INDEX>,
+    repair_flags:StorageBuffer<u32,TWINS>,repair_results:StorageBuffer<u32,TWINS>,
+    repair_blocks:StorageBuffer<u32,REPAIR_WORDS>,repair_state:StorageBuffer<u32,8>,
+    repair_faces_command:DispatchIndirectBuffer<RepairFaces>,
+    repair_edges_command:DispatchIndirectBuffer<RepairEdges>,
+    repair_blocks_command:DispatchIndirectBuffer<RepairBlocks>,
+    repair_scalar_command:DispatchIndirectBuffer<RepairScalar>,
+
+    receipt:StorageBuffer<u32,16>,
+    active:StorageBuffer<QuadJobState,1>,
+    atlas_header:StorageBuffer<u32,5>,
+    atlas_directory:StorageBuffer<u32,DIRECTORY_WORDS>,
+    atlas_copied:AtomicStorageBuffer<JOBS>,
+    atlas_points:StorageBuffer<u32,RESIDENT_WORDS>,
+    atlas_triangles:StorageBuffer<u32,RESIDENT_WORDS>,
+    tile_receipts:StorageBuffer<u32,TILE_RECEIPT_WORDS>,
+    completion:StorageBuffer<u32,5>,
+
+    fn begin_atlas(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<64,1,1>,FixedDispatch<JOB_GROUPS,1,1>>) {
+        residency::initialize<JOBS,DIRECTORY_WORDS>(self.atlas_header,self.atlas_directory,self.atlas_copied,EPOCH,i)
+        if i.global.x==0 {jobs::initialize(self.active,PREVIEW_LOD,EPOCH)}
+        if i.global.x<5 {self.completion.store(index:i.global.x,value:0)}
+    }
+    fn next_tile(self) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<AtlasJob,FixedDispatch<1,1,1>,JOBS>>) {
+        jobs::advance(self.active,EPOCH)
+    }
+    fn initialize(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,FixedDispatch<GROUPS,1,1>,JOBS>>) {
+        initialize_quad_candidate_lane<CANDIDATES,SAMPLING>(
+            self.active.load(index:0).key(),
+            SEED,self.sampling,i,
+        )
+    }
+    fn candidate_index_leaves(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,FixedDispatch<SEARCH_GROUPS,1,1>,JOBS>>) {
+        candidate_index::initialize<QuadAtlasKey,CANDIDATES,SAMPLING,SEARCH_LEAVES,SEARCH_WORDS>(
+            self.active.load(index:0).key(),self.sampling,self.candidate_bounds,i)
+    }
+    fn candidate_index_reduce(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<CandidateIndexLevel,FixedDispatch<SEARCH_GROUPS,1,1>,SEARCH_LEVELS>,JOBS>>) {
+        candidate_index::reduce_level<SEARCH_LEAVES,SEARCH_WORDS>(self.candidate_bounds,i)
+    }
+    fn candidate_index_advance(self) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<AtlasJob,CycledDispatch<CandidateIndexLevel,FixedDispatch<1,1,1>,SEARCH_LEVELS>,JOBS>>) {
+        candidate_index::advance_level<SEARCH_WORDS>(self.candidate_bounds)
+    }
+    fn propose(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<SampleRound,FixedDispatch<GROUPS,1,1>,64>,JOBS>>) {
+        propose_candidate_lane_with_policy<IndexedConflict<QuadCandidateConflict,SEARCH_LEAVES,SEARCH_WORDS>,CANDIDATES,SAMPLING>(
+            self.active.load(index:0).key(),
+            IndexedConflict {policy:QuadCandidateConflict {},tree:self.candidate_bounds},self.sampling,i,
+        )
+    }
+    fn retire(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<SampleRound,FixedDispatch<GROUPS,1,1>,64>,JOBS>>) {
+        retire_candidate_lane_with_policy<IndexedConflict<QuadCandidateConflict,SEARCH_LEAVES,SEARCH_WORDS>,CANDIDATES,SAMPLING>(
+            self.active.load(index:0).key(),
+            IndexedConflict {policy:QuadCandidateConflict {},tree:self.candidate_bounds},self.sampling,i,
+        )
+    }
+    fn advance(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<AtlasJob,CycledDispatch<SampleRound,FixedDispatch<1,1,1>,64>,JOBS>>) {
+        advance_candidate_generation<CANDIDATES,SAMPLING>(self.sampling,i)
+    }
+    fn compact_rank(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,FixedDispatch<COMPACT_GROUPS,1,1>,JOBS>>) {
+        rank_candidate_block<QuadAtlasKey,CANDIDATES,COMPACT_TILE,SAMPLING,COMPACT_WORDS>(
+            self.active.load(index:0).key(),
+            self.sampling,self.compaction,i,
+        )
+    }
+    fn compact(self) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<AtlasJob,FixedDispatch<1,1,1>,JOBS>>) {
+        let r=prefix_candidate_blocks<QuadAtlasKey,CANDIDATES,COMPACT_TILE,POINT_WORDS,COMPACT_WORDS>(
+            self.active.load(index:0).key(),self.compaction,
+        )
+        self.receipt.store(index:0,value:flag(r.valid))
+        self.receipt.store(index:1,value:flag(r.converged))
+        self.receipt.store(index:2,value:flag(r.overflowed))
+        self.receipt.store(index:3,value:r.accepted_candidates)
+        self.receipt.store(index:4,value:r.boundary_points)
+        self.receipt.store(index:5,value:r.resident_points)
+    }
+    fn compact_scatter(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,FixedDispatch<GROUPS,1,1>,JOBS>>) {
+        scatter_candidate_lane<QuadBoundaryPoints,CANDIDATES,COMPACT_TILE,SAMPLING,POINT_WORDS,COMPACT_WORDS>(
+            self.active.load(index:0).key(),
+            QuadBoundaryPoints {},self.sampling,self.compaction,self.points,i,
+        )
+    }
+    fn topology_initialize(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,FixedDispatch<TOPOLOGY_GROUPS,1,1>,JOBS>>) {
+        initialize_parallel_topology_lane_with_domain<QuadAtlasDomain,POINTS,POINT_WORDS,TRIANGLES,TRIANGLE_WORDS,TOPOLOGY_WORDS>(
+            QuadAtlasDomain {},self.active.load(index:0).key(),
+            self.receipt.load(index:0)!=0,self.receipt.load(index:5),self.points,
+            self.triangles_a,self.triangles_b,self.topology,i,
+        )
+    }
+    fn topology_locate(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<InsertionRound,FixedDispatch<TOPOLOGY_GROUPS,1,1>,64>,JOBS>>) {
+        locate_parallel_topology_point_lane_with_point<FixedPoint2,POINTS,POINT_WORDS,TRIANGLES,TRIANGLE_WORDS,TOPOLOGY_WORDS>(
+            self.points,self.triangles_a,self.triangles_b,self.topology,i,
+        )
+    }
+    fn topology_reset_claims(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<InsertionRound,FixedDispatch<TOPOLOGY_GROUPS,1,1>,64>,JOBS>>) {
+        initialize_parallel_topology_claim_lane<TRIANGLES>(self.face_claims,i)
+    }
+    fn topology_claim(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<InsertionRound,FixedDispatch<TOPOLOGY_GROUPS,1,1>,64>,JOBS>>) {
+        claim_parallel_topology_point_lane<POINTS,TRIANGLES,TOPOLOGY_WORDS>(self.topology,self.face_claims,i)
+    }
+    fn topology_arbitrate(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<InsertionRound,FixedDispatch<TOPOLOGY_GROUPS,1,1>,64>,JOBS>>) {
+        arbitrate_parallel_topology_point_lane<POINTS,TRIANGLES,TOPOLOGY_WORDS>(self.topology,self.face_claims,i)
+    }
+    fn topology_plan(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<InsertionRound,FixedDispatch<TOPOLOGY_GROUPS,1,1>,64>,JOBS>>) {
+        plan_parallel_topology_face_lane_with_point<FixedPoint2,POINTS,POINT_WORDS,TRIANGLES,TRIANGLE_WORDS,TOPOLOGY_WORDS>(
+            self.points,self.triangles_a,self.triangles_b,self.topology,self.face_claims,i,
+        )
+    }
+    fn topology_rank(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<InsertionRound,FixedDispatch<SCAN_GROUPS,1,1>,64>,JOBS>>) {
+        rank_topology_block<POINTS,TRIANGLES,TOPOLOGY_WORDS,SCAN_TILE,SCAN_WORDS>(self.topology,self.topology_blocks,i)
+    }
+    fn topology_scan(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<AtlasJob,CycledDispatch<InsertionRound,FixedDispatch<1,1,1>,64>,JOBS>>) {
+        prefix_topology_blocks<POINTS,TRIANGLES,TOPOLOGY_WORDS,SCAN_TILE,SCAN_WORDS>(self.topology,self.topology_blocks,i)
+    }
+    fn topology_offsets(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<InsertionRound,FixedDispatch<TOPOLOGY_GROUPS,1,1>,64>,JOBS>>) {
+        relocate_topology_offset<POINTS,TRIANGLES,TOPOLOGY_WORDS,SCAN_TILE,SCAN_WORDS>(self.topology,self.topology_blocks,i)
+    }
+    fn topology_rebuild(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<InsertionRound,FixedDispatch<TOPOLOGY_GROUPS,1,1>,64>,JOBS>>) {
+        rebuild_parallel_topology_face_lane_with_point<FixedPoint2,POINTS,POINT_WORDS,TRIANGLES,TRIANGLE_WORDS,TOPOLOGY_WORDS>(
+            self.points,self.triangles_a,self.triangles_b,self.topology,i,
+        )
+    }
+    fn topology_retire(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<InsertionRound,FixedDispatch<TOPOLOGY_GROUPS,1,1>,64>,JOBS>>) {
+        retire_parallel_topology_point_lane<POINTS,TRIANGLES,TOPOLOGY_WORDS>(self.topology,i)
+    }
+    fn topology_advance(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<AtlasJob,CycledDispatch<InsertionRound,FixedDispatch<1,1,1>,64>,JOBS>>) {
+        advance_parallel_topology_generation<POINTS,TRIANGLES,TOPOLOGY_WORDS>(self.topology,i)
+    }
+    fn topology_publish(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,FixedDispatch<TOPOLOGY_GROUPS,1,1>,JOBS>>) {
+        publish_parallel_topology_triangle_lane<POINTS,TRIANGLES,TRIANGLE_WORDS,TOPOLOGY_WORDS>(
+            self.triangles_a,self.triangles_b,self.topology,self.triangles,i,
+        )
+    }
+    fn delaunay_initialize(self) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<AtlasJob,FixedDispatch<1,1,1>,JOBS>>) {
+        let count=parallel_topology_progress<POINTS,TRIANGLES,TOPOLOGY_WORDS>(self.topology,2)
+        let pending=parallel_topology_progress<POINTS,TRIANGLES,TOPOLOGY_WORDS>(self.topology,3)
+        let locations=parallel_topology_progress<POINTS,TRIANGLES,TOPOLOGY_WORDS>(self.topology,6)
+        let invariants=parallel_topology_progress<POINTS,TRIANGLES,TOPOLOGY_WORDS>(self.topology,7)
+        let expected=self.receipt.load(index:5)*2-self.receipt.load(index:4)-2
+        let valid=self.receipt.load(index:0)!=0 && pending==0 && locations==0 && invariants==0 && count==expected
+        self.receipt.store(index:6,value:flag(valid))
+        self.receipt.store(index:7,value:count)
+        self.receipt.store(index:8,value:locations)
+        self.receipt.store(index:9,value:invariants)
+        incidence::begin<POINTS,TRIANGLES>(valid,self.receipt.load(index:5),count,self.repair_state)
+    }
+    fn index_reset(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,FixedDispatch<TOPOLOGY_GROUPS,1,1>,JOBS>>) {
+        incidence::reset<POINTS,TRIANGLES>(self.face_claims,i)
+    }
+    fn index_count(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,FixedDispatch<TOPOLOGY_GROUPS,1,1>,JOBS>>) {
+        incidence::count<QuadInteriorEdgeFlip,POINTS,TRIANGLES,POINT_WORDS,TRIANGLE_WORDS,TWINS>(
+            self.points,self.triangles,self.face_claims,self.repair_flags,self.repair_state,i)
+    }
+    fn index_rank(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,FixedDispatch<SCAN_GROUPS,1,1>,JOBS>>) {
+        incidence::rank<POINTS,TRIANGLES,TWINS,EDGE_INDEX,SCAN_TILE,SCAN_WORDS>(
+            self.face_claims,self.repair_flags,self.edge_index,self.topology_blocks,self.repair_state,i)
+    }
+    fn index_prefix(self) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<AtlasJob,FixedDispatch<1,1,1>,JOBS>>) {
+        incidence::prefix<POINTS,TRIANGLES,TWINS,EDGE_INDEX,SCAN_TILE,SCAN_WORDS>(self.edge_index,self.topology_blocks,self.repair_state)
+    }
+    fn index_offsets(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,FixedDispatch<TOPOLOGY_GROUPS,1,1>,JOBS>>) {
+        incidence::offsets<POINTS,TRIANGLES,TWINS,EDGE_INDEX,SCAN_TILE,SCAN_WORDS>(
+            self.face_claims,self.edge_index,self.topology_blocks,self.repair_state,i)
+    }
+    fn index_scatter(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,FixedDispatch<REPAIR_GROUPS,1,1>,JOBS>>) {
+        incidence::scatter<POINTS,TRIANGLES,TRIANGLE_WORDS,TWINS,EDGE_INDEX>(
+            self.triangles,self.face_claims,self.edge_index,self.repair_results,self.repair_state,i)
+    }
+    fn index_lookup(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,FixedDispatch<REPAIR_GROUPS,1,1>,JOBS>>) {
+        incidence::lookup<QuadInteriorEdgeFlip,POINTS,TRIANGLES,TRIANGLE_WORDS,TWINS,EDGE_INDEX>(
+            self.active.load(index:0).key(),
+            self.triangles,self.edge_index,self.twins,self.repair_flags,self.repair_state,i)
+    }
+    fn index_check(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,FixedDispatch<REPAIR_GROUPS,1,1>,JOBS>>) {
+        incidence::check<POINTS,TRIANGLES,TWINS,EDGE_INDEX>(
+            self.face_claims,self.edge_index,self.twins,self.repair_flags,self.repair_results,self.repair_state,i)
+    }
+    fn index_summarize(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,FixedDispatch<REPAIR_BLOCK_GROUPS,1,1>,JOBS>>) {
+        repair::summarize<TWINS,REPAIR_TILE,REPAIR_WORDS>(self.repair_flags,self.repair_results,self.repair_state,self.repair_blocks,i)
+    }
+    fn index_seal(self) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<AtlasJob,FixedDispatch<1,1,1>,JOBS>>) {
+        incidence::seal<TWINS,REPAIR_TILE,REPAIR_WORDS>(self.repair_blocks,self.repair_state)
+    }
+    fn repair_schedule(self) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<AtlasJob,CycledDispatch<RepairRound,FixedDispatch<1,1,1>,REPAIR_ROUND_BUDGET>,JOBS>>) {
+        let faces=self.repair_state.load(index:1)
+        if faces>TRIANGLES.downcast_truncate() {self.repair_state.store(index:4,value:1)}
+        let active=repair::running(self.repair_state) && faces<=TRIANGLES.downcast_truncate()
+        let edges=if active {faces*3} else {0}
+        let blocks=quilting_atlas::scan::block_count(edges,REPAIR_TILE.downcast_truncate())
+        repair::dispatch_count<RepairFaces>(self.repair_faces_command,faces,THREADS.downcast_truncate(),active)
+        repair::dispatch_count<RepairEdges>(self.repair_edges_command,edges,THREADS.downcast_truncate(),active)
+        repair::dispatch_count<RepairBlocks>(self.repair_blocks_command,blocks,THREADS.downcast_truncate(),active)
+        repair::dispatch_count<RepairScalar>(self.repair_scalar_command,1,1,active)
+    }
+    fn repair_reset(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<RepairRound,IndirectDispatch<DispatchIndirectBuffer<RepairFaces>>,REPAIR_ROUND_BUDGET>,JOBS>>) {
+        repair::reset_claims<TRIANGLES>(self.repair_state,self.face_claims,i)
+    }
+    fn repair_propose(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<RepairRound,IndirectDispatch<DispatchIndirectBuffer<RepairEdges>>,REPAIR_ROUND_BUDGET>,JOBS>>) {
+        repair::propose<QuadInteriorEdgeFlip,POINT_WORDS,TRIANGLE_WORDS,TWINS>(
+            self.active.load(index:0).key(),QuadInteriorEdgeFlip {},
+            self.points,self.triangles,self.twins,self.repair_flags,self.repair_results,self.repair_state,i)
+    }
+    fn repair_claim(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<RepairRound,IndirectDispatch<DispatchIndirectBuffer<RepairEdges>>,REPAIR_ROUND_BUDGET>,JOBS>>) {
+        repair::claim<TRIANGLES,TWINS>(self.twins,self.repair_flags,self.repair_state,self.face_claims,i)
+    }
+    fn repair_select(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<RepairRound,IndirectDispatch<DispatchIndirectBuffer<RepairEdges>>,REPAIR_ROUND_BUDGET>,JOBS>>) {
+        repair::select<TRIANGLES,TWINS>(self.twins,self.repair_flags,self.repair_results,self.repair_state,self.face_claims,i)
+    }
+    fn repair_apply(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<RepairRound,IndirectDispatch<DispatchIndirectBuffer<RepairEdges>>,REPAIR_ROUND_BUDGET>,JOBS>>) {
+        repair::apply<QuadInteriorEdgeFlip,POINT_WORDS,TRIANGLE_WORDS,TWINS>(
+            self.active.load(index:0).key(),QuadInteriorEdgeFlip {},
+            self.points,self.triangles,self.twins,self.repair_results,self.repair_state,i)
+    }
+    fn repair_summarize(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<RepairRound,IndirectDispatch<DispatchIndirectBuffer<RepairBlocks>>,REPAIR_ROUND_BUDGET>,JOBS>>) {
+        repair::summarize<TWINS,REPAIR_TILE,REPAIR_WORDS>(self.repair_flags,self.repair_results,self.repair_state,self.repair_blocks,i)
+    }
+    fn repair_advance(self) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<AtlasJob,CycledDispatch<RepairRound,IndirectDispatch<DispatchIndirectBuffer<RepairScalar>>,REPAIR_ROUND_BUDGET>,JOBS>>) {
+        repair::advance<TWINS,REPAIR_TILE,REPAIR_WORDS>(self.repair_state,self.repair_blocks,false)
+    }
+    // Certification has its own schedule even if no mutation round was run.
+    // Never let a stale/zero command accidentally certify an unexamined mesh.
+    fn repair_certificate_schedule(self) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<AtlasJob,FixedDispatch<1,1,1>,JOBS>>) {
+        let faces=self.repair_state.load(index:1)
+        if faces>TRIANGLES.downcast_truncate() {self.repair_state.store(index:4,value:1)}
+        let active=repair::running(self.repair_state) && faces<=TRIANGLES.downcast_truncate()
+        let edges=if active {faces*3} else {0}
+        let blocks=quilting_atlas::scan::block_count(edges,REPAIR_TILE.downcast_truncate())
+        repair::dispatch_count<RepairEdges>(self.repair_edges_command,edges,THREADS.downcast_truncate(),active)
+        repair::dispatch_count<RepairBlocks>(self.repair_blocks_command,blocks,THREADS.downcast_truncate(),active)
+    }
+    fn repair_certify(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,IndirectDispatch<DispatchIndirectBuffer<RepairEdges>>,JOBS>>) {
+        repair::propose<QuadInteriorEdgeFlip,POINT_WORDS,TRIANGLE_WORDS,TWINS>(
+            self.active.load(index:0).key(),QuadInteriorEdgeFlip {},
+            self.points,self.triangles,self.twins,self.repair_flags,self.repair_results,self.repair_state,i)
+    }
+    fn repair_certificate_blocks(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,IndirectDispatch<DispatchIndirectBuffer<RepairBlocks>>,JOBS>>) {
+        repair::summarize<TWINS,REPAIR_TILE,REPAIR_WORDS>(self.repair_flags,self.repair_results,self.repair_state,self.repair_blocks,i)
+    }
+    fn repair_finish(self) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<AtlasJob,FixedDispatch<1,1,1>,JOBS>>) {
+        repair::advance<TWINS,REPAIR_TILE,REPAIR_WORDS>(self.repair_state,self.repair_blocks,true)
+        let r=repair::receipt(self.repair_state)
+        self.receipt.store(index:10,value:flag(r.valid))
+        self.receipt.store(index:11,value:flag(r.converged))
+        self.receipt.store(index:12,value:r.flips)
+        self.receipt.store(index:13,value:r.remaining_violations)
+        self.receipt.store(index:14,value:r.invariant_failures)
+    }
+
+    fn reserve_tile(self) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<AtlasJob,FixedDispatch<1,1,1>,JOBS>>) {
+        let job=self.active.load(index:0)
+        residency::reserve<JOBS,DIRECTORY_WORDS>(self.atlas_header,self.atlas_directory,self.atlas_copied,
+            EPOCH,job.ordinal,job.key().code(),self.receipt.load(index:5),self.receipt.load(index:7),
+            (RESIDENT_WORDS/3).downcast_truncate(),(RESIDENT_WORDS/3).downcast_truncate(),
+            job.valid!=0 && self.receipt.load(index:0)!=0 && self.receipt.load(index:6)!=0 && self.receipt.load(index:10)!=0)
+    }
+    fn retain_tile(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,FixedDispatch<TOPOLOGY_GROUPS,1,1>,JOBS>>) {
+        residency::copy_tile<JOBS,DIRECTORY_WORDS,POINT_WORDS,TRIANGLE_WORDS,RESIDENT_WORDS,RESIDENT_WORDS>(
+            self.atlas_directory,self.atlas_copied,self.points,self.triangles,self.atlas_points,self.atlas_triangles,
+            EPOCH,self.active.load(index:0).ordinal,i)
+    }
+    fn retain_receipt(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<16,1,1>,CycledDispatch<AtlasJob,FixedDispatch<1,1,1>,JOBS>>) {
+        let job=self.active.load(index:0)
+        if job.valid!=0 && job.ordinal<JOBS.downcast_truncate() && i.global.x<16 {
+            self.tile_receipts.store(index:job.ordinal*16+i.global.x,value:self.receipt.load(index:i.global.x))
+        }
+    }
+    fn publish_tile(self) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<AtlasJob,CooperativeDispatch<FixedDispatch<1,1,1>,1>,JOBS>>) {
+        // Pacing after publication bounds the host queue to one scratch job.
+        // This awaits queue completion, not a geometry/count readback.
+        residency::publish<JOBS,DIRECTORY_WORDS>(self.atlas_header,self.atlas_directory,self.atlas_copied,
+            EPOCH,self.active.load(index:0).ordinal)
+    }
+    fn finish_atlas(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+        jobs::advance(self.active,EPOCH)
+        let job=self.active.load(index:0)
+        let ready=self.atlas_header.load(index:3)
+        let failed=self.atlas_header.load(index:4)
+        self.completion.store(index:0,value:EPOCH)
+        self.completion.store(index:1,value:ready)
+        self.completion.store(index:2,value:failed)
+        self.completion.store(index:3,value:flag(job.valid==0 && job.next_ordinal==JOBS.downcast_truncate()))
+        self.completion.store(index:4,value:flag(job.valid==0 && job.next_ordinal==JOBS.downcast_truncate()
+            && ready==JOBS.downcast_truncate() && failed==0))
+    }
+}
