@@ -114,7 +114,16 @@ Other pass sources did not change. This closes part, not all, of the manual
 reference gap. No new GPU timing comparison has been made. The candidate build
 reported 249,703 ms total, slower than the trace baseline's 195,295 ms; these
 single shared-machine runs do not isolate a compiler regression or improvement.
-Triangle-domain execution and broader optimization-pass experiments remain open.
+Broader optimization-pass experiments remain open.
+
+The triangle generator was then rebuilt and executed in Chromium at the same Fe
+revision. Its 47-pass baseline is reproduced exactly (points, triangles, twins,
+repair state and receipt), and independent equilateral-metric triangulation and
+candidate-tree/selection oracles pass. The capture is
+`../classic-quilting-generated/helper-sharing-browser-snapshot.json`. This is the
+fixed [1,2,3] triangle key, not an exhaustive triangular atlas sweep. Reported
+WGSL bytes fell from 540,395 to 493,960. The compiler fix is pushed on mb2 through
+`c01ba878f` (a whitespace-only fixture cleanup after `ad9c8ecc9`).
 
 The subsequent paired queue-completion comparison is recorded in
 `helper-sharing.timing.json`: two warm-up pairs and 24 alternating measured pairs

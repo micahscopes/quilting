@@ -4,8 +4,8 @@ import {readFileSync} from 'node:fs';
 import {verifyPlanarMesh} from '../quad-atlas/verify.mjs';
 import {verifyCandidateTree, verifyCandidateSelection} from '../quad-atlas/candidate-index.verify.mjs';
 
-for(const [filename,passes] of [['repair-browser-snapshot.json',34],['incidence-browser-snapshot.json',44],['candidate-index-browser-snapshot.json',47]]){
-test(`GPU triangle (${passes} passes) respects its barycentric boundary and equilateral Delaunay metric`,()=>{
+for(const [filename,passes] of [['repair-browser-snapshot.json',34],['incidence-browser-snapshot.json',44],['candidate-index-browser-snapshot.json',47],['helper-sharing-browser-snapshot.json',47]]){
+test(`GPU triangle (${filename}, ${passes} passes) respects its barycentric boundary and equilateral Delaunay metric`,()=>{
   const c=JSON.parse(readFileSync(new URL(filename,import.meta.url),'utf8'));
   assert.equal(c.passCount,passes);
   if(passes===47){
