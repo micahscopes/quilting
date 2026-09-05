@@ -45,6 +45,26 @@ use quilting_patch::barycentric_warp::{ProjectiveTriangleMap, RadialTriangleMap,
 use quilting_patch::sampling_warp::{interval_bias,TriangleBoundaryWarp,QuadBoundaryWarp,InteriorTwist,InteriorConcentration}
 use quilting_atlas::quad::{QuadAtlasKey,SquareSymmetry,canonicalize as canonical_quad,boundary_seed as quad_boundary_seed}
 use quilting_atlas::planar::{FixedPoint2,EquilateralMetric,SquareMetric,incircle_sign as planar_incircle}
+use quilting_atlas::quad_sampling::{
+    density_exponent_q8 as quad_density,
+    poisson_radius_squared as quad_radius,
+    candidate_slot_count as quad_slots,
+    interior_candidate_at_slot as quad_candidate,
+    candidate_conflicts_boundary as quad_boundary_conflict,
+}
+
+pub fn quad_density_lane(_ a:u32,_ b:u32,_ c:u32,_ d:u32,_ x:u32,_ y:u32,_ lane:u32)->u32 {
+    let key=QuadAtlasKey {bottom:a,right:b,top:c,left:d}
+    let p=FixedPoint2 {x:x,y:y}
+    if lane==0 {quad_density(key,p)} else if lane==1 {quad_radius(key,p)} else {quad_slots(key)}
+}
+pub fn quad_candidate_lane(_ a:u32,_ b:u32,_ c:u32,_ d:u32,_ seed:u32,_ slot:u32,_ lane:u32)->u32 {
+    let key=QuadAtlasKey {bottom:a,right:b,top:c,left:d}
+    let p=quad_candidate(key,seed,slot)
+    if lane==0 {p.point.x} else if lane==1 {p.point.y} else if lane==2 {p.radius_squared}
+    else if lane==3 {p.priority} else if lane==4 {if p.valid {1} else {0}}
+    else {if quad_boundary_conflict(key,p) {1} else {0}}
+}
 
 pub fn quad_key_lane(_ a:u32,_ b:u32,_ c:u32,_ d:u32,_ lane:u32)->u32 {
     let key=QuadAtlasKey {bottom:a,right:b,top:c,left:d}

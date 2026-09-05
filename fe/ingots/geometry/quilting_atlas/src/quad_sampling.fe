@@ -1,0 +1,143 @@
+//! Deterministic square candidates with four independently prescribed edges.
+//! Generate only canonical keys in providers, then transform the stored result.
+//! The density law is D4-equivariant; the random candidate realization need not
+//! itself be symmetric. Priorities, radius conversion, and independent-set
+//! state transitions come from the common sampler. Square provider integration
+//! is separate; this module does not yet realize a completed sample set.
+use core::marker::Copy
+use super::quad::{QuadAtlasKey, boundary_seed}
+use super::planar::{FixedPoint2, IntegerPlaneMetric, SquareMetric}
+use super::sampling::{
+    BARYCENTRIC_SCALE,
+    CANDIDATE_GRID_MULTIPLIER,
+    CANDIDATE_TRIALS_PER_CELL,
+    candidate_priority,
+    mix32,
+    ratio_q8,
+    radius_squared_from_exponent_q8,
+}
+
+pub struct QuadInteriorCandidate {
+    pub point: FixedPoint2,
+    pub radius_squared: u32,
+    pub priority: u32,
+    pub slot: u32,
+    pub valid: bool,
+}
+impl Copy for QuadInteriorCandidate {}
+
+pub const fn point_valid(_ p: FixedPoint2) -> bool {
+    p.x <= BARYCENTRIC_SCALE && p.y <= BARYCENTRIC_SCALE
+}
+
+/// Interpolate edge LoD exponents, not densities. Each open edge exactly
+/// inherits its own exponent; corners take the larger incident exponent.
+///
+/// Polynomial edge weights are formed from x(1-x), y(1-y) and distances to
+/// opposite sides. Symmetric Q13 rounding keeps every intermediate in u32:
+/// weight_sum <= 2^28, weighted_sum <= 2^31. There is no privileged diagonal.
+/// This is a reference-domain sampling policy, not surface uniformization.
+pub const fn density_exponent_q8(_ key: QuadAtlasKey, _ p: FixedPoint2) -> u32 {
+    if !key.valid() || !point_valid(p) {
+        return 0
+    }
+    let s = BARYCENTRIC_SCALE
+    let hx = (p.x * (s - p.x)) >> 13
+    let hy = (p.y * (s - p.y)) >> 13
+    let bottom = hx * (s - p.y)
+    let right = hy * p.x
+    let top = hx * p.y
+    let left = hy * (s - p.x)
+    let sum = bottom + right + top + left
+    if sum == 0 {
+        let horizontal = if p.y == 0 { key.bottom } else { key.top }
+        let vertical = if p.x == 0 { key.left } else { key.right }
+        return (if horizontal > vertical {
+                horizontal
+            } else {
+                vertical
+            }) * 256
+    }
+    ratio_q8(
+        bottom * key.bottom + right * key.right + top * key.top + left * key.left,
+        sum,
+    )
+}
+
+pub const fn poisson_radius_squared(_ key: QuadAtlasKey, _ p: FixedPoint2) -> u32 {
+    radius_squared_from_exponent_q8(density_exponent_q8(key, p))
+}
+
+/// Symmetric bigger-disk exclusion in the orthogonal unit square.
+pub fn poisson_conflict(_ a: FixedPoint2, _ ar: u32, _ b: FixedPoint2, _ br: u32) -> bool {
+    let ax: i32 = a.x.downcast_truncate()
+    let ay: i32 = a.y.downcast_truncate()
+    let bx: i32 = b.x.downcast_truncate()
+    let by: i32 = b.y.downcast_truncate()
+    let radius = if ar > br { ar } else { br }
+    SquareMetric {}.squared_delta(ax - bx, ay - by) < radius
+}
+
+pub const fn candidate_grid_side(_ key: QuadAtlasKey) -> u32 {
+    if !key.valid() { return 0 }
+    (1 << key.maximum_lod()) * CANDIDATE_GRID_MULTIPLIER
+}
+
+pub const fn candidate_slot_count(_ key: QuadAtlasKey) -> u32 {
+    let side = candidate_grid_side(key)
+    side * side * CANDIDATE_TRIALS_PER_CELL
+}
+
+/// One independently materializable jittered point in a square candidate cell.
+/// Candidates are not the final sample set: shared immutable MIS rounds still
+/// have to enforce boundary and pairwise exclusion and report convergence.
+pub const fn interior_candidate_at_slot(
+    _ key: QuadAtlasKey,
+    _ seed: u32,
+    _ slot: u32,
+) -> QuadInteriorCandidate {
+    let side = candidate_grid_side(key)
+    if slot >= candidate_slot_count(key) {
+        return QuadInteriorCandidate {
+            point: FixedPoint2 { x: 0, y: 0 },
+            radius_squared: 0,
+            priority: 0,
+            slot: slot,
+            valid: false,
+        }
+    }
+    let width = BARYCENTRIC_SCALE / side
+    let cell = slot / CANDIDATE_TRIALS_PER_CELL
+    let hash = candidate_priority(seed, key.code(), slot)
+    let p = FixedPoint2 {
+        x: (cell % side) * width + hash % width,
+        y: (cell / side) * width + mix32(hash ^ 0xa511e9b3) % width,
+    }
+    QuadInteriorCandidate {
+        point: p,
+        radius_squared: poisson_radius_squared(key, p),
+        priority: hash,
+        slot: slot,
+        valid: p.x > 0 && p.y > 0,
+    }
+}
+
+/// Reference relation, deliberately separate from a provider's spatial query.
+/// Large GPU jobs must index neighbors rather than scan this ring per lane.
+pub fn candidate_conflicts_boundary(_ key: QuadAtlasKey, _ c: QuadInteriorCandidate) -> bool {
+    if !c.valid { return false }
+    let mut ordinal: u32 = 0
+    while ordinal < key.boundary_count() {
+        let b = boundary_seed(key, ordinal)
+        if poisson_conflict(
+            c.point,
+            c.radius_squared,
+            b.point,
+            poisson_radius_squared(key, b.point),
+        ) {
+            return true
+        }
+        ordinal = ordinal + 1
+    }
+    false
+}

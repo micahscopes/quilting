@@ -133,9 +133,10 @@ pub const fn density_exponent_q8(_ key: AtlasKey, _ point: FixedBarycentric) -> 
 }
 
 /// `floor(numerator * 256 / denominator)` without a wide integer multiply.
-/// The eight remainder-doubling steps are exact because the density weights
-/// remain below the Q14 barycentric square envelope.
-const fn ratio_q8(_ numerator: u32, _ denominator: u32) -> u32 {
+/// Requires 0 < denominator <= 2^28 and numerator/denominator <= 8.
+/// The eight remainder-doubling steps are exact within this envelope, shared
+/// by the triangle and square density policies.
+pub const fn ratio_q8(_ numerator: u32, _ denominator: u32) -> u32 {
     let integer = numerator / denominator
     let mut remainder = numerator % denominator
     let mut fraction: u32 = 0
@@ -206,6 +207,12 @@ const fn i32_to_u32(_ value: i32) -> u32 {
 /// `scale^2 * 2^(-2*lod)` with a Q8-interpolated exponent.
 pub const fn poisson_radius_squared(_ key: AtlasKey, _ point: FixedBarycentric) -> u32 {
     let density_exponent = density_exponent_q8(key, point)
+    radius_squared_from_exponent_q8(density_exponent)
+}
+
+/// Shared Q14 squared spacing law for a Q8 LoD exponent in [0,8*256].
+/// The caller supplies the domain metric; this function supplies only radius.
+pub const fn radius_squared_from_exponent_q8(_ density_exponent: u32) -> u32 {
     let doubled_exponent = density_exponent + density_exponent
     let integer_shift = doubled_exponent / 256
     let fraction = doubled_exponent % 256

@@ -33,6 +33,23 @@ impl QuadAtlasKey {
             + edge_resolution(self.top)
             + edge_resolution(self.left)
     }
+    pub const fn maximum_lod(self) -> u32 {
+        let horizontal = if self.bottom > self.top {
+            self.bottom
+        } else {
+            self.top
+        }
+        let vertical = if self.left > self.right {
+            self.left
+        } else {
+            self.right
+        }
+        if horizontal > vertical {
+            horizontal
+        } else {
+            vertical
+        }
+    }
 }
 
 /// Reflection across x=1/2, followed by quarter-turns counterclockwise.

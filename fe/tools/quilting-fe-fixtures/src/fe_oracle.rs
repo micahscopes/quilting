@@ -430,6 +430,91 @@ fn planar_metric_incircle_wasm_matches_independent_i128() {
 }
 
 #[test]
+fn quad_sampling_wasm_preserves_edge_density_and_square_symmetry() {
+    let (mut store,instance)=instantiate();
+    let density=function::<(u32,u32,u32,u32,u32,u32,u32),u32>(&mut store,&instance,"quad_density_lane");
+    let transform=function::<(u32,u32,u32,u32,u32),u32>(&mut store,&instance,"quad_transformed_key");
+    let point=function::<(u32,u32,u32,u32,u32),u32>(&mut store,&instance,"quad_transformed_point_lane");
+    let decode=|code:u32| [code/729,(code/81)%9,(code/9)%9,code%9];
+    let mut checks=0;
+    for code in 0..6561_u32 {
+        let [a,b,c,d]=decode(code);
+        for t in [1,64,8192,16320,16383] {
+            for (x,y,edge) in [(t,0,a),(16384,t,b),(t,16384,c),(0,t,d)] {
+                assert_eq!(density.call(&mut store,(a,b,c,d,x,y,0)).unwrap(),edge*256,
+                    "open edge owns density, key {code} at {x},{y}");
+                assert_eq!(density.call(&mut store,(a,b,c,d,x,y,1)).unwrap(),1_u32<<(28-2*edge));
+                checks+=1;
+            }
+        }
+        for (x,y,expected) in [(0,0,a.max(d)),(16384,0,a.max(b)),
+            (16384,16384,b.max(c)),(0,16384,c.max(d))] {
+            assert_eq!(density.call(&mut store,(a,b,c,d,x,y,0)).unwrap(),expected*256);
+        }
+        assert_eq!(density.call(&mut store,(a,b,c,d,8192,8192,0)).unwrap(),(a+b+c+d)*64);
+        let x=(code*7187+1)%16385;
+        let y=(code*3559+3)%16385;
+        let reference=density.call(&mut store,(a,b,c,d,x,y,0)).unwrap();
+        assert!((a.min(b).min(c).min(d)*256..=a.max(b).max(c).max(d)*256).contains(&reference));
+        for symmetry in 0..8 {
+            let [e,f,g,h]=decode(transform.call(&mut store,(a,b,c,d,symmetry)).unwrap());
+            let qx=point.call(&mut store,(x,y,symmetry,0,0)).unwrap();
+            let qy=point.call(&mut store,(x,y,symmetry,0,1)).unwrap();
+            assert_eq!(density.call(&mut store,(e,f,g,h,qx,qy,0)).unwrap(),reference,
+                "density equivariant under D4, key {code}, symmetry {symmetry}");
+        }
+    }
+    assert_eq!(density.call(&mut store,(9,0,0,0,8192,8192,2)).unwrap(),0);
+    eprintln!("all 6,561 quad keys: {checks} exact open-edge densities, corner/center rules, D4 covariance");
+}
+
+#[test]
+fn quad_sampling_wasm_candidates_match_counter_reference_and_boundary_exclusion() {
+    let (mut store,instance)=instantiate();
+    let candidate=function::<(u32,u32,u32,u32,u32,u32,u32),u32>(&mut store,&instance,"quad_candidate_lane");
+    let density=function::<(u32,u32,u32,u32,u32,u32,u32),u32>(&mut store,&instance,"quad_density_lane");
+    let boundary=function::<(u32,u32,u32,u32,u32,u32),u32>(&mut store,&instance,"quad_boundary_lane");
+    let mix=|mut x:u32| { x^=x>>16; x=x.wrapping_mul(0x7feb352d); x^=x>>15; x=x.wrapping_mul(0x846ca68b); x^(x>>16) };
+    let mut checked=0;
+    for [a,b,c,d] in [[0,0,0,0],[2,1,4,0],[8,8,8,8]] {
+        let code=((a*9+b)*9+c)*9+d;
+        let side=2_u32<<a.max(b).max(c).max(d);
+        let count=side*side*2;
+        let width=16384/side;
+        assert_eq!(density.call(&mut store,(a,b,c,d,0,0,2)).unwrap(),count);
+        for slot in 0..count {
+            let hash=mix(1337 ^ code.wrapping_mul(0x9e3779b9) ^ slot.wrapping_mul(0x85ebca6b));
+            let expected=[(slot/2%side)*width+hash%width,
+                (slot/2/side)*width+mix(hash^0xa511e9b3)%width];
+            let p:[u32;2]=std::array::from_fn(|lane|candidate.call(&mut store,(a,b,c,d,1337,slot,lane as u32)).unwrap());
+            assert_eq!(p,expected);
+            assert_eq!(candidate.call(&mut store,(a,b,c,d,1337,slot,3)).unwrap(),hash);
+            assert_eq!(candidate.call(&mut store,(a,b,c,d,1337,slot,4)).unwrap(),u32::from(p[0]>0 && p[1]>0));
+            assert!(p[0]<16384 && p[1]<16384);
+            checked+=1;
+            // Check the potentially expensive full boundary relation only at
+            // a spread of slots; production will need an indexed provider.
+            if slot%(count/16).max(1)!=0 {continue;}
+            let radius=candidate.call(&mut store,(a,b,c,d,1337,slot,2)).unwrap();
+            let boundary_count=(1<<a)+(1<<b)+(1<<c)+(1<<d);
+            let mut expected_conflict=false;
+            for ordinal in 0..boundary_count {
+                let q:[u32;2]=std::array::from_fn(|lane|boundary.call(&mut store,(a,b,c,d,ordinal,lane as u32)).unwrap());
+                let qr=density.call(&mut store,(a,b,c,d,q[0],q[1],1)).unwrap();
+                let dx=i64::from(q[0])-i64::from(p[0]);
+                let dy=i64::from(q[1])-i64::from(p[1]);
+                expected_conflict|=dx*dx+dy*dy<i64::from(radius.max(qr));
+            }
+            expected_conflict&=p[0]>0 && p[1]>0;
+            assert_eq!(candidate.call(&mut store,(a,b,c,d,1337,slot,5)).unwrap(),u32::from(expected_conflict));
+        }
+        assert_eq!(candidate.call(&mut store,(a,b,c,d,1337,count,4)).unwrap(),0);
+    }
+    assert_eq!(candidate.call(&mut store,(9,0,0,0,1337,0,4)).unwrap(),0);
+    eprintln!("{checked} deterministic square candidate slots through LoD 8; boundary exclusion checked independently");
+}
+
+#[test]
 fn radial_atlas_fan_wasm_preserves_seams_and_triangle_orientation() {
     let (mut store, instance) = instantiate();
     let warp = function::<(f32,f32,f32,f32,u32),f32>(&mut store,&instance,"radial_warp_lane");

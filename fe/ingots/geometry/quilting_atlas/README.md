@@ -37,8 +37,33 @@ Release Fe-to-Wasm gates in `quilting-fe-fixtures`, feature `fe-oracle`:
   with an independent wide-integer determinant, including degeneracy and a
   square whose cocircularity differs between the two metrics.
 
-The quad sampler, topology provider, generated atlas, and renderer integration
-are not finished. The warp explorer's square grid is only a visualization
+`quad_sampling` now defines a four-edge density policy, deterministic jittered
+candidate slots, square-distance exclusion, and a reference boundary query.
+Open edges inherit their own exact LoD exponent; corners use the larger
+incident exponent. Interior exponents blend polynomial edge weights, with
+bounded integer rounding, and commute exactly with D4. This policy is not an
+optimality claim or an arc-length map on a curved surface.
+
+Candidate capacities are derived from the largest edge LoD, with two trials
+per cell on a grid twice that edge's resolution. The largest job has 524,288
+candidate slots. This is conservative candidate work, not the final point
+count or a claim that generating all 1,035 jobs simultaneously is affordable.
+Providers must batch bounded jobs and reuse the common independent-set state
+transitions. The reference boundary scan must be replaced by an equivalent
+indexed query for large GPU jobs.
+
+Additional release Wasm gates:
+
+- `quad_sampling_wasm_preserves_edge_density_and_square_symmetry` checks all
+  6,561 keys, 131,220 exact open-edge densities, corner and center rules, and D4
+  covariance of the density field.
+- `quad_sampling_wasm_candidates_match_counter_reference_and_boundary_exclusion`
+  checks 526,344 candidate slots including every slot of an LoD-8 job against
+  an independent counter-hash implementation, and selected boundary queries
+  against wide-integer square distances.
+
+Quad point-set selection, topology provider, generated atlas, and renderer
+integration are not finished. The warp explorer's square grid is only a visualization
 fixture, not a generated blue-noise/Delaunay quad atlas. Later surface warping
 must share one canonical edge map and sample sequence between adjacent patches;
 independent approximate arc-length inversions do not establish crack freedom.
