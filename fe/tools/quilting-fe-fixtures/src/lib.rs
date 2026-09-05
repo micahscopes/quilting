@@ -15,6 +15,9 @@ mod cga_oracle;
 #[cfg(test)]
 mod patch_metrics_oracle;
 
+#[cfg(test)]
+mod boundary_uniformization_oracle;
+
 pub mod fixed_raster_source;
 
 #[cfg(feature = "quilting-export")]

@@ -11,7 +11,7 @@
   <main>
     <header>
       <strong>two triangles · boundary spacing</strong>
-      <span title="The original surface is evaluated over two triangle domains. Edge spacing is measured in surface units, not pixels. Five shared GPU arc-length tables determine edge LoDs and spacing. Numerical, not certified exact: overlay strips are bottom/right/top/left/diagonal; amber means coarse/fine length disagreement above 0.01%, red means invalid or LoD capped. Toggle uniformize for comparison. Drag to orbit; wheel to zoom.">curved-edge LoD · shared diagonal · numerical arc length · amber = uncertainty · red = invalid/capped</span>
+      <span title="Constrained weights redistribute coordinates on ONE fixed shape; they do not edit corner directions or curvature. Enable reference_coordinates to analytically undo that coordinate skew (requires the weight constraint). This is not uniform surface sampling. Separately, uniformize applies numerical arc-length spacing to five shared curves. Edge spacing is in surface units, not pixels. Strips: bottom/right/top/left/diagonal; amber = coarse/fine disagreement, red = invalid/capped. Drag to orbit; wheel to zoom.">same shape · variable coordinates · shared diagonal · numerical boundary spacing</span>
     </header>
     <section class="stage" aria-label="Two triangular restrictions with shared arc-length boundaries">
       <script type="application/fe" data-fe-src="../../ingots/demos/two_triangle_uniformization" data-fe-render></script>

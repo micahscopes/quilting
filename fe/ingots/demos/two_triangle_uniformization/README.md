@@ -19,8 +19,24 @@ permutation-aware resident triangle atlas tile, through LoD 8.
   subject to `max_lod` (default 7, range 0–8).
 - `uniformize`: compare native parameter sampling with inverse cumulative
   length sampling. LoDs stay length-based in both modes.
-- Four weights, optional automatic surface-family constraint resolution,
-  orbit controls, wire toggle and wire width follow the shared explorers.
+- `reference_coordinates`: analytically cancel the separable scalar-weight
+  coordinate change before evaluating the weighted patch. Requires the weight
+  constraint; disabling the constraint turns this option off. The five edge
+  tables and the interior renderer use the same corrected chart. This should
+  hold the shape, diagonal and sampling fixed as constrained weights change,
+  up to floating-point error. It is not uniform area sampling.
+- Four weights, orbit controls, wire toggle and wire width follow the shared
+  explorers. **Constrained weights preserve this fixed surface patch; they only
+  redistribute its coordinates.** The corner positions and Clifford-weight
+  directions are fixed. This is a parameterization stress test, not general
+  shape authoring. Enabling the constraint from an unconstrained state may
+  change the surface; its scalar relation is not a general admission solver.
+
+For positive factors satisfying `w00*w11 = w10*w01`, the weighted patch is the
+unit-weight patch at `u' = r*u / (1-u+r*u)`, with `r=w10/w00`, and the analogous
+map in v with `r=w01/w00`. Taking reciprocal ratios inverts this map. This
+identity comes from factoring both bilinear homogeneous fields, not fitting.
+Without correction, unequal u/v ratios move the curve `u=v` on the same surface.
 
 Five status strips run bottom-to-top: bottom, right, top, left, diagonal.
 Green means the sampled length checks pass and the target is not capped;
@@ -66,6 +82,15 @@ weights near 0.02 / 0.4 / 0.4 / 8. The extreme still produces poor interior
 triangles. This explorer isolates that remaining problem instead of claiming
 that boundary uniformization fixes it. Numerical boundary convergence, actual
 atlas seam replay, and alternative interior extensions deserve focused follow-up.
+
+The independent f64 boundary replay measures local segment length against a
+16,384-chord reference; the four current fixtures stay below 0.1% relative error.
+This is numerical evidence, not an analytic guarantee or GPU readback. The same
+atlas replay exposes 56 and 69 inverted straight parameter triangles for the
+squeezed and unequal-axis boundary-warp fixtures. Monotone continuous edge-map
+composition does not imply that its vertex-only, straight-triangle realization
+is injective. Reference-coordinate cancellation is a separate control
+experiment, not evidence that those interior-warp failures are fixed.
 
 Shared implementation lives in `quilting_patch::arc_length`,
 `quilting_patch::sampling_warp::TriangleParameterMap`, and

@@ -276,6 +276,12 @@ pub fn resolved_corner_scale(
     else if index == 2 { weights.w01 } else { weights.w11 }
 }
 
+pub fn tensor_chart_lane(_ a:f32,_ b:f32,_ c:f32,_ u:f32,_ v:f32,_ inverse:bool,_ lane:u32)->f32 {
+    let chart=BilinearCornerScales {w00:a,w10:b,w01:c,w11:b*c/a}.parameter_map()
+    let p=if inverse {chart.inverse().map(vec2f(u,v))} else {chart.map(vec2f(u,v))}
+    if lane==0 {p.x} else {p.y}
+}
+
 fn input_bary(_ a: f32, _ b: f32, _ c: f32) -> Bary3F {
     bary3f(a, b, c)
 }

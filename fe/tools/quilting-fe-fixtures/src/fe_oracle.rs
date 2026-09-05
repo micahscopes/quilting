@@ -773,6 +773,34 @@ fn separable_corner_weights_wasm_resolve_symmetrically() {
 }
 
 #[test]
+fn tensor_projective_chart_wasm_matches_independent_fractional_map() {
+    let (mut store,instance)=instantiate();
+    let map=function::<(f32,f32,f32,f32,f32,i32,i32),f32>(&mut store,&instance,"tensor_chart_lane");
+    for a in [0.02_f32,0.4,1.0,8.0] { for b in [0.02_f32,0.4,1.0,8.0] { for c in [0.02_f32,0.4,1.0,8.0] {
+        for step in 0..=64 {
+            let u=step as f32/64.0;
+            let v=1.0-u;
+            for inverse in [false,true] {for lane in 0..2 {
+                let ratio=f64::from(if lane==0 {b}else{c})/f64::from(a);
+                let ratio=if inverse {1.0/ratio}else{ratio};
+                let t=f64::from(if lane==0 {u}else{v});
+                let expected=ratio*t/((1.0-t)+ratio*t);
+                let actual=map.call(&mut store,(a,b,c,u,v,i32::from(inverse),lane)).unwrap();
+                assert!((f64::from(actual)-expected).abs()<2.0e-7);
+                if t==0.0 || t==1.0 {assert_eq!(f64::from(actual),t,"fixed endpoints");}
+            }}
+            let x=map.call(&mut store,(a,b,c,u,v,0,0)).unwrap();
+            let y=map.call(&mut store,(a,b,c,u,v,0,1)).unwrap();
+            let p=map.call(&mut store,(a,b,c,x,y,1,0)).unwrap();
+            let q=map.call(&mut store,(a,b,c,x,y,1,1)).unwrap();
+            // f32 chart compression loses information; exact algebra is not
+            // bit-exact numerical inversion at extreme ratios.
+            assert!((p-u).abs()<4.0e-5 && (q-v).abs()<4.0e-5);
+        }
+    }}}
+}
+
+#[test]
 fn tangent_triangle_wasm_detects_flattening_and_preserves_scale() {
     let (mut store, instance) = instantiate();
     type Tangents = (f32, f32, f32, f32, f32, f32);

@@ -29,12 +29,12 @@ fn level(_ x: f32) -> u32 {
 }
 struct Params {
     edge_spacing:Param,max_lod:Param,uniformize:Param,show_triangles:Param,wire_px:Param,
-    resolve_weight_constraint:Param,w00:Param,w10:Param,w01:Param,w11:Param,
+    resolve_weight_constraint:Param,reference_coordinates:Param,w00:Param,w10:Param,w01:Param,w11:Param,
     orbit_yaw:Param,orbit_pitch:Param,orbit_distance:Param,res_x:Param,res_y:Param,dragging:Param,
 }
 struct State {
     edge_spacing:f32,max_lod:f32,uniformize:f32,show_triangles:f32,wire_px:f32,
-    resolve_weight_constraint:f32,w00:f32,w10:f32,w01:f32,w11:f32,
+    resolve_weight_constraint:f32,reference_coordinates:f32,w00:f32,w10:f32,w01:f32,w11:f32,
     orbit_yaw:f32,orbit_pitch:f32,orbit_distance:f32,res_x:f32,res_y:f32,dragging:f32,
 }
 impl Copy for State {}
@@ -46,7 +46,7 @@ const fn params()->Params {
         max_lod:Param::int(min:0.0,max:8.0,init:7.0),
         uniformize:Param::toggle(init:true),show_triangles:Param::toggle(init:true),
         wire_px:Param::range(min:0.0,max:1.6,init:0.35),
-        resolve_weight_constraint:Param::toggle(init:true),
+        resolve_weight_constraint:Param::toggle(init:true),reference_coordinates:Param::toggle(init:false),
         w00:Param::log(min:0.02,max:8.0,init:1.0),w10:Param::log(min:0.02,max:8.0,init:1.0),
         w01:Param::log(min:0.02,max:8.0,init:1.0),w11:Param::log(min:0.02,max:8.0,init:1.0),
         orbit_yaw:Param::range(min:-3.14159265,max:3.14159265,init:-0.72),
@@ -60,6 +60,15 @@ fn map(_ tables:EdgeTables,_ edge:u32,_ enabled:bool)->EdgeLengthMap {
 }
 fn directed(_ tables:EdgeTables,_ edge:u32,_ reversed:bool,_ enabled:bool)->DirectedEdgeMap {
     DirectedEdgeMap {law:map(tables,edge,enabled),reversed:reversed}
+}
+use quilting_patch::barycentric_warp::TensorProjectiveMap
+struct ReferenceSampling {inner:HalfSampling,chart:TensorProjectiveMap,enabled:bool}
+impl Copy for ReferenceSampling {}
+impl TriangleParameterMap for ReferenceSampling {
+    fn parameter(self,_ p:Bary3F)->Vec2F {
+        let uv=self.inner.parameter(p)
+        if self.enabled {self.chart.map(uv)} else {uv}
+    }
 }
 struct HalfSampling { tables:EdgeTables,half:u32,enabled:bool }
 impl Copy for HalfSampling {}
@@ -106,7 +115,7 @@ pub struct ReceiptVarying {pub t:f32,pub edge:f32}
 impl Copy for ReceiptVarying {}
 actor TwoTriangleUniformization uses (GpuProgram<WebGpuBackend>,SurfaceQuality<ResponsiveBacking>,SurfaceRecovery<StandardSurfaceRecovery>) {
     edge_spacing:f32,max_lod:f32,uniformize:f32,show_triangles:f32,wire_px:f32,
-    resolve_weight_constraint:f32,w00:f32,w10:f32,w01:f32,w11:f32,
+    resolve_weight_constraint:f32,reference_coordinates:f32,w00:f32,w10:f32,w01:f32,w11:f32,
     orbit_yaw:f32,orbit_pitch:f32,orbit_distance:f32,res_x:f32,res_y:f32,dragging:f32,
     fixture:FixtureBuffer,edges:EdgeTables,draw:DrawIndirectBuffer<Draw>,
     const fn raster()->RasterPlan uses (RasterConfiguration) {raster_plan<Depth24LessEqualMsaa4>()}
@@ -114,7 +123,7 @@ actor TwoTriangleUniformization uses (GpuProgram<WebGpuBackend>,SurfaceQuality<R
     fn transition(self,event:SurfaceEvent)->State uses (SurfaceTransition,SurfaceScheduling<LatestPerFrame>) {
         let mut next=State {
             edge_spacing:self.edge_spacing,max_lod:self.max_lod,uniformize:self.uniformize,
-            show_triangles:self.show_triangles,wire_px:self.wire_px,resolve_weight_constraint:self.resolve_weight_constraint,
+            show_triangles:self.show_triangles,wire_px:self.wire_px,resolve_weight_constraint:self.resolve_weight_constraint,reference_coordinates:self.reference_coordinates,
             w00:self.w00,w10:self.w10,w01:self.w01,w11:self.w11,
             orbit_yaw:self.orbit_yaw,orbit_pitch:self.orbit_pitch,orbit_distance:self.orbit_distance,
             res_x:self.res_x,res_y:self.res_y,dragging:self.dragging,
@@ -131,6 +140,8 @@ actor TwoTriangleUniformization uses (GpuProgram<WebGpuBackend>,SurfaceQuality<R
             next.w01=fitted.w01
             next.w11=fitted.w11
         }
+        // The inverse-chart identity requires the rank-one constraint.
+        if next.resolve_weight_constraint<0.5 {next.reference_coordinates=0.0}
         if event.is_pointer_down() {next.dragging=1.0}
         if event.is_pointer_move() && event.buttons!=0 && next.dragging>0.5 {
             next.orbit_yaw=wrap_pi(next.orbit_yaw-event.delta_x*0.008)
@@ -142,7 +153,7 @@ actor TwoTriangleUniformization uses (GpuProgram<WebGpuBackend>,SurfaceQuality<R
         next
     }
     fn integrate_edges(self,invocation:ComputeInvocation) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<5,1,1>>) {
-        prepare_edge(self.edges,invocation.global.x,BilinearCornerScales {w00:self.w00,w10:self.w10,w01:self.w01,w11:self.w11})
+        prepare_edge(self.edges,invocation.global.x,BilinearCornerScales {w00:self.w00,w10:self.w10,w01:self.w01,w11:self.w11},self.reference_coordinates>0.5)
     }
     fn prepare_draw(self,invocation:ComputeInvocation) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
         let mut valid=true
@@ -169,7 +180,11 @@ actor TwoTriangleUniformization uses (GpuProgram<WebGpuBackend>,SurfaceQuality<R
             distance:self.orbit_distance,focal:1.62,near:0.05,far:100.0},ScreenExtent {width:self.res_x,height:self.res_y})
         atlas_vertex_with_map(self.fixture,key(self.edges,half,self.edge_spacing,self.max_lod),
             paper_patch(BilinearCornerScales {w00:self.w00,w10:self.w10,w01:self.w01,w11:self.w11}),
-            HalfSampling {tables:self.edges,half:half,enabled:self.uniformize>0.5},local,half,camera,
+            ReferenceSampling {
+                inner:HalfSampling {tables:self.edges,half:half,enabled:self.uniformize>0.5},
+                chart:BilinearCornerScales {w00:self.w00,w10:self.w10,w01:self.w01,w11:self.w11}.parameter_map().inverse(),
+                enabled:self.reference_coordinates>0.5,
+            },local,half,camera,
             ScreenExtent {width:self.res_x,height:self.res_y})
     }
     fn surface_fragment(self,v:SurfaceVarying)->i32 uses (FragmentStage<SurfaceVarying>) {

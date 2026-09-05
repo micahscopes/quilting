@@ -29,6 +29,14 @@ pub struct BilinearCornerScales {
 impl Copy for BilinearCornerScales {}
 
 impl BilinearCornerScales {
+    /// The weighted homogeneous patch equals the original patch evaluated in
+    /// this chart, up to a common scalar that cancels in the quotient.
+    /// Requires positive finite factors satisfying w00*w11 = w10*w01.
+    /// This does not test or resolve that precondition.
+    pub fn parameter_map(self) -> barycentric_warp::TensorProjectiveMap {
+        barycentric_warp::TensorProjectiveMap {u_ratio:self.w10/self.w00,v_ratio:self.w01/self.w00}
+    }
+
     /// Resolve w00*w11 = w10*w01 with the smallest squared change in log
     /// weights. This treats all corners symmetrically. Requires positive finite
     /// inputs and representable intermediate products/ratios.

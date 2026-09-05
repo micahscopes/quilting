@@ -414,6 +414,11 @@ pub(crate) fn paper_sample(s: f64, t: f64) -> ([f64; 3], f64) {
     ([value.0[1], value.0[2], value.0[4]], value.0[7])
 }
 
+pub(crate) fn weighted_paper_sample(scales: [f64; 4], uv: [f64; 2]) -> [f64; 3] {
+    let value = evaluate(scaled_paper_example(scales), uv[0], uv[1]);
+    [value.0[1], value.0[2], value.0[4]]
+}
+
 pub(crate) fn paper_reconciliation_scale() -> f64 {
     let controls = paper_example(true);
     -grade_three_pair(controls[1], controls[2]) / grade_three_pair(controls[0], controls[3])
@@ -478,6 +483,28 @@ fn rank_one_corner_scaling_only_reparameterizes_the_paper_patch() {
             for blade in 0..8 {
                 assert_close(actual.0[blade], expected.0[blade], 2.0e-9);
             }
+        }
+    }
+}
+
+#[test]
+fn inverse_separable_chart_restores_shape_and_reference_diagonal() {
+    for scales in [[1.0;4],[0.02,0.4,0.4,8.0],[0.02,0.04,4.0,8.0],[8.0,0.4,0.4,0.02]] {
+        let mut diagonal_displacement=0.0_f64;
+        for i in 0..=64 {for j in 0..=64 {
+            let reference=[i as f64/64.0,j as f64/64.0];
+            let inverse=[reparameterize(reference[0],scales[1],scales[0]),
+                reparameterize(reference[1],scales[2],scales[0])];
+            let corrected=weighted_paper_sample(scales,inverse);
+            let expected=weighted_paper_sample([1.0;4],reference);
+            for lane in 0..3 {assert_close(corrected[lane],expected[lane],2.0e-10);}
+            if i==j {
+                let original=weighted_paper_sample(scales,reference);
+                diagonal_displacement=diagonal_displacement.max((0..3).map(|k|(original[k]-expected[k]).powi(2)).sum::<f64>().sqrt());
+            }
+        }}
+        if scales[1]!=scales[2] {
+            assert!(diagonal_displacement>0.1,"unequal axis maps move the diagonal on the same surface");
         }
     }
 }

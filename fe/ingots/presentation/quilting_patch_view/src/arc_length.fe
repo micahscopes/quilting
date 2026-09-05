@@ -14,8 +14,8 @@ use super::{paper_patch, policy}
 
 pub const INTEGRATION_SEGMENTS: usize = 1024
 pub const SEGMENTS: u32 = INTEGRATION_SEGMENTS.downcast_truncate()
-pub const STRIDE: u32 = SEGMENTS + 9
-pub const TABLE_WORDS: usize = 5 * (INTEGRATION_SEGMENTS + 9)
+pub const STRIDE: u32 = SEGMENTS + 10
+pub const TABLE_WORDS: usize = 5 * (INTEGRATION_SEGMENTS + 10)
 pub type EdgeTables = StorageBuffer<f32, TABLE_WORDS>
 extern { const fn __f32_from_i32(_: i32) -> f32 }
 fn number(_ n: u32) -> f32 { __f32_from_i32(n.downcast_unchecked()) }
@@ -34,31 +34,37 @@ fn conditioning_bias(_ edge: u32, _ w: BilinearCornerScales) -> f32 {
 /// One invocation owns one whole curve record. A weight cache avoids rebuilding
 /// integration tables during camera-only redraws. The following draw-preparation
 /// dispatch observes all five completed records.
-pub fn prepare_edge(_ tables: EdgeTables, _ edge: u32, _ weights: BilinearCornerScales) {
+/// `reference_coordinates` requires separable positive weights. In that mode
+/// inverse chart composition cancels coordinate skew, including on the diagonal.
+/// It does not make reference coordinates intrinsically uniform.
+pub fn prepare_edge(_ tables: EdgeTables, _ edge: u32, _ weights: BilinearCornerScales, _ reference_coordinates: bool) {
     if edge >= 5 { return }
     let base = edge * STRIDE
     if tables.load(index:base+4)==weights.w00 && tables.load(index:base+5)==weights.w10
-        && tables.load(index:base+6)==weights.w01 && tables.load(index:base+7)==weights.w11 { return }
+        && tables.load(index:base+6)==weights.w01 && tables.load(index:base+7)==weights.w11
+        && tables.load(index:base+8)==if reference_coordinates {1.0} else {0.0} { return }
     let patch = paper_patch(weights)
-    let bias = conditioning_bias(edge, weights)
+    let bias = if reference_coordinates {1.0} else {conditioning_bias(edge, weights)}
+    let chart = weights.parameter_map().inverse()
     let first = evaluate(patch, curve_parameter(edge, 0.0), policy())
     let mut previous = first.position
     let mut coarse_previous = previous
     let mut length: f32 = 0.0
     let mut coarse: f32 = 0.0
     let mut valid = first.conditioned
-    tables.store(index:base+8,value:0.0)
+    tables.store(index:base+9,value:0.0)
     let mut i: u32 = 1
     while i <= SEGMENTS {
         let t = interval_bias(number(i) / number(SEGMENTS), bias)
-        let sample = evaluate(patch, curve_parameter(edge,t), policy())
+        let uv = curve_parameter(edge,t)
+        let sample = evaluate(patch, if reference_coordinates {chart.map(uv)} else {uv}, policy())
         valid = valid && sample.conditioned
         length = length + length3(sub3(sample.position, previous))
         if i % 2 == 0 {
             coarse = coarse + length3(sub3(sample.position, coarse_previous))
             coarse_previous = sample.position
         }
-        tables.store(index:base+8+i,value:length)
+        tables.store(index:base+9+i,value:length)
         previous = sample.position
         i = i + 1
     }
@@ -70,13 +76,14 @@ pub fn prepare_edge(_ tables: EdgeTables, _ edge: u32, _ weights: BilinearCorner
     tables.store(index:base+5,value:weights.w10)
     tables.store(index:base+6,value:weights.w01)
     tables.store(index:base+7,value:weights.w11)
+    tables.store(index:base+8,value:if reference_coordinates {1.0} else {0.0})
 }
 
 pub struct EdgeLengthMap { pub tables: EdgeTables, pub edge: u32, pub enabled: bool }
 impl Copy for EdgeLengthMap {}
 impl CumulativeLengthSamples for EdgeLengthMap {
     fn segments(self) -> u32 { SEGMENTS }
-    fn cumulative(self, _ i: u32) -> f32 { self.tables.load(index:self.edge*STRIDE+8+i) }
+    fn cumulative(self, _ i: u32) -> f32 { self.tables.load(index:self.edge*STRIDE+9+i) }
 }
 impl IntervalSamplingMap for EdgeLengthMap {
     fn map(self, _ t: f32) -> f32 {

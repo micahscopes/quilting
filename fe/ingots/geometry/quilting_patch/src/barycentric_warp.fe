@@ -2,9 +2,29 @@
 //! A map changes sampling density; it does not alter patch controls.
 
 use core::marker::Copy
-use quilting_domain::{Bary3F, bary3f}
+use quilting_domain::{Bary3F, Vec2F, bary3f, vec2f}
 use super::{LinearElement, ProjectiveAlgebra, QuadraticTrianglePatch, TriangleDomain2, triangle_parameter,
     QuadraticTriangularProjectiveControls}
+
+/// Independent positive projective coordinate changes on a unit square.
+/// This changes the chart, not the surface. It is not an area-uniform map.
+/// Ratios must be positive and finite. Inverting swaps endpoint weights;
+/// the convex denominator avoids cancellation near the endpoints.
+pub struct TensorProjectiveMap { pub u_ratio: f32, pub v_ratio: f32 }
+impl Copy for TensorProjectiveMap {}
+fn projective_interval(_ t: f32, _ ratio: f32) -> f32 {
+    if t == 0.0 || t == 1.0 || ratio == 1.0 { return t }
+    let weighted = ratio * t
+    weighted / ((1.0 - t) + weighted)
+}
+impl TensorProjectiveMap {
+    pub fn map(self, _ point: Vec2F) -> Vec2F {
+        vec2f(projective_interval(point.x,self.u_ratio),projective_interval(point.y,self.v_ratio))
+    }
+    pub fn inverse(self) -> TensorProjectiveMap {
+        TensorProjectiveMap {u_ratio:1.0/self.u_ratio,v_ratio:1.0/self.v_ratio}
+    }
+}
 
 /// Positive homogeneous weights at the three parameter-triangle corners.
 /// On an edge only its two endpoint weights matter: neighbors can share those
