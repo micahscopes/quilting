@@ -102,6 +102,8 @@ fn triangle_corner(_ corner: u32) -> Bary3F {
 
 pub struct SurfaceVarying {
     pub triangle_edge: Bary3F,
+    /// Pixel distance times view depth for boundary edges of this rendered
+    /// triangle; interior edges carry a large sentinel. Not patch barycentrics.
     pub patch_edge: Bary3F,
     pub normal: Vec3F,
     pub patch_index: f32,
@@ -109,6 +111,16 @@ pub struct SurfaceVarying {
     pub valid: f32,
 }
 impl Copy for SurfaceVarying {}
+
+fn shares_patch_boundary(_ a: Bary3F, _ b: Bary3F) -> bool {
+    (a.a==0.0 && b.a==0.0) || (a.b==0.0 && b.b==0.0) || (a.c==0.0 && b.c==0.0)
+}
+
+fn boundary_distance(_ boundary: bool, _ corner: f32, _ altitude: f32, _ depth: f32) -> f32 {
+    // Every vertex gets the sentinel on a non-boundary lane. On a boundary
+    // lane only the opposite vertex contributes its screen altitude.
+    (if boundary {corner*altitude} else {1000000.0})*depth
+}
 
 fn invalid_surface_vertex() -> RasterVertex<SurfaceVarying> {
     RasterVertex {
@@ -244,7 +256,11 @@ pub fn atlas_vertex_with_map<M: TriangleParameterMap>(
                 corner.b * altitude * projected.depth,
                 corner.c * altitude * projected.depth,
             ),
-            patch_edge: bary,
+            patch_edge: bary3f(
+                boundary_distance(shares_patch_boundary(bary1,bary2),corner.a,altitude,projected.depth),
+                boundary_distance(shares_patch_boundary(bary2,bary0),corner.b,altitude,projected.depth),
+                boundary_distance(shares_patch_boundary(bary0,bary1),corner.c,altitude,projected.depth),
+            ),
             normal: differential.normal,
             patch_index: as_f32(patch_index),
             view_depth: projected.depth,
@@ -273,7 +289,8 @@ pub fn atlas_fragment(
     } else {
         0.0
     }
-    let patch_line = 1.0 - smoothstep(0.0, 0.012, minimum_barycentric(varying.patch_edge))
+    let patch_pixels = minimum_barycentric(varying.patch_edge) / varying.view_depth
+    let patch_line = 1.0 - smoothstep(0.05, 1.45, patch_pixels)
     let coverage = maximum(triangle_line * 0.62, patch_line)
     pack_rgba8(
         mix_display_rgb(surface, display_rgb(0.018, 0.025, 0.043), coverage),
