@@ -1,17 +1,16 @@
 [ingot]
-name = "exact_patch_subdivision"
+name = "paired_triangle_fans"
 version = "0.1.0"
 
 [dependencies]
 core = true
 std = true
 fmath = true
-quilting_clifford_bezier = true
-quilting_demo_view = true
 quilting_domain = true
-quilting_oklch = { path = "../../color/quilting_oklch" }
 quilting_patch = true
 quilting_patch_view = true
-quilting_qb = true
+quilting_clifford_bezier = true
 quilting_atlas = true
+quilting_demo_view = true
+quilting_oklch = { path = "../../color/quilting_oklch" }
 classic_quilting_lod = { path = "../classic_quilting_lod" }

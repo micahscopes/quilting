@@ -1,0 +1,304 @@
+//! A quad restricted to two triangles, each covered by a three-child atlas fan.
+//! Interior controls are independent. The shared diagonal has one LoD and an
+//! identity boundary parameterization, independent of either interior warp.
+use core::marker::Copy
+use fmath::{clamp, min, max, smoothstep, wrap_pi}
+use classic_quilting_lod::{FixtureBuffer, patch_triangle_count}
+use quilting_atlas::{AtlasKey, canonicalize, canonical_key_ordinal}
+use quilting_domain::{Bary3F, bary3f, vec2f, vec3f}
+use quilting_patch::{BilinearCornerScales, TriangleDomain2, triangle_parameter}
+use quilting_patch::barycentric_warp::{ProjectiveTriangleMap, TriangleFan3}
+use quilting_patch_view::{SurfaceVarying, paper_patch, atlas_vertex, atlas_fragment, patch_color}
+use quilting_demo_view::{CameraFrame, ScreenExtent, OrbitCamera, orbit_camera}
+use quilting_oklch::{display_rgb, mix_display_rgb, pack_rgba8}
+use std::web::view::{
+    ApplyParamBindings,
+    Extent,
+    Param,
+    ParamBindingsProvider,
+    Surface,
+    SurfaceEvent,
+    SurfaceState,
+}
+use std::webgpu::{
+    ClipPosition,
+    ComputeInvocation,
+    ComputeSurface,
+    DrawIndirectBuffer,
+    FixedDispatch,
+    Workgroup,
+    Depth24LessEqualMsaa4,
+    FragmentStage,
+    FragmentSurface,
+    GpuProgram,
+    IndirectTriangleList,
+    LatestPerFrame,
+    RasterConfiguration,
+    RasterPlan,
+    RasterVertex,
+    ResponsiveBacking,
+    StandardSurfaceRecovery,
+    SurfaceQuality,
+    SurfaceRecovery,
+    SurfaceScheduling,
+    SurfaceTransition,
+    TriangleList,
+    VertexStage,
+    WebGpuBackend,
+    raster_plan,
+}
+
+extern {
+    const fn __f32_from_i32(_: i32) -> f32
+}
+fn number(_ value: u32) -> f32 {
+    __f32_from_i32(value.downcast_unchecked())
+}
+fn level(_ value: f32) -> u32 {
+    let mut result: u32 = 0
+    while result < 8 && value >= number(result) + 0.5 {
+        result = result + 1
+    }
+    result
+}
+
+struct Params {
+    first_b: Param,
+    first_c: Param,
+    second_b: Param,
+    second_c: Param,
+    first_concentration: Param,
+    second_concentration: Param,
+    outer_lod: Param,
+    diagonal_lod: Param,
+    first_radial_lod: Param,
+    second_radial_lod: Param,
+    show_triangles: Param,
+    wire_px: Param,
+    resolve_weight_constraint: Param,
+    w00: Param,
+    w10: Param,
+    w01: Param,
+    w11: Param,
+    orbit_yaw: Param,
+    orbit_pitch: Param,
+    orbit_distance: Param,
+    res_x: Param,
+    res_y: Param,
+    dragging: Param,
+}
+struct State {
+    first_b: f32,
+    first_c: f32,
+    second_b: f32,
+    second_c: f32,
+    first_concentration: f32,
+    second_concentration: f32,
+    outer_lod: f32,
+    diagonal_lod: f32,
+    first_radial_lod: f32,
+    second_radial_lod: f32,
+    show_triangles: f32,
+    wire_px: f32,
+    resolve_weight_constraint: f32,
+    w00: f32,
+    w10: f32,
+    w01: f32,
+    w11: f32,
+    orbit_yaw: f32,
+    orbit_pitch: f32,
+    orbit_distance: f32,
+    res_x: f32,
+    res_y: f32,
+    dragging: f32,
+}
+impl Copy for State {}
+impl SurfaceState for State {
+    type Params = Params
+}
+derive ApplyParamBindings for State using ParamBindingsProvider
+
+const fn params() -> Params {
+    Params {
+        first_b: Param::log(min: 0.01, max: 100.0, init: 1.0),
+        first_c: Param::log(min: 0.01, max: 100.0, init: 1.0),
+        second_b: Param::log(min: 0.01, max: 100.0, init: 1.0),
+        second_c: Param::log(min: 0.01, max: 100.0, init: 1.0),
+        first_concentration: Param::log(min: 0.0625, max: 16.0, init: 1.0),
+        second_concentration: Param::log(min: 0.0625, max: 16.0, init: 1.0),
+        outer_lod: Param::int(min: 0.0, max: 8.0, init: 3.0),
+        diagonal_lod: Param::int(min: 0.0, max: 8.0, init: 4.0),
+        first_radial_lod: Param::int(min: 0.0, max: 8.0, init: 4.0),
+        second_radial_lod: Param::int(min: 0.0, max: 8.0, init: 4.0),
+        show_triangles: Param::toggle(init: true),
+        wire_px: Param::range(min: 0.0, max: 1.6, init: 0.35),
+        resolve_weight_constraint: Param::toggle(init: true),
+        w00: Param::log(min: 0.02, max: 8.0, init: 1.0),
+        w10: Param::log(min: 0.02, max: 8.0, init: 1.0),
+        w01: Param::log(min: 0.02, max: 8.0, init: 1.0),
+        w11: Param::log(min: 0.02, max: 8.0, init: 1.0),
+        orbit_yaw: Param::range(min: -3.14159265, max: 3.14159265, init: -0.72),
+        orbit_pitch: Param::range(min: -1.35, max: 1.35, init: 0.12),
+        orbit_distance: Param::log(min: 2.5, max: 16.0, init: 6.2),
+        res_x: Param::extent_x(),
+        res_y: Param::extent_y(),
+        dragging: Param::fixed(0.0),
+    }
+}
+
+/// Positive ratios keep the point strictly inside the parent triangle.
+fn focus(_ b: f32, _ c: f32) -> Bary3F {
+    let d = 1.0 + b + c
+    bary3f(1.0 / d, b / d, c / d)
+}
+
+/// A stable two-level address: half, then the edge opposite a parent corner.
+struct FanLeaf { half: u32, edge: u32 }
+impl Copy for FanLeaf {}
+impl FanLeaf {
+    fn parent(self) -> TriangleDomain2 {
+        if self.half == 0 {
+            TriangleDomain2 { a: vec2f(0.0, 0.0), b: vec2f(1.0, 0.0), c: vec2f(1.0, 1.0) }
+        } else {
+            TriangleDomain2 { a: vec2f(0.0, 0.0), b: vec2f(1.0, 1.0), c: vec2f(0.0, 1.0) }
+        }
+    }
+    fn diagonal(self) -> bool {
+        (self.half == 0 && self.edge == 1) || (self.half == 1 && self.edge == 2)
+    }
+    fn key(self, _ outer: f32, _ diagonal: f32, _ first: f32, _ second: f32) -> AtlasKey {
+        let radial = level(if self.half == 0 { first } else { second })
+        AtlasKey { a: level(if self.diagonal() { diagonal } else { outer }), b: radial, c: radial }
+    }
+    fn domain(self, _ first: Bary3F, _ second: Bary3F) -> TriangleDomain2 {
+        TriangleFan3 { interior: if self.half == 0 { first } else { second } }
+            .domain(self.parent(), self.edge)
+    }
+}
+fn leaf(_ index: u32) -> FanLeaf {
+    FanLeaf { half: index / 3, edge: index % 3 }
+}
+fn vertices(_ fixture: FixtureBuffer, _ key: AtlasKey) -> u32 {
+    patch_triangle_count(fixture, canonical_key_ordinal(canonicalize(key).key)) * 3
+}
+fn camera(_ width: f32, _ height: f32, _ yaw: f32, _ pitch: f32, _ distance: f32) -> CameraFrame {
+    orbit_camera(
+        OrbitCamera {
+            target: vec3f(1.1, 0.0, 0.0),
+            yaw: yaw,
+            pitch: pitch,
+            distance: distance,
+            focal: 1.62,
+            near: 0.05,
+            far: 100.0,
+        },
+        ScreenExtent { width: width, height: height },
+    )
+}
+fn corner(_ index: u32) -> Bary3F {
+    if index == 0 {
+        bary3f(1.0, 0.0, 0.0)
+    } else if index == 1 {
+        bary3f(0.0, 1.0, 0.0)
+    } else {
+        bary3f(0.0, 0.0, 1.0)
+    }
+}
+pub struct Diagram { pub edge: Bary3F, pub index: f32 }
+impl Copy for Diagram {}
+struct Draw {}
+
+actor PairedTriangleFans uses (GpuProgram<WebGpuBackend>,SurfaceQuality<ResponsiveBacking>,SurfaceRecovery<StandardSurfaceRecovery>) {
+    first_b:f32,first_c:f32,second_b:f32,second_c:f32,
+    first_concentration:f32,second_concentration:f32,
+    outer_lod:f32,diagonal_lod:f32,first_radial_lod:f32,second_radial_lod:f32,
+    show_triangles:f32,wire_px:f32,resolve_weight_constraint:f32,
+    w00:f32,w10:f32,w01:f32,w11:f32,
+    orbit_yaw:f32,orbit_pitch:f32,orbit_distance:f32,
+    res_x:f32,res_y:f32,dragging:f32,
+    fixture:FixtureBuffer,draw:DrawIndirectBuffer<Draw>,
+
+    const fn raster()->RasterPlan uses (RasterConfiguration) { raster_plan<Depth24LessEqualMsaa4>() }
+    const fn view()->Surface<Params> { Surface {extent:Extent::square(768),params:params()} }
+    fn transition(self,event:SurfaceEvent)->State uses (SurfaceTransition,SurfaceScheduling<LatestPerFrame>) {
+        let mut next=State {
+            first_b:self.first_b,first_c:self.first_c,second_b:self.second_b,second_c:self.second_c,
+            first_concentration:self.first_concentration,second_concentration:self.second_concentration,
+            outer_lod:self.outer_lod,diagonal_lod:self.diagonal_lod,
+            first_radial_lod:self.first_radial_lod,second_radial_lod:self.second_radial_lod,
+            show_triangles:self.show_triangles,wire_px:self.wire_px,resolve_weight_constraint:self.resolve_weight_constraint,
+            w00:self.w00,w10:self.w10,w01:self.w01,w11:self.w11,
+            orbit_yaw:self.orbit_yaw,orbit_pitch:self.orbit_pitch,orbit_distance:self.orbit_distance,
+            res_x:self.res_x,res_y:self.res_y,dragging:self.dragging,
+        }.apply_param_bindings(params(),event)
+        let changed=next.w00!=self.w00 || next.w10!=self.w10 || next.w01!=self.w01 || next.w11!=self.w11
+            || next.resolve_weight_constraint!=self.resolve_weight_constraint
+        if event.is_param_edit() && changed && next.resolve_weight_constraint>0.5 {
+            let w=BilinearCornerScales {w00:next.w00,w10:next.w10,w01:next.w01,w11:next.w11}.separable()
+            let low=min(min(w.w00,w.w10),min(w.w01,w.w11))
+            let high=max(max(w.w00,w.w10),max(w.w01,w.w11))
+            let fitted=w.scaled(clamp(1.0,0.02/low,8.0/high))
+            next.w00=fitted.w00
+            next.w10=fitted.w10
+            next.w01=fitted.w01
+            next.w11=fitted.w11
+        }
+        if event.is_pointer_down() {next.dragging=1.0}
+        if event.is_pointer_move() && event.buttons!=0 && next.dragging>0.5 {
+            next.orbit_yaw=wrap_pi(next.orbit_yaw-event.delta_x*0.008)
+            next.orbit_pitch=clamp(next.orbit_pitch-event.delta_y*0.008,-1.35,1.35)
+        }
+        if event.is_pointer_up() {next.dragging=0.0}
+        if event.wheel_delta<0.0 {next.orbit_distance=clamp(next.orbit_distance*0.9,2.5,16.0)}
+        else if event.wheel_delta>0.0 {next.orbit_distance=clamp(next.orbit_distance*1.1,2.5,16.0)}
+        next
+    }
+    fn prepare_draw(self,invocation:ComputeInvocation) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+        let mut count:u32=0
+        let mut i:u32=0
+        while i<6 {
+            count=count+vertices(self.fixture,leaf(i).key(self.outer_lod,self.diagonal_lod,self.first_radial_lod,self.second_radial_lod))
+            i=i+1
+        }
+        self.draw.store(index:0,value:count)
+        self.draw.store(index:1,value:1)
+        self.draw.store(index:2,value:0)
+        self.draw.store(index:3,value:0)
+    }
+    fn background(self,px:i32,py:i32)->i32 uses (FragmentSurface) { -15396337 }
+    fn surface_vertices(self,vertex_index:u32,instance_index:u32)->RasterVertex<SurfaceVarying>
+        uses (VertexStage<SurfaceVarying,IndirectTriangleList<DrawIndirectBuffer<Draw>>>) {
+        let mut index:u32=0
+        let mut vertex=vertex_index
+        let mut requested=leaf(0).key(self.outer_lod,self.diagonal_lod,self.first_radial_lod,self.second_radial_lod)
+        while index<5 && vertex>=vertices(self.fixture,requested) {
+            vertex=vertex-vertices(self.fixture,requested)
+            index=index+1
+            requested=leaf(index).key(self.outer_lod,self.diagonal_lod,self.first_radial_lod,self.second_radial_lod)
+        }
+        let domain=leaf(index).domain(focus(self.first_b,self.first_c),focus(self.second_b,self.second_c))
+        let value=paper_patch(BilinearCornerScales {w00:self.w00,w10:self.w10,w01:self.w01,w11:self.w11})
+        let concentration=if index<3 {self.first_concentration} else {self.second_concentration}
+        let warp=ProjectiveTriangleMap {weights:bary3f(concentration,1.0,1.0)}
+        atlas_vertex(self.fixture,requested,value,domain,warp,vertex,index,
+            camera(self.res_x,self.res_y,self.orbit_yaw,self.orbit_pitch,self.orbit_distance),
+            ScreenExtent {width:self.res_x,height:self.res_y})
+    }
+    fn surface_fragment(self,varying:SurfaceVarying)->i32 uses (FragmentStage<SurfaceVarying>) {
+        atlas_fragment(varying,true,self.show_triangles,self.wire_px)
+    }
+    fn diagram_vertices(self,vertex_index:u32)->RasterVertex<Diagram> uses (VertexStage<Diagram,TriangleList<18>>) {
+        let index=vertex_index/3
+        let bary=corner(vertex_index%3)
+        let uv=triangle_parameter(leaf(index).domain(focus(self.first_b,self.first_c),focus(self.second_b,self.second_c)),bary)
+        let side=min(self.res_x,self.res_y)*0.17
+        RasterVertex {
+            position:ClipPosition {x:-0.92+uv.x*side*2.0/self.res_x,y:-0.88+uv.y*side*2.0/self.res_y,z:0.0,w:1.0},
+            varying:Diagram {edge:bary,index:number(index)},
+        }
+    }
+    fn diagram_fragment(self,varying:Diagram)->i32 uses (FragmentStage<Diagram>) {
+        let line=1.0-smoothstep(0.0,0.035,min(varying.edge.a,min(varying.edge.b,varying.edge.c)))
+        pack_rgba8(mix_display_rgb(patch_color(varying.index,true),display_rgb(0.018,0.025,0.043),line))
+    }
+}

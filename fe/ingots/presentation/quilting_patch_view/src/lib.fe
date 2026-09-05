@@ -1,0 +1,262 @@
+//! Shared resident-atlas rendering for exact Clifford patch explorers.
+//! Patch subdivision and sampling policy belong to the caller.
+use core::marker::Copy
+use classic_quilting_lod::{
+    FixtureBuffer,
+    fixture_barycentric,
+    fixture_triangle_index,
+    patch_first_triangle,
+}
+use quilting_atlas::{AtlasKey, canonicalize, canonical_key_ordinal, edge_permutation_index}
+use quilting_qb::remap_barycentric
+use quilting_domain::{Bary3F, Vec3F, bary3f, vec3f, absf, dot3, normalize3_or}
+use quilting_patch::{BilinearCornerScales, TriangleDomain2, triangle_parameter}
+use quilting_patch::barycentric_warp::ProjectiveTriangleMap
+use quilting_clifford_bezier::{
+    IsotropicBilinearPatch,
+    IsotropicPolicy,
+    control,
+    even,
+    patch,
+    scale_weight,
+    evaluate,
+    evaluate_differential,
+}
+use quilting_demo_view::{CameraFrame, ScreenExtent, project, triangle_pixel_altitude}
+use quilting_oklch::{
+    Oklch,
+    DisplayRgb,
+    display_rgb,
+    mix_display_rgb,
+    oklch,
+    pack_rgba8,
+    scale_lightness_chroma,
+    to_display_rgb,
+}
+use fmath::smoothstep
+use std::webgpu::{ClipPosition, RasterVertex}
+extern {
+    const fn __f32_from_i32(_: i32) -> f32
+}
+fn as_f32(_ value: u32) -> f32 {
+    __f32_from_i32(value.downcast_unchecked())
+}
+fn minimum(_ a: f32, _ b: f32) -> f32 {
+    if a < b { a } else { b }
+}
+fn maximum(_ a: f32, _ b: f32) -> f32 {
+    if a > b { a } else { b }
+}
+fn minimum_barycentric(_ p: Bary3F) -> f32 {
+    minimum(p.a, minimum(p.b, p.c))
+}
+pub fn paper_patch(_ state: BilinearCornerScales) -> IsotropicBilinearPatch {
+    patch(
+        control(
+            vec3f(0.0, 2.0, 0.0),
+            scale_weight(even(1.0, 0.0, 0.0, 0.0), state.w00),
+        ),
+        control(
+            vec3f(0.0, 1.0, 0.0),
+            scale_weight(even(0.0, 1.0, 0.0, -1.0), state.w10),
+        ),
+        control(
+            vec3f(0.0, -2.0, 0.0),
+            scale_weight(even(0.0, 2.0, 0.0, 1.0), state.w01),
+        ),
+        control(
+            vec3f(0.0, -1.0, 0.0),
+            scale_weight(even(-6.0, 0.0, -3.0, 0.0), state.w11),
+        ),
+    )
+}
+
+pub fn policy() -> IsotropicPolicy {
+    IsotropicPolicy {
+        minimum_denominator_norm_squared: 0.000000000001,
+        maximum_trivector_residual: 0.00001,
+    }
+}
+
+pub fn atlas_barycentric(_ fixture: FixtureBuffer, _ requested: AtlasKey, _ vertex: u32) -> Bary3F {
+    let canonical = canonicalize(requested)
+    let patch_id = canonical_key_ordinal(canonical.key)
+    let triangle = patch_first_triangle(fixture, patch_id) + vertex / 3
+    let point = fixture_barycentric(
+        fixture,
+        fixture_triangle_index(fixture, triangle, vertex % 3),
+    )
+    remap_barycentric(edge_permutation_index(canonical.permutation), point)
+}
+
+fn triangle_corner(_ corner: u32) -> Bary3F {
+    if corner == 0 {
+        bary3f(1.0, 0.0, 0.0)
+    } else if corner == 1 {
+        bary3f(0.0, 1.0, 0.0)
+    } else {
+        bary3f(0.0, 0.0, 1.0)
+    }
+}
+
+pub struct SurfaceVarying {
+    pub triangle_edge: Bary3F,
+    pub patch_edge: Bary3F,
+    pub normal: Vec3F,
+    pub patch_index: f32,
+    pub view_depth: f32,
+    pub valid: f32,
+}
+impl Copy for SurfaceVarying {}
+
+fn invalid_surface_vertex() -> RasterVertex<SurfaceVarying> {
+    RasterVertex {
+        position: ClipPosition { x: 2.0, y: 2.0, z: 0.0, w: 1.0 },
+        varying: SurfaceVarying {
+            triangle_edge: bary3f(0.0, 0.0, 0.0),
+            patch_edge: bary3f(0.0, 0.0, 0.0),
+            normal: vec3f(0.0, 0.0, 1.0),
+            patch_index: 0.0,
+            view_depth: 1.0,
+            valid: 0.0,
+        },
+    }
+}
+
+fn patch_paint(_ index: f32, _ split: bool) -> Oklch {
+    if !split {
+        if index < 0.5 {
+            oklch(0.74, 0.075, 0.72)
+        } else {
+            oklch(0.72, 0.070, 0.92)
+        }
+    } else if index < 0.5 {
+        oklch(0.75, 0.095, 0.48)
+    } else if index < 1.5 {
+        oklch(0.76, 0.085, 1.38)
+    } else if index < 2.5 {
+        oklch(0.72, 0.080, 5.72)
+    } else if index < 3.5 {
+        oklch(0.73, 0.090, 4.88)
+    } else if index < 4.5 {
+        oklch(0.75, 0.070, 3.35)
+    } else {
+        oklch(0.74, 0.075, 2.40)
+    }
+}
+
+pub fn patch_color(_ index: f32, _ split: bool) -> DisplayRgb {
+    to_display_rgb(patch_paint(index, split))
+}
+
+fn shade(_ varying: SurfaceVarying, _ split: bool) -> DisplayRgb {
+    let normal = normalize3_or(varying.normal, vec3f(0.0, 0.0, 1.0), 0.0000001)
+    let light = normalize3_or(vec3f(-0.35, 0.48, 0.82), vec3f(0.0, 0.0, 1.0), 0.0000001)
+    let facing = absf(dot3(normal, light))
+    to_display_rgb(
+        scale_lightness_chroma(
+            patch_paint(varying.patch_index, split),
+            0.72 + 0.30 * facing,
+            1.0,
+        ),
+    )
+}
+
+pub fn atlas_vertex(
+    _ fixture: FixtureBuffer,
+    _ requested: AtlasKey,
+    _ original: IsotropicBilinearPatch,
+    _ domain: TriangleDomain2,
+    _ warp: ProjectiveTriangleMap,
+    _ patch_vertex: u32,
+    _ patch_index: u32,
+    _ camera_value: CameraFrame,
+    _ screen_extent: ScreenExtent,
+) -> RasterVertex<SurfaceVarying> {
+    let bary = atlas_barycentric(fixture, requested, patch_vertex)
+    let differential = evaluate_differential(
+        original,
+        triangle_parameter(domain, warp.map(bary)),
+        policy(),
+        0.000000000001,
+    )
+    if !differential.sample.conditioned {
+        return invalid_surface_vertex()
+    }
+    let triangle_start = patch_vertex / 3 * 3
+    let bary0 = atlas_barycentric(fixture, requested, triangle_start)
+    let bary1 = atlas_barycentric(fixture, requested, triangle_start + 1)
+    let bary2 = atlas_barycentric(fixture, requested, triangle_start + 2)
+    let sample0 = evaluate(
+        original,
+        triangle_parameter(domain, warp.map(bary0)),
+        policy(),
+    )
+    let sample1 = evaluate(
+        original,
+        triangle_parameter(domain, warp.map(bary1)),
+        policy(),
+    )
+    let sample2 = evaluate(
+        original,
+        triangle_parameter(domain, warp.map(bary2)),
+        policy(),
+    )
+    let projected = project(camera_value, differential.sample.position)
+    let projected0 = project(camera_value, sample0.position)
+    let projected1 = project(camera_value, sample1.position)
+    let projected2 = project(camera_value, sample2.position)
+    if projected.depth <= 0.05 {
+        return invalid_surface_vertex()
+    }
+    let altitude = triangle_pixel_altitude(
+        projected0,
+        projected1,
+        projected2,
+        patch_vertex % 3,
+        screen_extent,
+    )
+    let corner = triangle_corner(patch_vertex % 3)
+    RasterVertex {
+        position: projected.clip,
+        varying: SurfaceVarying {
+            triangle_edge: bary3f(
+                corner.a * altitude * projected.depth,
+                corner.b * altitude * projected.depth,
+                corner.c * altitude * projected.depth,
+            ),
+            patch_edge: bary,
+            normal: differential.normal,
+            patch_index: as_f32(patch_index),
+            view_depth: projected.depth,
+            valid: if differential.sample.vector_valued {
+                1.0
+            } else {
+                0.0
+            },
+        },
+    }
+}
+pub fn atlas_fragment(
+    _ varying: SurfaceVarying,
+    _ split: bool,
+    _ show_triangles: f32,
+    _ wire_px: f32,
+) -> i32 {
+    let surface = if varying.valid > 0.5 {
+        shade(varying, split)
+    } else {
+        to_display_rgb(oklch(0.64, 0.21, 0.39))
+    }
+    let triangle_pixels = minimum_barycentric(varying.triangle_edge) / varying.view_depth
+    let triangle_line = if show_triangles > 0.5 {
+        1.0 - smoothstep(wire_px - 0.70, wire_px + 0.70, triangle_pixels)
+    } else {
+        0.0
+    }
+    let patch_line = 1.0 - smoothstep(0.0, 0.012, minimum_barycentric(varying.patch_edge))
+    let coverage = maximum(triangle_line * 0.62, patch_line)
+    pack_rgba8(
+        mix_display_rgb(surface, display_rgb(0.018, 0.025, 0.043), coverage),
+    )
+}

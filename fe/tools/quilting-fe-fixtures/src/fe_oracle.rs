@@ -193,6 +193,57 @@ fn projective_control_pullback_wasm_matches_exact_surface_and_normals() {
 }
 
 #[test]
+fn nested_triangle_fans_wasm_preserve_domain_surface_and_diagonal() {
+    let (mut store, instance) = instantiate();
+    let sample = function::<(u32,u32,f32,f32,f32,f32,f32,u32),f32>(
+        &mut store,&instance,"nested_fan_sample_lane");
+    for (fb,fc,strength) in [(1.0,1.0,1.0),(0.01,100.0,0.0625),(100.0,0.01,16.0),(0.25,4.0,4.0)] {
+        let mut area = 0.0_f64;
+        for half in 0..2 { for child in 0..3 {
+            let mut uv = [[0.0_f64;2];3];
+            for (i,(a,b)) in [(1.0,0.0),(0.0,1.0),(0.0,0.0)].into_iter().enumerate() {
+                for lane in 0..2 {
+                    uv[i][lane] = sample.call(&mut store,(half,child,fb,fc,strength,a,b,lane as u32)).unwrap() as f64;
+                }
+            }
+            let signed = (uv[1][0]-uv[0][0])*(uv[2][1]-uv[0][1])-(uv[1][1]-uv[0][1])*(uv[2][0]-uv[0][0]);
+            assert!(signed>0.0,"each child retains orientation");
+            area += signed*0.5;
+            for (a,b) in [(0.25,0.25),(0.5,0.25),(0.125,0.625)] {
+                let u=sample.call(&mut store,(half,child,fb,fc,strength,a,b,0)).unwrap();
+                let v=sample.call(&mut store,(half,child,fb,fc,strength,a,b,1)).unwrap();
+                let (expected,_) = crate::clifford_oracle::paper_sample(u as f64,v as f64);
+                for lane in 0..3 {
+                    let actual=sample.call(&mut store,(half,child,fb,fc,strength,a,b,(lane+2) as u32)).unwrap();
+                    assert_close(actual,expected[lane] as f32,0.0001*(1.0+expected[lane].abs()) as f32,"nested exact child vs original surface");
+                }
+            }
+        }}
+        assert!((area-1.0).abs()<0.000002,"six children partition the square");
+    }
+    let mut child_normal_disagreement = 0.0_f32;
+    for i in 0..=256 {
+        let t=i as f32/256.0;
+        for lane in 0..14 {
+            // First half's diagonal is C->A, second half's is A->B.
+            // Independent interior positions and concentrations must not move it.
+            let left=sample.call(&mut store,(0,1,0.01,100.0,16.0,0.0,t,lane)).unwrap();
+            let right=sample.call(&mut store,(1,2,100.0,0.01,0.0625,0.0,1.0-t,lane)).unwrap();
+            if (5..8).contains(&lane) {
+                // Thin children amplify f32 cancellation in their reconstructed
+                // differential. Display uses the original differential instead.
+                child_normal_disagreement=child_normal_disagreement.max((left-right).abs());
+                assert!(left.is_finite() && right.is_finite());
+            } else {
+                assert_close(left,right,0.0001,"independent fans share diagonal; root evaluation avoids child differential cancellation");
+            }
+            if lane<2 || lane>=8 {assert_eq!(left.to_bits(),right.to_bits(),"shared root evaluation matches bitwise");}
+        }
+    }
+    eprintln!("thin child-net maximum normal-component disagreement: {child_normal_disagreement}");
+}
+
+#[test]
 fn radial_atlas_fan_wasm_preserves_seams_and_triangle_orientation() {
     let (mut store, instance) = instantiate();
     let warp = function::<(f32,f32,f32,f32,u32),f32>(&mut store,&instance,"radial_warp_lane");

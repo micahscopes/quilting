@@ -3,7 +3,7 @@
 
 use core::marker::Copy
 use quilting_domain::{Bary3F, bary3f}
-use super::{LinearElement, ProjectiveAlgebra, QuadraticTrianglePatch,
+use super::{LinearElement, ProjectiveAlgebra, QuadraticTrianglePatch, TriangleDomain2, triangle_parameter,
     QuadraticTriangularProjectiveControls}
 
 /// Positive homogeneous weights at the three parameter-triangle corners.
@@ -74,6 +74,16 @@ pub struct TriangleFan3 { pub interior: Bary3F }
 impl Copy for TriangleFan3 {}
 
 impl TriangleFan3 {
+    /// Exact affine child restriction, with the interior point in lane A.
+    /// Composition through the parent retains the original parameter chart.
+    pub fn domain(self, _ parent: TriangleDomain2, _ child: u32) -> TriangleDomain2 {
+        TriangleDomain2 {
+            a: triangle_parameter(parent,self.map(child,bary3f(1.0,0.0,0.0))),
+            b: triangle_parameter(parent,self.map(child,bary3f(0.0,1.0,0.0))),
+            c: triangle_parameter(parent,self.map(child,bary3f(0.0,0.0,1.0))),
+        }
+    }
+
     pub fn map(self, _ child: u32, _ local: Bary3F) -> Bary3F {
         let a = local.a * self.interior.a
         let b = local.a * self.interior.b

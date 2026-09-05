@@ -40,7 +40,7 @@ use quilting_domain::{
     vec2f,
     vec3f,
 }
-use quilting_patch::{BilinearCornerScales, DenotationSample, Euclidean3Points, TriangleDomain2, denote, measure_tangent_triangle3}
+use quilting_patch::{BilinearCornerScales, DenotationSample, Euclidean3Points, TriangleDomain2, denote, measure_tangent_triangle3, triangle_parameter}
 use quilting_patch::barycentric_warp::{ProjectiveTriangleMap, RadialTriangleMap, TriangleFan3}
 use quilting_quaternion::{QuatF, inverse_bounded, multiply, quatf, zero}
 use quilting_qb::{
@@ -75,6 +75,42 @@ pub fn projective_triangle_lane(
 ) -> f32 {
     let result = ProjectiveTriangleMap { weights: bary3f(wa,wb,wc) }.map(bary3f(a,b,c))
     if lane == 0 { result.a } else if lane == 1 { result.b } else { result.c }
+}
+
+/// Exercise the production affine fan restriction and exact control pullback.
+pub fn nested_fan_sample_lane(
+    _ half:u32,_ child:u32,_ fb:f32,_ fc:f32,_ strength:f32,
+    _ a:f32,_ b:f32,_ lane:u32,
+)->f32 {
+    let parent=if half==0 {
+        TriangleDomain2 {a:vec2f(0.0,0.0),b:vec2f(1.0,0.0),c:vec2f(1.0,1.0)}
+    } else {
+        TriangleDomain2 {a:vec2f(0.0,0.0),b:vec2f(1.0,1.0),c:vec2f(0.0,1.0)}
+    }
+    let total=1.0+fb+fc
+    let domain=TriangleFan3 {interior:bary3f(1.0/total,fb/total,fc/total)}.domain(parent,child)
+    let map=ProjectiveTriangleMap {weights:bary3f(strength,1.0,1.0)}
+    let bary=bary3f(a,b,1.0-a-b)
+    let uv=triangle_parameter(domain,map.map(bary))
+    if lane==0 {return uv.x}
+    if lane==1 {return uv.y}
+    if lane>=8 {
+        let direct=evaluate_isotropic_differential(paper_clifford_patch(),uv,clifford_policy(),0.000000000001)
+        if lane==8 {return direct.sample.position.x}
+        if lane==9 {return direct.sample.position.y}
+        if lane==10 {return direct.sample.position.z}
+        if lane==11 {return direct.normal.x}
+        if lane==12 {return direct.normal.y}
+        return direct.normal.z
+    }
+    let controls=map.quadratic_patch<IsotropicCliffordAlgebra>(triangular_projective_controls(paper_clifford_patch(),domain))
+    let sample=evaluate_triangular_projective_differential(controls,bary,clifford_policy(),0.000000000001)
+    if lane==2 {sample.sample.position.x}
+    else if lane==3 {sample.sample.position.y}
+    else if lane==4 {sample.sample.position.z}
+    else if lane==5 {sample.normal.x}
+    else if lane==6 {sample.normal.y}
+    else {sample.normal.z}
 }
 
 pub fn radial_fan_lane(

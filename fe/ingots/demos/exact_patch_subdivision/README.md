@@ -21,13 +21,15 @@ applies when four pieces are displayed; the no-subdivision comparison ignores
 it. The center search currently scores the unwarped child regions, not this
 new sampling distribution.
 
-The coordinate map is absorbed exactly into the quadratic numerator and
+The coordinate map can also be absorbed exactly into the quadratic numerator and
 denominator controls: each corner/edge coefficient is multiplied by the
 corresponding product of two barycentric weights. Both fields gain the same
 scalar denominator-squared factor, which cancels in their quotient. The shared
 Fe operation is generic over `ProjectiveAlgebra` and `LinearElement`; it does
-not hardcode a GA metric. The family-specific evaluator supplies analytic
-positions and normals after the reparameterization.
+not hardcode a GA metric. The display now maps atlas coordinates into the
+original chart and evaluates the original patch directly. This is algebraically
+equivalent but avoids reconstructing tiny child nets, whose f32 derivatives can
+lose precision. Exact restriction/pullback remains a separately tested operation.
 
 This viewer uses the same resident blue-noise atlas as Radial Atlas Fan:
 165 canonical edge triples spanning LoD 0–8, with permutations restored before
@@ -35,8 +37,11 @@ evaluation. `mesh_lod` selects the outer edges and `radial_lod` the edges
 incident to the center. A GPU compute pass writes the selected tile's indirect
 draw count; the render pass instances it across the exact children. Interaction
 does not read geometry back to the CPU or rebuild/upload a display mesh.
-The resident artifact is 24,871,552 bytes. Exact child controls are still
-reconstructed per vertex; caching those per child is a remaining optimization.
+The resident artifact is 24,871,552 bytes. Both this explorer and Two Triangles,
+Two Fans use `quilting_patch_view` for atlas lookup, original-surface evaluation,
+analytic normals, depth shading, and pixel-width wires. Leaf transforms and
+atlas lookups are still repeated per vertex; caching per-leaf plans remains an
+optimization opportunity.
 A fixed pair of LoDs retains the same triangle count as concentration changes.
 Valid parameter topology does not guarantee an accurate or well-shaped display
 mesh on the surface.
