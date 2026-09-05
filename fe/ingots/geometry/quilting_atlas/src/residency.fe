@@ -12,6 +12,15 @@ pub struct TileReservation {
 }
 impl Copy for TileReservation {}
 
+/// Validate a persisted allocation head without trusting its provenance.
+pub const fn reserve_ranges(_ vertex_capacity:u32,_ triangle_capacity:u32,
+    _ vertices_used:u32,_ triangles_used:u32,_ vertices:u32,_ triangles:u32)->TileReservation {
+    let valid=vertices_used<=vertex_capacity && triangles_used<=triangle_capacity
+        && vertices<=vertex_capacity-vertices_used && triangles<=triangle_capacity-triangles_used
+    TileReservation {vertex_offset:vertices_used,triangle_offset:triangles_used,
+        vertices:vertices,triangles:triangles,valid:valid}
+}
+
 pub struct AtlasArena {
     vertex_capacity:u32,
     triangle_capacity:u32,
@@ -26,13 +35,9 @@ impl AtlasArena {
     /// Single-writer allocation, shared by CPU and GPU providers. Rejection
     /// consumes neither arena. Subtraction-before-addition excludes wraparound.
     pub const fn reserve(mut self,_ vertices:u32,_ triangles:u32)->TileReservation {
-        let valid=vertices<=self.vertex_capacity-self.vertices_used
-            && triangles<=self.triangle_capacity-self.triangles_used
-        let result=TileReservation {
-            vertex_offset:self.vertices_used,triangle_offset:self.triangles_used,
-            vertices:vertices,triangles:triangles,valid:valid,
-        }
-        if valid {
+        let result=reserve_ranges(self.vertex_capacity,self.triangle_capacity,
+            self.vertices_used,self.triangles_used,vertices,triangles)
+        if result.valid {
             self.vertices_used=self.vertices_used+vertices
             self.triangles_used=self.triangles_used+triangles
         }
@@ -60,6 +65,8 @@ fn atlas_reservations_are_disjoint_and_fail_atomically() {
 
 #[test]
 fn atlas_reservations_do_not_wrap_at_word_limit() {
+    assert(!reserve_ranges(2,2,3,0,0,0).valid)
+    assert(!reserve_ranges(2,2,0,3,0,0).valid)
     let mut arena=AtlasArena::new(0xffffffff,0xffffffff)
     assert(arena.reserve(0xfffffffe,0xfffffffe).valid)
     assert(!arena.reserve(2,1).valid)

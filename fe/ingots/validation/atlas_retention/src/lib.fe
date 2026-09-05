@@ -1,0 +1,58 @@
+//! Small GPU acceptance case, not a tessellation generator. Authored input
+//! makes scratch reuse, incomplete copies and failed publication observable.
+use std::webgpu::{StorageBuffer,AtomicStorageBuffer,GpuProgram,WebGpuBackend,
+    ComputeSurface,ComputeInvocation,Workgroup,FixedDispatch}
+use quilting_atlas_webgpu::residency
+
+actor AtlasRetention uses (GpuProgram<WebGpuBackend>) {
+    header:StorageBuffer<u32,5>,
+    directory:StorageBuffer<u32,40>,
+    copied:AtomicStorageBuffer<5>,
+    points:StorageBuffer<u32,9>,
+    triangles:StorageBuffer<u32,4>,
+    resident_points:StorageBuffer<u32,27>,
+    resident_triangles:StorageBuffer<u32,9>,
+
+    fn initialize(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<8,1,1>,FixedDispatch<1,1,1>>) {
+        residency::initialize<5,40>(self.header,self.directory,self.copied,7,i)
+        if i.global.x<3 {
+            self.points.store(index:i.global.x*3,value:i.global.x+10)
+            self.points.store(index:i.global.x*3+1,value:i.global.x+20)
+            self.points.store(index:i.global.x*3+2,value:i.global.x+30)
+            self.triangles.store(index:i.global.x,value:i.global.x)
+        }
+        if i.global.x==0 {self.triangles.store(index:3,value:1)}
+    }
+    fn reserve(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+        residency::reserve<5,40>(self.header,self.directory,self.copied,7,0,100,3,1,9,3,true)
+        residency::reserve<5,40>(self.header,self.directory,self.copied,7,1,101,3,1,9,3,false)
+        residency::reserve<5,40>(self.header,self.directory,self.copied,7,2,102,10,1,9,3,true)
+        residency::reserve<5,40>(self.header,self.directory,self.copied,7,3,103,3,1,9,3,true)
+        residency::reserve<5,40>(self.header,self.directory,self.copied,7,4,104,3,1,9,3,true)
+    }
+    fn copy(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<4,1,1>,FixedDispatch<1,1,1>>) {
+        residency::copy_tile<5,40,9,4,27,9>(self.directory,self.copied,self.points,self.triangles,
+            self.resident_points,self.resident_triangles,7,0,i)
+        if i.global.x<2 {
+            residency::copy_tile<5,40,9,4,27,9>(self.directory,self.copied,self.points,self.triangles,
+                self.resident_points,self.resident_triangles,7,3,i)
+        }
+    }
+    fn corrupt_scratch(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+        self.triangles.store(index:0,value:3)
+        self.points.store(index:0,value:999)
+    }
+    fn invalid_copy(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<4,1,1>,FixedDispatch<1,1,1>>) {
+        residency::copy_tile<5,40,9,4,27,9>(self.directory,self.copied,self.points,self.triangles,
+            self.resident_points,self.resident_triangles,7,4,i)
+    }
+    fn publish(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+        residency::publish<5,40>(self.header,self.directory,self.copied,6,0)
+        let mut job:u32=0
+        while job<5 {
+            residency::publish<5,40>(self.header,self.directory,self.copied,7,job)
+            job=job+1
+        }
+        residency::publish<5,40>(self.header,self.directory,self.copied,7,0)
+    }
+}

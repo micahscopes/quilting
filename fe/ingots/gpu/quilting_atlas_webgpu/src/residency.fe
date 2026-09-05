@@ -1,0 +1,118 @@
+//! GPU atlas retention: reserve -> parallel copy -> publish. These are separate
+//! dispatches. A single writer reserves/publishes each job; copy lanes use an
+//! atomic completion count. Scratch may be reused only after the copy dispatch.
+use std::webgpu::{StorageBuffer,AtomicStorageBuffer,ComputeInvocation}
+use quilting_atlas::residency::reserve_ranges
+
+pub const RECORD_WORDS:usize=8
+pub const EMPTY:u32=0
+pub const RESERVED:u32=1
+pub const READY:u32=2
+pub const FAILED:u32=3
+// Header: epoch, used vertices, used triangles, ready jobs, failed jobs.
+// Record: state, epoch, key code, vertex offset, triangle offset, vertices,
+// triangles, reserved (zero). Coordinates use 3 words, retained faces 3 indices.
+
+pub fn initialize<const JOBS:usize,const WORDS:usize>(
+    _ header:StorageBuffer<u32,5>,_ directory:StorageBuffer<u32,WORDS>,
+    _ copied:AtomicStorageBuffer<JOBS>,_ epoch:u32,_ i:ComputeInvocation,
+) where {WORDS==JOBS*RECORD_WORDS},{JOBS<=0xffffffff/RECORD_WORDS} {
+    let slot=i.global.x
+    if slot<JOBS.downcast_truncate() {
+        directory.store(index:slot*8,value:EMPTY)
+        directory.store(index:slot*8+1,value:epoch)
+        copied.atomic_store(index:slot,value:0)
+    }
+    if slot==0 {
+        header.store(index:0,value:epoch)
+        header.store(index:1,value:0)
+        header.store(index:2,value:0)
+        header.store(index:3,value:0)
+        header.store(index:4,value:0)
+    }
+}
+
+/// Called once per job after mesh certification; never interprets a failed
+/// mesh's counts as usable geometry. Capacities are logical element counts.
+pub fn reserve<const JOBS:usize,const WORDS:usize>(
+    _ header:StorageBuffer<u32,5>,_ directory:StorageBuffer<u32,WORDS>,
+    _ copied:AtomicStorageBuffer<JOBS>,_ epoch:u32,_ job:u32,_ key:u32,
+    _ vertices:u32,_ triangles:u32,_ vertex_capacity:u32,_ triangle_capacity:u32,
+    _ certified:bool,
+) where {WORDS==JOBS*RECORD_WORDS},{JOBS<=0xffffffff/RECORD_WORDS} {
+    if job>=JOBS.downcast_truncate() || header.load(index:0)!=epoch {return}
+    let base=job*8
+    if directory.load(index:base)!=EMPTY || directory.load(index:base+1)!=epoch {return}
+    let r=reserve_ranges(vertex_capacity,triangle_capacity,header.load(index:1),
+        header.load(index:2),vertices,triangles)
+    if !certified || !r.valid || vertices<3 || triangles==0 {
+        directory.store(index:base,value:FAILED)
+        header.store(index:4,value:header.load(index:4)+1)
+        return
+    }
+    header.store(index:1,value:r.vertex_offset+vertices)
+    header.store(index:2,value:r.triangle_offset+triangles)
+    directory.store(index:base+2,value:key)
+    directory.store(index:base+3,value:r.vertex_offset)
+    directory.store(index:base+4,value:r.triangle_offset)
+    directory.store(index:base+5,value:vertices)
+    directory.store(index:base+6,value:triangles)
+    directory.store(index:base+7,value:0)
+    copied.atomic_store(index:job,value:0)
+    directory.store(index:base,value:RESERVED)
+}
+
+pub fn copy_tile<const JOBS:usize,const WORDS:usize,const SP:usize,const ST:usize,
+    const VP:usize,const VT:usize>(
+    _ directory:StorageBuffer<u32,WORDS>,_ copied:AtomicStorageBuffer<JOBS>,
+    _ points:StorageBuffer<u32,SP>,_ triangles:StorageBuffer<u32,ST>,
+    _ resident_points:StorageBuffer<u32,VP>,_ resident_triangles:StorageBuffer<u32,VT>,
+    _ epoch:u32,_ job:u32,_ i:ComputeInvocation,
+) where {WORDS==JOBS*RECORD_WORDS},{JOBS<=0xffffffff/RECORD_WORDS},
+    {SP%3==0},{ST%4==0},{VP%3==0},{VT%3==0},
+    {SP<=0xffffffff},{ST<=0xffffffff},{VP<=0xffffffff},{VT<=0xffffffff} {
+    if job>=JOBS.downcast_truncate() {return}
+    let base=job*8
+    if directory.load(index:base)!=RESERVED || directory.load(index:base+1)!=epoch {return}
+    let nv=directory.load(index:base+5)
+    let nt=directory.load(index:base+6)
+    let vo=directory.load(index:base+3)
+    let to=directory.load(index:base+4)
+    let r=reserve_ranges((VP/3).downcast_truncate(),(VT/3).downcast_truncate(),vo,to,nv,nt)
+    if !r.valid || nv>(SP/3).downcast_truncate() || nt>(ST/4).downcast_truncate() {return}
+    let lane=i.global.x
+    if lane>=nv && lane>=nt {return}
+    if lane<nt {
+        let a=triangles.load(index:lane*4)
+        let b=triangles.load(index:lane*4+1)
+        let c=triangles.load(index:lane*4+2)
+        if triangles.load(index:lane*4+3)==0 || a>=nv || b>=nv || c>=nv {return}
+        resident_triangles.store(index:(to+lane)*3,value:a)
+        resident_triangles.store(index:(to+lane)*3+1,value:b)
+        resident_triangles.store(index:(to+lane)*3+2,value:c)
+    }
+    if lane<nv {
+        resident_points.store(index:(vo+lane)*3,value:points.load(index:lane*3))
+        resident_points.store(index:(vo+lane)*3+1,value:points.load(index:lane*3+1))
+        resident_points.store(index:(vo+lane)*3+2,value:points.load(index:lane*3+2))
+    }
+    copied.atomic_add(index:job,value:1)
+}
+
+/// Dispatch after copy completion. Wrong epochs, repeated publication, partial
+/// dispatches and invalid copied faces cannot publish a ready directory record.
+pub fn publish<const JOBS:usize,const WORDS:usize>(
+    _ header:StorageBuffer<u32,5>,_ directory:StorageBuffer<u32,WORDS>,
+    _ copied:AtomicStorageBuffer<JOBS>,_ epoch:u32,_ job:u32,
+) where {WORDS==JOBS*RECORD_WORDS},{JOBS<=0xffffffff/RECORD_WORDS} {
+    if job>=JOBS.downcast_truncate() || header.load(index:0)!=epoch {return}
+    let base=job*8
+    if directory.load(index:base)!=RESERVED || directory.load(index:base+1)!=epoch {return}
+    let nv=directory.load(index:base+5)
+    let nt=directory.load(index:base+6)
+    let count=if nv>nt {nv} else {nt}
+    let ready=copied.atomic_load(index:job)==count
+    directory.store(index:base,value:if ready {READY} else {FAILED})
+    let counter=if ready {3} else {4}
+    header.store(index:counter,value:header.load(index:counter)+1)
+}

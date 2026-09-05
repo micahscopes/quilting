@@ -1,0 +1,8 @@
+[ingot]
+name = "atlas_retention"
+version = "0.1.0"
+[dependencies]
+core = true
+std = true
+quilting_atlas = { path = "../../geometry/quilting_atlas" }
+quilting_atlas_webgpu = { path = "../../gpu/quilting_atlas_webgpu" }
