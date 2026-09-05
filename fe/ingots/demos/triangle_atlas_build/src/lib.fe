@@ -3,7 +3,7 @@
 //! The nested job schedule is Fe-authored. No host geometry or count readback.
 use core::marker::Copy
 use quilting_atlas::AtlasKey
-use quilting_atlas::topology::FlipClaimOrder
+use quilting_atlas::topology::PermutedRoundFlipClaims
 use quilting_atlas::sampling::{candidate_slot_count,FixedBarycentric}
 use quilting_atlas::scan::balanced_block_size
 use quilting_atlas_webgpu::compaction::{rank_candidate_block, prefix_candidate_blocks, scatter_candidate_lane}
@@ -321,10 +321,10 @@ actor TriangleAtlasBuild uses (GpuProgram<WebGpuBackend>) {
             self.points,self.triangles,self.twins,self.repair_flags,self.repair_results,self.repair_state,i)
     }
     fn repair_claim(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<RepairRound,IndirectDispatch<DispatchIndirectBuffer<RepairEdges>>,REPAIR_ROUND_BUDGET>,JOBS>>) {
-        repair::claim_with_order<TRIANGLES,TWINS>(self.twins,self.repair_flags,self.repair_state,self.face_claims,FlipClaimOrder::PermutedRound,i)
+        repair::claim_with_order<PermutedRoundFlipClaims,TRIANGLES,TWINS>(self.twins,self.repair_flags,self.repair_state,self.face_claims,PermutedRoundFlipClaims {},i)
     }
     fn repair_select(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<RepairRound,IndirectDispatch<DispatchIndirectBuffer<RepairEdges>>,REPAIR_ROUND_BUDGET>,JOBS>>) {
-        repair::select_with_order<TRIANGLES,TWINS>(self.twins,self.repair_flags,self.repair_results,self.repair_state,self.face_claims,FlipClaimOrder::PermutedRound,i)
+        repair::select_with_order<PermutedRoundFlipClaims,TRIANGLES,TWINS>(self.twins,self.repair_flags,self.repair_results,self.repair_state,self.face_claims,PermutedRoundFlipClaims {},i)
     }
     fn repair_apply(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<RepairRound,IndirectDispatch<DispatchIndirectBuffer<RepairEdges>>,REPAIR_ROUND_BUDGET>,JOBS>>) {
         repair::apply<AtlasInteriorEdgeFlip,POINT_WORDS,TRIANGLE_WORDS,TWINS>(

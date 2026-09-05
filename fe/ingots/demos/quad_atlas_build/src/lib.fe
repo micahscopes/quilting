@@ -5,7 +5,7 @@ use core::marker::Copy
 use quilting_atlas::quad::QuadAtlasKey
 use quilting_atlas::quad_sampling::candidate_slot_count
 use quilting_atlas::planar::FixedPoint2
-use quilting_atlas::topology::FlipClaimOrder
+use quilting_atlas::topology::PermutedRoundFlipClaims
 use quilting_atlas::scan::balanced_block_size
 use quilting_atlas_webgpu::compaction::{rank_candidate_block, prefix_candidate_blocks, scatter_candidate_lane}
 use quilting_atlas_webgpu::topology_scan::{rank_topology_block, prefix_topology_blocks, relocate_topology_offset, SUMMARY_WORDS}
@@ -324,10 +324,10 @@ actor QuadAtlasBuild uses (GpuProgram<WebGpuBackend>) {
             self.points,self.triangles,self.twins,self.repair_flags,self.repair_results,self.repair_state,i)
     }
     fn repair_claim(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<RepairRound,IndirectDispatch<DispatchIndirectBuffer<RepairEdges>>,REPAIR_ROUND_BUDGET>,JOBS>>) {
-        repair::claim_with_order<TRIANGLES,TWINS>(self.twins,self.repair_flags,self.repair_state,self.face_claims,FlipClaimOrder::PermutedRound,i)
+        repair::claim_with_order<PermutedRoundFlipClaims,TRIANGLES,TWINS>(self.twins,self.repair_flags,self.repair_state,self.face_claims,PermutedRoundFlipClaims {},i)
     }
     fn repair_select(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<RepairRound,IndirectDispatch<DispatchIndirectBuffer<RepairEdges>>,REPAIR_ROUND_BUDGET>,JOBS>>) {
-        repair::select_with_order<TRIANGLES,TWINS>(self.twins,self.repair_flags,self.repair_results,self.repair_state,self.face_claims,FlipClaimOrder::PermutedRound,i)
+        repair::select_with_order<PermutedRoundFlipClaims,TRIANGLES,TWINS>(self.twins,self.repair_flags,self.repair_results,self.repair_state,self.face_claims,PermutedRoundFlipClaims {},i)
     }
     fn repair_apply(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<RepairRound,IndirectDispatch<DispatchIndirectBuffer<RepairEdges>>,REPAIR_ROUND_BUDGET>,JOBS>>) {
         repair::apply<QuadInteriorEdgeFlip,POINT_WORDS,TRIANGLE_WORDS,TWINS>(

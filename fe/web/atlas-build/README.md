@@ -94,7 +94,7 @@ initial storage. The full sampling hash and exact geometry match the original
 fixed-dispatch baseline. See `production-indirect-sampling-gate.json` beside
 the captures. Full-corpus indirect dispatch validation remains outstanding.
 
-The full-build actors now select `FlipClaimOrder::PermutedRound`; other callers
+The full-build actors now select `PermutedRoundFlipClaims`; other callers
 retain the original slot-order wrappers for controlled comparison. Both orders
 are strict u32 permutations and preserve the closed-neighborhood ownership
 rule. On the saved `(0,0,0,8)` fixture, an exact offline replay matches the GPU

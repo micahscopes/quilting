@@ -5,7 +5,7 @@ use std::webgpu::{StorageBuffer, AtomicStorageBuffer, ComputeInvocation}
 use std::webgpu::DispatchIndirectBuffer
 use quilting_atlas::scan::block_count
 use quilting_atlas::planar::{PlanarCoordinates, orientation}
-use quilting_atlas::topology::FlipClaimOrder
+use quilting_atlas::topology::{FlipClaimOrder,SlotFlipClaims}
 use super::{
     InteriorEdgeFlipPolicy, DelaunayRestoration, INVALID_VERTEX,
     POINT_WORDS, TRIANGLE_WORDS, TOPOLOGY_TWIN_WORDS_PER_TRIANGLE,
@@ -132,13 +132,13 @@ pub fn claim<const F:usize,const H:usize>(
 )
 where {H==F*3}
 {
-    claim_with_order<F,H>(twins,flags,state,claims,FlipClaimOrder::Slot,i)
+    claim_with_order<SlotFlipClaims,F,H>(twins,flags,state,claims,SlotFlipClaims {},i)
 }
 
-pub fn claim_with_order<const F:usize,const H:usize>(
+pub fn claim_with_order<O:FlipClaimOrder,const F:usize,const H:usize>(
     _ twins:StorageBuffer<u32,H>, _ flags:StorageBuffer<u32,H>,
     _ state:StorageBuffer<u32,STATE_WORDS>, _ claims:AtomicStorageBuffer<F>,
-    _ order:FlipClaimOrder, _ i:ComputeInvocation,
+    _ order:O, _ i:ComputeInvocation,
 )
 where {H==F*3}
 {
@@ -160,13 +160,13 @@ pub fn select<const F:usize,const H:usize>(
 )
 where {H==F*3}
 {
-    select_with_order<F,H>(twins,flags,results,state,claims,FlipClaimOrder::Slot,i)
+    select_with_order<SlotFlipClaims,F,H>(twins,flags,results,state,claims,SlotFlipClaims {},i)
 }
 
-pub fn select_with_order<const F:usize,const H:usize>(
+pub fn select_with_order<O:FlipClaimOrder,const F:usize,const H:usize>(
     _ twins:StorageBuffer<u32,H>, _ flags:StorageBuffer<u32,H>, _ results:StorageBuffer<u32,H>,
     _ state:StorageBuffer<u32,STATE_WORDS>, _ claims:AtomicStorageBuffer<F>,
-    _ order:FlipClaimOrder, _ i:ComputeInvocation,
+    _ order:O, _ i:ComputeInvocation,
 )
 where {H==F*3}
 {

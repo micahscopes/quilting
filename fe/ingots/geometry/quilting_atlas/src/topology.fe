@@ -21,16 +21,23 @@ use super::quad::QuadAtlasKey
 use core::marker::Copy
 
 /// A strict ordering for conservative flip claims, independent of GPU storage.
-/// Both choices are permutations of u32 slots: equal priorities imply equal
-/// proposals. Changing order changes parallel progress, not flip legality.
-pub enum FlipClaimOrder { Slot, PermutedRound }
-impl Copy for FlipClaimOrder {}
-impl FlipClaimOrder {
-    pub fn priority(self, _ slot:u32, _ round:u32)->u32 {
-        match self {
-            Self::Slot => slot,
-            Self::PermutedRound => super::sampling::mix32(slot ^ round.wrapping_mul(0x9e3779b9)),
-        }
+/// Law: for each round, priority must be injective over proposal slots. Equal
+/// priorities must imply equal proposals; GPU ownership relies on this law.
+/// Both provided policies are u32 permutations. The type, not a runtime tag,
+/// chooses the algorithm; changing order never changes flip legality.
+pub trait FlipClaimOrder: Copy {
+    fn priority(self, _ slot:u32, _ round:u32)->u32
+}
+pub struct SlotFlipClaims {}
+impl Copy for SlotFlipClaims {}
+impl FlipClaimOrder for SlotFlipClaims {
+    fn priority(self, _ slot:u32, _ round:u32)->u32 {slot}
+}
+pub struct PermutedRoundFlipClaims {}
+impl Copy for PermutedRoundFlipClaims {}
+impl FlipClaimOrder for PermutedRoundFlipClaims {
+    fn priority(self, _ slot:u32, _ round:u32)->u32 {
+        super::sampling::mix32(slot ^ round.wrapping_mul(0x9e3779b9))
     }
 }
 
@@ -38,14 +45,16 @@ impl FlipClaimOrder {
 fn flip_claim_order_is_injective_on_bounded_slots() {
     // The general argument is algebraic: xor shifts, odd multiplication, and
     // xor with a fixed salt are all invertible over u32. This is a smoke gate.
+    let slot_order=SlotFlipClaims {}
+    let permuted=PermutedRoundFlipClaims {}
     let mut round:u32=0
     while round<4 {
         let mut a:u32=0
         while a<64 {
-            assert!(FlipClaimOrder::Slot.priority(a,round)==a)
+            assert!(slot_order.priority(a,round)==a)
             let mut b=a+1
             while b<64 {
-                assert!(FlipClaimOrder::PermutedRound.priority(a,round)!=FlipClaimOrder::PermutedRound.priority(b,round))
+                assert!(permuted.priority(a,round)!=permuted.priority(b,round))
                 b=b+1
             }
             a=a+1
