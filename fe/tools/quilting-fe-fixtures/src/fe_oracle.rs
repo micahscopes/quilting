@@ -77,6 +77,69 @@ fn call2(store: &mut Store<()>, instance: &Instance, name: &str, a: f32, b: f32)
         .unwrap()
 }
 
+#[test]
+fn authored_arc_weights_wasm_match_dense_algebras_and_geometric_handles() {
+    let (mut store,instance)=instantiate();
+    let sample=function::<(i32,i32,f32,f32,f32,f32,i32),f32>(&mut store,&instance,"authored_arc_sample");
+    let oblique=function::<(i32,f32,f32,f32,f32,i32),f32>(&mut store,&instance,"authored_oblique_arc_sample");
+    let interval=function::<(i32,f32,f32),i32>(&mut store,&instance,"arc_segment_regular");
+    assert_eq!(interval.call(&mut store,(1,0.2,0.3)).unwrap(),0,"never bridge the pole at 1/4");
+    assert_eq!(interval.call(&mut store,(1,0.0,0.2)).unwrap(),1,"retain first branch");
+    assert_eq!(interval.call(&mut store,(1,0.3,1.0)).unwrap(),1,"retain second branch");
+    for step in 0..64 {
+        assert_eq!(interval.call(&mut store,(0,step as f32/64.0,(step+1) as f32/64.0)).unwrap(),1,"finite semicircle segments");
+    }
+    let handles=[[0.0_f32,1.0,0.0],[0.3,0.4,0.7],[-0.75,0.1,-1.3],[0.0,0.0,0.0]];
+    for (model,metric) in [[1.0,1.0,1.0],[1.0,1.0,0.0]].into_iter().enumerate() {
+        for h in handles {
+            for kind in 0..=1 {
+                if kind==1 && h==[0.0;3] {continue;}
+                for step in 0..=64 {
+                    let t=step as f32/64.0;
+                    let expected=crate::clifford_oracle::authored_arc_reference(metric,h.map(f64::from),kind==1,f64::from(t));
+                    let Some(expected)=expected else {continue;};
+                    let defined=sample.call(&mut store,(model as i32,kind,h[0],h[1],h[2],t,4)).unwrap();
+                    assert_eq!(defined,1.0,"accepted finite arc, model={model} kind={kind} handle={h:?} t={t}");
+                    for lane in 0..4 {
+                        let value=sample.call(&mut store,(model as i32,kind,h[0],h[1],h[2],t,lane)).unwrap();
+                        let tolerance=2.0e-5*(1.0+expected[lane as usize].abs());
+                        assert!((f64::from(value)-expected[lane as usize]).abs()<tolerance,
+                            "model={model} kind={kind} handle={h:?} t={t} lane={lane}: {value} vs {expected:?}");
+                        if kind==0 && (step==0 || step==32 || step==64) && lane<3 {
+                            let point=if step==0 {[-1.0,0.0,0.0]} else if step==64 {[1.0,0.0,0.0]} else {h};
+                            assert!((value-point[lane as usize]).abs()<3.0e-6,"handle interpolation");
+                        }
+                    }
+                }
+            }
+        }
+        for (kind,h) in [(0,[-1.0,0.0,0.0]),(0,[1.0,0.0,0.0]),(1,[0.0,0.0,0.0]),
+            (0,[f32::NAN,0.0,0.0]),(0,[0.0,f32::INFINITY,0.0])] {
+            assert_eq!(sample.call(&mut store,(model as i32,kind,h[0],h[1],h[2],0.5,4)).unwrap(),-999.0,"invalid construction");
+        }
+    }
+    // A collinear exterior handle selects a projective arc crossing infinity.
+    // The construction is meaningful, but its pole is not a drawable point.
+    assert_eq!(sample.call(&mut store,(0,0,2.0,0.0,0.0,0.25,4)).unwrap(),0.0);
+    // A purely null displacement is rejected only in the isotropic metric.
+    assert_eq!(sample.call(&mut store,(1,1,0.0,0.0,1.0,0.5,4)).unwrap(),-999.0);
+    assert_eq!(sample.call(&mut store,(0,1,0.0,0.0,1.0,0.5,4)).unwrap(),1.0);
+    // Non-axis-aligned endpoints exercise all three bivector coefficients.
+    let a=[-0.8_f32,0.3,0.4];
+    let b=[0.7_f32,-0.6,1.1];
+    for (model,metric) in [[1.0,1.0,1.0],[1.0,1.0,0.0]].into_iter().enumerate() {
+        for h in handles { for step in 0..=64 {
+            let t=step as f32/64.0;
+            let expected=crate::clifford_oracle::authored_arc_between_reference(metric,a.map(f64::from),h.map(f64::from),b.map(f64::from),false,f64::from(t)).unwrap();
+            for lane in 0..4 {
+                let actual=oblique.call(&mut store,(model as i32,h[0],h[1],h[2],t,lane)).unwrap();
+                assert!((f64::from(actual)-expected[lane as usize]).abs()<2.0e-5*(1.0+expected[lane as usize].abs()),
+                    "oblique model={model} handle={h:?} t={t} lane={lane}: {actual} vs {expected:?}");
+            }
+        }}
+    }
+}
+
 fn call3(store: &mut Store<()>, instance: &Instance, name: &str, values: [f32; 3]) -> f32 {
     let [a, b, c] = values;
     function::<(f32, f32, f32), f32>(store, instance, name)

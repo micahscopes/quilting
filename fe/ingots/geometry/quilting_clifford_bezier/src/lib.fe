@@ -68,15 +68,20 @@ use quilting_patch::{
     quadratic_tensor_patch,
     PullbackMetric2,
 }
+use quilting_patch::arc_authoring::{ArcAuthoringAlgebra,ArcWeight}
+use quilting_patch::arc_authoring::ArcIntervalChart
 
-/// A weight in Cl(2, 0, 1)'s even subalgebra E0 + E2.
-pub struct IsotropicEvenF { pub scalar: f32, pub e12: f32, pub e13: f32, pub e23: f32 }
-impl Copy for IsotropicEvenF {}
+/// Sparse grade-zero plus grade-two coefficients in a three-generator algebra.
+/// The algebra provider, not this storage record, determines the metric.
+pub struct CliffordEven3F { pub scalar: f32, pub e12: f32, pub e13: f32, pub e23: f32 }
+impl Copy for CliffordEven3F {}
+pub type IsotropicEvenF = CliffordEven3F
 
 /// The odd carrier reached by vector-even and odd-even products.
 /// A genuine Euclidean-valued patch has zero `e123` residual.
-pub struct IsotropicOddF { pub e1: f32, pub e2: f32, pub e3: f32, pub e123: f32 }
-impl Copy for IsotropicOddF {}
+pub struct CliffordOdd3F { pub e1: f32, pub e2: f32, pub e3: f32, pub e123: f32 }
+impl Copy for CliffordOdd3F {}
+pub type IsotropicOddF = CliffordOdd3F
 
 pub struct IsotropicControl { pub point: Vec3F, pub weight: IsotropicEvenF }
 impl Copy for IsotropicControl {}
@@ -185,11 +190,12 @@ struct EvaluationFrame {
 }
 impl Copy for EvaluationFrame {}
 
-pub struct IsotropicPolicy {
+pub struct Clifford3Policy {
     pub minimum_denominator_norm_squared: f32,
     pub maximum_trivector_residual: f32,
 }
-impl Copy for IsotropicPolicy {}
+impl Copy for Clifford3Policy {}
+pub type IsotropicPolicy = Clifford3Policy
 
 pub struct FourthWeightReconciliation {
     pub patch: IsotropicBilinearPatch,
@@ -205,6 +211,7 @@ impl Copy for IsotropicBilinearKernel {}
 // those blade-mask ordinals, hence vector support 2|4|16 and even support
 // 1|8|32|64. Only e1 and e2 have nonzero positive squares.
 struct PointCoefficients { e1: f32, e2: f32, e3: f32 }
+struct EndVectorCoefficients { e1: f32, e2: f32, e3: f32 }
 struct WeightCoefficients { scalar: f32, e12: f32, e13: f32, e23: f32 }
 struct LeftWeightCoefficients { scalar: f32, e12: f32, e13: f32, e23: f32 }
 struct RightWeightCoefficients { scalar: f32, e12: f32, e13: f32, e23: f32 }
@@ -216,6 +223,12 @@ type LeftWeightMv = MultivectorInput<LeftWeightCoefficients, 105>
 type RightWeightMv = MultivectorInput<RightWeightCoefficients, 105>
 type OddMv = MultivectorInput<OddCoefficients, 150>
 pub type IsotropicMetric = SignedOrthogonalMetric<3, 3, 0>
+
+type VectorPairExpression = Geometric<PointMv, MultivectorInput<EndVectorCoefficients,22>>
+struct VectorPairOperands {left:PointCoefficients,right:EndVectorCoefficients}
+derive EvaluateGaF32 for VectorPairOperands using CompileGaF32<
+    GaProgram<VectorPairExpression,IsotropicMetric,Strict>,
+>
 
 type WeightedPointExpression = Geometric<PointMv, WeightMv>
 struct WeightedPointOperands { point: PointCoefficients, weight: WeightCoefficients }
@@ -1300,6 +1313,52 @@ impl LinearElement for IsotropicOddF {
 /// choices. The `ga_expr` derivations above close over the same metric alias.
 pub struct IsotropicCliffordAlgebra {}
 impl Copy for IsotropicCliffordAlgebra {}
+
+impl ArcAuthoringAlgebra for IsotropicCliffordAlgebra {
+    type Displacement=Vec3F
+    fn difference(self,_ end:Vec3F,_ start:Vec3F)->Vec3F {
+        vec3f(end.x-start.x,end.y-start.y,end.z-start.z)
+    }
+    fn non_null(self,_ v:Vec3F,_ minimum:f32)->bool {
+        let squared=v.x*v.x+v.y*v.y
+        minimum>=0.0 && squared>minimum && 1.0/squared>0.0 && finite_component(v.z)
+    }
+    fn identity_weight(self)->IsotropicEvenF {even(1.0,0.0,0.0,0.0)}
+    fn relative_weight(self,_ denominator:Vec3F,_ numerator:Vec3F,_ minimum:f32)->ArcWeight<IsotropicCliffordAlgebra> {
+        let squared=denominator.x*denominator.x+denominator.y*denominator.y
+        if !(minimum>=0.0) || !self.non_null(denominator,minimum) || !self.non_null(numerator,minimum) {
+            return ArcWeight<IsotropicCliffordAlgebra> {value:even(0.0,0.0,0.0,0.0),denominator_measure:squared,defined:false}
+        }
+        let p=<VectorPairOperands as EvaluateGaF32>::evaluate(VectorPairOperands {
+            left:PointCoefficients {e1:denominator.x,e2:denominator.y,e3:denominator.z},
+            right:EndVectorCoefficients {e1:numerator.x,e2:numerator.y,e3:numerator.z},
+        })
+        ArcWeight<IsotropicCliffordAlgebra> {
+            value:even(p.0/squared,p.1/squared,p.2/squared,p.3/squared),
+            denominator_measure:squared,defined:finite_component(p.0/squared) && finite_component(p.1/squared)
+                && finite_component(p.2/squared) && finite_component(p.3/squared),
+        }
+    }
+}
+
+// IEEE subtraction rejects both infinities and NaNs without a made-up scale
+// cap. Arc construction separately bounds the metric denominator by policy.
+fn finite_component(_ value:f32)->bool {value-value==0.0}
+
+/// Lower distance of a linearly varying scalar from zero on an interval.
+fn interval_component_distance(_ a:f32,_ b:f32)->f32 {
+    if a>0.0 && b>0.0 {if a<b {a} else {b}}
+    else if a<0.0 && b<0.0 {if a>b {-a} else {-b}}
+    else {0.0}
+}
+
+impl ArcIntervalChart for IsotropicCliffordAlgebra {
+    fn interval_denominator_bound(self,_ a:CliffordEven3F,_ b:CliffordEven3F)->f32 {
+        let s=interval_component_distance(a.scalar,b.scalar)
+        let xy=interval_component_distance(a.e12,b.e12)
+        s*s+xy*xy
+    }
+}
 
 impl ProjectiveAlgebra for IsotropicCliffordAlgebra {
     type Metric = IsotropicMetric

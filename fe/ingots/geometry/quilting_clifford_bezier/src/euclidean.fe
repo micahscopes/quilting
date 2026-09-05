@@ -1,0 +1,173 @@
+//! Euclidean Cl(3,0,0) instance of the same sparse rational construction.
+//! Its arcs are ordinary Euclidean circles, unlike the isotropic peer.
+use core::marker::Copy
+use ga_expr::{CompileGaF32, EvaluateGaF32, GaProgram, SignedOrthogonalMetric, Strict}
+use quilting_domain::{Vec3F, vec3f, sub3, absf}
+use quilting_patch::{
+    ProjectiveAlgebra,
+    ProjectiveAdmission,
+    QuotientSample,
+    Euclidean3Points,
+    DenotationSample,
+    denotation_sample,
+}
+use quilting_patch::arc_authoring::{ArcAuthoringAlgebra, ArcWeight}
+use quilting_patch::arc_authoring::ArcIntervalChart
+use super::interval_component_distance
+use super::{
+    CliffordEven3F,
+    CliffordOdd3F,
+    Clifford3Policy,
+    even,
+    scale_odd,
+    PointCoefficients,
+    EndVectorCoefficients,
+    WeightCoefficients,
+    OddCoefficients,
+    VectorPairExpression,
+    WeightedPointExpression,
+    OddTimesReverseWeightExpression,
+    WeightNormExpression,
+    weight_coefficients,
+    odd_coefficients,
+    finite_component,
+}
+
+pub type EuclideanMetric = SignedOrthogonalMetric<3, 7, 0>
+impl ArcIntervalChart for EuclideanCliffordAlgebra {
+    fn interval_denominator_bound(self,_ a:CliffordEven3F,_ b:CliffordEven3F)->f32 {
+        let s=interval_component_distance(a.scalar,b.scalar)
+        let xy=interval_component_distance(a.e12,b.e12)
+        let xz=interval_component_distance(a.e13,b.e13)
+        let yz=interval_component_distance(a.e23,b.e23)
+        s*s+xy*xy+xz*xz+yz*yz
+    }
+}
+struct VectorPairOperands { left: PointCoefficients, right: EndVectorCoefficients }
+derive EvaluateGaF32 for VectorPairOperands using CompileGaF32<
+    GaProgram<VectorPairExpression, EuclideanMetric, Strict>,
+>
+struct WeightedPointOperands { point: PointCoefficients, weight: WeightCoefficients }
+derive EvaluateGaF32 for WeightedPointOperands using CompileGaF32<
+    GaProgram<WeightedPointExpression, EuclideanMetric, Strict>,
+>
+struct QuotientOperands { odd: OddCoefficients, weight: WeightCoefficients }
+derive EvaluateGaF32 for QuotientOperands using CompileGaF32<
+    GaProgram<OddTimesReverseWeightExpression, EuclideanMetric, Strict>,
+>
+struct NormOperands { weight: WeightCoefficients }
+derive EvaluateGaF32 for NormOperands using CompileGaF32<
+    GaProgram<WeightNormExpression, EuclideanMetric, Strict>,
+>
+
+pub struct EuclideanCliffordAlgebra {}
+impl Copy for EuclideanCliffordAlgebra {}
+impl ProjectiveAlgebra for EuclideanCliffordAlgebra {
+    type Metric = EuclideanMetric
+    type Point = Vec3F
+    type Weight = CliffordEven3F
+    type Numerator = CliffordOdd3F
+    type Quotient = CliffordOdd3F
+    type Policy = Clifford3Policy
+    fn weighted_point(self, _ p: Vec3F, _ w: CliffordEven3F) -> CliffordOdd3F {
+        let o = <WeightedPointOperands as EvaluateGaF32>::evaluate(
+            WeightedPointOperands {
+                point: PointCoefficients { e1: p.x, e2: p.y, e3: p.z },
+                weight: weight_coefficients(w),
+            },
+        )
+        CliffordOdd3F { e1: o.0, e2: o.1, e3: o.2, e123: o.3 }
+    }
+    fn right_quotient(
+        self,
+        _ n: CliffordOdd3F,
+        _ w: CliffordEven3F,
+        _ policy: Clifford3Policy,
+    ) -> QuotientSample<CliffordOdd3F> {
+        let norm = <NormOperands as EvaluateGaF32>::evaluate(
+            NormOperands { weight: weight_coefficients(w) },
+        )
+            .0
+        if !(norm > policy.minimum_denominator_norm_squared) || !(1.0 / norm > 0.0) {
+            return QuotientSample<CliffordOdd3F> {
+                value: CliffordOdd3F { e1: 0.0, e2: 0.0, e3: 0.0, e123: 0.0 },
+                denominator_measure: norm,
+                defined: false,
+            }
+        }
+        let o = <QuotientOperands as EvaluateGaF32>::evaluate(
+            QuotientOperands { odd: odd_coefficients(n), weight: weight_coefficients(w) },
+        )
+        let value = scale_odd(
+            CliffordOdd3F { e1: o.0, e2: o.1, e3: o.2, e123: o.3 },
+            1.0 / norm,
+        )
+        QuotientSample<CliffordOdd3F> {
+            value: value,
+            denominator_measure: norm,
+            defined: finite_component(value.e1)
+                && finite_component(value.e2)
+                && finite_component(value.e3)
+                && finite_component(value.e123),
+        }
+    }
+}
+impl ArcAuthoringAlgebra for EuclideanCliffordAlgebra {
+    type Displacement = Vec3F
+    fn difference(self, _ end: Vec3F, _ start: Vec3F) -> Vec3F {
+        sub3(end, start)
+    }
+    fn non_null(self, _ v: Vec3F, _ minimum: f32) -> bool {
+        let squared = v.x * v.x + v.y * v.y + v.z * v.z
+        minimum >= 0.0 && squared > minimum && 1.0 / squared > 0.0
+    }
+    fn identity_weight(self) -> CliffordEven3F {
+        even(1.0, 0.0, 0.0, 0.0)
+    }
+    fn relative_weight(self, _ d: Vec3F, _ n: Vec3F, _ minimum: f32) -> ArcWeight<
+        EuclideanCliffordAlgebra,
+    > {
+        let squared = d.x * d.x + d.y * d.y + d.z * d.z
+        if !self.non_null(d, minimum) || !self.non_null(n, minimum) {
+            return ArcWeight<EuclideanCliffordAlgebra> {
+                value: even(0.0, 0.0, 0.0, 0.0),
+                denominator_measure: squared,
+                defined: false,
+            }
+        }
+        let p = <VectorPairOperands as EvaluateGaF32>::evaluate(
+            VectorPairOperands {
+                left: PointCoefficients { e1: d.x, e2: d.y, e3: d.z },
+                right: EndVectorCoefficients { e1: n.x, e2: n.y, e3: n.z },
+            },
+        )
+        ArcWeight<EuclideanCliffordAlgebra> {
+            value: even(
+                p.0 / squared,
+                p.1 / squared,
+                p.2 / squared,
+                p.3 / squared,
+            ),
+            denominator_measure: squared,
+            defined: finite_component(p.0 / squared)
+                && finite_component(p.1 / squared)
+                && finite_component(p.2 / squared)
+                && finite_component(p.3 / squared),
+        }
+    }
+}
+pub struct EuclideanVectorAdmission {}
+impl Copy for EuclideanVectorAdmission {}
+impl ProjectiveAdmission<EuclideanCliffordAlgebra> for EuclideanVectorAdmission {
+    type Codomain = Euclidean3Points
+    fn admit(
+        self,
+        _ q: QuotientSample<CliffordOdd3F>,
+        _ policy: Clifford3Policy,
+    ) -> DenotationSample<Euclidean3Points> {
+        denotation_sample<Euclidean3Points>(
+            vec3f(q.value.e1, q.value.e2, q.value.e3),
+            q.defined && absf(q.value.e123) <= policy.maximum_trivector_residual,
+        )
+    }
+}

@@ -1,0 +1,135 @@
+//! Geometric authoring of degree-one rational arcs, not scalar chart controls.
+//! The algebra selects what "circle" means. A null displacement is rejected;
+//! this layer does not promise a finite affine chart along the entire arc.
+use core::marker::Copy
+use super::{ProjectiveAlgebra, ProjectiveControl, QuotientSample, LinearElement, projective_control}
+
+/// Extra operations needed to derive weights from geometric arc handles.
+/// A model must prove that its accepted constructions remain in its point
+/// space. This is deliberately not an operation on every projective model.
+pub trait ArcAuthoringAlgebra: ProjectiveAlgebra {
+    type Displacement: Copy
+    fn difference(
+        self,
+        _ end: <Self as ProjectiveAlgebra>::Point,
+        _ start: <Self as ProjectiveAlgebra>::Point,
+    ) -> Self::Displacement
+    fn non_null(self, _ displacement: Self::Displacement, _ minimum: f32) -> bool
+    fn identity_weight(self) -> <Self as ProjectiveAlgebra>::Weight
+    /// Ordered product denominator^-1 * numerator. Null vectors fail closed.
+    fn relative_weight(
+        self,
+        _ denominator: Self::Displacement,
+        _ numerator: Self::Displacement,
+        _ minimum: f32,
+    ) -> ArcWeight<Self>
+}
+
+/// Optional affine-chart bound for an interval of linearly blended weights.
+/// A provider returns a nonnegative lower bound on its denominator measure
+/// throughout the interval, not merely the two endpoint measurements.
+pub trait ArcIntervalChart: ArcAuthoringAlgebra {
+    fn interval_denominator_bound(self, _ first: <Self as ProjectiveAlgebra>::Weight,
+        _ last: <Self as ProjectiveAlgebra>::Weight) -> f32
+}
+
+/// A sufficient chart test; failure requests splitting or omission of this
+/// segment, never rejection of the complete arc. Floating-point providers
+/// require a positive numerical margin and do not imply a formal certificate.
+pub fn arc_interval_regular<A: ArcIntervalChart>(_ algebra:A,_ arc:ArcControls<A>,
+    _ first:f32,_ last:f32,_ minimum:f32)->bool {
+    let a=arc.start.weight.scaled(1.0-first).plus(arc.end.weight.scaled(first))
+    let b=arc.start.weight.scaled(1.0-last).plus(arc.end.weight.scaled(last))
+    let bound=algebra.interval_denominator_bound(a,b)
+    minimum>0.0 && bound>minimum
+}
+
+/// A model-qualified weight construction and its denominator conditioning.
+pub struct ArcWeight<A: ProjectiveAlgebra> {
+    pub value: A::Weight,
+    pub denominator_measure: f32,
+    pub defined: bool,
+}
+impl<A: ProjectiveAlgebra> Copy for ArcWeight<A> {}
+
+pub struct ArcControls<A: ArcAuthoringAlgebra> {
+    pub start: ProjectiveControl<A>,
+    pub end: ProjectiveControl<A>,
+}
+impl<A: ArcAuthoringAlgebra> Copy for ArcControls<A> {}
+
+/// Rejected input is not a drawable curve with a substituted zero weight.
+pub enum ArcConstruction<A: ArcAuthoringAlgebra> {
+    Ready(ArcControls<A>,),
+    Degenerate,
+}
+impl<A: ArcAuthoringAlgebra> Copy for ArcConstruction<A> {}
+
+/// The supplied point is exactly C(1/2), wherever the accepted quotient is
+/// defined. Moving it off the old arc changes geometry. Moving it along the
+/// old arc changes parameter speed and may select a different arc segment.
+pub fn arc_through<A: ArcAuthoringAlgebra>(
+    _ algebra: A,
+    _ start: A::Point,
+    _ through: A::Point,
+    _ end: A::Point,
+    _ minimum: f32,
+) -> ArcConstruction<A> {
+    if !algebra.non_null(algebra.difference(end, start), minimum) {
+        return ArcConstruction::Degenerate
+    }
+    let weight = algebra
+        .relative_weight(
+            algebra.difference(end, through),
+            algebra.difference(through, start),
+            minimum,
+        )
+    if !weight.defined {
+        return ArcConstruction::Degenerate
+    }
+    ArcConstruction::Ready(
+        ArcControls<A> {
+            start: projective_control(start, algebra.identity_weight()),
+            end: projective_control(end, weight.value),
+        },
+    )
+}
+
+/// C'(0) is the supplied displacement (not just its direction). Scaling the
+/// tangent positively reparameterizes this arc; rotating it changes geometry.
+pub fn arc_from_tangent<A: ArcAuthoringAlgebra>(
+    _ algebra: A,
+    _ start: A::Point,
+    _ tangent: A::Displacement,
+    _ end: A::Point,
+    _ minimum: f32,
+) -> ArcConstruction<A> {
+    let weight = algebra.relative_weight(algebra.difference(end, start), tangent, minimum)
+    if !weight.defined {
+        return ArcConstruction::Degenerate
+    }
+    ArcConstruction::Ready(
+        ArcControls<A> {
+            start: projective_control(start, algebra.identity_weight()),
+            end: projective_control(end, weight.value),
+        },
+    )
+}
+
+/// Pure degree-one interpolation followed by the model's checked quotient.
+/// Admission into the geometric point space remains a separate model policy.
+pub fn evaluate_arc<A: ArcAuthoringAlgebra>(
+    _ algebra: A,
+    _ arc: ArcControls<A>,
+    _ t: f32,
+    _ policy: A::Policy,
+) -> QuotientSample<A::Quotient> {
+    let numerator = algebra
+        .weighted_point(arc.start.point, arc.start.weight)
+        .scaled(1.0 - t)
+        .plus(
+            algebra.weighted_point(arc.end.point, arc.end.weight).scaled(t),
+        )
+    let denominator = arc.start.weight.scaled(1.0 - t).plus(arc.end.weight.scaled(t))
+    algebra.right_quotient(numerator, denominator, policy)
+}

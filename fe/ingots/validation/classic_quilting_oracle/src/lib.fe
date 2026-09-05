@@ -1,5 +1,49 @@
 //! Thin Wasm scalar exports over the three production M1 ingots.
 
+use quilting_patch::arc_authoring::{ArcAuthoringAlgebra,ArcConstruction,arc_through,arc_from_tangent,evaluate_arc}
+use quilting_clifford_bezier::{CliffordOdd3F,Clifford3Policy}
+use quilting_clifford_bezier::euclidean::EuclideanCliffordAlgebra
+
+fn authored_arc_lane<A: ArcAuthoringAlgebra<Displacement=quilting_domain::Vec3F> + quilting_patch::ProjectiveAlgebra<Point=quilting_domain::Vec3F,Quotient=CliffordOdd3F,Policy=Clifford3Policy>>(
+    _ algebra:A,_ kind:u32,_ a:quilting_domain::Vec3F,_ handle:quilting_domain::Vec3F,_ b:quilting_domain::Vec3F,_ t:f32,_ lane:u32,
+) -> f32 {
+    let construction=if kind==0 {arc_through(algebra,a,handle,b,0.000000000001)}
+        else {arc_from_tangent(algebra,a,handle,b,0.000000000001)}
+    match construction {
+        ArcConstruction::Degenerate => -999.0,
+        ArcConstruction::Ready(arc) => {
+            let q=evaluate_arc(algebra,arc,t,Clifford3Policy {
+                minimum_denominator_norm_squared:0.000000000001,maximum_trivector_residual:0.00001,
+            })
+            if lane==4 {if q.defined {1.0} else {0.0}}
+            else if lane==0 {q.value.e1} else if lane==1 {q.value.e2}
+            else if lane==2 {q.value.e3} else {q.value.e123}
+        }
+    }
+}
+pub fn authored_arc_sample(_ metric:u32,_ kind:u32,_ x:f32,_ y:f32,_ z:f32,_ t:f32,_ lane:u32)->f32 {
+    let a=vec3f(-1.0,0.0,0.0)
+    let b=vec3f(1.0,0.0,0.0)
+    let handle=vec3f(x,y,z)
+    if metric==0 {authored_arc_lane(EuclideanCliffordAlgebra {},kind,a,handle,b,t,lane)}
+    else {authored_arc_lane(IsotropicCliffordAlgebra {},kind,a,handle,b,t,lane)}
+}
+pub fn authored_oblique_arc_sample(_ metric:u32,_ x:f32,_ y:f32,_ z:f32,_ t:f32,_ lane:u32)->f32 {
+    let a=vec3f(-0.8,0.3,0.4)
+    let b=vec3f(0.7,-0.6,1.1)
+    let handle=vec3f(x,y,z)
+    if metric==0 {authored_arc_lane(EuclideanCliffordAlgebra {},0,a,handle,b,t,lane)}
+    else {authored_arc_lane(IsotropicCliffordAlgebra {},0,a,handle,b,t,lane)}
+}
+pub fn arc_segment_regular(_ exterior:u32,_ first:f32,_ last:f32)->u32 {
+    let algebra=EuclideanCliffordAlgebra {}
+    let h=if exterior==1 {vec3f(2.0,0.0,0.0)} else {vec3f(0.0,1.0,0.0)}
+    match arc_through(algebra,vec3f(-1.0,0.0,0.0),h,vec3f(1.0,0.0,0.0),0.000000000001) {
+        ArcConstruction::Degenerate=>0,
+        ArcConstruction::Ready(arc)=>if quilting_patch::arc_authoring::arc_interval_regular(algebra,arc,first,last,0.00000001) {1} else {0},
+    }
+}
+
 use quilting_cga::{
     CgaMapPolicy,
     CgaMappedDifferential,

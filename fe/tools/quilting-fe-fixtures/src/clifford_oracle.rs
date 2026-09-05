@@ -96,6 +96,44 @@ struct Control {
     weight: Multivector,
 }
 
+/// Dense eight-blade reference, independent of Fe's sparse expression plan.
+pub(crate) fn authored_arc_reference(metric: [f64; 3], handle: [f64; 3], tangent: bool, t: f64) -> Option<[f64; 4]> {
+    authored_arc_between_reference(metric,[-1.0,0.0,0.0],handle,[1.0,0.0,0.0],tangent,t)
+}
+
+pub(crate) fn authored_arc_between_reference(metric: [f64; 3], start: [f64;3], handle: [f64;3], end: [f64;3], tangent: bool, t: f64) -> Option<[f64;4]> {
+    let start=Multivector::vector(start[0],start[1],start[2]);
+    let end=Multivector::vector(end[0],end[1],end[2]);
+    let h=Multivector::vector(handle[0],handle[1],handle[2]);
+    let d=if tangent {end.add(start.scale(-1.0))} else {end.add(h.scale(-1.0))};
+    let n=if tangent {h} else {h.add(start.scale(-1.0))};
+    let squared=d.product(d,metric).0[0];
+    if squared<=1.0e-12 {return None;}
+    let weight=d.scale(squared.recip()).product(n,metric);
+    let denominator=Multivector::scalar(1.0-t).add(weight.scale(t));
+    let numerator=start.scale(1.0-t).add(end.product(weight,metric).scale(t));
+    let q=numerator.product(denominator.inverse_even(metric)?,metric);
+    Some([q.0[1],q.0[2],q.0[4],q.0[7]])
+}
+
+#[test]
+fn dense_arc_authoring_interpolates_handles_in_both_metrics() {
+    for metric in [[1.0,1.0,1.0],[1.0,1.0,0.0]] {
+        for h in [[0.0,1.0,0.0],[0.3,0.4,0.7],[-0.75,0.1,-1.3]] {
+            for (t,expected) in [(0.0,[-1.0,0.0,0.0]),(0.5,h),(1.0,[1.0,0.0,0.0])] {
+                let q=authored_arc_reference(metric,h,false,t).unwrap();
+                for lane in 0..3 {assert!((q[lane]-expected[lane]).abs()<1.0e-12);}
+                assert!(q[3].abs()<1.0e-12);
+            }
+        }
+    }
+    for i in 0..=100 {
+        let q=authored_arc_reference([1.0;3],[0.0,1.0,0.0],false,i as f64/100.0).unwrap();
+        assert!((q[0]*q[0]+q[1]*q[1]-1.0).abs()<1.0e-12,"unit semicircle");
+        assert!(q[1]>=0.0 && q[2].abs()<1.0e-12);
+    }
+}
+
 fn bilinear(values: [Multivector; 4], s: f64, t: f64) -> Multivector {
     values[0]
         .scale((1.0 - s) * (1.0 - t))
