@@ -244,6 +244,96 @@ fn nested_triangle_fans_wasm_preserve_domain_surface_and_diagonal() {
 }
 
 #[test]
+fn sampling_warps_wasm_preserve_independent_boundaries_and_interior_domain() {
+    let (mut store,instance)=instantiate();
+    let map=function::<(u32,f32,f32,f32,f32,f32,f32,f32,f32,f32,f32,u32),f32>(
+        &mut store,&instance,"sampling_warp_lane");
+    let mut sample=|domain:u32,p:[f32;2],s:[f32;8]| -> [f32;2] {
+        std::array::from_fn(|lane|map.call(&mut store,
+            (domain,p[0],p[1],s[0],s[1],s[2],s[3],s[4],s[5],s[6],s[7],lane as u32)).unwrap())
+    };
+    let identity=[1.0,1.0,1.0,1.0,0.0,1.0,1.0,1.0];
+    for domain in 0..2 {
+        for x in 0..=16 {for y in 0..=16 {
+            if domain==0 && x+y>16 {continue;}
+            let p=[x as f32/16.0,y as f32/16.0];
+            assert_eq!(sample(domain,p,identity),p,"neutral map is exact identity");
+        }}
+        for edge in 0..if domain==0 {3} else {4} {
+            for k in [0.0625_f32,0.25,1.0,4.0,16.0] {
+                let mut settings=[4.0,0.25,16.0,0.0625,0.0,1.0,1.0,1.0];
+                settings[edge]=k;
+                for i in 0..=256 {
+                    let t=i as f32/256.0;
+                    let p=if domain==0 {
+                        match edge {0=>[1.0-t,t],1=>[0.0,1.0-t],_=>[t,0.0]}
+                    } else {
+                        match edge {0=>[t,0.0],1=>[1.0,t],2=>[t,1.0],_=>[0.0,t]}
+                    };
+                    let f=(k as f64*t as f64/(1.0+(k as f64-1.0)*t as f64)) as f32;
+                    let expected=if domain==0 {
+                        match edge {0=>[1.0-f,f],1=>[0.0,1.0-f],_=>[f,0.0]}
+                    } else {
+                        match edge {0=>[f,0.0],1=>[1.0,f],2=>[f,1.0],_=>[0.0,f]}
+                    };
+                    let baseline=sample(domain,p,settings);
+                    for lane in 0..2 {assert_close(baseline[lane],expected[lane],0.000003,"only the edge's own skew applies");}
+                    for interior in [[6.0,0.02,50.0,16.0],[-6.0,50.0,0.02,0.0625]] {
+                        let mut changed=settings;
+                        changed[4..8].copy_from_slice(&interior);
+                        assert_eq!(sample(domain,p,changed),baseline,"twist/focus/concentration leave every boundary sample unchanged");
+                    }
+                }
+            }
+        }
+        for settings in [identity,[0.0625,16.0,4.0,0.25,6.0,0.02,50.0,16.0],
+            [4.0,0.25,16.0,0.0625,-6.0,50.0,0.02,0.0625]] {
+            for x in 0..=24 {for y in 0..=24 {
+                if domain==0 && x+y>24 {continue;}
+                let q=sample(domain,[x as f32/24.0,y as f32/24.0],settings);
+                assert!(q.iter().all(|v|v.is_finite() && *v>=-0.000003 && *v<=1.000003),"finite in-domain point: {q:?}");
+                if domain==0 {assert!(q[0]+q[1]<=1.000003,"inside triangle");}
+            }}
+        }
+        for (fx,fy) in [(1.0,1.0),(0.02,50.0),(50.0,0.02)] {
+            let p=if domain==0 {[fx/(1.0+fx+fy),fy/(1.0+fx+fy)]} else {[fx/(1.0+fx),fy/(1.0+fy)]};
+            let q=sample(domain,p,[1.0,1.0,1.0,1.0,6.0,fx,fy,16.0]);
+            for lane in 0..2 {assert_close(q[lane],p[lane],0.000003,"interior focus remains fixed");}
+        }
+    }
+    // A monotone continuous warp need not preserve orientation of a coarse
+    // straight-edge display mesh. Record rather than conceal this distinction.
+    let settings=[1.0,1.0,1.0,1.0,6.0,1.0,1.0,4.0];
+    let mut folded=0;
+    for x in 0..8 {for y in 0..8 {
+        let p=[[x as f32/8.0,y as f32/8.0],[(x+1) as f32/8.0,y as f32/8.0],
+            [(x+1) as f32/8.0,(y+1) as f32/8.0],[x as f32/8.0,(y+1) as f32/8.0]].map(|p|sample(1,p,settings));
+        for [a,b,c] in [[0,1,2],[0,2,3]] {
+            let area=(p[b][0]-p[a][0])*(p[c][1]-p[a][1])-(p[b][1]-p[a][1])*(p[c][0]-p[a][0]);
+            folded+=usize::from(area<=0.0);
+        }
+    }}
+    eprintln!("coarse twisted square: {folded}/128 straight triangles inverted or collapsed");
+}
+
+#[test]
+fn projective_interval_inverse_uniformizes_a_rational_line() {
+    let (mut store,instance)=instantiate();
+    let bias=function::<(f32,f32),f32>(&mut store,&instance,"sampling_interval_bias");
+    for k in [0.0625_f32,0.25,1.0,4.0,16.0] {
+        let mut previous=-1.0_f32;
+        for i in 0..=256 {
+            let fraction=i as f32/256.0;
+            let parameter=bias.call(&mut store,(fraction,1.0/k)).unwrap();
+            assert!(parameter>previous,"inverse map is strictly monotone");
+            let distance=bias.call(&mut store,(parameter,k)).unwrap();
+            assert_close(distance,fraction,0.000003,"analytic inverse gives uniformly spaced points on this rational straight edge");
+            previous=parameter;
+        }
+    }
+}
+
+#[test]
 fn radial_atlas_fan_wasm_preserves_seams_and_triangle_orientation() {
     let (mut store, instance) = instantiate();
     let warp = function::<(f32,f32,f32,f32,u32),f32>(&mut store,&instance,"radial_warp_lane");

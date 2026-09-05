@@ -1,0 +1,294 @@
+//! A flat atlas/grid warp explorer: no surface fitting and no child patches.
+use core::marker::Copy
+use fmath::{min, max, clamp, smoothstep, abs}
+use classic_quilting_lod::{FixtureBuffer, patch_triangle_count}
+use quilting_atlas::{AtlasKey, canonical_key_ordinal, lod_as_f32}
+use quilting_patch_view::atlas_barycentric
+use quilting_domain::{Bary3F, Vec2F, bary3f, vec2f, bary_to_cartesian, cartesian_to_bary, length2}
+use quilting_patch::sampling_warp::{
+    TriangleBoundaryWarp,
+    QuadBoundaryWarp,
+    InteriorTwist,
+    InteriorConcentration,
+}
+use quilting_oklch::{display_rgb, mix_display_rgb, oklch, to_display_rgb, pack_rgba8}
+use std::web::view::{
+    ApplyParamBindings,
+    ChoiceOptions,
+    Extent,
+    Param,
+    ParamBindingsProvider,
+    Surface,
+    SurfaceEvent,
+    SurfaceState,
+}
+use std::webgpu::{
+    ClipPosition,
+    ComputeInvocation,
+    ComputeSurface,
+    Depth24LessEqualMsaa4,
+    DrawIndirectBuffer,
+    FixedDispatch,
+    FragmentStage,
+    FragmentSurface,
+    GpuProgram,
+    IndirectTriangleList,
+    LatestPerFrame,
+    RasterConfiguration,
+    RasterPlan,
+    RasterVertex,
+    ResponsiveBacking,
+    StandardSurfaceRecovery,
+    SurfaceQuality,
+    SurfaceRecovery,
+    SurfaceScheduling,
+    SurfaceTransition,
+    VertexStage,
+    WebGpuBackend,
+    Workgroup,
+    raster_plan,
+}
+
+struct Params {
+    domain: Param,
+    lod: Param,
+    edge_a: Param,
+    edge_b: Param,
+    edge_c: Param,
+    edge_d: Param,
+    twist: Param,
+    focus_x: Param,
+    focus_y: Param,
+    concentration: Param,
+    show_wires: Param,
+    wire_px: Param,
+    res_x: Param,
+    res_y: Param,
+    dragging: Param,
+}
+struct State {
+    domain: f32,
+    lod: f32,
+    edge_a: f32,
+    edge_b: f32,
+    edge_c: f32,
+    edge_d: f32,
+    twist: f32,
+    focus_x: f32,
+    focus_y: f32,
+    concentration: f32,
+    show_wires: f32,
+    wire_px: f32,
+    res_x: f32,
+    res_y: f32,
+    dragging: f32,
+}
+impl Copy for State {}
+impl SurfaceState for State {
+    type Params = Params
+}
+derive ApplyParamBindings for State using ParamBindingsProvider
+const fn params() -> Params {
+    Params {
+        domain: Param::choice(
+            options: ChoiceOptions::two(first: "triangle atlas", second: "square grid"),
+            init: 0.0,
+        ),
+        lod: Param::int(min: 0.0, max: 8.0, init: 4.0),
+        edge_a: Param::log(min: 0.0625, max: 16.0, init: 1.0),
+        edge_b: Param::log(min: 0.0625, max: 16.0, init: 1.0),
+        edge_c: Param::log(min: 0.0625, max: 16.0, init: 1.0),
+        edge_d: Param::log(min: 0.0625, max: 16.0, init: 1.0),
+        twist: Param::range(min: -6.2831853, max: 6.2831853, init: 0.0),
+        focus_x: Param::log(min: 0.02, max: 50.0, init: 1.0),
+        focus_y: Param::log(min: 0.02, max: 50.0, init: 1.0),
+        concentration: Param::log(min: 0.0625, max: 16.0, init: 1.0),
+        show_wires: Param::toggle(init: true),
+        wire_px: Param::range(min: 0.0, max: 1.5, init: 0.45),
+        res_x: Param::extent_x(),
+        res_y: Param::extent_y(),
+        dragging: Param::fixed(0.0),
+    }
+}
+fn level(_ value: f32) -> u32 {
+    let mut l: u32 = 0
+    while l < 8 && value >= lod_as_f32(l) + 0.5 {
+        l = l + 1
+    }
+    l
+}
+fn key(_ lod: u32) -> AtlasKey {
+    AtlasKey { a: lod, b: lod, c: lod }
+}
+fn triangle_focus(_ x: f32, _ y: f32) -> Bary3F {
+    bary3f(1.0 / (1.0 + x + y), x / (1.0 + x + y), y / (1.0 + x + y))
+}
+fn quad_focus(_ x: f32, _ y: f32) -> Vec2F {
+    vec2f(x / (1.0 + x), y / (1.0 + y))
+}
+fn quad_world(_ p: Vec2F) -> Vec2F {
+    vec2f((p.x - 0.5) * 1.5, (p.y - 0.5) * 1.5)
+}
+
+/// A regular fixed-diagonal grid, not a claimed blue-noise quad atlas.
+fn grid_point(_ vertex: u32, _ lod: u32) -> Vec2F {
+    let side = 1 << lod
+    let cell = vertex / 6
+    let x = cell % side
+    let y = cell / side
+    let lane = vertex % 6
+    let u = if lane == 0 || lane == 3 || lane == 5 {
+        0
+    } else {
+        1
+    }
+    let v = if lane == 0 || lane == 1 || lane == 3 {
+        0
+    } else {
+        1
+    }
+    vec2f(
+        (lod_as_f32(x) + lod_as_f32(u)) / lod_as_f32(side),
+        (lod_as_f32(y) + lod_as_f32(v)) / lod_as_f32(side),
+    )
+}
+struct Warp {
+    a: f32,
+    b: f32,
+    c: f32,
+    d: f32,
+    twist: f32,
+    focus_x: f32,
+    focus_y: f32,
+    concentration: f32,
+}
+impl Copy for Warp {}
+impl Warp {
+    fn triangle(self, _ p: Bary3F) -> Vec2F {
+        let edge = TriangleBoundaryWarp { a: self.a, b: self.b, c: self.c }.map(p)
+        let focus = triangle_focus(self.focus_x, self.focus_y)
+        let twisted = InteriorTwist { angle: self.twist }.triangle(edge, focus)
+        bary_to_cartesian(
+            InteriorConcentration { strength: self.concentration }.triangle(twisted, focus),
+        )
+    }
+    fn quad(self, _ p: Vec2F) -> Vec2F {
+        let edge = QuadBoundaryWarp { bottom: self.a, right: self.b, top: self.c, left: self.d }
+            .map(p)
+        let focus = quad_focus(self.focus_x, self.focus_y)
+        let twisted = InteriorTwist { angle: self.twist }.quad(edge, focus)
+        quad_world(
+            InteriorConcentration { strength: self.concentration }.quad(twisted, focus),
+        )
+    }
+}
+fn point(
+    _ fixture: FixtureBuffer,
+    _ domain: f32,
+    _ lod: u32,
+    _ vertex: u32,
+    _ warp: Warp,
+) -> Vec2F {
+    if domain < 0.5 {
+        warp.triangle(atlas_barycentric(fixture, key(lod), vertex))
+    } else {
+        warp.quad(grid_point(vertex, lod))
+    }
+}
+fn orientation(_ a: Vec2F, _ b: Vec2F, _ c: Vec2F) -> f32 {
+    (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+}
+fn extent_scale(_ width: f32, _ height: f32) -> Vec2F {
+    vec2f(
+        0.90 * min(1.0, height / width),
+        0.90 * min(1.0, width / height),
+    )
+}
+fn corner(_ i: u32, _ value: f32) -> Bary3F {
+    if i == 0 {
+        bary3f(value, 0.0, 0.0)
+    } else if i == 1 {
+        bary3f(0.0, value, 0.0)
+    } else {
+        bary3f(0.0, 0.0, value)
+    }
+}
+pub struct Varying { pub pixels: Bary3F, pub position: Vec2F, pub folded: f32 }
+impl Copy for Varying {}
+struct Draw {}
+
+actor TessellationWarp uses (GpuProgram<WebGpuBackend>,SurfaceQuality<ResponsiveBacking>,SurfaceRecovery<StandardSurfaceRecovery>) {
+    domain:f32,lod:f32,edge_a:f32,edge_b:f32,edge_c:f32,edge_d:f32,
+    twist:f32,focus_x:f32,focus_y:f32,concentration:f32,
+    show_wires:f32,wire_px:f32,res_x:f32,res_y:f32,dragging:f32,
+    fixture:FixtureBuffer,draw:DrawIndirectBuffer<Draw>,
+    const fn view()->Surface<Params> {Surface {extent:Extent::square(768),params:params()}}
+    const fn raster()->RasterPlan uses (RasterConfiguration) {raster_plan<Depth24LessEqualMsaa4>()}
+    fn transition(self,event:SurfaceEvent)->State uses (SurfaceTransition,SurfaceScheduling<LatestPerFrame>) {
+        let mut next=State {domain:self.domain,lod:self.lod,edge_a:self.edge_a,edge_b:self.edge_b,edge_c:self.edge_c,edge_d:self.edge_d,
+            twist:self.twist,focus_x:self.focus_x,focus_y:self.focus_y,concentration:self.concentration,
+            show_wires:self.show_wires,wire_px:self.wire_px,res_x:self.res_x,res_y:self.res_y,dragging:self.dragging}
+            .apply_param_bindings(params(),event)
+        if event.is_pointer_down() {next.dragging=1.0}
+        if event.is_pointer_down() || (event.is_pointer_move() && event.buttons!=0 && next.dragging>0.5) {
+            let scale=extent_scale(event.width,event.height)
+            let p=vec2f((2.0*event.pointer_x/event.width-1.0)/scale.x,(1.0-2.0*event.pointer_y/event.height)/scale.y)
+            if next.domain<0.5 {
+                let b=cartesian_to_bary(p)
+                next.focus_x=clamp(max(b.b,0.001)/max(b.a,0.001),0.02,50.0)
+                next.focus_y=clamp(max(b.c,0.001)/max(b.a,0.001),0.02,50.0)
+            } else {
+                let x=clamp(p.x/1.5+0.5,0.02,0.98)
+                let y=clamp(p.y/1.5+0.5,0.02,0.98)
+                next.focus_x=clamp(x/(1.0-x),0.02,50.0)
+                next.focus_y=clamp(y/(1.0-y),0.02,50.0)
+            }
+        }
+        if event.is_pointer_up() {next.dragging=0.0}
+        next
+    }
+    fn prepare_draw(self,invocation:ComputeInvocation) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+        let lod=level(self.lod)
+        let count=if self.domain<0.5 {patch_triangle_count(self.fixture,canonical_key_ordinal(key(lod)))*3}
+            else {6*(1<<lod)*(1<<lod)}
+        self.draw.store(index:0,value:count)
+        self.draw.store(index:1,value:1)
+        self.draw.store(index:2,value:0)
+        self.draw.store(index:3,value:0)
+    }
+    fn background(self,px:i32,py:i32)->i32 uses (FragmentSurface) {pack_rgba8(display_rgb(0.025,0.032,0.045))}
+    fn vertices(self,vertex_index:u32,instance_index:u32)->RasterVertex<Varying>
+        uses (VertexStage<Varying,IndirectTriangleList<DrawIndirectBuffer<Draw>>>) {
+        let warp=Warp {a:self.edge_a,b:self.edge_b,c:self.edge_c,d:self.edge_d,twist:self.twist,
+            focus_x:self.focus_x,focus_y:self.focus_y,concentration:self.concentration}
+        let lod=level(self.lod)
+        let start=vertex_index/3*3
+        let p0=point(self.fixture,self.domain,lod,start,warp)
+        let p1=point(self.fixture,self.domain,lod,start+1,warp)
+        let p2=point(self.fixture,self.domain,lod,start+2,warp)
+        let lane=vertex_index%3
+        let p=if lane==0 {p0} else if lane==1 {p1} else {p2}
+        let a=if lane==0 {p1} else if lane==1 {p2} else {p0}
+        let b=if lane==0 {p2} else if lane==1 {p0} else {p1}
+        let scale=extent_scale(self.res_x,self.res_y)
+        let area=orientation(p0,p1,p2)
+        let altitude=abs(area)/max(length2(vec2f(a.x-b.x,a.y-b.y)),0.0000001)
+            *scale.x*self.res_x*0.5
+        RasterVertex {
+            position:ClipPosition {x:p.x*scale.x,y:p.y*scale.y,z:0.5,w:1.0},
+            varying:Varying {pixels:corner(lane,altitude),position:p,folded:if area<=0.0 {1.0} else {0.0}},
+        }
+    }
+    fn fragment(self,varying:Varying)->i32 uses (FragmentStage<Varying>) {
+        let base=if varying.folded>0.5 {to_display_rgb(oklch(0.65,0.22,0.4))}
+            else {to_display_rgb(oklch(0.78,0.075,4.7+varying.position.x*0.65))}
+        let distance=min(varying.pixels.a,min(varying.pixels.b,varying.pixels.c))
+        let wire=if self.show_wires>0.5 {1.0-smoothstep(self.wire_px-0.6,self.wire_px+0.6,distance)} else {0.0}
+        let shaded=mix_display_rgb(base,display_rgb(0.03,0.045,0.06),wire*0.8)
+        let focus=if self.domain<0.5 {bary_to_cartesian(triangle_focus(self.focus_x,self.focus_y))}
+            else {quad_world(quad_focus(self.focus_x,self.focus_y))}
+        let radius=length2(vec2f(varying.position.x-focus.x,varying.position.y-focus.y))
+        let marker=1.0-smoothstep(0.009,0.014,radius)
+        pack_rgba8(mix_display_rgb(shaded,to_display_rgb(oklch(0.84,0.15,1.5)),marker))
+    }
+}

@@ -42,6 +42,7 @@ use quilting_domain::{
 }
 use quilting_patch::{BilinearCornerScales, DenotationSample, Euclidean3Points, TriangleDomain2, denote, measure_tangent_triangle3, triangle_parameter}
 use quilting_patch::barycentric_warp::{ProjectiveTriangleMap, RadialTriangleMap, TriangleFan3}
+use quilting_patch::sampling_warp::{interval_bias,TriangleBoundaryWarp,QuadBoundaryWarp,InteriorTwist,InteriorConcentration}
 use quilting_quaternion::{QuatF, inverse_bounded, multiply, quatf, zero}
 use quilting_qb::{
     QbPolicy,
@@ -68,6 +69,26 @@ pub fn reparameterized_patch_lane(_ b: f32, _ c: f32, _ strength: f32, _ lane: u
     else if lane == 3 { differential.normal.x }
     else if lane == 4 { differential.normal.y }
     else { differential.normal.z }
+}
+
+pub fn sampling_interval_bias(_ t:f32,_ strength:f32)->f32 {interval_bias(t,strength)}
+
+pub fn sampling_warp_lane(_ domain:u32,_ x:f32,_ y:f32,
+    _ ea:f32,_ eb:f32,_ ec:f32,_ ed:f32,
+    _ twist:f32,_ fx:f32,_ fy:f32,_ concentration:f32,_ lane:u32)->f32 {
+    if domain==0 {
+        let focus=bary3f(1.0/(1.0+fx+fy),fx/(1.0+fx+fy),fy/(1.0+fx+fy))
+        let boundary=TriangleBoundaryWarp {a:ea,b:eb,c:ec}.map(bary3f(1.0-x-y,x,y))
+        let rotated=InteriorTwist {angle:twist}.triangle(boundary,focus)
+        let result=InteriorConcentration {strength:concentration}.triangle(rotated,focus)
+        if lane==0 {result.b} else {result.c}
+    } else {
+        let focus=vec2f(fx/(1.0+fx),fy/(1.0+fy))
+        let boundary=QuadBoundaryWarp {bottom:ea,right:eb,top:ec,left:ed}.map(vec2f(x,y))
+        let rotated=InteriorTwist {angle:twist}.quad(boundary,focus)
+        let result=InteriorConcentration {strength:concentration}.quad(rotated,focus)
+        if lane==0 {result.x} else {result.y}
+    }
 }
 
 pub fn projective_triangle_lane(

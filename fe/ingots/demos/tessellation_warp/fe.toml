@@ -1,0 +1,14 @@
+[ingot]
+name = "tessellation_warp"
+version = "0.1.0"
+
+[dependencies]
+core = true
+std = true
+fmath = true
+quilting_domain = true
+quilting_patch = true
+quilting_patch_view = true
+quilting_atlas = true
+quilting_oklch = { path = "../../color/quilting_oklch" }
+classic_quilting_lod = { path = "../classic_quilting_lod" }

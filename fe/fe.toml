@@ -22,6 +22,7 @@ members = [
   { path = "ingots/demos/exact_patch_subdivision", name = "exact_patch_subdivision" },
   { path = "ingots/demos/radial_atlas_fan", name = "radial_atlas_fan" },
   { path = "ingots/demos/paired_triangle_fans", name = "paired_triangle_fans" },
+  { path = "ingots/demos/tessellation_warp", name = "tessellation_warp" },
   { path = "ingots/demos/clifford_weight_locus", name = "clifford_weight_locus" },
   { path = "ingots/demos/twist_topology_lab", name = "twist_topology_lab" },
 ]
@@ -46,6 +47,7 @@ default-members = [
   "ingots/demos/exact_patch_subdivision",
   "ingots/demos/radial_atlas_fan",
   "ingots/demos/paired_triangle_fans",
+  "ingots/demos/tessellation_warp",
   "ingots/demos/clifford_weight_locus",
   "ingots/demos/twist_topology_lab",
 ]

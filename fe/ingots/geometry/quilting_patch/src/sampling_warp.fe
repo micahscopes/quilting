@@ -1,0 +1,250 @@
+//! Boundary-first sampling maps for convex parameter domains.
+//! These change parameter coordinates, not the surface being sampled.
+//! All biases/concentrations must be positive and finite; focal points must
+//! lie strictly inside the domain. Admission belongs to the caller.
+use core::marker::Copy
+use quilting_domain::{Bary3F, Vec2F, bary3f, vec2f, bary_to_cartesian, cartesian_to_bary}
+use fmath::{sin, cos}
+
+/// Lawful implementations are strictly increasing on [0,1], fix its endpoints,
+/// and return finite values. An analytic inverse arc-length map or a validated
+/// sampled inverse CDF can implement the same contract as a hand-authored skew.
+/// The trait expresses the interface; callers/tests must establish these laws.
+pub trait IntervalSamplingMap: Copy {
+    fn map(self, _ t: f32) -> f32
+}
+pub struct ProjectiveIntervalBias { pub strength: f32 }
+impl Copy for ProjectiveIntervalBias {}
+impl IntervalSamplingMap for ProjectiveIntervalBias {
+    fn map(self, _ t: f32) -> f32 {
+        interval_bias(t, self.strength)
+    }
+}
+
+/// Independent boundary laws extended by monotone slice composition.
+pub struct TriangleEdgeMaps<
+    A: IntervalSamplingMap,
+    B: IntervalSamplingMap,
+    C: IntervalSamplingMap,
+> { pub a: A, pub b: B, pub c: C }
+impl<A: IntervalSamplingMap, B: IntervalSamplingMap, C: IntervalSamplingMap> TriangleEdgeMaps<
+    A,
+    B,
+    C,
+> {
+    pub fn map(self, _ point: Bary3F) -> Bary3F {
+        let a = edge_slice(point, self.a)
+        let b = edge_slice(bary3f(a.b, a.c, a.a), self.b)
+        let c = edge_slice(bary3f(b.b, b.c, b.a), self.c)
+        bary3f(c.b, c.c, c.a)
+    }
+}
+
+pub struct QuadEdgeMaps<
+    B: IntervalSamplingMap,
+    R: IntervalSamplingMap,
+    T: IntervalSamplingMap,
+    L: IntervalSamplingMap,
+> { pub bottom: B, pub right: R, pub top: T, pub left: L }
+impl<
+    B: IntervalSamplingMap,
+    R: IntervalSamplingMap,
+    T: IntervalSamplingMap,
+    L: IntervalSamplingMap,
+> QuadEdgeMaps<B, R, T, L> {
+    pub fn map(self, _ point: Vec2F) -> Vec2F {
+        let x = blend(self.bottom.map(point.x), self.top.map(point.x), point.y)
+        let y = blend(self.left.map(point.y), self.right.map(point.y), x)
+        vec2f(x, y)
+    }
+}
+fn blend(_ a: f32, _ b: f32, _ t: f32) -> f32 {
+    if a == b { a } else { (1.0 - t) * a + t * b }
+}
+
+/// Increasing projective interval map, with exact fixed endpoints.
+pub fn interval_bias(_ t: f32, _ strength: f32) -> f32 {
+    if t == 0.0 || t == 1.0 || strength == 1.0 {
+        return t
+    }
+    strength * t / (1.0 + (strength - 1.0) * t)
+}
+fn maximum(_ a: f32, _ b: f32) -> f32 {
+    if a > b { a } else { b }
+}
+
+fn triangle_radius(_ p: Bary3F, _ f: Bary3F) -> f32 {
+    maximum(
+        0.0,
+        maximum(
+            1.0 - p.a / f.a,
+            maximum(1.0 - p.b / f.b, 1.0 - p.c / f.c),
+        ),
+    )
+}
+fn quad_radius(_ p: Vec2F, _ f: Vec2F) -> f32 {
+    maximum(
+        0.0,
+        maximum(
+            maximum(1.0 - p.x / f.x, (p.x - f.x) / (1.0 - f.x)),
+            maximum(1.0 - p.y / f.y, (p.y - f.y) / (1.0 - f.y)),
+        ),
+    )
+}
+fn triangle_boundary(_ p: Bary3F) -> bool {
+    p.a == 0.0 || p.b == 0.0 || p.c == 0.0
+}
+fn quad_boundary(_ p: Vec2F) -> bool {
+    p.x == 0.0 || p.x == 1.0 || p.y == 0.0 || p.y == 1.0
+}
+
+/// Boundary-fixed concentration with a replaceable monotone radius law.
+pub struct InteriorRadialMap<M: IntervalSamplingMap> { pub law: M }
+impl<M: IntervalSamplingMap> InteriorRadialMap<M> {
+    pub fn triangle(self, _ p: Bary3F, _ f: Bary3F) -> Bary3F {
+        if triangle_boundary(p) {
+            return p
+        }
+        let r = triangle_radius(p, f)
+        if r == 0.0 { return p }
+        let mapped = self.law.map(r)
+        if mapped == r { return p }
+        let s = mapped / r
+        bary3f(
+            f.a + (p.a - f.a) * s,
+            f.b + (p.b - f.b) * s,
+            f.c + (p.c - f.c) * s,
+        )
+    }
+    pub fn quad(self, _ p: Vec2F, _ f: Vec2F) -> Vec2F {
+        if quad_boundary(p) {
+            return p
+        }
+        let r = quad_radius(p, f)
+        if r == 0.0 { return p }
+        let mapped = self.law.map(r)
+        if mapped == r { return p }
+        let s = mapped / r
+        vec2f(f.x + (p.x - f.x) * s, f.y + (p.y - f.y) * s)
+    }
+}
+
+/// Rotate each nested polygon shell; the angle vanishes at the boundary.
+/// In (normalized radius, polar angle) this is (r,theta+angle*(1-r)^2).
+/// Thus it is invertible even at large angles; straight sampled triangles can
+/// still fold if their resolution does not resolve the twisting map.
+pub struct InteriorTwist { pub angle: f32 }
+impl Copy for InteriorTwist {}
+impl InteriorTwist {
+    pub fn triangle(self, _ p: Bary3F, _ f: Bary3F) -> Bary3F {
+        if self.angle == 0.0 || triangle_boundary(p) {
+            return p
+        }
+        let r = triangle_radius(p, f)
+        if r == 0.0 { return p }
+        let center = bary_to_cartesian(f)
+        let rotated = rotate_about(
+            bary_to_cartesian(p),
+            center,
+            self.angle * (1.0 - r) * (1.0 - r),
+        )
+        let q = cartesian_to_bary(rotated)
+        let s = r / triangle_radius(q, f)
+        bary3f(
+            f.a + (q.a - f.a) * s,
+            f.b + (q.b - f.b) * s,
+            f.c + (q.c - f.c) * s,
+        )
+    }
+    pub fn quad(self, _ p: Vec2F, _ f: Vec2F) -> Vec2F {
+        if self.angle == 0.0 || quad_boundary(p) {
+            return p
+        }
+        let r = quad_radius(p, f)
+        if r == 0.0 { return p }
+        let q = rotate_about(p, f, self.angle * (1.0 - r) * (1.0 - r))
+        let s = r / quad_radius(q, f)
+        vec2f(f.x + (q.x - f.x) * s, f.y + (q.y - f.y) * s)
+    }
+}
+fn rotate_about(_ p: Vec2F, _ f: Vec2F, _ angle: f32) -> Vec2F {
+    let x = p.x - f.x
+    let y = p.y - f.y
+    let c = cos(angle)
+    let s = sin(angle)
+    vec2f(f.x + c * x - s * y, f.y + s * x + c * y)
+}
+
+/// Three independent edge maps. A acts along B->C, B along C->A,
+/// and C along A->B. Each extension fixes the other two edges pointwise.
+pub struct TriangleBoundaryWarp { pub a: f32, pub b: f32, pub c: f32 }
+impl Copy for TriangleBoundaryWarp {}
+impl TriangleBoundaryWarp {
+    pub fn map(self, _ point: Bary3F) -> Bary3F {
+        // Each stage holds its opposite coordinate fixed, applying a monotone
+        // interval map within the remaining slice. Its strength tends to one
+        // toward the opposite vertex. Composition is orientation-preserving
+        // in real arithmetic; interpolating arbitrary displacement fields need
+        // not be. Stage order affects only the interior, not the edge rules.
+        TriangleEdgeMaps {
+            a: ProjectiveIntervalBias { strength: self.a },
+            b: ProjectiveIntervalBias { strength: self.b },
+            c: ProjectiveIntervalBias { strength: self.c },
+        }
+            .map(point)
+    }
+}
+fn edge_slice<M: IntervalSamplingMap>(_ p: Bary3F, _ law: M) -> Bary3F {
+    if p.b == 0.0 || p.c == 0.0 {
+        return p
+    }
+    let span = p.b + p.c
+    let t = p.c / span
+    let mapped = law.map(t)
+    if mapped == t { return p }
+    let c = span * ((1.0 - span) * t + span * mapped)
+    bary3f(p.a, span - c, c)
+}
+
+/// Four independent interval maps, all measured in increasing x or y.
+pub struct QuadBoundaryWarp { pub bottom: f32, pub right: f32, pub top: f32, pub left: f32 }
+impl Copy for QuadBoundaryWarp {}
+impl QuadBoundaryWarp {
+    pub fn map(self, _ point: Vec2F) -> Vec2F {
+        // Compose two monotone slice maps instead of adding cross-dependent
+        // displacements. Their positive Jacobian determinants multiply.
+        QuadEdgeMaps {
+            bottom: ProjectiveIntervalBias { strength: self.bottom },
+            right: ProjectiveIntervalBias { strength: self.right },
+            top: ProjectiveIntervalBias { strength: self.top },
+            left: ProjectiveIntervalBias { strength: self.left },
+        }
+            .map(point)
+    }
+}
+
+/// Radial concentration about an interior point with the boundary fixed.
+/// A convex polygon's normalized radius is max of its normalized facet
+/// distances from the focus. Map r to r/(k+(1-k)r), preserving every ray,
+/// focus, and boundary point. k>1 concentrates samples toward the focus.
+/// This map is continuous and injective in real arithmetic, but its derivative
+/// can jump between polygon sectors. Warped *straight mesh triangles* still
+/// require a separate orientation/coverage check at finite resolution.
+pub struct InteriorConcentration { pub strength: f32 }
+impl Copy for InteriorConcentration {}
+impl InteriorConcentration {
+    pub fn triangle(self, _ point: Bary3F, _ focus: Bary3F) -> Bary3F {
+        if self.strength == 1.0 {
+            return point
+        }
+        InteriorRadialMap { law: ProjectiveIntervalBias { strength: 1.0 / self.strength } }
+            .triangle(point, focus)
+    }
+    pub fn quad(self, _ point: Vec2F, _ focus: Vec2F) -> Vec2F {
+        if self.strength == 1.0 {
+            return point
+        }
+        InteriorRadialMap { law: ProjectiveIntervalBias { strength: 1.0 / self.strength } }
+            .quad(point, focus)
+    }
+}
