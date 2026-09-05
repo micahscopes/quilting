@@ -78,6 +78,7 @@ const REPAIR_WORDS: usize = ((TWINS+REPAIR_TILE-1)/REPAIR_TILE)*repair::SUMMARY_
 const REPAIR_GROUPS: usize = (TWINS+THREADS-1)/THREADS
 const REPAIR_BLOCK_GROUPS: usize = (((TWINS+REPAIR_TILE-1)/REPAIR_TILE)+THREADS-1)/THREADS
 pub struct SampleRound {}
+pub struct SampleCandidates {}
 pub struct CandidateIndexLevel {}
 pub struct InsertionRound {}
 pub struct RepairRound {}
@@ -118,6 +119,7 @@ actor TriangleAtlasBuild uses (GpuProgram<WebGpuBackend>) {
     repair_edges_command:DispatchIndirectBuffer<RepairEdges>,
     repair_blocks_command:DispatchIndirectBuffer<RepairBlocks>,
     repair_scalar_command:DispatchIndirectBuffer<RepairScalar>,
+    sample_command:DispatchIndirectBuffer<SampleCandidates>,
 
     receipt:StorageBuffer<u32,16>,
     active:StorageBuffer<TriangleJobState,1>,
@@ -153,13 +155,19 @@ actor TriangleAtlasBuild uses (GpuProgram<WebGpuBackend>) {
     fn candidate_index_advance(self) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<AtlasJob,CycledDispatch<CandidateIndexLevel,FixedDispatch<1,1,1>,SEARCH_LEVELS>,JOBS>>) {
         candidate_index::advance_level<SEARCH_WORDS>(self.candidate_bounds)
     }
-    fn propose(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<SampleRound,FixedDispatch<GROUPS,1,1>,64>,JOBS>>) {
+    // Reset the full arena once; sampling rounds touch only its resident prefix.
+    fn sample_schedule(self) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<AtlasJob,FixedDispatch<1,1,1>,JOBS>>) {
+        let job=self.active.load(index:0)
+        let count=candidate_slot_count(job.key())
+        repair::dispatch_count<SampleCandidates>(self.sample_command,count,THREADS.downcast_truncate(),job.valid!=0 && count<=CANDIDATE_COUNT)
+    }
+    fn propose(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<SampleRound,IndirectDispatch<DispatchIndirectBuffer<SampleCandidates>>,64>,JOBS>>) {
         propose_candidate_lane_with_policy<IndexedConflict<AtlasCandidateConflict,SEARCH_LEAVES,SEARCH_WORDS>,CANDIDATES,SAMPLING>(
             self.active.load(index:0).key(),
             IndexedConflict {policy:AtlasCandidateConflict {},tree:self.candidate_bounds},self.sampling,i,
         )
     }
-    fn retire(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<SampleRound,FixedDispatch<GROUPS,1,1>,64>,JOBS>>) {
+    fn retire(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<AtlasJob,CycledDispatch<SampleRound,IndirectDispatch<DispatchIndirectBuffer<SampleCandidates>>,64>,JOBS>>) {
         retire_candidate_lane_with_policy<IndexedConflict<AtlasCandidateConflict,SEARCH_LEAVES,SEARCH_WORDS>,CANDIDATES,SAMPLING>(
             self.active.load(index:0).key(),
             IndexedConflict {policy:AtlasCandidateConflict {},tree:self.candidate_bounds},self.sampling,i,
@@ -394,4 +402,3 @@ actor TriangleAtlasBuild uses (GpuProgram<WebGpuBackend>) {
             && ready==JOBS.downcast_truncate() && failed==0))
     }
 }
-

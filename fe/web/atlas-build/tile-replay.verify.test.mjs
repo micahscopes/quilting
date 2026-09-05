@@ -23,4 +23,5 @@ test('replay rejects escaping the outer job cycle',()=>{
 test('invalid job and checkpoint requests fail before allocating GPU resources',async()=>{
   await assert.rejects(replayAtlasTile(null,null,[]),/valid quad job/);
   await assert.rejects(replayAtlasTile(null,null,[0,0,0,8,8,1,1,8,9,9],{rounds:[128,64]}),/checkpoints/);
+  await assert.rejects(replayAtlasTile(null,null,[0,0,0,8,8,1,1,8,9,9],{sampleGroups:0}),/sampling dispatch/);
 });

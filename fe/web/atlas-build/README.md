@@ -18,6 +18,14 @@ retention implementations are shared in `quilting_atlas_webgpu`; future actor
 composition should consolidate this wiring without manufacturing Fe source or
 moving scheduling policy into JavaScript.
 
+Sampling proposal/retirement dispatches use a GPU-written indirect command
+derived from the current key's candidate count. Initialization still clears the
+whole reusable sampling arena, including both parity tails. This skips idle
+lanes without removing candidates, changing the 64-round budget, or reducing
+the atlas key set. For all quad keys, scheduled sampling invocations decrease
+from 69,457,674,240 to 29,995,204,608 (56.8%). This is a static schedule census,
+not GPU instructions or a measured time saving.
+
 Completion requires every canonical job ready and zero failures. Per-tile
 receipts distinguish the generation stages. The diagnostic directory oracle
 is separate from production and checks coverage, identities, epochs, range
@@ -53,6 +61,9 @@ buffers and a recorded job. It preserves inner pass order and observes repair
 at increasing round counts before running the unmodified final certificate.
 Neither diagnostic is imported by the application. Their JavaScript is test
 orchestration, not a replacement implementation of sampling or triangulation.
+Optional dispatch overrides, whole-buffer hashes and poisoned initial storage
+test active-prefix equivalence against the original compiled shaders. These
+are test interventions, never production host-side dispatch decisions.
 
 Checkpoint violation counts before the final certificate describe the last
 round's pre-flip proposals. Only the final certificate recomputes violations
@@ -70,6 +81,14 @@ checks for every flippable interior edge (635 points, 1,009 triangles, 1,643
 edges). Geometry and receipt evidence:
 `/laboratory/quilting/scratch/atlas-job-state-20260905/quad-0008-repaired-geometry.json`;
 `/laboratory/quilting/scratch/atlas-job-state-20260905/quad-0008-repair-replay.json`.
+
+Keys `(0,0,0,3)` and `(0,1,3,4)` produce identical full sampling-buffer SHA-256,
+receipts, and geometry with original versus active-prefix dispatch. Both pass
+the independent geometric oracle. The latter also matches when the entire
+sampling arena is poisoned before initialization. Evidence is saved alongside
+the captures as `sampling-dispatch-equivalence.json` and
+`sampling-poison-equivalence.json`. These tests establish those cases; the
+updated production indirect-command path still needs its own browser gate.
 
 Use the shared release toolchain:
 

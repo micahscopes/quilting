@@ -33,11 +33,14 @@ export function tileReplayBlocks(passes) {
   return blocks;
 }
 
-export async function replayAtlasTile(gpu, manifest, activeWords, {rounds = [128,256,512,1024], captureGeometry = false} = {}) {
+export async function replayAtlasTile(gpu, manifest, activeWords, {rounds = [128,256,512,1024], captureGeometry = false,
+  sampleGroups, captureSampling = false, poisonSampling = false} = {}) {
   if (activeWords.length !== 10 || !activeWords.every(x => Number.isSafeInteger(x) && x >= 0 && x <= 0xffffffff)
       || activeWords[5] !== 1) throw Error('expected a recorded valid quad job');
   if (!rounds.length || rounds.some((n,i) => !Number.isSafeInteger(n) || n < 1 || n > 65535 || (i > 0 && n <= rounds[i-1])))
     throw Error('repair checkpoints must increase within 1..65535');
+  if (sampleGroups !== undefined && (!Number.isSafeInteger(sampleGroups) || sampleGroups < 1 || sampleGroups > 65535))
+    throw Error('invalid diagnostic sampling dispatch');
   const blocks = tileReplayBlocks(manifest.passes);
   const device = gpu.device, owned = [], resources = new Map(), prepared = new Map();
   const make = (size,usage) => { const b = device.createBuffer({size,usage}); owned.push(b); return b; };
@@ -52,6 +55,11 @@ export async function replayAtlasTile(gpu, manifest, activeWords, {rounds = [128
     const active = resources.get('active');
     if (active?.size !== activeWords.length*4) throw Error('recorded job layout mismatch');
     device.queue.writeBuffer(active,0,new Uint32Array(activeWords));
+    if (poisonSampling) {
+      const sampling=resources.get('sampling');
+      if (sampling.size > 32*1024*1024) throw Error('sampling poison exceeds diagnostic bounds');
+      device.queue.writeBuffer(sampling,0,new Uint32Array(sampling.size/4).fill(0xdeadbeef));
+    }
     for (const block of blocks) for (const p of block.passes) {
       if (p.repeat !== undefined && p.repeat !== 1) throw Error('unsupported per-pass repetition');
       const record = gpu.passRecords.find(r => r.pass.source_entry === p.source_entry);
@@ -70,7 +78,10 @@ export async function replayAtlasTile(gpu, manifest, activeWords, {rounds = [128
     const dispatch = p => {
       const r = prepared.get(p.source_entry), pass = encoder.beginComputePass();
       pass.setPipeline(r.pipeline); pass.setBindGroup(0,r.group);
-      if (p.dispatch_indirect) pass.dispatchWorkgroupsIndirect(resources.get(p.dispatch_indirect.resource),p.dispatch_indirect.offset??0);
+      if (sampleGroups !== undefined && ['propose','retire'].includes(p.source_entry)) {
+        if (p.dispatch_indirect || sampleGroups > p.dispatch[0]) throw Error('override requires the fixed-dispatch baseline');
+        pass.dispatchWorkgroups(sampleGroups,p.dispatch[1],p.dispatch[2]);
+      } else if (p.dispatch_indirect) pass.dispatchWorkgroupsIndirect(resources.get(p.dispatch_indirect.resource),p.dispatch_indirect.offset??0);
       else pass.dispatchWorkgroups(...p.dispatch);
       pass.end();
     };
@@ -94,6 +105,18 @@ export async function replayAtlasTile(gpu, manifest, activeWords, {rounds = [128
       } else for (let n = 0; n < block.repeat; n++) for (const p of block.passes) dispatch(p);
     }
     await observe('final-certificate');
+    let samplingSha256;
+    if (captureSampling) {
+      const source = resources.get('sampling');
+      if (source.size > 32*1024*1024) throw Error('sampling observation exceeds diagnostic bounds');
+      const read = make(source.size,GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST);
+      encoder.copyBufferToBuffer(source,0,read,0,source.size);
+      device.queue.submit([encoder.finish()]);
+      await read.mapAsync(GPUMapMode.READ);
+      const hash = await crypto.subtle.digest('SHA-256',read.getMappedRange());
+      samplingSha256 = Array.from(new Uint8Array(hash),v=>v.toString(16).padStart(2,'0')).join('');
+      read.unmap(); encoder = device.createCommandEncoder();
+    }
     let geometry;
     if (captureGeometry) {
       const last = observations.at(-1), [nv,nt] = last.state;
@@ -114,7 +137,8 @@ export async function replayAtlasTile(gpu, manifest, activeWords, {rounds = [128
     }
     const error = await device.popErrorScope(); scopeOpen = false;
     if (error) throw Error(error.message);
-    return {activeWords,rounds,observations,...(geometry?{geometry}:{}),allocatedBytes:[...resources.values()].reduce((sum,b)=>sum+b.size,0)};
+    return {activeWords,rounds,observations,...(poisonSampling?{poisonSampling:true}:{}),...(sampleGroups!==undefined?{sampleGroups}:{}),
+      ...(samplingSha256?{samplingSha256}:{}),...(geometry?{geometry}:{}),allocatedBytes:[...resources.values()].reduce((sum,b)=>sum+b.size,0)};
   } finally {
     if (scopeOpen) await device.popErrorScope();
     for (const b of owned) b.destroy();
