@@ -41,10 +41,43 @@ impl super::ConvexAtlasDomain for QuadAtlasDomain {
 
 pub struct QuadCandidateConflict {}
 impl Copy for QuadCandidateConflict {}
+fn minimum_lod(_ key: QuadAtlasKey) -> u32 {
+    let mut minimum = key.bottom
+    let mut edge: u32 = 1
+    while edge < 4 {
+        let value = key.edge(edge)
+        if value < minimum {
+            minimum = value
+        }
+        edge = edge + 1
+    }
+    minimum
+}
 impl CandidateConflictPolicy for QuadCandidateConflict {
     type Key = QuadAtlasKey
     type Point = FixedPoint2
+    fn neighborhood(
+        self,
+        _ key: QuadAtlasKey,
+        _ candidate: QuadInteriorCandidate,
+    ) -> quilting_atlas::neighborhood::CandidateWindow {
+        quilting_atlas::neighborhood::grid_window(
+            quilting_atlas::quad_sampling::candidate_grid_side(key),
+            minimum_lod(key),
+            candidate.point.y,
+            candidate.point.x,
+            false,
+        )
+    }
     fn conflicts_boundary(self, _ key: QuadAtlasKey, _ candidate: QuadInteriorCandidate) -> bool {
+        let scale = quilting_atlas::sampling::BARYCENTRIC_SCALE
+        let radius = scale >> minimum_lod(key)
+        if candidate.point.x > radius
+            && candidate.point.y > radius
+            && candidate.point.x < scale - radius
+            && candidate.point.y < scale - radius {
+            return false
+        }
         candidate_conflicts_boundary(key, candidate)
     }
     fn conflicts(self, _ left: QuadInteriorCandidate, _ right: QuadInteriorCandidate) -> bool {

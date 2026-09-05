@@ -51,6 +51,7 @@ use quilting_atlas::topology::{
 }
 use std::webgpu::{ComputeInvocation, StorageBuffer}
 use quilting_atlas::planar::PlanarCoordinates
+use quilting_atlas::neighborhood::{CandidateWindow, grid_window}
 pub use quad
 
 /// Typed coordinates in the resident three-word point slot. Square points
@@ -128,6 +129,12 @@ pub trait CandidateConflictPolicy: core::marker::Copy {
     fn conflicts_boundary(self, _ key: Self::Key, _ candidate: Candidate<Self::Point>) -> bool
 
     fn conflicts(self, _ left: Candidate<Self::Point>, _ right: Candidate<Self::Point>) -> bool
+
+    /// Conservative search policy. Arbitrary pullback/deformed providers
+    /// retain exhaustive checks unless they supply their own proven bound.
+    fn neighborhood(self, _ key:Self::Key, _ candidate:Candidate<Self::Point>) -> CandidateWindow {
+        CandidateWindow::all(key.candidate_slots())
+    }
 }
 
 pub struct AtlasCandidateConflict {}
@@ -136,7 +143,18 @@ impl core::marker::Copy for AtlasCandidateConflict {}
 impl CandidateConflictPolicy for AtlasCandidateConflict {
     type Key = AtlasKey
     type Point = FixedBarycentric
+    fn neighborhood(self, _ key:AtlasKey, _ candidate:InteriorCandidate) -> CandidateWindow {
+        grid_window(quilting_atlas::sampling::candidate_grid_side(key), key.a,
+            candidate.point.b,candidate.point.c,true)
+    }
     fn conflicts_boundary(self, _ key: AtlasKey, _ candidate: InteriorCandidate) -> bool {
+        // Every boundary exclusion radius is <= S/2^minimum_lod. The
+        // equilateral altitude to an edge is 3/2 of its barycentric lane,
+        // so this cheaper coordinate bound is conservative for all edges.
+        let radius=quilting_atlas::sampling::BARYCENTRIC_SCALE>>key.a
+        if candidate.point.a>radius && candidate.point.b>radius && candidate.point.c>radius {
+            return false
+        }
         candidate_conflicts_boundary(key, candidate)
     }
 
@@ -1875,9 +1893,12 @@ where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WOR
     let candidate = load_candidate<P::Point, WORDS>(workspace, slot)
     let mut accepted_conflict = false
     let mut preceding_pending_conflict = false
-    let mut other_slot: u32 = 0
-    while other_slot < count {
-        if other_slot != slot {
+    let window = if key.candidate_slots()>count {CandidateWindow::all(count)}
+        else {policy.neighborhood(key, candidate)}
+    let mut query: u32 = 0
+    while query < window.count() {
+        let other_slot = window.slot(query)
+        if other_slot < count && other_slot != slot {
             let other_state = load_generation_state<CAPACITY, WORDS>(workspace, parity, other_slot)
             if other_state == CANDIDATE_ACCEPTED || other_state == CANDIDATE_PENDING {
                 let other = load_candidate<P::Point, WORDS>(workspace, other_slot)
@@ -1895,7 +1916,7 @@ where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WOR
                 }
             }
         }
-        other_slot = other_slot + 1
+        query = query + 1
     }
     workspace
         .store(
@@ -1956,9 +1977,12 @@ where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WOR
     let winner = workspace.load(index: candidate_winner_offset<CAPACITY>(slot)) != 0
     let mut accepted_conflict = false
     let mut winner_conflict = false
-    let mut other_slot: u32 = 0
-    while other_slot < count {
-        if other_slot != slot {
+    let window = if key.candidate_slots()>count {CandidateWindow::all(count)}
+        else {policy.neighborhood(key, candidate)}
+    let mut query: u32 = 0
+    while query < window.count() {
+        let other_slot = window.slot(query)
+        if other_slot < count && other_slot != slot {
             let other_state = load_generation_state<CAPACITY, WORDS>(workspace, parity, other_slot)
             let other_winner = workspace.load(index: candidate_winner_offset<CAPACITY>(other_slot))
                 != 0
@@ -1974,7 +1998,7 @@ where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WOR
                 }
             }
         }
-        other_slot = other_slot + 1
+        query = query + 1
     }
     store_next_generation_state<CAPACITY, WORDS>(
         workspace,

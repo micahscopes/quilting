@@ -1,0 +1,105 @@
+//! Conservative candidate queries over the generator's implicit cell index.
+//! This only prunes impossible conflicts; priority and MIS semantics do not
+//! change. Surface-deformed candidates must use an appropriate metric bound
+//! or the exhaustive fallback, never this reference-domain grid by accident.
+use core::marker::Copy
+use super::sampling::{BARYCENTRIC_SCALE, CANDIDATE_TRIALS_PER_CELL}
+
+pub struct CandidateWindow {
+    first_row: u32,
+    first_column: u32,
+    rows: u32,
+    columns: u32,
+    side: u32,
+    triangular: bool,
+}
+impl Copy for CandidateWindow {}
+impl CandidateWindow {
+    pub const fn all(_ count: u32) -> Self {
+        Self { first_row: 0, first_column: 0, rows: 1, columns: count, side: 0, triangular: false }
+    }
+    pub const fn count(self) -> u32 {
+        self.rows * self.columns * (if self.side == 0 {
+                1
+            } else {
+                CANDIDATE_TRIALS_PER_CELL
+            })
+    }
+    /// Candidate slot in its original stable order, or the invalid sentinel
+    /// for a rectangular-window cell outside the triangular domain.
+    pub const fn slot(self, _ index: u32) -> u32 {
+        if index >= self.count() {
+            return 0xffffffff
+        }
+        if self.side == 0 {
+            return index
+        }
+        let cell = index / CANDIDATE_TRIALS_PER_CELL
+        let trial = index % CANDIDATE_TRIALS_PER_CELL
+        let row = self.first_row + cell / self.columns
+        let column = self.first_column + cell % self.columns
+        if self.triangular && row + column >= self.side {
+            return 0xffffffff
+        }
+        let preceding = if self.triangular {
+            row * (2 * self.side - row + 1) / 2
+        } else {
+            row * self.side
+        }
+        (preceding + column) * CANDIDATE_TRIALS_PER_CELL + trial
+    }
+}
+
+/// Radius is at most S/2^minimum_lod. A conflicting pair therefore differs
+/// by no more than that amount in either square coordinate. The equilateral
+/// metric is stricter (3*(db²+dc²+db*dc) >= 9/4*db² and likewise for dc), so
+/// the same envelope is conservative there. Including endpoint cells handles
+/// integer rounding and exact radius ties without relying on floating point.
+///
+/// Mixed-density jobs may still have large windows. A multilevel radius index
+/// can improve those later without changing the relation or its tests.
+pub const fn grid_window(
+    _ side: u32,
+    _ minimum_lod: u32,
+    _ row_coordinate: u32,
+    _ column_coordinate: u32,
+    _ triangular: bool,
+) -> CandidateWindow {
+    if side == 0
+        || side > BARYCENTRIC_SCALE
+        || BARYCENTRIC_SCALE % side != 0
+        || minimum_lod > 8
+        || row_coordinate > BARYCENTRIC_SCALE
+        || column_coordinate > BARYCENTRIC_SCALE {
+        return CandidateWindow::all(0)
+    }
+    let width = BARYCENTRIC_SCALE / side
+    let radius = BARYCENTRIC_SCALE >> minimum_lod
+    let first_row = (if row_coordinate > radius {
+            row_coordinate - radius
+        } else {
+            0
+        }) / width
+    let first_column = (if column_coordinate > radius {
+            column_coordinate - radius
+        } else {
+            0
+        })
+        / width
+    let row_end = (row_coordinate + radius) / width
+    let column_end = (column_coordinate + radius) / width
+    let last_row = if row_end < side { row_end } else { side - 1 }
+    let last_column = if column_end < side {
+        column_end
+    } else {
+        side - 1
+    }
+    CandidateWindow {
+        first_row: first_row,
+        first_column: first_column,
+        rows: last_row - first_row + 1,
+        columns: last_column - first_column + 1,
+        side: side,
+        triangular: triangular,
+    }
+}

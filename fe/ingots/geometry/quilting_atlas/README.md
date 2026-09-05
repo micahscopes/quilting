@@ -67,6 +67,12 @@ Providers must batch bounded jobs and reuse the common independent-set state
 transitions. The reference boundary scan must be replaced by an equivalent
 indexed query for large GPU jobs.
 
+`neighborhood` maps conservative spatial windows back to stable candidate
+slots without an auxiliary buffer. Uniform-density queries inspect at most
+50 slots through LoD 8 in either domain. Mixed-density windows remain bounded
+by the largest exclusion radius and may still be large. Deformed-surface
+policies retain exhaustive queries unless they supply their own valid bound.
+
 Additional release Wasm gates:
 
 - `quad_sampling_wasm_preserves_edge_density_and_square_symmetry` checks all

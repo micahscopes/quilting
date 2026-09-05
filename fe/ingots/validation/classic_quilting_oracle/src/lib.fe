@@ -1,5 +1,15 @@
 //! Thin Wasm scalar exports over the three production M1 ingots.
 
+pub fn candidate_window_lane(
+    _ maximum_lod:u32,_ minimum_lod:u32,_ row:u32,_ column:u32,
+    _ triangular:u32,_ index:u32,
+)->u32 {
+    let window=quilting_atlas::neighborhood::grid_window(
+        2<<maximum_lod,minimum_lod,row,column,triangular!=0,
+    )
+    if index==0xffffffff {window.count()} else {window.slot(index)}
+}
+
 use quilting_patch::arc_authoring::{ArcAuthoringAlgebra,ArcConstruction,arc_through,arc_from_tangent,evaluate_arc}
 use quilting_clifford_bezier::{CliffordOdd3F,Clifford3Policy}
 use quilting_clifford_bezier::euclidean::EuclideanCliffordAlgebra

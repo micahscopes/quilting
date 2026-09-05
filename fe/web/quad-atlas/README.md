@@ -22,11 +22,19 @@ GPU storage and drives an indirect draw; no CPU readback selects topology.
 ## Limits, not completion claims
 
 The current live generator covers **0–3**, not the requested complete 0–8 atlas.
-Both triangle and quad GPU selection still scan every candidate slot. Square
-insertion and edge-flip repair currently execute on one GPU invocation. Neither
+Both triangle and quad GPU selection now query a conservative candidate-cell
+window. Uniform-density jobs visit at most 50 slots per query through LoD 8;
+mixed-density windows can still be large. Square insertion and edge-flip repair
+currently execute on one GPU invocation. Neither
 the all-keys batch scheduler nor a complete resident quad atlas exists yet.
 The full triangle atlas used by Tessellation Warp is a precomputed artifact,
 not evidence that this live GPU generator already scales to level 8.
+
+The delivery requirement is **device-side Fe/WebGPU generation**, not shipping
+the 24,871,552-byte Rust-generated triangle artifact. That artifact is a legacy
+baseline, not the intended startup path. Generation latency, first usable
+frame, full-atlas readiness, peak memory, and downloaded bytes need separate
+measurements; none is established by the small jobs below.
 
 This is planar reference-domain Delaunay, not surface-metric uniformization.
 Subsequent warps can invert triangles and do not preserve Delaunay legality.
@@ -49,6 +57,12 @@ triangles, boundary/interior edge incidence, exact square area, Euler's disk
 relation, crossing edges, and local Delaunay legality using independent BigInt
 incircle arithmetic. It accepts either cocircular diagonal. These four cases
 are evidence, not an exhaustive all-key gate.
+
+The candidate-window implementation was rerun on these four jobs and produced
+identical complete point/index buffers and receipts. The release Fe-to-Wasm
+`atlas_candidate_windows_cover_conflicts_and_bound_uniform_work_through_lod8`
+gate independently checks conservative cell coverage and the uniform-query
+bound. This is a work-count guarantee, not a GPU startup timing.
 
 Snapshots were copied using a diagnostic-only WebGPU storage-copy pass because
 the production buffers intentionally lack COPY_SRC. Direct buffer copies from

@@ -1555,3 +1555,50 @@ fn quilting_qb_wasm_matches_rust_differentials_flat_patch_and_s3() {
     assert_pole_fails_closed(&mut store, &instance);
     assert_s3_remaps(&mut store, &instance);
 }
+
+#[test]
+fn atlas_candidate_windows_cover_conflicts_and_bound_uniform_work_through_lod8() {
+    use std::collections::HashSet;
+    let (mut store, instance) = instantiate();
+    let query = function::<(i32, i32, i32, i32, i32, i32), i32>(
+        &mut store, &instance, "candidate_window_lane",
+    );
+    let s = 16384i32;
+    for maximum in 0..=8 {
+        let side = 2 << maximum;
+        let width = s / side;
+        for triangular in 0..=1 {
+            for minimum in [0, maximum / 2, maximum] {
+                for (row, col) in [(0, 0), (s / 3, s / 5), (s - 1, 0)] {
+                    let count = query.call(&mut store, (maximum, minimum, row, col, triangular, -1)).unwrap();
+                    if minimum == maximum {
+                        assert!(count <= 50, "uniform query grew at LoD {maximum}: {count}");
+                    }
+                    let mut actual = HashSet::new();
+                    for i in 0..count {
+                        let slot = query.call(&mut store, (maximum, minimum, row, col, triangular, i)).unwrap();
+                        if slot >= 0 { assert!(actual.insert(slot), "duplicate candidate slot"); }
+                    }
+                    assert_eq!(query.call(&mut store, (maximum, minimum, row, col, triangular, count)).unwrap(), -1);
+                    let radius = s >> minimum;
+                    // Independent closed cell/AABB intersection: stronger
+                    // than disk conflict, so no metric-specific false negative
+                    // can hide inside an excluded cell. Probe every cell.
+                    for r in 0..side {
+                        for c in 0..side {
+                            if triangular != 0 && r + c >= side { continue; }
+                            let first = if triangular != 0 { r * (2 * side - r + 1) / 2 } else { r * side };
+                            let slot = (first + c) * 2;
+                            let dx = (r * width - row).max(row - ((r + 1) * width - 1)).max(0);
+                            let dy = (c * width - col).max(col - ((c + 1) * width - 1)).max(0);
+                            if dx <= radius && dy <= radius {
+                                assert!(actual.contains(&slot) && actual.contains(&(slot + 1)),
+                                    "missed cell ({r},{c}) for max={maximum} min={minimum} tri={triangular}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

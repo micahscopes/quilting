@@ -26,6 +26,7 @@ pub use triangulation
 pub use planar
 pub use quad
 pub use quad_sampling
+pub use neighborhood
 
 pub const MIN_LOD: u32 = 0
 pub const MAX_LOD: u32 = 8
