@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {verifyPlanarMesh} from '../quad-atlas/verify.mjs';
 
-test('GPU triangle repair respects its barycentric boundary and equilateral Delaunay metric',()=>{
-  const c=JSON.parse(readFileSync(new URL('./repair-browser-snapshot.json',import.meta.url),'utf8'));
-  assert.equal(c.passCount,34);
+for(const [filename,passes] of [['repair-browser-snapshot.json',34],['incidence-browser-snapshot.json',44]]){
+test(`GPU triangle (${passes} passes) respects its barycentric boundary and equilateral Delaunay metric`,()=>{
+  const c=JSON.parse(readFileSync(new URL(filename,import.meta.url),'utf8'));
+  assert.equal(c.passCount,passes);
   const S=16384,[a,b,d]=c.key.map(x=>2**x),boundary=[];
   for(let i=0;i<=d;++i)boundary.push([S-S*i/d,S*i/d,0]);
   for(let i=1;i<=b;++i)boundary.push([S-S*i/b,0,S*i/b]);
@@ -27,3 +28,4 @@ test('GPU triangle repair respects its barycentric boundary and equilateral Dela
   for(const [face,t] of c.triangles.entries())for(let e=0;e<3;++e)
     assert.equal(c.twins[face*3+e],edges.get(`${t[(e+1)%3]},${t[e]}`)??0xffffffff);
 });
+}

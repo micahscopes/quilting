@@ -19,7 +19,7 @@ pub const SUMMARY_WORDS:usize=3
 const ACTIVE:u32=1
 const FAILED:u32=2
 
-fn running(_ state:StorageBuffer<u32,STATE_WORDS>)->bool {
+pub fn running(_ state:StorageBuffer<u32,STATE_WORDS>)->bool {
     state.load(index:4)==0 && state.load(index:5)==0 && state.load(index:7)!=0
 }
 

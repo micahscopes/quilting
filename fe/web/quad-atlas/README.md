@@ -28,7 +28,7 @@ mixed-density windows can still be large. Triangle and square insertion now
 share parallel, immutable-generation rounds with local child-face relocation.
 Arbitration and face planning now use per-face atomic claims with bounded
 work per point/face. Edge repair now executes in conflict-safe parallel rounds;
-the one-time neighbor-index initializer is still scalar. Neither
+the one-time neighbor index uses parallel counts, blocked scans and scatter. Neither
 the all-keys batch scheduler nor a complete resident quad atlas exists yet.
 The full triangle atlas used by Tessellation Warp is a precomputed artifact,
 not evidence that this live GPU generator already scales to level 8.
@@ -42,9 +42,35 @@ measurements; none is established by the small jobs below.
 This is planar reference-domain Delaunay, not surface-metric uniformization.
 Subsequent warps can invert triangles and do not preserve Delaunay legality.
 
+## Parallel neighbor-index checkpoint, 2026-09-05
+
+The current 44-pass quad build is `fe-render-91f6308767bb396d.json`; the
+triangle build is `fe-render-daf0008f0d7fc7c1.json`. The shared Fe initializer
+counts outgoing edges, computes vertex ranges, scatters edges using atomic
+cursors, then checks reverse matches and reciprocal links. Scratch is reused
+from insertion and repair: no new actor resources, just one extra offset word.
+Ordering inside each vertex range is unspecified; the resulting neighbors are
+deterministic. This index is consumed before flips, not maintained through them.
+
+`incidence-mesh-evidence.json` records fresh GPU hashes for all 55 canonical
+preview keys plus the alternate seed, exactly matching the preceding build's
+ordered meshes, neighbors and repair receipts. `incidence-browser.json` also
+captures the pre-repair index: all 246 directed edges of the dense preview
+occur exactly once in the appropriate vertex range. The four actual GPU fault
+injections in `incidence-faults.browser.json` disable drawing for degenerate,
+out-of-range, reversed and invalid faces. Both triangle GPU snapshots pass the
+same independent geometry oracle. All 32 Node regression tests pass.
+
+Reverse lookup still scans local vertex ranges, so high-valence work can grow
+with the sum of squared degrees. This is **not** full LoD 8, batched residency,
+or startup-performance evidence. Release bundles contain 507,310 WGSL bytes
+(quad) and 456,266 (triangle), with no Wasm module for these GPU actors; shader
+size is not an execution-time measurement. Diagnostic captures are tests, not
+geometry shipped to or read back by the production page.
+
 ## Parallel repair checkpoint, 2026-09-05
 
-The live 34-pass build is `fe-render-ff07de52cc3cfbfb.json`. Triangle and quad
+The preceding 34-pass build is `fe-render-ff07de52cc3cfbfb.json`. Triangle and quad
 consumers now share parallel edge repair. A flip owns its two triangles and
 all neighboring faces it touches; winner selection finishes before any
 mutation. Separate final certification rejects an unfinished tile even when
@@ -66,7 +92,7 @@ Chromium: 19 points and 22 triangles pass exact barycentric-boundary, area,
 incidence, crossing, reciprocal-neighbor, and equilateral-metric Delaunay
 checks. Its evidence is under `../classic-quilting-generated/`.
 
-This is **still preview LoD 0–3**. Higher levels, parallel index initialization,
+This is **still preview LoD 0–3**. Higher levels,
 mixed-density sampling costs, batched full-atlas residency, and startup timings
 remain open. No complete-atlas speedup is inferred from the small-job results.
 

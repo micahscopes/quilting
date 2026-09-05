@@ -58,6 +58,7 @@ pub use quad
 pub use compaction
 pub use topology_scan
 pub use repair
+pub use incidence
 
 /// Typed coordinates in the resident three-word point slot. Square points
 /// occupy two words plus padding; they are never fake triangle barycentrics.

@@ -1,0 +1,241 @@
+//! Parallel compressed vertex incidence, used once before edge-flip repair.
+//! Count -> blocked prefix -> scatter -> reverse lookup -> reciprocal check.
+//! The ordering within a vertex's range is intentionally unspecified; exact
+//! matching and match counts make the resulting neighbor relation deterministic.
+use std::webgpu::{StorageBuffer,AtomicStorageBuffer,ComputeInvocation}
+use quilting_atlas::scan::block_count
+use quilting_atlas::planar::{PlanarCoordinates,orientation}
+use super::{InteriorEdgeFlipPolicy,INVALID_VERTEX,triangle_load,triangle_directed_edge,
+    load_packed_point,directed_edges_form_interior_pair}
+use super::repair::{STATE_WORDS,running}
+
+pub const SUMMARY_WORDS:usize=3
+
+pub fn begin<const V:usize,const F:usize>(
+    _ valid:bool,_ points:u32,_ faces:u32,_ state:StorageBuffer<u32,STATE_WORDS>,
+) {
+    state.store(index:0,value:points)
+    state.store(index:1,value:faces)
+    state.store(index:2,value:0)
+    state.store(index:3,value:0)
+    state.store(index:4,value:if !valid || points>V.downcast_truncate() || faces>F.downcast_truncate() {1} else {0})
+    state.store(index:5,value:0)
+    state.store(index:6,value:0)
+    state.store(index:7,value:if valid {1} else {0})
+}
+
+/// Face-claim storage is reused as vertex degrees/cursors after insertion.
+pub fn reset<const V:usize,const F:usize>(
+    _ counts:AtomicStorageBuffer<F>,_ i:ComputeInvocation,
+)
+where F>=V
+{
+    if i.global.x<V.downcast_truncate() {counts.atomic_store(index:i.global.x,value:0)}
+}
+
+pub fn count<M:InteriorEdgeFlipPolicy,const V:usize,const F:usize,const S:usize,const T:usize,const H:usize>(
+    _ points:StorageBuffer<u32,S>,_ triangles:StorageBuffer<u32,T>,_ counts:AtomicStorageBuffer<F>,
+    _ flags:StorageBuffer<u32,H>,_ state:StorageBuffer<u32,STATE_WORDS>,_ i:ComputeInvocation,
+)
+where F>=V,{S==V*3},{T==F*4},{H==F*3}
+{
+    let face=i.global.x
+    if !running(state) || face>=state.load(index:1) {return}
+    let t=triangle_load<T>(triangles,face)
+    let n=state.load(index:0)
+    let mut valid=false
+    if t.valid && t.first<n && t.second<n && t.third<n
+        && t.first!=t.second && t.first!=t.third && t.second!=t.third {
+        valid=orientation(load_packed_point<M::Point,S>(points,t.first).coordinates(),
+            load_packed_point<M::Point,S>(points,t.second).coordinates(),
+            load_packed_point<M::Point,S>(points,t.third).coordinates())>0
+    }
+    flags.store(index:face,value:if valid {0} else {1})
+    if valid {
+        counts.atomic_add(index:t.first,value:1)
+        counts.atomic_add(index:t.second,value:1)
+        counts.atomic_add(index:t.third,value:1)
+    }
+}
+
+pub fn rank<const V:usize,const F:usize,const H:usize,const I:usize,const TILE:usize,const B:usize>(
+    _ counts:AtomicStorageBuffer<F>,_ flags:StorageBuffer<u32,H>,_ index:StorageBuffer<u32,I>,
+    _ blocks:StorageBuffer<u32,B>,_ state:StorageBuffer<u32,STATE_WORDS>,_ i:ComputeInvocation,
+)
+where F>=V,F<=0x0fffffff,{H==F*3},{I>=V+1+H},TILE>0,TILE<=65536,{B>=((F+TILE-1)/TILE)*SUMMARY_WORDS}
+{
+    if !running(state) {return}
+    let vertices=state.load(index:0)
+    let faces=state.load(index:1)
+    let n=if faces>vertices {faces} else {vertices}
+    let tile:u32=TILE.downcast_truncate()
+    let block=i.global.x
+    if block>=block_count(n,tile) {return}
+    let first=block*tile
+    let end=if n-first<tile {n} else {first+tile}
+    let mut total:u32=0
+    let mut errors:u32=0
+    let mut lane=first
+    while lane<end {
+        if lane<vertices {
+            index.store(index:lane,value:total)
+            total=total+counts.atomic_load(index:lane)
+        }
+        if lane<faces {errors=errors+flags.load(index:lane)}
+        lane=lane+1
+    }
+    blocks.store(index:block*3,value:total)
+    blocks.store(index:block*3+1,value:errors)
+}
+
+pub fn prefix<const V:usize,const F:usize,const H:usize,const I:usize,const TILE:usize,const B:usize>(
+    _ index:StorageBuffer<u32,I>,_ blocks:StorageBuffer<u32,B>,_ state:StorageBuffer<u32,STATE_WORDS>,
+)
+where F>=V,F<=0x0fffffff,{H==F*3},{I>=V+1+H},TILE>0,TILE<=65536,{B>=((F+TILE-1)/TILE)*SUMMARY_WORDS}
+{
+    if !running(state) {return}
+    let vertices=state.load(index:0)
+    let faces=state.load(index:1)
+    let n=if faces>vertices {faces} else {vertices}
+    let count=block_count(n,TILE.downcast_truncate())
+    let mut total:u32=0
+    let mut errors:u32=0
+    let mut block:u32=0
+    while block<count {
+        blocks.store(index:block*3+2,value:total)
+        total=total+blocks.load(index:block*3)
+        errors=errors+blocks.load(index:block*3+1)
+        block=block+1
+    }
+    if total!=faces*3 || total>H.downcast_truncate() {errors=errors+1}
+    state.store(index:4,value:errors)
+    index.store(index:vertices,value:total)
+}
+
+pub fn offsets<const V:usize,const F:usize,const H:usize,const I:usize,const TILE:usize,const B:usize>(
+    _ counts:AtomicStorageBuffer<F>,_ index:StorageBuffer<u32,I>,_ blocks:StorageBuffer<u32,B>,
+    _ state:StorageBuffer<u32,STATE_WORDS>,_ i:ComputeInvocation,
+)
+where F>=V,F<=0x0fffffff,{H==F*3},{I>=V+1+H},TILE>0,TILE<=65536,{B>=((F+TILE-1)/TILE)*SUMMARY_WORDS}
+{
+    let vertex=i.global.x
+    if !running(state) || vertex>=state.load(index:0) {return}
+    let base=blocks.load(index:(vertex/TILE.downcast_truncate())*3+2)
+    index.store(index:vertex,value:base+index.load(index:vertex))
+    counts.atomic_store(index:vertex,value:0)
+}
+
+pub fn scatter<const V:usize,const F:usize,const T:usize,const H:usize,const I:usize>(
+    _ triangles:StorageBuffer<u32,T>,_ counts:AtomicStorageBuffer<F>,_ index:StorageBuffer<u32,I>,
+    _ results:StorageBuffer<u32,H>,_ state:StorageBuffer<u32,STATE_WORDS>,_ i:ComputeInvocation,
+)
+where F>=V,{T==F*4},{H==F*3},{I>=V+1+H}
+{
+    let slot=i.global.x
+    if slot>=H.downcast_truncate() {return}
+    results.store(index:slot,value:0)
+    if !running(state) || slot>=state.load(index:1)*3 {return}
+    let t=triangle_load<T>(triangles,slot/3)
+    let local=slot%3
+    let vertex=if local==0 {t.first} else if local==1 {t.second} else {t.third}
+    let rank=counts.atomic_add(index:vertex,value:1)
+    let begin=index.load(index:vertex)
+    let end=index.load(index:vertex+1)
+    let edge_base:u32=V.downcast_truncate()
+    if begin<=end && rank<end-begin {
+        index.store(index:edge_base+1+begin+rank,value:slot)
+    } else {results.store(index:slot,value:2)}
+}
+
+pub fn lookup<M:InteriorEdgeFlipPolicy,const V:usize,const F:usize,const T:usize,const H:usize,const I:usize>(
+    _ key:M::Key,_ triangles:StorageBuffer<u32,T>,_ index:StorageBuffer<u32,I>,
+    _ twins:StorageBuffer<u32,H>,_ flags:StorageBuffer<u32,H>,
+    _ state:StorageBuffer<u32,STATE_WORDS>,_ i:ComputeInvocation,
+)
+where F>=V,{T==F*4},{H==F*3},{I>=V+1+H}
+{
+    let slot=i.global.x
+    if slot>=H.downcast_truncate() {return}
+    flags.store(index:slot,value:0)
+    twins.store(index:slot,value:INVALID_VERTEX)
+    let edges=state.load(index:1)*3
+    if !running(state) || slot>=edges {return}
+    let d=triangle_directed_edge(key,triangle_load<T>(triangles,slot/3),slot/3,slot%3)
+    if !d.valid {
+        flags.store(index:slot,value:2)
+        return
+    }
+    let edge_base:u32=V.downcast_truncate()
+    let mut entry=index.load(index:d.second)
+    let end=index.load(index:d.second+1)
+    let mut matches:u32=0
+    let mut twin=INVALID_VERTEX
+    while entry<end {
+        let candidate=index.load(index:edge_base+1+entry)
+        if candidate<edges {
+            let other=triangle_directed_edge(key,triangle_load<T>(triangles,candidate/3),candidate/3,candidate%3)
+            let reverse=if d.constrained {other.valid && other.first==d.second && other.second==d.first}
+                else {directed_edges_form_interior_pair(d,other)}
+            if reverse {
+                matches=matches+1
+                twin=candidate
+            }
+        }
+        entry=entry+1
+    }
+    // Every directed edge, including a locked boundary, must occur once.
+    let mut copies:u32=0
+    entry=index.load(index:d.first)
+    let source_end=index.load(index:d.first+1)
+    while entry<source_end {
+        let candidate=index.load(index:edge_base+1+entry)
+        if candidate<edges {
+            let other=triangle_directed_edge(key,triangle_load<T>(triangles,candidate/3),candidate/3,candidate%3)
+            if other.valid && other.first==d.first && other.second==d.second {copies=copies+1}
+        }
+        entry=entry+1
+    }
+    if copies!=1 {flags.store(index:slot,value:2)}
+    else if d.constrained {
+        if matches!=0 {flags.store(index:slot,value:2)}
+    } else if matches==1 {twins.store(index:slot,value:twin)}
+    else {flags.store(index:slot,value:2)}
+}
+
+pub fn check<const V:usize,const F:usize,const H:usize,const I:usize>(
+    _ counts:AtomicStorageBuffer<F>,_ index:StorageBuffer<u32,I>,_ twins:StorageBuffer<u32,H>,
+    _ flags:StorageBuffer<u32,H>,_ results:StorageBuffer<u32,H>,
+    _ state:StorageBuffer<u32,STATE_WORDS>,_ i:ComputeInvocation,
+)
+where F>=V,{H==F*3},{I>=V+1+H}
+{
+    let slot=i.global.x
+    if !running(state) || slot>=H.downcast_truncate() {return}
+    let edges=state.load(index:1)*3
+    if slot<edges {
+        let twin=twins.load(index:slot)
+        if twin!=INVALID_VERTEX && (twin>=edges || twins.load(index:twin)!=slot) {flags.store(index:slot,value:2)}
+    }
+    if slot<state.load(index:0) {
+        let count=counts.atomic_load(index:slot)
+        if count!=index.load(index:slot+1)-index.load(index:slot) {results.store(index:slot,value:2)}
+    }
+}
+
+/// Called after repair::summarize, but does not mark Delaunay convergence:
+/// a correct neighbor index says nothing about which diagonal is preferable.
+pub fn seal<const H:usize,const TILE:usize,const B:usize>(
+    _ blocks:StorageBuffer<u32,B>,_ state:StorageBuffer<u32,STATE_WORDS>,
+)
+where H>0,H<=0x3fffffff,TILE>0,TILE<=65536,{B==((H+TILE-1)/TILE)*SUMMARY_WORDS}
+{
+    if !running(state) {return}
+    let count=block_count(state.load(index:1)*3,TILE.downcast_truncate())
+    let mut errors:u32=0
+    let mut block:u32=0
+    while block<count {
+        errors=errors+blocks.load(index:block*3+2)
+        block=block+1
+    }
+    state.store(index:4,value:errors)
+}

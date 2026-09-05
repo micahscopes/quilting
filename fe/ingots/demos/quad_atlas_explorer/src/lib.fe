@@ -9,6 +9,7 @@ use quilting_atlas::scan::balanced_block_size
 use quilting_atlas_webgpu::compaction::{rank_candidate_block, prefix_candidate_blocks, scatter_candidate_lane}
 use quilting_atlas_webgpu::topology_scan::{rank_topology_block, prefix_topology_blocks, relocate_topology_offset, SUMMARY_WORDS}
 use quilting_atlas_webgpu::repair
+use quilting_atlas_webgpu::incidence
 use quilting_atlas_webgpu::{
     propose_candidate_lane_with_policy,
     retire_candidate_lane_with_policy,
@@ -77,7 +78,7 @@ const POINT_WORDS: usize = POINTS * 3
 const TRIANGLES: usize = POINTS * 2 - (MAX_KEY.boundary_count() as usize) - 2
 const TRIANGLE_WORDS: usize = TRIANGLES * 4
 const TWINS: usize = TRIANGLES * 3
-const EDGE_INDEX: usize = POINTS + TWINS
+const EDGE_INDEX: usize = POINTS + 1 + TWINS
 const THREADS: usize = 64
 const GROUPS: usize = (CANDIDATES + THREADS - 1) / THREADS
 const COMPACT_TILE: usize = balanced_block_size(CANDIDATE_COUNT) as usize
@@ -270,12 +271,44 @@ actor QuadAtlasExplorer uses (GpuProgram<WebGpuBackend>) {
         self.receipt.store(index:7,value:count)
         self.receipt.store(index:8,value:locations)
         self.receipt.store(index:9,value:invariants)
-        repair::initialize<QuadInteriorEdgeFlip,POINT_WORDS,TRIANGLE_WORDS,TWINS,EDGE_INDEX>(
+        incidence::begin<POINTS,TRIANGLES>(valid,self.receipt.load(index:5),count,self.repair_state)
+    }
+    fn index_reset(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,FixedDispatch<TOPOLOGY_GROUPS,1,1>>) {
+        incidence::reset<POINTS,TRIANGLES>(self.face_claims,i)
+    }
+    fn index_count(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,FixedDispatch<TOPOLOGY_GROUPS,1,1>>) {
+        incidence::count<QuadInteriorEdgeFlip,POINTS,TRIANGLES,POINT_WORDS,TRIANGLE_WORDS,TWINS>(
+            self.points,self.triangles,self.face_claims,self.repair_flags,self.repair_state,i)
+    }
+    fn index_rank(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,FixedDispatch<SCAN_GROUPS,1,1>>) {
+        incidence::rank<POINTS,TRIANGLES,TWINS,EDGE_INDEX,SCAN_TILE,SCAN_WORDS>(
+            self.face_claims,self.repair_flags,self.edge_index,self.topology_blocks,self.repair_state,i)
+    }
+    fn index_prefix(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+        incidence::prefix<POINTS,TRIANGLES,TWINS,EDGE_INDEX,SCAN_TILE,SCAN_WORDS>(self.edge_index,self.topology_blocks,self.repair_state)
+    }
+    fn index_offsets(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,FixedDispatch<TOPOLOGY_GROUPS,1,1>>) {
+        incidence::offsets<POINTS,TRIANGLES,TWINS,EDGE_INDEX,SCAN_TILE,SCAN_WORDS>(
+            self.face_claims,self.edge_index,self.topology_blocks,self.repair_state,i)
+    }
+    fn index_scatter(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,FixedDispatch<REPAIR_GROUPS,1,1>>) {
+        incidence::scatter<POINTS,TRIANGLES,TRIANGLE_WORDS,TWINS,EDGE_INDEX>(
+            self.triangles,self.face_claims,self.edge_index,self.repair_results,self.repair_state,i)
+    }
+    fn index_lookup(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,FixedDispatch<REPAIR_GROUPS,1,1>>) {
+        incidence::lookup<QuadInteriorEdgeFlip,POINTS,TRIANGLES,TRIANGLE_WORDS,TWINS,EDGE_INDEX>(
             canonicalize(request(self.bottom,self.right,self.top,self.left)).key,
-            self.receipt.load(index:6)!=0,
-            self.receipt.load(index:5),self.receipt.load(index:7),
-            self.points,self.triangles,self.twins,self.edge_index,self.repair_state,
-        )
+            self.triangles,self.edge_index,self.twins,self.repair_flags,self.repair_state,i)
+    }
+    fn index_check(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,FixedDispatch<REPAIR_GROUPS,1,1>>) {
+        incidence::check<POINTS,TRIANGLES,TWINS,EDGE_INDEX>(
+            self.face_claims,self.edge_index,self.twins,self.repair_flags,self.repair_results,self.repair_state,i)
+    }
+    fn index_summarize(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,FixedDispatch<REPAIR_BLOCK_GROUPS,1,1>>) {
+        repair::summarize<TWINS,REPAIR_TILE,REPAIR_WORDS>(self.repair_flags,self.repair_results,self.repair_state,self.repair_blocks,i)
+    }
+    fn index_seal(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+        incidence::seal<TWINS,REPAIR_TILE,REPAIR_WORDS>(self.repair_blocks,self.repair_state)
     }
     fn repair_reset(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<RepairRound,FixedDispatch<TOPOLOGY_GROUPS,1,1>,64>>) {
         repair::reset_claims<TRIANGLES>(self.repair_state,self.face_claims,i)

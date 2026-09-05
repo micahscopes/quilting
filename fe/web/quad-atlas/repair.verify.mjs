@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import {verifyQuadSnapshot} from './verify.mjs';
 
-export function verifyRepairSnapshot(snapshot){
+export function verifyRepairSnapshot(snapshot,expectedPassCount=34){
   verifyQuadSnapshot(snapshot);
   const {points,triangles,twins,repair,receipt}=snapshot;
-  assert.equal(snapshot.passCount,34);
+  assert.equal(snapshot.passCount,expectedPassCount);
   assert.equal(twins.length,triangles.length*3);
   assert.deepEqual(repair.slice(0,2),[points.length,triangles.length]);
   assert.deepEqual(repair.slice(2,6),[receipt[12],0,0,1]);

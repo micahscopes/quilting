@@ -72,11 +72,23 @@ canonical combinations or silently clamp their LoDs.
   claims over each flip's complete touched neighborhood, winner snapshots,
   disjoint mutation, and blocked reductions. An observation-only final round
   certifies the post-mutation mesh, including after budget exhaustion.
-  The one-time vertex-incidence/neighbor-index initializer remains scalar;
-  it is the next serial triangulation component to replace.
+  The one-time vertex-incidence/neighbor-index initializer is now parallel too,
+  as described below; the scalar implementation remains a reference.
   All 56 quad preview jobs retain the serial reference's points and final
   triangle sets, with exact reciprocal neighbor links. The triangle consumer
   also passes a real GPU run and the independent equilateral-metric oracle.
+- Neighbor initialization now counts vertex degrees, scans independent blocks,
+  scatters outgoing edges into vertex ranges, and finds/checks reciprocal links
+  in separate GPU dispatches. It reuses insertion/repair scratch and adds only
+  one offset-sentinel word, not another actor resource. The 44-pass quad build
+  preserves points, ordered triangles, twins, and repair receipts for all 56
+  preceding preview jobs. The triangle GPU consumer passes its independent
+  geometry oracle too. Four injected invalid faces prevent draw publication.
+- This index exists only before repair: flips invalidate its vertex ranges,
+  and subsequent repair does not consume them. Reverse lookup is parallel but
+  still scans local vertex ranges (total work can grow with the sum of squared
+  vertex degrees). Neither high-valence scaling nor LoD 8 throughput follows
+  from the preview checks.
 - Full-key batching, bounded scratch reuse, atlas publication, and replacement
   of the triangle artifact consumers are not implemented.
 
