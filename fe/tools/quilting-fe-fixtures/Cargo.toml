@@ -64,12 +64,12 @@ web-demo = [
 quilting-core = { path = "../../../crates/quilting-core", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
-common = { package = "fe-common", path = "../../../.toolchains/fe/crates/common", optional = true }
-driver = { package = "fe-driver", path = "../../../.toolchains/fe/crates/driver", optional = true }
-fe-codegen = { path = "../../../.toolchains/fe/crates/codegen", default-features = false, optional = true }
-fe-html-precompile = { path = "../../../.toolchains/fe/crates/html-precompile", optional = true }
-hir = { package = "fe-hir", path = "../../../.toolchains/fe/crates/hir", features = ["testutils"], optional = true }
-mir = { package = "fe-mir", path = "../../../.toolchains/fe/crates/mir", optional = true }
+common = { package = "fe-common", path = "../../../../fe-stuff/fe-worktrees/mb2/crates/common", optional = true }
+driver = { package = "fe-driver", path = "../../../../fe-stuff/fe-worktrees/mb2/crates/driver", optional = true }
+fe-codegen = { path = "../../../../fe-stuff/fe-worktrees/mb2/crates/codegen", default-features = false, optional = true }
+fe-html-precompile = { path = "../../../../fe-stuff/fe-worktrees/mb2/crates/html-precompile", optional = true }
+hir = { package = "fe-hir", path = "../../../../fe-stuff/fe-worktrees/mb2/crates/hir", features = ["testutils"], optional = true }
+mir = { package = "fe-mir", path = "../../../../fe-stuff/fe-worktrees/mb2/crates/mir", optional = true }
 naga = { version = "29", features = ["wgsl-in"], optional = true }
 pollster = { version = "0.4.0", optional = true }
 salsa = { version = "0.20", optional = true }

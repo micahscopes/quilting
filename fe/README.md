@@ -43,20 +43,19 @@ keeps member manifests portable and makes the compiler boundary visible.
 
 ## Toolchain
 
-The exact compiler revision and isolation procedure are in
-[`toolchain/README.md`](toolchain/README.md). `../.toolchains/fe` is ignored
-and must be an isolated checkout; the active Fe development worktree is never
-a dependency. Keeping it outside this subtree also means workspace-wide Fe
-formatting never traverses compiler sources.
+Use the shared `/laboratory/fe-stuff/fe-worktrees/mb2` worktree for both
+compiler commands and standard-library dependencies. See
+[`toolchain/README.md`](toolchain/README.md) for coordination and verification.
+Do not create an independently advancing Quilting compiler checkout.
 
 After preparing it, run from this directory:
 
 ```sh
-../.toolchains/fe/target/release/fe fmt --check ingots --color never
-../.toolchains/fe/target/release/fe check . --profile release --color never
-CARGO_TARGET_DIR=../.toolchains/fe/target cargo test --release --locked --manifest-path tools/quilting-fe-fixtures/Cargo.toml
-CARGO_TARGET_DIR=../.toolchains/fe/target cargo test --release --locked --manifest-path tools/quilting-fe-fixtures/Cargo.toml --features quilting-export
-CARGO_TARGET_DIR=../.toolchains/fe/target cargo test --release --locked --manifest-path tools/quilting-fe-fixtures/Cargo.toml --features fe-oracle
+/laboratory/fe-stuff/fe-worktrees/mb2/target/release/fe fmt --check ingots --color never
+/laboratory/fe-stuff/fe-worktrees/mb2/target/release/fe check . --profile release --color never
+CARGO_TARGET_DIR=/laboratory/fe-stuff/fe-worktrees/mb2/target cargo test --release --locked --manifest-path tools/quilting-fe-fixtures/Cargo.toml
+CARGO_TARGET_DIR=/laboratory/fe-stuff/fe-worktrees/mb2/target cargo test --release --locked --manifest-path tools/quilting-fe-fixtures/Cargo.toml --features quilting-export
+CARGO_TARGET_DIR=/laboratory/fe-stuff/fe-worktrees/mb2/target cargo test --release --locked --manifest-path tools/quilting-fe-fixtures/Cargo.toml --features fe-oracle
 ```
 
 Debug-mode checks are useful during editing, but they are not accepted as
@@ -85,7 +84,7 @@ WebGPU render and compute path is mature.
 For the normal edit/reload loop, `fe web dev` watches by default:
 
 ```sh
-.toolchains/fe/target/release/fe web dev \
+/laboratory/fe-stuff/fe-worktrees/mb2/target/release/fe web dev \
   --port 8766 fe/web/classic-quilting/index.html
 ```
 
@@ -93,7 +92,7 @@ For deterministic release evidence, build and serve it from the repository
 root:
 
 ```sh
-CARGO_TARGET_DIR=.toolchains/fe/target cargo run --release \
+CARGO_TARGET_DIR=/laboratory/fe-stuff/fe-worktrees/mb2/target cargo run --release \
   --manifest-path fe/tools/quilting-fe-fixtures/Cargo.toml \
   --features web-demo --bin precompile-quilting-fe-web -- \
   fe/web/classic-quilting/index.html fe/target/web/classic-quilting
