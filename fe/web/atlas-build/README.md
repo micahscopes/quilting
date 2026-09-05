@@ -63,7 +63,12 @@ The first replay, key `(0,0,0,8)`, reproduced the corpus's 635 vertices,
 1,009 triangles and 2,180 flips at round 128. It converged at round 248 with
 2,836 flips and a successful final certificate. Later checkpoints retained
 that state. This establishes insufficient budget for this tile, not a global
-repair bound or an independent geometry validation. Receipt evidence:
+repair bound. A second replay retained the actual geometry and passed the
+independent `verifyQuadSnapshot` oracle: exact boundary spacing, disk incidence,
+positive orientation, exact square area, no crossing edges, and BigInt incircle
+checks for every flippable interior edge (635 points, 1,009 triangles, 1,643
+edges). Geometry and receipt evidence:
+`/laboratory/quilting/scratch/atlas-job-state-20260905/quad-0008-repaired-geometry.json`;
 `/laboratory/quilting/scratch/atlas-job-state-20260905/quad-0008-repair-replay.json`.
 
 Use the shared release toolchain:
