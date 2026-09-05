@@ -5,6 +5,7 @@ use std::webgpu::{StorageBuffer, AtomicStorageBuffer, ComputeInvocation}
 use std::webgpu::DispatchIndirectBuffer
 use quilting_atlas::scan::block_count
 use quilting_atlas::planar::{PlanarCoordinates, orientation}
+use quilting_atlas::topology::FlipClaimOrder
 use super::{
     InteriorEdgeFlipPolicy, DelaunayRestoration, INVALID_VERTEX,
     POINT_WORDS, TRIANGLE_WORDS, TOPOLOGY_TWIN_WORDS_PER_TRIANGLE,
@@ -131,13 +132,24 @@ pub fn claim<const F:usize,const H:usize>(
 )
 where {H==F*3}
 {
+    claim_with_order<F,H>(twins,flags,state,claims,FlipClaimOrder::Slot,i)
+}
+
+pub fn claim_with_order<const F:usize,const H:usize>(
+    _ twins:StorageBuffer<u32,H>, _ flags:StorageBuffer<u32,H>,
+    _ state:StorageBuffer<u32,STATE_WORDS>, _ claims:AtomicStorageBuffer<F>,
+    _ order:FlipClaimOrder, _ i:ComputeInvocation,
+)
+where {H==F*3}
+{
     let slot=i.global.x
     if slot>=H.downcast_truncate() || slot>=state.load(index:1)*3 || !running(state) {return}
     if flags.load(index:slot)!=ACTIVE {return}
+    let priority=order.priority(slot,state.load(index:6))
     let mut n:u32=0
     while n<8 {
         let face=neighborhood_face<H>(twins,slot,n,state.load(index:1)*3)
-        if face!=INVALID_VERTEX {claims.atomic_min(index:face,value:slot)}
+        if face!=INVALID_VERTEX {claims.atomic_min(index:face,value:priority)}
         n=n+1
     }
 }
@@ -148,14 +160,25 @@ pub fn select<const F:usize,const H:usize>(
 )
 where {H==F*3}
 {
+    select_with_order<F,H>(twins,flags,results,state,claims,FlipClaimOrder::Slot,i)
+}
+
+pub fn select_with_order<const F:usize,const H:usize>(
+    _ twins:StorageBuffer<u32,H>, _ flags:StorageBuffer<u32,H>, _ results:StorageBuffer<u32,H>,
+    _ state:StorageBuffer<u32,STATE_WORDS>, _ claims:AtomicStorageBuffer<F>,
+    _ order:FlipClaimOrder, _ i:ComputeInvocation,
+)
+where {H==F*3}
+{
     let slot=i.global.x
     if slot>=H.downcast_truncate() || slot>=state.load(index:1)*3 || !running(state) {return}
     if flags.load(index:slot)!=ACTIVE {return}
+    let priority=order.priority(slot,state.load(index:6))
     let mut n:u32=0
     let mut owns=true
     while n<8 && owns {
         let face=neighborhood_face<H>(twins,slot,n,state.load(index:1)*3)
-        if face!=INVALID_VERTEX && claims.atomic_load(index:face)!=slot {owns=false}
+        if face!=INVALID_VERTEX && claims.atomic_load(index:face)!=priority {owns=false}
         n=n+1
     }
     results.store(index:slot,value:if owns {ACTIVE} else {0})

@@ -87,8 +87,27 @@ receipts, and geometry with original versus active-prefix dispatch. Both pass
 the independent geometric oracle. The latter also matches when the entire
 sampling arena is poisoned before initialization. Evidence is saved alongside
 the captures as `sampling-dispatch-equivalence.json` and
-`sampling-poison-equivalence.json`. These tests establish those cases; the
-updated production indirect-command path still needs its own browser gate.
+`sampling-poison-equivalence.json`. A production browser gate also passed for
+`(0,1,3,4)` using the actual Fe-generated
+`sample_schedule` and indirect proposal/retirement dispatches, with poisoned
+initial storage. The full sampling hash and exact geometry match the original
+fixed-dispatch baseline. See `production-indirect-sampling-gate.json` beside
+the captures. Full-corpus indirect dispatch validation remains outstanding.
+
+The full-build actors now select `FlipClaimOrder::PermutedRound`; other callers
+retain the original slot-order wrappers for controlled comparison. Both orders
+are strict u32 permutations and preserve the closed-neighborhood ownership
+rule. On the saved `(0,0,0,8)` fixture, an exact offline replay matches the GPU
+slot-order baseline (248 rounds, 2,836 flips), while permutation reaches the
+same geometric certificate in 122 rounds and 2,951 flips. This is not yet a
+GPU performance claim or a corpus-wide repair bound. The Fe priority smoke
+test executes successfully; the updated WebGPU build is under validation.
+
+The first full-corpus run also exposed presentation resize replaying the
+compute-only graph after `.live()` finished, overwriting its final receipts.
+Shared mb2 `6f30a3d02` fixes that host lifecycle bug; 58 runtime tests pass.
+The current release CLI predates this runtime change, so its served assets do
+not yet carry the fix. The old page was frozen rather than left rebuilding.
 
 Use the shared release toolchain:
 
