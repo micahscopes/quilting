@@ -23,6 +23,11 @@ pub const CANDIDATE_INVALID: u32 = 3
 
 pub struct FixedBarycentric { pub a: u32, pub b: u32, pub c: u32 }
 impl Copy for FixedBarycentric {}
+impl super::planar::PlanarCoordinates for FixedBarycentric {
+    fn coordinates(self) -> super::planar::FixedPoint2 {
+        super::planar::FixedPoint2 { x: self.b, y: self.c }
+    }
+}
 
 pub struct BoundarySeed {
     pub point: FixedBarycentric,

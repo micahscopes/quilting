@@ -52,6 +52,56 @@ use quilting_atlas::quad_sampling::{
     interior_candidate_at_slot as quad_candidate,
     candidate_conflicts_boundary as quad_boundary_conflict,
 }
+use quilting_atlas::topology::{
+    Triangle, classify_point_in_triangle, normalized_triangle, split_triangle_interior,
+    split_triangle_edge, interior_edge_flip_decision_with_metric, flipped_triangle_pair,
+    is_constrained_boundary_edge,
+}
+
+fn topology_triangle_lane(_ t: Triangle, _ lane: u32) -> u32 {
+    if lane==0 {t.first} else if lane==1 {t.second} else if lane==2 {t.third}
+    else {if t.valid {1} else {0}}
+}
+pub fn planar_location_lane(
+    _ ax:u32,_ ay:u32,_ bx:u32,_ by:u32,_ cx:u32,_ cy:u32,_ px:u32,_ py:u32,_ mode:u32,_ lane:u32,
+) -> u32 {
+    let a=FixedPoint2 {x:ax,y:ay}
+    let b=FixedPoint2 {x:bx,y:by}
+    let c=FixedPoint2 {x:cx,y:cy}
+    let p=FixedPoint2 {x:px,y:py}
+    let t=Triangle {first:0,second:1,third:2,valid:true}
+    if mode==0 {classify_point_in_triangle(a,b,c,p)}
+    else if mode==1 {topology_triangle_lane(normalized_triangle(0,a,1,b,2,c),lane)}
+    else if mode==2 {
+        let split=split_triangle_interior(t,a,b,c,3,p)
+        topology_triangle_lane(if lane<4 {split.first} else if lane<8 {split.second} else {split.third},lane%4)
+    } else {
+        let split=split_triangle_edge(t,0,a,b,c,3,p)
+        topology_triangle_lane(if lane<4 {split.first} else {split.second},lane%4)
+    }
+}
+pub fn planar_flip_lane(
+    _ ux:u32,_ uy:u32,_ vx:u32,_ vy:u32,_ ax:u32,_ ay:u32,_ bx:u32,_ by:u32,_ metric:u32,_ lane:u32,
+) -> i32 {
+    let u=FixedPoint2 {x:ux,y:uy}
+    let v=FixedPoint2 {x:vx,y:vy}
+    let a=FixedPoint2 {x:ax,y:ay}
+    let b=FixedPoint2 {x:bx,y:by}
+    let decision=if metric==0 {
+        interior_edge_flip_decision_with_metric(2,u,3,v,0,a,1,b,EquilateralMetric {})
+    } else {interior_edge_flip_decision_with_metric(2,u,3,v,0,a,1,b,SquareMetric {})}
+    if lane==0 {decision.incircle} else if lane==1 {if decision.convex {1} else {0}}
+    else if lane==2 {if decision.flip {1} else {0}} else {
+        let pair=flipped_triangle_pair(decision,2,u,3,v,0,a,1,b)
+        topology_triangle_lane(if lane<7 {pair.first} else {pair.second},(lane-3)%4).downcast_truncate()
+    }
+}
+pub fn atlas_boundary_segment(_ a:u32,_ b:u32,_ c:u32,_ d:u32,_ first:u32,_ second:u32,_ domain:u32)->u32 {
+    let locked=if domain==0 {
+        is_constrained_boundary_edge(quilting_atlas::AtlasKey {a:a,b:b,c:c},first,second)
+    } else {is_constrained_boundary_edge(QuadAtlasKey {bottom:a,right:b,top:c,left:d},first,second)}
+    if locked {1} else {0}
+}
 
 pub fn quad_density_lane(_ a:u32,_ b:u32,_ c:u32,_ d:u32,_ x:u32,_ y:u32,_ lane:u32)->u32 {
     let key=QuadAtlasKey {bottom:a,right:b,top:c,left:d}

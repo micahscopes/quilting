@@ -469,6 +469,129 @@ fn quad_sampling_wasm_preserves_edge_density_and_square_symmetry() {
 }
 
 #[test]
+fn planar_topology_wasm_preserves_incidence_orientation_and_area() {
+    let (mut store,instance)=instantiate();
+    let location=function::<(u32,u32,u32,u32,u32,u32,u32,u32,u32,u32),u32>(&mut store,&instance,"planar_location_lane");
+    let cross=|a:[u32;2],b:[u32;2],c:[u32;2]| {
+        let a=a.map(i64::from); let b=b.map(i64::from); let c=c.map(i64::from);
+        (b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0])
+    };
+    for x in (0..=16384_u32).step_by(1024) {
+        for y in (0..=16384_u32).step_by(1024) {
+            let expected=if y>x {0} else if [[0,0],[16384,0],[16384,16384]].contains(&[x,y]) {3}
+                else if y==0 || x==16384 || y==x {2} else {1};
+            assert_eq!(location.call(&mut store,(0,0,16384,0,16384,16384,x,y,0,0)).unwrap(),expected);
+            for mode in [2,3] {
+                let count=if mode==2 {3} else {2};
+                let expected_valid=if mode==2 {expected==1} else {y==0 && x>0 && x<16384};
+                let mut area=0;
+                for child in 0..count {
+                    let triangle:[u32;4]=std::array::from_fn(|lane|location.call(&mut store,
+                        (0,0,16384,0,16384,16384,x,y,mode,child*4+lane as u32)).unwrap());
+                    assert_eq!(triangle[3],u32::from(expected_valid));
+                    if expected_valid {
+                        let points=[[0,0],[16384,0],[16384,16384],[x,y]];
+                        let signed=cross(points[triangle[0] as usize],points[triangle[1] as usize],points[triangle[2] as usize]);
+                        assert!(signed>0,"every inserted triangle is nondegenerate CCW");
+                        area+=signed;
+                    }
+                }
+                if expected_valid {assert_eq!(area,16384_i64.pow(2),"split preserves exact area");}
+            }
+        }
+    }
+    // A collinear point beyond the segment is not an edge insertion.
+    assert_eq!(location.call(&mut store,(0,0,8192,0,8192,8192,12288,0,3,3)).unwrap(),0);
+    let normalized:[u32;4]=std::array::from_fn(|lane|location.call(&mut store,
+        (0,0,16384,16384,16384,0,0,0,1,lane as u32)).unwrap());
+    assert_eq!(normalized,[0,2,1,1]);
+}
+
+#[test]
+fn planar_topology_wasm_flips_match_exact_metric_and_preserve_area() {
+    let (mut store,instance)=instantiate();
+    let flip=function::<(u32,u32,u32,u32,u32,u32,u32,u32,u32,u32),i32>(&mut store,&instance,"planar_flip_lane");
+    let cross=|a:[u32;2],b:[u32;2],c:[u32;2]| {
+        let a=a.map(i128::from); let b=b.map(i128::from); let c=c.map(i128::from);
+        (b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0])
+    };
+    let mut state=0x738190ab_u64;
+    let mut flipped=0;
+    for index in 0..4000 {
+        let [u,v,a,b]=if index==0 {[[0,0],[16384,16384],[0,16384],[16384,0]]}
+            else {std::array::from_fn(|_| std::array::from_fn(|_| {
+                state=state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                ((state>>32)%16385) as u32
+            }))};
+        let convex=cross(u,v,a)>0 && cross(v,u,b)>0 && cross(a,u,b)>0 && cross(b,v,a)>0;
+        for metric in 0..2 {
+            let d:[[_;2];3]=[u,v,a].map(|p| [p[0] as i128-b[0] as i128,p[1] as i128-b[1] as i128]);
+            let lift=|p:[i128;2]| p[0]*p[0]+p[1]*p[1]+if metric==0 {p[0]*p[1]} else {0};
+            let wedge=|p:[i128;2],q:[i128;2]| p[0]*q[1]-p[1]*q[0];
+            let determinant=lift(d[0])*wedge(d[1],d[2])+lift(d[1])*wedge(d[2],d[0])+lift(d[2])*wedge(d[0],d[1]);
+            let circle=if convex {determinant.signum() as i32} else {0};
+            // On a tie, candidate diagonal (0,1) precedes existing (2,3).
+            let should_flip=convex && circle>=0;
+            let mut lane=|n| flip.call(&mut store,(u[0],u[1],v[0],v[1],a[0],a[1],b[0],b[1],metric,n)).unwrap();
+            assert_eq!(lane(0),circle);
+            assert_eq!(lane(1),i32::from(convex));
+            assert_eq!(lane(2),i32::from(should_flip));
+            let first:[i32;4]=std::array::from_fn(|i|lane(3+i as u32));
+            let second:[i32;4]=std::array::from_fn(|i|lane(7+i as u32));
+            assert_eq!(first[3],i32::from(should_flip));
+            assert_eq!(second[3],i32::from(should_flip));
+            if should_flip {
+                let p=[a,b,u,v];
+                let area1=cross(p[first[0] as usize],p[first[1] as usize],p[first[2] as usize]);
+                let area2=cross(p[second[0] as usize],p[second[1] as usize],p[second[2] as usize]);
+                assert!(area1>0 && area2>0);
+                assert_eq!(area1+area2,cross(u,v,a)+cross(v,u,b));
+                flipped+=1;
+            }
+        }
+    }
+    assert!(flipped>50,"fixtures must exercise actual topology mutations");
+    eprintln!("{flipped} exact metric-qualified flips preserve area and orientation");
+}
+
+#[test]
+fn atlas_topology_wasm_locks_triangle_and_quad_boundary_chains() {
+    let (mut store,instance)=instantiate();
+    let locked=function::<(u32,u32,u32,u32,u32,u32,u32),u32>(&mut store,&instance,"atlas_boundary_segment");
+    for a in 0..=8_u32 {for b in a..=8 {for c in b..=8 {
+        let ra=1<<a; let rb=1<<b; let rc=1<<c;
+        let count=ra+rb+rc;
+        // Independent circular order from the triangle sampler's AB/AC/BC storage.
+        let ring:Vec<u32>=(0..=rc).chain((rc+rb+1)..count).chain(std::iter::once(rc+rb))
+            .chain(((rc+1)..(rc+rb)).rev()).collect();
+        assert_eq!(ring.len(),count as usize);
+        for i in 0..ring.len() {
+            let u=ring[i]; let v=ring[(i+1)%ring.len()];
+            assert_eq!(locked.call(&mut store,(a,b,c,0,u,v,0)).unwrap(),1);
+            assert_eq!(locked.call(&mut store,(a,b,c,0,v,u,0)).unwrap(),1);
+            assert_eq!(locked.call(&mut store,(a,b,c,0,u,u,0)).unwrap(),0);
+            assert_eq!(locked.call(&mut store,(a,b,c,0,u,count,0)).unwrap(),0);
+            if count>3 {
+                assert_eq!(locked.call(&mut store,(a,b,c,0,u,ring[(i+2)%ring.len()],0)).unwrap(),0);
+            }
+        }
+    }}}
+    for code in 0..6561_u32 {
+        let [a,b,c,d]=[code/729,(code/81)%9,(code/9)%9,code%9];
+        let count=(1<<a)+(1<<b)+(1<<c)+(1<<d);
+        for u in [0,1,count/2,count-1] {
+            let v=(u+1)%count;
+            assert_eq!(locked.call(&mut store,(a,b,c,d,u,v,1)).unwrap(),1);
+            assert_eq!(locked.call(&mut store,(a,b,c,d,v,u,1)).unwrap(),1);
+            assert_eq!(locked.call(&mut store,(a,b,c,d,u,(u+2)%count,1)).unwrap(),0);
+            assert_eq!(locked.call(&mut store,(a,b,c,d,u,u,1)).unwrap(),0);
+            assert_eq!(locked.call(&mut store,(a,b,c,d,u,count,1)).unwrap(),0);
+        }
+    }
+    assert_eq!(locked.call(&mut store,(9,0,0,0,0,1,1)).unwrap(),0);
+}
+
+#[test]
 fn quad_sampling_wasm_candidates_match_counter_reference_and_boundary_exclusion() {
     let (mut store,instance)=instantiate();
     let candidate=function::<(u32,u32,u32,u32,u32,u32,u32),u32>(&mut store,&instance,"quad_candidate_lane");

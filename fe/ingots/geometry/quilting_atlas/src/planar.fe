@@ -6,6 +6,15 @@ use core::marker::Copy
 pub struct FixedPoint2 { pub x: u32, pub y: u32 }
 impl Copy for FixedPoint2 {}
 
+/// Independent Q14 coordinates used by planar topology. This supplies no
+/// distance metric: orientation and incidence do not require one.
+pub trait PlanarCoordinates: Copy {
+    fn coordinates(self) -> FixedPoint2
+}
+impl PlanarCoordinates for FixedPoint2 {
+    fn coordinates(self) -> FixedPoint2 { self }
+}
+
 pub trait IntegerPlaneMetric: Copy {
     fn squared_delta(self, _ x: i32, _ y: i32) -> u32
 }

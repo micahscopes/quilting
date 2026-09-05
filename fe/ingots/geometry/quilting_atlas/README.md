@@ -28,6 +28,13 @@ reference-domain samples, not yet uniform arc-length samples on a curved patch.
 respect the documented lift bound. Triangle topology retains its original
 entry points and metric.
 
+`topology` now shares point location, insertion, normalization, and flipped
+triangle construction through `PlanarCoordinates`. Coordinates provide
+incidence only; `interior_edge_flip_decision_with_metric` takes the distance
+metric explicitly. `ConstrainedBoundary` distinguishes the triangle sampler's
+AB/AC/BC storage order from the quad's direct circular order. Neither requires
+pretending that a square point is a valid barycentric triple.
+
 Release Fe-to-Wasm gates in `quilting-fe-fixtures`, feature `fe-oracle`:
 
 - `quad_atlas_wasm_canonicalizes_d4_and_preserves_exact_boundary_rings` checks
@@ -36,6 +43,14 @@ Release Fe-to-Wasm gates in `quilting-fe-fixtures`, feature `fe-oracle`:
 - `planar_metric_incircle_wasm_matches_independent_i128` compares both metrics
   with an independent wide-integer determinant, including degeneracy and a
   square whose cocircularity differs between the two metrics.
+- `planar_topology_wasm_preserves_incidence_orientation_and_area` checks
+  location, normalization, edge/interior insertion, rejected off-segment
+  points, and exact signed area.
+- `planar_topology_wasm_flips_match_exact_metric_and_preserve_area` checks
+  convexity, both metric decisions, deterministic cocircular tie-breaking,
+  and the resulting triangle pair against independent i128 calculations.
+- `atlas_topology_wasm_locks_triangle_and_quad_boundary_chains` checks every
+  canonical triangle's boundary chain and probes every quad edge-LoD request.
 
 `quad_sampling` now defines a four-edge density policy, deterministic jittered
 candidate slots, square-distance exclusion, and a reference boundary query.

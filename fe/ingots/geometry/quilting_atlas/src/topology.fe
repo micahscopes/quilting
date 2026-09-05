@@ -9,8 +9,49 @@
 
 use super::{AtlasKey, MAX_LOD, boundary_vertices, edge_resolution}
 use super::sampling::FixedBarycentric
-use super::triangulation::{incircle_sign, orientation, should_flip_edge}
+use super::triangulation::should_flip_edge
+use super::planar::{
+    PlanarCoordinates,
+    IntegerPlaneMetric,
+    EquilateralMetric,
+    incircle_sign as planar_incircle,
+    orientation as planar_orientation,
+}
+use super::quad::QuadAtlasKey
 use core::marker::Copy
+
+fn orientation<P: PlanarCoordinates>(_ a: P, _ b: P, _ c: P) -> i32 {
+    planar_orientation(a.coordinates(), b.coordinates(), c.coordinates())
+}
+
+/// Locked segments are an ordered-boundary property, not a triangle-metric
+/// property. Providers retain their own boundary vertex storage convention.
+pub trait ConstrainedBoundary: Copy {
+    fn contains_segment(self, _ first: u32, _ second: u32) -> bool
+}
+impl ConstrainedBoundary for AtlasKey {
+    fn contains_segment(self, _ first: u32, _ second: u32) -> bool {
+        triangle_boundary_segment(self, first, second)
+    }
+}
+impl ConstrainedBoundary for QuadAtlasKey {
+    fn contains_segment(self, _ first: u32, _ second: u32) -> bool {
+        let count = self.boundary_count()
+        if first == second || first >= count || second >= count {
+            return false
+        }
+        let low = if first < second { first } else { second }
+        let high = if first > second { first } else { second }
+        high == low + 1 || (low == 0 && high == count - 1)
+    }
+}
+pub fn is_constrained_boundary_edge<K: ConstrainedBoundary>(
+    _ key: K,
+    _ first: u32,
+    _ second: u32,
+) -> bool {
+    key.contains_segment(first, second)
+}
 
 pub const INVALID_VERTEX: u32 = 0xffffffff
 pub const POINT_OUTSIDE: u32 = 0
@@ -18,12 +59,7 @@ pub const POINT_STRICTLY_INSIDE: u32 = 1
 pub const POINT_ON_EDGE: u32 = 2
 pub const POINT_ON_VERTEX: u32 = 3
 
-pub struct Triangle {
-    pub first: u32,
-    pub second: u32,
-    pub third: u32,
-    pub valid: bool,
-}
+pub struct Triangle { pub first: u32, pub second: u32, pub third: u32, pub valid: bool }
 impl Copy for Triangle {}
 
 pub struct TrianglePair { pub first: Triangle, pub second: Triangle, pub valid: bool }
@@ -47,11 +83,7 @@ pub struct DirectedEdge {
 }
 impl Copy for DirectedEdge {}
 
-pub struct FlipDecision {
-    pub incircle: i32,
-    pub convex: bool,
-    pub flip: bool,
-}
+pub struct FlipDecision { pub incircle: i32, pub convex: bool, pub flip: bool }
 impl Copy for FlipDecision {}
 
 pub struct FlipProposal {
@@ -80,18 +112,20 @@ const fn invalid_triple() -> TriangleTriple {
     }
 }
 
-fn same_point(_ left: FixedBarycentric, _ right: FixedBarycentric) -> bool {
-    left.a == right.a && left.b == right.b && left.c == right.c
+fn same_point<P: PlanarCoordinates>(_ left: P, _ right: P) -> bool {
+    let a = left.coordinates()
+    let b = right.coordinates()
+    a.x == b.x && a.y == b.y
 }
 
 /// Construct a nondegenerate CCW triangle, normalizing the final two lanes.
-pub fn normalized_triangle(
+pub fn normalized_triangle<P: PlanarCoordinates>(
     _ first_id: u32,
-    _ first: FixedBarycentric,
+    _ first: P,
     _ second_id: u32,
-    _ second: FixedBarycentric,
+    _ second: P,
     _ third_id: u32,
-    _ third: FixedBarycentric,
+    _ third: P,
 ) -> Triangle {
     if first_id == second_id || first_id == third_id || second_id == third_id {
         return invalid_triangle()
@@ -107,11 +141,11 @@ pub fn normalized_triangle(
 }
 
 /// Exact location of one point relative to a valid CCW triangle.
-pub fn classify_point_in_triangle(
-    _ first: FixedBarycentric,
-    _ second: FixedBarycentric,
-    _ third: FixedBarycentric,
-    _ query: FixedBarycentric,
+pub fn classify_point_in_triangle<P: PlanarCoordinates>(
+    _ first: P,
+    _ second: P,
+    _ third: P,
+    _ query: P,
 ) -> u32 {
     let first_edge = orientation(first, second, query)
     let second_edge = orientation(second, third, query)
@@ -120,9 +154,15 @@ pub fn classify_point_in_triangle(
         return POINT_OUTSIDE
     }
     let mut zeros: u32 = 0
-    if first_edge == 0 { zeros = zeros + 1 }
-    if second_edge == 0 { zeros = zeros + 1 }
-    if third_edge == 0 { zeros = zeros + 1 }
+    if first_edge == 0 {
+        zeros = zeros + 1
+    }
+    if second_edge == 0 {
+        zeros = zeros + 1
+    }
+    if third_edge == 0 {
+        zeros = zeros + 1
+    }
     if zeros == 0 {
         POINT_STRICTLY_INSIDE
     } else if zeros == 1 {
@@ -134,20 +174,19 @@ pub fn classify_point_in_triangle(
 
 /// Split a CCW triangle at a strictly interior point. Output slots are in
 /// stable source-edge order and remain CCW without another predicate pass.
-pub fn split_triangle_interior(
+pub fn split_triangle_interior<P: PlanarCoordinates>(
     _ triangle: Triangle,
-    _ first: FixedBarycentric,
-    _ second: FixedBarycentric,
-    _ third: FixedBarycentric,
+    _ first: P,
+    _ second: P,
+    _ third: P,
     _ point_id: u32,
-    _ point: FixedBarycentric,
+    _ point: P,
 ) -> TriangleTriple {
     if !triangle.valid
         || point_id == triangle.first
         || point_id == triangle.second
         || point_id == triangle.third
-        || classify_point_in_triangle(first, second, third, point) != POINT_STRICTLY_INSIDE
-    {
+        || classify_point_in_triangle(first, second, third, point) != POINT_STRICTLY_INSIDE {
         return invalid_triple()
     }
     TriangleTriple {
@@ -173,32 +212,31 @@ pub fn split_triangle_interior(
     }
 }
 
-fn strictly_between(_ first: FixedBarycentric, _ second: FixedBarycentric, _ point: FixedBarycentric) -> bool {
+fn strictly_between<P: PlanarCoordinates>(_ first: P, _ second: P, _ point: P) -> bool {
     if same_point(first, point) || same_point(second, point) {
         return false
     }
-    let a_low = if first.a < second.a { first.a } else { second.a }
-    let a_high = if first.a > second.a { first.a } else { second.a }
-    let b_low = if first.b < second.b { first.b } else { second.b }
-    let b_high = if first.b > second.b { first.b } else { second.b }
-    let c_low = if first.c < second.c { first.c } else { second.c }
-    let c_high = if first.c > second.c { first.c } else { second.c }
-    point.a >= a_low && point.a <= a_high
-        && point.b >= b_low && point.b <= b_high
-        && point.c >= c_low && point.c <= c_high
+    let a = first.coordinates()
+    let b = second.coordinates()
+    let p = point.coordinates()
+    let x_low = if a.x < b.x { a.x } else { b.x }
+    let x_high = if a.x > b.x { a.x } else { b.x }
+    let y_low = if a.y < b.y { a.y } else { b.y }
+    let y_high = if a.y > b.y { a.y } else { b.y }
+    p.x >= x_low && p.x <= x_high && p.y >= y_low && p.y <= y_high
 }
 
 /// Split one directed triangle edge at a strict on-segment point. A provider
 /// locates the sole adjacent face for a constrained boundary edge, then uses
 /// this transition while inserting the ordered boundary chain.
-pub fn split_triangle_edge(
+pub fn split_triangle_edge<P: PlanarCoordinates>(
     _ triangle: Triangle,
     _ edge: u32,
-    _ edge_first: FixedBarycentric,
-    _ edge_second: FixedBarycentric,
-    _ opposite: FixedBarycentric,
+    _ edge_first: P,
+    _ edge_second: P,
+    _ opposite: P,
     _ point_id: u32,
-    _ point: FixedBarycentric,
+    _ point: P,
 ) -> TrianglePair {
     if !triangle.valid
         || edge > 2
@@ -206,37 +244,73 @@ pub fn split_triangle_edge(
         || point_id == triangle.second
         || point_id == triangle.third
         || orientation(edge_first, edge_second, point) != 0
-        || !strictly_between(edge_first, edge_second, point)
-    {
+        || !strictly_between(edge_first, edge_second, point) {
         return invalid_pair()
     }
     let first_id = triangle_edge_first(triangle, edge)
     let second_id = triangle_edge_second(triangle, edge)
     let opposite_id = triangle_edge_opposite(triangle, edge)
-    let first = normalized_triangle(first_id, edge_first, point_id, point, opposite_id, opposite)
-    let second = normalized_triangle(point_id, point, second_id, edge_second, opposite_id, opposite)
+    let first = normalized_triangle(
+        first_id,
+        edge_first,
+        point_id,
+        point,
+        opposite_id,
+        opposite,
+    )
+    let second = normalized_triangle(
+        point_id,
+        point,
+        second_id,
+        edge_second,
+        opposite_id,
+        opposite,
+    )
     TrianglePair { first: first, second: second, valid: first.valid && second.valid }
 }
 
 pub const fn triangle_edge_first(_ triangle: Triangle, _ edge: u32) -> u32 {
-    if edge == 0 { triangle.first } else if edge == 1 { triangle.second } else if edge == 2 {
+    if edge == 0 {
+        triangle.first
+    } else if edge == 1 {
+        triangle.second
+    } else if edge == 2 {
         triangle.third
-    } else { INVALID_VERTEX }
+    } else {
+        INVALID_VERTEX
+    }
 }
 
 pub const fn triangle_edge_second(_ triangle: Triangle, _ edge: u32) -> u32 {
-    if edge == 0 { triangle.second } else if edge == 1 { triangle.third } else if edge == 2 {
+    if edge == 0 {
+        triangle.second
+    } else if edge == 1 {
+        triangle.third
+    } else if edge == 2 {
         triangle.first
-    } else { INVALID_VERTEX }
+    } else {
+        INVALID_VERTEX
+    }
 }
 
 pub const fn triangle_edge_opposite(_ triangle: Triangle, _ edge: u32) -> u32 {
-    if edge == 0 { triangle.third } else if edge == 1 { triangle.first } else if edge == 2 {
+    if edge == 0 {
+        triangle.third
+    } else if edge == 1 {
+        triangle.first
+    } else if edge == 2 {
         triangle.second
-    } else { INVALID_VERTEX }
+    } else {
+        INVALID_VERTEX
+    }
 }
 
-fn unordered_pair_is(_ first: u32, _ second: u32, _ expected_first: u32, _ expected_second: u32) -> bool {
+fn unordered_pair_is(
+    _ first: u32,
+    _ second: u32,
+    _ expected_first: u32,
+    _ expected_second: u32,
+) -> bool {
     (first == expected_first && second == expected_second)
         || (first == expected_second && second == expected_first)
 }
@@ -247,11 +321,7 @@ fn unordered_pair_is(_ first: u32, _ second: u32, _ expected_first: u32, _ expec
 /// interiors from B to C. Topology wants A→B→C→A. This mapping performs that
 /// change of view arithmetically, without a generated permutation table.
 pub const fn boundary_ring_vertex(_ key: AtlasKey, _ ring_ordinal: u32) -> u32 {
-    if key.a > key.b
-        || key.b > key.c
-        || key.c > MAX_LOD
-        || ring_ordinal >= boundary_vertices(key)
-    {
+    if key.a > key.b || key.b > key.c || key.c > MAX_LOD || ring_ordinal >= boundary_vertices(key) {
         return INVALID_VERTEX
     }
     let resolution_a = edge_resolution(key.a)
@@ -281,14 +351,13 @@ pub const fn boundary_ring_vertex(_ key: AtlasKey, _ ring_ordinal: u32) -> u32 {
 
 /// Whether two boundary-seed IDs are one locked segment in the reference
 /// triangle's three ordered chains.
-pub fn is_constrained_boundary_edge(_ key: AtlasKey, _ first: u32, _ second: u32) -> bool {
+fn triangle_boundary_segment(_ key: AtlasKey, _ first: u32, _ second: u32) -> bool {
     if key.a > key.b
         || key.b > key.c
         || key.c > MAX_LOD
         || first == second
         || first >= boundary_vertices(key)
-        || second >= boundary_vertices(key)
-    {
+        || second >= boundary_vertices(key) {
         return false
     }
     let resolution_a = edge_resolution(key.a)
@@ -302,7 +371,9 @@ pub fn is_constrained_boundary_edge(_ key: AtlasKey, _ first: u32, _ second: u32
     if first <= vertex_b && second <= vertex_b {
         let low = if first < second { first } else { second }
         let high = if first < second { second } else { first }
-        if high == low + 1 { return true }
+        if high == low + 1 {
+            return true
+        }
     }
 
     // AC stores A separately, followed by its interior points and C.
@@ -313,7 +384,9 @@ pub fn is_constrained_boundary_edge(_ key: AtlasKey, _ first: u32, _ second: u32
     if first >= ac_first && first <= vertex_c && second >= ac_first && second <= vertex_c {
         let low = if first < second { first } else { second }
         let high = if first < second { second } else { first }
-        if high == low + 1 { return true }
+        if high == low + 1 {
+            return true
+        }
     }
 
     // BC stores only interior points after C; B and C retain their IDs above.
@@ -323,8 +396,7 @@ pub fn is_constrained_boundary_edge(_ key: AtlasKey, _ first: u32, _ second: u32
     let bc_first = vertex_c + 1
     let bc_last = vertex_c + resolution_a - 1
     if unordered_pair_is(first, second, vertex_b, bc_first)
-        || unordered_pair_is(first, second, bc_last, vertex_c)
-    {
+        || unordered_pair_is(first, second, bc_last, vertex_c) {
         return true
     }
     if first >= bc_first && first <= bc_last && second >= bc_first && second <= bc_last {
@@ -336,15 +408,23 @@ pub fn is_constrained_boundary_edge(_ key: AtlasKey, _ first: u32, _ second: u32
 }
 
 pub const fn edge_low(_ edge: DirectedEdge) -> u32 {
-    if edge.first < edge.second { edge.first } else { edge.second }
+    if edge.first < edge.second {
+        edge.first
+    } else {
+        edge.second
+    }
 }
 
 pub const fn edge_high(_ edge: DirectedEdge) -> u32 {
-    if edge.first > edge.second { edge.first } else { edge.second }
+    if edge.first > edge.second {
+        edge.first
+    } else {
+        edge.second
+    }
 }
 
-pub fn triangle_directed_edge(
-    _ key: AtlasKey,
+pub fn triangle_directed_edge<K: ConstrainedBoundary>(
+    _ key: K,
     _ triangle: Triangle,
     _ triangle_ordinal: u32,
     _ local_edge: u32,
@@ -401,6 +481,31 @@ pub fn interior_edge_flip_decision(
     _ second_opposite_id: u32,
     _ second_opposite: FixedBarycentric,
 ) -> FlipDecision {
+    interior_edge_flip_decision_with_metric(
+        u_id,
+        u,
+        v_id,
+        v,
+        first_opposite_id,
+        first_opposite,
+        second_opposite_id,
+        second_opposite,
+        EquilateralMetric {},
+    )
+}
+
+/// Same incidence and tie-breaking semantics, with an explicit distance metric.
+pub fn interior_edge_flip_decision_with_metric<P: PlanarCoordinates, M: IntegerPlaneMetric>(
+    _ u_id: u32,
+    _ u: P,
+    _ v_id: u32,
+    _ v: P,
+    _ first_opposite_id: u32,
+    _ first_opposite: P,
+    _ second_opposite_id: u32,
+    _ second_opposite: P,
+    _ metric: M,
+) -> FlipDecision {
     let first_winding = orientation(u, v, first_opposite)
     let second_winding = orientation(v, u, second_opposite)
     let first_replacement = orientation(first_opposite, u, second_opposite)
@@ -412,30 +517,30 @@ pub fn interior_edge_flip_decision(
     if !convex {
         return FlipDecision { incircle: 0, convex: false, flip: false }
     }
-    let circle = incircle_sign(u, v, first_opposite, second_opposite)
+    let circle = planar_incircle(
+        u.coordinates(),
+        v.coordinates(),
+        first_opposite.coordinates(),
+        second_opposite.coordinates(),
+        metric,
+    )
     FlipDecision {
         incircle: circle,
         convex: true,
-        flip: should_flip_edge(
-            u_id,
-            v_id,
-            first_opposite_id,
-            second_opposite_id,
-            circle,
-        ),
+        flip: should_flip_edge(u_id, v_id, first_opposite_id, second_opposite_id, circle),
     }
 }
 
-pub fn flipped_triangle_pair(
+pub fn flipped_triangle_pair<P: PlanarCoordinates>(
     _ decision: FlipDecision,
     _ u_id: u32,
-    _ u: FixedBarycentric,
+    _ u: P,
     _ v_id: u32,
-    _ v: FixedBarycentric,
+    _ v: P,
     _ first_opposite_id: u32,
-    _ first_opposite: FixedBarycentric,
+    _ first_opposite: P,
     _ second_opposite_id: u32,
-    _ second_opposite: FixedBarycentric,
+    _ second_opposite: P,
 ) -> TrianglePair {
     if !decision.convex || !decision.flip {
         return invalid_pair()
