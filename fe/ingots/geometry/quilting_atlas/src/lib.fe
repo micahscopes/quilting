@@ -27,6 +27,7 @@ pub use planar
 pub use quad
 pub use quad_sampling
 pub use neighborhood
+pub use candidate_index
 pub use scan
 
 pub const MIN_LOD: u32 = 0

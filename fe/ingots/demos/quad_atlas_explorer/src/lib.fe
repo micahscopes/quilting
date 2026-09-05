@@ -10,6 +10,7 @@ use quilting_atlas_webgpu::compaction::{rank_candidate_block, prefix_candidate_b
 use quilting_atlas_webgpu::topology_scan::{rank_topology_block, prefix_topology_blocks, relocate_topology_offset, SUMMARY_WORDS}
 use quilting_atlas_webgpu::repair
 use quilting_atlas_webgpu::incidence
+use quilting_atlas_webgpu::candidate_index::{self,IndexedConflict}
 use quilting_atlas_webgpu::{
     propose_candidate_lane_with_policy,
     retire_candidate_lane_with_policy,
@@ -72,6 +73,10 @@ const MAX_KEY: QuadAtlasKey = QuadAtlasKey {
 }
 const CANDIDATE_COUNT: u32 = candidate_slot_count(MAX_KEY)
 const CANDIDATES: usize = CANDIDATE_COUNT as usize
+const SEARCH_LEAVES: usize = quilting_atlas::candidate_index::leaf_count(CANDIDATE_COUNT) as usize
+const SEARCH_LEVELS: usize = quilting_atlas::candidate_index::level_count(quilting_atlas::candidate_index::leaf_count(CANDIDATE_COUNT)) as usize
+const SEARCH_WORDS: usize = quilting_atlas::candidate_index::storage_words(CANDIDATE_COUNT) as usize
+const SEARCH_GROUPS: usize = (SEARCH_LEAVES+63)/64
 const SAMPLING: usize = CANDIDATES * 8 + 1
 const POINTS: usize = CANDIDATES + (MAX_KEY.boundary_count() as usize)
 const POINT_WORDS: usize = POINTS * 3
@@ -96,6 +101,7 @@ const REPAIR_WORDS: usize = ((TWINS+REPAIR_TILE-1)/REPAIR_TILE)*repair::SUMMARY_
 const REPAIR_GROUPS: usize = (TWINS+THREADS-1)/THREADS
 const REPAIR_BLOCK_GROUPS: usize = (((TWINS+REPAIR_TILE-1)/REPAIR_TILE)+THREADS-1)/THREADS
 pub struct SampleRound {}
+pub struct CandidateIndexLevel {}
 pub struct InsertionRound {}
 pub struct RepairRound {}
 pub struct Draw {}
@@ -152,6 +158,7 @@ fn altitude(_ p: Vec3F, _ a: Vec3F, _ b: Vec3F) -> f32 {
 actor QuadAtlasExplorer uses (GpuProgram<WebGpuBackend>) {
     bottom:f32,right:f32,top:f32,left:f32,seed:f32,wire_px:f32,
     sampling:StorageBuffer<u32,SAMPLING>,points:StorageBuffer<u32,POINT_WORDS>,
+    candidate_bounds:StorageBuffer<u32,SEARCH_WORDS>,
     compaction:StorageBuffer<u32,COMPACT_WORDS>,
     triangles:StorageBuffer<u32,TRIANGLE_WORDS>,twins:StorageBuffer<u32,TWINS>,
     triangles_a:StorageBuffer<u32,TRIANGLE_WORDS>,triangles_b:StorageBuffer<u32,TRIANGLE_WORDS>,
@@ -171,16 +178,26 @@ actor QuadAtlasExplorer uses (GpuProgram<WebGpuBackend>) {
             seed_value(self.seed),self.sampling,i,
         )
     }
+    fn candidate_index_leaves(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,FixedDispatch<SEARCH_GROUPS,1,1>>) {
+        candidate_index::initialize<QuadAtlasKey,CANDIDATES,SAMPLING,SEARCH_LEAVES,SEARCH_WORDS>(
+            canonicalize(request(self.bottom,self.right,self.top,self.left)).key,self.sampling,self.candidate_bounds,i)
+    }
+    fn candidate_index_reduce(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<CandidateIndexLevel,FixedDispatch<SEARCH_GROUPS,1,1>,SEARCH_LEVELS>>) {
+        candidate_index::reduce_level<SEARCH_LEAVES,SEARCH_WORDS>(self.candidate_bounds,i)
+    }
+    fn candidate_index_advance(self) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<CandidateIndexLevel,FixedDispatch<1,1,1>,SEARCH_LEVELS>>) {
+        candidate_index::advance_level<SEARCH_WORDS>(self.candidate_bounds)
+    }
     fn propose(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<SampleRound,FixedDispatch<GROUPS,1,1>,64>>) {
-        propose_candidate_lane_with_policy<QuadCandidateConflict,CANDIDATES,SAMPLING>(
+        propose_candidate_lane_with_policy<IndexedConflict<QuadCandidateConflict,SEARCH_LEAVES,SEARCH_WORDS>,CANDIDATES,SAMPLING>(
             canonicalize(request(self.bottom,self.right,self.top,self.left)).key,
-            QuadCandidateConflict {},self.sampling,i,
+            IndexedConflict {policy:QuadCandidateConflict {},tree:self.candidate_bounds},self.sampling,i,
         )
     }
     fn retire(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<SampleRound,FixedDispatch<GROUPS,1,1>,64>>) {
-        retire_candidate_lane_with_policy<QuadCandidateConflict,CANDIDATES,SAMPLING>(
+        retire_candidate_lane_with_policy<IndexedConflict<QuadCandidateConflict,SEARCH_LEAVES,SEARCH_WORDS>,CANDIDATES,SAMPLING>(
             canonicalize(request(self.bottom,self.right,self.top,self.left)).key,
-            QuadCandidateConflict {},self.sampling,i,
+            IndexedConflict {policy:QuadCandidateConflict {},tree:self.candidate_bounds},self.sampling,i,
         )
     }
     fn advance(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<SampleRound,FixedDispatch<1,1,1>,64>>) {

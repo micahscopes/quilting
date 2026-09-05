@@ -12,6 +12,7 @@ use quilting_atlas_webgpu::compaction::{rank_candidate_block, prefix_candidate_b
 use quilting_atlas_webgpu::topology_scan::{rank_topology_block, prefix_topology_blocks, relocate_topology_offset, SUMMARY_WORDS}
 use quilting_atlas_webgpu::repair
 use quilting_atlas_webgpu::incidence
+use quilting_atlas_webgpu::candidate_index::{self,IndexedConflict}
 use quilting_atlas_webgpu::{
     advance_candidate_generation,
     advance_parallel_topology_generation,
@@ -26,12 +27,13 @@ use quilting_atlas_webgpu::{
     locate_parallel_topology_point_lane,
     parallel_topology_progress,
     plan_parallel_topology_face_lane,
-    propose_candidate_lane,
+    propose_candidate_lane_with_policy,
+    AtlasCandidateConflict,
     publish_parallel_topology_triangle_lane,
     rebuild_parallel_topology_face_lane,
     resident_point,
     resident_triangle,
-    retire_candidate_lane,
+    retire_candidate_lane_with_policy,
     retire_parallel_topology_point_lane,
 }
 use quilting_domain::{Bary3F, Vec3F, bary3f, vec3f}
@@ -62,6 +64,10 @@ extern {
 
 const CANDIDATE_COUNT: u32 = quilting_atlas::sampling::candidate_slot_count(key())
 const CANDIDATES: usize = CANDIDATE_COUNT as usize
+const SEARCH_LEAVES: usize = quilting_atlas::candidate_index::leaf_count(CANDIDATE_COUNT) as usize
+const SEARCH_LEVELS: usize = quilting_atlas::candidate_index::level_count(quilting_atlas::candidate_index::leaf_count(CANDIDATE_COUNT)) as usize
+const SEARCH_WORDS: usize = quilting_atlas::candidate_index::storage_words(CANDIDATE_COUNT) as usize
+const SEARCH_GROUPS: usize = (SEARCH_LEAVES+127)/128
 const BOUNDARY: usize = quilting_atlas::boundary_vertices(key()) as usize
 const SAMPLING_WORKSPACE_WORDS: usize = CANDIDATES * 8 + 1
 const POINTS: usize = CANDIDATES + BOUNDARY
@@ -91,6 +97,7 @@ const REPAIR_BLOCK_GROUPS: usize = (((TWINS+REPAIR_TILE-1)/REPAIR_TILE)+THREADS-
 const SEED: u32 = 0x51c32a97
 
 pub struct SamplingRound {}
+pub struct CandidateIndexLevel {}
 pub struct InsertionRound {}
 pub struct RepairRound {}
 
@@ -162,6 +169,7 @@ fn invalid_vertex() -> RasterVertex<MeshVarying> {
 
 actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
     sampling_workspace: Shared<u32, SAMPLING_WORKSPACE_WORDS>,
+    candidate_bounds: Shared<u32, SEARCH_WORDS>,
     compaction: Shared<u32, COMPACT_WORDS>,
     points: Shared<u32, POINT_WORDS>,
     triangles_a: Shared<u32, TRIANGLE_WORDS>,
@@ -192,6 +200,16 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
         )
     }
 
+    fn candidate_index_leaves(self,i:ComputeInvocation) uses (Kernel<Threads<THREADS,1,1>,Once<SEARCH_GROUPS,1,1>>) {
+        candidate_index::initialize<AtlasKey,CANDIDATES,SAMPLING_WORKSPACE_WORDS,SEARCH_LEAVES,SEARCH_WORDS>(
+            key(),self.sampling_workspace,self.candidate_bounds,i)
+    }
+    fn candidate_index_reduce(self,i:ComputeInvocation) uses (Kernel<Threads<THREADS,1,1>,Cycle<CandidateIndexLevel,Once<SEARCH_GROUPS,1,1>,SEARCH_LEVELS>>) {
+        candidate_index::reduce_level<SEARCH_LEAVES,SEARCH_WORDS>(self.candidate_bounds,i)
+    }
+    fn candidate_index_advance(self) uses (Kernel<Threads<1,1,1>,Cycle<CandidateIndexLevel,Once<1,1,1>,SEARCH_LEVELS>>) {
+        candidate_index::advance_level<SEARCH_WORDS>(self.candidate_bounds)
+    }
     fn sample_propose(self, invocation: ComputeInvocation)
         uses (
             Kernel<
@@ -200,8 +218,9 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
             >
         )
     {
-        propose_candidate_lane<CANDIDATES, SAMPLING_WORKSPACE_WORDS>(
+        propose_candidate_lane_with_policy<IndexedConflict<AtlasCandidateConflict,SEARCH_LEAVES,SEARCH_WORDS>,CANDIDATES,SAMPLING_WORKSPACE_WORDS>(
             key(),
+            IndexedConflict {policy:AtlasCandidateConflict {},tree:self.candidate_bounds},
             self.sampling_workspace,
             invocation,
         )
@@ -215,8 +234,9 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
             >
         )
     {
-        retire_candidate_lane<CANDIDATES, SAMPLING_WORKSPACE_WORDS>(
+        retire_candidate_lane_with_policy<IndexedConflict<AtlasCandidateConflict,SEARCH_LEAVES,SEARCH_WORDS>,CANDIDATES,SAMPLING_WORKSPACE_WORDS>(
             key(),
+            IndexedConflict {policy:AtlasCandidateConflict {},tree:self.candidate_bounds},
             self.sampling_workspace,
             invocation,
         )

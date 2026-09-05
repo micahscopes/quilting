@@ -1,0 +1,118 @@
+//! Conservative, placement-neutral bounds for immutable candidate geometry.
+//! Tree leaves preserve contiguous candidate IDs. No resampling or quantized
+//! radius classes: a parent is exactly the union of its children's envelopes.
+use core::marker::Copy
+use super::sampling::BARYCENTRIC_SCALE
+
+pub const NODE_WORDS: usize = 5
+pub const LEAF_SLOTS: u32 = 16
+
+/// Complete binary-tree allocation, including unused leaf padding. Slot zero
+/// is a build-level cursor, nodes start at word one. Input is atlas capacity.
+pub const fn leaf_count(_ capacity: u32) -> u32 {
+    let needed = capacity / LEAF_SLOTS + if capacity % LEAF_SLOTS == 0 {0} else {1}
+    let mut leaves: u32 = 1
+    while leaves < needed {leaves = leaves * 2}
+    leaves
+}
+pub const fn level_count(_ leaves: u32) -> u32 {
+    let mut n = leaves
+    let mut levels: u32 = 0
+    while n > 1 {n = n / 2
+        levels = levels + 1}
+    levels
+}
+pub const fn storage_words(_ capacity: u32) -> u32 {
+    1 + (2 * leaf_count(capacity) - 1) * 5
+}
+
+pub struct CandidateBounds {
+    pub min_x: u32, pub min_y: u32, pub max_x: u32, pub max_y: u32,
+    pub radius_squared: u32,
+}
+impl Copy for CandidateBounds {}
+const fn min(_ a:u32,_ b:u32)->u32 {if a<b {a} else {b}}
+const fn max(_ a:u32,_ b:u32)->u32 {if a>b {a} else {b}}
+impl CandidateBounds {
+    pub const fn empty()->Self {
+        Self {min_x:0xffffffff,min_y:0xffffffff,max_x:0,max_y:0,radius_squared:0}
+    }
+    pub const fn point(_ x:u32,_ y:u32,_ radius:u32)->Self {
+        Self {min_x:x,min_y:y,max_x:x,max_y:y,radius_squared:radius}
+    }
+    pub const fn union(self,_ other:Self)->Self {
+        Self {min_x:min(self.min_x,other.min_x),min_y:min(self.min_y,other.min_y),
+            max_x:max(self.max_x,other.max_x),max_y:max(self.max_y,other.max_y),
+            radius_squared:max(self.radius_squared,other.radius_squared)}
+    }
+    /// Valid only for the Q14 square or equilateral reference metrics. The
+    /// latter dominates Euclidean distance in either independent barycentric
+    /// pair: 3*(dx²+dy²+dx*dy) >= 3/2*(dx²+dy²).
+    /// Arbitrary surface metrics must supply another conservative relation.
+    pub const fn excludes_reference_point(self,_ x:u32,_ y:u32,_ radius:u32)->bool {
+        if self.min_x==0xffffffff {return true}
+        // Fail open outside the proven integer envelope, never overflow a
+        // distance into a false exclusion for an unfamiliar coordinate model.
+        if x>BARYCENTRIC_SCALE || y>BARYCENTRIC_SCALE
+            || self.max_x>BARYCENTRIC_SCALE || self.max_y>BARYCENTRIC_SCALE {return false}
+        let dx=if x<self.min_x {self.min_x-x} else if x>self.max_x {x-self.max_x} else {0}
+        let dy=if y<self.min_y {self.min_y-y} else if y>self.max_y {y-self.max_y} else {0}
+        dx*dx+dy*dy>=max(radius,self.radius_squared)
+    }
+}
+
+/// Next subtree in a left-to-right depth-first walk of a 1-based heap.
+/// Zero means exhaustion. No per-query stack or recursion is needed.
+pub const fn following_subtree(_ node:u32)->u32 {
+    let mut n=node
+    while n>1 && n%2==1 {n=n/2}
+    if n<=1 {0} else {n+1}
+}
+
+pub struct CandidateCursor {
+    pub node:u32, pub offset:u32, pub slot:u32, pub valid:bool,
+}
+impl Copy for CandidateCursor {}
+impl CandidateCursor {
+    pub const fn start()->Self {Self {node:1,offset:0,slot:0xffffffff,valid:false}}
+    pub const fn done()->Self {Self {node:0,offset:0,slot:0xffffffff,valid:false}}
+}
+
+#[test]
+fn candidate_tree_allocation_and_stackless_order() {
+    let mut capacity:u32=0
+    while capacity<1025 {
+        let leaves=leaf_count(capacity)
+        assert(leaves*LEAF_SLOTS>=capacity)
+        assert(leaves==1 || leaves/2*LEAF_SLOTS<capacity)
+        assert(storage_words(capacity)==1+(2*leaves-1)*5)
+        let mut node:u32=1
+        let mut seen:u32=0
+        while node!=0 {
+            if node<leaves {node=node*2}
+            else {
+                assert(node==leaves+seen)
+                seen=seen+1
+                node=following_subtree(node)
+            }
+        }
+        assert(seen==leaves)
+        capacity=capacity+17
+    }
+    assert(leaf_count(524288)==32768)
+    assert(level_count(32768)==15)
+    assert(storage_words(524288)==327676)
+}
+
+#[test]
+fn candidate_bounds_preserve_strict_bigger_disk_conflicts() {
+    let a=CandidateBounds::point(10,20,25)
+    let b=CandidateBounds::point(14,24,9)
+    let box_=a.union(b)
+    assert(CandidateBounds::empty().union(a).min_x==10)
+    assert(!box_.excludes_reference_point(9,20,1))
+    assert(box_.excludes_reference_point(5,20,1)) // strict radius tie
+    assert(!box_.excludes_reference_point(5,20,26)) // query's larger disk
+    assert(!box_.excludes_reference_point(0xffffffff,20,1))
+    assert(CandidateBounds::empty().excludes_reference_point(10,20,25))
+}

@@ -54,11 +54,13 @@ use quilting_atlas::topology::{
 use std::webgpu::{AtomicStorageBuffer, ComputeInvocation, StorageBuffer}
 use quilting_atlas::planar::PlanarCoordinates
 use quilting_atlas::neighborhood::{CandidateWindow, grid_window}
+use quilting_atlas::candidate_index::CandidateCursor
 pub use quad
 pub use compaction
 pub use topology_scan
 pub use repair
 pub use incidence
+pub use candidate_index
 
 /// Typed coordinates in the resident three-word point slot. Square points
 /// occupy two words plus padding; they are never fake triangle barycentrics.
@@ -140,6 +142,16 @@ pub trait CandidateConflictPolicy: core::marker::Copy {
     /// retain exhaustive checks unless they supply their own proven bound.
     fn neighborhood(self, _ key:Self::Key, _ candidate:Candidate<Self::Point>) -> CandidateWindow {
         CandidateWindow::all(key.candidate_slots())
+    }
+
+    /// A cursor separates candidate enumeration from the immutable MIS
+    /// decision. Indexed providers may skip only proven non-conflicts.
+    fn next_neighbor(self,_ key:Self::Key,_ candidate:Candidate<Self::Point>,
+        _ count:u32,_ cursor:CandidateCursor)->CandidateCursor {
+        let window=if key.candidate_slots()>count {CandidateWindow::all(count)}
+            else {self.neighborhood(key,candidate)}
+        if cursor.offset>=window.count() {CandidateCursor::done()}
+        else {CandidateCursor {node:1,offset:cursor.offset+1,slot:window.slot(cursor.offset),valid:true}}
     }
 }
 
@@ -2032,14 +2044,12 @@ where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WOR
     let candidate = load_candidate<P::Point, WORDS>(workspace, slot)
     let mut accepted_conflict = false
     let mut preceding_pending_conflict = false
-    let window = if key.candidate_slots()>count {CandidateWindow::all(count)}
-        else {policy.neighborhood(key, candidate)}
-    let mut query: u32 = 0
+    let mut query = policy.next_neighbor(key,candidate,count,CandidateCursor::start())
     // Either conflict already decides non-membership. The query only reads
     // this immutable generation, so visiting the remaining neighbors cannot
     // change the winner or publish any other effect.
-    while query < window.count() && !accepted_conflict && !preceding_pending_conflict {
-        let other_slot = window.slot(query)
+    while query.valid && !accepted_conflict && !preceding_pending_conflict {
+        let other_slot = query.slot
         if other_slot < count && other_slot != slot {
             let other_state = load_generation_state<CAPACITY, WORDS>(workspace, parity, other_slot)
             if other_state == CANDIDATE_ACCEPTED || other_state == CANDIDATE_PENDING {
@@ -2058,7 +2068,9 @@ where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WOR
                 }
             }
         }
-        query = query + 1
+        if !accepted_conflict && !preceding_pending_conflict {
+            query = policy.next_neighbor(key,candidate,count,query)
+        }
     }
     workspace
         .store(
@@ -2119,13 +2131,11 @@ where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WOR
     let winner = workspace.load(index: candidate_winner_offset<CAPACITY>(slot)) != 0
     let mut accepted_conflict = false
     let mut winner_conflict = false
-    let window = if key.candidate_slots()>count {CandidateWindow::all(count)}
-        else {policy.neighborhood(key, candidate)}
-    let mut query: u32 = 0
+    let mut query = policy.next_neighbor(key,candidate,count,CandidateCursor::start())
     // Preserve candidate_state_after_round's precedence even for an
     // inconsistent winner mask: a winner must still check accepted conflicts.
-    while query < window.count() && !accepted_conflict && (winner || !winner_conflict) {
-        let other_slot = window.slot(query)
+    while query.valid && !accepted_conflict && (winner || !winner_conflict) {
+        let other_slot = query.slot
         if other_slot < count && other_slot != slot {
             let other_state = load_generation_state<CAPACITY, WORDS>(workspace, parity, other_slot)
             let other_winner = workspace.load(index: candidate_winner_offset<CAPACITY>(other_slot))
@@ -2142,7 +2152,9 @@ where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WOR
                 }
             }
         }
-        query = query + 1
+        if !accepted_conflict && (winner || !winner_conflict) {
+            query = policy.next_neighbor(key,candidate,count,query)
+        }
     }
     store_next_generation_state<CAPACITY, WORDS>(
         workspace,

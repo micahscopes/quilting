@@ -1,0 +1,112 @@
+//! GPU placement of the immutable candidate-bounds hierarchy. One leaf lane
+//! reduces sixteen consecutive candidate IDs; independent parents reduce one
+//! completed level at a time. Sampling states and priorities are not indexed,
+//! so the hierarchy is reusable for every MIS round, including diagnostic
+//! winner masks. Even initially rejected candidates remain conservatively bound.
+use core::marker::Copy
+use std::webgpu::{StorageBuffer,ComputeInvocation}
+use quilting_atlas::sampling::{Candidate,SampleSetKey}
+use quilting_atlas::candidate_index::{CandidateBounds,CandidateCursor,LEAF_SLOTS,following_subtree}
+use super::{CandidateConflictPolicy,PackedSamplePoint,AtlasCandidateConflict}
+use super::quad::QuadCandidateConflict
+
+/// Explicit opt-in: packed words 0/1 are Q14 coordinates whose metric
+/// dominates Euclidean distance. Not granted to arbitrary pullback samplers.
+pub trait ReferenceCandidatePolicy: CandidateConflictPolicy {}
+impl ReferenceCandidatePolicy for AtlasCandidateConflict {}
+impl ReferenceCandidatePolicy for QuadCandidateConflict {}
+
+fn load<const N:usize>(_ tree:StorageBuffer<u32,N>,_ node:u32)->CandidateBounds {
+    let word=1+(node-1)*5
+    CandidateBounds {min_x:tree.load(index:word),min_y:tree.load(index:word+1),
+        max_x:tree.load(index:word+2),max_y:tree.load(index:word+3),radius_squared:tree.load(index:word+4)}
+}
+fn store<const N:usize>(_ tree:StorageBuffer<u32,N>,_ node:u32,_ bounds:CandidateBounds) {
+    let word=1+(node-1)*5
+    tree.store(index:word,value:bounds.min_x)
+    tree.store(index:word+1,value:bounds.min_y)
+    tree.store(index:word+2,value:bounds.max_x)
+    tree.store(index:word+3,value:bounds.max_y)
+    tree.store(index:word+4,value:bounds.radius_squared)
+}
+
+pub fn initialize<K:SampleSetKey,const C:usize,const W:usize,const L:usize,const N:usize>(
+    _ key:K,_ workspace:StorageBuffer<u32,W>,_ tree:StorageBuffer<u32,N>,_ i:ComputeInvocation,
+)
+where {W==C*8+1},L>0,{L*16>=C},{(L&(L-1))==0},{N==1+(2*L-1)*5}
+{
+    let leaf=i.global.x
+    if leaf>=L.downcast_truncate() {return}
+    let capacity:u32=C.downcast_truncate()
+    let count=if key.candidate_slots()<capacity {key.candidate_slots()} else {capacity}
+    let first=leaf*LEAF_SLOTS
+    let mut slot=first
+    let mut bounds=CandidateBounds::empty()
+    while slot<first+LEAF_SLOTS && slot<count {
+        // All original IDs remain represented, independent of state. This
+        // costs extra false positives but keeps the query contract unconditional.
+        let word=slot*5
+        bounds=bounds.union(CandidateBounds::point(workspace.load(index:word),
+            workspace.load(index:word+1),workspace.load(index:word+3)))
+        slot=slot+1
+    }
+    let leaves:u32=L.downcast_truncate()
+    store<N>(tree,leaves+leaf,bounds)
+    if leaf==0 {tree.store(index:0,value:leaves/2)}
+}
+
+pub fn reduce_level<const L:usize,const N:usize>(_ tree:StorageBuffer<u32,N>,_ i:ComputeInvocation)
+where L>0,{(L&(L-1))==0},{N==1+(2*L-1)*5}
+{
+    let first=tree.load(index:0)
+    if i.global.x>=first {return}
+    let node=first+i.global.x
+    store<N>(tree,node,load<N>(tree,node*2).union(load<N>(tree,node*2+1)))
+}
+pub fn advance_level<const N:usize>(_ tree:StorageBuffer<u32,N>) {
+    tree.store(index:0,value:tree.load(index:0)/2)
+}
+
+pub struct IndexedConflict<P:ReferenceCandidatePolicy,const L:usize,const N:usize> {
+    pub policy:P, pub tree:StorageBuffer<u32,N>,
+}
+impl<P:ReferenceCandidatePolicy,const L:usize,const N:usize> Copy for IndexedConflict<P,L,N> {}
+impl<P:ReferenceCandidatePolicy,const L:usize,const N:usize> CandidateConflictPolicy for IndexedConflict<P,L,N>
+where L>0,{(L&(L-1))==0},{N==1+(2*L-1)*5}
+{
+    type Key=P::Key
+    type Point=P::Point
+    fn conflicts_boundary(self,_ key:P::Key,_ candidate:Candidate<P::Point>)->bool {
+        self.policy.conflicts_boundary(key,candidate)
+    }
+    fn conflicts(self,_ left:Candidate<P::Point>,_ right:Candidate<P::Point>)->bool {
+        self.policy.conflicts(left,right)
+    }
+    fn next_neighbor(self,_ key:P::Key,_ candidate:Candidate<P::Point>,
+        _ count:u32,_ cursor:CandidateCursor)->CandidateCursor {
+        // Uniform/small rectangular queries already have a tight bound and
+        // do not benefit from hierarchy traversal overhead. This choice must
+        // be stable throughout one query (key/candidate/count are immutable).
+        if key.candidate_slots()>count || self.policy.neighborhood(key,candidate).count()<=50 {
+            return self.policy.next_neighbor(key,candidate,count,cursor)
+        }
+        let leaves:u32=L.downcast_truncate()
+        let mut node=cursor.node
+        let mut offset=cursor.offset
+        while node!=0 {
+            if offset==0 && load<N>(self.tree,node).excludes_reference_point(
+                candidate.point.word(0),candidate.point.word(1),candidate.radius_squared) {
+                node=following_subtree(node)
+            } else if node<leaves {node=node*2}
+            else {
+                let slot=(node-leaves)*LEAF_SLOTS+offset
+                if slot>=count {return CandidateCursor::done()}
+                offset=offset+1
+                if offset==LEAF_SLOTS {node=following_subtree(node)
+                    offset=0}
+                return CandidateCursor {node:node,offset:offset,slot:slot,valid:true}
+            }
+        }
+        CandidateCursor::done()
+    }
+}

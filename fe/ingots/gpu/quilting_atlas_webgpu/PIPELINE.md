@@ -30,6 +30,33 @@ canonical combinations or silently clamp their LoDs.
 
 ## Current state and remaining work
 
+### Candidate hierarchy source checkpoint (GPU acceptance pending)
+
+`candidate_index` now provides a placement-neutral bounds/iteration model and
+GPU leaf/parent reduction stages. Leaves cover sixteen stable candidate IDs;
+parents carry a coordinate box and maximum squared exclusion radius. Queries
+walk without a stack. Square/equilateral policies explicitly opt into the
+conservative distance bound; arbitrary deformed-surface policies retain their
+existing query behavior. Small windows still use the preceding grid query.
+
+The source is wired into both generator demos but **not yet GPU-accepted**.
+Their first builds exposed a shared-continue compiler defect. Sonatina
+`a81222d94b139bebd94af426f339c70f5e9b81c9` fixes it, with all 125 shader tests
+passing, including direct/forwarded phi transport executed on software Vulkan.
+Fe's updated pin/build and the actual 47-pass pipeline gates remain pending.
+The live browser preview is still the verified 44-pass build.
+
+Both demo source checks and two Fe allocation/bounds tests pass. An independent
+tree model checks every exact conflict pair in three actual GPU candidate sets
+(512 candidates each). This is not execution evidence for the new GPU index.
+It also exposes a limit: the 0/0/0/3 tile has 226,020 exact conflicts out of
+262,144 possible ordered pairs. Bounds over *all* candidates cannot prune those
+pairs. Initial boundary rejection, active-state eligibility, and the cost of
+overproducing fine-grid candidates must be measured before calling this fast.
+Neither query-model counts nor compiler tests establish startup throughput.
+
+### Verified pipeline substrate
+
 - Uniform-density sample queries visit at most 50 candidate slots. Mixed-density
   jobs still need a multilevel radius-aware index; a global coarse radius can
   make their current windows large.
