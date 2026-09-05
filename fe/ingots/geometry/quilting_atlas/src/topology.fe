@@ -59,6 +59,42 @@ pub const POINT_STRICTLY_INSIDE: u32 = 1
 pub const POINT_ON_EDGE: u32 = 2
 pub const POINT_ON_VERTEX: u32 = 3
 
+/// A pending point stays in the children of its previous containing face(s)
+/// while insertion only splits faces. A strict-face point has one parent;
+/// an interior-edge point has two. Each parent contributes at most three
+/// children. This statement does not survive edge flips or vertex movement.
+pub struct ChildFaceSearch {
+    pub valid: bool,
+    first: u32,
+    first_count: u32,
+    second: u32,
+    second_count: u32,
+}
+impl Copy for ChildFaceSearch {}
+impl ChildFaceSearch {
+    pub const fn count(self) -> u32 {
+        if self.valid {self.first_count+self.second_count} else {0}
+    }
+    pub const fn face(self, _ index:u32) -> u32 {
+        if index>=self.count() {INVALID_VERTEX}
+        else if index<self.first_count {self.first+index}
+        else {self.second+index-self.first_count}
+    }
+}
+pub const fn child_face_search(
+    _ first:u32,_ first_count:u32,_ second:u32,_ second_count:u32,_ resident:u32,
+) -> ChildFaceSearch {
+    let first_valid=first_count>0 && first_count<=3 && first<=resident
+        && first_count<=resident-first
+    let second_valid=second_count==0 || (second_count<=3 && second<=resident
+        && second_count<=resident-second)
+    let disjoint=second_count==0 || first+first_count<=second || second+second_count<=first
+    ChildFaceSearch {
+        valid:first_valid && second_valid && disjoint,
+        first:first,first_count:first_count,second:second,second_count:second_count,
+    }
+}
+
 pub struct Triangle { pub first: u32, pub second: u32, pub third: u32, pub valid: bool }
 impl Copy for Triangle {}
 

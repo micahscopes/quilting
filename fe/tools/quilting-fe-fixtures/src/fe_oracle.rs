@@ -1648,3 +1648,30 @@ fn atlas_nearest_boundary_query_matches_exhaustive_relation_for_every_key() {
     }
     eprintln!("matched {checked} exhaustive/bounded boundary queries across every LoD 0–8 key");
 }
+
+#[test]
+fn insertion_child_face_search_is_bounded_disjoint_and_fails_closed() {
+    let (mut store, instance) = instantiate();
+    let query = function::<(i32,i32,i32,i32,i32,i32),i32>(&mut store,&instance,"insertion_child_face_lane");
+    for a in 0..12 {
+        for an in 0..5 {
+            for b in 0..12 {
+                for bn in 0..5 {
+                    let valid=(1..=3).contains(&an) && a+an<=12 &&
+                        (bn==0 || (bn<=3 && b+bn<=12 && (a+an<=b || b+bn<=a)));
+                    let expected:Vec<i32>=if valid {(a..a+an).chain(b..b+bn).collect()} else {vec![]};
+                    let count=query.call(&mut store,(a,an,b,bn,12,-1)).unwrap();
+                    assert_eq!(count,expected.len() as i32);
+                    assert!(count<=6);
+                    for i in 0..=count {
+                        assert_eq!(query.call(&mut store,(a,an,b,bn,12,i)).unwrap(),
+                            expected.get(i as usize).copied().unwrap_or(-1));
+                    }
+                }
+            }
+        }
+    }
+    for (a,an,b,bn,n) in [(-1,1,0,0,12),(0,1,-1,1,12),(0,4,4,1,12),(0,1,0,1,12)] {
+        assert_eq!(query.call(&mut store,(a,an,b,bn,n,-1)).unwrap(),0);
+    }
+}

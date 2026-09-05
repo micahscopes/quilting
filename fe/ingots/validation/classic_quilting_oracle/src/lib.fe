@@ -1,5 +1,10 @@
 //! Thin Wasm scalar exports over the three production M1 ingots.
 
+pub fn insertion_child_face_lane(_ a:u32,_ an:u32,_ b:u32,_ bn:u32,_ resident:u32,_ lane:u32)->u32 {
+    let search=quilting_atlas::topology::child_face_search(a,an,b,bn,resident)
+    if lane==0xffffffff {search.count()} else {search.face(lane)}
+}
+
 /// Bit 0 is the bounded query, bit 1 the unchanged exhaustive relation.
 pub fn boundary_query_comparison(
     _ a:u32,_ b:u32,_ c:u32,_ d:u32,_ x:u32,_ y:u32,_ radius:u32,_ domain:u32,

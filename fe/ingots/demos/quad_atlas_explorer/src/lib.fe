@@ -10,7 +10,16 @@ use quilting_atlas_webgpu::{
     retire_candidate_lane_with_policy,
     advance_candidate_generation,
     compact_candidate_points_with_boundary,
-    construct_planar_triangles,
+    initialize_parallel_topology_lane_with_domain,
+    locate_parallel_topology_point_lane_with_point,
+    arbitrate_parallel_topology_point_lane,
+    plan_parallel_topology_face_lane_with_point,
+    scan_parallel_topology_face_plan,
+    rebuild_parallel_topology_face_lane_with_point,
+    retire_parallel_topology_point_lane,
+    advance_parallel_topology_generation,
+    publish_parallel_topology_triangle_lane,
+    parallel_topology_progress,
     restore_indexed_constrained_delaunay_with_policy,
     resident_triangle,
     load_packed_point,
@@ -67,7 +76,10 @@ const EDGE_INDEX: usize = POINTS + TWINS
 const PROPOSALS: usize = (TWINS + 31) / 32
 const THREADS: usize = 64
 const GROUPS: usize = (CANDIDATES + THREADS - 1) / THREADS
+const TOPOLOGY_WORDS: usize = POINTS*7+TRIANGLES*3+8
+const TOPOLOGY_GROUPS: usize = (TRIANGLES+THREADS-1)/THREADS
 pub struct SampleRound {}
+pub struct InsertionRound {}
 pub struct Draw {}
 pub struct Varying { pub edge: Vec3F }
 impl Copy for Varying {}
@@ -123,6 +135,8 @@ actor QuadAtlasExplorer uses (GpuProgram<WebGpuBackend>) {
     bottom:f32,right:f32,top:f32,left:f32,seed:f32,wire_px:f32,
     sampling:StorageBuffer<u32,SAMPLING>,points:StorageBuffer<u32,POINT_WORDS>,
     triangles:StorageBuffer<u32,TRIANGLE_WORDS>,twins:StorageBuffer<u32,TWINS>,
+    triangles_a:StorageBuffer<u32,TRIANGLE_WORDS>,triangles_b:StorageBuffer<u32,TRIANGLE_WORDS>,
+    topology:StorageBuffer<u32,TOPOLOGY_WORDS>,
     edge_index:StorageBuffer<u32,EDGE_INDEX>,proposals:StorageBuffer<u32,PROPOSALS>,
     receipt:StorageBuffer<u32,16>,draw:DrawIndirectBuffer<Draw>,
     const fn view()->Surface<Params> {Surface {extent:Extent::square(768),params:params()}}
@@ -161,17 +175,56 @@ actor QuadAtlasExplorer uses (GpuProgram<WebGpuBackend>) {
         self.receipt.store(index:4,value:r.boundary_points)
         self.receipt.store(index:5,value:r.resident_points)
     }
-    fn triangulate(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
-        let r=construct_planar_triangles<QuadAtlasDomain,POINT_WORDS,TRIANGLE_WORDS>(
+    fn topology_initialize(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,FixedDispatch<TOPOLOGY_GROUPS,1,1>>) {
+        initialize_parallel_topology_lane_with_domain<QuadAtlasDomain,POINTS,POINT_WORDS,TRIANGLES,TRIANGLE_WORDS,TOPOLOGY_WORDS>(
             QuadAtlasDomain {},canonicalize(request(self.bottom,self.right,self.top,self.left)).key,
-            self.receipt.load(index:0)!=0,self.receipt.load(index:5),self.points,self.triangles,
+            self.receipt.load(index:0)!=0,self.receipt.load(index:5),self.points,
+            self.triangles_a,self.triangles_b,self.topology,i,
         )
-        self.receipt.store(index:6,value:flag(r.valid))
-        self.receipt.store(index:7,value:r.resident_triangles)
-        self.receipt.store(index:8,value:r.location_failures)
-        self.receipt.store(index:9,value:r.invariant_failures)
+    }
+    fn topology_locate(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<InsertionRound,FixedDispatch<TOPOLOGY_GROUPS,1,1>,64>>) {
+        locate_parallel_topology_point_lane_with_point<FixedPoint2,POINTS,POINT_WORDS,TRIANGLES,TRIANGLE_WORDS,TOPOLOGY_WORDS>(
+            self.points,self.triangles_a,self.triangles_b,self.topology,i,
+        )
+    }
+    fn topology_arbitrate(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<InsertionRound,FixedDispatch<TOPOLOGY_GROUPS,1,1>,64>>) {
+        arbitrate_parallel_topology_point_lane<POINTS,TRIANGLES,TOPOLOGY_WORDS>(self.topology,i)
+    }
+    fn topology_plan(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<InsertionRound,FixedDispatch<TOPOLOGY_GROUPS,1,1>,64>>) {
+        plan_parallel_topology_face_lane_with_point<FixedPoint2,POINTS,POINT_WORDS,TRIANGLES,TRIANGLE_WORDS,TOPOLOGY_WORDS>(
+            self.points,self.triangles_a,self.triangles_b,self.topology,i,
+        )
+    }
+    fn topology_scan(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<InsertionRound,FixedDispatch<1,1,1>,64>>) {
+        scan_parallel_topology_face_plan<POINTS,TRIANGLES,TOPOLOGY_WORDS>(self.topology,i)
+    }
+    fn topology_rebuild(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<InsertionRound,FixedDispatch<TOPOLOGY_GROUPS,1,1>,64>>) {
+        rebuild_parallel_topology_face_lane_with_point<FixedPoint2,POINTS,POINT_WORDS,TRIANGLES,TRIANGLE_WORDS,TOPOLOGY_WORDS>(
+            self.points,self.triangles_a,self.triangles_b,self.topology,i,
+        )
+    }
+    fn topology_retire(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<InsertionRound,FixedDispatch<TOPOLOGY_GROUPS,1,1>,64>>) {
+        retire_parallel_topology_point_lane<POINTS,TRIANGLES,TOPOLOGY_WORDS>(self.topology,i)
+    }
+    fn topology_advance(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<InsertionRound,FixedDispatch<1,1,1>,64>>) {
+        advance_parallel_topology_generation<POINTS,TRIANGLES,TOPOLOGY_WORDS>(self.topology,i)
+    }
+    fn topology_publish(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,FixedDispatch<TOPOLOGY_GROUPS,1,1>>) {
+        publish_parallel_topology_triangle_lane<POINTS,TRIANGLES,TRIANGLE_WORDS,TOPOLOGY_WORDS>(
+            self.triangles_a,self.triangles_b,self.topology,self.triangles,i,
+        )
     }
     fn delaunay(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+        let count=parallel_topology_progress<POINTS,TRIANGLES,TOPOLOGY_WORDS>(self.topology,2)
+        let pending=parallel_topology_progress<POINTS,TRIANGLES,TOPOLOGY_WORDS>(self.topology,3)
+        let locations=parallel_topology_progress<POINTS,TRIANGLES,TOPOLOGY_WORDS>(self.topology,6)
+        let invariants=parallel_topology_progress<POINTS,TRIANGLES,TOPOLOGY_WORDS>(self.topology,7)
+        let expected=self.receipt.load(index:5)*2-self.receipt.load(index:4)-2
+        let valid=self.receipt.load(index:0)!=0 && pending==0 && locations==0 && invariants==0 && count==expected
+        self.receipt.store(index:6,value:flag(valid))
+        self.receipt.store(index:7,value:count)
+        self.receipt.store(index:8,value:locations)
+        self.receipt.store(index:9,value:invariants)
         let r=restore_indexed_constrained_delaunay_with_policy<QuadInteriorEdgeFlip,
             POINT_WORDS,TRIANGLE_WORDS,TWINS,EDGE_INDEX,PROPOSALS,4096>(
             canonicalize(request(self.bottom,self.right,self.top,self.left)).key,

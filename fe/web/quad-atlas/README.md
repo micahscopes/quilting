@@ -24,8 +24,10 @@ GPU storage and drives an indirect draw; no CPU readback selects topology.
 The current live generator covers **0–3**, not the requested complete 0–8 atlas.
 Both triangle and quad GPU selection now query a conservative candidate-cell
 window. Uniform-density jobs visit at most 50 slots per query through LoD 8;
-mixed-density windows can still be large. Square insertion and edge-flip repair
-currently execute on one GPU invocation. Neither
+mixed-density windows can still be large. Triangle and square insertion now
+share parallel, immutable-generation rounds with local child-face relocation.
+Arbitration and face planning still contain global point scans; edge-flip repair
+still executes on one GPU invocation. Neither
 the all-keys batch scheduler nor a complete resident quad atlas exists yet.
 The full triangle atlas used by Tessellation Warp is a precomputed artifact,
 not evidence that this live GPU generator already scales to level 8.
@@ -74,3 +76,23 @@ The initial seed-loop early-return form exposed a compiler structurization bug
 (FE-QF-014 in the shared upstream report). Seed failures now join the same
 checked error counters/final receipt as boundary and interior failures. That
 refactoring is **not** a claim that the compiler bug was fixed.
+
+## Parallel insertion checkpoint, 2026-09-05
+
+The 18-pass release bundle `fe-render-55cc5410c2000ad2.json` replaces scalar
+square insertion with the shared triangle/square insertion provider. After the
+seed round, a pending point checks only the children of its one or two previous
+containing faces (at most six), using the previous immutable face-plan offsets.
+This is valid only during split-only insertion; Delaunay flips remain later.
+No square coordinates are reinterpreted as triangular barycentrics.
+
+`parallel-browser-snapshots.json` records the same four jobs through this new
+pipeline. Their points, triangles, and final receipts match the saved serial
+baseline; the independent crossing/area/incircle oracle also passes. Source
+checks pass for both demo domains. The release Fe-to-Wasm child-range test
+checks valid, overlapping, out-of-range, and sentinel parent ranges.
+
+The browser needed an explicit reload to pick up this build; the first reads
+still showed the old ten-pass manifest and were not counted as new-path proof.
+The verified page had eighteen passes and eleven allocated logical resources.
+These remain small integration jobs, not a full-atlas startup benchmark.

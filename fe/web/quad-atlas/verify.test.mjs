@@ -12,6 +12,12 @@ test('recorded Chromium GPU snapshots satisfy planar invariants', () => {
 const square = () => ({ key: [0, 0, 0, 0],
   points: [[0, 0], [16384, 0], [16384, 16384], [0, 16384]],
   triangles: [[0, 1, 2], [0, 2, 3]] });
+test('parallel insertion and local relocation preserve checked planar meshes', () => {
+  const evidence = JSON.parse(readFileSync(new URL('./parallel-browser-snapshots.json', import.meta.url), 'utf8'));
+  assert.equal(evidence.passes, 18);
+  assert.equal(evidence.cases.length, 4);
+  for (const snapshot of evidence.cases) verifyQuadSnapshot(snapshot);
+});
 test('both cocircular square diagonals are valid', () => {
   verifyQuadSnapshot(square());
   verifyQuadSnapshot({ ...square(), triangles: [[0, 1, 3], [1, 2, 3]] });
