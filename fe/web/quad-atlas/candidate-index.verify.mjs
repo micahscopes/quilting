@@ -7,6 +7,28 @@ const union = (a, b) => [Math.min(a[0], b[0]), Math.min(a[1], b[1]),
   Math.max(a[2], b[2]), Math.max(a[3], b[3]), Math.max(a[4], b[4])];
 const after = node => {while (node > 1 && node % 2) node = Math.floor(node / 2); return node <= 1 ? 0 : node + 1;};
 
+// Tree coverage alone does not prove the compiled iterator visits its results.
+// Check the actual MIS output independently of subsequent triangulation.
+export function verifyCandidateSelection({count, candidates, states, triangular = false}) {
+  assert.equal(candidates.length, count);
+  assert.equal(states.length, count);
+  const accepted = [];
+  for (let i = 0; i < count; ++i) {
+    // State 3 denotes an invalid generated candidate, not an incomplete query.
+    assert(states[i] === 1 || states[i] === 2 || states[i] === 3, `unfinished/invalid candidate ${i}`);
+    if (states[i] === 1) accepted.push(i);
+  }
+  for (let i = 0; i < accepted.length; ++i) {
+    const a = candidates[accepted[i]];
+    for (let j = 0; j < i; ++j) {
+      const b = candidates[accepted[j]], dx = a[0] - b[0], dy = a[1] - b[1];
+      const d2 = triangular ? 3 * (dx * dx + dy * dy + dx * dy) : dx * dx + dy * dy;
+      assert(d2 >= Math.max(a[3], b[3]), `accepted conflict ${accepted[j]}/${accepted[i]}`);
+    }
+  }
+  return {accepted: accepted.length};
+}
+
 export function verifyCandidateTree({capacity, count, words, candidates, triangular = false}) {
   let leaves = 1; while (leaves * LEAF < capacity) leaves *= 2;
   assert.equal(words.length, 1 + (2 * leaves - 1) * 5);

@@ -43,8 +43,16 @@ The source is wired into both generator demos but **not yet GPU-accepted**.
 Their first builds exposed a shared-continue compiler defect. Sonatina
 `a81222d94b139bebd94af426f339c70f5e9b81c9` fixes it, with all 125 shader tests
 passing, including direct/forwarded phi transport executed on software Vulkan.
-Fe's updated pin/build and the actual 47-pass pipeline gates remain pending.
-The live browser preview is still the verified 44-pass build.
+Fe's release CLI builds with that pin and all 44 actor tests pass. Both
+47-pass bundles compile (quad: 599,257 WGSL bytes; triangle: 540,380), but the
+quad execution gate **fails**: key 0/3/0/3 accepts 86 interior candidates
+instead of the reference's one. Actual GPU bounds pass the independent tree
+oracle; actual selected samples violate the exclusion rule. Uniform 3/3/3/3
+still accepts the reference's 26 samples through the small-window path.
+The failure capture and a sample-independence oracle are checked in separately
+from the accepted baselines. A reduced Sonatina GPU test reproduces premature
+outer-loop exit after a nested iterator; its fix is being gated. The live
+browser preview remains the verified 44-pass build, not the rejected 47-pass one.
 
 Both demo source checks and two Fe allocation/bounds tests pass. An independent
 tree model checks every exact conflict pair in three actual GPU candidate sets

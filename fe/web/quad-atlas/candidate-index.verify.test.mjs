@@ -1,7 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {verifyCandidateTree} from './candidate-index.verify.mjs';
+import {verifyCandidateTree, verifyCandidateSelection} from './candidate-index.verify.mjs';
+
+test('selection oracle rejects missing neighbor decisions independently of topology', () => {
+  const c = {count: 3, candidates: [[0, 0, 0, 25, 0], [3, 0, 0, 1, 1], [5, 0, 0, 1, 2]],
+    states: [1, 2, 1]};
+  assert.deepEqual(verifyCandidateSelection(c), {accepted: 2});
+  assert.throws(() => verifyCandidateSelection({...c, states: [1, 1, 1]}), /accepted conflict/);
+  assert.throws(() => verifyCandidateSelection({...c, states: [1, 0, 1]}), /unfinished/);
+  assert.deepEqual(verifyCandidateSelection({...c, triangular: true, states: [1, 1, 1]}), {accepted: 3});
+});
+
+test('rejected indexed GPU build has correct bounds but fails sample independence', () => {
+  const capture = JSON.parse(readFileSync(new URL('./candidate-index-failure.browser.json', import.meta.url), 'utf8'));
+  verifyCandidateTree(capture.candidateIndex);
+  assert.throws(() => verifyCandidateSelection(capture.candidateIndex), /accepted conflict/);
+  assert.equal(capture.receipt[3], 86);
+  assert.equal(capture.receipt[10], 0, 'failed repair must not publish a drawable tile');
+});
 
 test('candidate hierarchy model preserves every exact conflict in captured GPU candidate sets', () => {
   // The candidates are actual GPU output; this tree is an independent CPU
