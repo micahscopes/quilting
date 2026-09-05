@@ -1,0 +1,38 @@
+//! Backend-neutral allocation for a blocked, stable prefix scan.
+//! Local scans are independent; a scan of their totals supplies block offsets.
+//! This bounds the two serial chains by roughly sqrt(capacity), with O(N) work.
+
+/// Smallest power of two whose square covers capacity, without overflowing
+/// u32 during planning. Empty inputs still have a nonzero block size.
+pub const fn balanced_block_size(_ capacity: u32) -> u32 {
+    let mut size: u32 = 1
+    while size < capacity / size || (size == capacity / size && capacity % size != 0) {
+        size = size * 2
+    }
+    size
+}
+
+pub const fn block_count(_ items: u32, _ block_size: u32) -> u32 {
+    if block_size == 0 { return 0 }
+    items / block_size + if items % block_size == 0 { 0 } else { 1 }
+}
+
+#[test]
+fn balanced_blocks_cover_capacity_without_overflow() {
+    let mut capacity: u32 = 0
+    while capacity < 4096 {
+        let size = balanced_block_size(capacity)
+        assert(size != 0 && (size & (size - 1)) == 0)
+        assert(block_count(capacity, size) <= size)
+        if size > 1 { assert(block_count(capacity, size / 2) > size / 2) }
+        let count = block_count(capacity, size)
+        assert(count * size >= capacity)
+        if count > 0 { assert((count - 1) * size < capacity) }
+        capacity = capacity + 1
+    }
+    assert(balanced_block_size(0xffffffff) == 65536)
+    assert(block_count(0xffffffff, 65536) == 65536)
+    assert(block_count(0xffffffff, 1) == 0xffffffff)
+    assert(block_count(0, 1) == 0)
+    assert(block_count(1, 0) == 0)
+}

@@ -41,6 +41,24 @@ measurements; none is established by the small jobs below.
 This is planar reference-domain Delaunay, not surface-metric uniformization.
 Subsequent warps can invert triangles and do not preserve Delaunay legality.
 
+## Blocked compaction checkpoint, 2026-09-05
+
+Bundle `fe-render-c2445ee8cc903f07.json` has 22 passes: sample packing now uses
+independent local ranks, a small block-total scan, and parallel scatter. The
+block size is computed in Fe CTFE; accepted candidates retain their exact IDs.
+At the LoD 8 quad candidate capacity this gives 1,024-item local scans and 512
+block totals, rather than one 524,288-item scan. This is a work bound, not a
+measured startup speedup, and the remaining topology scan/repair are still serial.
+
+`compaction-browser-evidence.json` records hashes from fresh Chromium captures
+of all 55 canonical preview keys plus the alternate-seed case. Each passed the
+independent geometry oracle and exactly matched the previous point coordinates,
+ordered triangle indices, and receipts. The diagnostic reads are not part of
+production generation. `compaction.verify.test.mjs` also exhausts short state
+sequences, block sizes, output clipping, and reversed dispatch order. The Fe
+allocation test passes; both triangle and quad release bundles compile. Only
+the quad bundle has this new browser gate. Full LoD 8 generation remains open.
+
 ## Browser evidence, 2026-09-04
 
 Release Fe `8b7ff12ce`, shared Sonatina pin `ef13a656`, Chromium WebGPU:

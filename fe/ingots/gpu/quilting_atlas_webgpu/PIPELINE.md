@@ -55,8 +55,14 @@ canonical combinations or silently clamp their LoDs.
   inconsistent winner mask. The finite decision model and unchanged baseline
   sampled-point checks pass. This does not replace the missing mixed-density
   spatial index.
-- Stable compaction and scan placement still need work-efficient parallel
-  realizations. Preserve deterministic order and checked capacity overflow.
+- Stable sample compaction now uses three GPU dispatches: independent local
+  ranks, a scan of block totals, and disjoint scatter. CTFE balances the block
+  size; stable IDs and checked overflow are preserved. The 22-pass quad bundle
+  matches the preceding GPU point coordinates, ordered triangles, and receipts
+  for all 55 preview keys plus an alternate seed. Triangle compilation passes;
+  its new dispatch sequence has not yet been browser-verified.
+- The insertion-plan face/point scan remains singleton work per round. It
+  still needs a parallel realization preserving ownership checks and receipts.
 - Indexed Delaunay restoration remains serial. Parallel repair needs explicit
   conflict selection, safe adjacency updates, and a convergence certificate.
 - Full-key batching, bounded scratch reuse, atlas publication, and replacement

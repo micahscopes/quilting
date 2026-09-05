@@ -7,13 +7,15 @@
 
 use core::marker::Copy
 use quilting_atlas::{AtlasKey, canonical_key_ordinal}
+use quilting_atlas::scan::balanced_block_size
+use quilting_atlas_webgpu::compaction::{rank_candidate_block, prefix_candidate_blocks, scatter_candidate_lane}
 use quilting_atlas_webgpu::{
     advance_candidate_generation,
     advance_parallel_topology_generation,
     arbitrate_parallel_topology_point_lane,
     initialize_parallel_topology_claim_lane,
     claim_parallel_topology_point_lane,
-    compact_candidate_points,
+    AtlasBoundaryPoints,
     DelaunayRestoration,
     initialize_candidate_lane,
     initialize_parallel_topology_lane,
@@ -56,15 +58,22 @@ extern {
     const fn __f32_from_i32(_: i32) -> f32
 }
 
-const CANDIDATES: usize = 272
+const CANDIDATE_COUNT: u32 = quilting_atlas::sampling::candidate_slot_count(key())
+const CANDIDATES: usize = CANDIDATE_COUNT as usize
+const BOUNDARY: usize = quilting_atlas::boundary_vertices(key()) as usize
 const SAMPLING_WORKSPACE_WORDS: usize = CANDIDATES * 8 + 1
-const POINTS: usize = 286
+const POINTS: usize = CANDIDATES + BOUNDARY
 const POINT_WORDS: usize = POINTS * 3
-const TRIANGLES: usize = 556
+const TRIANGLES: usize = POINTS * 2 - BOUNDARY - 2
 const TRIANGLE_WORDS: usize = TRIANGLES * 4
+const DRAW_VERTICES: usize = TRIANGLES * 3
 const TOPOLOGY_WORKSPACE_WORDS: usize = POINTS * 7 + TRIANGLES * 3 + 8
 const THREADS: usize = 128
-const WORKGROUPS: usize = 5
+const WORKGROUPS: usize = (TRIANGLES + THREADS - 1) / THREADS
+const COMPACT_TILE: usize = balanced_block_size(CANDIDATE_COUNT) as usize
+const COMPACT_BLOCKS: usize = (CANDIDATES + COMPACT_TILE - 1) / COMPACT_TILE
+const COMPACT_WORDS: usize = COMPACT_BLOCKS * 3
+const COMPACT_GROUPS: usize = (COMPACT_BLOCKS + THREADS - 1) / THREADS
 const SAMPLING_ROUNDS: usize = 64
 const INSERTION_ROUNDS: usize = 64
 const FLIP_LIMIT: usize = 512
@@ -95,7 +104,7 @@ fn store_delaunay_receipt(
     receipt.store(index: 22, value: restored.invariant_failures)
 }
 
-fn key() -> AtlasKey {
+const fn key() -> AtlasKey {
     AtlasKey { a: 1, b: 2, c: 3 }
 }
 
@@ -141,6 +150,7 @@ fn invalid_vertex() -> RasterVertex<MeshVarying> {
 
 actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
     sampling_workspace: Shared<u32, SAMPLING_WORKSPACE_WORDS>,
+    compaction: Shared<u32, COMPACT_WORDS>,
     points: Shared<u32, POINT_WORDS>,
     triangles_a: Shared<u32, TRIANGLE_WORDS>,
     triangles_b: Shared<u32, TRIANGLE_WORDS>,
@@ -210,12 +220,18 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
         )
     }
 
+    fn sample_compact_rank(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Once<COMPACT_GROUPS, 1, 1>>)
+    {
+        rank_candidate_block<AtlasKey,CANDIDATES,COMPACT_TILE,SAMPLING_WORKSPACE_WORDS,COMPACT_WORDS>(
+            key(),self.sampling_workspace,self.compaction,invocation,
+        )
+    }
+
     fn sample_compact(self) uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>) {
-        let compacted = compact_candidate_points<
-            CANDIDATES,
-            SAMPLING_WORKSPACE_WORDS,
-            POINT_WORDS,
-        >(key(), self.sampling_workspace, self.points)
+        let compacted = prefix_candidate_blocks<AtlasKey,CANDIDATES,COMPACT_TILE,POINT_WORDS,COMPACT_WORDS>(
+            key(),self.compaction,
+        )
         self.receipt.store(index: 0, value: if compacted.valid { 1 } else { 0 })
         self.receipt.store(index: 1, value: if compacted.converged { 1 } else { 0 })
         self.receipt.store(index: 2, value: if compacted.overflowed { 1 } else { 0 })
@@ -223,6 +239,14 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
         self.receipt.store(index: 4, value: compacted.accepted_candidates)
         self.receipt.store(index: 5, value: compacted.boundary_points)
         self.receipt.store(index: 6, value: compacted.resident_points)
+    }
+
+    fn sample_compact_scatter(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Once<WORKGROUPS, 1, 1>>)
+    {
+        scatter_candidate_lane<AtlasBoundaryPoints,CANDIDATES,COMPACT_TILE,SAMPLING_WORKSPACE_WORDS,POINT_WORDS,COMPACT_WORDS>(
+            key(),AtlasBoundaryPoints {},self.sampling_workspace,self.compaction,self.points,invocation,
+        )
     }
 
     fn topology_initialize(self, invocation: ComputeInvocation)
@@ -500,7 +524,7 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
     }
 
     fn mesh_vertices(self, vertex_index: u32) -> RasterVertex<MeshVarying>
-        uses (VertexStage<MeshVarying, TriangleList<1668>>)
+        uses (VertexStage<MeshVarying, TriangleList<DRAW_VERTICES>>)
     {
         let mut result = invalid_vertex()
         if self.receipt.load(index: 7) != 0 {

@@ -55,6 +55,7 @@ use std::webgpu::{AtomicStorageBuffer, ComputeInvocation, StorageBuffer}
 use quilting_atlas::planar::PlanarCoordinates
 use quilting_atlas::neighborhood::{CandidateWindow, grid_window}
 pub use quad
+pub use compaction
 
 /// Typed coordinates in the resident three-word point slot. Square points
 /// occupy two words plus padding; they are never fake triangle barycentrics.

@@ -1,0 +1,114 @@
+//! Stable sample packing: local ranks -> block offsets -> disjoint scatter.
+//! These are separate dispatches. No cross-workgroup spin or host scan occurs.
+//! The final sampling winner lanes become local ranks only AFTER MIS finishes.
+use std::webgpu::{StorageBuffer, ComputeInvocation}
+use quilting_atlas::sampling::{SampleSetKey, CANDIDATE_ACCEPTED, CANDIDATE_PENDING}
+use quilting_atlas::scan::block_count
+use super::{
+    BoundaryPointPolicy, CandidateCompaction,
+    candidate_progress_offset, candidate_winner_offset,
+    load_generation_state, load_candidate, store_packed_point,
+}
+
+/// Each invocation owns one contiguous input block. Its three summary words
+/// are accepted count, pending count, and (in the next dispatch) base rank.
+pub fn rank_candidate_block<K: SampleSetKey,
+    const CAPACITY: usize, const TILE: usize, const WORDS: usize, const BLOCK_WORDS: usize,
+>(
+    _ key: K, _ workspace: StorageBuffer<u32,WORDS>,
+    _ blocks: StorageBuffer<u32,BLOCK_WORDS>, _ invocation: ComputeInvocation,
+)
+where CAPACITY > 0, CAPACITY <= 0x1fffffff, TILE > 0, TILE <= 65536,
+    { WORDS == CAPACITY * 8 + 1 }, { BLOCK_WORDS == ((CAPACITY + TILE - 1) / TILE) * 3 }
+{
+    let capacity: u32 = CAPACITY.downcast_truncate()
+    let tile: u32 = TILE.downcast_truncate()
+    let slots = if key.candidate_slots() < capacity { key.candidate_slots() } else { capacity }
+    let block = invocation.global.x
+    if block >= block_count(slots,tile) { return }
+    let first = block * tile
+    let end = if slots - first < tile { slots } else { first + tile }
+    let parity = workspace.load(index:candidate_progress_offset<CAPACITY>())
+    let mut accepted: u32 = 0
+    let mut pending: u32 = 0
+    let mut slot = first
+    while slot < end {
+        let state = load_generation_state<CAPACITY,WORDS>(workspace,parity,slot)
+        workspace.store(index:candidate_winner_offset<CAPACITY>(slot),value:accepted)
+        if state == CANDIDATE_ACCEPTED { accepted = accepted + 1 }
+        else if state == CANDIDATE_PENDING { pending = pending + 1 }
+        slot = slot + 1
+    }
+    blocks.store(index:block*3,value:accepted)
+    blocks.store(index:block*3+1,value:pending)
+}
+
+/// One invocation scans only block summaries, not the candidate array. Call
+/// from a singleton stage; its returned receipt precedes the scatter dispatch.
+pub fn prefix_candidate_blocks<K: SampleSetKey,
+    const CAPACITY: usize, const TILE: usize, const POINT_WORDS: usize, const BLOCK_WORDS: usize,
+>(_ key: K, _ blocks: StorageBuffer<u32,BLOCK_WORDS>) -> CandidateCompaction
+where CAPACITY > 0, CAPACITY <= 0x1fffffff, TILE > 0, TILE <= 65536,
+    { POINT_WORDS % 3 == 0 }, POINT_WORDS <= 0xffffffff,
+    { BLOCK_WORDS == ((CAPACITY + TILE - 1) / TILE) * 3 }
+{
+    let capacity: u32 = CAPACITY.downcast_truncate()
+    let tile: u32 = TILE.downcast_truncate()
+    let requested = key.candidate_slots()
+    let slots = if requested < capacity { requested } else { capacity }
+    let count = block_count(slots,tile)
+    let mut accepted: u32 = 0
+    let mut pending: u32 = 0
+    let mut block: u32 = 0
+    while block < count {
+        blocks.store(index:block*3+2,value:accepted)
+        accepted = accepted + blocks.load(index:block*3)
+        pending = pending + blocks.load(index:block*3+1)
+        block = block + 1
+    }
+    let boundary = key.boundary_points()
+    let representable = accepted <= 0xffffffff - boundary
+    let resident = if representable { boundary + accepted } else { 0xffffffff }
+    let point_capacity: u32 = (POINT_WORDS / 3).downcast_truncate()
+    let overflowed = requested > capacity || !representable || resident > point_capacity
+    CandidateCompaction {
+        valid: !overflowed && pending == 0,
+        converged: pending == 0, overflowed: overflowed, candidate_slots: requested,
+        accepted_candidates: accepted, boundary_points: boundary, resident_points: resident,
+    }
+}
+
+/// Boundaries and candidates occupy disjoint prefixes. Input slot order, not
+/// invocation order, determines every resident ID. Overflow writes only the
+/// representable prefix, matching the scalar provider for valid atlas keys.
+pub fn scatter_candidate_lane<P: BoundaryPointPolicy,
+    const CAPACITY: usize, const TILE: usize, const WORDS: usize,
+    const POINT_WORDS: usize, const BLOCK_WORDS: usize,
+>(
+    _ key: P::Key, _ boundary_points: P,
+    _ workspace: StorageBuffer<u32,WORDS>, _ blocks: StorageBuffer<u32,BLOCK_WORDS>,
+    _ points: StorageBuffer<u32,POINT_WORDS>, _ invocation: ComputeInvocation,
+)
+where CAPACITY > 0, CAPACITY <= 0x1fffffff, TILE > 0, TILE <= 65536,
+    { WORDS == CAPACITY * 8 + 1 }, { POINT_WORDS % 3 == 0 }, POINT_WORDS <= 0xffffffff,
+    { BLOCK_WORDS == ((CAPACITY + TILE - 1) / TILE) * 3 }
+{
+    let lane = invocation.global.x
+    let capacity: u32 = CAPACITY.downcast_truncate()
+    let tile: u32 = TILE.downcast_truncate()
+    let slots = if key.candidate_slots() < capacity { key.candidate_slots() } else { capacity }
+    let boundary = key.boundary_points()
+    let point_capacity: u32 = (POINT_WORDS / 3).downcast_truncate()
+    if lane < boundary && lane < point_capacity {
+        store_packed_point<P::Point,POINT_WORDS>(points,lane,boundary_points.point(key,lane))
+    }
+    if lane >= slots { return }
+    let parity = workspace.load(index:candidate_progress_offset<CAPACITY>())
+    if load_generation_state<CAPACITY,WORDS>(workspace,parity,lane) != CANDIDATE_ACCEPTED { return }
+    let rank = blocks.load(index:(lane/tile)*3+2)
+        + workspace.load(index:candidate_winner_offset<CAPACITY>(lane))
+    if boundary < point_capacity && rank < point_capacity - boundary {
+        let candidate = load_candidate<P::Point,WORDS>(workspace,lane)
+        store_packed_point<P::Point,POINT_WORDS>(points,boundary+rank,candidate.point)
+    }
+}

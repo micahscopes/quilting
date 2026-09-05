@@ -5,11 +5,12 @@ use fmath::{abs, sqrt, smoothstep, min}
 use quilting_atlas::quad::{QuadAtlasKey, canonicalize}
 use quilting_atlas::quad_sampling::candidate_slot_count
 use quilting_atlas::planar::FixedPoint2
+use quilting_atlas::scan::balanced_block_size
+use quilting_atlas_webgpu::compaction::{rank_candidate_block, prefix_candidate_blocks, scatter_candidate_lane}
 use quilting_atlas_webgpu::{
     propose_candidate_lane_with_policy,
     retire_candidate_lane_with_policy,
     advance_candidate_generation,
-    compact_candidate_points_with_boundary,
     initialize_parallel_topology_lane_with_domain,
     locate_parallel_topology_point_lane_with_point,
     arbitrate_parallel_topology_point_lane,
@@ -68,7 +69,8 @@ const MAX_KEY: QuadAtlasKey = QuadAtlasKey {
     top: PREVIEW_LOD,
     left: PREVIEW_LOD,
 }
-const CANDIDATES: usize = candidate_slot_count(MAX_KEY) as usize
+const CANDIDATE_COUNT: u32 = candidate_slot_count(MAX_KEY)
+const CANDIDATES: usize = CANDIDATE_COUNT as usize
 const SAMPLING: usize = CANDIDATES * 8 + 1
 const POINTS: usize = CANDIDATES + (MAX_KEY.boundary_count() as usize)
 const POINT_WORDS: usize = POINTS * 3
@@ -79,6 +81,10 @@ const EDGE_INDEX: usize = POINTS + TWINS
 const PROPOSALS: usize = (TWINS + 31) / 32
 const THREADS: usize = 64
 const GROUPS: usize = (CANDIDATES + THREADS - 1) / THREADS
+const COMPACT_TILE: usize = balanced_block_size(CANDIDATE_COUNT) as usize
+const COMPACT_BLOCKS: usize = (CANDIDATES + COMPACT_TILE - 1) / COMPACT_TILE
+const COMPACT_WORDS: usize = COMPACT_BLOCKS * 3
+const COMPACT_GROUPS: usize = (COMPACT_BLOCKS + THREADS - 1) / THREADS
 const TOPOLOGY_WORDS: usize = POINTS*7+TRIANGLES*3+8
 const TOPOLOGY_GROUPS: usize = (TRIANGLES+THREADS-1)/THREADS
 pub struct SampleRound {}
@@ -137,6 +143,7 @@ fn altitude(_ p: Vec3F, _ a: Vec3F, _ b: Vec3F) -> f32 {
 actor QuadAtlasExplorer uses (GpuProgram<WebGpuBackend>) {
     bottom:f32,right:f32,top:f32,left:f32,seed:f32,wire_px:f32,
     sampling:StorageBuffer<u32,SAMPLING>,points:StorageBuffer<u32,POINT_WORDS>,
+    compaction:StorageBuffer<u32,COMPACT_WORDS>,
     triangles:StorageBuffer<u32,TRIANGLE_WORDS>,twins:StorageBuffer<u32,TWINS>,
     triangles_a:StorageBuffer<u32,TRIANGLE_WORDS>,triangles_b:StorageBuffer<u32,TRIANGLE_WORDS>,
     topology:StorageBuffer<u32,TOPOLOGY_WORDS>,
@@ -167,10 +174,15 @@ actor QuadAtlasExplorer uses (GpuProgram<WebGpuBackend>) {
     fn advance(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<SampleRound,FixedDispatch<1,1,1>,64>>) {
         advance_candidate_generation<CANDIDATES,SAMPLING>(self.sampling,i)
     }
-    fn compact(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
-        let r=compact_candidate_points_with_boundary<QuadBoundaryPoints,CANDIDATES,SAMPLING,POINT_WORDS>(
+    fn compact_rank(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,FixedDispatch<COMPACT_GROUPS,1,1>>) {
+        rank_candidate_block<QuadAtlasKey,CANDIDATES,COMPACT_TILE,SAMPLING,COMPACT_WORDS>(
             canonicalize(request(self.bottom,self.right,self.top,self.left)).key,
-            QuadBoundaryPoints {},self.sampling,self.points,
+            self.sampling,self.compaction,i,
+        )
+    }
+    fn compact(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+        let r=prefix_candidate_blocks<QuadAtlasKey,CANDIDATES,COMPACT_TILE,POINT_WORDS,COMPACT_WORDS>(
+            canonicalize(request(self.bottom,self.right,self.top,self.left)).key,self.compaction,
         )
         self.receipt.store(index:0,value:flag(r.valid))
         self.receipt.store(index:1,value:flag(r.converged))
@@ -178,6 +190,12 @@ actor QuadAtlasExplorer uses (GpuProgram<WebGpuBackend>) {
         self.receipt.store(index:3,value:r.accepted_candidates)
         self.receipt.store(index:4,value:r.boundary_points)
         self.receipt.store(index:5,value:r.resident_points)
+    }
+    fn compact_scatter(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,FixedDispatch<GROUPS,1,1>>) {
+        scatter_candidate_lane<QuadBoundaryPoints,CANDIDATES,COMPACT_TILE,SAMPLING,POINT_WORDS,COMPACT_WORDS>(
+            canonicalize(request(self.bottom,self.right,self.top,self.left)).key,
+            QuadBoundaryPoints {},self.sampling,self.compaction,self.points,i,
+        )
     }
     fn topology_initialize(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,FixedDispatch<TOPOLOGY_GROUPS,1,1>>) {
         initialize_parallel_topology_lane_with_domain<QuadAtlasDomain,POINTS,POINT_WORDS,TRIANGLES,TRIANGLE_WORDS,TOPOLOGY_WORDS>(
