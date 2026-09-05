@@ -1,0 +1,36 @@
+//! Enumerate the full quad key space on the GPU; no sampling substitute.
+use std::webgpu::{StorageBuffer,GpuProgram,WebGpuBackend,ComputeSurface,ComputeInvocation,
+    Workgroup,FixedDispatch,CycledDispatch}
+use quilting_atlas::quad::CANONICAL_QUAD_KEY_COUNT
+use quilting_atlas_webgpu::jobs::{QuadJobState,initialize,advance}
+const JOBS:usize=CANONICAL_QUAD_KEY_COUNT as usize
+const GROUPS:usize=(JOBS+63)/64
+pub struct Job {}
+actor QuadJobs uses (GpuProgram<WebGpuBackend>) {
+    active:StorageBuffer<QuadJobState,1>,
+    history:StorageBuffer<u32,JOBS>,
+    receipt:StorageBuffer<u32,4>,
+    fn initialize_jobs(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<64,1,1>,FixedDispatch<GROUPS,1,1>>) {
+        if i.global.x<CANONICAL_QUAD_KEY_COUNT {self.history.store(index:i.global.x,value:0)}
+        if i.global.x<4 {self.receipt.store(index:i.global.x,value:0)}
+        if i.global.x==0 {initialize(self.active,8,11)}
+    }
+    fn next_job(self) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<Job,FixedDispatch<1,1,1>,JOBS>>) {
+        advance(self.active,11)
+    }
+    fn record_job(self) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<Job,FixedDispatch<1,1,1>,JOBS>>) {
+        let job=self.active.load(index:0)
+        if job.valid!=0 && job.ordinal<CANONICAL_QUAD_KEY_COUNT {
+            self.history.store(index:job.ordinal,value:job.key().code()+1)
+        }
+    }
+    fn finish_jobs(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+        advance(self.active,12)
+        let last=self.active.load(index:0)
+        self.receipt.store(index:0,value:last.next_ordinal)
+        self.receipt.store(index:1,value:last.valid)
+        self.receipt.store(index:2,value:last.key().code())
+        advance(self.active,11)
+        self.receipt.store(index:3,value:self.active.load(index:0).valid)
+    }
+}

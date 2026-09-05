@@ -39,7 +39,7 @@ use quilting_atlas_webgpu::{
 use quilting_domain::{Bary3F, Vec3F, bary3f, vec3f}
 use quilting_quaternion::quatf
 use quilting_qb::{QbTriPatch, control, evaluate_differential, patch}
-use std::web::view::{Extent, Surface}
+use std::web::view::{Extent, Surface, Param}
 use std::webgpu::{
     ClipPosition,
     ComputeInvocation,
@@ -52,7 +52,8 @@ use std::webgpu::{
     RasterVertex,
     StorageBuffer as Shared,
     AtomicStorageBuffer,
-    TriangleList,
+    IndirectTriangleList,
+    DrawIndirectBuffer,
     VertexStage,
     WebGpuBackend,
     Workgroup as Threads,
@@ -62,19 +63,18 @@ extern {
     const fn __f32_from_i32(_: i32) -> f32
 }
 
-const CANDIDATE_COUNT: u32 = quilting_atlas::sampling::candidate_slot_count(key())
+const CANDIDATE_COUNT: u32 = quilting_atlas::sampling::candidate_slot_count(maximum_key())
 const CANDIDATES: usize = CANDIDATE_COUNT as usize
 const SEARCH_LEAVES: usize = quilting_atlas::candidate_index::leaf_count(CANDIDATE_COUNT) as usize
 const SEARCH_LEVELS: usize = quilting_atlas::candidate_index::level_count(quilting_atlas::candidate_index::leaf_count(CANDIDATE_COUNT)) as usize
 const SEARCH_WORDS: usize = quilting_atlas::candidate_index::storage_words(CANDIDATE_COUNT) as usize
 const SEARCH_GROUPS: usize = (SEARCH_LEAVES+127)/128
-const BOUNDARY: usize = quilting_atlas::boundary_vertices(key()) as usize
+const BOUNDARY: usize = quilting_atlas::boundary_vertices(maximum_key()) as usize
 const SAMPLING_WORKSPACE_WORDS: usize = CANDIDATES * 8 + 1
 const POINTS: usize = CANDIDATES + BOUNDARY
 const POINT_WORDS: usize = POINTS * 3
 const TRIANGLES: usize = POINTS * 2 - BOUNDARY - 2
 const TRIANGLE_WORDS: usize = TRIANGLES * 4
-const DRAW_VERTICES: usize = TRIANGLES * 3
 const TOPOLOGY_WORKSPACE_WORDS: usize = POINTS * 7 + TRIANGLES * 3 + 8
 const THREADS: usize = 128
 const WORKGROUPS: usize = (TRIANGLES + THREADS - 1) / THREADS
@@ -82,7 +82,7 @@ const COMPACT_TILE: usize = balanced_block_size(CANDIDATE_COUNT) as usize
 const COMPACT_BLOCKS: usize = (CANDIDATES + COMPACT_TILE - 1) / COMPACT_TILE
 const COMPACT_WORDS: usize = COMPACT_BLOCKS * 3
 const COMPACT_GROUPS: usize = (COMPACT_BLOCKS + THREADS - 1) / THREADS
-const SCAN_TILE: usize = balanced_block_size(CANDIDATE_COUNT*2+quilting_atlas::boundary_vertices(key())-2) as usize
+const SCAN_TILE: usize = balanced_block_size(CANDIDATE_COUNT*2+quilting_atlas::boundary_vertices(maximum_key())-2) as usize
 const SCAN_BLOCKS: usize = (TRIANGLES+SCAN_TILE-1)/SCAN_TILE
 const SCAN_WORDS: usize = SCAN_BLOCKS*SUMMARY_WORDS
 const SCAN_GROUPS: usize = (SCAN_BLOCKS+THREADS-1)/THREADS
@@ -90,7 +90,7 @@ const SAMPLING_ROUNDS: usize = 64
 const INSERTION_ROUNDS: usize = 64
 const TWINS: usize = TRIANGLES*3
 const EDGE_INDEX: usize = POINTS+1+TWINS
-const REPAIR_TILE: usize = balanced_block_size((CANDIDATE_COUNT*2+quilting_atlas::boundary_vertices(key())-2)*3) as usize
+const REPAIR_TILE: usize = balanced_block_size((CANDIDATE_COUNT*2+quilting_atlas::boundary_vertices(maximum_key())-2)*3) as usize
 const REPAIR_WORDS: usize = ((TWINS+REPAIR_TILE-1)/REPAIR_TILE)*repair::SUMMARY_WORDS
 const REPAIR_GROUPS: usize = (TWINS+THREADS-1)/THREADS
 const REPAIR_BLOCK_GROUPS: usize = (((TWINS+REPAIR_TILE-1)/REPAIR_TILE)+THREADS-1)/THREADS
@@ -100,11 +100,12 @@ pub struct SamplingRound {}
 pub struct CandidateIndexLevel {}
 pub struct InsertionRound {}
 pub struct RepairRound {}
+pub struct Draw {}
 
 pub struct MeshVarying { pub edge: Bary3F, pub normal: Vec3F }
 impl Copy for MeshVarying {}
 
-struct GeneratedParams {}
+struct GeneratedParams { a: Param, b: Param, c: Param }
 
 fn flag(_ value: bool) -> u32 {
     if value { 1 } else { 0 }
@@ -123,8 +124,20 @@ fn store_delaunay_receipt(
     receipt.store(index: 22, value: restored.invariant_failures)
 }
 
-const fn key() -> AtlasKey {
-    AtlasKey { a: 1, b: 2, c: 3 }
+const fn maximum_key() -> AtlasKey {
+    AtlasKey { a: quilting_atlas::MAX_LOD, b: quilting_atlas::MAX_LOD, c: quilting_atlas::MAX_LOD }
+}
+
+fn level(_ x: f32) -> u32 {
+    let mut n: u32 = 0
+    while n < quilting_atlas::MAX_LOD && x >= __f32_from_i32(n.downcast_unchecked()) + 0.5 {
+        n = n + 1
+    }
+    n
+}
+
+fn request(_ a: f32, _ b: f32, _ c: f32) -> AtlasKey {
+    quilting_atlas::canonicalize(AtlasKey {a:level(a),b:level(b),c:level(c)}).key
 }
 
 fn local_corner(_ corner: u32) -> Bary3F {
@@ -168,6 +181,8 @@ fn invalid_vertex() -> RasterVertex<MeshVarying> {
 }
 
 actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
+    a:f32,b:f32,c:f32,
+    draw: DrawIndirectBuffer<Draw>,
     sampling_workspace: Shared<u32, SAMPLING_WORKSPACE_WORDS>,
     candidate_bounds: Shared<u32, SEARCH_WORDS>,
     compaction: Shared<u32, COMPACT_WORDS>,
@@ -184,13 +199,17 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
     receipt: Shared<u32, 23>,
 
     const fn view() -> Surface<GeneratedParams> {
-        Surface { extent: Extent::square(768), params: GeneratedParams {} }
+        Surface { extent: Extent::square(768), params: GeneratedParams {
+            a: Param::int(min:0.0,max:8.0,init:1.0),
+            b: Param::int(min:0.0,max:8.0,init:2.0),
+            c: Param::int(min:0.0,max:8.0,init:3.0),
+        } }
     }
 
     fn sample_initialize(self, invocation: ComputeInvocation)
         uses (Kernel<Threads<THREADS, 1, 1>, Once<WORKGROUPS, 1, 1>>)
     {
-        let atlas_key = key()
+        let atlas_key = request(self.a,self.b,self.c)
         initialize_candidate_lane<CANDIDATES, SAMPLING_WORKSPACE_WORDS>(
             atlas_key,
             canonical_key_ordinal(atlas_key),
@@ -202,7 +221,7 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
 
     fn candidate_index_leaves(self,i:ComputeInvocation) uses (Kernel<Threads<THREADS,1,1>,Once<SEARCH_GROUPS,1,1>>) {
         candidate_index::initialize<AtlasKey,CANDIDATES,SAMPLING_WORKSPACE_WORDS,SEARCH_LEAVES,SEARCH_WORDS>(
-            key(),self.sampling_workspace,self.candidate_bounds,i)
+            request(self.a,self.b,self.c),self.sampling_workspace,self.candidate_bounds,i)
     }
     fn candidate_index_reduce(self,i:ComputeInvocation) uses (Kernel<Threads<THREADS,1,1>,Cycle<CandidateIndexLevel,Once<SEARCH_GROUPS,1,1>,SEARCH_LEVELS>>) {
         candidate_index::reduce_level<SEARCH_LEAVES,SEARCH_WORDS>(self.candidate_bounds,i)
@@ -219,7 +238,7 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
         )
     {
         propose_candidate_lane_with_policy<IndexedConflict<AtlasCandidateConflict,SEARCH_LEAVES,SEARCH_WORDS>,CANDIDATES,SAMPLING_WORKSPACE_WORDS>(
-            key(),
+            request(self.a,self.b,self.c),
             IndexedConflict {policy:AtlasCandidateConflict {},tree:self.candidate_bounds},
             self.sampling_workspace,
             invocation,
@@ -235,7 +254,7 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
         )
     {
         retire_candidate_lane_with_policy<IndexedConflict<AtlasCandidateConflict,SEARCH_LEAVES,SEARCH_WORDS>,CANDIDATES,SAMPLING_WORKSPACE_WORDS>(
-            key(),
+            request(self.a,self.b,self.c),
             IndexedConflict {policy:AtlasCandidateConflict {},tree:self.candidate_bounds},
             self.sampling_workspace,
             invocation,
@@ -260,13 +279,13 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
         uses (Kernel<Threads<THREADS, 1, 1>, Once<COMPACT_GROUPS, 1, 1>>)
     {
         rank_candidate_block<AtlasKey,CANDIDATES,COMPACT_TILE,SAMPLING_WORKSPACE_WORDS,COMPACT_WORDS>(
-            key(),self.sampling_workspace,self.compaction,invocation,
+            request(self.a,self.b,self.c),self.sampling_workspace,self.compaction,invocation,
         )
     }
 
     fn sample_compact(self) uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>) {
         let compacted = prefix_candidate_blocks<AtlasKey,CANDIDATES,COMPACT_TILE,POINT_WORDS,COMPACT_WORDS>(
-            key(),self.compaction,
+            request(self.a,self.b,self.c),self.compaction,
         )
         self.receipt.store(index: 0, value: if compacted.valid { 1 } else { 0 })
         self.receipt.store(index: 1, value: if compacted.converged { 1 } else { 0 })
@@ -281,7 +300,7 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
         uses (Kernel<Threads<THREADS, 1, 1>, Once<WORKGROUPS, 1, 1>>)
     {
         scatter_candidate_lane<AtlasBoundaryPoints,CANDIDATES,COMPACT_TILE,SAMPLING_WORKSPACE_WORDS,POINT_WORDS,COMPACT_WORDS>(
-            key(),AtlasBoundaryPoints {},self.sampling_workspace,self.compaction,self.points,invocation,
+            request(self.a,self.b,self.c),AtlasBoundaryPoints {},self.sampling_workspace,self.compaction,self.points,invocation,
         )
     }
 
@@ -295,7 +314,7 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
             TRIANGLE_WORDS,
             TOPOLOGY_WORKSPACE_WORDS,
         >(
-            key(),
+            request(self.a,self.b,self.c),
             self.receipt.load(index: 0) != 0,
             self.receipt.load(index: 6),
             self.points,
@@ -523,7 +542,7 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
             self.triangles,self.face_claims,self.edge_index,self.repair_results,self.repair_state,i)
     }
     fn index_lookup(self,i:ComputeInvocation) uses (Kernel<Threads<THREADS,1,1>,Once<REPAIR_GROUPS,1,1>>) {
-        incidence::lookup<AtlasInteriorEdgeFlip,POINTS,TRIANGLES,TRIANGLE_WORDS,TWINS,EDGE_INDEX>(key(),
+        incidence::lookup<AtlasInteriorEdgeFlip,POINTS,TRIANGLES,TRIANGLE_WORDS,TWINS,EDGE_INDEX>(request(self.a,self.b,self.c),
             self.triangles,self.edge_index,self.twins,self.repair_flags,self.repair_state,i)
     }
     fn index_check(self,i:ComputeInvocation) uses (Kernel<Threads<THREADS,1,1>,Once<REPAIR_GROUPS,1,1>>) {
@@ -541,7 +560,7 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
     }
     fn repair_propose(self,i:ComputeInvocation) uses (Kernel<Threads<THREADS,1,1>,Cycle<RepairRound,Once<REPAIR_GROUPS,1,1>,64>>) {
         repair::propose<AtlasInteriorEdgeFlip,POINT_WORDS,TRIANGLE_WORDS,TWINS>(
-            key(),AtlasInteriorEdgeFlip {},self.points,self.triangles,self.twins,
+            request(self.a,self.b,self.c),AtlasInteriorEdgeFlip {},self.points,self.triangles,self.twins,
             self.repair_flags,self.repair_results,self.repair_state,i)
     }
     fn repair_claim(self,i:ComputeInvocation) uses (Kernel<Threads<THREADS,1,1>,Cycle<RepairRound,Once<REPAIR_GROUPS,1,1>,64>>) {
@@ -552,7 +571,7 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
     }
     fn repair_apply(self,i:ComputeInvocation) uses (Kernel<Threads<THREADS,1,1>,Cycle<RepairRound,Once<REPAIR_GROUPS,1,1>,64>>) {
         repair::apply<AtlasInteriorEdgeFlip,POINT_WORDS,TRIANGLE_WORDS,TWINS>(
-            key(),AtlasInteriorEdgeFlip {},self.points,self.triangles,self.twins,
+            request(self.a,self.b,self.c),AtlasInteriorEdgeFlip {},self.points,self.triangles,self.twins,
             self.repair_results,self.repair_state,i)
     }
     fn repair_summarize(self,i:ComputeInvocation) uses (Kernel<Threads<THREADS,1,1>,Cycle<RepairRound,Once<REPAIR_BLOCK_GROUPS,1,1>,64>>) {
@@ -563,7 +582,7 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
     }
     fn repair_certify(self,i:ComputeInvocation) uses (Kernel<Threads<THREADS,1,1>,Once<REPAIR_GROUPS,1,1>>) {
         repair::propose<AtlasInteriorEdgeFlip,POINT_WORDS,TRIANGLE_WORDS,TWINS>(
-            key(),AtlasInteriorEdgeFlip {},self.points,self.triangles,self.twins,
+            request(self.a,self.b,self.c),AtlasInteriorEdgeFlip {},self.points,self.triangles,self.twins,
             self.repair_flags,self.repair_results,self.repair_state,i)
     }
     fn repair_certificate_blocks(self,i:ComputeInvocation) uses (Kernel<Threads<THREADS,1,1>,Once<REPAIR_BLOCK_GROUPS,1,1>>) {
@@ -619,6 +638,10 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
             ),
         )
         self.receipt.store(index: 15, value: 1)
+        self.draw.store(index:0,value:if valid {triangles*3} else {0})
+        self.draw.store(index:1,value:1)
+        self.draw.store(index:2,value:0)
+        self.draw.store(index:3,value:0)
     }
 
     fn background(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
@@ -626,7 +649,7 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
     }
 
     fn mesh_vertices(self, vertex_index: u32) -> RasterVertex<MeshVarying>
-        uses (VertexStage<MeshVarying, TriangleList<DRAW_VERTICES>>)
+        uses (VertexStage<MeshVarying, IndirectTriangleList<DrawIndirectBuffer<Draw>>>)
     {
         let mut result = invalid_vertex()
         if self.receipt.load(index: 7) != 0 {

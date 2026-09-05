@@ -1,0 +1,45 @@
+//! GPU-resident canonical job iteration. Geometry remains placement-neutral;
+//! only this provider derives the storage layout and realizes buffer effects.
+use std::webgpu::{StorageBuffer,StorageGpuLayout,StorageLayoutProvider}
+use quilting_atlas::quad::{QuadAtlasKey,next_canonical_key}
+use core::marker::Copy
+
+pub struct QuadJobState {
+    pub bottom:u32,
+    pub right:u32,
+    pub top:u32,
+    pub left:u32,
+    pub ordinal:u32,
+    pub valid:u32,
+    pub epoch:u32,
+    pub maximum_lod:u32,
+    pub next_code:u32,
+    pub next_ordinal:u32,
+}
+impl Copy for QuadJobState {}
+derive StorageGpuLayout for QuadJobState using StorageLayoutProvider
+
+impl QuadJobState {
+    pub fn key(self)->QuadAtlasKey {
+        QuadAtlasKey {bottom:self.bottom,right:self.right,top:self.top,left:self.left}
+    }
+}
+
+/// Single writer, before the first job. All job state uses a derived layout.
+pub fn initialize(_ active:StorageBuffer<QuadJobState,1>,_ maximum_lod:u32,_ epoch:u32) {
+    active.store(index:0,value:QuadJobState {bottom:0xffffffff,right:0xffffffff,
+        top:0xffffffff,left:0xffffffff,ordinal:0xffffffff,valid:0,epoch:epoch,
+        maximum_lod:maximum_lod,next_code:0,next_ordinal:0})
+}
+
+/// Dispatch only after the preceding job's consumers finish. Exhaustion
+/// publishes an invalid job rather than reusing the preceding valid key.
+pub fn advance(_ active:StorageBuffer<QuadJobState,1>,_ epoch:u32) {
+    let state=active.load(index:0)
+    if state.epoch!=epoch {return}
+    let step=next_canonical_key(state.maximum_lod,state.next_code)
+    active.store(index:0,value:QuadJobState {bottom:step.key.bottom,right:step.key.right,
+        top:step.key.top,left:step.key.left,ordinal:if step.valid {state.next_ordinal} else {0xffffffff},
+        valid:if step.valid {1} else {0},epoch:epoch,maximum_lod:state.maximum_lod,
+        next_code:step.next_code,next_ordinal:state.next_ordinal+if step.valid {1} else {0}})
+}

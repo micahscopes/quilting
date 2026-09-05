@@ -1,5 +1,5 @@
 //! One canonical square tile, generated and triangulated in GPU storage.
-//! Bounded integration preview, not yet the full resident LoD 0–8 atlas.
+//! Interactive LoD 0–8 tile generation, not the full resident atlas sweep.
 use core::marker::Copy
 use fmath::{abs, sqrt, smoothstep, min}
 use quilting_atlas::quad::{QuadAtlasKey, canonicalize}
@@ -45,6 +45,8 @@ use std::webgpu::{
     StorageBuffer,
     AtomicStorageBuffer,
     DrawIndirectBuffer,
+    DispatchIndirectBuffer,
+    IndirectDispatch,
     ComputeSurface,
     ComputeInvocation,
     Workgroup,
@@ -63,8 +65,8 @@ use std::webgpu::{
 }
 
 // Capacities follow the candidate policy and Euler's disk relation, rather
-// than a handwritten tile table. Increase only with measured bounded jobs.
-const PREVIEW_LOD: u32 = 3
+// than a handwritten tile table. The complete supported range is allocatable.
+const PREVIEW_LOD: u32 = quilting_atlas::MAX_LOD
 const MAX_KEY: QuadAtlasKey = QuadAtlasKey {
     bottom: PREVIEW_LOD,
     right: PREVIEW_LOD,
@@ -104,16 +106,23 @@ pub struct SampleRound {}
 pub struct CandidateIndexLevel {}
 pub struct InsertionRound {}
 pub struct RepairRound {}
+pub struct RepairFaces {}
+pub struct RepairEdges {}
+pub struct RepairBlocks {}
+pub struct RepairScalar {}
+// This is an explicit exhaustion budget, not a convergence guarantee. Finished
+// rounds publish zero GPU work; certification still rejects unfinished tiles.
+const REPAIR_ROUND_BUDGET:usize=128
 pub struct Draw {}
 pub struct Varying { pub edge: Vec3F }
 impl Copy for Varying {}
 struct Params { bottom: Param, right: Param, top: Param, left: Param, seed: Param, wire_px: Param }
 const fn params() -> Params {
     Params {
-        bottom: Param::int(min: 0.0, max: 3.0, init: 2.0),
-        right: Param::int(min: 0.0, max: 3.0, init: 3.0),
-        top: Param::int(min: 0.0, max: 3.0, init: 2.0),
-        left: Param::int(min: 0.0, max: 3.0, init: 3.0),
+        bottom: Param::int(min: 0.0, max: 8.0, init: 2.0),
+        right: Param::int(min: 0.0, max: 8.0, init: 3.0),
+        top: Param::int(min: 0.0, max: 8.0, init: 2.0),
+        left: Param::int(min: 0.0, max: 8.0, init: 3.0),
         seed: Param::int(min: 0.0, max: 255.0, init: 42.0),
         wire_px: Param::range(min: 0.0, max: 2.0, init: 0.65),
     }
@@ -125,9 +134,9 @@ fn number(_ n: u32) -> f32 {
     __f32_from_i32(n.downcast_unchecked())
 }
 fn level(_ x: f32) -> u32 {
-    if x < 0.5 {
-        0
-    } else if x < 1.5 { 1 } else if x < 2.5 { 2 } else { 3 }
+    let mut n: u32 = 0
+    while n < PREVIEW_LOD && x >= number(n) + 0.5 { n = n + 1 }
+    n
 }
 fn request(_ a: f32, _ b: f32, _ c: f32, _ d: f32) -> QuadAtlasKey {
     QuadAtlasKey { bottom: level(a), right: level(b), top: level(c), left: level(d) }
@@ -168,6 +177,10 @@ actor QuadAtlasExplorer uses (GpuProgram<WebGpuBackend>) {
     edge_index:StorageBuffer<u32,EDGE_INDEX>,
     repair_flags:StorageBuffer<u32,TWINS>,repair_results:StorageBuffer<u32,TWINS>,
     repair_blocks:StorageBuffer<u32,REPAIR_WORDS>,repair_state:StorageBuffer<u32,8>,
+    repair_faces_command:DispatchIndirectBuffer<RepairFaces>,
+    repair_edges_command:DispatchIndirectBuffer<RepairEdges>,
+    repair_blocks_command:DispatchIndirectBuffer<RepairBlocks>,
+    repair_scalar_command:DispatchIndirectBuffer<RepairScalar>,
     receipt:StorageBuffer<u32,16>,draw:DrawIndirectBuffer<Draw>,
     const fn view()->Surface<Params> {Surface {extent:Extent::square(768),params:params()}}
     const fn raster()->RasterPlan uses (RasterConfiguration) {raster_plan<Depth24LessEqualMsaa4>()}
@@ -327,37 +340,59 @@ actor QuadAtlasExplorer uses (GpuProgram<WebGpuBackend>) {
     fn index_seal(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
         incidence::seal<TWINS,REPAIR_TILE,REPAIR_WORDS>(self.repair_blocks,self.repair_state)
     }
-    fn repair_reset(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<RepairRound,FixedDispatch<TOPOLOGY_GROUPS,1,1>,64>>) {
+    fn repair_schedule(self) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<RepairRound,FixedDispatch<1,1,1>,REPAIR_ROUND_BUDGET>>) {
+        let faces=self.repair_state.load(index:1)
+        if faces>TRIANGLES.downcast_truncate() {self.repair_state.store(index:4,value:1)}
+        let active=repair::running(self.repair_state) && faces<=TRIANGLES.downcast_truncate()
+        let edges=if active {faces*3} else {0}
+        let blocks=quilting_atlas::scan::block_count(edges,REPAIR_TILE.downcast_truncate())
+        repair::dispatch_count<RepairFaces>(self.repair_faces_command,faces,THREADS.downcast_truncate(),active)
+        repair::dispatch_count<RepairEdges>(self.repair_edges_command,edges,THREADS.downcast_truncate(),active)
+        repair::dispatch_count<RepairBlocks>(self.repair_blocks_command,blocks,THREADS.downcast_truncate(),active)
+        repair::dispatch_count<RepairScalar>(self.repair_scalar_command,1,1,active)
+    }
+    fn repair_reset(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<RepairRound,IndirectDispatch<DispatchIndirectBuffer<RepairFaces>>,REPAIR_ROUND_BUDGET>>) {
         repair::reset_claims<TRIANGLES>(self.repair_state,self.face_claims,i)
     }
-    fn repair_propose(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<RepairRound,FixedDispatch<REPAIR_GROUPS,1,1>,64>>) {
+    fn repair_propose(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<RepairRound,IndirectDispatch<DispatchIndirectBuffer<RepairEdges>>,REPAIR_ROUND_BUDGET>>) {
         repair::propose<QuadInteriorEdgeFlip,POINT_WORDS,TRIANGLE_WORDS,TWINS>(
             canonicalize(request(self.bottom,self.right,self.top,self.left)).key,QuadInteriorEdgeFlip {},
             self.points,self.triangles,self.twins,self.repair_flags,self.repair_results,self.repair_state,i)
     }
-    fn repair_claim(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<RepairRound,FixedDispatch<REPAIR_GROUPS,1,1>,64>>) {
+    fn repair_claim(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<RepairRound,IndirectDispatch<DispatchIndirectBuffer<RepairEdges>>,REPAIR_ROUND_BUDGET>>) {
         repair::claim<TRIANGLES,TWINS>(self.twins,self.repair_flags,self.repair_state,self.face_claims,i)
     }
-    fn repair_select(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<RepairRound,FixedDispatch<REPAIR_GROUPS,1,1>,64>>) {
+    fn repair_select(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<RepairRound,IndirectDispatch<DispatchIndirectBuffer<RepairEdges>>,REPAIR_ROUND_BUDGET>>) {
         repair::select<TRIANGLES,TWINS>(self.twins,self.repair_flags,self.repair_results,self.repair_state,self.face_claims,i)
     }
-    fn repair_apply(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<RepairRound,FixedDispatch<REPAIR_GROUPS,1,1>,64>>) {
+    fn repair_apply(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<RepairRound,IndirectDispatch<DispatchIndirectBuffer<RepairEdges>>,REPAIR_ROUND_BUDGET>>) {
         repair::apply<QuadInteriorEdgeFlip,POINT_WORDS,TRIANGLE_WORDS,TWINS>(
             canonicalize(request(self.bottom,self.right,self.top,self.left)).key,QuadInteriorEdgeFlip {},
             self.points,self.triangles,self.twins,self.repair_results,self.repair_state,i)
     }
-    fn repair_summarize(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<RepairRound,FixedDispatch<REPAIR_BLOCK_GROUPS,1,1>,64>>) {
+    fn repair_summarize(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<RepairRound,IndirectDispatch<DispatchIndirectBuffer<RepairBlocks>>,REPAIR_ROUND_BUDGET>>) {
         repair::summarize<TWINS,REPAIR_TILE,REPAIR_WORDS>(self.repair_flags,self.repair_results,self.repair_state,self.repair_blocks,i)
     }
-    fn repair_advance(self) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<RepairRound,FixedDispatch<1,1,1>,64>>) {
+    fn repair_advance(self) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<RepairRound,IndirectDispatch<DispatchIndirectBuffer<RepairScalar>>,REPAIR_ROUND_BUDGET>>) {
         repair::advance<TWINS,REPAIR_TILE,REPAIR_WORDS>(self.repair_state,self.repair_blocks,false)
     }
-    fn repair_certify(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,FixedDispatch<REPAIR_GROUPS,1,1>>) {
+    // Certification has its own schedule even if no mutation round was run.
+    // Never let a stale/zero command accidentally certify an unexamined mesh.
+    fn repair_certificate_schedule(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+        let faces=self.repair_state.load(index:1)
+        if faces>TRIANGLES.downcast_truncate() {self.repair_state.store(index:4,value:1)}
+        let active=repair::running(self.repair_state) && faces<=TRIANGLES.downcast_truncate()
+        let edges=if active {faces*3} else {0}
+        let blocks=quilting_atlas::scan::block_count(edges,REPAIR_TILE.downcast_truncate())
+        repair::dispatch_count<RepairEdges>(self.repair_edges_command,edges,THREADS.downcast_truncate(),active)
+        repair::dispatch_count<RepairBlocks>(self.repair_blocks_command,blocks,THREADS.downcast_truncate(),active)
+    }
+    fn repair_certify(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,IndirectDispatch<DispatchIndirectBuffer<RepairEdges>>>) {
         repair::propose<QuadInteriorEdgeFlip,POINT_WORDS,TRIANGLE_WORDS,TWINS>(
             canonicalize(request(self.bottom,self.right,self.top,self.left)).key,QuadInteriorEdgeFlip {},
             self.points,self.triangles,self.twins,self.repair_flags,self.repair_results,self.repair_state,i)
     }
-    fn repair_certificate_blocks(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,FixedDispatch<REPAIR_BLOCK_GROUPS,1,1>>) {
+    fn repair_certificate_blocks(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,IndirectDispatch<DispatchIndirectBuffer<RepairBlocks>>>) {
         repair::summarize<TWINS,REPAIR_TILE,REPAIR_WORDS>(self.repair_flags,self.repair_results,self.repair_state,self.repair_blocks,i)
     }
     fn repair_finish(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {

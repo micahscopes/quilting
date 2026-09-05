@@ -2,6 +2,7 @@
 //! AND every neighboring face whose edge links it reads or writes.
 //! Proposals, claims, winner snapshots, and mutations are separate dispatches.
 use std::webgpu::{StorageBuffer, AtomicStorageBuffer, ComputeInvocation}
+use std::webgpu::DispatchIndirectBuffer
 use quilting_atlas::scan::block_count
 use quilting_atlas::planar::{PlanarCoordinates, orientation}
 use super::{
@@ -21,6 +22,16 @@ const FAILED:u32=2
 
 pub fn running(_ state:StorageBuffer<u32,STATE_WORDS>)->bool {
     state.load(index:4)==0 && state.load(index:5)==0 && state.load(index:7)!=0
+}
+
+/// Publish one bounded command from the resident domain, not arena capacity.
+/// The writer runs before consumers; zero work is the converged/failed state.
+pub fn dispatch_count<Brand>(_ command:DispatchIndirectBuffer<Brand>,
+    _ items:u32, _ lanes:u32, _ active:bool) {
+    let groups=if active && lanes>0 {items/lanes+if items%lanes!=0 {1} else {0}} else {0}
+    command.store(index:0,value:groups)
+    command.store(index:1,value:1)
+    command.store(index:2,value:1)
 }
 
 /// The index initializer is still scalar. It runs once, not once per flip;

@@ -58,6 +58,7 @@ use quilting_atlas::candidate_index::CandidateCursor
 pub use quad
 pub use compaction
 pub use residency
+pub use jobs
 pub use topology_scan
 pub use repair
 pub use incidence
