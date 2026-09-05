@@ -1,0 +1,680 @@
+{
+  "manifest": "http://127.0.0.1:8781/assets/fe-render-ec8c1583c88b231c.json",
+  "passes": 24,
+  "canonicalKeys": 55,
+  "maximumLod": 3,
+  "cases": [
+    {
+      "key": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "seed": 42,
+      "points": 4,
+      "triangles": 2,
+      "sha256": "1a6b2ee716abb9930df53f29f98eafefc8630f58451894201369436ea82f861c"
+    },
+    {
+      "key": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "seed": 42,
+      "points": 5,
+      "triangles": 3,
+      "sha256": "c0da4e02d3d56fee2427c61172230a3c57a693fbef98d734a4d7353cd636b433"
+    },
+    {
+      "key": [
+        0,
+        0,
+        0,
+        2
+      ],
+      "seed": 42,
+      "points": 7,
+      "triangles": 5,
+      "sha256": "9eecf43f88a4387227fe2d84dcfc42d96abfc55d840a8e15cdc8698f51193377"
+    },
+    {
+      "key": [
+        0,
+        0,
+        0,
+        3
+      ],
+      "seed": 42,
+      "points": 11,
+      "triangles": 9,
+      "sha256": "2f51ada24b9150069d041ea00f47a4abec81e86acd11970cd87877ee1f2ce8d3"
+    },
+    {
+      "key": [
+        0,
+        0,
+        1,
+        1
+      ],
+      "seed": 42,
+      "points": 6,
+      "triangles": 4,
+      "sha256": "772317f9819c8b2df095340c42a71e14fc9c2995318afc75e4092cd5d3920ab7"
+    },
+    {
+      "key": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "seed": 42,
+      "points": 8,
+      "triangles": 6,
+      "sha256": "cf5b2e3663378f638d37c009d3f3526ad02b04e0c28e3a344e0c617fe6f0e30f"
+    },
+    {
+      "key": [
+        0,
+        0,
+        1,
+        3
+      ],
+      "seed": 42,
+      "points": 12,
+      "triangles": 10,
+      "sha256": "768edfad9e9e5952cca052d7464668d7de915f9635a2f74161efff5bd3118981"
+    },
+    {
+      "key": [
+        0,
+        0,
+        2,
+        2
+      ],
+      "seed": 42,
+      "points": 10,
+      "triangles": 8,
+      "sha256": "d9e1fb3fe9969fb9955c3156f8d49c8be4ea2d8cef9b4d8f75086b037536968f"
+    },
+    {
+      "key": [
+        0,
+        0,
+        2,
+        3
+      ],
+      "seed": 42,
+      "points": 14,
+      "triangles": 12,
+      "sha256": "465fe410fb3d80beed985b9826e344fd568eb310518dea6f3540d62fc73513e0"
+    },
+    {
+      "key": [
+        0,
+        0,
+        3,
+        3
+      ],
+      "seed": 42,
+      "points": 19,
+      "triangles": 18,
+      "sha256": "d815861994862dc101153ea8ae387e2c4a5da34713f118866fba055ea2bd3880"
+    },
+    {
+      "key": [
+        0,
+        1,
+        0,
+        1
+      ],
+      "seed": 42,
+      "points": 6,
+      "triangles": 4,
+      "sha256": "2a053e7423c4c809b5def72c49aec762b72a7d018ebf2e7a2be9d1b4e57d87a2"
+    },
+    {
+      "key": [
+        0,
+        1,
+        0,
+        2
+      ],
+      "seed": 42,
+      "points": 8,
+      "triangles": 6,
+      "sha256": "705756d84efc90bd879ef1d1807e3a238d0a18b2e70838cc7b37b67e43b9d63d"
+    },
+    {
+      "key": [
+        0,
+        1,
+        0,
+        3
+      ],
+      "seed": 42,
+      "points": 12,
+      "triangles": 10,
+      "sha256": "212a18f04964fc4659f051be1c1bc65ee1bb93850120220f9369e1a39e0f2ae5"
+    },
+    {
+      "key": [
+        0,
+        1,
+        1,
+        1
+      ],
+      "seed": 42,
+      "points": 7,
+      "triangles": 5,
+      "sha256": "a339a5dffb1b7ad1e471889711822d145296cf55dba85487f9233e035546d91b"
+    },
+    {
+      "key": [
+        0,
+        1,
+        1,
+        2
+      ],
+      "seed": 42,
+      "points": 9,
+      "triangles": 7,
+      "sha256": "3df87632f5b6723a039ce4ff2932652f51e967bcca57f4cec184ee1f08b47718"
+    },
+    {
+      "key": [
+        0,
+        1,
+        1,
+        3
+      ],
+      "seed": 42,
+      "points": 14,
+      "triangles": 13,
+      "sha256": "aa08c15667ad158dc2a7baa4b3cb081b6fb733114e26e4e612213167dd7001a4"
+    },
+    {
+      "key": [
+        0,
+        1,
+        2,
+        1
+      ],
+      "seed": 42,
+      "points": 9,
+      "triangles": 7,
+      "sha256": "25c5cd2951e8e694a854ca5091b67f8e461755d354db5ff7f738a8404d9ff21d"
+    },
+    {
+      "key": [
+        0,
+        1,
+        2,
+        2
+      ],
+      "seed": 42,
+      "points": 12,
+      "triangles": 11,
+      "sha256": "cfd49846424c48435822aa1fc4f60205ee415f8404aa3478587c1dce38752a70"
+    },
+    {
+      "key": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "seed": 42,
+      "points": 16,
+      "triangles": 15,
+      "sha256": "6e5c1cf3811cbdb8f756146f4826bd63a1d7ee7d4f46b652c1b144696d7f6fc3"
+    },
+    {
+      "key": [
+        0,
+        1,
+        3,
+        1
+      ],
+      "seed": 42,
+      "points": 14,
+      "triangles": 13,
+      "sha256": "7d8fca95687fb111f0c7beb94d0d7dff85267256cdc50bb8cc21b6cda29a45ff"
+    },
+    {
+      "key": [
+        0,
+        1,
+        3,
+        2
+      ],
+      "seed": 42,
+      "points": 16,
+      "triangles": 15,
+      "sha256": "3541e3ba0bec625cdcfe4ba508a98a392df56be5d236676857ead1a33a72bc37"
+    },
+    {
+      "key": [
+        0,
+        1,
+        3,
+        3
+      ],
+      "seed": 42,
+      "points": 22,
+      "triangles": 23,
+      "sha256": "ba63346aa3ac58a78c81fe820cd54a7ccf017ace26a299aa7de714f7da41bf20"
+    },
+    {
+      "key": [
+        0,
+        2,
+        0,
+        2
+      ],
+      "seed": 42,
+      "points": 10,
+      "triangles": 8,
+      "sha256": "7bbc395e414fe1d1b7e036fa90d9ee6fba69c22c2a5afd5228b34317b1a6b908"
+    },
+    {
+      "key": [
+        0,
+        2,
+        0,
+        3
+      ],
+      "seed": 42,
+      "points": 15,
+      "triangles": 14,
+      "sha256": "6f2be444f57518d2e5f5563ee16ea11f858d9b8f193b32d070e0dc8a1b3b3842"
+    },
+    {
+      "key": [
+        0,
+        2,
+        1,
+        2
+      ],
+      "seed": 42,
+      "points": 12,
+      "triangles": 11,
+      "sha256": "da27d88dffde04d6e0973a2ba747dd14f12966e92cf9a5fa2c3f8ce7719c8603"
+    },
+    {
+      "key": [
+        0,
+        2,
+        1,
+        3
+      ],
+      "seed": 42,
+      "points": 16,
+      "triangles": 15,
+      "sha256": "c3eed7f3bd7dea77fbc1d62f42579317bb3cd0ceba173cba5aa55601faa3bbb7"
+    },
+    {
+      "key": [
+        0,
+        2,
+        2,
+        2
+      ],
+      "seed": 42,
+      "points": 14,
+      "triangles": 13,
+      "sha256": "044c3dca592a35f33742feea0cca3610d4e9ed4849d08f8bad725291ad8c67cc"
+    },
+    {
+      "key": [
+        0,
+        2,
+        2,
+        3
+      ],
+      "seed": 42,
+      "points": 19,
+      "triangles": 19,
+      "sha256": "b4349d4a1a5272d78cbc1172ab99fb4cbdf5f8eb5ac59d7a2bc8d5948f02d425"
+    },
+    {
+      "key": [
+        0,
+        2,
+        3,
+        2
+      ],
+      "seed": 42,
+      "points": 20,
+      "triangles": 21,
+      "sha256": "8c6d567853c3fde7fd61f54e68456879b95090c5106b94827e377a1a6fa21113"
+    },
+    {
+      "key": [
+        0,
+        2,
+        3,
+        3
+      ],
+      "seed": 42,
+      "points": 25,
+      "triangles": 27,
+      "sha256": "179e3e491c316347447667da6ac48e6cc82ec23b10d72f95a6261cfce28a31ef"
+    },
+    {
+      "key": [
+        0,
+        3,
+        0,
+        3
+      ],
+      "seed": 42,
+      "points": 19,
+      "triangles": 18,
+      "sha256": "4e721a2bf0a398ca5f4d7e4355a03e7dfc6a2ddc3eaab35e6abf166aad660138"
+    },
+    {
+      "key": [
+        0,
+        3,
+        1,
+        3
+      ],
+      "seed": 42,
+      "points": 21,
+      "triangles": 21,
+      "sha256": "55cbb4a27981413e3d1407bbf246223dd70f1f73d0b831a931a2a21f552e16ea"
+    },
+    {
+      "key": [
+        0,
+        3,
+        2,
+        3
+      ],
+      "seed": 42,
+      "points": 25,
+      "triangles": 27,
+      "sha256": "3d04ee27067371cd2bfe768cf8c71bd6a78b8b03b583d9731a1cccf5cae30557"
+    },
+    {
+      "key": [
+        0,
+        3,
+        3,
+        3
+      ],
+      "seed": 42,
+      "points": 35,
+      "triangles": 43,
+      "sha256": "a7cb0a10a1868c00e2260a53c10a4b969dc744c4e6ca1b5bd98181a4f7a8113e"
+    },
+    {
+      "key": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "seed": 42,
+      "points": 8,
+      "triangles": 6,
+      "sha256": "7ed4a1d09e72fbd5f8c5ff79426b7beedddf48ddc2fc77892366748d8d73e751"
+    },
+    {
+      "key": [
+        1,
+        1,
+        1,
+        2
+      ],
+      "seed": 42,
+      "points": 10,
+      "triangles": 8,
+      "sha256": "c5df24ac819eea75f36aba38f97f791d5043a02e44dbdae2105b120e06652916"
+    },
+    {
+      "key": [
+        1,
+        1,
+        1,
+        3
+      ],
+      "seed": 42,
+      "points": 15,
+      "triangles": 14,
+      "sha256": "c77cf2478abc4aa67d6aa37af6aab0bd432ab78077fcb33200d322bd9c512f21"
+    },
+    {
+      "key": [
+        1,
+        1,
+        2,
+        2
+      ],
+      "seed": 42,
+      "points": 13,
+      "triangles": 12,
+      "sha256": "1913b5975ab5571a518cbaa4dff3191624adff93374c15c0402163559ba18b94"
+    },
+    {
+      "key": [
+        1,
+        1,
+        2,
+        3
+      ],
+      "seed": 42,
+      "points": 18,
+      "triangles": 18,
+      "sha256": "3ec31291bdd881982721b055739f2d74b1574e9a2a2b98cae201c70d935c73d9"
+    },
+    {
+      "key": [
+        1,
+        1,
+        3,
+        3
+      ],
+      "seed": 42,
+      "points": 24,
+      "triangles": 26,
+      "sha256": "1cc8c02700f28b25caca1297f45fb9981aaf7b2fefe289aec53b0eeab07f517e"
+    },
+    {
+      "key": [
+        1,
+        2,
+        1,
+        2
+      ],
+      "seed": 42,
+      "points": 13,
+      "triangles": 12,
+      "sha256": "1e96c5d756932a7145f02ef681d2711be88cc240ee9c076bd3a23e0413f5e8b5"
+    },
+    {
+      "key": [
+        1,
+        2,
+        1,
+        3
+      ],
+      "seed": 42,
+      "points": 18,
+      "triangles": 18,
+      "sha256": "8dc5461aaec9cf36877dfb691f39df7343d90c1c176b071001d17c2f5f1f6ff6"
+    },
+    {
+      "key": [
+        1,
+        2,
+        2,
+        2
+      ],
+      "seed": 42,
+      "points": 16,
+      "triangles": 16,
+      "sha256": "015041c6468f60bc8e7dee420234355c339db41f149d6c651ff0d0133ebb8a03"
+    },
+    {
+      "key": [
+        1,
+        2,
+        2,
+        3
+      ],
+      "seed": 42,
+      "points": 21,
+      "triangles": 22,
+      "sha256": "77ddbad97c1a08557c39c29e55c1de22200a1448ae30c9fd58b83dfdd835af18"
+    },
+    {
+      "key": [
+        1,
+        2,
+        3,
+        2
+      ],
+      "seed": 42,
+      "points": 22,
+      "triangles": 24,
+      "sha256": "a4af007ffd3fd7ed3480afd8bc7c68ef997513b870eb15494f3d6292854e34c2"
+    },
+    {
+      "key": [
+        1,
+        2,
+        3,
+        3
+      ],
+      "seed": 42,
+      "points": 27,
+      "triangles": 30,
+      "sha256": "fbc8139447c2dc270128c2cc22fcc3a25c8ee91da71c28416d6e8ca6ebfacdbf"
+    },
+    {
+      "key": [
+        1,
+        3,
+        1,
+        3
+      ],
+      "seed": 42,
+      "points": 22,
+      "triangles": 22,
+      "sha256": "efd801d1edbcf1d5b872f3d927503c36f903998a772e313fea208d4315444853"
+    },
+    {
+      "key": [
+        1,
+        3,
+        2,
+        3
+      ],
+      "seed": 42,
+      "points": 27,
+      "triangles": 30,
+      "sha256": "b2d6f28ca97a19ca23a43dc9504da410b75490b1d0b96a889c98e890b8670e05"
+    },
+    {
+      "key": [
+        1,
+        3,
+        3,
+        3
+      ],
+      "seed": 42,
+      "points": 34,
+      "triangles": 40,
+      "sha256": "d9818de4a2ebbfaa305b1079a27b62b74be0c69a7d0bc1a66094ecab7414812e"
+    },
+    {
+      "key": [
+        2,
+        2,
+        2,
+        2
+      ],
+      "seed": 42,
+      "points": 19,
+      "triangles": 20,
+      "sha256": "99fd364ba45f4fd224a550188ca0bf7c0fe9d9a882c67375b6442f2032cce398"
+    },
+    {
+      "key": [
+        2,
+        2,
+        2,
+        3
+      ],
+      "seed": 42,
+      "points": 27,
+      "triangles": 32,
+      "sha256": "c262408d858aa2e46e7415d4307dec619fdfa80b8e2b3cf26db41bfe35605626"
+    },
+    {
+      "key": [
+        2,
+        2,
+        3,
+        3
+      ],
+      "seed": 42,
+      "points": 33,
+      "triangles": 40,
+      "sha256": "a7ff83123182548cb1afb21a2cc7fc7eb7815d4cb1257bca06041903a3043a25"
+    },
+    {
+      "key": [
+        2,
+        3,
+        2,
+        3
+      ],
+      "seed": 42,
+      "points": 34,
+      "triangles": 42,
+      "sha256": "63d4f2cf5990cb6f1965c2059382e5fa64d9df6ca638c55b29c7135a4a098808"
+    },
+    {
+      "key": [
+        2,
+        3,
+        3,
+        3
+      ],
+      "seed": 42,
+      "points": 45,
+      "triangles": 60,
+      "sha256": "30fa81c2e83d866f22c4eee9c697a11cde03d60e936dc79f425ccd95487a30ae"
+    },
+    {
+      "key": [
+        3,
+        3,
+        3,
+        3
+      ],
+      "seed": 42,
+      "points": 58,
+      "triangles": 82,
+      "sha256": "793a19bf3c71847aebf6aa41ae666911d08edd29e03300ae7c0cb1e833328671"
+    },
+    {
+      "key": [
+        0,
+        2,
+        1,
+        3
+      ],
+      "seed": 143,
+      "points": 16,
+      "triangles": 15,
+      "sha256": "239c9805f2bd6c180117c2f259e6a041da584b95fe91e133bc9261b1e6cf1ee4"
+    }
+  ]
+}

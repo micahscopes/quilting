@@ -1,0 +1,169 @@
+//! Stable insertion-plan offsets: independent blocks, totals, then relocation.
+//! Ownership validation is shared with the scalar reference. Invalid plans
+//! take that reference path to preserve its precise failure/overflow receipt;
+//! successful rounds never scan the full point/face arrays on one invocation.
+use std::webgpu::{StorageBuffer, ComputeInvocation}
+use quilting_atlas::scan::block_count
+use super::{
+    INVALID_VERTEX, POINT_PENDING, PROPOSAL_STRICT_FACE, PROPOSAL_EDGE,
+    TOPOLOGY_PROGRESS_WORDS,
+    topology_load_progress, topology_store_progress, topology_load_point_state,
+    topology_proposal_word, topology_proposal_owns_face, topology_winner_offset,
+    topology_face_owner_offset, topology_face_expansion_offset, topology_face_output_offset,
+    scan_parallel_topology_face_plan,
+}
+
+pub fn face_invariant_failures<const P:usize,const W:usize>(
+    _ workspace:StorageBuffer<u32,W>, _ face:u32, _ expansion:u32,
+) -> u32 {
+    let owner=workspace.load(index:topology_face_owner_offset<P>(face))
+    if expansion==1 { return if owner!=INVALID_VERTEX {1} else {0} }
+    if owner>=P.downcast_truncate() { return 1 }
+    let kind=topology_proposal_word<P,W>(workspace,owner,0)
+    let expected=if kind==PROPOSAL_STRICT_FACE {3} else if kind==PROPOSAL_EDGE {2} else {0}
+    if expansion!=expected || workspace.load(index:topology_winner_offset<P>(owner))==0
+        || !topology_proposal_owns_face<P,W>(workspace,owner,face) {1} else {0}
+}
+
+pub struct PointPlanMeasure {
+    pub winners:u32,
+    pub added_faces:u32,
+    pub location_failures:u32,
+    pub invariant_failures:u32,
+}
+
+pub fn measure_point_plan<const P:usize,const W:usize>(
+    _ workspace:StorageBuffer<u32,W>, _ point:u32, _ parity:u32, _ faces:u32,
+) -> PointPlanMeasure {
+    let mut measure=PointPlanMeasure {winners:0,added_faces:0,location_failures:0,invariant_failures:0}
+    if topology_load_point_state<P,W>(workspace,parity,point)!=POINT_PENDING { return measure }
+    let kind=topology_proposal_word<P,W>(workspace,point,0)
+    if kind!=PROPOSAL_STRICT_FACE && kind!=PROPOSAL_EDGE { measure.location_failures=1 }
+    if workspace.load(index:topology_winner_offset<P>(point))==0 { return measure }
+    measure.winners=1
+    let first=topology_proposal_word<P,W>(workspace,point,1)
+    let second=topology_proposal_word<P,W>(workspace,point,2)
+    let boundary=kind==PROPOSAL_EDGE && second==INVALID_VERTEX
+    let expected:u32=if kind==PROPOSAL_EDGE && !boundary {2} else {1}
+    measure.added_faces=if boundary {1} else {2}
+    let mut owned:u32=0
+    if first<faces && workspace.load(index:topology_face_owner_offset<P>(first))==point {owned=1}
+    if expected==2 && second<faces && second!=first
+        && workspace.load(index:topology_face_owner_offset<P>(second))==point {owned=owned+1}
+    if owned!=expected {measure.invariant_failures=1}
+    measure
+}
+
+// Summary layout: expansion total, winners, added faces, location failures,
+// invariant failures, exclusive block base. No stage reads a partial summary.
+pub const SUMMARY_WORDS:usize=6
+
+pub fn rank_topology_block<const P:usize,const F:usize,const W:usize,const TILE:usize,const B:usize>(
+    _ workspace:StorageBuffer<u32,W>, _ blocks:StorageBuffer<u32,B>, _ invocation:ComputeInvocation,
+)
+where P>0, F>=P, F<=0x0fffffff, TILE>0, TILE<=65536,
+    {W==P*7+F*3+TOPOLOGY_PROGRESS_WORDS}, {B==((F+TILE-1)/TILE)*SUMMARY_WORDS}
+{
+    if topology_load_progress<P,F,W>(workspace,6)!=0 || topology_load_progress<P,F,W>(workspace,7)!=0
+        || topology_load_progress<P,F,W>(workspace,3)==0 {return}
+    let block=invocation.global.x
+    let tile:u32=TILE.downcast_truncate()
+    let faces=topology_load_progress<P,F,W>(workspace,2)
+    let points:u32=P.downcast_truncate()
+    let count=if faces>points {faces} else {points}
+    if block>=block_count(count,tile) {return}
+    let first=block*tile
+    let end=if count-first<tile {count} else {first+tile}
+    let parity=topology_load_progress<P,F,W>(workspace,1)
+    let mut output:u32=0
+    let mut winners:u32=0
+    let mut added:u32=0
+    let mut locations:u32=0
+    let mut invariants:u32=0
+    let mut lane=first
+    while lane<end {
+        if lane<faces {
+            workspace.store(index:topology_face_output_offset<P,F>(lane),value:output)
+            let expansion=workspace.load(index:topology_face_expansion_offset<P,F>(lane))
+            invariants=invariants+face_invariant_failures<P,W>(workspace,lane,expansion)
+            if expansion==0 || expansion>3 {invariants=invariants+1}
+            else {output=output+expansion}
+        }
+        if lane<points {
+            let point=measure_point_plan<P,W>(workspace,lane,parity,faces)
+            winners=winners+point.winners
+            added=added+point.added_faces
+            locations=locations+point.location_failures
+            invariants=invariants+point.invariant_failures
+        }
+        lane=lane+1
+    }
+    let base=block*6
+    blocks.store(index:base,value:output)
+    blocks.store(index:base+1,value:winners)
+    blocks.store(index:base+2,value:added)
+    blocks.store(index:base+3,value:locations)
+    blocks.store(index:base+4,value:invariants)
+}
+
+pub fn prefix_topology_blocks<const P:usize,const F:usize,const W:usize,const TILE:usize,const B:usize>(
+    _ workspace:StorageBuffer<u32,W>, _ blocks:StorageBuffer<u32,B>, _ invocation:ComputeInvocation,
+)
+where P>0, F>=P, F<=0x0fffffff, TILE>0, TILE<=65536,
+    {W==P*7+F*3+TOPOLOGY_PROGRESS_WORDS}, {B==((F+TILE-1)/TILE)*SUMMARY_WORDS}
+{
+    if invocation.global.x!=0 {return}
+    if topology_load_progress<P,F,W>(workspace,6)!=0 || topology_load_progress<P,F,W>(workspace,7)!=0 {return}
+    let faces=topology_load_progress<P,F,W>(workspace,2)
+    let pending=topology_load_progress<P,F,W>(workspace,3)
+    if pending==0 {
+        topology_store_progress<P,F,W>(workspace,4,faces)
+        topology_store_progress<P,F,W>(workspace,5,0)
+        return
+    }
+    let points:u32=P.downcast_truncate()
+    let count=block_count(if faces>points {faces} else {points},TILE.downcast_truncate())
+    let mut output:u32=0
+    let mut winners:u32=0
+    let mut added:u32=0
+    let mut locations:u32=0
+    let mut invariants:u32=0
+    let mut block:u32=0
+    while block<count {
+        let base=block*6
+        blocks.store(index:base+5,value:output)
+        output=output+blocks.load(index:base)
+        winners=winners+blocks.load(index:base+1)
+        added=added+blocks.load(index:base+2)
+        locations=locations+blocks.load(index:base+3)
+        invariants=invariants+blocks.load(index:base+4)
+        block=block+1
+    }
+    // These are total scalar comparisons, not guarded resource accesses.
+    // Eager Boolean union keeps one error branch instead of a decision tree.
+    let invalid=(locations!=0) | (invariants!=0) | (winners>pending) | (winners==0)
+        | (output!=faces+added) | (output>F.downcast_truncate())
+    if invalid {
+        // Reference preserves ordered capacity-clipping and all failure counts.
+        // It rewrites every offset; the following relocation skips failed plans.
+        scan_parallel_topology_face_plan<P,F,W>(workspace,invocation)
+        return
+    }
+    topology_store_progress<P,F,W>(workspace,4,output)
+    topology_store_progress<P,F,W>(workspace,5,winners)
+}
+
+pub fn relocate_topology_offset<const P:usize,const F:usize,const W:usize,const TILE:usize,const B:usize>(
+    _ workspace:StorageBuffer<u32,W>, _ blocks:StorageBuffer<u32,B>, _ invocation:ComputeInvocation,
+)
+where P>0, F>=P, F<=0x0fffffff, TILE>0, TILE<=65536,
+    {W==P*7+F*3+TOPOLOGY_PROGRESS_WORDS}, {B==((F+TILE-1)/TILE)*SUMMARY_WORDS}
+{
+    if topology_load_progress<P,F,W>(workspace,6)!=0 || topology_load_progress<P,F,W>(workspace,7)!=0
+        || topology_load_progress<P,F,W>(workspace,3)==0 {return}
+    let face=invocation.global.x
+    if face>=topology_load_progress<P,F,W>(workspace,2) {return}
+    let offset=topology_face_output_offset<P,F>(face)
+    let base=blocks.load(index:(face/TILE.downcast_truncate())*6+5)
+    workspace.store(index:offset,value:base+workspace.load(index:offset))
+}

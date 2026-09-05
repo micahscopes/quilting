@@ -7,6 +7,7 @@ use quilting_atlas::quad_sampling::candidate_slot_count
 use quilting_atlas::planar::FixedPoint2
 use quilting_atlas::scan::balanced_block_size
 use quilting_atlas_webgpu::compaction::{rank_candidate_block, prefix_candidate_blocks, scatter_candidate_lane}
+use quilting_atlas_webgpu::topology_scan::{rank_topology_block, prefix_topology_blocks, relocate_topology_offset, SUMMARY_WORDS}
 use quilting_atlas_webgpu::{
     propose_candidate_lane_with_policy,
     retire_candidate_lane_with_policy,
@@ -17,7 +18,6 @@ use quilting_atlas_webgpu::{
     initialize_parallel_topology_claim_lane,
     claim_parallel_topology_point_lane,
     plan_parallel_topology_face_lane_with_point,
-    scan_parallel_topology_face_plan,
     rebuild_parallel_topology_face_lane_with_point,
     retire_parallel_topology_point_lane,
     advance_parallel_topology_generation,
@@ -87,6 +87,10 @@ const COMPACT_WORDS: usize = COMPACT_BLOCKS * 3
 const COMPACT_GROUPS: usize = (COMPACT_BLOCKS + THREADS - 1) / THREADS
 const TOPOLOGY_WORDS: usize = POINTS*7+TRIANGLES*3+8
 const TOPOLOGY_GROUPS: usize = (TRIANGLES+THREADS-1)/THREADS
+const SCAN_TILE: usize = balanced_block_size(CANDIDATE_COUNT*2+MAX_KEY.boundary_count()-2) as usize
+const SCAN_BLOCKS: usize = (TRIANGLES+SCAN_TILE-1)/SCAN_TILE
+const SCAN_WORDS: usize = SCAN_BLOCKS*SUMMARY_WORDS
+const SCAN_GROUPS: usize = (SCAN_BLOCKS+THREADS-1)/THREADS
 pub struct SampleRound {}
 pub struct InsertionRound {}
 pub struct Draw {}
@@ -147,6 +151,7 @@ actor QuadAtlasExplorer uses (GpuProgram<WebGpuBackend>) {
     triangles:StorageBuffer<u32,TRIANGLE_WORDS>,twins:StorageBuffer<u32,TWINS>,
     triangles_a:StorageBuffer<u32,TRIANGLE_WORDS>,triangles_b:StorageBuffer<u32,TRIANGLE_WORDS>,
     topology:StorageBuffer<u32,TOPOLOGY_WORDS>,
+    topology_blocks:StorageBuffer<u32,SCAN_WORDS>,
     face_claims:AtomicStorageBuffer<TRIANGLES>,
     edge_index:StorageBuffer<u32,EDGE_INDEX>,proposals:StorageBuffer<u32,PROPOSALS>,
     receipt:StorageBuffer<u32,16>,draw:DrawIndirectBuffer<Draw>,
@@ -223,8 +228,14 @@ actor QuadAtlasExplorer uses (GpuProgram<WebGpuBackend>) {
             self.points,self.triangles_a,self.triangles_b,self.topology,self.face_claims,i,
         )
     }
+    fn topology_rank(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<InsertionRound,FixedDispatch<SCAN_GROUPS,1,1>,64>>) {
+        rank_topology_block<POINTS,TRIANGLES,TOPOLOGY_WORDS,SCAN_TILE,SCAN_WORDS>(self.topology,self.topology_blocks,i)
+    }
     fn topology_scan(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<InsertionRound,FixedDispatch<1,1,1>,64>>) {
-        scan_parallel_topology_face_plan<POINTS,TRIANGLES,TOPOLOGY_WORDS>(self.topology,i)
+        prefix_topology_blocks<POINTS,TRIANGLES,TOPOLOGY_WORDS,SCAN_TILE,SCAN_WORDS>(self.topology,self.topology_blocks,i)
+    }
+    fn topology_offsets(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<InsertionRound,FixedDispatch<TOPOLOGY_GROUPS,1,1>,64>>) {
+        relocate_topology_offset<POINTS,TRIANGLES,TOPOLOGY_WORDS,SCAN_TILE,SCAN_WORDS>(self.topology,self.topology_blocks,i)
     }
     fn topology_rebuild(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<InsertionRound,FixedDispatch<TOPOLOGY_GROUPS,1,1>,64>>) {
         rebuild_parallel_topology_face_lane_with_point<FixedPoint2,POINTS,POINT_WORDS,TRIANGLES,TRIANGLE_WORDS,TOPOLOGY_WORDS>(

@@ -56,6 +56,7 @@ use quilting_atlas::planar::PlanarCoordinates
 use quilting_atlas::neighborhood::{CandidateWindow, grid_window}
 pub use quad
 pub use compaction
+pub use topology_scan
 
 /// Typed coordinates in the resident three-word point slot. Square points
 /// occupy two words plus padding; they are never fake triangle barycentrics.
@@ -1529,21 +1530,8 @@ where { WORKSPACE_WORDS == POINT_CAPACITY * 7 + TRIANGLE_CAPACITY * 3 + TOPOLOGY
             .load(
                 index: topology_face_expansion_offset<POINT_CAPACITY, TRIANGLE_CAPACITY>(face),
             )
-        let owner=workspace.load(index:topology_face_owner_offset<POINT_CAPACITY>(face))
-        if expansion==1 {
-            if owner!=INVALID_VERTEX {invariant_failures=invariant_failures+1}
-        } else if owner>=POINT_CAPACITY.downcast_truncate() {
-            invariant_failures=invariant_failures+1
-        } else {
-            let kind=topology_proposal_word<POINT_CAPACITY,WORKSPACE_WORDS>(workspace,owner,0)
-            let expected_expansion=if kind==PROPOSAL_STRICT_FACE {3}
-                else if kind==PROPOSAL_EDGE {2} else {0}
-            if expansion!=expected_expansion
-                || workspace.load(index:topology_winner_offset<POINT_CAPACITY>(owner))==0
-                || !topology_proposal_owns_face<POINT_CAPACITY,WORKSPACE_WORDS>(workspace,owner,face) {
-                invariant_failures=invariant_failures+1
-            }
-        }
+        invariant_failures = invariant_failures
+            + topology_scan::face_invariant_failures<POINT_CAPACITY,WORKSPACE_WORDS>(workspace,face,expansion)
         if expansion == 0 || expansion > 3 {
             invariant_failures = invariant_failures + 1
         } else if output > triangle_capacity || expansion > triangle_capacity - output {
@@ -1564,49 +1552,13 @@ where { WORKSPACE_WORDS == POINT_CAPACITY * 7 + TRIANGLE_CAPACITY * 3 + TOPOLOGY
     let mut expected_output = triangle_count
     let mut point_id: u32 = 0
     while point_id < point_capacity {
-        if topology_load_point_state<POINT_CAPACITY, WORKSPACE_WORDS>(
-                workspace,
-                point_parity,
-                point_id,
-            )
-            == POINT_PENDING {
-            let kind = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(
-                workspace,
-                point_id,
-                0,
-            )
-            if kind != PROPOSAL_STRICT_FACE && kind != PROPOSAL_EDGE {
-                location_failures = location_failures + 1
-            }
-            if workspace.load(index: topology_winner_offset<POINT_CAPACITY>(point_id)) != 0 {
-                winners = winners + 1
-                let second_face = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(
-                    workspace,
-                    point_id,
-                    2,
-                )
-                let boundary_edge = kind == PROPOSAL_EDGE && second_face == INVALID_VERTEX
-                let expected_faces: u32 = if kind == PROPOSAL_EDGE && !boundary_edge {
-                    2
-                } else {
-                    1
-                }
-                expected_output = expected_output + if boundary_edge { 1 } else { 2 }
-                let first_face=topology_proposal_word<POINT_CAPACITY,WORKSPACE_WORDS>(workspace,point_id,1)
-                let mut owned_faces:u32=0
-                if first_face<triangle_count
-                    && workspace.load(index:topology_face_owner_offset<POINT_CAPACITY>(first_face))==point_id {
-                    owned_faces=1
-                }
-                if expected_faces==2 && second_face<triangle_count && second_face!=first_face
-                    && workspace.load(index:topology_face_owner_offset<POINT_CAPACITY>(second_face))==point_id {
-                    owned_faces=owned_faces+1
-                }
-                if owned_faces != expected_faces {
-                    invariant_failures = invariant_failures + 1
-                }
-            }
-        }
+        let point = topology_scan::measure_point_plan<POINT_CAPACITY,WORKSPACE_WORDS>(
+            workspace,point_id,point_parity,triangle_count,
+        )
+        winners = winners + point.winners
+        expected_output = expected_output + point.added_faces
+        location_failures = location_failures + point.location_failures
+        invariant_failures = invariant_failures + point.invariant_failures
         point_id = point_id + 1
     }
     if winners > pending {

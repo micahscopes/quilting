@@ -9,6 +9,7 @@ use core::marker::Copy
 use quilting_atlas::{AtlasKey, canonical_key_ordinal}
 use quilting_atlas::scan::balanced_block_size
 use quilting_atlas_webgpu::compaction::{rank_candidate_block, prefix_candidate_blocks, scatter_candidate_lane}
+use quilting_atlas_webgpu::topology_scan::{rank_topology_block, prefix_topology_blocks, relocate_topology_offset, SUMMARY_WORDS}
 use quilting_atlas_webgpu::{
     advance_candidate_generation,
     advance_parallel_topology_generation,
@@ -30,7 +31,6 @@ use quilting_atlas_webgpu::{
     restore_constrained_delaunay,
     retire_candidate_lane,
     retire_parallel_topology_point_lane,
-    scan_parallel_topology_face_plan,
 }
 use quilting_domain::{Bary3F, Vec3F, bary3f, vec3f}
 use quilting_quaternion::quatf
@@ -74,6 +74,10 @@ const COMPACT_TILE: usize = balanced_block_size(CANDIDATE_COUNT) as usize
 const COMPACT_BLOCKS: usize = (CANDIDATES + COMPACT_TILE - 1) / COMPACT_TILE
 const COMPACT_WORDS: usize = COMPACT_BLOCKS * 3
 const COMPACT_GROUPS: usize = (COMPACT_BLOCKS + THREADS - 1) / THREADS
+const SCAN_TILE: usize = balanced_block_size(CANDIDATE_COUNT*2+quilting_atlas::boundary_vertices(key())-2) as usize
+const SCAN_BLOCKS: usize = (TRIANGLES+SCAN_TILE-1)/SCAN_TILE
+const SCAN_WORDS: usize = SCAN_BLOCKS*SUMMARY_WORDS
+const SCAN_GROUPS: usize = (SCAN_BLOCKS+THREADS-1)/THREADS
 const SAMPLING_ROUNDS: usize = 64
 const INSERTION_ROUNDS: usize = 64
 const FLIP_LIMIT: usize = 512
@@ -156,6 +160,7 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
     triangles_b: Shared<u32, TRIANGLE_WORDS>,
     triangles: Shared<u32, TRIANGLE_WORDS>,
     topology_workspace: Shared<u32, TOPOLOGY_WORKSPACE_WORDS>,
+    topology_blocks: Shared<u32, SCAN_WORDS>,
     face_claims: AtomicStorageBuffer<TRIANGLES>,
     receipt: Shared<u32, 23>,
 
@@ -346,18 +351,23 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
         )
     }
 
-    fn topology_scan(self, invocation: ComputeInvocation)
-        uses (
-            Kernel<
-                Threads<THREADS, 1, 1>,
-                Cycle<InsertionRound, Once<WORKGROUPS, 1, 1>, INSERTION_ROUNDS>,
-            >
-        )
+    fn topology_rank(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS,1,1>,Cycle<InsertionRound,Once<SCAN_GROUPS,1,1>,INSERTION_ROUNDS>>)
     {
-        scan_parallel_topology_face_plan<POINTS, TRIANGLES, TOPOLOGY_WORKSPACE_WORDS>(
-            self.topology_workspace,
-            invocation,
-        )
+        rank_topology_block<POINTS,TRIANGLES,TOPOLOGY_WORKSPACE_WORDS,SCAN_TILE,SCAN_WORDS>(
+            self.topology_workspace,self.topology_blocks,invocation)
+    }
+    fn topology_scan(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<1,1,1>,Cycle<InsertionRound,Once<1,1,1>,INSERTION_ROUNDS>>)
+    {
+        prefix_topology_blocks<POINTS,TRIANGLES,TOPOLOGY_WORKSPACE_WORDS,SCAN_TILE,SCAN_WORDS>(
+            self.topology_workspace,self.topology_blocks,invocation)
+    }
+    fn topology_offsets(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS,1,1>,Cycle<InsertionRound,Once<WORKGROUPS,1,1>,INSERTION_ROUNDS>>)
+    {
+        relocate_topology_offset<POINTS,TRIANGLES,TOPOLOGY_WORKSPACE_WORDS,SCAN_TILE,SCAN_WORDS>(
+            self.topology_workspace,self.topology_blocks,invocation)
     }
 
     fn topology_rebuild(self, invocation: ComputeInvocation)

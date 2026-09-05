@@ -61,8 +61,13 @@ canonical combinations or silently clamp their LoDs.
   matches the preceding GPU point coordinates, ordered triangles, and receipts
   for all 55 preview keys plus an alternate seed. Triangle compilation passes;
   its new dispatch sequence has not yet been browser-verified.
-- The insertion-plan face/point scan remains singleton work per round. It
-  still needs a parallel realization preserving ownership checks and receipts.
+- The insertion-plan scan now ranks and validates independent blocks, scans
+  their totals, then assigns global offsets in parallel. Ownership validation
+  is shared with the ordered reference. Only rejected plans use the scalar
+  reference to retain precise ordered overflow/failure accounting. The 24-pass
+  quad pipeline preserves all 56 preceding preview meshes exactly; a separate
+  GPU probe checks all workspace words for 46 valid/invalid plans, both point
+  generations, tail blocks, and deliberately stale summary storage.
 - Indexed Delaunay restoration remains serial. Parallel repair needs explicit
   conflict selection, safe adjacency updates, and a convergence certificate.
 - Full-key batching, bounded scratch reuse, atlas publication, and replacement
@@ -101,9 +106,10 @@ and saved receipts are in `fe/web/quad-atlas/atomic-claims.*`.
 This is a compiler prerequisite, **not** an atlas performance measurement.
 Fe resource-family integration is committed as `4c1dafe2f` on mb2: all 43
 release actor/WebGPU regressions pass, including typed atomic add/min through
-helpers and rejection of mixed ordinary/atomic access. The claim-based atlas
-passes remain unverified; neither the older core atomic
-provider stubs nor the full atlas pipeline is thereby declared complete.
+helpers and rejection of mixed ordinary/atomic access. At that checkpoint the
+claim-based atlas passes remained unverified; neither the older core atomic
+provider stubs nor the full pipeline was thereby declared complete. The later
+preview geometry gates are recorded above.
 
 Sonatina `69f8c389` completes atomic load/store lowering and preserves unused
 observations in WGSL. All 122 shader-backend regressions, the atomic verifier,

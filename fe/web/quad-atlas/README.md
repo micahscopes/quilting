@@ -43,6 +43,28 @@ Subsequent warps can invert triangles and do not preserve Delaunay legality.
 
 ## Blocked compaction checkpoint, 2026-09-05
 
+The subsequent 24-pass topology-scan build is
+`fe-render-ec8c1583c88b231c.json`. Insertion now also uses independent block
+scans and parallel offset assignment, sharing ownership checks with the
+ordered GPU reference. Successful rounds scan only block totals on a single
+invocation. Invalid plans use that GPU reference to preserve exact failure and
+ordered overflow counts; no host processing is involved. This is not yet
+parallel Delaunay edge repair.
+
+`topology-scan.verify.mjs` runs the actual emitted stages on separate diagnostic
+buffers. All 46 valid/error fixtures match the reference across every workspace
+word, including both point generations, block tails, stale summaries, ownership
+failures, and exhausted capacity. `topology-scan.browser.json` records those
+observations. `topology-browser-evidence.json` records the separate complete
+preview geometry comparisons. Both triangle and quad release bundles compile;
+only the quad has this live browser gate.
+
+The final total-scan shader is 22,737 bytes rather than the first build's
+93,500: combining total scalar conditions with eager Boolean union avoids
+duplicated error paths. Guarded buffer accesses still use short-circuit checks.
+This measures shader size, not GPU generation latency. The page still does
+not download or upload geometry as part of generating its tile.
+
 Bundle `fe-render-c2445ee8cc903f07.json` has 22 passes: sample packing now uses
 independent local ranks, a small block-total scan, and parallel scatter. The
 block size is computed in Fe CTFE; accepted candidates retain their exact IDs.
