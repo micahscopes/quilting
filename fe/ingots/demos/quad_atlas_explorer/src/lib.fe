@@ -1,0 +1,221 @@
+//! One canonical square tile, generated and triangulated in GPU storage.
+//! Bounded integration preview, not yet the full resident LoD 0–8 atlas.
+use core::marker::Copy
+use fmath::{abs, sqrt, smoothstep, min}
+use quilting_atlas::quad::{QuadAtlasKey, canonicalize}
+use quilting_atlas::quad_sampling::candidate_slot_count
+use quilting_atlas::planar::FixedPoint2
+use quilting_atlas_webgpu::{
+    propose_candidate_lane_with_policy,
+    retire_candidate_lane_with_policy,
+    advance_candidate_generation,
+    compact_candidate_points_with_boundary,
+    construct_planar_triangles,
+    restore_indexed_constrained_delaunay_with_policy,
+    resident_triangle,
+    load_packed_point,
+}
+use quilting_atlas_webgpu::quad::{
+    QuadCandidateConflict,
+    QuadBoundaryPoints,
+    QuadAtlasDomain,
+    QuadInteriorEdgeFlip,
+    initialize_quad_candidate_lane,
+}
+use quilting_domain::{Vec3F, vec3f}
+use quilting_oklch::{display_rgb, mix_display_rgb, pack_rgba8}
+use std::web::view::{Param, Surface, Extent}
+use std::webgpu::{
+    GpuProgram,
+    WebGpuBackend,
+    StorageBuffer,
+    DrawIndirectBuffer,
+    ComputeSurface,
+    ComputeInvocation,
+    Workgroup,
+    FixedDispatch,
+    CycledDispatch,
+    FragmentSurface,
+    FragmentStage,
+    VertexStage,
+    RasterVertex,
+    ClipPosition,
+    IndirectTriangleList,
+    RasterConfiguration,
+    RasterPlan,
+    Depth24LessEqualMsaa4,
+    raster_plan,
+}
+
+// Capacities follow the candidate policy and Euler's disk relation, rather
+// than a handwritten tile table. Increase only with measured bounded jobs.
+const PREVIEW_LOD: u32 = 3
+const MAX_KEY: QuadAtlasKey = QuadAtlasKey {
+    bottom: PREVIEW_LOD,
+    right: PREVIEW_LOD,
+    top: PREVIEW_LOD,
+    left: PREVIEW_LOD,
+}
+const CANDIDATES: usize = candidate_slot_count(MAX_KEY) as usize
+const SAMPLING: usize = CANDIDATES * 8 + 1
+const POINTS: usize = CANDIDATES + (MAX_KEY.boundary_count() as usize)
+const POINT_WORDS: usize = POINTS * 3
+const TRIANGLES: usize = POINTS * 2 - (MAX_KEY.boundary_count() as usize) - 2
+const TRIANGLE_WORDS: usize = TRIANGLES * 4
+const TWINS: usize = TRIANGLES * 3
+const EDGE_INDEX: usize = POINTS + TWINS
+const PROPOSALS: usize = (TWINS + 31) / 32
+const THREADS: usize = 64
+const GROUPS: usize = (CANDIDATES + THREADS - 1) / THREADS
+pub struct SampleRound {}
+pub struct Draw {}
+pub struct Varying { pub edge: Vec3F }
+impl Copy for Varying {}
+struct Params { bottom: Param, right: Param, top: Param, left: Param, seed: Param, wire_px: Param }
+const fn params() -> Params {
+    Params {
+        bottom: Param::int(min: 0.0, max: 3.0, init: 2.0),
+        right: Param::int(min: 0.0, max: 3.0, init: 3.0),
+        top: Param::int(min: 0.0, max: 3.0, init: 2.0),
+        left: Param::int(min: 0.0, max: 3.0, init: 3.0),
+        seed: Param::int(min: 0.0, max: 255.0, init: 42.0),
+        wire_px: Param::range(min: 0.0, max: 2.0, init: 0.65),
+    }
+}
+extern {
+    const fn __f32_from_i32(_: i32) -> f32
+}
+fn number(_ n: u32) -> f32 {
+    __f32_from_i32(n.downcast_unchecked())
+}
+fn level(_ x: f32) -> u32 {
+    if x < 0.5 {
+        0
+    } else if x < 1.5 { 1 } else if x < 2.5 { 2 } else { 3 }
+}
+fn request(_ a: f32, _ b: f32, _ c: f32, _ d: f32) -> QuadAtlasKey {
+    QuadAtlasKey { bottom: level(a), right: level(b), top: level(c), left: level(d) }
+}
+fn seed_value(_ value: f32) -> u32 {
+    let mut n: u32 = 0
+    while n < 255 && value >= number(n) + 0.5 {
+        n = n + 1
+    }
+    n
+}
+fn flag(_ value: bool) -> u32 {
+    if value { 1 } else { 0 }
+}
+fn position(_ p: FixedPoint2) -> Vec3F {
+    vec3f(
+        (number(p.x) / 16384.0 - 0.5) * 1.6,
+        (number(p.y) / 16384.0 - 0.5) * 1.6,
+        0.5,
+    )
+}
+fn altitude(_ p: Vec3F, _ a: Vec3F, _ b: Vec3F) -> f32 {
+    abs((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x))
+        / (sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y)) + 0.00000001)
+        * 384.0
+}
+
+actor QuadAtlasExplorer uses (GpuProgram<WebGpuBackend>) {
+    bottom:f32,right:f32,top:f32,left:f32,seed:f32,wire_px:f32,
+    sampling:StorageBuffer<u32,SAMPLING>,points:StorageBuffer<u32,POINT_WORDS>,
+    triangles:StorageBuffer<u32,TRIANGLE_WORDS>,twins:StorageBuffer<u32,TWINS>,
+    edge_index:StorageBuffer<u32,EDGE_INDEX>,proposals:StorageBuffer<u32,PROPOSALS>,
+    receipt:StorageBuffer<u32,16>,draw:DrawIndirectBuffer<Draw>,
+    const fn view()->Surface<Params> {Surface {extent:Extent::square(768),params:params()}}
+    const fn raster()->RasterPlan uses (RasterConfiguration) {raster_plan<Depth24LessEqualMsaa4>()}
+
+    fn initialize(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,FixedDispatch<GROUPS,1,1>>) {
+        initialize_quad_candidate_lane<CANDIDATES,SAMPLING>(
+            canonicalize(request(self.bottom,self.right,self.top,self.left)).key,
+            seed_value(self.seed),self.sampling,i,
+        )
+    }
+    fn propose(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<SampleRound,FixedDispatch<GROUPS,1,1>,64>>) {
+        propose_candidate_lane_with_policy<QuadCandidateConflict,CANDIDATES,SAMPLING>(
+            canonicalize(request(self.bottom,self.right,self.top,self.left)).key,
+            QuadCandidateConflict {},self.sampling,i,
+        )
+    }
+    fn retire(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<SampleRound,FixedDispatch<GROUPS,1,1>,64>>) {
+        retire_candidate_lane_with_policy<QuadCandidateConflict,CANDIDATES,SAMPLING>(
+            canonicalize(request(self.bottom,self.right,self.top,self.left)).key,
+            QuadCandidateConflict {},self.sampling,i,
+        )
+    }
+    fn advance(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<SampleRound,FixedDispatch<1,1,1>,64>>) {
+        advance_candidate_generation<CANDIDATES,SAMPLING>(self.sampling,i)
+    }
+    fn compact(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+        let r=compact_candidate_points_with_boundary<QuadBoundaryPoints,CANDIDATES,SAMPLING,POINT_WORDS>(
+            canonicalize(request(self.bottom,self.right,self.top,self.left)).key,
+            QuadBoundaryPoints {},self.sampling,self.points,
+        )
+        self.receipt.store(index:0,value:flag(r.valid))
+        self.receipt.store(index:1,value:flag(r.converged))
+        self.receipt.store(index:2,value:flag(r.overflowed))
+        self.receipt.store(index:3,value:r.accepted_candidates)
+        self.receipt.store(index:4,value:r.boundary_points)
+        self.receipt.store(index:5,value:r.resident_points)
+    }
+    fn triangulate(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+        let r=construct_planar_triangles<QuadAtlasDomain,POINT_WORDS,TRIANGLE_WORDS>(
+            QuadAtlasDomain {},canonicalize(request(self.bottom,self.right,self.top,self.left)).key,
+            self.receipt.load(index:0)!=0,self.receipt.load(index:5),self.points,self.triangles,
+        )
+        self.receipt.store(index:6,value:flag(r.valid))
+        self.receipt.store(index:7,value:r.resident_triangles)
+        self.receipt.store(index:8,value:r.location_failures)
+        self.receipt.store(index:9,value:r.invariant_failures)
+    }
+    fn delaunay(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+        let r=restore_indexed_constrained_delaunay_with_policy<QuadInteriorEdgeFlip,
+            POINT_WORDS,TRIANGLE_WORDS,TWINS,EDGE_INDEX,PROPOSALS,4096>(
+            canonicalize(request(self.bottom,self.right,self.top,self.left)).key,
+            QuadInteriorEdgeFlip {},self.receipt.load(index:6)!=0,
+            self.receipt.load(index:5),self.receipt.load(index:7),
+            self.points,self.triangles,self.twins,self.edge_index,self.proposals,
+        )
+        self.receipt.store(index:10,value:flag(r.valid))
+        self.receipt.store(index:11,value:flag(r.converged))
+        self.receipt.store(index:12,value:r.flips)
+        self.receipt.store(index:13,value:r.remaining_violations)
+        self.receipt.store(index:14,value:r.invariant_failures)
+    }
+    fn publish(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+        self.draw.store(index:0,value:if self.receipt.load(index:10)!=0 {self.receipt.load(index:7)*3} else {0})
+        self.draw.store(index:1,value:1)
+        self.draw.store(index:2,value:0)
+        self.draw.store(index:3,value:0)
+    }
+    fn background(self,x:i32,y:i32)->i32 uses (FragmentSurface) {
+        // Three stage lamps: sampling, insertion, Delaunay; no success inferred
+        // merely from having emitted a draw. Amber/red are explicit failures.
+        if y<14 && x>=12 && x<108 {
+            let stage=if x<44 {0} else if x<76 {6} else {10}
+            return pack_rgba8(if self.receipt.load(index:stage)!=0 {display_rgb(0.25,0.7,0.52)} else {display_rgb(0.9,0.3,0.2)})
+        }
+        pack_rgba8(display_rgb(0.055,0.065,0.08))
+    }
+    fn vertices(self,index:u32,instance:u32)->RasterVertex<Varying> uses (VertexStage<Varying,IndirectTriangleList<DrawIndirectBuffer<Draw>>>) {
+        let triangle=resident_triangle<TRIANGLE_WORDS>(self.triangles,index/3)
+        let symmetry=canonicalize(request(self.bottom,self.right,self.top,self.left)).to_canonical.inverse()
+        let a=position(symmetry.point(load_packed_point<FixedPoint2,POINT_WORDS>(self.points,triangle.first)))
+        let b=position(symmetry.point(load_packed_point<FixedPoint2,POINT_WORDS>(self.points,triangle.second)))
+        let c=position(symmetry.point(load_packed_point<FixedPoint2,POINT_WORDS>(self.points,triangle.third)))
+        let corner=index%3
+        let p=if corner==0 {a} else if corner==1 {b} else {c}
+        let edge=if corner==0 {vec3f(altitude(a,b,c),0.0,0.0)}
+            else if corner==1 {vec3f(0.0,altitude(b,c,a),0.0)}
+            else {vec3f(0.0,0.0,altitude(c,a,b))}
+        RasterVertex {position:ClipPosition {x:p.x,y:p.y,z:p.z,w:1.0},varying:Varying {edge:edge}}
+    }
+    fn fragment(self,v:Varying)->i32 uses (FragmentStage<Varying>) {
+        let d=min(v.edge.x,min(v.edge.y,v.edge.z))
+        let wire=if self.wire_px<=0.0 {0.0} else {1.0-smoothstep(self.wire_px*0.5,self.wire_px*0.5+0.8,d)}
+        pack_rgba8(mix_display_rgb(display_rgb(0.61,0.75,0.73),display_rgb(0.09,0.15,0.19),wire))
+    }
+}

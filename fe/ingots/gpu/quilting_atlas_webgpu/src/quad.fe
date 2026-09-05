@@ -1,0 +1,117 @@
+//! Square-domain policies for the shared GPU sampling schedule.
+use core::marker::Copy
+use quilting_atlas::quad::{QuadAtlasKey, boundary_seed}
+use quilting_atlas::quad_sampling::{
+    QuadInteriorCandidate,
+    interior_candidate_at_slot,
+    candidate_conflicts_boundary,
+    poisson_conflict,
+}
+use quilting_atlas::planar::FixedPoint2
+use std::webgpu::{ComputeInvocation, StorageBuffer}
+use super::{
+    CandidateConflictPolicy,
+    BoundaryPointPolicy,
+    initialize_materialized_candidate_lane_with_policy,
+    SAMPLING_WORDS_PER_CANDIDATE,
+    SAMPLING_PROGRESS_WORDS,
+}
+
+pub struct QuadAtlasDomain {}
+impl Copy for QuadAtlasDomain {}
+impl super::ConvexAtlasDomain for QuadAtlasDomain {
+    type Key = QuadAtlasKey
+    type Point = FixedPoint2
+    fn valid(self, _ key: QuadAtlasKey) -> bool {
+        key.valid()
+    }
+    fn corner_count(self) -> u32 {
+        4
+    }
+    fn corner(self, _ key: QuadAtlasKey, _ index: u32) -> u32 {
+        let mut offset: u32 = 0
+        let mut edge: u32 = 0
+        while edge < index && edge < 4 {
+            offset = offset + (1 << key.edge(edge))
+            edge = edge + 1
+        }
+        offset
+    }
+}
+
+pub struct QuadCandidateConflict {}
+impl Copy for QuadCandidateConflict {}
+impl CandidateConflictPolicy for QuadCandidateConflict {
+    type Key = QuadAtlasKey
+    type Point = FixedPoint2
+    fn conflicts_boundary(self, _ key: QuadAtlasKey, _ candidate: QuadInteriorCandidate) -> bool {
+        candidate_conflicts_boundary(key, candidate)
+    }
+    fn conflicts(self, _ left: QuadInteriorCandidate, _ right: QuadInteriorCandidate) -> bool {
+        poisson_conflict(
+            left.point,
+            left.radius_squared,
+            right.point,
+            right.radius_squared,
+        )
+    }
+}
+
+/// Euclidean square-domain Delaunay, with the shared exact incircle and
+/// deterministic cocircular tie rule. This is not a surface-metric heuristic.
+pub struct QuadInteriorEdgeFlip {}
+impl Copy for QuadInteriorEdgeFlip {}
+impl super::InteriorEdgeFlipPolicy for QuadInteriorEdgeFlip {
+    type Key = QuadAtlasKey
+    type Point = FixedPoint2
+    fn decision(
+        self,
+        _ u_id: u32,
+        _ u: FixedPoint2,
+        _ v_id: u32,
+        _ v: FixedPoint2,
+        _ a_id: u32,
+        _ a: FixedPoint2,
+        _ b_id: u32,
+        _ b: FixedPoint2,
+    ) -> quilting_atlas::topology::FlipDecision {
+        quilting_atlas::topology::interior_edge_flip_decision_with_metric(
+            u_id,
+            u,
+            v_id,
+            v,
+            a_id,
+            a,
+            b_id,
+            b,
+            quilting_atlas::planar::SquareMetric {},
+        )
+    }
+}
+
+pub struct QuadBoundaryPoints {}
+impl Copy for QuadBoundaryPoints {}
+impl BoundaryPointPolicy for QuadBoundaryPoints {
+    type Key = QuadAtlasKey
+    type Point = FixedPoint2
+    fn point(self, _ key: QuadAtlasKey, _ ordinal: u32) -> FixedPoint2 {
+        boundary_seed(key, ordinal).point
+    }
+}
+
+pub fn initialize_quad_candidate_lane<const CAPACITY: usize, const WORDS: usize>(
+    _ key: QuadAtlasKey,
+    _ seed: u32,
+    _ workspace: StorageBuffer<u32, WORDS>,
+    _ invocation: ComputeInvocation,
+)
+where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WORDS }
+{
+    initialize_materialized_candidate_lane_with_policy<QuadCandidateConflict, CAPACITY, WORDS>(
+        key,
+        interior_candidate_at_slot(key, seed, invocation.global.x),
+        QuadCandidateConflict {},
+        workspace,
+        invocation,
+    )
+}

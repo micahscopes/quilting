@@ -1005,6 +1005,8 @@ struct SurfaceBoundaryPoints { candidates: StorageBuffer<u32, DEFORMED_CANDIDATE
 impl Copy for SurfaceBoundaryPoints {}
 
 impl BoundaryPointPolicy for SurfaceBoundaryPoints {
+    type Key = AtlasKey
+    type Point = FixedBarycentric
     fn point(self, _ key: AtlasKey, _ ordinal: u32) -> FixedBarycentric {
         load_surface_candidate(self.candidates, deformed_boundary_slot(ordinal)).point
     }
@@ -1150,6 +1152,8 @@ fn projective_samples_conflict(
 }
 
 impl<const WORDS: usize> CandidateConflictPolicy for SurfaceCandidateConflict<WORDS> {
+    type Key = AtlasKey
+    type Point = FixedBarycentric
     fn conflicts_boundary(self, _ key: AtlasKey, _ candidate: InteriorCandidate) -> bool {
         let candidate_sample = load_projective_sample(self.samples, candidate.slot)
         let mut conflict = !candidate.valid || !candidate_sample.defined
@@ -1176,6 +1180,8 @@ impl<const WORDS: usize> CandidateConflictPolicy for SurfaceCandidateConflict<WO
 }
 
 impl<const WORDS: usize> InteriorEdgeFlipPolicy for SurfaceShortEdgeFlip<WORDS> {
+    type Key = AtlasKey
+    type Point = FixedBarycentric
     fn decision(
         self,
         _ u_id: u32,

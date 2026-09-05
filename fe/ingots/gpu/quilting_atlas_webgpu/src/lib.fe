@@ -7,6 +7,8 @@
 
 use quilting_atlas::{AtlasKey, MAX_LOD, boundary_vertices, edge_resolution}
 use quilting_atlas::sampling::{
+    Candidate,
+    SampleSetKey,
     CANDIDATE_ACCEPTED,
     CANDIDATE_INVALID,
     CANDIDATE_PENDING,
@@ -24,6 +26,7 @@ use quilting_atlas::sampling::{
 }
 use quilting_atlas::triangulation::orientation
 use quilting_atlas::topology::{
+    ConstrainedBoundary,
     INVALID_VERTEX,
     POINT_ON_EDGE,
     POINT_ON_VERTEX,
@@ -47,6 +50,53 @@ use quilting_atlas::topology::{
     triangle_edge_second,
 }
 use std::webgpu::{ComputeInvocation, StorageBuffer}
+use quilting_atlas::planar::PlanarCoordinates
+pub use quad
+
+/// Typed coordinates in the resident three-word point slot. Square points
+/// occupy two words plus padding; they are never fake triangle barycentrics.
+pub trait PackedSamplePoint: core::marker::Copy {
+    fn word(self, _ lane: u32) -> u32
+    fn from_words(_ first: u32, _ second: u32, _ third: u32) -> Self
+}
+
+/// Convex reference-domain seed polygon. Corner IDs address the same locked
+/// boundary prefix as the sampler; insertion/refinement do not own that order.
+pub trait ConvexAtlasDomain: core::marker::Copy {
+    type Key: SampleSetKey
+    type Point: PackedSamplePoint + PlanarCoordinates
+    fn valid(self, _ key:Self::Key)->bool
+    fn corner_count(self)->u32
+    fn corner(self, _ key:Self::Key, _ index:u32)->u32
+}
+pub struct TriangleAtlasDomain {}
+impl core::marker::Copy for TriangleAtlasDomain {}
+impl ConvexAtlasDomain for TriangleAtlasDomain {
+    type Key = AtlasKey
+    type Point = FixedBarycentric
+    fn valid(self, _ key:AtlasKey)->bool { key.a<=key.b && key.b<=key.c && key.c<=MAX_LOD }
+    fn corner_count(self)->u32 {3}
+    fn corner(self, _ key:AtlasKey, _ index:u32)->u32 {
+        if index==0 {0} else if index==1 {edge_resolution(key.c)}
+        else {edge_resolution(key.c)+edge_resolution(key.b)}
+    }
+}
+impl PackedSamplePoint for FixedBarycentric {
+    fn word(self, _ lane: u32) -> u32 {
+        if lane == 0 { self.a } else if lane == 1 { self.b } else { self.c }
+    }
+    fn from_words(_ first: u32, _ second: u32, _ third: u32) -> Self {
+        FixedBarycentric { a: first, b: second, c: third }
+    }
+}
+impl PackedSamplePoint for quilting_atlas::planar::FixedPoint2 {
+    fn word(self, _ lane: u32) -> u32 {
+        if lane == 0 { self.x } else if lane == 1 { self.y } else { 0 }
+    }
+    fn from_words(_ first: u32, _ second: u32, _ third: u32) -> Self {
+        quilting_atlas::planar::FixedPoint2 { x: first, y: second }
+    }
+}
 
 pub const CANDIDATE_WORDS: usize = 5
 pub const SAMPLING_WORDS_PER_CANDIDATE: usize = 8
@@ -73,15 +123,19 @@ pub const PROPOSAL_INVALID: u32 = 3
 /// renderers may instead specialize these two relations over a pullback metric
 /// while retaining the same deterministic MIS schedule and packed workspace.
 pub trait CandidateConflictPolicy: core::marker::Copy {
-    fn conflicts_boundary(self, _ key: AtlasKey, _ candidate: InteriorCandidate) -> bool
+    type Key: SampleSetKey
+    type Point: PackedSamplePoint
+    fn conflicts_boundary(self, _ key: Self::Key, _ candidate: Candidate<Self::Point>) -> bool
 
-    fn conflicts(self, _ left: InteriorCandidate, _ right: InteriorCandidate) -> bool
+    fn conflicts(self, _ left: Candidate<Self::Point>, _ right: Candidate<Self::Point>) -> bool
 }
 
 pub struct AtlasCandidateConflict {}
 impl core::marker::Copy for AtlasCandidateConflict {}
 
 impl CandidateConflictPolicy for AtlasCandidateConflict {
+    type Key = AtlasKey
+    type Point = FixedBarycentric
     fn conflicts_boundary(self, _ key: AtlasKey, _ candidate: InteriorCandidate) -> bool {
         candidate_conflicts_boundary(key, candidate)
     }
@@ -101,13 +155,17 @@ impl CandidateConflictPolicy for AtlasCandidateConflict {
 /// its own geometric measure while retaining the shared point ordering and
 /// constrained-topology machinery.
 pub trait BoundaryPointPolicy: core::marker::Copy {
-    fn point(self, _ key: AtlasKey, _ ordinal: u32) -> FixedBarycentric
+    type Key: SampleSetKey
+    type Point: PackedSamplePoint
+    fn point(self, _ key: Self::Key, _ ordinal: u32) -> Self::Point
 }
 
 pub struct AtlasBoundaryPoints {}
 impl core::marker::Copy for AtlasBoundaryPoints {}
 
 impl BoundaryPointPolicy for AtlasBoundaryPoints {
+    type Key = AtlasKey
+    type Point = FixedBarycentric
     fn point(self, _ key: AtlasKey, _ ordinal: u32) -> FixedBarycentric {
         boundary_seed(key, ordinal).point
     }
@@ -115,16 +173,18 @@ impl BoundaryPointPolicy for AtlasBoundaryPoints {
 
 /// Static diagonal policy over a convex chart quadrilateral.
 pub trait InteriorEdgeFlipPolicy: core::marker::Copy {
+    type Key: ConstrainedBoundary
+    type Point: PackedSamplePoint + PlanarCoordinates
     fn decision(
         self,
         _ u_id: u32,
-        _ u: FixedBarycentric,
+        _ u: Self::Point,
         _ v_id: u32,
-        _ v: FixedBarycentric,
+        _ v: Self::Point,
         _ first_opposite_id: u32,
-        _ first_opposite: FixedBarycentric,
+        _ first_opposite: Self::Point,
         _ second_opposite_id: u32,
-        _ second_opposite: FixedBarycentric,
+        _ second_opposite: Self::Point,
     ) -> FlipDecision
 }
 
@@ -132,6 +192,8 @@ pub struct AtlasInteriorEdgeFlip {}
 impl core::marker::Copy for AtlasInteriorEdgeFlip {}
 
 impl InteriorEdgeFlipPolicy for AtlasInteriorEdgeFlip {
+    type Key = AtlasKey
+    type Point = FixedBarycentric
     fn decision(
         self,
         _ u_id: u32,
@@ -215,30 +277,27 @@ fn candidate_progress_offset<const CAPACITY: usize>() -> u32 {
     capacity * SAMPLING_WORDS_PER_CANDIDATE.downcast_truncate()
 }
 
-fn store_candidate<const WORDS: usize>(
+fn store_candidate<P: PackedSamplePoint, const WORDS: usize>(
     _ workspace: StorageBuffer<u32, WORDS>,
-    _ candidate: InteriorCandidate,
+    _ candidate: Candidate<P>,
     _ slot: u32,
 ) {
     let offset = candidate_offset(slot)
-    workspace.store(index: offset, value: candidate.point.a)
-    workspace.store(index: offset + 1, value: candidate.point.b)
-    workspace.store(index: offset + 2, value: candidate.point.c)
+    workspace.store(index: offset, value: candidate.point.word(0))
+    workspace.store(index: offset + 1, value: candidate.point.word(1))
+    workspace.store(index: offset + 2, value: candidate.point.word(2))
     workspace.store(index: offset + 3, value: candidate.radius_squared)
     workspace.store(index: offset + 4, value: candidate.priority)
 }
 
-fn load_candidate<const WORDS: usize>(
+fn load_candidate<P: PackedSamplePoint, const WORDS: usize>(
     _ workspace: StorageBuffer<u32, WORDS>,
     _ slot: u32,
-) -> InteriorCandidate {
+) -> Candidate<P> {
     let offset = candidate_offset(slot)
-    let point = FixedBarycentric {
-        a: workspace.load(index: offset),
-        b: workspace.load(index: offset + 1),
-        c: workspace.load(index: offset + 2),
-    }
-    InteriorCandidate {
+    let point = P::from_words(workspace.load(index: offset),
+        workspace.load(index: offset + 1), workspace.load(index: offset + 2))
+    Candidate<P> {
         point: point,
         radius_squared: workspace.load(index: offset + 3),
         priority: workspace.load(index: offset + 4),
@@ -279,10 +338,24 @@ fn point_store<const WORDS: usize>(
     _ ordinal: u32,
     _ point: FixedBarycentric,
 ) {
+    store_packed_point<FixedBarycentric, WORDS>(points, ordinal, point)
+}
+
+pub fn store_packed_point<P: PackedSamplePoint, const WORDS: usize>(
+    _ points: StorageBuffer<u32, WORDS>, _ ordinal: u32, _ point: P,
+) {
     let offset = ordinal * POINT_WORDS.downcast_truncate()
-    points.store(index: offset, value: point.a)
-    points.store(index: offset + 1, value: point.b)
-    points.store(index: offset + 2, value: point.c)
+    points.store(index: offset, value: point.word(0))
+    points.store(index: offset + 1, value: point.word(1))
+    points.store(index: offset + 2, value: point.word(2))
+}
+
+pub fn load_packed_point<P: PackedSamplePoint, const WORDS: usize>(
+    _ points: StorageBuffer<u32, WORDS>, _ ordinal: u32,
+) -> P {
+    let offset = ordinal * POINT_WORDS.downcast_truncate()
+    P::from_words(points.load(index: offset), points.load(index: offset + 1),
+        points.load(index: offset + 2))
 }
 
 fn point_load<const WORDS: usize>(
@@ -367,10 +440,23 @@ fn classify_resident_point<const POINT_STORAGE_WORDS: usize>(
     _ triangle: Triangle,
     _ point: FixedBarycentric,
 ) -> u32 {
+    classify_packed_point<FixedBarycentric, POINT_STORAGE_WORDS>(points, triangle, point)
+}
+
+fn packed_triangle_point<P:PackedSamplePoint,const WORDS:usize>(
+    _ points:StorageBuffer<u32,WORDS>, _ triangle:Triangle, _ lane:u32,
+)->P {
+    let id=if lane==0 {triangle.first} else if lane==1 {triangle.second} else {triangle.third}
+    load_packed_point<P,WORDS>(points,id)
+}
+
+fn classify_packed_point<P:PackedSamplePoint+PlanarCoordinates,const POINT_STORAGE_WORDS:usize>(
+    _ points:StorageBuffer<u32,POINT_STORAGE_WORDS>, _ triangle:Triangle, _ point:P,
+)->u32 {
     classify_point_in_triangle(
-        triangle_point<POINT_STORAGE_WORDS>(points, triangle, 0),
-        triangle_point<POINT_STORAGE_WORDS>(points, triangle, 1),
-        triangle_point<POINT_STORAGE_WORDS>(points, triangle, 2),
+        packed_triangle_point<P,POINT_STORAGE_WORDS>(points, triangle, 0),
+        packed_triangle_point<P,POINT_STORAGE_WORDS>(points, triangle, 1),
+        packed_triangle_point<P,POINT_STORAGE_WORDS>(points, triangle, 2),
         point,
     )
 }
@@ -381,6 +467,13 @@ fn split_resident_triangle_edge<const POINT_STORAGE_WORDS: usize>(
     _ point_id: u32,
     _ point: FixedBarycentric,
 ) -> TrianglePair {
+    split_packed_triangle_edge<FixedBarycentric,POINT_STORAGE_WORDS>(points,triangle,point_id,point)
+}
+
+fn split_packed_triangle_edge<P:PackedSamplePoint+PlanarCoordinates,const POINT_STORAGE_WORDS:usize>(
+    _ points:StorageBuffer<u32,POINT_STORAGE_WORDS>, _ triangle:Triangle,
+    _ point_id:u32, _ point:P,
+)->TrianglePair {
     let mut edge: u32 = 0
     while edge < 3 {
         let first_id = triangle_edge_first(triangle, edge)
@@ -389,9 +482,9 @@ fn split_resident_triangle_edge<const POINT_STORAGE_WORDS: usize>(
         let split = split_triangle_edge(
             triangle,
             edge,
-            point_load<POINT_STORAGE_WORDS>(points, first_id),
-            point_load<POINT_STORAGE_WORDS>(points, second_id),
-            point_load<POINT_STORAGE_WORDS>(points, opposite_id),
+            load_packed_point<P,POINT_STORAGE_WORDS>(points, first_id),
+            load_packed_point<P,POINT_STORAGE_WORDS>(points, second_id),
+            load_packed_point<P,POINT_STORAGE_WORDS>(points, opposite_id),
             point_id,
             point,
         )
@@ -1640,8 +1733,8 @@ where { WORKSPACE_WORDS == POINT_CAPACITY * 7 + TRIANGLE_CAPACITY * 3 + TOPOLOGY
     )
 }
 
-fn resident_candidate_slots<const CAPACITY: usize>(_ key: AtlasKey) -> u32 {
-    let requested = candidate_slot_count(key)
+fn resident_candidate_slots<K: SampleSetKey, const CAPACITY: usize>(_ key: K) -> u32 {
+    let requested = key.candidate_slots()
     let capacity: u32 = CAPACITY.downcast_truncate()
     if requested < capacity {
         requested
@@ -1652,7 +1745,7 @@ fn resident_candidate_slots<const CAPACITY: usize>(_ key: AtlasKey) -> u32 {
 
 /// Materialize one compact work item under a static conflict policy.
 pub fn initialize_candidate_lane_with_policy<
-    P: CandidateConflictPolicy,
+    P: CandidateConflictPolicy<Key=AtlasKey, Point=FixedBarycentric>,
     const CAPACITY: usize,
     const WORDS: usize,
 >(
@@ -1692,8 +1785,8 @@ pub fn initialize_materialized_candidate_lane_with_policy<
     const CAPACITY: usize,
     const WORDS: usize,
 >(
-    _ key: AtlasKey,
-    _ candidate: InteriorCandidate,
+    _ key: P::Key,
+    _ candidate: Candidate<P::Point>,
     _ policy: P,
     _ workspace: StorageBuffer<u32, WORDS>,
     _ invocation: ComputeInvocation,
@@ -1704,7 +1797,7 @@ where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WOR
     if slot >= CAPACITY.downcast_truncate() {
         return
     }
-    store_candidate<WORDS>(workspace, candidate, slot)
+    store_candidate<P::Point, WORDS>(workspace, candidate, slot)
     let coherent = candidate.slot == slot
     let boundary_conflict = if candidate.valid && coherent {
         policy.conflicts_boundary(key, candidate)
@@ -1757,7 +1850,7 @@ pub fn propose_candidate_lane_with_policy<
     const CAPACITY: usize,
     const WORDS: usize,
 >(
-    _ key: AtlasKey,
+    _ key: P::Key,
     _ policy: P,
     _ workspace: StorageBuffer<u32, WORDS>,
     _ invocation: ComputeInvocation,
@@ -1768,7 +1861,7 @@ where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WOR
     if slot >= CAPACITY.downcast_truncate() {
         return
     }
-    let count = resident_candidate_slots<CAPACITY>(key)
+    let count = resident_candidate_slots<P::Key, CAPACITY>(key)
     if slot >= count {
         workspace.store(index: candidate_winner_offset<CAPACITY>(slot), value: 0)
         return
@@ -1779,7 +1872,7 @@ where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WOR
         workspace.store(index: candidate_winner_offset<CAPACITY>(slot), value: 0)
         return
     }
-    let candidate = load_candidate<WORDS>(workspace, slot)
+    let candidate = load_candidate<P::Point, WORDS>(workspace, slot)
     let mut accepted_conflict = false
     let mut preceding_pending_conflict = false
     let mut other_slot: u32 = 0
@@ -1787,7 +1880,7 @@ where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WOR
         if other_slot != slot {
             let other_state = load_generation_state<CAPACITY, WORDS>(workspace, parity, other_slot)
             if other_state == CANDIDATE_ACCEPTED || other_state == CANDIDATE_PENDING {
-                let other = load_candidate<WORDS>(workspace, other_slot)
+                let other = load_candidate<P::Point, WORDS>(workspace, other_slot)
                 if policy.conflicts(candidate, other) {
                     if other_state == CANDIDATE_ACCEPTED {
                         accepted_conflict = true
@@ -1841,7 +1934,7 @@ pub fn retire_candidate_lane_with_policy<
     const CAPACITY: usize,
     const WORDS: usize,
 >(
-    _ key: AtlasKey,
+    _ key: P::Key,
     _ policy: P,
     _ workspace: StorageBuffer<u32, WORDS>,
     _ invocation: ComputeInvocation,
@@ -1852,14 +1945,14 @@ where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WOR
     if slot >= CAPACITY.downcast_truncate() {
         return
     }
-    let count = resident_candidate_slots<CAPACITY>(key)
+    let count = resident_candidate_slots<P::Key, CAPACITY>(key)
     let parity = workspace.load(index: candidate_progress_offset<CAPACITY>())
     let state = load_generation_state<CAPACITY, WORDS>(workspace, parity, slot)
     if slot >= count || state != CANDIDATE_PENDING {
         store_next_generation_state<CAPACITY, WORDS>(workspace, parity, slot, state)
         return
     }
-    let candidate = load_candidate<WORDS>(workspace, slot)
+    let candidate = load_candidate<P::Point, WORDS>(workspace, slot)
     let winner = workspace.load(index: candidate_winner_offset<CAPACITY>(slot)) != 0
     let mut accepted_conflict = false
     let mut winner_conflict = false
@@ -1870,7 +1963,7 @@ where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WOR
             let other_winner = workspace.load(index: candidate_winner_offset<CAPACITY>(other_slot))
                 != 0
             if other_state == CANDIDATE_ACCEPTED || other_winner {
-                let other = load_candidate<WORDS>(workspace, other_slot)
+                let other = load_candidate<P::Point, WORDS>(workspace, other_slot)
                 if policy.conflicts(candidate, other) {
                     if other_state == CANDIDATE_ACCEPTED {
                         accepted_conflict = true
@@ -1962,7 +2055,7 @@ pub fn compact_candidate_points_with_boundary<
     const WORDS: usize,
     const POINT_STORAGE_WORDS: usize,
 >(
-    _ key: AtlasKey,
+    _ key: P::Key,
     _ boundary_points: P,
     _ workspace: StorageBuffer<u32, WORDS>,
     _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
@@ -1975,16 +2068,16 @@ where
         POINT_STORAGE_WORDS % POINT_WORDS == 0
     }
 {
-    let requested_slots = candidate_slot_count(key)
-    let slots = resident_candidate_slots<CAPACITY>(key)
-    let boundary = boundary_vertices(key)
+    let requested_slots = key.candidate_slots()
+    let slots = resident_candidate_slots<P::Key, CAPACITY>(key)
+    let boundary = key.boundary_points()
     let point_capacity: u32 = (POINT_STORAGE_WORDS / POINT_WORDS).downcast_truncate()
     let mut resident: u32 = 0
     let mut overflowed = requested_slots > CAPACITY.downcast_truncate()
     let mut boundary_ordinal: u32 = 0
     while boundary_ordinal < boundary {
         if resident < point_capacity {
-            point_store<POINT_STORAGE_WORDS>(
+            store_packed_point<P::Point, POINT_STORAGE_WORDS>(
                 points,
                 resident,
                 boundary_points.point(key, boundary_ordinal),
@@ -2003,9 +2096,9 @@ where
     while slot < slots {
         let state = load_generation_state<CAPACITY, WORDS>(workspace, parity, slot)
         if state == CANDIDATE_ACCEPTED {
-            let candidate = load_candidate<WORDS>(workspace, slot)
+            let candidate = load_candidate<P::Point, WORDS>(workspace, slot)
             if resident < point_capacity {
-                point_store<POINT_STORAGE_WORDS>(points, resident, candidate.point)
+                store_packed_point<P::Point, POINT_STORAGE_WORDS>(points, resident, candidate.point)
             } else {
                 overflowed = true
             }
@@ -2045,9 +2138,29 @@ pub fn construct_constrained_triangles<
 ) -> TopologyConstruction
 where { POINT_STORAGE_WORDS % POINT_WORDS == 0 }, { TRIANGLE_STORAGE_WORDS % TRIANGLE_WORDS == 0 }
 {
+    construct_planar_triangles<TriangleAtlasDomain,POINT_STORAGE_WORDS,TRIANGLE_STORAGE_WORDS>(
+        TriangleAtlasDomain {},key,source_valid,requested_points,points,triangles,
+    )
+}
+
+/// Shared constrained insertion over a convex triangle or square domain.
+pub fn construct_planar_triangles<
+    D: ConvexAtlasDomain,
+    const POINT_STORAGE_WORDS: usize,
+    const TRIANGLE_STORAGE_WORDS: usize,
+>(
+    _ domain: D,
+    _ key: D::Key,
+    _ source_valid: bool,
+    _ requested_points: u32,
+    _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
+    _ triangles: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
+) -> TopologyConstruction
+where { POINT_STORAGE_WORDS % POINT_WORDS == 0 }, { TRIANGLE_STORAGE_WORDS % TRIANGLE_WORDS == 0 }
+{
     let point_capacity: u32 = (POINT_STORAGE_WORDS / POINT_WORDS).downcast_truncate()
     let triangle_capacity: u32 = (TRIANGLE_STORAGE_WORDS / TRIANGLE_WORDS).downcast_truncate()
-    let boundary = boundary_vertices(key)
+    let boundary = key.boundary_points()
     let mut overflowed = requested_points > point_capacity
     let resident_points = if requested_points < point_capacity {
         requested_points
@@ -2061,12 +2174,14 @@ where { POINT_STORAGE_WORDS % POINT_WORDS == 0 }, { TRIANGLE_STORAGE_WORDS % TRI
         clear = clear + 1
     }
 
-    let canonical_key = key.a <= key.b && key.b <= key.c && key.c <= MAX_LOD
+    let canonical_key = domain.valid(key)
+    let corners = domain.corner_count()
     if !source_valid
         || !canonical_key
-        || boundary < 3
+        || corners < 3
+        || boundary < corners
         || resident_points < boundary
-        || triangle_capacity == 0 {
+        || triangle_capacity < corners - 2 {
         return TopologyConstruction {
             valid: false,
             overflowed: overflowed,
@@ -2080,41 +2195,39 @@ where { POINT_STORAGE_WORDS % POINT_WORDS == 0 }, { TRIANGLE_STORAGE_WORDS % TRI
         }
     }
 
-    let corner_a: u32 = 0
-    let corner_b = edge_resolution(key.c)
-    let corner_c = corner_b + edge_resolution(key.b)
-    let seed = normalized_triangle(
-        corner_a,
-        point_load<POINT_STORAGE_WORDS>(points, corner_a),
-        corner_b,
-        point_load<POINT_STORAGE_WORDS>(points, corner_b),
-        corner_c,
-        point_load<POINT_STORAGE_WORDS>(points, corner_c),
-    )
-    if !seed.valid {
-        return TopologyConstruction {
-            valid: false,
-            overflowed: overflowed,
-            resident_points: resident_points,
-            boundary_points: boundary,
-            inserted_points: 0,
-            resident_triangles: 0,
-            expected_triangles: 0,
-            location_failures: 1,
-            invariant_failures: 1,
+    let mut triangle_count:u32=0
+    let mut location_failures:u32=0
+    let mut invariant_failures:u32=0
+    while triangle_count < corners - 2 && invariant_failures == 0 {
+        let a=domain.corner(key,0)
+        let b=domain.corner(key,triangle_count+1)
+        let c=domain.corner(key,triangle_count+2)
+        let seed=normalized_triangle(a,load_packed_point<D::Point,POINT_STORAGE_WORDS>(points,a),
+            b,load_packed_point<D::Point,POINT_STORAGE_WORDS>(points,b),
+            c,load_packed_point<D::Point,POINT_STORAGE_WORDS>(points,c))
+        if seed.valid {
+            triangle_store<TRIANGLE_STORAGE_WORDS>(triangles,triangle_count,seed)
+            triangle_count=triangle_count+1
+        } else {
+            location_failures=1
+            invariant_failures=1
         }
     }
-    triangle_store<TRIANGLE_STORAGE_WORDS>(triangles, 0, seed)
-    let mut triangle_count: u32 = 1
-    let mut inserted: u32 = 3
-    let mut location_failures: u32 = 0
-    let mut invariant_failures: u32 = 0
+    // Seed, boundary, and interior failures share the same checked receipt.
+    // A partial seed is never advertised as an inserted corner set.
+    let mut inserted = if invariant_failures == 0 {corners} else {0}
 
     // Insert each non-corner boundary seed into its unique current hull edge.
     let mut point_id: u32 = 0
     while point_id < boundary && location_failures == 0 && invariant_failures == 0 {
-        if point_id != corner_a && point_id != corner_b && point_id != corner_c {
-            let point = point_load<POINT_STORAGE_WORDS>(points, point_id)
+        let mut is_corner=false
+        let mut corner:u32=0
+        while corner<corners {
+            is_corner=is_corner || point_id==domain.corner(key,corner)
+            corner=corner+1
+        }
+        if !is_corner {
+            let point = load_packed_point<D::Point,POINT_STORAGE_WORDS>(points, point_id)
             let mut found: u32 = 0
             let mut found_face: u32 = 0
             let mut found_split = invalid_triangle_pair()
@@ -2122,9 +2235,9 @@ where { POINT_STORAGE_WORDS % POINT_WORDS == 0 }, { TRIANGLE_STORAGE_WORDS % TRI
             while face < triangle_count {
                 let triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, face)
                 if triangle.valid
-                    && classify_resident_point<POINT_STORAGE_WORDS>(points, triangle, point)
+                    && classify_packed_point<D::Point,POINT_STORAGE_WORDS>(points, triangle, point)
                         == POINT_ON_EDGE {
-                    let split = split_resident_triangle_edge<POINT_STORAGE_WORDS>(
+                    let split = split_packed_triangle_edge<D::Point,POINT_STORAGE_WORDS>(
                         points,
                         triangle,
                         point_id,
@@ -2163,7 +2276,7 @@ where { POINT_STORAGE_WORDS % POINT_WORDS == 0 }, { TRIANGLE_STORAGE_WORDS % TRI
         && !overflowed
         && location_failures == 0
         && invariant_failures == 0 {
-        let point = point_load<POINT_STORAGE_WORDS>(points, point_id)
+        let point = load_packed_point<D::Point,POINT_STORAGE_WORDS>(points, point_id)
         let mut strict_hits: u32 = 0
         let mut strict_face: u32 = 0
         let mut edge_hits: u32 = 0
@@ -2174,7 +2287,7 @@ where { POINT_STORAGE_WORDS % POINT_WORDS == 0 }, { TRIANGLE_STORAGE_WORDS % TRI
         while face < triangle_count {
             let triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, face)
             if triangle.valid {
-                let classification = classify_resident_point<POINT_STORAGE_WORDS>(
+                let classification = classify_packed_point<D::Point,POINT_STORAGE_WORDS>(
                     points,
                     triangle,
                     point,
@@ -2208,9 +2321,9 @@ where { POINT_STORAGE_WORDS % POINT_WORDS == 0 }, { TRIANGLE_STORAGE_WORDS % TRI
                 let triangle = triangle_load<TRIANGLE_STORAGE_WORDS>(triangles, strict_face)
                 let split = split_triangle_interior(
                     triangle,
-                    triangle_point<POINT_STORAGE_WORDS>(points, triangle, 0),
-                    triangle_point<POINT_STORAGE_WORDS>(points, triangle, 1),
-                    triangle_point<POINT_STORAGE_WORDS>(points, triangle, 2),
+                    packed_triangle_point<D::Point,POINT_STORAGE_WORDS>(points, triangle, 0),
+                    packed_triangle_point<D::Point,POINT_STORAGE_WORDS>(points, triangle, 1),
+                    packed_triangle_point<D::Point,POINT_STORAGE_WORDS>(points, triangle, 2),
                     point_id,
                     point,
                 )
@@ -2240,13 +2353,13 @@ where { POINT_STORAGE_WORDS % POINT_WORDS == 0 }, { TRIANGLE_STORAGE_WORDS % TRI
                     triangles,
                     second_edge_face,
                 )
-                let first_split = split_resident_triangle_edge<POINT_STORAGE_WORDS>(
+                let first_split = split_packed_triangle_edge<D::Point,POINT_STORAGE_WORDS>(
                     points,
                     first_triangle,
                     point_id,
                     point,
                 )
-                let second_split = split_resident_triangle_edge<POINT_STORAGE_WORDS>(
+                let second_split = split_packed_triangle_edge<D::Point,POINT_STORAGE_WORDS>(
                     points,
                     second_triangle,
                     point_id,
@@ -2314,7 +2427,7 @@ where { POINT_STORAGE_WORDS % POINT_WORDS == 0 }, { TRIANGLE_STORAGE_WORDS % TRI
 }
 
 fn flippable_pair_with_policy<P: InteriorEdgeFlipPolicy, const POINT_STORAGE_WORDS: usize>(
-    _ key: AtlasKey,
+    _ key: P::Key,
     _ policy: P,
     _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
     _ first_triangle: Triangle,
@@ -2331,10 +2444,10 @@ fn flippable_pair_with_policy<P: InteriorEdgeFlipPolicy, const POINT_STORAGE_WOR
     }
     let first_opposite_id = triangle_edge_opposite(first_triangle, first_edge)
     let second_opposite_id = triangle_edge_opposite(second_triangle, second_edge)
-    let u = point_load<POINT_STORAGE_WORDS>(points, first.first)
-    let v = point_load<POINT_STORAGE_WORDS>(points, first.second)
-    let first_opposite = point_load<POINT_STORAGE_WORDS>(points, first_opposite_id)
-    let second_opposite = point_load<POINT_STORAGE_WORDS>(points, second_opposite_id)
+    let u = load_packed_point<P::Point,POINT_STORAGE_WORDS>(points, first.first)
+    let v = load_packed_point<P::Point,POINT_STORAGE_WORDS>(points, first.second)
+    let first_opposite = load_packed_point<P::Point,POINT_STORAGE_WORDS>(points, first_opposite_id)
+    let second_opposite = load_packed_point<P::Point,POINT_STORAGE_WORDS>(points, second_opposite_id)
     let decision = policy
         .decision(
             first.first,
@@ -2410,13 +2523,13 @@ fn half_edge_local(_ slot: u32) -> u32 {
 /// vertex's local degree while preserving the original exact match count.
 /// One scalar invocation owns both resources, so initialization is
 /// deterministic and requires no atomics.
-fn initialize_resident_twins<
+fn initialize_resident_twins<K: ConstrainedBoundary,
     const POINT_STORAGE_WORDS: usize,
     const TRIANGLE_STORAGE_WORDS: usize,
     const TWIN_STORAGE_WORDS: usize,
     const EDGE_INDEX_STORAGE_WORDS: usize,
 >(
-    _ key: AtlasKey,
+    _ key: K,
     _ resident_triangles: u32,
     _ triangles: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
     _ twins: StorageBuffer<u32, TWIN_STORAGE_WORDS>,
@@ -2581,11 +2694,11 @@ fn resident_face_pair_slot(_ first_face: u32, _ second_face: u32, _ index: u32) 
 /// normalized triangle winding changes their local slots. The candidate set
 /// is therefore bounded by the six rewritten slots plus their six former
 /// twins. A full resident scan would be semantically redundant.
-fn reconnect_resident_face_pair<
+fn reconnect_resident_face_pair<K: ConstrainedBoundary,
     const TRIANGLE_STORAGE_WORDS: usize,
     const TWIN_STORAGE_WORDS: usize,
 >(
-    _ key: AtlasKey,
+    _ key: K,
     _ first_face: u32,
     _ second_face: u32,
     _ resident_triangles: u32,
@@ -2737,7 +2850,7 @@ fn refresh_resident_edge_proposal<
     const TWIN_STORAGE_WORDS: usize,
     const PROPOSAL_STORAGE_WORDS: usize,
 >(
-    _ key: AtlasKey,
+    _ key: P::Key,
     _ policy: P,
     _ resident_triangles: u32,
     _ points: StorageBuffer<u32, POINT_STORAGE_WORDS>,
@@ -2795,7 +2908,7 @@ fn refresh_resident_face_proposals<
     const TWIN_STORAGE_WORDS: usize,
     const PROPOSAL_STORAGE_WORDS: usize,
 >(
-    _ key: AtlasKey,
+    _ key: P::Key,
     _ policy: P,
     _ face: u32,
     _ resident_triangles: u32,
@@ -2855,7 +2968,7 @@ pub fn restore_indexed_constrained_delaunay_with_policy<
     const PROPOSAL_STORAGE_WORDS: usize,
     const FLIP_LIMIT: usize,
 >(
-    _ key: AtlasKey,
+    _ key: P::Key,
     _ policy: P,
     _ source_valid: bool,
     _ resident_points: u32,
@@ -2892,10 +3005,10 @@ where
             || triangle.first == triangle.third
             || triangle.second == triangle.third {
             invariant_failures = invariant_failures + 1
-        } else if orientation(
-                point_load<POINT_STORAGE_WORDS>(points, triangle.first),
-                point_load<POINT_STORAGE_WORDS>(points, triangle.second),
-                point_load<POINT_STORAGE_WORDS>(points, triangle.third),
+        } else if quilting_atlas::planar::orientation(
+                load_packed_point<P::Point,POINT_STORAGE_WORDS>(points, triangle.first).coordinates(),
+                load_packed_point<P::Point,POINT_STORAGE_WORDS>(points, triangle.second).coordinates(),
+                load_packed_point<P::Point,POINT_STORAGE_WORDS>(points, triangle.third).coordinates(),
             )
             <= 0 {
             invariant_failures = invariant_failures + 1
@@ -2903,7 +3016,7 @@ where
         face = face + 1
     }
     if invariant_failures == 0 {
-        invariant_failures = invariant_failures + initialize_resident_twins<
+        invariant_failures = invariant_failures + initialize_resident_twins<P::Key,
             POINT_STORAGE_WORDS,
             TRIANGLE_STORAGE_WORDS,
             TWIN_STORAGE_WORDS,
@@ -3028,7 +3141,7 @@ where
                 disconnect_resident_face<TWIN_STORAGE_WORDS>(best_second_face, twins)
                 triangle_store<TRIANGLE_STORAGE_WORDS>(triangles, best_first_face, best_pair.first)
                 triangle_store<TRIANGLE_STORAGE_WORDS>(triangles, best_second_face, best_pair.second)
-                invariant_failures = invariant_failures + reconnect_resident_face_pair<
+                invariant_failures = invariant_failures + reconnect_resident_face_pair<P::Key,
                     TRIANGLE_STORAGE_WORDS,
                     TWIN_STORAGE_WORDS,
                 >(
@@ -3123,7 +3236,7 @@ pub fn restore_constrained_delaunay_with_policy<
     const TRIANGLE_STORAGE_WORDS: usize,
     const FLIP_LIMIT: usize,
 >(
-    _ key: AtlasKey,
+    _ key: P::Key,
     _ policy: P,
     _ source_valid: bool,
     _ resident_points: u32,
@@ -3151,10 +3264,10 @@ where { POINT_STORAGE_WORDS % POINT_WORDS == 0 }, { TRIANGLE_STORAGE_WORDS % TRI
             || triangle.first == triangle.third
             || triangle.second == triangle.third {
             invariant_failures = invariant_failures + 1
-        } else if orientation(
-                point_load<POINT_STORAGE_WORDS>(points, triangle.first),
-                point_load<POINT_STORAGE_WORDS>(points, triangle.second),
-                point_load<POINT_STORAGE_WORDS>(points, triangle.third),
+        } else if quilting_atlas::planar::orientation(
+                load_packed_point<P::Point,POINT_STORAGE_WORDS>(points, triangle.first).coordinates(),
+                load_packed_point<P::Point,POINT_STORAGE_WORDS>(points, triangle.second).coordinates(),
+                load_packed_point<P::Point,POINT_STORAGE_WORDS>(points, triangle.third).coordinates(),
             )
             <= 0 {
             invariant_failures = invariant_failures + 1

@@ -4,10 +4,11 @@
 //! itself be symmetric. Priorities, radius conversion, and independent-set
 //! state transitions come from the common sampler. Square provider integration
 //! is separate; this module does not yet realize a completed sample set.
-use core::marker::Copy
 use super::quad::{QuadAtlasKey, boundary_seed}
 use super::planar::{FixedPoint2, IntegerPlaneMetric, SquareMetric}
 use super::sampling::{
+    Candidate,
+    SampleSetKey,
     BARYCENTRIC_SCALE,
     CANDIDATE_GRID_MULTIPLIER,
     CANDIDATE_TRIALS_PER_CELL,
@@ -17,14 +18,11 @@ use super::sampling::{
     radius_squared_from_exponent_q8,
 }
 
-pub struct QuadInteriorCandidate {
-    pub point: FixedPoint2,
-    pub radius_squared: u32,
-    pub priority: u32,
-    pub slot: u32,
-    pub valid: bool,
+pub type QuadInteriorCandidate = Candidate<FixedPoint2>
+impl SampleSetKey for QuadAtlasKey {
+    fn candidate_slots(self) -> u32 { candidate_slot_count(self) }
+    fn boundary_points(self) -> u32 { self.boundary_count() }
 }
-impl Copy for QuadInteriorCandidate {}
 
 pub const fn point_valid(_ p: FixedPoint2) -> bool {
     p.x <= BARYCENTRIC_SCALE && p.y <= BARYCENTRIC_SCALE

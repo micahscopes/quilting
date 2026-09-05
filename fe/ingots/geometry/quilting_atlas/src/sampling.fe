@@ -37,14 +37,26 @@ pub struct BoundarySeed {
 }
 impl Copy for BoundarySeed {}
 
-pub struct InteriorCandidate {
-    pub point: FixedBarycentric,
+pub struct Candidate<P: Copy> {
+    pub point: P,
     pub radius_squared: u32,
     pub priority: u32,
     pub slot: u32,
     pub valid: bool,
 }
-impl Copy for InteriorCandidate {}
+impl<P: Copy> Copy for Candidate<P> {}
+pub type InteriorCandidate = Candidate<FixedBarycentric>
+
+/// Work and boundary cardinalities, independent of the point coordinates.
+/// This lets triangle and quad jobs share one immutable MIS schedule.
+pub trait SampleSetKey: Copy {
+    fn candidate_slots(self) -> u32
+    fn boundary_points(self) -> u32
+}
+impl SampleSetKey for AtlasKey {
+    fn candidate_slots(self) -> u32 { candidate_slot_count(self) }
+    fn boundary_points(self) -> u32 { boundary_vertices(self) }
+}
 
 pub struct CandidateCell {
     pub cell_b: u32,

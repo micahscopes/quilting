@@ -77,8 +77,10 @@ Additional release Wasm gates:
   an independent counter-hash implementation, and selected boundary queries
   against wide-integer square distances.
 
-Quad point-set selection, topology provider, generated atlas, and renderer
-integration are not finished. The warp explorer's square grid is only a visualization
-fixture, not a generated blue-noise/Delaunay quad atlas. Later surface warping
+The shared GPU provider now realizes bounded quad point selection, convex
+insertion, and square-metric Delaunay repair. The quad generator integration
+gate records four independently checked Chromium jobs through LoD 3 in
+`fe/web/quad-atlas`. A complete generated 0–8 atlas and scalable job scheduling
+are **not finished**. Later surface warping
 must share one canonical edge map and sample sequence between adjacent patches;
 independent approximate arc-length inversions do not establish crack freedom.
