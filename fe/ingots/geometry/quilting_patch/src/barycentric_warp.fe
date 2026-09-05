@@ -3,6 +3,8 @@
 
 use core::marker::Copy
 use quilting_domain::{Bary3F, bary3f}
+use super::{LinearElement, ProjectiveAlgebra, QuadraticTrianglePatch,
+    QuadraticTriangularProjectiveControls}
 
 /// Positive homogeneous weights at the three parameter-triangle corners.
 /// On an edge only its two endpoint weights matter: neighbors can share those
@@ -12,6 +14,27 @@ pub struct ProjectiveTriangleMap { pub weights: Bary3F }
 impl Copy for ProjectiveTriangleMap {}
 
 impl ProjectiveTriangleMap {
+    /// Pull back a homogeneous degree-two Bernstein field. Its evaluation at
+    /// b equals D(b)^2 times the original field evaluated at map(b).
+    pub fn quadratic_field<T: LinearElement>(self, _ field: QuadraticTrianglePatch<T>) -> QuadraticTrianglePatch<T> {
+        let w = self.weights
+        QuadraticTrianglePatch<T> {
+            aa: field.aa.scaled(w.a*w.a), ab: field.ab.scaled(w.a*w.b),
+            bb: field.bb.scaled(w.b*w.b), ac: field.ac.scaled(w.a*w.c),
+            bc: field.bc.scaled(w.b*w.c), cc: field.cc.scaled(w.c*w.c),
+        }
+    }
+
+    /// Exact projective reparameterization, not a fit. Both fields receive the
+    /// same D^2 factor, which cancels in their right quotient because real
+    /// scalar multiplication is central. Numerical conditioning may still change.
+    pub fn quadratic_patch<A: ProjectiveAlgebra>(self, _ controls: QuadraticTriangularProjectiveControls<A>) -> QuadraticTriangularProjectiveControls<A> {
+        QuadraticTriangularProjectiveControls<A> {
+            numerator: self.quadratic_field<A::Numerator>(controls.numerator),
+            denominator: self.quadratic_field<A::Weight>(controls.denominator),
+        }
+    }
+
     pub fn map(self, _ point: Bary3F) -> Bary3F {
         if self.weights.a == self.weights.b && self.weights.b == self.weights.c { return point }
         if point.a == 0.0 && self.weights.b == self.weights.c { return point }

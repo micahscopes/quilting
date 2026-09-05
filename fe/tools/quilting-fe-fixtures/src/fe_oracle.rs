@@ -158,6 +158,41 @@ fn assert_close(actual: f32, expected: f32, tolerance: f32, context: &str) {
 }
 
 #[test]
+fn projective_control_pullback_wasm_matches_exact_surface_and_normals() {
+    let (mut store,instance) = instantiate();
+    let evaluate = function::<(f32,f32,f32,u32),f32>(&mut store,&instance,"reparameterized_patch_lane");
+    for strength in [0.0625_f32,0.25,1.0,4.0,16.0] {
+        for i in 1..16 { for j in 1..16-i {
+            let b = i as f32/16.0;
+            let c = j as f32/16.0;
+            let denominator = 1.0 + (f64::from(strength)-1.0)*f64::from(c);
+            let wb = f64::from(b)/denominator;
+            let wc = f64::from(c)*f64::from(strength)/denominator;
+            let u = wb + f64::from(0.43_f32)*wc;
+            let v = f64::from(0.58_f32)*wc;
+            let (expected,_) = crate::clifford_oracle::paper_sample(u,v);
+            for lane in 0..3 {
+                let actual = evaluate.call(&mut store,(b,c,strength,lane as u32)).unwrap();
+                assert_close(actual,expected[lane] as f32,0.00003*(1.0+expected[lane].abs()) as f32,"control pullback vs direct analytic evaluation");
+            }
+            let h = 1.0e-6;
+            let (pu,_) = crate::clifford_oracle::paper_sample(u+h,v);
+            let (mu,_) = crate::clifford_oracle::paper_sample(u-h,v);
+            let (pv,_) = crate::clifford_oracle::paper_sample(u,v+h);
+            let (mv,_) = crate::clifford_oracle::paper_sample(u,v-h);
+            let du: [f64;3] = std::array::from_fn(|k| pu[k]-mu[k]);
+            let dv: [f64;3] = std::array::from_fn(|k| pv[k]-mv[k]);
+            let cross = [du[1]*dv[2]-du[2]*dv[1],du[2]*dv[0]-du[0]*dv[2],du[0]*dv[1]-du[1]*dv[0]];
+            let length = cross.iter().map(|x| x*x).sum::<f64>().sqrt();
+            for lane in 0..3 {
+                let actual = evaluate.call(&mut store,(b,c,strength,(lane+3) as u32)).unwrap();
+                assert_close(actual,(cross[lane]/length) as f32,0.0005,"pullback analytic normal vs independent f64 finite difference");
+            }
+        }}
+    }
+}
+
+#[test]
 fn radial_atlas_fan_wasm_preserves_seams_and_triangle_orientation() {
     let (mut store, instance) = instantiate();
     let warp = function::<(f32,f32,f32,f32,u32),f32>(&mut store,&instance,"radial_warp_lane");

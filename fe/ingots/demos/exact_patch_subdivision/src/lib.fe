@@ -11,6 +11,7 @@ use core::marker::Copy
 use fmath::{clamp, min, max, smoothstep, wrap_pi}
 use quilting_clifford_bezier::{
     IsotropicBilinearPatch,
+    IsotropicCliffordAlgebra,
     IsotropicPolicy,
     control,
     even,
@@ -50,6 +51,7 @@ use quilting_oklch::{
     to_display_rgb,
 }
 use quilting_patch::{BilinearCornerScales, TriangleDomain2, measure_tangent_triangle3}
+use quilting_patch::barycentric_warp::ProjectiveTriangleMap
 use std::web::view::{
     ApplyParamBindings,
     ChoiceOptions,
@@ -96,6 +98,7 @@ struct PatchSubdivisionParams {
     center_goal: Param,
     center_u: Param,
     center_v: Param,
+    fan_concentration: Param,
     split_threshold: Param,
     mesh_lod: Param,
     show_triangles: Param,
@@ -121,6 +124,7 @@ struct PatchSubdivisionState {
     center_goal: f32,
     center_u: f32,
     center_v: f32,
+    fan_concentration: f32,
     split_threshold: f32,
     mesh_lod: f32,
     show_triangles: f32,
@@ -171,6 +175,7 @@ const fn patch_subdivision_params() -> PatchSubdivisionParams {
         ),
         center_u: Param::range(min: 0.001, max: 0.999, init: 0.5),
         center_v: Param::range(min: 0.001, max: 0.999, init: 0.5),
+        fan_concentration: Param::log(min: 0.0625, max: 16.0, init: 1.0),
         split_threshold: Param::unit(init: 0.32),
         mesh_lod: Param::int(min: 0.0, max: 5.0, init: 3.0),
         show_triangles: Param::toggle(init: true),
@@ -197,6 +202,7 @@ fn state(
     _ center_goal: f32,
     _ center_u: f32,
     _ center_v: f32,
+    _ fan_concentration: f32,
     _ split_threshold: f32,
     _ mesh_lod: f32,
     _ show_triangles: f32,
@@ -221,6 +227,7 @@ fn state(
         center_goal: center_goal,
         center_u: center_u,
         center_v: center_v,
+        fan_concentration: fan_concentration,
         split_threshold: split_threshold,
         mesh_lod: mesh_lod,
         show_triangles: show_triangles,
@@ -740,6 +747,7 @@ actor ExactPatchSubdivision uses (
     center_goal: f32,
     center_u: f32,
     center_v: f32,
+    fan_concentration: f32,
     split_threshold: f32,
     mesh_lod: f32,
     show_triangles: f32,
@@ -775,6 +783,7 @@ actor ExactPatchSubdivision uses (
             self.center_goal,
             self.center_u,
             self.center_v,
+            self.fan_concentration,
             self.split_threshold,
             self.mesh_lod,
             self.show_triangles,
@@ -833,6 +842,7 @@ actor ExactPatchSubdivision uses (
             self.center_goal,
             self.center_u,
             self.center_v,
+            self.fan_concentration,
             self.split_threshold,
             self.mesh_lod,
             self.show_triangles,
@@ -860,7 +870,12 @@ actor ExactPatchSubdivision uses (
             return invalid_surface_vertex()
         }
         let domain = displayed_domain(patch_index, current)
-        let controls = triangular_projective_controls(patch_value(current), domain)
+        let original = triangular_projective_controls(patch_value(current), domain)
+        // Each four-fan child has its shared interior point in lane C. The
+        // common radial rule leaves outer edges fixed and keeps seams paired.
+        let concentration = if active_patch_count(current) == 4 { current.fan_concentration } else { 1.0 }
+        let controls = ProjectiveTriangleMap { weights: bary3f(1.0,1.0,concentration) }
+            .quadratic_patch<IsotropicCliffordAlgebra>(original)
         let bary = patch_barycentric(patch_vertex, side)
         let differential = evaluate_triangular_projective_differential(
             controls, bary, policy(), 0.000000000001,
@@ -943,6 +958,7 @@ actor ExactPatchSubdivision uses (
             self.center_goal,
             self.center_u,
             self.center_v,
+            self.fan_concentration,
             self.split_threshold,
             self.mesh_lod,
             self.show_triangles,
@@ -1007,6 +1023,7 @@ actor ExactPatchSubdivision uses (
             self.center_goal,
             self.center_u,
             self.center_v,
+            self.fan_concentration,
             self.split_threshold,
             self.mesh_lod,
             self.show_triangles,

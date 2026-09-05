@@ -13,6 +13,28 @@ bilinear numerator and weight fields to these triangles gives quadratic
 triangular fields. Their quotient evaluates the same original patch. The
 center changes the partition and display mesh, not the underlying surface.
 
+**Fan concentration** now redistributes samples toward that shared center
+(values above one) or toward the outer boundary (below one). It is independent
+of the shape-weight controls and uses the same value on all four children.
+Outer samples remain fixed and shared radial samples remain paired. It only
+applies when four pieces are displayed; the no-subdivision comparison ignores
+it. The center search currently scores the unwarped child regions, not this
+new sampling distribution.
+
+The coordinate map is absorbed exactly into the quadratic numerator and
+denominator controls: each corner/edge coefficient is multiplied by the
+corresponding product of two barycentric weights. Both fields gain the same
+scalar denominator-squared factor, which cancels in their quotient. The shared
+Fe operation is generic over `ProjectiveAlgebra` and `LinearElement`; it does
+not hardcode a GA metric. The family-specific evaluator supplies analytic
+positions and normals after the reparameterization.
+
+This viewer still uses its regular dyadic display triangulation, not the
+resident blue-noise atlas used by the standalone Radial Atlas Fan. Connecting
+that atlas/indirect-draw path here remains required. A fixed display LoD retains
+the same triangle count as concentration changes. Valid parameter topology
+does not guarantee an accurate or well-shaped display mesh on the surface.
+
 ## Meaning and limits
 
 | Part | Contract |
@@ -87,6 +109,19 @@ subdivision; it does not by itself resolve a patch singularity or uneven
 screen-space stretch within a large child.
 
 ## Evidence
+
+`projective_control_pullback_wasm_matches_exact_surface_and_normals` checks
+525 interior samples across five concentrations from 1/16 to 16. The production
+Fe reweighted-control evaluator is compared against direct independent f64
+surface evaluation at explicitly warped coordinates; analytic normals are
+compared with independent f64 finite differences. Numerical conditioning can
+still change under homogeneous scaling, especially near singularities.
+
+Browser check (2026-09-04): `fan_concentration=4` reached Fe state and the
+curved four-piece surface rendered with its redistributed mesh in Chrome MCP.
+The corner diagram retained the same center and partition. This build reports
+48,889 bytes of Wasm and 111,052 bytes of WGSL across four shaders. This is an
+interaction/visual check, not evidence that automatic meshing is solved.
 
 `separable_corner_weights_wasm_resolve_symmetrically` executes the shared Fe
 correction in Wasm over 1,296 weight combinations, comparing against an
