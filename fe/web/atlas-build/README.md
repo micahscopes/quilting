@@ -171,6 +171,11 @@ not GPU instruction counts or a measured runtime attribution. Converged
 repair tiles already publish zero-work indirect commands, but the repeated
 commands are still encoded. Raising every tile's repair budget compounds
 that scheduling cost; batching jobs needs investigation alongside shader size.
+`atlasScheduleCensus` in `schedule.verify.mjs` reproduces the static count from
+the compiled manifest and separately reports 1,061,910 indirect commands.
+It rejects tapered graphs rather than guessing their iteration-dependent
+counts. This diagnostic is not imported by the application and supplies no
+production scheduling decisions.
 
 ### Commands
 
