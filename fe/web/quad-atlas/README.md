@@ -8,7 +8,7 @@ Run with the release compiler:
 
 ```sh
 .toolchains/fe/target/release/fe web dev fe/web/quad-atlas/index.html --port 8781
-node --test fe/web/quad-atlas/verify.test.mjs
+node --test fe/web/quad-atlas/*.test.mjs
 ```
 
 Four edge exponents select a square-domain key. D4 canonicalization preserves
@@ -26,8 +26,8 @@ Both triangle and quad GPU selection now query a conservative candidate-cell
 window. Uniform-density jobs visit at most 50 slots per query through LoD 8;
 mixed-density windows can still be large. Triangle and square insertion now
 share parallel, immutable-generation rounds with local child-face relocation.
-Arbitration and face planning still contain global point scans; edge-flip repair
-still executes on one GPU invocation. Neither
+Arbitration and face planning now use per-face atomic claims with bounded
+work per point/face. Edge-flip repair still executes on one GPU invocation. Neither
 the all-keys batch scheduler nor a complete resident quad atlas exists yet.
 The full triangle atlas used by Tessellation Warp is a precomputed artifact,
 not evidence that this live GPU generator already scales to level 8.
@@ -106,3 +106,30 @@ must name a winning proposer that requested them, and winners must own their
 one or two requested faces. The former scan of every face for every winner is
 removed. The new release bundle passes all four independent geometry checks.
 Arbitration, face planning, compaction, and Delaunay repair still need scaling.
+
+## Atomic-claim checkpoint, 2026-09-05
+
+Fe `59d9a1a21` / Sonatina `b24f5bd6` compile the 20-pass bundle
+`fe-render-00742decdf120500.json`. Claims use actual atomic initialization,
+minimum, and observation, with separate dispatches for publication. Reversed
+ID-bit priorities balance insertion along ordered boundaries without moving
+or renumbering samples. Candidate queries stop once their immutable neighbor
+facts decide the result. Source details and limits are in
+`../../ingots/gpu/quilting_atlas_webgpu/PIPELINE.md`.
+
+`claims-browser-snapshots.json` records the four baseline jobs. All pass the
+unchanged independent geometry oracle, and their point buffers and unordered
+final triangle sets match the original baseline. Flip counts may differ
+because insertion priority intentionally changed.
+
+`claims-canonical-browser-snapshots.json` records **all 55 canonical quad keys
+through LoD 3**, at seed 42, captured from the actual running WebGPU pipeline.
+All 1,017 resulting triangles pass boundary, area, incidence, crossing, and
+Delaunay checks. The test independently enumerates the complete D4 key set to
+detect missing or duplicate cases. These JSON files are diagnostic evidence,
+not assets fetched by the page and not a production generation dependency.
+
+The full LoD 0–8 pipeline is still incomplete. Parallel compaction/scans,
+mixed-density indexing, parallel Delaunay repair, bounded full-key batching,
+and startup/memory measurements remain. In particular, a successful small-key
+coverage gate must not be reported as a complete-atlas performance result.

@@ -11,6 +11,8 @@ use quilting_atlas_webgpu::{
     advance_candidate_generation,
     advance_parallel_topology_generation,
     arbitrate_parallel_topology_point_lane,
+    initialize_parallel_topology_claim_lane,
+    claim_parallel_topology_point_lane,
     compact_candidate_points,
     DelaunayRestoration,
     initialize_candidate_lane,
@@ -43,6 +45,7 @@ use std::webgpu::{
     GpuProgram as Program,
     RasterVertex,
     StorageBuffer as Shared,
+    AtomicStorageBuffer,
     TriangleList,
     VertexStage,
     WebGpuBackend,
@@ -143,6 +146,7 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
     triangles_b: Shared<u32, TRIANGLE_WORDS>,
     triangles: Shared<u32, TRIANGLE_WORDS>,
     topology_workspace: Shared<u32, TOPOLOGY_WORKSPACE_WORDS>,
+    face_claims: AtomicStorageBuffer<TRIANGLES>,
     receipt: Shared<u32, 23>,
 
     const fn view() -> Surface<GeneratedParams> {
@@ -265,6 +269,20 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
         )
     }
 
+    fn topology_reset_claims(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Cycle<InsertionRound, Once<WORKGROUPS, 1, 1>, INSERTION_ROUNDS>>)
+    {
+        initialize_parallel_topology_claim_lane<TRIANGLES>(self.face_claims, invocation)
+    }
+
+    fn topology_claim(self, invocation: ComputeInvocation)
+        uses (Kernel<Threads<THREADS, 1, 1>, Cycle<InsertionRound, Once<WORKGROUPS, 1, 1>, INSERTION_ROUNDS>>)
+    {
+        claim_parallel_topology_point_lane<POINTS, TRIANGLES, TOPOLOGY_WORKSPACE_WORDS>(
+            self.topology_workspace, self.face_claims, invocation,
+        )
+    }
+
     fn topology_arbitrate(self, invocation: ComputeInvocation)
         uses (
             Kernel<
@@ -277,7 +295,7 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
             POINTS,
             TRIANGLES,
             TOPOLOGY_WORKSPACE_WORDS,
-        >(self.topology_workspace, invocation)
+        >(self.topology_workspace, self.face_claims, invocation)
     }
 
     fn topology_plan(self, invocation: ComputeInvocation)
@@ -299,6 +317,7 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
             self.triangles_a,
             self.triangles_b,
             self.topology_workspace,
+            self.face_claims,
             invocation,
         )
     }

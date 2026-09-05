@@ -39,10 +39,22 @@ canonical combinations or silently clamp their LoDs.
 - Both domains now share immutable-generation parallel insertion. A pending
   point follows at most six child faces. This relies on split-only insertion:
   edge flips and vertex motion must not occur during that phase.
-- The in-progress triangle and quad sources replace the global arbitration
-  and per-face planning scans with per-face atomic claims. This integration
-  is not yet compiled/browser-verified; the served preview remains the earlier
-  18-pass implementation.
+- Triangle and quad sources replace the global arbitration and per-face
+  planning scans with per-face atomic claims. The first 20-pass quad build
+  exposed a raster compiler bug:
+  access validation rejected an unused compute-only atomic resource before
+  liveness pruning. Sonatina `b24f5bd6` fixes that ordering and is pushed with
+  all 122 shader-backend tests passing. Fe `59d9a1a21` is pushed to mb2 with
+  that pin and a paired-raster regression; all 44 actor tests pass. Its release
+  CLI and 20-pass quad bundle now build. Chromium snapshots for all 55
+  canonical keys through LoD 3 at seed 42 pass the independent geometry
+  oracle. Four baseline jobs also retain identical point sets and final
+  triangle sets. This is not full LoD 8 or whole-atlas startup evidence.
+- Candidate queries now stop once the immutable neighbor facts decide the
+  outcome. Retirement preserves accepted-conflict precedence even for an
+  inconsistent winner mask. The finite decision model and unchanged baseline
+  sampled-point checks pass. This does not replace the missing mixed-density
+  spatial index.
 - Stable compaction and scan placement still need work-efficient parallel
   realizations. Preserve deterministic order and checked capacity overflow.
 - Indexed Delaunay restoration remains serial. Parallel repair needs explicit
@@ -50,7 +62,7 @@ canonical combinations or silently clamp their LoDs.
 - Full-key batching, bounded scratch reuse, atlas publication, and replacement
   of the triangle artifact consumers are not implemented.
 
-## Compiler prerequisite
+## Compiler prerequisite history and gates
 
 At Fe `8b7ff12ce`, `GpuIntrinsic` exposes only storage load/store. The
 `WebGpuAtomics` implementations in `std::webgpu` are declaration-level panic
@@ -90,8 +102,8 @@ provider stubs nor the full atlas pipeline is thereby declared complete.
 Sonatina `69f8c389` completes atomic load/store lowering and preserves unused
 observations in WGSL. All 122 shader-backend regressions, the atomic verifier,
 and the unused-result ADCE regression pass. Fe `08bc4b3dd` is pushed to mb2
-with the corresponding read/store integration. Its two targeted release
-tests and a five-generation Chromium lifecycle gate pass: initialize claims
+with the corresponding read/store integration. All 43 release actor tests
+and a five-generation Chromium lifecycle gate pass: initialize claims
 on GPU, perform 128 updates from 64 invocations, then observe the completed
 counter/minimum from all 64 lanes in a separate pass. `atomic-actor.*` contains
 the actual compiler output, diagnostic runner, and browser receipts. No shader

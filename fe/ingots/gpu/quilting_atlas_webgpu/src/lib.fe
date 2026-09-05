@@ -32,6 +32,8 @@ use quilting_atlas::topology::{
     POINT_ON_VERTEX,
     POINT_STRICTLY_INSIDE,
     DirectedEdge,
+    dyadic_insertion_rank,
+    dyadic_insertion_point,
     FlipDecision,
     FlipProposal,
     Triangle,
@@ -49,7 +51,7 @@ use quilting_atlas::topology::{
     triangle_edge_opposite,
     triangle_edge_second,
 }
-use std::webgpu::{ComputeInvocation, StorageBuffer}
+use std::webgpu::{AtomicStorageBuffer, ComputeInvocation, StorageBuffer}
 use quilting_atlas::planar::PlanarCoordinates
 use quilting_atlas::neighborhood::{CandidateWindow, grid_window}
 pub use quad
@@ -981,45 +983,6 @@ fn topology_proposal_word<const POINT_CAPACITY: usize, const WORKSPACE_WORDS: us
         )
 }
 
-fn topology_proposals_share_face<const POINT_CAPACITY: usize, const WORKSPACE_WORDS: usize>(
-    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
-    _ left: u32,
-    _ right: u32,
-) -> bool {
-    let left_kind = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, left, 0)
-    let right_kind = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, right, 0)
-    let left_valid = left_kind == PROPOSAL_STRICT_FACE || left_kind == PROPOSAL_EDGE
-    let right_valid = right_kind == PROPOSAL_STRICT_FACE || right_kind == PROPOSAL_EDGE
-    let left_first = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, left, 1)
-    let left_second = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, left, 2)
-    let right_first = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, right, 1)
-    let right_second = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, right, 2)
-    let mut shared = false
-    if left_valid && right_valid {
-        if left_first == right_first {
-            shared = true
-        }
-        if right_kind == PROPOSAL_EDGE
-            && right_second != INVALID_VERTEX
-            && left_first == right_second {
-            shared = true
-        }
-        if left_kind == PROPOSAL_EDGE
-            && left_second != INVALID_VERTEX
-            && left_second == right_first {
-            shared = true
-        }
-        if left_kind == PROPOSAL_EDGE
-            && right_kind == PROPOSAL_EDGE
-            && left_second != INVALID_VERTEX
-            && right_second != INVALID_VERTEX
-            && left_second == right_second {
-            shared = true
-        }
-    }
-    shared
-}
-
 fn topology_proposal_owns_face<const POINT_CAPACITY: usize, const WORKSPACE_WORDS: usize>(
     _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
     _ point: u32,
@@ -1225,55 +1188,98 @@ where
     }
 }
 
-/// Select a deterministic face-disjoint subset of the located points.
+/// One immutable proposal's bounded ownership request. The optional second
+/// face belongs to an interior edge and must be won together with the first.
+struct TopologyClaim { first: u32, second: u32, valid: bool }
+impl core::marker::Copy for TopologyClaim {}
+
+fn topology_point_claim<
+    const POINT_CAPACITY: usize,
+    const TRIANGLE_CAPACITY: usize,
+    const WORKSPACE_WORDS: usize,
+>(_ workspace: StorageBuffer<u32, WORKSPACE_WORDS>, _ point: u32) -> TopologyClaim
+where { WORKSPACE_WORDS == POINT_CAPACITY * 7 + TRIANGLE_CAPACITY * 3 + TOPOLOGY_PROGRESS_WORDS }
+{
+    let parity = topology_load_progress<POINT_CAPACITY,TRIANGLE_CAPACITY,WORKSPACE_WORDS>(workspace, 1)
+    let pending = topology_load_point_state<POINT_CAPACITY,WORKSPACE_WORDS>(workspace, parity, point) == POINT_PENDING
+    let kind = topology_proposal_word<POINT_CAPACITY,WORKSPACE_WORDS>(workspace, point, 0)
+    let first = topology_proposal_word<POINT_CAPACITY,WORKSPACE_WORDS>(workspace, point, 1)
+    let second = topology_proposal_word<POINT_CAPACITY,WORKSPACE_WORDS>(workspace, point, 2)
+    let count = topology_load_progress<POINT_CAPACITY,TRIANGLE_CAPACITY,WORKSPACE_WORDS>(workspace, 2)
+    let capacity: u32 = TRIANGLE_CAPACITY.downcast_truncate()
+    let valid_second = if kind == PROPOSAL_STRICT_FACE { second == INVALID_VERTEX }
+        else { second == INVALID_VERTEX || (second < count && second < capacity && second != first) }
+    TopologyClaim {
+        first: first, second: second,
+        valid: pending && (kind == PROPOSAL_STRICT_FACE || kind == PROPOSAL_EDGE)
+            && first < count && first < capacity && valid_second,
+    }
+}
+
+/// A separate dispatch resets the face words before any contenders run.
+pub fn initialize_parallel_topology_claim_lane<const TRIANGLE_CAPACITY: usize>(
+    _ claims: AtomicStorageBuffer<TRIANGLE_CAPACITY>, _ invocation: ComputeInvocation,
+) {
+    let capacity: u32 = TRIANGLE_CAPACITY.downcast_truncate()
+    if invocation.global.x < capacity {
+        claims.atomic_store(index: invocation.global.x, value: INVALID_VERTEX)
+    }
+}
+
+/// At most two relaxed minimum operations per eligible point. The following
+/// arbitration dispatch, not the atomic alone, publishes the completed claims.
+pub fn claim_parallel_topology_point_lane<
+    const POINT_CAPACITY: usize,
+    const TRIANGLE_CAPACITY: usize,
+    const WORKSPACE_WORDS: usize,
+>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ claims: AtomicStorageBuffer<TRIANGLE_CAPACITY>, _ invocation: ComputeInvocation,
+)
+where { WORKSPACE_WORDS == POINT_CAPACITY * 7 + TRIANGLE_CAPACITY * 3 + TOPOLOGY_PROGRESS_WORDS }
+{
+    let point = invocation.global.x
+    let capacity: u32 = POINT_CAPACITY.downcast_truncate()
+    if point < capacity {
+        let claim = topology_point_claim<POINT_CAPACITY,TRIANGLE_CAPACITY,WORKSPACE_WORDS>(workspace, point)
+        if claim.valid {
+            let rank = dyadic_insertion_rank(point)
+            claims.atomic_min(index: claim.first, value: rank)
+            if claim.second != INVALID_VERTEX {
+                claims.atomic_min(index: claim.second, value: rank)
+            }
+        }
+    }
+}
+
+/// Resolve the preceding-conflict rule in dyadic-rank order, with constant work per point.
+/// A half-won edge is never inserted. This is not a maximal independent set.
 pub fn arbitrate_parallel_topology_point_lane<
     const POINT_CAPACITY: usize,
     const TRIANGLE_CAPACITY: usize,
     const WORKSPACE_WORDS: usize,
->(_ workspace: StorageBuffer<u32, WORKSPACE_WORDS>, _ invocation: ComputeInvocation)
+>(
+    _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ claims: AtomicStorageBuffer<TRIANGLE_CAPACITY>, _ invocation: ComputeInvocation,
+)
 where { WORKSPACE_WORDS == POINT_CAPACITY * 7 + TRIANGLE_CAPACITY * 3 + TOPOLOGY_PROGRESS_WORDS }
 {
     let point_id = invocation.global.x
     let point_capacity: u32 = POINT_CAPACITY.downcast_truncate()
     if point_id < point_capacity {
-        let point_parity = topology_load_progress<
-            POINT_CAPACITY,
-            TRIANGLE_CAPACITY,
-            WORKSPACE_WORDS,
-        >(workspace, 1)
-        let point_state = topology_load_point_state<POINT_CAPACITY, WORKSPACE_WORDS>(
-            workspace,
-            point_parity,
-            point_id,
-        )
-        let kind = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, point_id, 0)
-        let eligible = point_state == POINT_PENDING
-            && (kind == PROPOSAL_STRICT_FACE || kind == PROPOSAL_EDGE)
-        let mut preceding_conflict = false
-        let mut other: u32 = 0
-        if eligible {
-            while other < point_id {
-                let other_pending = topology_load_point_state<POINT_CAPACITY, WORKSPACE_WORDS>(
-                        workspace,
-                        point_parity,
-                        other,
-                    )
-                    == POINT_PENDING
-                if other_pending
-                    && topology_proposals_share_face<POINT_CAPACITY, WORKSPACE_WORDS>(
-                        workspace,
-                        point_id,
-                        other,
-                    ) {
-                    preceding_conflict = true
-                }
-                other = other + 1
+        let claim = topology_point_claim<POINT_CAPACITY,TRIANGLE_CAPACITY,WORKSPACE_WORDS>(workspace, point_id)
+        let mut won = false
+        if claim.valid {
+            let rank = dyadic_insertion_rank(point_id)
+            won = claims.atomic_load(index: claim.first) == rank
+            if claim.second != INVALID_VERTEX {
+                won = won && claims.atomic_load(index: claim.second) == rank
             }
         }
         workspace
             .store(
                 index: topology_winner_offset<POINT_CAPACITY>(point_id),
-                value: if eligible && !preceding_conflict {
+                value: if won {
                     1
                 } else {
                     0
@@ -1300,6 +1306,7 @@ pub fn plan_parallel_topology_face_lane<
     _ triangles_a: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
     _ triangles_b: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
     _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ claims: AtomicStorageBuffer<TRIANGLE_CAPACITY>,
     _ invocation: ComputeInvocation,
 )
 where
@@ -1314,7 +1321,7 @@ where
     }
 {
     plan_parallel_topology_face_lane_with_point<FixedBarycentric,POINT_CAPACITY,POINT_STORAGE_WORDS,TRIANGLE_CAPACITY,TRIANGLE_STORAGE_WORDS,WORKSPACE_WORDS>(
-        points,triangles_a,triangles_b,workspace,invocation,
+        points,triangles_a,triangles_b,workspace,claims,invocation,
     )
 }
 
@@ -1330,6 +1337,7 @@ pub fn plan_parallel_topology_face_lane_with_point<
     _ triangles_a: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
     _ triangles_b: StorageBuffer<u32, TRIANGLE_STORAGE_WORDS>,
     _ workspace: StorageBuffer<u32, WORKSPACE_WORDS>,
+    _ claims: AtomicStorageBuffer<TRIANGLE_CAPACITY>,
     _ invocation: ComputeInvocation,
 )
 where
@@ -1395,22 +1403,10 @@ where
     if !triangle.valid { return }
 
     let point_capacity: u32 = POINT_CAPACITY.downcast_truncate()
-    let mut owner: u32 = INVALID_VERTEX
-    let mut owners: u32 = 0
-    let mut point_id: u32 = 0
-    while point_id < point_capacity {
-        if workspace.load(index: topology_winner_offset<POINT_CAPACITY>(point_id)) != 0
-            && topology_proposal_owns_face<POINT_CAPACITY, WORKSPACE_WORDS>(
-                workspace,
-                point_id,
-                face,
-            ) {
-            owner = point_id
-            owners = owners + 1
-        }
-        point_id = point_id + 1
-    }
-    if owners == 0 {
+    let owner = dyadic_insertion_point(claims.atomic_load(index: face))
+    // A point may reserve this face but lose its other face. Preserve the
+    // current face in that case; never publish half an interior-edge split.
+    if owner == INVALID_VERTEX {
         workspace
             .store(
                 index: topology_face_expansion_offset<POINT_CAPACITY, TRIANGLE_CAPACITY>(face),
@@ -1418,11 +1414,21 @@ where
             )
         return
     }
+    if owner >= point_capacity { return }
+    if workspace.load(index: topology_winner_offset<POINT_CAPACITY>(owner)) == 0 {
+        workspace.store(
+            index: topology_face_expansion_offset<POINT_CAPACITY,TRIANGLE_CAPACITY>(face),
+            value: 1,
+        )
+        return
+    }
+    if !topology_proposal_owns_face<POINT_CAPACITY,WORKSPACE_WORDS>(workspace, owner, face) {
+        return
+    }
     workspace.store(
             index: topology_face_owner_offset<POINT_CAPACITY>(face),
             value: owner,
         )
-    if owners != 1 { return }
 
     let kind = topology_proposal_word<POINT_CAPACITY, WORKSPACE_WORDS>(workspace, owner, 0)
     let point = load_packed_point<P,POINT_STORAGE_WORDS>(points, owner)
@@ -2074,7 +2080,10 @@ where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WOR
     let window = if key.candidate_slots()>count {CandidateWindow::all(count)}
         else {policy.neighborhood(key, candidate)}
     let mut query: u32 = 0
-    while query < window.count() {
+    // Either conflict already decides non-membership. The query only reads
+    // this immutable generation, so visiting the remaining neighbors cannot
+    // change the winner or publish any other effect.
+    while query < window.count() && !accepted_conflict && !preceding_pending_conflict {
         let other_slot = window.slot(query)
         if other_slot < count && other_slot != slot {
             let other_state = load_generation_state<CAPACITY, WORDS>(workspace, parity, other_slot)
@@ -2158,7 +2167,9 @@ where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WOR
     let window = if key.candidate_slots()>count {CandidateWindow::all(count)}
         else {policy.neighborhood(key, candidate)}
     let mut query: u32 = 0
-    while query < window.count() {
+    // Preserve candidate_state_after_round's precedence even for an
+    // inconsistent winner mask: a winner must still check accepted conflicts.
+    while query < window.count() && !accepted_conflict && (winner || !winner_conflict) {
         let other_slot = window.slot(query)
         if other_slot < count && other_slot != slot {
             let other_state = load_generation_state<CAPACITY, WORDS>(workspace, parity, other_slot)
