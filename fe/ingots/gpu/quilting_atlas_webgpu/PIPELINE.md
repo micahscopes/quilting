@@ -100,24 +100,27 @@ gate, not proof that the new atlas source has passed its geometry tests.
 
 ### Claim-based insertion phase contract
 
-The replacement for the two global arbitration/planning scans is deliberately
-separate from changing the selected triangulation. Keep the current priority:
-the smallest eligible pending point ID wins every face it requests.
+Ownership uses the preceding-conflict rule: the lowest-priority-word eligible
+point wins every face it requests. The current source now ranks points by
+reversed ID bits rather than by their increasing resident IDs. This changes
+insertion order, not the samples, their coordinates, or their stable numbering.
+The rank is a bijection and its own inverse, so face planning can recover a
+point ID from one atomic claim word without an auxiliary table.
 
 1. After location, initialize one atomic claim per current face to `u32::MAX`.
-2. Each eligible point performs at most two atomic minimum claims: one for a
+2. Each eligible point performs at most two atomic minimum claims of its rank: one for a
    face-interior or boundary-edge insertion, two for an interior-edge insertion.
-3. In a later dispatch, a point wins only if **all** its requested faces name
-   that point. Never publish half of an interior-edge split.
-4. Each face reads its claimant directly. A losing claimant means the face
+3. In a later dispatch, a point wins only if **all** its requested faces hold
+   that rank. Never publish half of an interior-edge split.
+4. Each face decodes its claimant directly. A losing claimant means the face
    remains unchanged; a winning claimant must pass the existing exact split
    and ownership checks before its expansion is accepted.
 5. Scan expansions, rebuild the immutable next generation, retire winners,
    and advance. Existing location/invariant failures still prevent publication.
 
-This matches the current preceding-conflict rule, not a maximal independent
+This retains the preceding-conflict rule under the new order, not a maximal independent
 set: a point that loses one face can conservatively reserve another for this
-round. Progress still follows because the smallest eligible point wins every
+round. Progress still follows because the lowest-ranked eligible point wins every
 face it names. Keep separate dispatches between initialization, claims,
 winner publication, and face planning. Relaxed atomics alone are not a
 cross-workgroup publication barrier for the other arrays.
@@ -129,9 +132,25 @@ be real supported operations, not ordinary racing stores or hidden host work.
 
 `face-claims.verify.test.mjs` exhaustively compares the ownership rule against
 the preceding-conflict oracle: 14,641 four-point proposal sets, each in all 24
-arrival orders (351,384 schedules). It checks winners, face ownership, progress,
-and rejection of half-won interior edges. This finite-model test is not evidence
-that the atlas currently runs these claim passes on the GPU.
+arrival orders, for both ID order and reversed-bit order. The latter also checks
+decoding stable owners. These finite-model tests are not evidence that the atlas
+currently runs these claim passes on the GPU.
+
+### Ordered boundaries also exposed a round-count bottleneck
+
+The initializer inserts only the polygon corners. All other locked boundary
+samples are pending, in contour order. With increasing-ID priority, the first
+uninserted point on an edge always wins before its later neighbors in the same
+face. Splitting near an endpoint leaves all those neighbors on one remaining
+segment. A 256-segment edge therefore needs at least 255 rounds, already more
+than the old 64-round budget: claims alone do not make LoD 8 viable.
+
+Reversed-bit ranks visit coarse dyadic split points first. The isolated-edge
+model needs exactly `lod` rounds for edges starting at ID zero, and at most
+`lod + 1` across the tested offsets 0–1024, through LoD 8. The test also checks
+rank inversion and the all-ones sentinel. This is not a whole-mesh bound:
+cross-edge/interior face conflicts still require actual convergence receipts
+and geometry checks. Do not replace that gate with this model result.
 
 ### Parallel repair must also own adjacency writes
 

@@ -20,6 +20,64 @@ use super::planar::{
 use super::quad::QuadAtlasKey
 use core::marker::Copy
 
+/// Middle-first priority for ordered boundary samples. Reversing the ID bits
+/// visits dyadic split points before their finer neighbors without reordering
+/// the resident points or changing their coordinates. On an isolated 256-part
+/// edge this changes the insertion chain from 255 rounds to 8.
+///
+/// This is a bijection, so minimum claims need only one atomic u32. All-ones
+/// stays all-ones and remains the empty-claim sentinel. Full mesh convergence
+/// still depends on face conflicts; this is not a bound for arbitrary meshes.
+pub const fn dyadic_insertion_rank(_ point: u32) -> u32 {
+    let a = ((point >> 1) & 0x55555555) | ((point & 0x55555555) << 1)
+    let b = ((a >> 2) & 0x33333333) | ((a & 0x33333333) << 2)
+    let c = ((b >> 4) & 0x0f0f0f0f) | ((b & 0x0f0f0f0f) << 4)
+    let d = ((c >> 8) & 0x00ff00ff) | ((c & 0x00ff00ff) << 8)
+    (d >> 16) | ((d & 0x0000ffff) << 16)
+}
+
+/// Bit reversal is its own inverse; no lookup table or extra claim word is
+/// needed to recover the stable resident point ID from a winning rank.
+pub const fn dyadic_insertion_point(_ rank: u32) -> u32 {
+    dyadic_insertion_rank(rank)
+}
+
+#[test]
+fn dyadic_insertion_rank_matches_bitwise_reference() {
+    let mut point: u32 = 0
+    while point < 1024 {
+        let mut input = point
+        let mut expected: u32 = 0
+        let mut bit: u32 = 0
+        while bit < 32 {
+            expected = (expected << 1) | (input & 1)
+            input = input >> 1
+            bit = bit + 1
+        }
+        assert!(dyadic_insertion_rank(point) == expected)
+        assert!(dyadic_insertion_point(expected) == point)
+        point = point + 1
+    }
+    assert!(dyadic_insertion_rank(0xffffffff) == 0xffffffff)
+    assert!(dyadic_insertion_rank(0x80000000) == 1)
+    assert!(dyadic_insertion_point(dyadic_insertion_rank(0xdeadbeef)) == 0xdeadbeef)
+}
+
+#[test]
+fn dyadic_insertion_rank_selects_edge_midpoints_first() {
+    let mut segments: u32 = 2
+    while segments <= 256 {
+        let middle = segments / 2
+        let rank = dyadic_insertion_rank(middle)
+        let mut point: u32 = 1
+        while point < segments {
+            if point != middle { assert!(rank < dyadic_insertion_rank(point)) }
+            point = point + 1
+        }
+        segments = segments * 2
+    }
+}
+
 fn orientation<P: PlanarCoordinates>(_ a: P, _ b: P, _ c: P) -> i32 {
     planar_orientation(a.coordinates(), b.coordinates(), c.coordinates())
 }
