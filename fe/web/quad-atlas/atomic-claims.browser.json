@@ -1,0 +1,132 @@
+{
+  "scope": "Sonatina atomic prerequisite; not a full-atlas benchmark or Fe end-to-end receipt",
+  "date": "2026-09-05",
+  "sonatinaCommit": "98696420726ba00e2a1b098837fc33eb71f2a26a",
+  "regression": "atomic_object_rmw_preserves_helper_identity_and_emits_portable_atomics",
+  "entryPoint": "main",
+  "wgsl": "@group(0) @binding(0) \nvar<storage, read_write> claims: array<atomic<u32>>;\n\nfn claim_one(a1_: u32) -> u32 {\n    let _e6 = atomicAdd((&claims[i32(0u)]), 1u);\n    let _e10 = atomicMin((&claims[i32(1u)]), a1_);\n    return _e10;\n}\n\n@compute @workgroup_size(64, 1, 1) \nfn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {\n    let _e3 = claim_one(global_invocation_id.x);\n    let _e4 = claim_one(_e3);\n}\n",
+  "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+  "shaderBytes": 420,
+  "receipts": [
+    {
+      "workgroups": 1,
+      "invocations": 64,
+      "updates": 128,
+      "initialCount": 0,
+      "actual": [
+        128,
+        0,
+        305419896,
+        2596069104
+      ]
+    },
+    {
+      "workgroups": 1,
+      "invocations": 64,
+      "updates": 128,
+      "initialCount": 4294967280,
+      "actual": [
+        112,
+        0,
+        305419896,
+        2596069104
+      ]
+    },
+    {
+      "workgroups": 2,
+      "invocations": 128,
+      "updates": 256,
+      "initialCount": 0,
+      "actual": [
+        256,
+        0,
+        305419896,
+        2596069104
+      ]
+    },
+    {
+      "workgroups": 2,
+      "invocations": 128,
+      "updates": 256,
+      "initialCount": 4294967280,
+      "actual": [
+        240,
+        0,
+        305419896,
+        2596069104
+      ]
+    },
+    {
+      "workgroups": 16,
+      "invocations": 1024,
+      "updates": 2048,
+      "initialCount": 0,
+      "actual": [
+        2048,
+        0,
+        305419896,
+        2596069104
+      ]
+    },
+    {
+      "workgroups": 16,
+      "invocations": 1024,
+      "updates": 2048,
+      "initialCount": 4294967280,
+      "actual": [
+        2032,
+        0,
+        305419896,
+        2596069104
+      ]
+    },
+    {
+      "workgroups": 64,
+      "invocations": 4096,
+      "updates": 8192,
+      "initialCount": 0,
+      "actual": [
+        8192,
+        0,
+        305419896,
+        2596069104
+      ]
+    },
+    {
+      "workgroups": 64,
+      "invocations": 4096,
+      "updates": 8192,
+      "initialCount": 4294967280,
+      "actual": [
+        8176,
+        0,
+        305419896,
+        2596069104
+      ]
+    },
+    {
+      "workgroups": 255,
+      "invocations": 16320,
+      "updates": 32640,
+      "initialCount": 0,
+      "actual": [
+        32640,
+        0,
+        305419896,
+        2596069104
+      ]
+    },
+    {
+      "workgroups": 255,
+      "invocations": 16320,
+      "updates": 32640,
+      "initialCount": 4294967280,
+      "actual": [
+        32624,
+        0,
+        305419896,
+        2596069104
+      ]
+    }
+  ]
+}

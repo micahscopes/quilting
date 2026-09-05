@@ -72,6 +72,46 @@ Regression gates must include competing claims, exact resource identity through
 helpers, rejection on plain or read-only storage, and no lost operations under
 optimization. Do not publish declaration-only panic bodies as implemented APIs.
 
+Sonatina `98696420` now implements atomic-u32 add and unsigned minimum through
+effectful object instructions and Naga, including helper calls. The 120 shader
+backend regressions, verifier, and unused-result optimizer gates pass. The
+actual emitted 420-byte shader passed ten Chromium contention cases up to
+16,320 invocations, including counter wraparound. The reproducible diagnostic
+and saved receipts are in `fe/web/quad-atlas/atomic-claims.*`.
+This is a compiler prerequisite, **not** an atlas performance measurement.
+Fe resource-family integration is still being checked. Atomic load/store and
+the claim-based atlas passes remain pending; neither the older core atomic
+provider stubs nor the full atlas pipeline is thereby declared complete.
+
+### Claim-based insertion phase contract
+
+The replacement for the two global arbitration/planning scans is deliberately
+separate from changing the selected triangulation. Keep the current priority:
+the smallest eligible pending point ID wins every face it requests.
+
+1. After location, initialize one atomic claim per current face to `u32::MAX`.
+2. Each eligible point performs at most two atomic minimum claims: one for a
+   face-interior or boundary-edge insertion, two for an interior-edge insertion.
+3. In a later dispatch, a point wins only if **all** its requested faces name
+   that point. Never publish half of an interior-edge split.
+4. Each face reads its claimant directly. A losing claimant means the face
+   remains unchanged; a winning claimant must pass the existing exact split
+   and ownership checks before its expansion is accepted.
+5. Scan expansions, rebuild the immutable next generation, retire winners,
+   and advance. Existing location/invariant failures still prevent publication.
+
+This matches the current preceding-conflict rule, not a maximal independent
+set: a point that loses one face can conservatively reserve another for this
+round. Progress still follows because the smallest eligible point wins every
+face it names. Keep separate dispatches between initialization, claims,
+winner publication, and face planning. Relaxed atomics alone are not a
+cross-workgroup publication barrier for the other arrays.
+
+Claim/planning work becomes O(points + faces), excluding the separate scan and
+rebuild. Atomic contention and required round count still need measurements;
+this work bound is not a throughput guarantee. Atomic read/initialization must
+be real supported operations, not ordinary racing stores or hidden host work.
+
 ## Algorithm references and adaptation boundaries
 
 [gCDT, section 5](https://min-tang.github.io/gCDT/files/gcdt.pdf) separates
