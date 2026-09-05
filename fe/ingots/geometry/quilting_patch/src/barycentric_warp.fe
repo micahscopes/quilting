@@ -1,0 +1,62 @@
+//! Sampling maps, independent of the surface evaluated at their result.
+//! A map changes sampling density; it does not alter patch controls.
+
+use core::marker::Copy
+use quilting_domain::{Bary3F, bary3f}
+
+/// Positive homogeneous weights at the three parameter-triangle corners.
+/// On an edge only its two endpoint weights matter: neighbors can share those
+/// weights (up to common scale) and reverse orientation without changing the
+/// geometric sampling. This is not an arbitrary independently authored edge map.
+pub struct ProjectiveTriangleMap { pub weights: Bary3F }
+impl Copy for ProjectiveTriangleMap {}
+
+impl ProjectiveTriangleMap {
+    pub fn map(self, _ point: Bary3F) -> Bary3F {
+        if self.weights.a == self.weights.b && self.weights.b == self.weights.c { return point }
+        if point.a == 0.0 && self.weights.b == self.weights.c { return point }
+        if point.b == 0.0 && self.weights.a == self.weights.c { return point }
+        if point.c == 0.0 && self.weights.a == self.weights.b { return point }
+        let a = point.a * self.weights.a
+        let b = point.b * self.weights.b
+        let c = point.c * self.weights.c
+        let sum = (a + b) + c
+        bary3f(a/sum,b/sum,c/sum)
+    }
+}
+
+/// Projective radial map in child coordinates (interior point, outer B, outer C).
+/// Requires a positive finite weight and simplex coordinates. A positive
+/// denominator preserves lines and orientation, including straight mesh edges.
+/// Unlike a generic smooth warp, straight triangles remain a triangulation.
+pub struct RadialTriangleMap { pub focus_weight: f32 }
+impl Copy for RadialTriangleMap {}
+
+impl RadialTriangleMap {
+    pub fn map(self, _ point: Bary3F) -> Bary3F {
+        ProjectiveTriangleMap { weights: bary3f(self.focus_weight,1.0,1.0) }.map(point)
+    }
+
+    /// Parameter area ratio, not surface area or a screen-space LoD estimate.
+    pub fn area_scale(self, _ point: Bary3F) -> f32 {
+        let denominator = self.focus_weight * point.a + (point.b + point.c)
+        self.focus_weight / (denominator * denominator * denominator)
+    }
+}
+
+/// Three positively oriented children around an interior root barycentric point.
+/// Child i touches outer edge i (opposite root corner i). Every child uses
+/// its first barycentric lane for the shared interior point.
+pub struct TriangleFan3 { pub interior: Bary3F }
+impl Copy for TriangleFan3 {}
+
+impl TriangleFan3 {
+    pub fn map(self, _ child: u32, _ local: Bary3F) -> Bary3F {
+        let a = local.a * self.interior.a
+        let b = local.a * self.interior.b
+        let c = local.a * self.interior.c
+        if child == 0 { bary3f(a, b + local.b, c + local.c) }
+        else if child == 1 { bary3f(a + local.c, b, c + local.b) }
+        else { bary3f(a + local.b, b + local.c, c) }
+    }
+}

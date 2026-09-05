@@ -158,6 +158,80 @@ fn assert_close(actual: f32, expected: f32, tolerance: f32, context: &str) {
 }
 
 #[test]
+fn radial_atlas_fan_wasm_preserves_seams_and_triangle_orientation() {
+    let (mut store, instance) = instantiate();
+    let warp = function::<(f32,f32,f32,f32,u32),f32>(&mut store,&instance,"radial_warp_lane");
+    let fan = function::<(f32,f32,f32,f32,f32,f32,f32,u32,u32),f32>(
+        &mut store,&instance,"radial_fan_lane");
+    let strengths = [0.0625_f32,0.25,1.0,4.0,16.0];
+    let projective = function::<(f32,f32,f32,f32,f32,f32,u32),f32>(
+        &mut store,&instance,"projective_triangle_lane");
+    // Two triangles may have unrelated opposite vertices/weights. Their edge
+    // sampling depends only on the shared endpoints, even in reversed order.
+    for wb in [0.25_f32,1.0,4.0] { for wc in [0.25_f32,1.0,4.0] {
+        for step in 0..=256 {
+            let t = step as f32/256.0;
+            let left_b = projective.call(&mut store,(0.0,t,1.0-t,16.0,wb,wc,1)).unwrap();
+            let left_c = projective.call(&mut store,(0.0,t,1.0-t,16.0,wb,wc,2)).unwrap();
+            let right_b = projective.call(&mut store,(1.0-t,t,0.0,wc,wb,0.0625,1)).unwrap();
+            let right_c = projective.call(&mut store,(1.0-t,t,0.0,wc,wb,0.0625,0)).unwrap();
+            assert_eq!(left_b.to_bits(),right_b.to_bits(),"shared outer edge endpoint B");
+            assert_eq!(left_c.to_bits(),right_c.to_bits(),"shared outer edge endpoint C");
+        }
+    }}
+    for strength in strengths {
+        for step in 0..=256 {
+            let t = step as f32 / 256.0;
+            let outer = [0.0,t,1.0-t];
+            for lane in 0..3 {
+                let value = warp.call(&mut store,(outer[0],outer[1],outer[2],strength,lane)).unwrap();
+                assert_eq!(value.to_bits(),outer[lane as usize].to_bits(),"outer boundary unchanged");
+            }
+            // Both incident children evaluate the same radial edge, with its
+            // outer endpoint in different local lanes. Require bitwise equality.
+            for focus in [[0.2_f32,0.3,0.5],[0.001,0.009,0.99]] {
+                for child in 0..3_u32 { for lane in 0..3_u32 {
+                    let left = fan.call(&mut store,(t,0.0,1.0-t,strength,focus[0],focus[1],focus[2],child,lane)).unwrap();
+                    let right = fan.call(&mut store,(t,1.0-t,0.0,strength,focus[0],focus[1],focus[2],(child+1)%3,lane)).unwrap();
+                    assert_eq!(left.to_bits(),right.to_bits(),"shared radial edge");
+                }}
+            }
+        }
+    }
+
+    let artifact = crate::decode(include_bytes!("../../../fixtures/classic-quilting/v1/direct-seed42-matrix.cqa")).unwrap();
+    let signed_area = |p: [[f32;3];3]| {
+        let [a,b,c] = p.map(|v| v.map(f64::from));
+        (b[1]-a[1])*(c[2]-a[2])-(b[2]-a[2])*(c[1]-a[1])
+    };
+    for permutation in S3_PERMUTATIONS { for strength in strengths {
+        let mapped: Vec<[f32;3]> = artifact.vertices.iter().map(|vertex| {
+            let p = permutation.map(|i| vertex.barycentric[i]);
+            let result = std::array::from_fn(|lane| warp.call(&mut store,(p[0],p[1],p[2],strength,lane as u32)).unwrap());
+            assert!(result.iter().all(|v| *v >= 0.0 && v.is_finite()));
+            assert!((result.iter().sum::<f32>()-1.0).abs()<3.0e-7);
+            for lane in 0..3 {
+                let inverse = warp.call(&mut store,(result[0],result[1],result[2],1.0/strength,lane as u32)).unwrap();
+                assert_close(inverse,p[lane],3.0e-7,"inverse radial map");
+            }
+            result
+        }).collect();
+        for patch in &artifact.patches {
+            let mut covered = 0.0_f64;
+            for triangle in &artifact.triangles[patch.first_triangle as usize..(patch.first_triangle+patch.triangle_count) as usize] {
+                let original = triangle.indices.map(|i| permutation.map(|lane| artifact.vertices[i as usize].barycentric[lane]));
+                let result = triangle.indices.map(|i| mapped[i as usize]);
+                let before = signed_area(original);
+                let after = signed_area(result);
+                assert!(before*after>0.0,"radial map preserves orientation, including odd permutations");
+                covered += after.abs();
+            }
+            assert!((covered-1.0).abs()<2.0e-6,"fixed outer triangle is covered once: {covered}");
+        }
+    }}
+}
+
+#[test]
 fn separable_corner_weights_wasm_resolve_symmetrically() {
     let (mut store, instance) = instantiate();
     let resolve = function::<(f32, f32, f32, f32, i32), f32>(

@@ -19,6 +19,7 @@ members = [
   { path = "ingots/demos/classic_quilting_generated", name = "classic_quilting_generated" },
   { path = "ingots/demos/clifford_patch_lab", name = "clifford_patch_lab" },
   { path = "ingots/demos/exact_patch_subdivision", name = "exact_patch_subdivision" },
+  { path = "ingots/demos/radial_atlas_fan", name = "radial_atlas_fan" },
   { path = "ingots/demos/clifford_weight_locus", name = "clifford_weight_locus" },
   { path = "ingots/demos/twist_topology_lab", name = "twist_topology_lab" },
 ]
@@ -40,6 +41,7 @@ default-members = [
   "ingots/demos/classic_quilting_generated",
   "ingots/demos/clifford_patch_lab",
   "ingots/demos/exact_patch_subdivision",
+  "ingots/demos/radial_atlas_fan",
   "ingots/demos/clifford_weight_locus",
   "ingots/demos/twist_topology_lab",
 ]

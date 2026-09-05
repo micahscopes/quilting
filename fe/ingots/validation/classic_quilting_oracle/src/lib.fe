@@ -38,6 +38,7 @@ use quilting_domain::{
     vec3f,
 }
 use quilting_patch::{BilinearCornerScales, DenotationSample, Euclidean3Points, denote, measure_tangent_triangle3}
+use quilting_patch::barycentric_warp::{ProjectiveTriangleMap, RadialTriangleMap, TriangleFan3}
 use quilting_quaternion::{QuatF, inverse_bounded, multiply, quatf, zero}
 use quilting_qb::{
     QbPolicy,
@@ -49,6 +50,27 @@ use quilting_qb::{
     patch,
     permutation_parity,
     remap_barycentric,
+}
+
+pub fn projective_triangle_lane(
+    _ a: f32, _ b: f32, _ c: f32, _ wa: f32, _ wb: f32, _ wc: f32, _ lane: u32,
+) -> f32 {
+    let result = ProjectiveTriangleMap { weights: bary3f(wa,wb,wc) }.map(bary3f(a,b,c))
+    if lane == 0 { result.a } else if lane == 1 { result.b } else { result.c }
+}
+
+pub fn radial_fan_lane(
+    _ a: f32, _ b: f32, _ c: f32, _ strength: f32,
+    _ focus_a: f32, _ focus_b: f32, _ focus_c: f32, _ child: u32, _ lane: u32,
+) -> f32 {
+    let local = RadialTriangleMap { focus_weight: strength }.map(bary3f(a,b,c))
+    let result = TriangleFan3 { interior: bary3f(focus_a,focus_b,focus_c) }.map(child,local)
+    if lane == 0 { result.a } else if lane == 1 { result.b } else { result.c }
+}
+
+pub fn radial_warp_lane(_ a: f32, _ b: f32, _ c: f32, _ strength: f32, _ lane: u32) -> f32 {
+    let result = RadialTriangleMap { focus_weight: strength }.map(bary3f(a,b,c))
+    if lane == 0 { result.a } else if lane == 1 { result.b } else { result.c }
 }
 
 pub fn resolved_corner_scale(

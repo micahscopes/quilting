@@ -1,0 +1,201 @@
+//! Three ordinary atlas tiles, with shared radial sampling toward an interior point.
+//! No resampling, triangulation, or GPU readback occurs during interaction.
+
+use core::marker::Copy
+use classic_quilting_lod::{FixtureBuffer, fixture_barycentric, fixture_triangle_index,
+    patch_first_triangle, patch_triangle_count}
+use fmath::{abs, clamp, min, max, smoothstep}
+use quilting_atlas::{AtlasKey, canonical_key_ordinal, canonicalize, edge_permutation_index, lod_as_f32}
+use quilting_domain::{Bary3F, Vec2F, bary3f, bary_to_cartesian, cartesian_to_bary, length2, vec2f}
+use quilting_patch::barycentric_warp::{ProjectiveTriangleMap, TriangleFan3}
+use quilting_qb::remap_barycentric
+use quilting_oklch::{display_rgb, mix_display_rgb, oklch, pack_rgba8, to_display_rgb}
+use std::web::view::{ApplyParamBindings, Extent, Param, ParamBindingsProvider,
+    Surface, SurfaceEvent, SurfaceState}
+use std::webgpu::{ClipPosition, ComputeInvocation, ComputeSurface, Depth24LessEqualMsaa4,
+    DrawIndirectBuffer, FixedDispatch, FragmentStage, FragmentSurface, GpuProgram,
+    IndirectTriangleList, LatestPerFrame, RasterConfiguration, RasterPlan, RasterVertex,
+    ResponsiveBacking, StandardSurfaceRecovery, SurfaceQuality, SurfaceRecovery,
+    SurfaceScheduling, SurfaceTransition, VertexStage, WebGpuBackend, Workgroup, raster_plan}
+
+struct FanParams {
+    outer_a: Param, outer_b: Param, outer_c: Param, interior_lod: Param,
+    concentration: Param, endpoint_a: Param, endpoint_b: Param, endpoint_c: Param,
+    interior_b: Param, interior_c: Param,
+    wire_px: Param, res_x: Param, res_y: Param, dragging: Param,
+}
+struct FanState {
+    outer_a: f32, outer_b: f32, outer_c: f32, interior_lod: f32,
+    concentration: f32, endpoint_a: f32, endpoint_b: f32, endpoint_c: f32,
+    interior_b: f32, interior_c: f32,
+    wire_px: f32, res_x: f32, res_y: f32, dragging: f32,
+}
+impl Copy for FanState {}
+impl SurfaceState for FanState { type Params = FanParams }
+derive ApplyParamBindings for FanState using ParamBindingsProvider
+
+const fn params() -> FanParams {
+    FanParams {
+        outer_a: Param::int(min: 0.0, max: 8.0, init: 3.0),
+        outer_b: Param::int(min: 0.0, max: 8.0, init: 3.0),
+        outer_c: Param::int(min: 0.0, max: 8.0, init: 3.0),
+        interior_lod: Param::int(min: 0.0, max: 8.0, init: 4.0),
+        concentration: Param::log(min: 0.0625, max: 16.0, init: 1.0),
+        endpoint_a: Param::log(min: 0.25, max: 4.0, init: 1.0),
+        endpoint_b: Param::log(min: 0.25, max: 4.0, init: 1.0),
+        endpoint_c: Param::log(min: 0.25, max: 4.0, init: 1.0),
+        // Positive ratios to root corner A cover strictly interior positions.
+        interior_b: Param::log(min: 0.01, max: 100.0, init: 1.0),
+        interior_c: Param::log(min: 0.01, max: 100.0, init: 1.0),
+        wire_px: Param::range(min: 0.0, max: 1.5, init: 0.4),
+        res_x: Param::extent_x(), res_y: Param::extent_y(), dragging: Param::fixed(0.0),
+    }
+}
+
+fn level(_ value: f32) -> u32 {
+    let mut result: u32 = 0
+    while result < 8 && value >= lod_as_f32(result) + 0.5 { result = result + 1 }
+    result
+}
+
+fn interior(_ b: f32, _ c: f32) -> Bary3F {
+    let denominator = 1.0 + b + c
+    bary3f(1.0 / denominator, b / denominator, c / denominator)
+}
+
+fn key(_ child: u32, _ a: f32, _ b: f32, _ c: f32, _ inner: f32) -> AtlasKey {
+    let outer = if child == 0 { a } else if child == 1 { b } else { c }
+    AtlasKey { a: level(outer), b: level(inner), c: level(inner) }
+}
+
+fn count(_ fixture: FixtureBuffer, _ requested: AtlasKey) -> u32 {
+    patch_triangle_count(fixture, canonical_key_ordinal(canonicalize(requested).key))
+}
+
+fn warped_point(
+    _ fixture: FixtureBuffer, _ requested: AtlasKey, _ triangle: u32, _ corner: u32,
+    _ child: u32, _ focus: Bary3F, _ concentration: f32, _ endpoint_weights: Bary3F,
+) -> Bary3F {
+    let canonical = canonicalize(requested)
+    let source = patch_first_triangle(fixture, canonical_key_ordinal(canonical.key)) + triangle
+    let point = fixture_barycentric(fixture, fixture_triangle_index(fixture, source, corner))
+    let local = remap_barycentric(edge_permutation_index(canonical.permutation), point)
+    let weights = if child == 0 { bary3f(concentration,endpoint_weights.b,endpoint_weights.c) }
+        else if child == 1 { bary3f(concentration,endpoint_weights.c,endpoint_weights.a) }
+        else { bary3f(concentration,endpoint_weights.a,endpoint_weights.b) }
+    TriangleFan3 { interior: focus }.map(child,ProjectiveTriangleMap { weights: weights }.map(local))
+}
+
+fn clip_xy(_ point: Bary3F, _ width: f32, _ height: f32) -> Vec2F {
+    let position = bary_to_cartesian(point)
+    vec2f(position.x * 0.85 * min(1.0, height / width),
+        position.y * 0.85 * min(1.0, width / height))
+}
+
+fn screen(_ point: Bary3F, _ width: f32, _ height: f32) -> Vec2F {
+    let p = clip_xy(point, width, height)
+    vec2f(p.x * width * 0.5, p.y * height * 0.5)
+}
+
+fn altitude(_ a: Vec2F, _ b: Vec2F, _ c: Vec2F, _ corner: u32) -> f32 {
+    let area = abs((b.x-a.x)*(c.y-a.y) - (b.y-a.y)*(c.x-a.x))
+    let edge = if corner == 0 { vec2f(c.x-b.x,c.y-b.y) }
+        else if corner == 1 { vec2f(a.x-c.x,a.y-c.y) }
+        else { vec2f(b.x-a.x,b.y-a.y) }
+    area / max(length2(edge), 0.000000000001)
+}
+
+struct FanVarying { edge: Bary3F, root: Bary3F, child: f32 }
+impl Copy for FanVarying {}
+struct FanDraw {}
+
+actor RadialAtlasFan uses (GpuProgram<WebGpuBackend>, SurfaceQuality<ResponsiveBacking>,
+    SurfaceRecovery<StandardSurfaceRecovery>) {
+    outer_a: f32, outer_b: f32, outer_c: f32, interior_lod: f32,
+    concentration: f32, endpoint_a: f32, endpoint_b: f32, endpoint_c: f32,
+    interior_b: f32, interior_c: f32,
+    wire_px: f32, res_x: f32, res_y: f32, dragging: f32,
+    fixture: FixtureBuffer,
+    draw: DrawIndirectBuffer<FanDraw>,
+
+    const fn raster() -> RasterPlan uses (RasterConfiguration) { raster_plan<Depth24LessEqualMsaa4>() }
+    const fn view() -> Surface<FanParams> { Surface { extent: Extent::square(768), params: params() } }
+
+    fn navigate(self, event: own SurfaceEvent) -> FanState
+        uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>) {
+        let mut state = FanState {
+            outer_a: self.outer_a, outer_b: self.outer_b, outer_c: self.outer_c,
+            interior_lod: self.interior_lod, concentration: self.concentration,
+            endpoint_a: self.endpoint_a, endpoint_b: self.endpoint_b, endpoint_c: self.endpoint_c,
+            interior_b: self.interior_b, interior_c: self.interior_c, wire_px: self.wire_px,
+            res_x: self.res_x, res_y: self.res_y, dragging: self.dragging,
+        }.apply_param_bindings(params(), event)
+        if event.is_pointer_down() { state.dragging = 1.0 }
+        if event.is_pointer_down() || (event.is_pointer_move() && state.dragging > 0.5 && event.buttons != 0) {
+            let x = (2.0 * event.pointer_x / event.width - 1.0) / (0.85 * min(1.0,event.height/event.width))
+            let y = (1.0 - 2.0 * event.pointer_y / event.height) / (0.85 * min(1.0,event.width/event.height))
+            let point = cartesian_to_bary(vec2f(x,y))
+            let a = max(point.a, 0.01)
+            state.interior_b = clamp(max(point.b,0.01)/a,0.01,100.0)
+            state.interior_c = clamp(max(point.c,0.01)/a,0.01,100.0)
+        }
+        if event.is_pointer_up() { state.dragging = 0.0 }
+        state
+    }
+
+    fn prepare_draw(self, invocation: ComputeInvocation)
+        uses (ComputeSurface<Workgroup<1,1,1>, FixedDispatch<1,1,1>>) {
+        let mut triangles: u32 = 0
+        let mut child: u32 = 0
+        while child < 3 {
+            triangles = triangles + count(self.fixture, key(child,self.outer_a,self.outer_b,self.outer_c,self.interior_lod))
+            child = child + 1
+        }
+        self.draw.store(index: 0, value: triangles * 3)
+        self.draw.store(index: 1, value: 1)
+        self.draw.store(index: 2, value: 0)
+        self.draw.store(index: 3, value: 0)
+    }
+
+    fn background(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        pack_rgba8(display_rgb(0.025,0.032,0.045))
+    }
+
+    fn fan_vertices(self, vertex_index: u32, instance_index: u32) -> RasterVertex<FanVarying>
+        uses (VertexStage<FanVarying, IndirectTriangleList<DrawIndirectBuffer<FanDraw>>>) {
+        let mut triangle = vertex_index / 3
+        let corner = vertex_index % 3
+        let mut child: u32 = 0
+        while child < 2 {
+            let n = count(self.fixture, key(child,self.outer_a,self.outer_b,self.outer_c,self.interior_lod))
+            if triangle < n { break }
+            triangle = triangle - n
+            child = child + 1
+        }
+        let requested = key(child,self.outer_a,self.outer_b,self.outer_c,self.interior_lod)
+        let focus = interior(self.interior_b,self.interior_c)
+        let endpoints = bary3f(self.endpoint_a,self.endpoint_b,self.endpoint_c)
+        let p0 = warped_point(self.fixture,requested,triangle,0,child,focus,self.concentration,endpoints)
+        let p1 = warped_point(self.fixture,requested,triangle,1,child,focus,self.concentration,endpoints)
+        let p2 = warped_point(self.fixture,requested,triangle,2,child,focus,self.concentration,endpoints)
+        let p = if corner == 0 { p0 } else if corner == 1 { p1 } else { p2 }
+        let xy = clip_xy(p,self.res_x,self.res_y)
+        let h = altitude(screen(p0,self.res_x,self.res_y),screen(p1,self.res_x,self.res_y),screen(p2,self.res_x,self.res_y),corner)
+        let edge = if corner == 0 { bary3f(h,0.0,0.0) }
+            else if corner == 1 { bary3f(0.0,h,0.0) } else { bary3f(0.0,0.0,h) }
+        RasterVertex { position: ClipPosition { x: xy.x, y: xy.y, z: 0.1, w: 1.0 },
+            varying: FanVarying { edge: edge, root: p, child: lod_as_f32(child) } }
+    }
+
+    fn fan_fragment(self, varying: FanVarying) -> i32 uses (FragmentStage<FanVarying>) {
+        let color = to_display_rgb(oklch(0.74,0.085,0.48 + varying.child * 1.9))
+        let distance = min(varying.edge.a,min(varying.edge.b,varying.edge.c))
+        let wire = if self.wire_px <= 0.0 { 0.0 }
+            else { 1.0-smoothstep(self.wire_px-0.65,self.wire_px+0.65,distance) }
+        let focus = screen(interior(self.interior_b,self.interior_c),self.res_x,self.res_y)
+        let here = screen(varying.root,self.res_x,self.res_y)
+        let marker = 1.0-smoothstep(4.0,5.5,length2(vec2f(here.x-focus.x,here.y-focus.y)))
+        let shaded = mix_display_rgb(color,display_rgb(0.025,0.032,0.045),wire * 0.72)
+        pack_rgba8(mix_display_rgb(shaded,to_display_rgb(oklch(0.9,0.13,1.5)),marker))
+    }
+}
