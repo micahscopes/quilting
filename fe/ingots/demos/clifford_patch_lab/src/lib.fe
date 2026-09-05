@@ -384,17 +384,7 @@ impl Copy for ControlPositions {}
 struct CornerWeights { w00: f32, w10: f32, w01: f32, w11: f32 }
 impl Copy for CornerWeights {}
 
-struct CameraFrame {
-    eye: Vec3F,
-    right: Vec3F,
-    up: Vec3F,
-    forward: Vec3F,
-    focal: f32,
-    aspect: f32,
-    near: f32,
-    far: f32,
-}
-impl Copy for CameraFrame {}
+use quilting_demo_view::{CameraFrame,moved_in_camera_plane}
 
 struct Projection { clip: ClipPosition, depth: f32, view_x: f32, view_y: f32 }
 impl Copy for Projection {}
@@ -3218,24 +3208,6 @@ fn handle_clip(
         z: center.z - 0.0005 * center.w,
         w: center.w,
     }
-}
-
-fn moved_in_camera_plane(
-    _ point: Vec3F,
-    _ camera: CameraFrame,
-    _ clip_dx: f32,
-    _ clip_dy: f32,
-) -> Vec3F {
-    let depth = project(camera, point).depth
-    let right_distance = clip_dx * camera.aspect * depth / camera.focal
-    let up_distance = clip_dy * depth / camera.focal
-    add3(
-        point,
-        add3(
-            scale3(camera.right, right_distance),
-            scale3(camera.up, up_distance),
-        ),
-    )
 }
 
 fn moved_in_depth(_ point: Vec3F, _ camera: CameraFrame, _ distance: f32) -> Vec3F {

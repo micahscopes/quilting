@@ -266,10 +266,19 @@ pub fn mix_display_rgb(_ left: DisplayRgb, _ right: DisplayRgb, _ amount: f32) -
 
 /// Pack opaque display sRGB as little-endian RGBA8 in one signed word.
 pub fn pack_rgba8(_ color: DisplayRgb) -> i32 {
+    pack_rgba8_with_alpha(color, 1.0)
+}
+
+/// Pack unassociated display RGB and alpha. This does not premultiply RGB;
+/// select straight-alpha blending, or premultiply explicitly before packing.
+pub fn pack_rgba8_with_alpha(_ color: DisplayRgb, _ alpha: f32) -> i32 {
     let red = __i32_from_f32(clamp01(color.red) * 255.0 + 0.5)
     let green = __i32_from_f32(clamp01(color.green) * 255.0 + 0.5)
     let blue = __i32_from_f32(clamp01(color.blue) * 255.0 + 0.5)
-    red + green * 256 + blue * 65536 + -16777216
+    let a = __i32_from_f32(clamp01(alpha) * 255.0 + 0.5)
+    // Use the signed high byte without overflowing an intermediate i32.
+    let high = if a < 128 { a } else { a - 256 }
+    red + green * 256 + blue * 65536 + high * 16777216
 }
 
 /// The complete safe path for renderers that do not need intermediate RGB.

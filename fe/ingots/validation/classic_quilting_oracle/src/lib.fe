@@ -994,6 +994,10 @@ pub fn cga_reflect_xy_normal_y(
     cga_reflection_xy_frame(px, py, pz, cx, cy, cz, radius).normal.y
 }
 
+pub fn display_rgba_with_alpha(_ red: f32, _ green: f32, _ blue: f32, _ alpha: f32) -> i32 {
+    quilting_oklch::pack_rgba8_with_alpha(quilting_oklch::display_rgb(red, green, blue), alpha)
+}
+
 pub fn cga_reflect_xy_normal_z(
     _ px: f32,
     _ py: f32,

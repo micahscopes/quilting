@@ -3,6 +3,7 @@ name = "clifford_patch_lab"
 version = "0.1.0"
 
 [dependencies]
+quilting_demo_view = true
 core = true
 std = true
 fmath = true

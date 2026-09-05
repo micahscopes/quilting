@@ -1,0 +1,362 @@
+//! Geometric curve handles: one construction, planar and spatial views.
+use core::marker::Copy
+use fmath::{abs, clamp, sqrt, smoothstep, wrap_pi}
+use quilting_domain::{Vec3F, vec3f, add3, scale3, sub3, dot3}
+use quilting_patch::{ProjectiveAlgebra}
+use quilting_patch::arc_authoring::{
+    ArcIntervalChart,
+    ArcConstruction,
+    arc_through,
+    evaluate_arc,
+    arc_interval_regular,
+}
+use quilting_clifford_bezier::{CliffordOdd3F, Clifford3Policy, IsotropicCliffordAlgebra}
+use quilting_clifford_bezier::euclidean::EuclideanCliffordAlgebra
+use quilting_demo_view::{
+    CameraFrame,
+    OrbitCamera,
+    ScreenExtent,
+    orbit_camera,
+    project,
+    moved_in_camera_plane,
+}
+use quilting_oklch::{display_rgb, mix_display_rgb, pack_rgba8, pack_rgba8_with_alpha}
+use std::web::view::{
+    ApplyParamBindings,
+    ChoiceOptions,
+    Extent,
+    Param,
+    ParamBindingsProvider,
+    Surface,
+    SurfaceEvent,
+    SurfaceState,
+}
+use std::webgpu::{
+    ClipPosition,
+    FragmentStage,
+    FragmentSurface,
+    GpuProgram,
+    LatestPerFrame,
+    RasterConfiguration,
+    RasterPlan,
+    RasterVertex,
+    ResponsiveBacking,
+    StandardSurfaceRecovery,
+    SurfaceQuality,
+    SurfaceRecovery,
+    SurfaceScheduling,
+    SurfaceTransition,
+    TriangleList,
+    TriangleStrip,
+    Instanced,
+    VertexStage,
+    WebGpuBackend,
+    raster_plan,
+    RasterState,
+    DepthTest,
+    Depth24Plus,
+    CompareLessEqual,
+    DepthWrite,
+    ClearThenLoadStore,
+    Samples4,
+    CullNone,
+    ColorTarget,
+    OpaqueBlack,
+    StraightAlpha,
+    COLOR_WRITE_ALL,
+}
+type ArcDepth = DepthTest<Depth24Plus, CompareLessEqual, DepthWrite, ClearThenLoadStore>
+type ArcRaster = RasterState<
+    ArcDepth,
+    Samples4,
+    CullNone,
+    ColorTarget<OpaqueBlack<ClearThenLoadStore>, StraightAlpha, COLOR_WRITE_ALL>,
+>
+extern {
+    const fn __f32_from_i32(_: i32) -> f32
+}
+fn number(_ n: u32) -> f32 {
+    __f32_from_i32(n.downcast_unchecked())
+}
+struct Params {
+    dimensions: Param,
+    metric: Param,
+    a_x: Param,
+    a_y: Param,
+    a_z: Param,
+    m_x: Param,
+    m_y: Param,
+    m_z: Param,
+    b_x: Param,
+    b_y: Param,
+    b_z: Param,
+    line_px: Param,
+    horizon: Param,
+    orbit_yaw: Param,
+    orbit_pitch: Param,
+    orbit_distance: Param,
+    res_x: Param,
+    res_y: Param,
+    selected: Param,
+    dragging: Param,
+}
+struct State {
+    dimensions: f32,
+    metric: f32,
+    a_x: f32,
+    a_y: f32,
+    a_z: f32,
+    m_x: f32,
+    m_y: f32,
+    m_z: f32,
+    b_x: f32,
+    b_y: f32,
+    b_z: f32,
+    line_px: f32,
+    horizon: f32,
+    orbit_yaw: f32,
+    orbit_pitch: f32,
+    orbit_distance: f32,
+    res_x: f32,
+    res_y: f32,
+    selected: f32,
+    dragging: f32,
+}
+impl Copy for State {}
+struct ActorState { state: State }
+impl SurfaceState for State {
+    type Params = Params
+}
+derive ApplyParamBindings for State using ParamBindingsProvider
+const fn params() -> Params {
+    Params {
+        dimensions: Param::choice(
+            options: ChoiceOptions::two(first: "2D plane", second: "3D space"),
+            init: 1.0,
+        ),
+        metric: Param::choice(
+            options: ChoiceOptions::two(first: "Euclidean circles", second: "isotropic arcs"),
+            init: 0.0,
+        ),
+        a_x: Param::range(min: -4.0, max: 4.0, init: -1.5),
+        a_y: Param::range(min: -4.0, max: 4.0, init: -0.5),
+        a_z: Param::range(min: -4.0, max: 4.0, init: 0.0),
+        m_x: Param::range(min: -4.0, max: 4.0, init: 0.0),
+        m_y: Param::range(min: -4.0, max: 4.0, init: 1.1),
+        m_z: Param::range(min: -4.0, max: 4.0, init: 0.5),
+        b_x: Param::range(min: -4.0, max: 4.0, init: 1.5),
+        b_y: Param::range(min: -4.0, max: 4.0, init: -0.5),
+        b_z: Param::range(min: -4.0, max: 4.0, init: 0.0),
+        line_px: Param::range(min: 0.5, max: 5.0, init: 2.0),
+        horizon: Param::log(min: 8.0, max: 200.0, init: 40.0),
+        orbit_yaw: Param::range(min: -3.14159, max: 3.14159, init: 0.35),
+        orbit_pitch: Param::range(min: -1.35, max: 1.35, init: 0.15),
+        orbit_distance: Param::log(min: 2.0, max: 20.0, init: 5.8),
+        res_x: Param::extent_x(),
+        res_y: Param::extent_y(),
+        selected: Param::fixed(-1.0),
+        dragging: Param::fixed(0.0),
+    }
+}
+fn point(_ s: State, _ i: u32) -> Vec3F {
+    let p = if i == 0 {
+        vec3f(s.a_x, s.a_y, s.a_z)
+    } else if i == 1 {
+        vec3f(s.m_x, s.m_y, s.m_z)
+    } else {
+        vec3f(s.b_x, s.b_y, s.b_z)
+    }
+    if s.dimensions < 0.5 {
+        vec3f(p.x, p.y, 0.0)
+    } else {
+        p
+    }
+}
+fn camera(_ s: State) -> CameraFrame {
+    orbit_camera(
+        OrbitCamera {
+            target: vec3f(0.0, 0.0, 0.0),
+            yaw: if s.dimensions < 0.5 {
+                0.0
+            } else {
+                s.orbit_yaw
+            },
+            pitch: if s.dimensions < 0.5 {
+                0.0
+            } else {
+                s.orbit_pitch
+            },
+            distance: s.orbit_distance,
+            focal: 1.65,
+            near: 0.025,
+            far: 250.0,
+        },
+        ScreenExtent { width: s.res_x, height: s.res_y },
+    )
+}
+fn set_point(_ s: State, _ i: u32, _ p: Vec3F) -> State {
+    let mut n = s
+    if i == 0 {
+        n.a_x = p.x
+        n.a_y = p.y
+        if s.dimensions > 0.5 {
+            n.a_z = p.z
+        }
+    } else if i == 1 {
+        n.m_x = p.x
+        n.m_y = p.y
+        if s.dimensions > 0.5 {
+            n.m_z = p.z
+        }
+    } else {
+        n.b_x = p.x
+        n.b_y = p.y
+        if s.dimensions > 0.5 {
+            n.b_z = p.z
+        }
+    }
+    n
+}
+struct Segment { a: Vec3F, b: Vec3F, valid: bool }
+fn arc_segment<
+    A: ArcIntervalChart + ProjectiveAlgebra<
+        Point = Vec3F,
+        Quotient = CliffordOdd3F,
+        Policy = Clifford3Policy,
+    >,
+>(_ algebra: A, _ s: State, _ t0: f32, _ t1: f32) -> Segment {
+    let zero = Segment { a: vec3f(0.0, 0.0, 0.0), b: vec3f(0.0, 0.0, 0.0), valid: false }
+    match arc_through(
+        algebra,
+        point(s, 0),
+        point(s, 1),
+        point(s, 2),
+        0.000000000001,
+    ) {
+        ArcConstruction::Degenerate => zero,
+        ArcConstruction::Ready(arc,) => {
+            if !arc_interval_regular(algebra, arc, t0, t1, 0.00000001) {
+                return zero
+            }
+            let policy = Clifford3Policy {
+                minimum_denominator_norm_squared: 0.000000000001,
+                maximum_trivector_residual: 0.00001,
+            }
+            let a = evaluate_arc(algebra, arc, t0, policy)
+            let b = evaluate_arc(algebra, arc, t1, policy)
+            Segment {
+                a: vec3f(a.value.e1, a.value.e2, a.value.e3),
+                b: vec3f(b.value.e1, b.value.e2, b.value.e3),
+                valid: a.defined
+                    && b.defined
+                    && abs(a.value.e123) < policy.maximum_trivector_residual
+                    && abs(b.value.e123) < policy.maximum_trivector_residual,
+            }
+        },
+    }
+}
+pub struct LineVarying { pub fade: f32 }
+impl Copy for LineVarying {}
+pub struct HandleVarying { pub kind: f32, pub selected: f32 }
+impl Copy for HandleVarying {}
+fn ribbon(_ segment: Segment, _ corner: u32, _ s: State) -> RasterVertex<LineVarying> {
+    let frame = camera(s)
+    let a = project(frame, segment.a)
+    let b = project(frame, segment.b)
+    if !segment.valid || a.depth <= frame.near || b.depth <= frame.near {
+        return RasterVertex {
+            position: ClipPosition { x: 2.0, y: 2.0, z: 0.0, w: 1.0 },
+            varying: LineVarying { fade: 0.0 },
+        }
+    }
+    let dx = (b.clip.x / b.clip.w - a.clip.x / a.clip.w) * s.res_x
+    let dy = (b.clip.y / b.clip.w - a.clip.y / a.clip.w) * s.res_y
+    let length = sqrt(dx * dx + dy * dy) + 0.000001
+    let last = corner % 2 == 1
+    let positive = corner >= 2
+    let side = if positive { 1.0 } else { -1.0 }
+    let c = if last { b.clip } else { a.clip }
+    let p = if last { segment.b } else { segment.a }
+    let delta = sub3(p, frame.eye)
+    let fade = 1.0 - smoothstep(s.horizon * 0.4, s.horizon, sqrt(dot3(delta, delta)))
+    let width = s.line_px * 0.5
+    RasterVertex {
+        position: ClipPosition {
+            x: c.x - side * dy / length * width * 2.0 / s.res_x * c.w,
+            y: c.y + side * dx / length * width * 2.0 / s.res_y * c.w,
+            z: c.z,
+            w: c.w,
+        },
+        varying: LineVarying { fade: fade },
+    }
+}
+actor ArcCurveExplorer uses (GpuProgram<WebGpuBackend>,SurfaceQuality<ResponsiveBacking>,SurfaceRecovery<StandardSurfaceRecovery>) {
+    state: State,
+    const fn raster()->RasterPlan uses (RasterConfiguration) {raster_plan<ArcRaster>()}
+    const fn view()->Surface<Params> {Surface {extent:Extent::square(768),params:params()}}
+    fn transition(self,event:SurfaceEvent)->ActorState uses (SurfaceTransition,SurfaceScheduling<LatestPerFrame>) {
+        let mut s=self.state.apply_param_bindings(params(),event)
+        if event.is_pointer_down() {
+            s.selected=-1.0
+            s.dragging=1.0
+            let mut best=225.0
+            let mut i:u32=0
+            while i<3 {
+                let p=project(camera(s),point(s,i))
+                let dx=(p.clip.x/p.clip.w+1.0)*0.5*event.width-event.pointer_x
+                let dy=(1.0-p.clip.y/p.clip.w)*0.5*event.height-event.pointer_y
+                if p.depth>0.0 && dx*dx+dy*dy<best {
+                    best=dx*dx+dy*dy
+                    s.selected=number(i)
+                }
+                i=i+1
+            }
+        }
+        if event.is_pointer_move() && event.buttons!=0 && s.dragging>0.5 {
+            if s.selected>=0.0 {
+                let i=if s.selected<0.5 {0} else if s.selected<1.5 {1} else {2}
+                s=set_point(s,i,moved_in_camera_plane(point(s,i),camera(s),event.delta_x*2.0/event.width,-event.delta_y*2.0/event.height))
+            } else if s.dimensions>0.5 {
+                s.orbit_yaw=wrap_pi(s.orbit_yaw-event.delta_x*0.008)
+                s.orbit_pitch=clamp(s.orbit_pitch-event.delta_y*0.008,-1.35,1.35)
+            }
+        }
+        if event.is_pointer_up() {s.dragging=0.0}
+        if event.wheel_delta!=0.0 {
+            if s.selected>=0.0 && s.dimensions>0.5 {
+                let i=if s.selected<0.5 {0} else if s.selected<1.5 {1} else {2}
+                let direction=if event.wheel_delta<0.0 {-1.0} else {1.0}
+                s=set_point(s,i,add3(point(s,i),scale3(camera(s).forward,direction*s.orbit_distance*0.025)))
+            } else {s.orbit_distance=clamp(s.orbit_distance*if event.wheel_delta<0.0 {0.9} else {1.1},2.0,20.0)}
+        }
+        ActorState {state: s}
+    }
+    fn background(self,x:i32,y:i32)->i32 uses (FragmentSurface) {pack_rgba8(display_rgb(0.055,0.065,0.080))}
+    fn curve_vertices(self,index:u32,segment_index:u32)->RasterVertex<LineVarying>
+        uses (VertexStage<LineVarying,Instanced<TriangleStrip<4>,256>>) {
+        let s=self.state
+        let t0=number(segment_index)/256.0
+        let t1=number(segment_index+1)/256.0
+        let segment=if s.metric<0.5 {arc_segment(EuclideanCliffordAlgebra {},s,t0,t1)} else {arc_segment(IsotropicCliffordAlgebra {},s,t0,t1)}
+        ribbon(segment,index,s)
+    }
+    fn curve_fragment(self,v:LineVarying)->i32 uses (FragmentStage<LineVarying>) {
+        pack_rgba8_with_alpha(display_rgb(0.70,0.86,0.85),v.fade)
+    }
+    fn handle_vertices(self,index:u32)->RasterVertex<HandleVarying> uses (VertexStage<HandleVarying,TriangleList<18>>) {
+        let s=self.state
+        let i=index/6
+        let c=project(camera(s),point(s,i)).clip
+        let corner=index%6
+        let x=if corner==1 || corner==2 || corner==4 {1.0} else {-1.0}
+        let y=if corner==2 || corner==4 || corner==5 {1.0} else {-1.0}
+        let selected=s.selected==number(i)
+        let radius=if selected {8.5} else {6.5}
+        RasterVertex {position:ClipPosition {x:c.x+x*radius*2.0/s.res_x*c.w,y:c.y+y*radius*2.0/s.res_y*c.w,z:0.0,w:c.w},
+            varying:HandleVarying {kind:number(i),selected:if selected {1.0} else {0.0}}}
+    }
+    fn handle_fragment(self,v:HandleVarying)->i32 uses (FragmentStage<HandleVarying>) {
+        let color=if v.kind<0.5 {display_rgb(0.70,0.80,0.96)} else if v.kind<1.5 {display_rgb(0.95,0.65,0.48)} else {display_rgb(0.75,0.64,0.90)}
+        pack_rgba8(mix_display_rgb(color,display_rgb(1.0,0.96,0.87),v.selected*0.3))
+    }
+}
