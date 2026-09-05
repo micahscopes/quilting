@@ -141,6 +141,32 @@ pub const fn canonical_key_count(_ maximum_lod: u32) -> u32 {
 pub const CANONICAL_QUAD_KEY_COUNT: u32 = canonical_key_count(MAX_LOD)
 static_assert(CANONICAL_QUAD_KEY_COUNT == 1035)
 
+/// One bounded step through the canonical key space. The scan position is
+/// separate from a dense job ordinal; providers may keep both in owned state.
+pub struct QuadKeyStep {
+    pub key:QuadAtlasKey,
+    pub next_code:u32,
+    pub valid:bool,
+}
+impl Copy for QuadKeyStep {}
+pub const fn next_canonical_key(_ maximum_lod:u32,_ first_code:u32)->QuadKeyStep {
+    let mut code=first_code
+    if maximum_lod<=MAX_LOD {
+        let n=maximum_lod+1
+        while code<n*n*n*n {
+            let key=QuadAtlasKey {
+                bottom:code/(n*n*n),right:(code/(n*n))%n,top:(code/n)%n,left:code%n,
+            }
+            code=code+1
+            if canonicalize(key).key.code()==key.code() {
+                return QuadKeyStep {key:key,next_code:code,valid:true}
+            }
+        }
+    }
+    QuadKeyStep {key:QuadAtlasKey {bottom:0xffffffff,right:0xffffffff,top:0xffffffff,left:0xffffffff},
+        next_code:code,valid:false}
+}
+
 /// Streaming canonical-job enumeration. The cursor owns its dense ordinal;
 /// callers cannot accidentally confuse a full-key code with an atlas slot.
 /// The same loop can execute at compile time or once per GPU publication.
@@ -165,22 +191,27 @@ impl QuadAtlasJobs {
             key:QuadAtlasKey {bottom:0xffffffff,right:0xffffffff,top:0xffffffff,left:0xffffffff},
             ordinal:0xffffffff,valid:false,
         }
-        if self.maximum_lod > MAX_LOD {return invalid}
-        let n = self.maximum_lod + 1
-        while self.next_code < n*n*n*n {
-            let code = self.next_code
-            self.next_code = code + 1
-            let key = QuadAtlasKey {
-                bottom:code/(n*n*n),right:(code/(n*n))%n,top:(code/n)%n,left:code%n,
-            }
-            if canonicalize(key).key.code() == key.code() {
-                let ordinal = self.next_ordinal
-                self.next_ordinal = ordinal + 1
-                return QuadAtlasJob {key:key,ordinal:ordinal,valid:true}
-            }
+        let step=next_canonical_key(self.maximum_lod,self.next_code)
+        self.next_code=step.next_code
+        if step.valid {
+            let ordinal=self.next_ordinal
+            self.next_ordinal=ordinal+1
+            return QuadAtlasJob {key:step.key,ordinal:ordinal,valid:true}
         }
         invalid
     }
+}
+
+#[test]
+fn canonical_key_steps_fail_closed_without_wrapping() {
+    let first=next_canonical_key(0,0)
+    assert(first.valid && first.key.code()==0 && first.next_code==1)
+    let end=next_canonical_key(0,first.next_code)
+    assert(!end.valid && !end.key.valid() && end.next_code==1)
+    let invalid=next_canonical_key(MAX_LOD+1,0)
+    assert(!invalid.valid && !invalid.key.valid())
+    let large=next_canonical_key(MAX_LOD,0xffffffff)
+    assert(!large.valid && large.next_code==0xffffffff)
 }
 
 #[test]
