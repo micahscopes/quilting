@@ -1,0 +1,70 @@
+//! Placement-neutral packed atlas allocation. Counts are in vertices and
+//! triangles, not bytes; providers derive their physical word layout separately.
+//! A reservation owns space but is not a publication/completion certificate.
+use core::marker::Copy
+
+pub struct TileReservation {
+    pub vertex_offset:u32,
+    pub triangle_offset:u32,
+    pub vertices:u32,
+    pub triangles:u32,
+    pub valid:bool,
+}
+impl Copy for TileReservation {}
+
+pub struct AtlasArena {
+    vertex_capacity:u32,
+    triangle_capacity:u32,
+    vertices_used:u32,
+    triangles_used:u32,
+}
+impl Copy for AtlasArena {}
+impl AtlasArena {
+    pub const fn new(_ vertices:u32,_ triangles:u32)->Self {
+        Self {vertex_capacity:vertices,triangle_capacity:triangles,vertices_used:0,triangles_used:0}
+    }
+    /// Single-writer allocation, shared by CPU and GPU providers. Rejection
+    /// consumes neither arena. Subtraction-before-addition excludes wraparound.
+    pub const fn reserve(mut self,_ vertices:u32,_ triangles:u32)->TileReservation {
+        let valid=vertices<=self.vertex_capacity-self.vertices_used
+            && triangles<=self.triangle_capacity-self.triangles_used
+        let result=TileReservation {
+            vertex_offset:self.vertices_used,triangle_offset:self.triangles_used,
+            vertices:vertices,triangles:triangles,valid:valid,
+        }
+        if valid {
+            self.vertices_used=self.vertices_used+vertices
+            self.triangles_used=self.triangles_used+triangles
+        }
+        result
+    }
+    pub const fn vertices(self)->u32 {self.vertices_used}
+    pub const fn triangles(self)->u32 {self.triangles_used}
+}
+
+#[test]
+fn atlas_reservations_are_disjoint_and_fail_atomically() {
+    let mut arena=AtlasArena::new(100,200)
+    let a=arena.reserve(30,50)
+    let b=arena.reserve(40,60)
+    assert(a.valid && b.valid)
+    assert(a.vertex_offset==0 && a.triangle_offset==0)
+    assert(b.vertex_offset==30 && b.triangle_offset==50)
+    assert(!arena.reserve(31,1).valid)
+    assert(!arena.reserve(1,91).valid)
+    assert(arena.vertices()==70 && arena.triangles()==110)
+    let c=arena.reserve(30,90)
+    assert(c.valid && c.vertex_offset==70 && c.triangle_offset==110)
+    assert(!arena.reserve(1,0).valid && !arena.reserve(0,1).valid)
+}
+
+#[test]
+fn atlas_reservations_do_not_wrap_at_word_limit() {
+    let mut arena=AtlasArena::new(0xffffffff,0xffffffff)
+    assert(arena.reserve(0xfffffffe,0xfffffffe).valid)
+    assert(!arena.reserve(2,1).valid)
+    assert(arena.vertices()==0xfffffffe && arena.triangles()==0xfffffffe)
+    assert(arena.reserve(1,1).valid)
+    assert(!arena.reserve(0xffffffff,0xffffffff).valid)
+    assert(arena.vertices()==0xffffffff && arena.triangles()==0xffffffff)
+}

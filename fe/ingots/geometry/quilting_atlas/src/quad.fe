@@ -141,6 +141,73 @@ pub const fn canonical_key_count(_ maximum_lod: u32) -> u32 {
 pub const CANONICAL_QUAD_KEY_COUNT: u32 = canonical_key_count(MAX_LOD)
 static_assert(CANONICAL_QUAD_KEY_COUNT == 1035)
 
+/// Streaming canonical-job enumeration. The cursor owns its dense ordinal;
+/// callers cannot accidentally confuse a full-key code with an atlas slot.
+/// The same loop can execute at compile time or once per GPU publication.
+pub struct QuadAtlasJobs {
+    maximum_lod: u32,
+    next_code: u32,
+    next_ordinal: u32,
+}
+impl Copy for QuadAtlasJobs {}
+pub struct QuadAtlasJob {
+    pub key: QuadAtlasKey,
+    pub ordinal: u32,
+    pub valid: bool,
+}
+impl Copy for QuadAtlasJob {}
+impl QuadAtlasJobs {
+    pub const fn new(_ maximum_lod: u32) -> Self {
+        Self {maximum_lod:maximum_lod,next_code:0,next_ordinal:0}
+    }
+    pub const fn next(mut self) -> QuadAtlasJob {
+        let invalid = QuadAtlasJob {
+            key:QuadAtlasKey {bottom:0xffffffff,right:0xffffffff,top:0xffffffff,left:0xffffffff},
+            ordinal:0xffffffff,valid:false,
+        }
+        if self.maximum_lod > MAX_LOD {return invalid}
+        let n = self.maximum_lod + 1
+        while self.next_code < n*n*n*n {
+            let code = self.next_code
+            self.next_code = code + 1
+            let key = QuadAtlasKey {
+                bottom:code/(n*n*n),right:(code/(n*n))%n,top:(code/n)%n,left:code%n,
+            }
+            if canonicalize(key).key.code() == key.code() {
+                let ordinal = self.next_ordinal
+                self.next_ordinal = ordinal + 1
+                return QuadAtlasJob {key:key,ordinal:ordinal,valid:true}
+            }
+        }
+        invalid
+    }
+}
+
+#[test]
+fn quad_atlas_jobs_cover_every_canonical_key_through_eight() {
+    let mut maximum:u32=0
+    while maximum<=MAX_LOD {
+        let mut jobs=QuadAtlasJobs::new(maximum)
+        let mut count:u32=0
+        let mut previous:u32=0
+        let mut job=jobs.next()
+        while job.valid {
+            assert(job.ordinal==count)
+            assert(job.key.maximum_lod()<=maximum)
+            assert(canonicalize(job.key).key.code()==job.key.code())
+            assert(count==0 || job.key.code()>previous)
+            previous=job.key.code()
+            count=count+1
+            job=jobs.next()
+        }
+        assert(count==canonical_key_count(maximum))
+        assert(!jobs.next().valid)
+        maximum=maximum+1
+    }
+    let mut invalid=QuadAtlasJobs::new(MAX_LOD+1)
+    assert(!invalid.next().valid)
+}
+
 pub struct QuadBoundarySeed {
     pub point: FixedPoint2,
     pub edge: u32,

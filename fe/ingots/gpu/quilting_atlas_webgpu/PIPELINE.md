@@ -30,6 +30,28 @@ canonical combinations or silently clamp their LoDs.
 
 ## Current state and remaining work
 
+### Full-atlas orchestration foundation
+
+`quilting_atlas::quad::QuadAtlasJobs` streams all canonical quad keys without a
+baked lookup table, with an owned dense ordinal distinct from the full-key code.
+Its optimized Fe test verifies each admitted maximum from 0 through 8 against
+the independent Burnside count, canonicality, strict ordering, and stable
+exhaustion. The full quad count is 1,035; triangular enumeration already covers
+165 S3 keys.
+
+`quilting_atlas::residency::AtlasArena` reserves disjoint packed vertex/triangle
+ranges transactionally. It checks capacity before addition, and a rejected
+reservation changes neither head. Tests cover exact filling, one-arena
+exhaustion, retry after rejection, and u32 limits. This is a reservation, **not**
+proof that a tile has been copied, validated, or published.
+
+Neither foundation is yet wired into a complete GPU atlas build. The next
+integration must keep job identity and generation in device storage, copy only
+certified geometry before scratch reuse, and publish ready records only after
+the copy pass. It must also select bounded job execution/scratch allocation
+without expanding every canonical key into an independent shader program.
+Do not describe the existing 47-stage single-tile preview as this full provider.
+
 ### Candidate hierarchy (preview GPU acceptance passed)
 
 `candidate_index` now provides a placement-neutral bounds/iteration model and
