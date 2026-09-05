@@ -8,6 +8,7 @@ use quilting_atlas::planar::FixedPoint2
 use quilting_atlas::scan::balanced_block_size
 use quilting_atlas_webgpu::compaction::{rank_candidate_block, prefix_candidate_blocks, scatter_candidate_lane}
 use quilting_atlas_webgpu::topology_scan::{rank_topology_block, prefix_topology_blocks, relocate_topology_offset, SUMMARY_WORDS}
+use quilting_atlas_webgpu::repair
 use quilting_atlas_webgpu::{
     propose_candidate_lane_with_policy,
     retire_candidate_lane_with_policy,
@@ -23,7 +24,6 @@ use quilting_atlas_webgpu::{
     advance_parallel_topology_generation,
     publish_parallel_topology_triangle_lane,
     parallel_topology_progress,
-    restore_indexed_constrained_delaunay_with_policy,
     resident_triangle,
     load_packed_point,
 }
@@ -78,7 +78,6 @@ const TRIANGLES: usize = POINTS * 2 - (MAX_KEY.boundary_count() as usize) - 2
 const TRIANGLE_WORDS: usize = TRIANGLES * 4
 const TWINS: usize = TRIANGLES * 3
 const EDGE_INDEX: usize = POINTS + TWINS
-const PROPOSALS: usize = (TWINS + 31) / 32
 const THREADS: usize = 64
 const GROUPS: usize = (CANDIDATES + THREADS - 1) / THREADS
 const COMPACT_TILE: usize = balanced_block_size(CANDIDATE_COUNT) as usize
@@ -91,8 +90,13 @@ const SCAN_TILE: usize = balanced_block_size(CANDIDATE_COUNT*2+MAX_KEY.boundary_
 const SCAN_BLOCKS: usize = (TRIANGLES+SCAN_TILE-1)/SCAN_TILE
 const SCAN_WORDS: usize = SCAN_BLOCKS*SUMMARY_WORDS
 const SCAN_GROUPS: usize = (SCAN_BLOCKS+THREADS-1)/THREADS
+const REPAIR_TILE: usize = balanced_block_size((CANDIDATE_COUNT*2+MAX_KEY.boundary_count()-2)*3) as usize
+const REPAIR_WORDS: usize = ((TWINS+REPAIR_TILE-1)/REPAIR_TILE)*repair::SUMMARY_WORDS
+const REPAIR_GROUPS: usize = (TWINS+THREADS-1)/THREADS
+const REPAIR_BLOCK_GROUPS: usize = (((TWINS+REPAIR_TILE-1)/REPAIR_TILE)+THREADS-1)/THREADS
 pub struct SampleRound {}
 pub struct InsertionRound {}
+pub struct RepairRound {}
 pub struct Draw {}
 pub struct Varying { pub edge: Vec3F }
 impl Copy for Varying {}
@@ -153,7 +157,9 @@ actor QuadAtlasExplorer uses (GpuProgram<WebGpuBackend>) {
     topology:StorageBuffer<u32,TOPOLOGY_WORDS>,
     topology_blocks:StorageBuffer<u32,SCAN_WORDS>,
     face_claims:AtomicStorageBuffer<TRIANGLES>,
-    edge_index:StorageBuffer<u32,EDGE_INDEX>,proposals:StorageBuffer<u32,PROPOSALS>,
+    edge_index:StorageBuffer<u32,EDGE_INDEX>,
+    repair_flags:StorageBuffer<u32,TWINS>,repair_results:StorageBuffer<u32,TWINS>,
+    repair_blocks:StorageBuffer<u32,REPAIR_WORDS>,repair_state:StorageBuffer<u32,8>,
     receipt:StorageBuffer<u32,16>,draw:DrawIndirectBuffer<Draw>,
     const fn view()->Surface<Params> {Surface {extent:Extent::square(768),params:params()}}
     const fn raster()->RasterPlan uses (RasterConfiguration) {raster_plan<Depth24LessEqualMsaa4>()}
@@ -253,7 +259,7 @@ actor QuadAtlasExplorer uses (GpuProgram<WebGpuBackend>) {
             self.triangles_a,self.triangles_b,self.topology,self.triangles,i,
         )
     }
-    fn delaunay(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+    fn delaunay_initialize(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
         let count=parallel_topology_progress<POINTS,TRIANGLES,TOPOLOGY_WORDS>(self.topology,2)
         let pending=parallel_topology_progress<POINTS,TRIANGLES,TOPOLOGY_WORDS>(self.topology,3)
         let locations=parallel_topology_progress<POINTS,TRIANGLES,TOPOLOGY_WORDS>(self.topology,6)
@@ -264,13 +270,49 @@ actor QuadAtlasExplorer uses (GpuProgram<WebGpuBackend>) {
         self.receipt.store(index:7,value:count)
         self.receipt.store(index:8,value:locations)
         self.receipt.store(index:9,value:invariants)
-        let r=restore_indexed_constrained_delaunay_with_policy<QuadInteriorEdgeFlip,
-            POINT_WORDS,TRIANGLE_WORDS,TWINS,EDGE_INDEX,PROPOSALS,4096>(
+        repair::initialize<QuadInteriorEdgeFlip,POINT_WORDS,TRIANGLE_WORDS,TWINS,EDGE_INDEX>(
             canonicalize(request(self.bottom,self.right,self.top,self.left)).key,
-            QuadInteriorEdgeFlip {},self.receipt.load(index:6)!=0,
+            self.receipt.load(index:6)!=0,
             self.receipt.load(index:5),self.receipt.load(index:7),
-            self.points,self.triangles,self.twins,self.edge_index,self.proposals,
+            self.points,self.triangles,self.twins,self.edge_index,self.repair_state,
         )
+    }
+    fn repair_reset(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<RepairRound,FixedDispatch<TOPOLOGY_GROUPS,1,1>,64>>) {
+        repair::reset_claims<TRIANGLES>(self.repair_state,self.face_claims,i)
+    }
+    fn repair_propose(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<RepairRound,FixedDispatch<REPAIR_GROUPS,1,1>,64>>) {
+        repair::propose<QuadInteriorEdgeFlip,POINT_WORDS,TRIANGLE_WORDS,TWINS>(
+            canonicalize(request(self.bottom,self.right,self.top,self.left)).key,QuadInteriorEdgeFlip {},
+            self.points,self.triangles,self.twins,self.repair_flags,self.repair_results,self.repair_state,i)
+    }
+    fn repair_claim(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<RepairRound,FixedDispatch<REPAIR_GROUPS,1,1>,64>>) {
+        repair::claim<TRIANGLES,TWINS>(self.twins,self.repair_flags,self.repair_state,self.face_claims,i)
+    }
+    fn repair_select(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<RepairRound,FixedDispatch<REPAIR_GROUPS,1,1>,64>>) {
+        repair::select<TRIANGLES,TWINS>(self.twins,self.repair_flags,self.repair_results,self.repair_state,self.face_claims,i)
+    }
+    fn repair_apply(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<RepairRound,FixedDispatch<REPAIR_GROUPS,1,1>,64>>) {
+        repair::apply<QuadInteriorEdgeFlip,POINT_WORDS,TRIANGLE_WORDS,TWINS>(
+            canonicalize(request(self.bottom,self.right,self.top,self.left)).key,QuadInteriorEdgeFlip {},
+            self.points,self.triangles,self.twins,self.repair_results,self.repair_state,i)
+    }
+    fn repair_summarize(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,CycledDispatch<RepairRound,FixedDispatch<REPAIR_BLOCK_GROUPS,1,1>,64>>) {
+        repair::summarize<TWINS,REPAIR_TILE,REPAIR_WORDS>(self.repair_flags,self.repair_results,self.repair_state,self.repair_blocks,i)
+    }
+    fn repair_advance(self) uses (ComputeSurface<Workgroup<1,1,1>,CycledDispatch<RepairRound,FixedDispatch<1,1,1>,64>>) {
+        repair::advance<TWINS,REPAIR_TILE,REPAIR_WORDS>(self.repair_state,self.repair_blocks,false)
+    }
+    fn repair_certify(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,FixedDispatch<REPAIR_GROUPS,1,1>>) {
+        repair::propose<QuadInteriorEdgeFlip,POINT_WORDS,TRIANGLE_WORDS,TWINS>(
+            canonicalize(request(self.bottom,self.right,self.top,self.left)).key,QuadInteriorEdgeFlip {},
+            self.points,self.triangles,self.twins,self.repair_flags,self.repair_results,self.repair_state,i)
+    }
+    fn repair_certificate_blocks(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<THREADS,1,1>,FixedDispatch<REPAIR_BLOCK_GROUPS,1,1>>) {
+        repair::summarize<TWINS,REPAIR_TILE,REPAIR_WORDS>(self.repair_flags,self.repair_results,self.repair_state,self.repair_blocks,i)
+    }
+    fn repair_finish(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+        repair::advance<TWINS,REPAIR_TILE,REPAIR_WORDS>(self.repair_state,self.repair_blocks,true)
+        let r=repair::receipt(self.repair_state)
         self.receipt.store(index:10,value:flag(r.valid))
         self.receipt.store(index:11,value:flag(r.converged))
         self.receipt.store(index:12,value:r.flips)

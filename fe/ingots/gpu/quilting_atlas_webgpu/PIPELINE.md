@@ -68,8 +68,15 @@ canonical combinations or silently clamp their LoDs.
   quad pipeline preserves all 56 preceding preview meshes exactly; a separate
   GPU probe checks all workspace words for 46 valid/invalid plans, both point
   generations, tail blocks, and deliberately stale summary storage.
-- Indexed Delaunay restoration remains serial. Parallel repair needs explicit
-  conflict selection, safe adjacency updates, and a convergence certificate.
+- Both domains now use parallel Delaunay repair: immutable proposals, minimum
+  claims over each flip's complete touched neighborhood, winner snapshots,
+  disjoint mutation, and blocked reductions. An observation-only final round
+  certifies the post-mutation mesh, including after budget exhaustion.
+  The one-time vertex-incidence/neighbor-index initializer remains scalar;
+  it is the next serial triangulation component to replace.
+  All 56 quad preview jobs retain the serial reference's points and final
+  triangle sets, with exact reciprocal neighbor links. The triangle consumer
+  also passes a real GPU run and the independent equilateral-metric oracle.
 - Full-key batching, bounded scratch reuse, atlas publication, and replacement
   of the triangle artifact consumers are not implemented.
 
@@ -187,6 +194,25 @@ with a separately reconciled output generation. Packed proposal bitsets also
 need atomic updates or unique word ownership; concurrent ordinary read/modify/
 write on different bits of one word is still a race. Keep the serial exact
 restoration as an oracle while deriving and testing the parallel phase protocol.
+
+`repair.fe` now implements closed-neighborhood ownership: every candidate
+claims its two faces and the faces across their six old directed edges.
+Duplicate requests are harmless. A separate selection dispatch snapshots
+winners before mutation; losing lanes read no mutable topology in the apply
+pass. The existing bounded disconnect/reconnect routines can then be reused
+without concurrent accesses to the same neighboring faces. Proposal/result
+flags are unpacked, with one writer per directed-edge lane; the serial packed
+proposal bitset is not used by the parallel path.
+
+The 34-pass quad build `fe-render-ff07de52cc3cfbfb.json` runs on the portable
+eight-storage-binding limit despite 17 actor resources globally. Across all
+55 canonical preview keys plus an alternate seed, 31 jobs contain multi-flip
+rounds and the maximum is 38 repair rounds. The all-3 key repairs 91 edges;
+its first round applies five flips. These are work/convergence observations,
+not throughput measurements or a bound for larger keys. The diagnostic replay
+with zero/one repair rounds correctly publishes no draw. At 64 allowed rounds
+the final certificate permits the complete mesh. Triangle and quad use the
+same repair implementation with distinct metric policies.
 
 ## Algorithm references and adaptation boundaries
 

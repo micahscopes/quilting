@@ -10,6 +10,7 @@ use quilting_atlas::{AtlasKey, canonical_key_ordinal}
 use quilting_atlas::scan::balanced_block_size
 use quilting_atlas_webgpu::compaction::{rank_candidate_block, prefix_candidate_blocks, scatter_candidate_lane}
 use quilting_atlas_webgpu::topology_scan::{rank_topology_block, prefix_topology_blocks, relocate_topology_offset, SUMMARY_WORDS}
+use quilting_atlas_webgpu::repair
 use quilting_atlas_webgpu::{
     advance_candidate_generation,
     advance_parallel_topology_generation,
@@ -17,6 +18,7 @@ use quilting_atlas_webgpu::{
     initialize_parallel_topology_claim_lane,
     claim_parallel_topology_point_lane,
     AtlasBoundaryPoints,
+    AtlasInteriorEdgeFlip,
     DelaunayRestoration,
     initialize_candidate_lane,
     initialize_parallel_topology_lane,
@@ -28,7 +30,6 @@ use quilting_atlas_webgpu::{
     rebuild_parallel_topology_face_lane,
     resident_point,
     resident_triangle,
-    restore_constrained_delaunay,
     retire_candidate_lane,
     retire_parallel_topology_point_lane,
 }
@@ -80,11 +81,17 @@ const SCAN_WORDS: usize = SCAN_BLOCKS*SUMMARY_WORDS
 const SCAN_GROUPS: usize = (SCAN_BLOCKS+THREADS-1)/THREADS
 const SAMPLING_ROUNDS: usize = 64
 const INSERTION_ROUNDS: usize = 64
-const FLIP_LIMIT: usize = 512
+const TWINS: usize = TRIANGLES*3
+const EDGE_INDEX: usize = POINTS+TWINS
+const REPAIR_TILE: usize = balanced_block_size((CANDIDATE_COUNT*2+quilting_atlas::boundary_vertices(key())-2)*3) as usize
+const REPAIR_WORDS: usize = ((TWINS+REPAIR_TILE-1)/REPAIR_TILE)*repair::SUMMARY_WORDS
+const REPAIR_GROUPS: usize = (TWINS+THREADS-1)/THREADS
+const REPAIR_BLOCK_GROUPS: usize = (((TWINS+REPAIR_TILE-1)/REPAIR_TILE)+THREADS-1)/THREADS
 const SEED: u32 = 0x51c32a97
 
 pub struct SamplingRound {}
 pub struct InsertionRound {}
+pub struct RepairRound {}
 
 pub struct MeshVarying { pub edge: Bary3F, pub normal: Vec3F }
 impl Copy for MeshVarying {}
@@ -162,6 +169,9 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
     topology_workspace: Shared<u32, TOPOLOGY_WORKSPACE_WORDS>,
     topology_blocks: Shared<u32, SCAN_WORDS>,
     face_claims: AtomicStorageBuffer<TRIANGLES>,
+    twins: Shared<u32,TWINS>, edge_index: Shared<u32,EDGE_INDEX>,
+    repair_flags: Shared<u32,TWINS>, repair_results: Shared<u32,TWINS>,
+    repair_blocks: Shared<u32,REPAIR_WORDS>, repair_state: Shared<u32,8>,
     receipt: Shared<u32, 23>,
 
     const fn view() -> Surface<GeneratedParams> {
@@ -467,19 +477,46 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
             && pending == 0
             && locations == 0
             && invariants == 0
-        let restored = restore_constrained_delaunay<
-            POINT_WORDS,
-            TRIANGLE_WORDS,
-            FLIP_LIMIT,
-        >(
-            key(),
-            source_valid,
-            resident_points,
-            resident_triangles,
-            self.points,
-            self.triangles,
-        )
-        store_delaunay_receipt(self.receipt, restored)
+        repair::initialize<AtlasInteriorEdgeFlip,POINT_WORDS,TRIANGLE_WORDS,TWINS,EDGE_INDEX>(
+            key(),source_valid,resident_points,resident_triangles,
+            self.points,self.triangles,self.twins,self.edge_index,self.repair_state)
+    }
+    fn repair_reset(self,i:ComputeInvocation) uses (Kernel<Threads<THREADS,1,1>,Cycle<RepairRound,Once<WORKGROUPS,1,1>,64>>) {
+        repair::reset_claims<TRIANGLES>(self.repair_state,self.face_claims,i)
+    }
+    fn repair_propose(self,i:ComputeInvocation) uses (Kernel<Threads<THREADS,1,1>,Cycle<RepairRound,Once<REPAIR_GROUPS,1,1>,64>>) {
+        repair::propose<AtlasInteriorEdgeFlip,POINT_WORDS,TRIANGLE_WORDS,TWINS>(
+            key(),AtlasInteriorEdgeFlip {},self.points,self.triangles,self.twins,
+            self.repair_flags,self.repair_results,self.repair_state,i)
+    }
+    fn repair_claim(self,i:ComputeInvocation) uses (Kernel<Threads<THREADS,1,1>,Cycle<RepairRound,Once<REPAIR_GROUPS,1,1>,64>>) {
+        repair::claim<TRIANGLES,TWINS>(self.twins,self.repair_flags,self.repair_state,self.face_claims,i)
+    }
+    fn repair_select(self,i:ComputeInvocation) uses (Kernel<Threads<THREADS,1,1>,Cycle<RepairRound,Once<REPAIR_GROUPS,1,1>,64>>) {
+        repair::select<TRIANGLES,TWINS>(self.twins,self.repair_flags,self.repair_results,self.repair_state,self.face_claims,i)
+    }
+    fn repair_apply(self,i:ComputeInvocation) uses (Kernel<Threads<THREADS,1,1>,Cycle<RepairRound,Once<REPAIR_GROUPS,1,1>,64>>) {
+        repair::apply<AtlasInteriorEdgeFlip,POINT_WORDS,TRIANGLE_WORDS,TWINS>(
+            key(),AtlasInteriorEdgeFlip {},self.points,self.triangles,self.twins,
+            self.repair_results,self.repair_state,i)
+    }
+    fn repair_summarize(self,i:ComputeInvocation) uses (Kernel<Threads<THREADS,1,1>,Cycle<RepairRound,Once<REPAIR_BLOCK_GROUPS,1,1>,64>>) {
+        repair::summarize<TWINS,REPAIR_TILE,REPAIR_WORDS>(self.repair_flags,self.repair_results,self.repair_state,self.repair_blocks,i)
+    }
+    fn repair_advance(self) uses (Kernel<Threads<1,1,1>,Cycle<RepairRound,Once<1,1,1>,64>>) {
+        repair::advance<TWINS,REPAIR_TILE,REPAIR_WORDS>(self.repair_state,self.repair_blocks,false)
+    }
+    fn repair_certify(self,i:ComputeInvocation) uses (Kernel<Threads<THREADS,1,1>,Once<REPAIR_GROUPS,1,1>>) {
+        repair::propose<AtlasInteriorEdgeFlip,POINT_WORDS,TRIANGLE_WORDS,TWINS>(
+            key(),AtlasInteriorEdgeFlip {},self.points,self.triangles,self.twins,
+            self.repair_flags,self.repair_results,self.repair_state,i)
+    }
+    fn repair_certificate_blocks(self,i:ComputeInvocation) uses (Kernel<Threads<THREADS,1,1>,Once<REPAIR_BLOCK_GROUPS,1,1>>) {
+        repair::summarize<TWINS,REPAIR_TILE,REPAIR_WORDS>(self.repair_flags,self.repair_results,self.repair_state,self.repair_blocks,i)
+    }
+    fn repair_finish(self) uses (Kernel<Threads<1,1,1>,Once<1,1,1>>) {
+        repair::advance<TWINS,REPAIR_TILE,REPAIR_WORDS>(self.repair_state,self.repair_blocks,true)
+        store_delaunay_receipt(self.receipt,repair::receipt(self.repair_state))
     }
 
     fn topology_seal(self) uses (Kernel<Threads<1, 1, 1>, Once<1, 1, 1>>) {

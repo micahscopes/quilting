@@ -57,6 +57,7 @@ use quilting_atlas::neighborhood::{CandidateWindow, grid_window}
 pub use quad
 pub use compaction
 pub use topology_scan
+pub use repair
 
 /// Typed coordinates in the resident three-word point slot. Square points
 /// occupy two words plus padding; they are never fake triangle barycentrics.

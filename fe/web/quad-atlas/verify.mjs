@@ -15,10 +15,10 @@ function intersect(a, b, c, d) {
   return (x * y < 0 && z * w < 0) ||
     between(a, b, c) || between(a, b, d) || between(c, d, a) || between(c, d, b);
 }
-function incircle(a, b, c, d) {
+function incircle(a, b, c, d, crossTerm) {
   const rows = [a, b, c].map(p => {
     const x = BigInt(p[0] - d[0]), y = BigInt(p[1] - d[1]);
-    return [x, y, x * x + y * y];
+    return [x, y, x * x + y * y + BigInt(crossTerm) * x * y];
   });
   const [u, v, w] = rows;
   return u[0] * (v[1] * w[2] - v[2] * w[1]) -
@@ -48,6 +48,16 @@ export function verifyQuadSnapshot({ key, points, triangles, receipt }) {
       assert.deepEqual(points[id++], expected, `boundary point ${id - 1}`);
     }
   }
+  return verifyPlanarMesh({points,triangles,boundaryCycle:Array.from({length:boundary},(_,i)=>i),area2:2*S*S,crossTerm:0});
+}
+
+// Independent exact topology/geometry checks shared by the square and
+// equilateral-triangle reference domains. crossTerm selects x²+y² or x²+xy+y².
+export function verifyPlanarMesh({points,triangles,boundaryCycle,area2:expectedArea2,crossTerm}) {
+  assert(crossTerm===0 || crossTerm===1);
+  const boundary=boundaryCycle.length;
+  assert.equal(new Set(points.map(p=>p.join(','))).size,points.length,'duplicate points');
+  assert(points.every(p=>p.length===2 && p.every(x=>Number.isInteger(x) && x>=0 && x<=S)));
   assert.equal(triangles.length, 2 * points.length - boundary - 2, 'Euler disk relation');
   const edges = new Map(), used = new Set();
   let area2 = 0;
@@ -66,8 +76,8 @@ export function verifyQuadSnapshot({ key, points, triangles, receipt }) {
     }
   }
   assert.equal(used.size, points.length, 'unreferenced vertex');
-  assert.equal(area2, 2 * S * S, 'exact square area');
-  const hull = new Set(Array.from({ length: boundary }, (_, i) => edgeKey(i, (i + 1) % boundary)));
+  assert.equal(area2, expectedArea2, 'exact domain area');
+  const hull = new Set(boundaryCycle.map((id,i)=>edgeKey(id,boundaryCycle[(i+1)%boundary])));
   for (const k of hull) assert(edges.has(k), `missing boundary segment ${k}`);
   for (const [k, owners] of edges) {
     assert.equal(owners.length, hull.has(k) ? 1 : 2, `edge incidence ${k}`);
@@ -76,7 +86,7 @@ export function verifyQuadSnapshot({ key, points, triangles, receipt }) {
       assert(a === v && b === u, `edge orientation ${k}`);
       // Only convex quadrilaterals admit an alternate diagonal.
       if (orient(points[c], points[d], points[a]) * orient(points[c], points[d], points[b]) < 0) {
-        assert(incircle(points[a], points[b], points[c], points[d]) <= 0n, `Delaunay violation ${k}`);
+        assert(incircle(points[a], points[b], points[c], points[d],crossTerm) <= 0n, `Delaunay violation ${k}`);
       }
     }
   }

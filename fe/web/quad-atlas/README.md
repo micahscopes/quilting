@@ -27,7 +27,8 @@ window. Uniform-density jobs visit at most 50 slots per query through LoD 8;
 mixed-density windows can still be large. Triangle and square insertion now
 share parallel, immutable-generation rounds with local child-face relocation.
 Arbitration and face planning now use per-face atomic claims with bounded
-work per point/face. Edge-flip repair still executes on one GPU invocation. Neither
+work per point/face. Edge repair now executes in conflict-safe parallel rounds;
+the one-time neighbor-index initializer is still scalar. Neither
 the all-keys batch scheduler nor a complete resident quad atlas exists yet.
 The full triangle atlas used by Tessellation Warp is a precomputed artifact,
 not evidence that this live GPU generator already scales to level 8.
@@ -40,6 +41,34 @@ measurements; none is established by the small jobs below.
 
 This is planar reference-domain Delaunay, not surface-metric uniformization.
 Subsequent warps can invert triangles and do not preserve Delaunay legality.
+
+## Parallel repair checkpoint, 2026-09-05
+
+The live 34-pass build is `fe-render-ff07de52cc3cfbfb.json`. Triangle and quad
+consumers now share parallel edge repair. A flip owns its two triangles and
+all neighboring faces it touches; winner selection finishes before any
+mutation. Separate final certification rejects an unfinished tile even when
+the configured round budget expires. The actor uses 17 global resources but
+no stage exceeds the device's eight-storage-binding limit.
+
+`repair-browser-snapshots.json` contains fresh GPU output for all 55 canonical
+preview keys plus the alternate seed. Independent geometry checks pass, every
+neighbor link is reciprocal and correct, and the points/final triangle sets
+match the serial reference. Repair order and flip counts need not match it.
+31 jobs demonstrate multi-flip rounds; the maximum observed count is 38 rounds.
+The dense all-3 job repairs 91 edges, with five flips in its first round.
+`repair-budget.verify.mjs` replays the actual compiled stages into independent
+diagnostic buffers: zero/one repair rounds leave drawing disabled, while a
+sufficient budget publishes the mesh. These probes are not page assets.
+
+Both consumers compile in release mode. The triangle consumer also runs in
+Chromium: 19 points and 22 triangles pass exact barycentric-boundary, area,
+incidence, crossing, reciprocal-neighbor, and equilateral-metric Delaunay
+checks. Its evidence is under `../classic-quilting-generated/`.
+
+This is **still preview LoD 0–3**. Higher levels, parallel index initialization,
+mixed-density sampling costs, batched full-atlas residency, and startup timings
+remain open. No complete-atlas speedup is inferred from the small-job results.
 
 ## Blocked compaction checkpoint, 2026-09-05
 
