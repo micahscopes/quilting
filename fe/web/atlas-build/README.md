@@ -116,6 +116,32 @@ not yet carry the fix. The old page was frozen rather than left rebuilding.
 
 Use the shared release toolchain:
 
+### Full triangle run, 2026-09-05
+
+Source `7994d1b`, release Fe executable SHA-256
+`99403c22267674c5e0d54e59a9f8b950ac3753be68ba846b8b56f8fdd113cd19`:
+all 165 canonical LoD 0–8 jobs terminated, but only 116 tiles were retained;
+49 failed. This is **not a complete atlas**. The saved completion receipt is
+`[1,116,49,1,0]`. Independent directory/receipt consistency checks pass.
+Every failed tile reports unsettled Delaunay repair after the 128-round budget:
+1,330 remaining edge violations in total, at most 83 on one tile. Sampling
+and insertion report success and no invariant failures. These are GPU-reported
+gates, not an independent geometric proof of those 165 meshes.
+
+Generation plus bounded receipt readback took 292,155.3 ms; preparation plus
+generation/readback took 328,350.4 ms. Another atlas run shared the GPU, so
+these are diagnostic wall times, not isolated performance measurements. They
+do not satisfy the sub-second goal. Retained geometry occupies 3,075,348 bytes;
+that excludes failed tiles and working buffers.
+
+Evidence: `/laboratory/quilting/scratch/atlas-job-state-20260905/triangle-prefilter-full-receipts.json`.
+`summarizeTileReceipts` classifies the individual gates and rejects a ready
+directory entry whose receipt fails or reports different geometry counts.
+The priority-prefilter optimization still needs a controlled GPU equivalence
+comparison: finishing this run does not establish equivalence to its baseline.
+
+### Commands
+
 ```sh
 /laboratory/fe-stuff/fe-worktrees/mb2/target/release/fe web dev fe/web/atlas-build/index.html --port 8785
 node --test fe/web/atlas-build/*.test.mjs
