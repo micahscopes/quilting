@@ -15,7 +15,7 @@ use quilting_atlas::sampling::{
     FixedBarycentric,
     InteriorCandidate,
     boundary_seed,
-    candidate_conflicts_boundary,
+    candidate_conflicts_boundary_nearest,
     candidate_is_round_winner,
     candidate_precedes,
     candidate_slot_count,
@@ -155,7 +155,7 @@ impl CandidateConflictPolicy for AtlasCandidateConflict {
         if candidate.point.a>radius && candidate.point.b>radius && candidate.point.c>radius {
             return false
         }
-        candidate_conflicts_boundary(key, candidate)
+        candidate_conflicts_boundary_nearest(key, candidate)
     }
 
     fn conflicts(self, _ left: InteriorCandidate, _ right: InteriorCandidate) -> bool {

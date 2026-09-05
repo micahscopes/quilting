@@ -5,6 +5,19 @@
 use core::marker::Copy
 use super::sampling::{BARYCENTRIC_SCALE, CANDIDATE_TRIALS_PER_CELL}
 
+/// Nearest open-edge sample to an orthogonal projection, in doubled Q14
+/// coordinates. Endpoints are checked separately: their density can differ
+/// from the constant density on an open edge. Zero means no open samples.
+/// Half-step ties have equal metric distance, so either nearest sample suffices.
+pub const fn nearest_open_edge_step(_ projection_twice: u32, _ resolution: u32) -> u32 {
+    if resolution <= 1 || resolution > 256 || BARYCENTRIC_SCALE % resolution != 0 {
+        return 0
+    }
+    let spacing = BARYCENTRIC_SCALE / resolution
+    let step = (projection_twice + spacing) / (2 * spacing)
+    if step < 1 { 1 } else if step >= resolution { resolution - 1 } else { step }
+}
+
 pub struct CandidateWindow {
     first_row: u32,
     first_column: u32,

@@ -1602,3 +1602,49 @@ fn atlas_candidate_windows_cover_conflicts_and_bound_uniform_work_through_lod8()
         }
     }
 }
+
+#[test]
+fn atlas_nearest_boundary_query_matches_exhaustive_relation_for_every_key() {
+    let (mut store, instance) = instantiate();
+    let query = function::<(i32, i32, i32, i32, i32, i32, i32, i32), i32>(
+        &mut store, &instance, "boundary_query_comparison",
+    );
+    let mut checked = 0;
+    for domain in 0..=1 {
+        for a in 0..=8 {
+            for b in 0..=8 {
+                for c in 0..=8 {
+                    if domain == 0 && !(a <= b && b <= c) { continue; }
+                    for d in 0..=if domain == 0 { 0 } else { 8 } {
+                        // Include corners, exact sample positions, half-step
+                        // ties, and deterministic interior points. Candidate
+                        // radius is independent of boundary radius here.
+                        let mut points = vec![(0,0), (16384,0), (0,16384),
+                            (8192,8192), (32,32), (64,64), (8192,1),
+                            (16383,1), (1,8192), (4001,7351)];
+                        if domain == 1 { points.extend([(16384,16384), (16352,8192), (8192,16352)]); }
+                        let code: u32 = (((a * 9 + b) * 9 + c) * 9 + d) as u32;
+                        let mut state = code.wrapping_add(42);
+                        for _ in 0..8 {
+                            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                            let mut x = (state % 16385) as i32;
+                            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                            let mut y = (state % 16385) as i32;
+                            if domain == 0 && x+y > 16384 { x=16384-x; y=16384-y; }
+                            points.push((x,y));
+                        }
+                        for (x,y) in points {
+                            for radius in [0, 4096, 4097, 65536, 268435456] {
+                                let result = query.call(&mut store,(a,b,c,d,x,y,radius,domain)).unwrap();
+                                assert!(result == 0 || result == 3,
+                                    "boundary mismatch domain={domain} key={a},{b},{c},{d} point={x},{y} r2={radius} bits={result}");
+                                checked += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("matched {checked} exhaustive/bounded boundary queries across every LoD 0–8 key");
+}

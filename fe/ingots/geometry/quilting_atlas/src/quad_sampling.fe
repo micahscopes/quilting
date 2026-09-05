@@ -139,3 +139,32 @@ pub fn candidate_conflicts_boundary(_ key: QuadAtlasKey, _ c: QuadInteriorCandid
     }
     false
 }
+
+/// Exact reference-ring exclusion using at most eight point tests. On each
+/// straight open edge the density is constant, so only its nearest sample can
+/// be the first conflict. Corners have their own density and are tested too.
+pub fn candidate_conflicts_boundary_nearest(_ key: QuadAtlasKey, _ c: QuadInteriorCandidate) -> bool {
+    if !c.valid || !key.valid() { return false }
+    let s = BARYCENTRIC_SCALE
+    let mut edge: u32 = 0
+    let mut offset: u32 = 0
+    while edge < 4 {
+        let corner = boundary_seed(key,offset).point
+        if poisson_conflict(c.point,c.radius_squared,corner,poisson_radius_squared(key,corner)) {
+            return true
+        }
+        let resolution = 1 << key.edge(edge)
+        let projection = if edge == 0 {c.point.x} else if edge == 1 {c.point.y}
+            else if edge == 2 {s-c.point.x} else {s-c.point.y}
+        let step = super::neighborhood::nearest_open_edge_step(2*projection,resolution)
+        if step != 0 {
+            let p = boundary_seed(key,offset+step).point
+            if poisson_conflict(c.point,c.radius_squared,p,poisson_radius_squared(key,p)) {
+                return true
+            }
+        }
+        offset = offset+resolution
+        edge = edge+1
+    }
+    false
+}

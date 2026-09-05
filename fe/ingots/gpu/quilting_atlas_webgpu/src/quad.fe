@@ -4,7 +4,7 @@ use quilting_atlas::quad::{QuadAtlasKey, boundary_seed}
 use quilting_atlas::quad_sampling::{
     QuadInteriorCandidate,
     interior_candidate_at_slot,
-    candidate_conflicts_boundary,
+    candidate_conflicts_boundary_nearest,
     poisson_conflict,
 }
 use quilting_atlas::planar::FixedPoint2
@@ -78,7 +78,7 @@ impl CandidateConflictPolicy for QuadCandidateConflict {
             && candidate.point.y < scale - radius {
             return false
         }
-        candidate_conflicts_boundary(key, candidate)
+        candidate_conflicts_boundary_nearest(key, candidate)
     }
     fn conflicts(self, _ left: QuadInteriorCandidate, _ right: QuadInteriorCandidate) -> bool {
         poisson_conflict(

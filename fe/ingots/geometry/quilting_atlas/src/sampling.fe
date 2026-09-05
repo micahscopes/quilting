@@ -425,6 +425,41 @@ pub fn candidate_conflicts_boundary(
     false
 }
 
+/// Exact constant-work equivalent of the reference boundary scan: one corner
+/// and the nearest open sample per edge. Open-edge density is constant, but
+/// corner density is not necessarily the same, so corners cannot be omitted.
+/// Orthogonal projections use the equilateral metric, not a Cartesian UV norm.
+pub fn candidate_conflicts_boundary_nearest(_ key: AtlasKey, _ c: InteriorCandidate) -> bool {
+    if !c.valid || key.a > key.b || key.b > key.c || key.c > MAX_LOD { return false }
+    let s = BARYCENTRIC_SCALE
+    let mut edge: u32 = 0
+    while edge < 3 {
+        let corner = if edge == 0 { FixedBarycentric { a:s,b:0,c:0 } }
+            else if edge == 1 { FixedBarycentric { a:0,b:s,c:0 } }
+            else { FixedBarycentric { a:0,b:0,c:s } }
+        if poisson_conflict(c.point,c.radius_squared,corner,poisson_radius_squared(key,corner)) {
+            return true
+        }
+        let lod = if edge == 0 {key.a} else if edge == 1 {key.b} else {key.c}
+        let resolution = edge_resolution(lod)
+        let projection = if edge == 0 {2*c.point.c+c.point.a}
+            else if edge == 1 {2*c.point.c+c.point.b}
+            else {2*c.point.b+c.point.c}
+        let step = super::neighborhood::nearest_open_edge_step(projection,resolution)
+        if step != 0 {
+            let t = step*(s/resolution)
+            let p = if edge == 0 {FixedBarycentric {a:0,b:s-t,c:t}}
+                else if edge == 1 {FixedBarycentric {a:s-t,b:0,c:t}}
+                else {FixedBarycentric {a:s-t,b:t,c:0}}
+            if poisson_conflict(c.point,c.radius_squared,p,poisson_radius_squared(key,p)) {
+                return true
+            }
+        }
+        edge = edge+1
+    }
+    false
+}
+
 /// Initial state after materialization and boundary-seed exclusion.
 pub const fn initial_candidate_state(_ valid: bool, _ boundary_conflict: bool) -> u32 {
     if !valid {

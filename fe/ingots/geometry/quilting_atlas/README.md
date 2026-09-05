@@ -64,14 +64,26 @@ per cell on a grid twice that edge's resolution. The largest job has 524,288
 candidate slots. This is conservative candidate work, not the final point
 count or a claim that generating all 1,035 jobs simultaneously is affordable.
 Providers must batch bounded jobs and reuse the common independent-set state
-transitions. The reference boundary scan must be replaced by an equivalent
-indexed query for large GPU jobs.
+transitions. The provider now replaces the reference boundary scan with an
+exact nearest-sample query: at most six point tests for a triangle, eight for
+a square. Each open edge has constant exclusion radius, so its nearest sample
+suffices; corners are tested separately because their radii may differ.
+Triangle projections use the equilateral metric. The unchanged full-ring
+relation remains available as an oracle, not as the production query.
 
 `neighborhood` maps conservative spatial windows back to stable candidate
 slots without an auxiliary buffer. Uniform-density queries inspect at most
 50 slots through LoD 8 in either domain. Mixed-density windows remain bounded
 by the largest exclusion radius and may still be large. Deformed-surface
 policies retain exhaustive queries unless they supply their own valid bound.
+
+The release Fe-to-Wasm gate
+`atlas_nearest_boundary_query_matches_exhaustive_relation_for_every_key`
+matches 703,755 bounded/exhaustive queries across every canonical triangle key
+and every square edge request through LoD 8, including corners, half-step ties,
+interior points, and independently varied candidate radii. This proves those
+comparisons, not full-atlas generation speed. GPU provider source checking also
+passes; post-change browser validation is a separate outstanding gate.
 
 Additional release Wasm gates:
 
