@@ -115,3 +115,11 @@ reference gap. No new GPU timing comparison has been made. The candidate build
 reported 249,703 ms total, slower than the trace baseline's 195,295 ms; these
 single shared-machine runs do not isolate a compiler regression or improvement.
 Triangle-domain execution and broader optimization-pass experiments remain open.
+
+The subsequent paired queue-completion comparison is recorded in
+`helper-sharing.timing.json`: two warm-up pairs and 24 alternating measured pairs
+per case, on the same device, retaining identical initialization and dispatches.
+Only the proposal/retirement pipelines change. Mixed 0/3/0/3 medians were
+5.50 ms before and 5.40 ms after; uniform 3/3/3/3 medians were 4.20 and 4.35 ms.
+Ranges overlap. This establishes no clear runtime improvement. These are small
+sampling jobs, not full-atlas startup or isolated GPU timestamp measurements.

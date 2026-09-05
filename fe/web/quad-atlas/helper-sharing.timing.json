@@ -1,0 +1,612 @@
+{
+  "kind": "paired-queue-completion-not-gpu-timestamps",
+  "scope": "candidate and bounds initialization plus 64 sampling rounds; excludes triangulation, rendering, compilation, CPU encoding",
+  "beforeFe": "a8cee5c85",
+  "afterFe": "ad9c8ecc9",
+  "warmupPairs": 2,
+  "measuredPairs": 24,
+  "runs": [
+    {
+      "kind": "queue-completion-not-gpu-timestamp",
+      "params": {
+        "bottom": 0,
+        "right": 3,
+        "top": 0,
+        "left": 3,
+        "seed": 42,
+        "wire_px": 0.65
+      },
+      "observations": [
+        {
+          "pair": 0,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 5.300000071525574
+        },
+        {
+          "pair": 0,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.3999999761581421,
+          "submitToCompletionMs": 5.799999952316284
+        },
+        {
+          "pair": 1,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 6.200000047683716
+        },
+        {
+          "pair": 1,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.5999999046325684,
+          "submitToCompletionMs": 5.800000071525574
+        },
+        {
+          "pair": 2,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.3999999761581421,
+          "submitToCompletionMs": 5.600000023841858
+        },
+        {
+          "pair": 2,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.6999999284744263,
+          "submitToCompletionMs": 5.100000023841858
+        },
+        {
+          "pair": 3,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.6000000238418579,
+          "submitToCompletionMs": 5.100000023841858
+        },
+        {
+          "pair": 3,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.3999999761581421,
+          "submitToCompletionMs": 5.100000023841858
+        },
+        {
+          "pair": 4,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.5999999046325684,
+          "submitToCompletionMs": 5.5
+        },
+        {
+          "pair": 4,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.6000000238418579,
+          "submitToCompletionMs": 5.200000047683716
+        },
+        {
+          "pair": 5,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 5.299999952316284
+        },
+        {
+          "pair": 5,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.3999999761581421,
+          "submitToCompletionMs": 5.5
+        },
+        {
+          "pair": 6,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 5.600000023841858
+        },
+        {
+          "pair": 6,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 7.5
+        },
+        {
+          "pair": 7,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 6.699999928474426
+        },
+        {
+          "pair": 7,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 5.300000071525574
+        },
+        {
+          "pair": 8,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 4.899999976158142
+        },
+        {
+          "pair": 8,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.3999999761581421,
+          "submitToCompletionMs": 5
+        },
+        {
+          "pair": 9,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.7000000476837158,
+          "submitToCompletionMs": 5.299999952316284
+        },
+        {
+          "pair": 9,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 5.700000047683716
+        },
+        {
+          "pair": 10,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.5999999046325684,
+          "submitToCompletionMs": 6.5
+        },
+        {
+          "pair": 10,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 6.400000095367432
+        },
+        {
+          "pair": 11,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 6.299999952316284
+        },
+        {
+          "pair": 11,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.7999999523162842,
+          "submitToCompletionMs": 6.700000047683716
+        },
+        {
+          "pair": 12,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 5.199999928474426
+        },
+        {
+          "pair": 12,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.40000009536743164,
+          "submitToCompletionMs": 5.399999976158142
+        },
+        {
+          "pair": 13,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 5.199999928474426
+        },
+        {
+          "pair": 13,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.40000009536743164,
+          "submitToCompletionMs": 5.399999976158142
+        },
+        {
+          "pair": 14,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.6000000238418579,
+          "submitToCompletionMs": 5
+        },
+        {
+          "pair": 14,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 5.5
+        },
+        {
+          "pair": 15,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.3999999761581421,
+          "submitToCompletionMs": 5.299999952316284
+        },
+        {
+          "pair": 15,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 6
+        },
+        {
+          "pair": 16,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.8999999761581421,
+          "submitToCompletionMs": 6.200000047683716
+        },
+        {
+          "pair": 16,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.3999999761581421,
+          "submitToCompletionMs": 5.899999976158142
+        },
+        {
+          "pair": 17,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.30000007152557373,
+          "submitToCompletionMs": 5.899999976158142
+        },
+        {
+          "pair": 17,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.3999999761581421,
+          "submitToCompletionMs": 5.800000071525574
+        },
+        {
+          "pair": 18,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 5.199999928474426
+        },
+        {
+          "pair": 18,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 5.200000047683716
+        },
+        {
+          "pair": 19,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.2999999523162842,
+          "submitToCompletionMs": 4.899999976158142
+        },
+        {
+          "pair": 19,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.40000009536743164,
+          "submitToCompletionMs": 4.899999976158142
+        },
+        {
+          "pair": 20,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.3999999761581421,
+          "submitToCompletionMs": 5.700000047683716
+        },
+        {
+          "pair": 20,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.3999999761581421,
+          "submitToCompletionMs": 5.799999952316284
+        },
+        {
+          "pair": 21,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 5.200000047683716
+        },
+        {
+          "pair": 21,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 5.5
+        },
+        {
+          "pair": 22,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.3999999761581421,
+          "submitToCompletionMs": 5.700000047683716
+        },
+        {
+          "pair": 22,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 5.5
+        },
+        {
+          "pair": 23,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.3999999761581421,
+          "submitToCompletionMs": 5.399999976158142
+        },
+        {
+          "pair": 23,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 5.100000023841858
+        }
+      ]
+    },
+    {
+      "kind": "queue-completion-not-gpu-timestamp",
+      "params": {
+        "bottom": 3,
+        "right": 3,
+        "top": 3,
+        "left": 3,
+        "seed": 42,
+        "wire_px": 0.65
+      },
+      "observations": [
+        {
+          "pair": 0,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 4.200000047683716
+        },
+        {
+          "pair": 0,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.3999999761581421,
+          "submitToCompletionMs": 4.100000023841858
+        },
+        {
+          "pair": 1,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.8999999761581421,
+          "submitToCompletionMs": 4.100000023841858
+        },
+        {
+          "pair": 1,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.7000000476837158,
+          "submitToCompletionMs": 3.899999976158142
+        },
+        {
+          "pair": 2,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.6000000238418579,
+          "submitToCompletionMs": 4.199999928474426
+        },
+        {
+          "pair": 2,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.8000000715255737,
+          "submitToCompletionMs": 5.599999904632568
+        },
+        {
+          "pair": 3,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 5
+        },
+        {
+          "pair": 3,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 4.400000095367432
+        },
+        {
+          "pair": 4,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.5999999046325684,
+          "submitToCompletionMs": 4.200000047683716
+        },
+        {
+          "pair": 4,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.7000000476837158,
+          "submitToCompletionMs": 4
+        },
+        {
+          "pair": 5,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.40000009536743164,
+          "submitToCompletionMs": 4.099999904632568
+        },
+        {
+          "pair": 5,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 4.600000023841858
+        },
+        {
+          "pair": 6,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.8000000715255737,
+          "submitToCompletionMs": 4.099999904632568
+        },
+        {
+          "pair": 6,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.7000000476837158,
+          "submitToCompletionMs": 4.299999952316284
+        },
+        {
+          "pair": 7,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 4.100000023841858
+        },
+        {
+          "pair": 7,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.8000000715255737,
+          "submitToCompletionMs": 4.399999976158142
+        },
+        {
+          "pair": 8,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 4
+        },
+        {
+          "pair": 8,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.6000000238418579,
+          "submitToCompletionMs": 4.199999928474426
+        },
+        {
+          "pair": 9,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.8000000715255737,
+          "submitToCompletionMs": 4.299999952316284
+        },
+        {
+          "pair": 9,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.7999999523162842,
+          "submitToCompletionMs": 4.900000095367432
+        },
+        {
+          "pair": 10,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.6999999284744263,
+          "submitToCompletionMs": 4.300000071525574
+        },
+        {
+          "pair": 10,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.6999999284744263,
+          "submitToCompletionMs": 4.800000071525574
+        },
+        {
+          "pair": 11,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 4.700000047683716
+        },
+        {
+          "pair": 11,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.3999999761581421,
+          "submitToCompletionMs": 4.200000047683716
+        },
+        {
+          "pair": 12,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.3999999761581421,
+          "submitToCompletionMs": 4.100000023841858
+        },
+        {
+          "pair": 12,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 4.600000023841858
+        },
+        {
+          "pair": 13,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.5999999046325684,
+          "submitToCompletionMs": 4.800000071525574
+        },
+        {
+          "pair": 13,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 1,
+          "submitToCompletionMs": 5
+        },
+        {
+          "pair": 14,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.3999999761581421,
+          "submitToCompletionMs": 4.799999952316284
+        },
+        {
+          "pair": 14,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.6000000238418579,
+          "submitToCompletionMs": 4.600000023841858
+        },
+        {
+          "pair": 15,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.3999999761581421,
+          "submitToCompletionMs": 4.600000023841858
+        },
+        {
+          "pair": 15,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.3999999761581421,
+          "submitToCompletionMs": 5.100000023841858
+        },
+        {
+          "pair": 16,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 4.699999928474426
+        },
+        {
+          "pair": 16,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.40000009536743164,
+          "submitToCompletionMs": 4.5
+        },
+        {
+          "pair": 17,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 4.399999976158142
+        },
+        {
+          "pair": 17,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.3999999761581421,
+          "submitToCompletionMs": 4.100000023841858
+        },
+        {
+          "pair": 18,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.5,
+          "submitToCompletionMs": 3.5999999046325684
+        },
+        {
+          "pair": 18,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.6000000238418579,
+          "submitToCompletionMs": 3.600000023841858
+        },
+        {
+          "pair": 19,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.7000000476837158,
+          "submitToCompletionMs": 4
+        },
+        {
+          "pair": 19,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.2999999523162842,
+          "submitToCompletionMs": 4
+        },
+        {
+          "pair": 20,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.2999999523162842,
+          "submitToCompletionMs": 3.9000000953674316
+        },
+        {
+          "pair": 20,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.30000007152557373,
+          "submitToCompletionMs": 3.899999976158142
+        },
+        {
+          "pair": 21,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.2999999523162842,
+          "submitToCompletionMs": 4.600000023841858
+        },
+        {
+          "pair": 21,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.2999999523162842,
+          "submitToCompletionMs": 3.8000000715255737
+        },
+        {
+          "pair": 22,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.6000000238418579,
+          "submitToCompletionMs": 3.6999999284744263
+        },
+        {
+          "pair": 22,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.3999999761581421,
+          "submitToCompletionMs": 3.9000000953674316
+        },
+        {
+          "pair": 23,
+          "implementation": "after-helper-sharing",
+          "encodingMs": 0.3999999761581421,
+          "submitToCompletionMs": 5.100000023841858
+        },
+        {
+          "pair": 23,
+          "implementation": "before-helper-sharing",
+          "encodingMs": 0.8999999761581421,
+          "submitToCompletionMs": 4.699999928474426
+        }
+      ]
+    }
+  ]
+}

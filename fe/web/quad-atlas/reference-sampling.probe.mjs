@@ -32,7 +32,12 @@ export async function installReferenceSampling(surface, source) {
 // sampling job (candidate/bounds build + 64 immutable proposal/retirement rounds),
 // not triangulation, rendering, downloading, or whole-atlas startup. Compile
 // time and CPU command encoding are excluded from submitToCompletionMs.
-export async function compareSamplingQueueTime(surface, changes, pairs = 12) {
+export async function compareSamplingQueueTime(surface, changes, pairs = 12,
+  labels = {original: 'fe', replacement: 'manual'}) {
+  if (!Number.isInteger(pairs) || pairs < 1 ||
+      typeof labels.original !== 'string' || typeof labels.replacement !== 'string' ||
+      !labels.original || !labels.replacement || labels.original === labels.replacement)
+    throw Error('timing requires positive pairs and distinct implementation labels');
   const gpu = surface._gpu, device = gpu.device;
   await device.queue.onSubmittedWorkDone();
   const records = gpu.passRecords.slice(0, 7);
@@ -41,12 +46,12 @@ export async function compareSamplingQueueTime(surface, changes, pairs = 12) {
     throw Error('unsupported generator prelude');
   const observations = [];
   for (let pair = -2; pair < pairs; ++pair) {
-    for (const manual of pair % 2 === 0 ? [false, true] : [true, false]) {
+    for (const replacement of pair % 2 === 0 ? [false, true] : [true, false]) {
       const began = performance.now(), encoder = device.createCommandEncoder();
       const dispatch = record => {
         const c = changes.find(c => c.record === record);
         const pass = encoder.beginComputePass();
-        pass.setPipeline(c ? (manual ? c.pipeline : c.original) : record.pipeline);
+        pass.setPipeline(c ? (replacement ? c.pipeline : c.original) : record.pipeline);
         pass.setBindGroup(0, record.bindGroup);
         pass.dispatchWorkgroups(...record.pass.dispatch); pass.end();
       };
@@ -56,7 +61,7 @@ export async function compareSamplingQueueTime(surface, changes, pairs = 12) {
       const commands = encoder.finish(), submitted = performance.now();
       device.queue.submit([commands]); await device.queue.onSubmittedWorkDone();
       const finished = performance.now();
-      if (pair >= 0) observations.push({pair, implementation: manual ? 'manual' : 'fe',
+      if (pair >= 0) observations.push({pair, implementation: replacement ? labels.replacement : labels.original,
         encodingMs: submitted-began, submitToCompletionMs: finished-submitted});
     }
   }
