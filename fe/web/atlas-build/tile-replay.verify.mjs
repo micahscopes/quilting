@@ -34,7 +34,7 @@ export function tileReplayBlocks(passes) {
 }
 
 export async function replayAtlasTile(gpu, manifest, activeWords, {rounds = [128,256,512,1024], captureGeometry = false,
-  sampleGroups, captureSampling = false, poisonSampling = false} = {}) {
+  sampleGroups, captureSampling = false, poisonSampling = false, captureInitialGeometry = false} = {}) {
   if (activeWords.length !== 10 || !activeWords.every(x => Number.isSafeInteger(x) && x >= 0 && x <= 0xffffffff)
       || activeWords[5] !== 1) throw Error('expected a recorded valid quad job');
   if (!rounds.length || rounds.some((n,i) => !Number.isSafeInteger(n) || n < 1 || n > 65535 || (i > 0 && n <= rounds[i-1])))
@@ -94,9 +94,29 @@ export async function replayAtlasTile(gpu, manifest, activeWords, {rounds = [128
       observations.push({label,state:words.slice(0,state.size/4),receipt:words.slice(state.size/4)});
       encoder = device.createCommandEncoder();
     };
+    const readGeometry = async () => {
+      const last = observations.at(-1), [nv,nt] = last.state;
+      const vertexBytes = nv*12, triangleBytes = nt*16;
+      if (!nv || !nt || vertexBytes+triangleBytes > 4*1024*1024
+          || vertexBytes > resources.get('points').size || triangleBytes > resources.get('triangles').size)
+        throw Error('geometry observation exceeds diagnostic bounds');
+      const geometryRead = make(vertexBytes+triangleBytes,GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST);
+      encoder.copyBufferToBuffer(resources.get('points'),0,geometryRead,0,vertexBytes);
+      encoder.copyBufferToBuffer(resources.get('triangles'),0,geometryRead,vertexBytes,triangleBytes);
+      device.queue.submit([encoder.finish()]);
+      await geometryRead.mapAsync(GPUMapMode.READ);
+      const words = new Uint32Array(geometryRead.getMappedRange());
+      const result = {key:activeWords.slice(0,4),receipt:last.receipt,
+        points:Array.from({length:nv},(_,i)=>Array.from(words.slice(i*3,i*3+2))),
+        triangles:Array.from({length:nt},(_,i)=>Array.from(words.slice(nv*3+i*4,nv*3+i*4+3)))};
+      geometryRead.unmap(); encoder = device.createCommandEncoder();
+      return result;
+    };
+    let initialGeometry;
     for (const block of blocks) {
       if (block.passes.some(p => p.source_entry === 'repair_apply')) {
         await observe('before-repair');
+        if (captureInitialGeometry) initialGeometry = await readGeometry();
         let done = 0;
         for (const n of rounds) {
           for (; done < n; done++) for (const p of block.passes) dispatch(p);
@@ -117,28 +137,12 @@ export async function replayAtlasTile(gpu, manifest, activeWords, {rounds = [128
       samplingSha256 = Array.from(new Uint8Array(hash),v=>v.toString(16).padStart(2,'0')).join('');
       read.unmap(); encoder = device.createCommandEncoder();
     }
-    let geometry;
-    if (captureGeometry) {
-      const last = observations.at(-1), [nv,nt] = last.state;
-      const vertexBytes = nv*12, triangleBytes = nt*16;
-      if (!nv || !nt || vertexBytes+triangleBytes > 4*1024*1024
-          || vertexBytes > resources.get('points').size || triangleBytes > resources.get('triangles').size)
-        throw Error('geometry observation exceeds diagnostic bounds');
-      const geometryRead = make(vertexBytes+triangleBytes,GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST);
-      encoder.copyBufferToBuffer(resources.get('points'),0,geometryRead,0,vertexBytes);
-      encoder.copyBufferToBuffer(resources.get('triangles'),0,geometryRead,vertexBytes,triangleBytes);
-      device.queue.submit([encoder.finish()]);
-      await geometryRead.mapAsync(GPUMapMode.READ);
-      const words = new Uint32Array(geometryRead.getMappedRange());
-      geometry = {key:activeWords.slice(0,4),receipt:last.receipt,
-        points:Array.from({length:nv},(_,i)=>Array.from(words.slice(i*3,i*3+2))),
-        triangles:Array.from({length:nt},(_,i)=>Array.from(words.slice(nv*3+i*4,nv*3+i*4+3)))};
-      geometryRead.unmap();
-    }
+    const geometry = captureGeometry ? await readGeometry() : undefined;
     const error = await device.popErrorScope(); scopeOpen = false;
     if (error) throw Error(error.message);
     return {activeWords,rounds,observations,...(poisonSampling?{poisonSampling:true}:{}),...(sampleGroups!==undefined?{sampleGroups}:{}),
-      ...(samplingSha256?{samplingSha256}:{}),...(geometry?{geometry}:{}),allocatedBytes:[...resources.values()].reduce((sum,b)=>sum+b.size,0)};
+      ...(samplingSha256?{samplingSha256}:{}),...(geometry?{geometry}:{}),...(initialGeometry?{initialGeometry}:{}),
+      allocatedBytes:[...resources.values()].reduce((sum,b)=>sum+b.size,0)};
   } finally {
     if (scopeOpen) await device.popErrorScope();
     for (const b of owned) b.destroy();
