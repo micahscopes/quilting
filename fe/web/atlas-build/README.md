@@ -25,13 +25,18 @@ overlap and completion counts. Its synthetic tests are not GPU proof.
 
 ## Current gate
 
-Both actors pass `fe check`. The first full quad precompile fails in the
+Both actors pass `fe check`. The first full quad precompile failed in the
 typed job cursor during Naga aggregate lowering. The smaller `atlas_jobs`
-fixture reproduces it. Captures are in
-`/laboratory/quilting/scratch/atlas-job-state-20260905/` and a Sonatina regression
-is in progress. Neither a successful full build nor subsecond timing is yet
-established. Fixed sampling/insertion/repair budgets still need full-corpus
-convergence testing; exhausted tiles must remain failed.
+fixture reproduced it. Sonatina commit `2e3cc1f5` fixes shared fallback phi
+transport and inconsistent success/exhaustion control-flow classification.
+Its six-case cursor regression executes on llvmpipe, and all 133 shader tests
+and 29 control-flow tests pass in release mode. Shared Fe is rebuilding with
+that exact pin. These compiler tests do not prove complete atlas generation.
+
+Captures are in `/laboratory/quilting/scratch/atlas-job-state-20260905/`.
+Neither a successful full build nor subsecond timing is yet established.
+Fixed sampling/insertion/repair budgets still need full-corpus convergence
+testing; exhausted tiles must remain failed.
 
 Use the shared release toolchain:
 
