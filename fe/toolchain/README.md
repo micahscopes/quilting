@@ -40,6 +40,12 @@ ground-type suite has 40 passing tests and one pre-existing expectation of an
 obsolete forwarded-parameter rejection; that is not a fully green release gate.
 The old atlas baseline above cannot compile the new cross-module arc provider.
 
+The arc **renderer** additionally needs `c2e7b346e` or a successor: this includes
+Fe-authored blending and typed native primitive assembly. The shared WebGPU API
+checkpoint `8b7ff12ce` on `mb2` adds sample masks, alpha-to-coverage and all core
+depth comparisons. Its 41 actor/compiler and 55 host regressions pass. These
+are focused gates, not a declaration that the whole compiler release is green.
+
 All release gates use `target/release/fe`. Fe project analysis additionally
 passes `--profile release`; this profile is independent of the Cargo profile
 used to build the compiler itself.
