@@ -64,7 +64,10 @@ where {S%POINT_WORDS==0}, {T%TRIANGLE_WORDS==0},
 pub fn reset_claims<const F:usize>(
     _ state:StorageBuffer<u32,STATE_WORDS>, _ claims:AtomicStorageBuffer<F>, _ i:ComputeInvocation,
 ) {
-    if i.global.x<F.downcast_truncate() && running(state) {claims.atomic_store(index:i.global.x,value:INVALID_VERTEX)}
+    // Only resident faces can be claimed. Capacity is an allocation bound,
+    // not the active mesh size (especially when a LoD-8 arena holds a tiny tile).
+    if i.global.x<F.downcast_truncate() && i.global.x<state.load(index:1)
+        && running(state) {claims.atomic_store(index:i.global.x,value:INVALID_VERTEX)}
 }
 
 pub fn propose<P:InteriorEdgeFlipPolicy,const S:usize,const T:usize,const H:usize>(
@@ -76,11 +79,10 @@ where {S%POINT_WORDS==0}, {T%TRIANGLE_WORDS==0}, {H==T/TRIANGLE_WORDS*TOPOLOGY_T
 {
     let slot=i.global.x
     if slot>=H.downcast_truncate() {return}
+    let edges=state.load(index:1)*3
+    if slot>=edges || !running(state) {return}
     flags.store(index:slot,value:0)
     results.store(index:slot,value:0)
-    if !running(state) {return}
-    let edges=state.load(index:1)*3
-    if slot>=edges {return}
     let twin=twins.load(index:slot)
     if twin==INVALID_VERTEX {
         let directed=triangle_directed_edge(key,triangle_load<T>(triangles,slot/3),slot/3,slot%3)
@@ -119,7 +121,7 @@ pub fn claim<const F:usize,const H:usize>(
 where {H==F*3}
 {
     let slot=i.global.x
-    if slot>=H.downcast_truncate() || !running(state) {return}
+    if slot>=H.downcast_truncate() || slot>=state.load(index:1)*3 || !running(state) {return}
     if flags.load(index:slot)!=ACTIVE {return}
     let mut n:u32=0
     while n<8 {
@@ -136,7 +138,7 @@ pub fn select<const F:usize,const H:usize>(
 where {H==F*3}
 {
     let slot=i.global.x
-    if slot>=H.downcast_truncate() || !running(state) {return}
+    if slot>=H.downcast_truncate() || slot>=state.load(index:1)*3 || !running(state) {return}
     if flags.load(index:slot)!=ACTIVE {return}
     let mut n:u32=0
     let mut owns=true
@@ -156,7 +158,7 @@ pub fn apply<P:InteriorEdgeFlipPolicy,const S:usize,const T:usize,const H:usize>
 where {S%POINT_WORDS==0}, {T%TRIANGLE_WORDS==0}, {H==T/TRIANGLE_WORDS*TOPOLOGY_TWIN_WORDS_PER_TRIANGLE}
 {
     let slot=i.global.x
-    if slot>=H.downcast_truncate() || !running(state) {return}
+    if slot>=H.downcast_truncate() || slot>=state.load(index:1)*3 || !running(state) {return}
     // Losers read no topology here: selected flips may already be mutating it.
     if results.load(index:slot)!=ACTIVE {return}
     let twin=twins.load(index:slot)
