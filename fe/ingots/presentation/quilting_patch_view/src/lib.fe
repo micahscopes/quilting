@@ -12,6 +12,7 @@ use quilting_qb::remap_barycentric
 use quilting_domain::{Bary3F, Vec3F, bary3f, vec3f, absf, dot3, normalize3_or}
 use quilting_patch::{BilinearCornerScales, TriangleDomain2, triangle_parameter}
 use quilting_patch::barycentric_warp::ProjectiveTriangleMap
+use quilting_patch::sampling_warp::TriangleParameterMap
 use quilting_clifford_bezier::{
     IsotropicBilinearPatch,
     IsotropicPolicy,
@@ -173,10 +174,28 @@ pub fn atlas_vertex(
     _ camera_value: CameraFrame,
     _ screen_extent: ScreenExtent,
 ) -> RasterVertex<SurfaceVarying> {
+    atlas_vertex_with_map(fixture, requested, original,
+        ProjectiveDomainMap { domain: domain, warp: warp }, patch_vertex, patch_index,
+        camera_value, screen_extent)
+}
+
+struct ProjectiveDomainMap { domain: TriangleDomain2, warp: ProjectiveTriangleMap }
+impl Copy for ProjectiveDomainMap {}
+impl TriangleParameterMap for ProjectiveDomainMap {
+    fn parameter(self, _ p: Bary3F) -> quilting_domain::Vec2F {
+        triangle_parameter(self.domain, self.warp.map(p))
+    }
+}
+
+pub fn atlas_vertex_with_map<M: TriangleParameterMap>(
+    _ fixture: FixtureBuffer, _ requested: AtlasKey, _ original: IsotropicBilinearPatch,
+    _ map: M, _ patch_vertex: u32, _ patch_index: u32,
+    _ camera_value: CameraFrame, _ screen_extent: ScreenExtent,
+) -> RasterVertex<SurfaceVarying> {
     let bary = atlas_barycentric(fixture, requested, patch_vertex)
     let differential = evaluate_differential(
         original,
-        triangle_parameter(domain, warp.map(bary)),
+        map.parameter(bary),
         policy(),
         0.000000000001,
     )
@@ -189,17 +208,17 @@ pub fn atlas_vertex(
     let bary2 = atlas_barycentric(fixture, requested, triangle_start + 2)
     let sample0 = evaluate(
         original,
-        triangle_parameter(domain, warp.map(bary0)),
+        map.parameter(bary0),
         policy(),
     )
     let sample1 = evaluate(
         original,
-        triangle_parameter(domain, warp.map(bary1)),
+        map.parameter(bary1),
         policy(),
     )
     let sample2 = evaluate(
         original,
-        triangle_parameter(domain, warp.map(bary2)),
+        map.parameter(bary2),
         policy(),
     )
     let projected = project(camera_value, differential.sample.position)

@@ -400,6 +400,35 @@ fn quad_atlas_wasm_canonicalizes_d4_and_preserves_exact_boundary_rings() {
 }
 
 #[test]
+fn sampled_length_inverse_wasm_is_monotone_and_lod_tracks_curved_length() {
+    let (mut store,instance)=instantiate();
+    let inverse=function::<(u32,f32),f32>(&mut store,&instance,"inverse_length_test");
+    let lod=function::<(f32,f32,u32),u32>(&mut store,&instance,"measured_edge_lod");
+    for kind in 0..4 {
+        let mut previous=0.0;
+        for step in 0..=4096 {
+            let t=step as f32/4096.0;
+            let x=inverse.call(&mut store,(kind,t)).unwrap();
+            assert!(x>=previous && x<=1.0,"monotone inverse, kind {kind}, step {step}");
+            previous=x;
+            if step==0 || step==4096 {assert_eq!(x,t,"exact endpoints");}
+            if kind==0 || kind==3 {assert_eq!(x,t,"linear CDF / explicitly unmeasured fallback");}
+            if kind==1 {assert!((x*x-t).abs()<=0.000004,"piecewise-linear length approximation error");}
+            if kind==2 && step>0 {assert!((2.0*x-1.0-t).abs()<=0.000001,"zero-length prefix is skipped");}
+        }
+    }
+    for maximum in 0..=8 {
+        for length in [0.01_f32,0.1,1.0,3.7,12.0,100.0] {
+            for spacing in [0.01_f32,0.18,1.0,2.0] {
+                let actual=lod.call(&mut store,(length,spacing,maximum)).unwrap();
+                let expected=(0..=maximum).find(|&l|spacing*(1_u32<<l) as f32>=length).unwrap_or(maximum);
+                assert_eq!(actual,expected,"LoD by arc length, with explicit cap");
+            }
+        }
+    }
+}
+
+#[test]
 fn planar_metric_incircle_wasm_matches_independent_i128() {
     let (mut store,instance)=instantiate();
     let predicate=function::<(u32,u32,u32,u32,u32,u32,u32,u32,u32),i32>(&mut store,&instance,"planar_incircle_lane");

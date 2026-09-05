@@ -43,6 +43,24 @@ use quilting_domain::{
 use quilting_patch::{BilinearCornerScales, DenotationSample, Euclidean3Points, TriangleDomain2, denote, measure_tangent_triangle3, triangle_parameter}
 use quilting_patch::barycentric_warp::{ProjectiveTriangleMap, RadialTriangleMap, TriangleFan3}
 use quilting_patch::sampling_warp::{interval_bias,TriangleBoundaryWarp,QuadBoundaryWarp,InteriorTwist,InteriorConcentration}
+use quilting_patch::arc_length::{CumulativeLengthSamples,inverse_length,length_lod}
+struct TestLengthSamples { kind:u32 }
+impl core::marker::Copy for TestLengthSamples {}
+extern { const fn __f32_from_i32(_: i32) -> f32 }
+impl CumulativeLengthSamples for TestLengthSamples {
+    fn segments(self)->u32 {256}
+    fn cumulative(self,_ index:u32)->f32 {
+        let t=__f32_from_i32(index.downcast_unchecked())/256.0
+        if self.kind==0 {t} else if self.kind==1 {t*t}
+        else if self.kind==2 {if t<0.5 {0.0} else {2.0*t-1.0}} else {0.0}
+    }
+}
+pub fn inverse_length_test(_ kind:u32,_ fraction:f32)->f32 {
+    inverse_length(TestLengthSamples {kind:kind},fraction)
+}
+pub fn measured_edge_lod(_ length:f32,_ spacing:f32,_ maximum:u32)->u32 {
+    length_lod(length,spacing,maximum)
+}
 use quilting_atlas::quad::{QuadAtlasKey,SquareSymmetry,canonicalize as canonical_quad,boundary_seed as quad_boundary_seed}
 use quilting_atlas::planar::{FixedPoint2,EquilateralMetric,SquareMetric,incircle_sign as planar_incircle}
 use quilting_atlas::quad_sampling::{

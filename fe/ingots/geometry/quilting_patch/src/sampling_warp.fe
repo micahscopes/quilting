@@ -6,6 +6,11 @@ use core::marker::Copy
 use quilting_domain::{Bary3F, Vec2F, bary3f, vec2f, bary_to_cartesian, cartesian_to_bary}
 use fmath::{sin, cos}
 
+/// A triangle sampling coordinate mapped into a patch's parameter domain.
+pub trait TriangleParameterMap: Copy {
+    fn parameter(self, _ point: Bary3F) -> Vec2F
+}
+
 /// Lawful implementations are strictly increasing on [0,1], fix its endpoints,
 /// and return finite values. An analytic inverse arc-length map or a validated
 /// sampled inverse CDF can implement the same contract as a hand-authored skew.

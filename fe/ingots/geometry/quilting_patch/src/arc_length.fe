@@ -1,0 +1,44 @@
+//! Monotone inversion of sampled cumulative length. This is exact for the
+//! represented piecewise-linear CDF, not a proof of exact surface arc length.
+use core::marker::Copy
+
+extern { const fn __f32_from_i32(_: i32) -> f32 }
+fn number(_ n: u32) -> f32 { __f32_from_i32(n.downcast_unchecked()) }
+
+/// Values must be finite, nondecreasing, start at zero and end above zero.
+/// Sample locations are equally spaced in the integration coordinate. A
+/// caller may compose a conditioning map after inversion.
+pub trait CumulativeLengthSamples: Copy {
+    fn segments(self) -> u32
+    fn cumulative(self, _ index: u32) -> f32
+}
+pub fn inverse_length<M: CumulativeLengthSamples>(_ samples: M, _ fraction: f32) -> f32 {
+    if fraction <= 0.0 { return 0.0 }
+    if fraction >= 1.0 { return 1.0 }
+    let n = samples.segments()
+    let total = samples.cumulative(n)
+    if n == 0 || !(total > 0.0) { return fraction }
+    let target = fraction * total
+    let mut low: u32 = 0
+    let mut high = n
+    while low + 1 < high {
+        let middle = (low + high) / 2
+        if samples.cumulative(middle) < target { low = middle } else { high = middle }
+    }
+    let before = samples.cumulative(low)
+    let after = samples.cumulative(high)
+    let local = if after > before { (target - before) / (after - before) } else { 0.0 }
+    (number(low) + local) / number(n)
+}
+
+/// Smallest dyadic edge resolution meeting the requested length/spacing ratio,
+/// unless capped. The caller must separately report a capped request.
+pub fn length_lod(_ length: f32, _ spacing: f32, _ maximum: u32) -> u32 {
+    let mut lod: u32 = 0
+    let mut covered = spacing
+    while lod < maximum && covered < length {
+        covered = covered * 2.0
+        lod = lod + 1
+    }
+    lod
+}

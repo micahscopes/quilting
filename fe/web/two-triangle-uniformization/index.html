@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="../demo-shell.css" data-fe-publish>
+  <title>Two Triangles · Boundary Spacing · Fe</title>
+</head>
+<body>
+  <main>
+    <header>
+      <strong>two triangles · boundary spacing</strong>
+      <span title="The original surface is evaluated over two triangle domains. Edge spacing is measured in surface units, not pixels. Five shared GPU arc-length tables determine edge LoDs and spacing. Numerical, not certified exact: overlay strips are bottom/right/top/left/diagonal; amber means coarse/fine length disagreement above 0.01%, red means invalid or LoD capped. Toggle uniformize for comparison. Drag to orbit; wheel to zoom.">curved-edge LoD · shared diagonal · numerical arc length · amber = uncertainty · red = invalid/capped</span>
+    </header>
+    <section class="stage" aria-label="Two triangular restrictions with shared arc-length boundaries">
+      <script type="application/fe" data-fe-src="../../ingots/demos/two_triangle_uniformization" data-fe-render></script>
+    </section>
+  </main>
+</body>
+</html>

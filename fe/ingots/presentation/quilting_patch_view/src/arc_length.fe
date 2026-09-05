@@ -1,0 +1,93 @@
+//! GPU-resident boundary integration for the paper-patch explorers.
+//! Five canonically oriented curves: four outer edges and the shared diagonal.
+//! The polynomial CDF is approximate; coarse/fine disagreement is an indicator,
+//! not a certified error bound. No readback participates in rendering.
+use core::marker::Copy
+use fmath::sqrt
+use quilting_domain::{Vec2F, vec2f, length3, sub3}
+use quilting_patch::BilinearCornerScales
+use quilting_patch::arc_length::{CumulativeLengthSamples, inverse_length}
+use quilting_patch::sampling_warp::{IntervalSamplingMap, interval_bias}
+use quilting_clifford_bezier::evaluate
+use std::webgpu::StorageBuffer
+use super::{paper_patch, policy}
+
+pub const INTEGRATION_SEGMENTS: usize = 1024
+pub const SEGMENTS: u32 = INTEGRATION_SEGMENTS.downcast_truncate()
+pub const STRIDE: u32 = SEGMENTS + 9
+pub const TABLE_WORDS: usize = 5 * (INTEGRATION_SEGMENTS + 9)
+pub type EdgeTables = StorageBuffer<f32, TABLE_WORDS>
+extern { const fn __f32_from_i32(_: i32) -> f32 }
+fn number(_ n: u32) -> f32 { __f32_from_i32(n.downcast_unchecked()) }
+
+pub fn curve_parameter(_ edge: u32, _ t: f32) -> Vec2F {
+    if edge == 0 { vec2f(t, 0.0) } else if edge == 1 { vec2f(1.0, t) }
+    else if edge == 2 { vec2f(t, 1.0) } else if edge == 3 { vec2f(0.0, t) }
+    else { vec2f(t, t) }
+}
+fn conditioning_bias(_ edge: u32, _ w: BilinearCornerScales) -> f32 {
+    if edge == 0 { w.w00 / w.w10 } else if edge == 1 { w.w10 / w.w11 }
+    else if edge == 2 { w.w01 / w.w11 } else if edge == 3 { w.w00 / w.w01 }
+    else { sqrt(w.w00 / w.w11) }
+}
+
+/// One invocation owns one whole curve record. A weight cache avoids rebuilding
+/// integration tables during camera-only redraws. The following draw-preparation
+/// dispatch observes all five completed records.
+pub fn prepare_edge(_ tables: EdgeTables, _ edge: u32, _ weights: BilinearCornerScales) {
+    if edge >= 5 { return }
+    let base = edge * STRIDE
+    if tables.load(index:base+4)==weights.w00 && tables.load(index:base+5)==weights.w10
+        && tables.load(index:base+6)==weights.w01 && tables.load(index:base+7)==weights.w11 { return }
+    let patch = paper_patch(weights)
+    let bias = conditioning_bias(edge, weights)
+    let first = evaluate(patch, curve_parameter(edge, 0.0), policy())
+    let mut previous = first.position
+    let mut coarse_previous = previous
+    let mut length: f32 = 0.0
+    let mut coarse: f32 = 0.0
+    let mut valid = first.conditioned
+    tables.store(index:base+8,value:0.0)
+    let mut i: u32 = 1
+    while i <= SEGMENTS {
+        let t = interval_bias(number(i) / number(SEGMENTS), bias)
+        let sample = evaluate(patch, curve_parameter(edge,t), policy())
+        valid = valid && sample.conditioned
+        length = length + length3(sub3(sample.position, previous))
+        if i % 2 == 0 {
+            coarse = coarse + length3(sub3(sample.position, coarse_previous))
+            coarse_previous = sample.position
+        }
+        tables.store(index:base+8+i,value:length)
+        previous = sample.position
+        i = i + 1
+    }
+    tables.store(index:base,value:length)
+    tables.store(index:base+1,value:coarse)
+    tables.store(index:base+2,value:if valid && length>0.0 && length<100000000000000000000.0 {1.0} else {0.0})
+    tables.store(index:base+3,value:bias)
+    tables.store(index:base+4,value:weights.w00)
+    tables.store(index:base+5,value:weights.w10)
+    tables.store(index:base+6,value:weights.w01)
+    tables.store(index:base+7,value:weights.w11)
+}
+
+pub struct EdgeLengthMap { pub tables: EdgeTables, pub edge: u32, pub enabled: bool }
+impl Copy for EdgeLengthMap {}
+impl CumulativeLengthSamples for EdgeLengthMap {
+    fn segments(self) -> u32 { SEGMENTS }
+    fn cumulative(self, _ i: u32) -> f32 { self.tables.load(index:self.edge*STRIDE+8+i) }
+}
+impl IntervalSamplingMap for EdgeLengthMap {
+    fn map(self, _ t: f32) -> f32 {
+        if !self.enabled || t==0.0 || t==1.0 { return t }
+        interval_bias(inverse_length(self,t),self.tables.load(index:self.edge*STRIDE+3))
+    }
+}
+pub struct DirectedEdgeMap { pub law: EdgeLengthMap, pub reversed: bool }
+impl Copy for DirectedEdgeMap {}
+impl IntervalSamplingMap for DirectedEdgeMap {
+    fn map(self, _ t: f32) -> f32 {
+        if self.reversed { 1.0-self.law.map(1.0-t) } else { self.law.map(t) }
+    }
+}

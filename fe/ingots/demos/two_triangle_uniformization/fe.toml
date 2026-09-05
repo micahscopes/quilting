@@ -1,0 +1,16 @@
+[ingot]
+name = "two_triangle_uniformization"
+version = "0.1.0"
+
+[dependencies]
+core = true
+std = true
+fmath = true
+quilting_domain = true
+quilting_patch = true
+quilting_patch_view = true
+quilting_clifford_bezier = true
+quilting_atlas = true
+quilting_demo_view = true
+quilting_oklch = { path = "../../color/quilting_oklch" }
+classic_quilting_lod = { path = "../classic_quilting_lod" }

@@ -1,0 +1,198 @@
+//! Two triangular domains, five canonical curved edges, one resident atlas.
+//! No new fitted surface and no extra fan: every point evaluates the root patch.
+use core::marker::Copy
+use fmath::{abs, clamp, min, max, smoothstep, wrap_pi}
+use classic_quilting_lod::{FixtureBuffer, patch_triangle_count}
+use quilting_atlas::{AtlasKey, canonicalize, canonical_key_ordinal}
+use quilting_domain::{Bary3F, Vec2F, bary3f, vec2f, vec3f}
+use quilting_patch::{BilinearCornerScales, TriangleDomain2, triangle_parameter}
+use quilting_patch::arc_length::length_lod
+use quilting_patch::sampling_warp::{TriangleParameterMap, TriangleEdgeMaps, IntervalSamplingMap}
+use quilting_patch_view::{SurfaceVarying, paper_patch, atlas_vertex_with_map, atlas_fragment}
+use quilting_patch_view::arc_length::{EdgeTables, EdgeLengthMap, DirectedEdgeMap, STRIDE, prepare_edge, curve_parameter}
+use quilting_demo_view::{ScreenExtent, OrbitCamera, orbit_camera}
+use quilting_oklch::{display_rgb, mix_display_rgb, pack_rgba8}
+use std::web::view::{ApplyParamBindings, Extent, Param, ParamBindingsProvider, Surface, SurfaceEvent, SurfaceState}
+use std::webgpu::{
+    ClipPosition, ComputeInvocation, ComputeSurface, DrawIndirectBuffer, FixedDispatch, Workgroup,
+    Depth24LessEqualMsaa4, FragmentStage, FragmentSurface, GpuProgram, IndirectTriangleList,
+    LatestPerFrame, RasterConfiguration, RasterPlan, RasterVertex, ResponsiveBacking,
+    StandardSurfaceRecovery, SurfaceQuality, SurfaceRecovery, SurfaceScheduling, SurfaceTransition,
+    TriangleList, VertexStage, WebGpuBackend, raster_plan,
+}
+extern { const fn __f32_from_i32(_: i32) -> f32 }
+fn number(_ n: u32) -> f32 { __f32_from_i32(n.downcast_unchecked()) }
+fn level(_ x: f32) -> u32 {
+    let mut n: u32=0
+    while n<8 && x>=number(n)+0.5 { n=n+1 }
+    n
+}
+struct Params {
+    edge_spacing:Param,max_lod:Param,uniformize:Param,show_triangles:Param,wire_px:Param,
+    resolve_weight_constraint:Param,w00:Param,w10:Param,w01:Param,w11:Param,
+    orbit_yaw:Param,orbit_pitch:Param,orbit_distance:Param,res_x:Param,res_y:Param,dragging:Param,
+}
+struct State {
+    edge_spacing:f32,max_lod:f32,uniformize:f32,show_triangles:f32,wire_px:f32,
+    resolve_weight_constraint:f32,w00:f32,w10:f32,w01:f32,w11:f32,
+    orbit_yaw:f32,orbit_pitch:f32,orbit_distance:f32,res_x:f32,res_y:f32,dragging:f32,
+}
+impl Copy for State {}
+impl SurfaceState for State { type Params=Params }
+derive ApplyParamBindings for State using ParamBindingsProvider
+const fn params()->Params {
+    Params {
+        edge_spacing:Param::log(min:0.01,max:2.0,init:0.18),
+        max_lod:Param::int(min:0.0,max:8.0,init:7.0),
+        uniformize:Param::toggle(init:true),show_triangles:Param::toggle(init:true),
+        wire_px:Param::range(min:0.0,max:1.6,init:0.35),
+        resolve_weight_constraint:Param::toggle(init:true),
+        w00:Param::log(min:0.02,max:8.0,init:1.0),w10:Param::log(min:0.02,max:8.0,init:1.0),
+        w01:Param::log(min:0.02,max:8.0,init:1.0),w11:Param::log(min:0.02,max:8.0,init:1.0),
+        orbit_yaw:Param::range(min:-3.14159265,max:3.14159265,init:-0.72),
+        orbit_pitch:Param::range(min:-1.35,max:1.35,init:0.12),
+        orbit_distance:Param::log(min:2.5,max:16.0,init:6.2),
+        res_x:Param::extent_x(),res_y:Param::extent_y(),dragging:Param::fixed(0.0),
+    }
+}
+fn map(_ tables:EdgeTables,_ edge:u32,_ enabled:bool)->EdgeLengthMap {
+    EdgeLengthMap {tables:tables,edge:edge,enabled:enabled}
+}
+fn directed(_ tables:EdgeTables,_ edge:u32,_ reversed:bool,_ enabled:bool)->DirectedEdgeMap {
+    DirectedEdgeMap {law:map(tables,edge,enabled),reversed:reversed}
+}
+struct HalfSampling { tables:EdgeTables,half:u32,enabled:bool }
+impl Copy for HalfSampling {}
+impl TriangleParameterMap for HalfSampling {
+    fn parameter(self,_ p:Bary3F)->Vec2F {
+        // Boundary authority bypasses composed/reversed arithmetic. Both
+        // diagonal consumers call precisely the same map with the same dyadic t.
+        if self.half==0 {
+            if p.a==0.0 {return curve_parameter(1,map(self.tables,1,self.enabled).map(p.c))}
+            if p.b==0.0 {return curve_parameter(4,map(self.tables,4,self.enabled).map(p.c))}
+            if p.c==0.0 {return curve_parameter(0,map(self.tables,0,self.enabled).map(p.b))}
+            let q=TriangleEdgeMaps {
+                a:directed(self.tables,1,false,self.enabled),b:directed(self.tables,4,true,self.enabled),
+                c:directed(self.tables,0,false,self.enabled),
+            }.map(p)
+            triangle_parameter(TriangleDomain2 {a:vec2f(0.0,0.0),b:vec2f(1.0,0.0),c:vec2f(1.0,1.0)},q)
+        } else {
+            if p.a==0.0 {return curve_parameter(2,map(self.tables,2,self.enabled).map(p.b))}
+            if p.b==0.0 {return curve_parameter(3,map(self.tables,3,self.enabled).map(p.c))}
+            if p.c==0.0 {return curve_parameter(4,map(self.tables,4,self.enabled).map(p.b))}
+            let q=TriangleEdgeMaps {
+                a:directed(self.tables,2,true,self.enabled),b:directed(self.tables,3,true,self.enabled),
+                c:directed(self.tables,4,false,self.enabled),
+            }.map(p)
+            triangle_parameter(TriangleDomain2 {a:vec2f(0.0,0.0),b:vec2f(1.0,1.0),c:vec2f(0.0,1.0)},q)
+        }
+    }
+}
+fn edge_lod(_ tables:EdgeTables,_ edge:u32,_ spacing:f32,_ maximum:f32)->u32 {
+    length_lod(tables.load(index:edge*STRIDE),spacing,level(maximum))
+}
+fn key(_ tables:EdgeTables,_ half:u32,_ spacing:f32,_ maximum:f32)->AtlasKey {
+    if half==0 {
+        AtlasKey {a:edge_lod(tables,1,spacing,maximum),b:edge_lod(tables,4,spacing,maximum),c:edge_lod(tables,0,spacing,maximum)}
+    } else {
+        AtlasKey {a:edge_lod(tables,2,spacing,maximum),b:edge_lod(tables,3,spacing,maximum),c:edge_lod(tables,4,spacing,maximum)}
+    }
+}
+fn vertices(_ fixture:FixtureBuffer,_ k:AtlasKey)->u32 {
+    patch_triangle_count(fixture,canonical_key_ordinal(canonicalize(k).key))*3
+}
+struct Draw {}
+pub struct ReceiptVarying {pub t:f32,pub edge:f32}
+impl Copy for ReceiptVarying {}
+actor TwoTriangleUniformization uses (GpuProgram<WebGpuBackend>,SurfaceQuality<ResponsiveBacking>,SurfaceRecovery<StandardSurfaceRecovery>) {
+    edge_spacing:f32,max_lod:f32,uniformize:f32,show_triangles:f32,wire_px:f32,
+    resolve_weight_constraint:f32,w00:f32,w10:f32,w01:f32,w11:f32,
+    orbit_yaw:f32,orbit_pitch:f32,orbit_distance:f32,res_x:f32,res_y:f32,dragging:f32,
+    fixture:FixtureBuffer,edges:EdgeTables,draw:DrawIndirectBuffer<Draw>,
+    const fn raster()->RasterPlan uses (RasterConfiguration) {raster_plan<Depth24LessEqualMsaa4>()}
+    const fn view()->Surface<Params> {Surface {extent:Extent::square(768),params:params()}}
+    fn transition(self,event:SurfaceEvent)->State uses (SurfaceTransition,SurfaceScheduling<LatestPerFrame>) {
+        let mut next=State {
+            edge_spacing:self.edge_spacing,max_lod:self.max_lod,uniformize:self.uniformize,
+            show_triangles:self.show_triangles,wire_px:self.wire_px,resolve_weight_constraint:self.resolve_weight_constraint,
+            w00:self.w00,w10:self.w10,w01:self.w01,w11:self.w11,
+            orbit_yaw:self.orbit_yaw,orbit_pitch:self.orbit_pitch,orbit_distance:self.orbit_distance,
+            res_x:self.res_x,res_y:self.res_y,dragging:self.dragging,
+        }.apply_param_bindings(params(),event)
+        let changed=next.w00!=self.w00 || next.w10!=self.w10 || next.w01!=self.w01 || next.w11!=self.w11
+            || next.resolve_weight_constraint!=self.resolve_weight_constraint
+        if event.is_param_edit() && changed && next.resolve_weight_constraint>0.5 {
+            let w=BilinearCornerScales {w00:next.w00,w10:next.w10,w01:next.w01,w11:next.w11}.separable()
+            let low=min(min(w.w00,w.w10),min(w.w01,w.w11))
+            let high=max(max(w.w00,w.w10),max(w.w01,w.w11))
+            let fitted=w.scaled(clamp(1.0,0.02/low,8.0/high))
+            next.w00=fitted.w00
+            next.w10=fitted.w10
+            next.w01=fitted.w01
+            next.w11=fitted.w11
+        }
+        if event.is_pointer_down() {next.dragging=1.0}
+        if event.is_pointer_move() && event.buttons!=0 && next.dragging>0.5 {
+            next.orbit_yaw=wrap_pi(next.orbit_yaw-event.delta_x*0.008)
+            next.orbit_pitch=clamp(next.orbit_pitch-event.delta_y*0.008,-1.35,1.35)
+        }
+        if event.is_pointer_up() {next.dragging=0.0}
+        if event.wheel_delta<0.0 {next.orbit_distance=clamp(next.orbit_distance*0.9,2.5,16.0)}
+        else if event.wheel_delta>0.0 {next.orbit_distance=clamp(next.orbit_distance*1.1,2.5,16.0)}
+        next
+    }
+    fn integrate_edges(self,invocation:ComputeInvocation) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<5,1,1>>) {
+        prepare_edge(self.edges,invocation.global.x,BilinearCornerScales {w00:self.w00,w10:self.w10,w01:self.w01,w11:self.w11})
+    }
+    fn prepare_draw(self,invocation:ComputeInvocation) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+        let mut valid=true
+        let mut edge:u32=0
+        while edge<5 {
+            valid=valid && self.edges.load(index:edge*STRIDE+2)>0.5
+            edge=edge+1
+        }
+        let count=vertices(self.fixture,key(self.edges,0,self.edge_spacing,self.max_lod))
+            +vertices(self.fixture,key(self.edges,1,self.edge_spacing,self.max_lod))
+        self.draw.store(index:0,value:if valid {count} else {0})
+        self.draw.store(index:1,value:1)
+        self.draw.store(index:2,value:0)
+        self.draw.store(index:3,value:0)
+    }
+    fn background(self,px:i32,py:i32)->i32 uses (FragmentSurface) {-15396337}
+    fn surface_vertices(self,vertex_index:u32,instance_index:u32)->RasterVertex<SurfaceVarying>
+        uses (VertexStage<SurfaceVarying,IndirectTriangleList<DrawIndirectBuffer<Draw>>>) {
+        let first=key(self.edges,0,self.edge_spacing,self.max_lod)
+        let count=vertices(self.fixture,first)
+        let half=if vertex_index<count {0} else {1}
+        let local=if half==0 {vertex_index} else {vertex_index-count}
+        let camera=orbit_camera(OrbitCamera {target:vec3f(1.1,0.0,0.0),yaw:self.orbit_yaw,pitch:self.orbit_pitch,
+            distance:self.orbit_distance,focal:1.62,near:0.05,far:100.0},ScreenExtent {width:self.res_x,height:self.res_y})
+        atlas_vertex_with_map(self.fixture,key(self.edges,half,self.edge_spacing,self.max_lod),
+            paper_patch(BilinearCornerScales {w00:self.w00,w10:self.w10,w01:self.w01,w11:self.w11}),
+            HalfSampling {tables:self.edges,half:half,enabled:self.uniformize>0.5},local,half,camera,
+            ScreenExtent {width:self.res_x,height:self.res_y})
+    }
+    fn surface_fragment(self,v:SurfaceVarying)->i32 uses (FragmentStage<SurfaceVarying>) {
+        atlas_fragment(v,true,self.show_triangles,self.wire_px)
+    }
+    fn receipt_vertices(self,index:u32)->RasterVertex<ReceiptVarying> uses (VertexStage<ReceiptVarying,TriangleList<30>>) {
+        let edge=index/6
+        let i=index%6
+        let x=if i==1 || i==2 || i==4 {1.0} else {0.0}
+        let y=if i==2 || i==4 || i==5 {1.0} else {0.0}
+        RasterVertex {position:ClipPosition {x:-0.94+x*0.40,y:-0.92+number(edge)*0.026+y*0.016,z:0.0,w:1.0},
+            varying:ReceiptVarying {t:x,edge:number(edge)}}
+    }
+    fn receipt_fragment(self,v:ReceiptVarying)->i32 uses (FragmentStage<ReceiptVarying>) {
+        let edge=level(v.edge)
+        let length=self.edges.load(index:edge*STRIDE)
+        let coarse=self.edges.load(index:edge*STRIDE+1)
+        let lod=edge_lod(self.edges,edge,self.edge_spacing,self.max_lod)
+        let cap=number(1<<lod)*self.edge_spacing<length
+        let invalid=self.edges.load(index:edge*STRIDE+2)<0.5
+        let uncertain=abs(length-coarse)>length*0.0001
+        let color=if invalid || cap {display_rgb(0.9,0.20,0.17)} else if uncertain {display_rgb(0.95,0.61,0.18)}
+            else {display_rgb(0.38,0.72,0.66)}
+        pack_rgba8(color)
+    }
+}
