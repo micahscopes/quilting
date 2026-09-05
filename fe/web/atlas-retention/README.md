@@ -48,8 +48,10 @@ node --test fe/web/atlas-retention/verify.test.mjs
 1. Feed the canonical triangle/quad job cursor into the real sampling and
    triangulation passes, with reusable scratch and bounded resident arenas.
 2. Compose job iteration with the existing sampling/insertion/repair cycles.
-   Current Fe dispatch policies explicitly reject nested actor cycles; this
-   needs a general scheduling solution, not a demo-specific JavaScript loop.
+   Fe mb2 `6717e746f` now supports nested `CycledDispatch` policies and compact
+   shared schedules. Its six-stage browser fixture records the exact nested
+   execution order. Wire this facility into the generator, including bounded
+   queue pacing; the full atlas job loop is not connected yet.
 3. Connect mesh certificates and compacted counts to reservation, copying,
    publication, and ready-only atlas rendering.
 4. Scale scratch allocation and convergence policy through LoD 8; surface
