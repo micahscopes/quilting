@@ -40,3 +40,21 @@ test('a purported winner must still reject a later accepted neighbor', () => {
   assert.equal(retirement(true, true, true), 'rejected');
   assert.equal(retirement(false, true, true), 'accepted');
 });
+
+test('pending priority can reject irrelevant geometric queries without changing proposal facts',()=>{
+  let baselineQueries=0,filteredQueries=0;
+  for(const state of ['accepted','pending','rejected','invalid'])
+    for(const precedes of [false,true])for(const conflicts of [false,true]) {
+      const eligible=state==='accepted'||state==='pending';
+      const baseline=eligible&&conflicts
+        ? [state==='accepted',state==='pending'&&precedes] : [false,false];
+      if(eligible)baselineQueries++;
+      const relevant=eligible&&(state==='accepted'||precedes);
+      if(relevant)filteredQueries++;
+      const filtered=relevant&&conflicts
+        ? [state==='accepted',state==='pending'] : [false,false];
+      assert.deepEqual(filtered,baseline);
+    }
+  assert.equal(baselineQueries,8);assert.equal(filteredQueries,6);
+  // A finite truth table, not a measured runtime saving or neighbor frequency.
+});

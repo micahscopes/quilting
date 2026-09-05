@@ -2056,15 +2056,16 @@ where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WOR
             let other_state = load_generation_state<CAPACITY, WORDS>(workspace, parity, other_slot)
             if other_state == CANDIDATE_ACCEPTED || other_state == CANDIDATE_PENDING {
                 let other = load_candidate<P::Point, WORDS>(workspace, other_slot)
-                if policy.conflicts(candidate, other) {
+                // Accepted neighbors always matter. A pending neighbor can
+                // defeat us only if it precedes us; do that cheap immutable
+                // priority test before invoking the geometric relation.
+                let relevant = other_state == CANDIDATE_ACCEPTED || candidate_precedes(
+                    other.priority, other.slot, candidate.priority, candidate.slot,
+                )
+                if relevant && policy.conflicts(candidate, other) {
                     if other_state == CANDIDATE_ACCEPTED {
                         accepted_conflict = true
-                    } else if candidate_precedes(
-                        other.priority,
-                        other.slot,
-                        candidate.priority,
-                        candidate.slot,
-                    ) {
+                    } else {
                         preceding_pending_conflict = true
                     }
                 }
