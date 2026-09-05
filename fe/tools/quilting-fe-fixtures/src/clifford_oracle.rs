@@ -342,6 +342,63 @@ fn scaled_paper_example(scales: [f64; 4]) -> [Control; 4] {
     })
 }
 
+/// Equal-budget experiment using the exact resident atlas, not a substitute
+/// regular grid. Chord error is sampled in the *warped* parameter triangles.
+#[test]
+fn radial_atlas_concentration_is_a_budget_neutral_tradeoff() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+        "../../ingots/demos/classic_quilting_lod/assets/sha256/695152acd242f5b88a6ac4074f6855fea35b12bf16436308ba925b8cc962803e.bin");
+    let atlas = crate::decode(&std::fs::read(path).expect("resident atlas artifact")).unwrap();
+    let tile = atlas.patches.iter().find(|p| p.key == crate::AtlasKey::new(8,8,8)).unwrap();
+    let samples = [[0.5,0.5,0.0],[0.0,0.5,0.5],[0.5,0.0,0.5],[1.0/3.0;3]];
+    let corners = [[0.0,0.0],[1.0,0.0],[1.0,1.0],[0.0,1.0]];
+    for (name,weights,center) in [
+        ("paper-centered",[1.0;4],[0.5,0.5]),
+        ("paper-offset",[1.0;4],[0.12,0.76]),
+        ("squeezed-centered",[0.02,0.4,0.4,8.0],[0.5,0.5]),
+    ] {
+        let controls = scaled_paper_example(weights);
+        let position = |uv: [f64;2]| {
+            let p = evaluate(controls,uv[0],uv[1]);
+            [p.0[1],p.0[2],p.0[4]]
+        };
+        for strength in [0.0625,0.25,1.0,4.0,16.0] {
+            let mut worst = 0.0_f64;
+            let mut weighted_squared = 0.0_f64;
+            let mut covered_area = 0.0_f64;
+            let mut triangles = 0;
+            for child in 0..4 {
+                let vertex_uv = |index: u32| {
+                    let [a,b,c] = atlas.vertices[index as usize].barycentric.map(f64::from);
+                    let d = a+b+strength*c;
+                    std::array::from_fn::<_,2,_>(|axis|
+                        (a*corners[child][axis]+b*corners[(child+1)%4][axis]+strength*c*center[axis])/d)
+                };
+                for triangle in &atlas.triangles[tile.first_triangle as usize..(tile.first_triangle+tile.triangle_count) as usize] {
+                    triangles += 1;
+                    let uv = triangle.indices.map(vertex_uv);
+                    let p = uv.map(position);
+                    let area = 0.5*((uv[1][0]-uv[0][0])*(uv[2][1]-uv[0][1])-(uv[1][1]-uv[0][1])*(uv[2][0]-uv[0][0]));
+                    assert!(area>0.0,"no parameter-space triangle inversion");
+                    covered_area += area;
+                    for bary in samples {
+                        let at = std::array::from_fn(|axis| (0..3).map(|i| bary[i]*uv[i][axis]).sum());
+                        let exact = position(at);
+                        let flat: [f64;3] = std::array::from_fn(|axis| (0..3).map(|i| bary[i]*p[i][axis]).sum());
+                        let error_squared = (0..3).map(|i| (exact[i]-flat[i]).powi(2)).sum::<f64>();
+                        worst = worst.max(error_squared.sqrt());
+                        weighted_squared += area*error_squared/(samples.len() as f64);
+                    }
+                }
+            }
+            assert_eq!(triangles,4*tile.triangle_count);
+            assert!((covered_area-1.0).abs()<0.000002);
+            assert!(worst.is_finite() && weighted_squared.is_finite());
+            eprintln!("{name}: k={strength}, triangles={triangles}, sampled_max_chord={worst:.8}, parameter_area_rms={:.8}",(weighted_squared/covered_area).sqrt());
+        }
+    }
+}
+
 fn denominator_norm_squared(controls: [Control; 4], s: f64, t: f64) -> f64 {
     let metric = [1.0, 1.0, 0.0];
     let denominator = bilinear(controls.map(|control| control.weight), s, t);

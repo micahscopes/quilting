@@ -8,6 +8,10 @@
 //! optional wireframe is only a temporary mesh used to display them.
 
 use core::marker::Copy
+use classic_quilting_lod::{FixtureBuffer, fixture_barycentric, fixture_triangle_index,
+    patch_first_triangle, patch_triangle_count}
+use quilting_atlas::{AtlasKey, MAX_LOD, canonicalize, canonical_key_ordinal, edge_permutation_index}
+use quilting_qb::remap_barycentric
 use fmath::{clamp, min, max, smoothstep, wrap_pi}
 use quilting_clifford_bezier::{
     IsotropicBilinearPatch,
@@ -64,6 +68,12 @@ use std::web::view::{
 }
 use std::webgpu::{
     ClipPosition,
+    ComputeInvocation,
+    ComputeSurface,
+    DrawIndirectBuffer,
+    FixedDispatch,
+    IndirectTriangleList,
+    Workgroup,
     Depth24LessEqualMsaa4,
     FragmentStage,
     FragmentSurface,
@@ -88,9 +98,7 @@ extern {
     const fn __f32_from_i32(_: i32) -> f32
 }
 
-const MAX_MESH_LOD: u32 = 5
-const VERTICES_PER_PATCH: u32 = 3072
-const MAX_SURFACE_VERTICES: usize = 12288
+struct SurfaceDraw {}
 
 struct PatchSubdivisionParams {
     split_mode: Param,
@@ -101,6 +109,7 @@ struct PatchSubdivisionParams {
     fan_concentration: Param,
     split_threshold: Param,
     mesh_lod: Param,
+    radial_lod: Param,
     show_triangles: Param,
     resolve_weight_constraint: Param,
     w00: Param,
@@ -127,6 +136,7 @@ struct PatchSubdivisionState {
     fan_concentration: f32,
     split_threshold: f32,
     mesh_lod: f32,
+    radial_lod: f32,
     show_triangles: f32,
     resolve_weight_constraint: f32,
     w00: f32,
@@ -177,7 +187,8 @@ const fn patch_subdivision_params() -> PatchSubdivisionParams {
         center_v: Param::range(min: 0.001, max: 0.999, init: 0.5),
         fan_concentration: Param::log(min: 0.0625, max: 16.0, init: 1.0),
         split_threshold: Param::unit(init: 0.32),
-        mesh_lod: Param::int(min: 0.0, max: 5.0, init: 3.0),
+        mesh_lod: Param::int(min: 0.0, max: 8.0, init: 3.0),
+        radial_lod: Param::int(min: 0.0, max: 8.0, init: 3.0),
         show_triangles: Param::toggle(init: true),
         resolve_weight_constraint: Param::toggle(init: true),
         w00: Param::log(min: 0.02, max: 8.0, init: 1.0),
@@ -205,6 +216,7 @@ fn state(
     _ fan_concentration: f32,
     _ split_threshold: f32,
     _ mesh_lod: f32,
+    _ radial_lod: f32,
     _ show_triangles: f32,
     _ resolve_weight_constraint: f32,
     _ w00: f32,
@@ -230,6 +242,7 @@ fn state(
         fan_concentration: fan_concentration,
         split_threshold: split_threshold,
         mesh_lod: mesh_lod,
+        radial_lod: radial_lod,
         show_triangles: show_triangles,
         resolve_weight_constraint: resolve_weight_constraint,
         w00: w00,
@@ -305,7 +318,7 @@ fn as_f32(_ value: u32) -> f32 {
 
 fn admitted_lod(_ value: f32) -> u32 {
     let mut lod: u32 = 0
-    while lod < MAX_MESH_LOD && value >= as_f32(lod) + 0.5 {
+    while lod < MAX_LOD && value >= as_f32(lod) + 0.5 {
         lod = lod + 1
     }
     lod
@@ -564,56 +577,20 @@ fn active_patch_count(_ state: PatchSubdivisionState) -> u32 {
     if uses_four_patches(state) { 4 } else { 2 }
 }
 
-struct TriangleCell {
-    row: u32,
-    column: u32,
-    upper: bool,
-}
-impl Copy for TriangleCell {}
-
-fn triangle_cell(_ triangle: u32, _ side: u32) -> TriangleCell {
-    let mut remaining = triangle
-    let mut row: u32 = 0
-    while row < side {
-        let count = 2 * (side - row) - 1
-        if remaining < count {
-            return TriangleCell {
-                row: row,
-                column: remaining / 2,
-                upper: remaining % 2 == 1,
-            }
-        }
-        remaining = remaining - count
-        row = row + 1
-    }
-    TriangleCell { row: 0, column: 0, upper: false }
+/// Fan corners A/B are on the outer boundary; C is the shared interior point.
+/// Atlas lanes are opposite corners, so A/B receive the shared radial LoD.
+fn displayed_atlas_key(_ outer: f32, _ radial: f32, _ four: bool) -> AtlasKey {
+    let edge = admitted_lod(outer)
+    let inner = if four { admitted_lod(radial) } else { edge }
+    AtlasKey { a: inner, b: inner, c: edge }
 }
 
-fn grid_barycentric(_ column: u32, _ row: u32, _ side: u32) -> Bary3F {
-    let b = as_f32(column) / as_f32(side)
-    let c = as_f32(row) / as_f32(side)
-    bary3f(1.0 - b - c, b, c)
-}
-
-fn patch_barycentric(_ patch_vertex: u32, _ side: u32) -> Bary3F {
-    let triangle = patch_vertex / 3
-    let corner = patch_vertex % 3
-    let cell = triangle_cell(triangle, side)
-    if !cell.upper {
-        if corner == 0 {
-            grid_barycentric(cell.column, cell.row, side)
-        } else if corner == 1 {
-            grid_barycentric(cell.column + 1, cell.row, side)
-        } else {
-            grid_barycentric(cell.column, cell.row + 1, side)
-        }
-    } else if corner == 0 {
-        grid_barycentric(cell.column + 1, cell.row, side)
-    } else if corner == 1 {
-        grid_barycentric(cell.column + 1, cell.row + 1, side)
-    } else {
-        grid_barycentric(cell.column, cell.row + 1, side)
-    }
+fn atlas_barycentric(_ fixture: FixtureBuffer, _ requested: AtlasKey, _ vertex: u32) -> Bary3F {
+    let canonical = canonicalize(requested)
+    let patch_id = canonical_key_ordinal(canonical.key)
+    let triangle = patch_first_triangle(fixture,patch_id) + vertex / 3
+    let point = fixture_barycentric(fixture,fixture_triangle_index(fixture,triangle,vertex % 3))
+    remap_barycentric(edge_permutation_index(canonical.permutation),point)
 }
 
 fn triangle_corner(_ corner: u32) -> Bary3F {
@@ -750,6 +727,7 @@ actor ExactPatchSubdivision uses (
     fan_concentration: f32,
     split_threshold: f32,
     mesh_lod: f32,
+    radial_lod: f32,
     show_triangles: f32,
     resolve_weight_constraint: f32,
     w00: f32,
@@ -765,6 +743,20 @@ actor ExactPatchSubdivision uses (
     orbiting: f32,
     difficulty: f32,
     center_score: f32,
+
+    fixture: FixtureBuffer,
+    surface_draw: DrawIndirectBuffer<SurfaceDraw>,
+
+    fn prepare_surface_draw(self, invocation: ComputeInvocation)
+        uses (ComputeSurface<Workgroup<1,1,1>, FixedDispatch<1,1,1>>) {
+        let four = self.split_mode < 0.5 || (self.split_mode < 1.5 && self.difficulty > self.split_threshold)
+        let requested = displayed_atlas_key(self.mesh_lod,self.radial_lod,four)
+        let patch_id = canonical_key_ordinal(canonicalize(requested).key)
+        self.surface_draw.store(index: 0, value: patch_triangle_count(self.fixture,patch_id) * 3)
+        self.surface_draw.store(index: 1, value: if four { 4 } else { 2 })
+        self.surface_draw.store(index: 2, value: 0)
+        self.surface_draw.store(index: 3, value: 0)
+    }
 
     const fn raster() -> RasterPlan uses (RasterConfiguration) {
         raster_plan<Depth24LessEqualMsaa4>()
@@ -786,6 +778,7 @@ actor ExactPatchSubdivision uses (
             self.fan_concentration,
             self.split_threshold,
             self.mesh_lod,
+            self.radial_lod,
             self.show_triangles,
             self.resolve_weight_constraint,
             self.w00,
@@ -833,8 +826,8 @@ actor ExactPatchSubdivision uses (
         -15396337
     }
 
-    fn surface_vertices(self, vertex_index: u32) -> RasterVertex<SurfaceVarying>
-        uses (VertexStage<SurfaceVarying, TriangleList<MAX_SURFACE_VERTICES>>)
+    fn surface_vertices(self, vertex_index: u32, instance_index: u32) -> RasterVertex<SurfaceVarying>
+        uses (VertexStage<SurfaceVarying, IndirectTriangleList<DrawIndirectBuffer<SurfaceDraw>>>)
     {
         let current = state(
             self.split_mode,
@@ -845,6 +838,7 @@ actor ExactPatchSubdivision uses (
             self.fan_concentration,
             self.split_threshold,
             self.mesh_lod,
+            self.radial_lod,
             self.show_triangles,
             self.resolve_weight_constraint,
             self.w00,
@@ -861,14 +855,9 @@ actor ExactPatchSubdivision uses (
             self.difficulty,
             self.center_score,
         )
-        let patch_index = vertex_index / VERTICES_PER_PATCH
-        let patch_vertex = vertex_index % VERTICES_PER_PATCH
-        let lod = admitted_lod(current.mesh_lod)
-        let side = 1 << lod
-        let active_vertices = side * side * 3
-        if patch_index >= active_patch_count(current) || patch_vertex >= active_vertices {
-            return invalid_surface_vertex()
-        }
+        let patch_index = instance_index
+        let patch_vertex = vertex_index
+        let requested = displayed_atlas_key(current.mesh_lod,current.radial_lod,uses_four_patches(current))
         let domain = displayed_domain(patch_index, current)
         let original = triangular_projective_controls(patch_value(current), domain)
         // Each four-fan child has its shared interior point in lane C. The
@@ -876,7 +865,7 @@ actor ExactPatchSubdivision uses (
         let concentration = if active_patch_count(current) == 4 { current.fan_concentration } else { 1.0 }
         let controls = ProjectiveTriangleMap { weights: bary3f(1.0,1.0,concentration) }
             .quadratic_patch<IsotropicCliffordAlgebra>(original)
-        let bary = patch_barycentric(patch_vertex, side)
+        let bary = atlas_barycentric(self.fixture,requested,patch_vertex)
         let differential = evaluate_triangular_projective_differential(
             controls, bary, policy(), 0.000000000001,
         )
@@ -884,9 +873,9 @@ actor ExactPatchSubdivision uses (
             return invalid_surface_vertex()
         }
         let triangle_start = patch_vertex / 3 * 3
-        let bary0 = patch_barycentric(triangle_start, side)
-        let bary1 = patch_barycentric(triangle_start + 1, side)
-        let bary2 = patch_barycentric(triangle_start + 2, side)
+        let bary0 = atlas_barycentric(self.fixture,requested,triangle_start)
+        let bary1 = atlas_barycentric(self.fixture,requested,triangle_start + 1)
+        let bary2 = atlas_barycentric(self.fixture,requested,triangle_start + 2)
         let sample0 = evaluate_triangular_projective_controls(controls, bary0, policy())
         let sample1 = evaluate_triangular_projective_controls(controls, bary1, policy())
         let sample2 = evaluate_triangular_projective_controls(controls, bary2, policy())
@@ -961,6 +950,7 @@ actor ExactPatchSubdivision uses (
             self.fan_concentration,
             self.split_threshold,
             self.mesh_lod,
+            self.radial_lod,
             self.show_triangles,
             self.resolve_weight_constraint,
             self.w00,
@@ -1026,6 +1016,7 @@ actor ExactPatchSubdivision uses (
             self.fan_concentration,
             self.split_threshold,
             self.mesh_lod,
+            self.radial_lod,
             self.show_triangles,
             self.resolve_weight_constraint,
             self.w00,

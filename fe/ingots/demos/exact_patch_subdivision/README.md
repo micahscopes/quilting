@@ -29,11 +29,17 @@ Fe operation is generic over `ProjectiveAlgebra` and `LinearElement`; it does
 not hardcode a GA metric. The family-specific evaluator supplies analytic
 positions and normals after the reparameterization.
 
-This viewer still uses its regular dyadic display triangulation, not the
-resident blue-noise atlas used by the standalone Radial Atlas Fan. Connecting
-that atlas/indirect-draw path here remains required. A fixed display LoD retains
-the same triangle count as concentration changes. Valid parameter topology
-does not guarantee an accurate or well-shaped display mesh on the surface.
+This viewer uses the same resident blue-noise atlas as Radial Atlas Fan:
+165 canonical edge triples spanning LoD 0–8, with permutations restored before
+evaluation. `mesh_lod` selects the outer edges and `radial_lod` the edges
+incident to the center. A GPU compute pass writes the selected tile's indirect
+draw count; the render pass instances it across the exact children. Interaction
+does not read geometry back to the CPU or rebuild/upload a display mesh.
+The resident artifact is 24,871,552 bytes. Exact child controls are still
+reconstructed per vertex; caching those per child is a remaining optimization.
+A fixed pair of LoDs retains the same triangle count as concentration changes.
+Valid parameter topology does not guarantee an accurate or well-shaped display
+mesh on the surface.
 
 ## Meaning and limits
 
@@ -58,13 +64,16 @@ its three edges is short. Its normalization preserves quality across uniform
 scales. Area estimates integrate the magnitude of the surface Jacobian and
 are kept separate from quality.
 
-All four child meshes currently use the same dyadic edge sampling. Matching
-analytic edges does not by itself guarantee crack-free rendering with different
-edge LoDs; that requires the hierarchy's boundary reconciliation.
+All four children share the same radial LoD and concentration, pairing their
+radial boundary samples. Their outer samples are unaffected by concentration.
+Independent per-edge demand in a larger hierarchy still requires canonical
+shared-edge ownership and reconciliation; matching analytic curves alone is
+insufficient.
 
 The no-subdivision comparison displays the square through its fixed diagonal;
-it currently uses two triangular restrictions internally. At a given mesh LoD
-the four-region path has twice as many rendered triangles as this comparison.
+it uses two triangular restrictions internally with uniform `mesh_lod` on
+every edge, ignoring `radial_lod` and concentration. When both LoD controls
+agree, the four-region path has twice as many triangles as this comparison.
 This is not an equal-budget performance or approximation-quality comparison.
 
 For this authored example, the four scale controls preserve the vector-valued
@@ -87,7 +96,7 @@ sampled non-vector residuals rather than tessellation error. Near its tolerance,
 rounding can also affect admission. Red does not mean that the displayed xyz
 projection is undefined, nor that the triangles themselves are invalid.
 
-## Next atlas experiment: independent interior density
+## Alternative atlas experiment: independent interior density
 
 Add an adaptive blue-noise atlas key `(A, B, C; M)`: three edge densities and
 one interior density. `M` controls the interior sampling field, not the location
@@ -104,7 +113,8 @@ and allocation/overflow before choosing full residency versus on-demand caching.
 High boundary demand still imposes a minimum amount of interior triangulation;
 the center control cannot promise an arbitrary independent triangle count.
 
-This is planned, not implemented. A richer atlas complements exact child
+This is an alternative, not implemented. The current radial fan reuses the
+ordinary atlas instead of multiplying residency by nine. A richer atlas complements exact child
 subdivision; it does not by itself resolve a patch singularity or uneven
 screen-space stretch within a large child.
 
@@ -117,11 +127,22 @@ surface evaluation at explicitly warped coordinates; analytic normals are
 compared with independent f64 finite differences. Numerical conditioning can
 still change under homogeneous scaling, especially near singularities.
 
-Browser check (2026-09-04): `fan_concentration=4` reached Fe state and the
-curved four-piece surface rendered with its redistributed mesh in Chrome MCP.
-The corner diagram retained the same center and partition. This build reports
-48,889 bytes of Wasm and 111,052 bytes of WGSL across four shaders. This is an
+Browser check (2026-09-04): `fan_concentration=4`, `mesh_lod=2`, and
+`radial_lod=5` rendered the curved four-piece surface with the resident atlas
+in Chrome MCP. The corner diagram retained the same center and partition.
+This build reports 49,076 bytes of Wasm and 126,472 bytes of WGSL across five shaders. This is an
 interaction/visual check, not evidence that automatic meshing is solved.
+
+`radial_atlas_concentration_is_a_budget_neutral_tradeoff` uses the actual
+resident equal-edge LoD-3 tile: 400 triangles across four children, at every
+tested concentration. Fifteen cases check positive parameter-triangle area,
+complete parameter-domain coverage, and finite sampled chord error. At the
+default centered paper patch, sampled maximum error is 0.290 at concentration
+1 versus 0.914 at 4. On the compatible squeezed patch it is 2.327 at 1 versus
+1.909 at 0.25: redistribution helps that sampled maximum but does not solve
+the large error. These are four probes per rendered triangle, not certified
+bounds. The reported RMS weights parameter area, not surface area; it can
+underrepresent a stretched surface region.
 
 `separable_corner_weights_wasm_resolve_symmetrically` executes the shared Fe
 correction in Wasm over 1,296 weight combinations, comparing against an
