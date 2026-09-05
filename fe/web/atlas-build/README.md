@@ -101,7 +101,12 @@ rule. On the saved `(0,0,0,8)` fixture, an exact offline replay matches the GPU
 slot-order baseline (248 rounds, 2,836 flips), while permutation reaches the
 same geometric certificate in 122 rounds and 2,951 flips. This is not yet a
 GPU performance claim or a corpus-wide repair bound. The Fe priority smoke
-test executes successfully; the updated WebGPU build is under validation.
+test executes successfully. The type-policy WebGPU build passes two exact
+replays: `(0,0,0,8)` converges in 122 rounds (slot baseline 248), and
+`(0,0,3,7)` converges in 60 (slot baseline 196). GPU round counts, flip counts
+and the exact face arrays match the independent replay; both resulting meshes
+pass the independent geometric oracle. See `typed-repair-gpu-cases.json` in
+the capture directory. These are not full-corpus or timing guarantees.
 
 The first full-corpus run also exposed presentation resize replaying the
 compute-only graph after `.live()` finished, overwriting its final receipts.
