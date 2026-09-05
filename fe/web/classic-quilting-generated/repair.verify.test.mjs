@@ -2,11 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {verifyPlanarMesh} from '../quad-atlas/verify.mjs';
+import {verifyCandidateTree, verifyCandidateSelection} from '../quad-atlas/candidate-index.verify.mjs';
 
-for(const [filename,passes] of [['repair-browser-snapshot.json',34],['incidence-browser-snapshot.json',44]]){
+for(const [filename,passes] of [['repair-browser-snapshot.json',34],['incidence-browser-snapshot.json',44],['candidate-index-browser-snapshot.json',47]]){
 test(`GPU triangle (${passes} passes) respects its barycentric boundary and equilateral Delaunay metric`,()=>{
   const c=JSON.parse(readFileSync(new URL(filename,import.meta.url),'utf8'));
   assert.equal(c.passCount,passes);
+  if(passes===47){
+    verifyCandidateTree(c.candidateIndex);
+    assert.deepEqual(verifyCandidateSelection(c.candidateIndex),{accepted:5});
+    const baseline=JSON.parse(readFileSync(new URL('incidence-browser-snapshot.json',import.meta.url),'utf8'));
+    for(const field of ['points','triangles','twins','repair','receipt'])assert.deepEqual(c[field],baseline[field]);
+  }
   const S=16384,[a,b,d]=c.key.map(x=>2**x),boundary=[];
   for(let i=0;i<=d;++i)boundary.push([S-S*i/d,S*i/d,0]);
   for(let i=1;i<=b;++i)boundary.push([S-S*i/b,0,S*i/b]);

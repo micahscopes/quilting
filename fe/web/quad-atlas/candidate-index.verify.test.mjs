@@ -20,6 +20,21 @@ test('rejected indexed GPU build has correct bounds but fails sample independenc
   assert.equal(capture.receipt[10], 0, 'failed repair must not publish a drawable tile');
 });
 
+test('fixed indexed GPU build preserves reference selection and every preview mesh', () => {
+  const read = file => JSON.parse(readFileSync(new URL(file, import.meta.url), 'utf8'));
+  const capture = read('./candidate-index-fixed.browser.json');
+  verifyCandidateTree(capture.candidateIndex);
+  assert.deepEqual(verifyCandidateSelection(capture.candidateIndex), {accepted: 1});
+  assert.equal(capture.receipt[10], 1);
+  const evidence = read('./candidate-index-browser-evidence.json');
+  const baseline = read('./incidence-mesh-evidence.json');
+  assert.equal(evidence.passes, 47);
+  assert.equal(evidence.canonicalKeys, 55);
+  assert.equal(evidence.maximumLod, 3);
+  assert.equal(evidence.cases.length, 56);
+  assert.deepEqual(evidence.cases.map(({key, seed, sha256}) => ({key, seed, sha256})), baseline.cases);
+});
+
 test('candidate hierarchy model preserves every exact conflict in captured GPU candidate sets', () => {
   // The candidates are actual GPU output; this tree is an independent CPU
   // reference model, not evidence that the new GPU tree has executed yet.

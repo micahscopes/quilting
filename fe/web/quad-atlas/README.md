@@ -22,9 +22,10 @@ GPU storage and drives an indirect draw; no CPU readback selects topology.
 ## Limits, not completion claims
 
 The current live generator covers **0–3**, not the requested complete 0–8 atlas.
-Both triangle and quad GPU selection now query a conservative candidate-cell
-window. Uniform-density jobs visit at most 50 slots per query through LoD 8;
-mixed-density windows can still be large. Triangle and square insertion now
+Both triangle and quad GPU selection use conservative candidate queries:
+small windows visit at most 50 slots; larger windows use a bounds hierarchy.
+Mixed-density hierarchy pruning still needs scaling measurements and removal
+of initially ineligible candidates. Triangle and square insertion now
 share parallel, immutable-generation rounds with local child-face relocation.
 Arbitration and face planning now use per-face atomic claims with bounded
 work per point/face. Edge repair now executes in conflict-safe parallel rounds;
@@ -42,9 +43,29 @@ measurements; none is established by the small jobs below.
 This is planar reference-domain Delaunay, not surface-metric uniformization.
 Subsequent warps can invert triangles and do not preserve Delaunay legality.
 
+## Candidate hierarchy checkpoint, 2026-09-05
+
+The 47-pass quad build is `fe-render-a616411cc1442734.json`; the triangle build
+is `fe-render-f6f1e17b56739d46.json`. Independent GPU tree construction, parallel
+sample selection, compaction, insertion and repair all execute in Fe-generated
+shaders. The hierarchy adds one actor buffer while retaining portable per-pass
+binding limits.
+
+The actual GPU comparison in `candidate-index-browser-evidence.json` preserves
+all 56 preceding quad meshes exactly. The triangle output also matches its
+preceding snapshot exactly. Independent tree and selected-point oracles pass.
+The rejected first build is deliberately retained as a negative fixture: its
+bounds were correct but an emitted nested-loop break skipped neighbor checks.
+Sonatina `2804b9ca` fixes that compiler defect, with all 126 shader tests passing;
+Fe mb2 `a8cee5c85` pins the fixes and passes all 44 actor tests.
+
+These are correctness results through preview LoD 3, not full-atlas timings or
+evidence of LoD 8 scalability. See the shared pipeline document for remaining
+eligibility, allocation, batching and residency work.
+
 ## Parallel neighbor-index checkpoint, 2026-09-05
 
-The current 44-pass quad build is `fe-render-91f6308767bb396d.json`; the
+The preceding 44-pass quad build is `fe-render-91f6308767bb396d.json`; the
 triangle build is `fe-render-daf0008f0d7fc7c1.json`. The shared Fe initializer
 counts outgoing edges, computes vertex ranges, scatters edges using atomic
 cursors, then checks reverse matches and reciprocal links. Scratch is reused

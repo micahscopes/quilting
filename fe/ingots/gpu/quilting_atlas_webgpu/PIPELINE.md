@@ -30,7 +30,7 @@ canonical combinations or silently clamp their LoDs.
 
 ## Current state and remaining work
 
-### Candidate hierarchy source checkpoint (GPU acceptance pending)
+### Candidate hierarchy (preview GPU acceptance passed)
 
 `candidate_index` now provides a placement-neutral bounds/iteration model and
 GPU leaf/parent reduction stages. Leaves cover sixteen stable candidate IDs;
@@ -39,24 +39,35 @@ walk without a stack. Square/equilateral policies explicitly opt into the
 conservative distance bound; arbitrary deformed-surface policies retain their
 existing query behavior. Small windows still use the preceding grid query.
 
-The source is wired into both generator demos but **not yet GPU-accepted**.
-Their first builds exposed a shared-continue compiler defect. Sonatina
+The source is wired into both generator demos. Their first builds exposed a
+shared-continue compiler defect. Sonatina
 `a81222d94b139bebd94af426f339c70f5e9b81c9` fixes it, with all 125 shader tests
 passing, including direct/forwarded phi transport executed on software Vulkan.
-Fe's release CLI builds with that pin and all 44 actor tests pass. Both
-47-pass bundles compile (quad: 599,257 WGSL bytes; triangle: 540,380), but the
-quad execution gate **fails**: key 0/3/0/3 accepts 86 interior candidates
+Fe's release CLI built with that pin and all 44 actor tests passed. Both
+47-pass bundles compiled, but the first quad execution gate **failed**:
+key 0/3/0/3 accepted 86 interior candidates
 instead of the reference's one. Actual GPU bounds pass the independent tree
 oracle; actual selected samples violate the exclusion rule. Uniform 3/3/3/3
 still accepts the reference's 26 samples through the small-window path.
 The failure capture and a sample-independence oracle are checked in separately
-from the accepted baselines. A reduced Sonatina GPU test reproduces premature
-outer-loop exit after a nested iterator; its fix is being gated. The live
-browser preview remains the verified 44-pass build, not the rejected 47-pass one.
+from the accepted baselines.
+
+Sonatina `2804b9caf4a58ed3afb690f6e993aca9e015668c` fixes premature outer-loop
+exit after a nested iterator. Its reduced GPU test fails before the fix and
+passes afterward; all 126 shader tests pass. Fe's release CLI and all 44 actor
+tests pass on that pin. Rebuilt with the fix, the quad generator preserves the
+preceding 44-pass points, ordered triangles, neighbor links, and completion
+receipts for all 55 canonical preview keys plus the alternate seed.
+Independent selected-point checks pass for all 56 jobs. The formerly failing
+mixed key now selects one interior point and completes. The triangle generator
+also exactly preserves its preceding GPU output and passes its boundary,
+equilateral Delaunay, bounds, and selection oracles. Corrected shader totals:
+599,272 bytes (quad), 540,395 (triangle).
+These are **preview-size correctness gates, not full LoD 8 or startup timings**.
 
 Both demo source checks and two Fe allocation/bounds tests pass. An independent
 tree model checks every exact conflict pair in three actual GPU candidate sets
-(512 candidates each). This is not execution evidence for the new GPU index.
+(512 candidates each). This model is separate from the GPU checks above.
 It also exposes a limit: the 0/0/0/3 tile has 226,020 exact conflicts out of
 262,144 possible ordered pairs. Bounds over *all* candidates cannot prune those
 pairs. Initial boundary rejection, active-state eligibility, and the cost of
@@ -66,8 +77,8 @@ Neither query-model counts nor compiler tests establish startup throughput.
 ### Verified pipeline substrate
 
 - Uniform-density sample queries visit at most 50 candidate slots. Mixed-density
-  jobs still need a multilevel radius-aware index; a global coarse radius can
-  make their current windows large.
+  jobs now use the bounds hierarchy above; eligibility pruning and scaling
+  remain open because bounding all coarse-radius candidates can limit pruning.
 - Exact boundary exclusion needs at most six point tests for triangles and
   eight for squares. Corners are checked separately from constant-density open
   edges. An unchanged exhaustive oracle checks the optimization.
