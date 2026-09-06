@@ -33,6 +33,96 @@ export function tileReplayBlocks(passes) {
   return blocks;
 }
 
+// A diagnostic prefix ends at a complete compiled cycle, never halfway through
+// an iteration. This is not an alternative production scheduler.
+export function tileReplayPrefix(passes, stopAfter) {
+  const blocks = tileReplayBlocks(passes);
+  const end = blocks.findIndex(b => b.passes.at(-1).source_entry === stopAfter);
+  if (end < 0) throw Error('prefix must end at a compiled block boundary');
+  return blocks.slice(0, end + 1);
+}
+
+export async function diagnoseAtlasPrefix(gpu, manifest, activeWords,
+  {stopAfter = 'initialize', passesPerSubmission = 1, onProgress = () => {}} = {}) {
+  if (![7,10].includes(activeWords.length) || !activeWords.every(v => Number.isSafeInteger(v) && v >= 0 && v <= 0xffffffff)
+      || activeWords[activeWords.length === 7 ? 4 : 5] !== 1)
+    throw Error('expected a recorded valid atlas job');
+  if (!Number.isSafeInteger(passesPerSubmission) || passesPerSubmission < 1 || passesPerSubmission > 256)
+    throw Error('submission bound must be within 1..256');
+  const blocks = tileReplayPrefix(manifest.passes, stopAfter);
+  const device = gpu.device, owned = [], resources = new Map(), prepared = new Map(), outputs = [];
+  let allocatedBytes = 0;
+  const make = (size, usage) => {
+    if (!Number.isSafeInteger(size) || size < 4 || size % 4 || allocatedBytes + size > 512*1024*1024)
+      throw Error('prefix allocation exceeds diagnostic bounds');
+    const buffer = device.createBuffer({size,usage}); owned.push(buffer); allocatedBytes += size; return buffer;
+  };
+  const needed = new Set(blocks.flatMap(b=>b.passes.flatMap(p=>p.layout.bindings.filter(b=>b.role==='resource').map(b=>b.name))));
+  device.pushErrorScope('validation'); let scopeOpen = true;
+  try {
+    for (const r of manifest.resources.filter(r=>needed.has(r.name))) {
+      if (r.artifact) throw Error('prefix must generate its own data');
+      resources.set(r.name,make(r.length*r.stride,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST
+        |(r.buffer_usage?.includes('indirect')?GPUBufferUsage.INDIRECT:0)));
+    }
+    if (resources.get('active')?.size !== activeWords.length*4) throw Error('recorded job layout mismatch');
+    device.queue.writeBuffer(resources.get('active'),0,new Uint32Array(activeWords));
+    for (const block of blocks) for (const p of block.passes) {
+      if (p.layout.graph_failure || (p.repeat !== undefined && p.repeat !== 1))
+        throw Error('prefix does not own graph failure epochs or per-pass repeats');
+      const record = gpu.passRecords.find(r=>r.pass.source_entry===p.source_entry);
+      const pipeline = record?.pipeline ?? await record?.pipelinePromise;
+      if (!pipeline) throw Error(`missing compiled pipeline ${p.source_entry}`);
+      const entries = p.layout.bindings.map(b=>{
+        if (b.group !== 0) throw Error('unsupported diagnostic binding group');
+        if (b.role==='resource' && resources.has(b.name))
+          return {binding:b.binding,resource:{buffer:resources.get(b.name)}};
+        if (b.role==='output' && b.name==='trap' && b.stride===4 && b.access==='read_write') {
+          const buffer=make(b.span,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC);
+          outputs.push({entry:p.source_entry,buffer});
+          return {binding:b.binding,resource:{buffer}};
+        }
+        throw Error(`unsupported prefix binding ${b.name}`);
+      });
+      prepared.set(p.source_entry,{pipeline,group:device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries})});
+    }
+    const batches=[]; let encoder=device.createCommandEncoder(), names=[];
+    const flush=async()=>{
+      if (!names.length) return;
+      const row={passes:[...names],status:'submitted',started:performance.now()}; batches.push(row); onProgress({...row});
+      device.queue.submit([encoder.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      row.status='completed'; row.elapsedMs=performance.now()-row.started; onProgress({...row});
+      encoder=device.createCommandEncoder(); names=[];
+    };
+    for (const block of blocks) for (let n=0;n<block.repeat;n++) for (const p of block.passes) {
+      const r=prepared.get(p.source_entry), pass=encoder.beginComputePass();
+      pass.setPipeline(r.pipeline); pass.setBindGroup(0,r.group);
+      if (p.dispatch_indirect) pass.dispatchWorkgroupsIndirect(resources.get(p.dispatch_indirect.resource),p.dispatch_indirect.offset??0);
+      else pass.dispatchWorkgroups(...p.dispatch);
+      pass.end(); names.push(p.source_entry);
+      if (names.length===passesPerSubmission) await flush();
+    }
+    await flush();
+    const lastInvocationTraps=[];
+    for (const {entry,buffer} of outputs) {
+      const mapped=make(buffer.size,GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST);
+      const copy=device.createCommandEncoder(); copy.copyBufferToBuffer(buffer,0,mapped,0,buffer.size);
+      device.queue.submit([copy.finish()]); await mapped.mapAsync(GPUMapMode.READ);
+      const words=new Uint32Array(mapped.getMappedRange()); let nonzero=0;
+      for (const word of words) if (word) nonzero++;
+      lastInvocationTraps.push({entry,words:words.length,nonzero}); mapped.unmap();
+    }
+    const error=await device.popErrorScope(); scopeOpen=false;
+    if (error) throw Error(error.message);
+    return {stopAfter,passesPerSubmission,batches,allocatedBytes,lastInvocationTraps,
+      trapCoverage:'last stored invocation slots only; not a whole-epoch certificate'};
+  } finally {
+    try { if (scopeOpen) await device.popErrorScope(); }
+    finally { for (const buffer of owned) buffer.destroy(); }
+  }
+}
+
 export async function replayAtlasTile(gpu, manifest, activeWords, {rounds = [128,256,512,1024], captureGeometry = false,
   sampleGroups, captureSampling = false, poisonSampling = false, captureInitialGeometry = false, shape = 'quad'} = {}) {
   if (shape !== 'quad' && shape !== 'triangle') throw Error('unknown atlas shape');

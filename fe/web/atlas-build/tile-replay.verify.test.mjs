@@ -1,9 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {tileReplayBlocks,replayAtlasTile} from './tile-replay.verify.mjs';
+import {tileReplayBlocks,tileReplayPrefix,diagnoseAtlasPrefix,replayAtlasTile} from './tile-replay.verify.mjs';
 const p = (name, inner) => ({source_entry:name,cycle:{group:0,repeat:1035,...(inner?{inner}: {})}});
 const cycle = {group:4,repeat:128};
 const fixture = () => [p('begin_atlas'),p('initialize'),p('repair_schedule',cycle),p('repair_apply',cycle),p('repair_advance',cycle),p('repair_finish'),p('reserve_tile')];
+test('diagnostic prefix preserves entire compiled cycles',()=>{
+  assert.deepEqual(tileReplayPrefix(fixture(),'initialize'),[{passes:[p('initialize')],repeat:1}]);
+  assert.equal(tileReplayPrefix(fixture(),'repair_advance')[1].repeat,128);
+  assert.throws(()=>tileReplayPrefix(fixture(),'repair_apply'),/block boundary/);
+  assert.throws(()=>tileReplayPrefix(fixture(),'missing'),/block boundary/);
+});
+test('diagnostic submission bounds fail before touching the GPU',async()=>{
+  const job=[0,0,0,0,1,1,1];
+  await assert.rejects(diagnoseAtlasPrefix(null,null,[]),/valid atlas job/);
+  for (const bound of [0,257,1.5,NaN])
+    await assert.rejects(diagnoseAtlasPrefix(null,null,job,{passesPerSubmission:bound}),/submission bound/);
+});
 test('replay isolates one tile and preserves compiled repair order and count',()=>{
   assert.deepEqual(tileReplayBlocks(fixture()).map(b=>[b.repeat,b.passes.map(p=>p.source_entry)]),[
     [1,['initialize']],[128,['repair_schedule','repair_apply','repair_advance']],[1,['repair_finish']]]);
