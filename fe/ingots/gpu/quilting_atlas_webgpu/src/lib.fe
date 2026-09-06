@@ -2132,12 +2132,21 @@ where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WOR
     }
     let candidate = load_candidate<P::Point, WORDS>(workspace, slot)
     let winner = workspace.load(index: candidate_winner_offset<CAPACITY>(slot)) != 0
+    // This pass consumes propose's mask from the same immutable generation.
+    // A winner has already proved absence of accepted conflicts. Repeating
+    // that exhaustive search is especially costly for a coarse exclusion disk
+    // over a fine candidate grid. No candidate states change until advance.
+    // An arbitrary/stale mask is not a valid input to this two-pass protocol.
+    if winner {
+        store_next_generation_state<CAPACITY, WORDS>(
+            workspace, parity, slot, CANDIDATE_ACCEPTED,
+        )
+        return
+    }
     let mut accepted_conflict = false
     let mut winner_conflict = false
     let mut query = policy.next_neighbor(key,candidate,count,CandidateCursor::start())
-    // Preserve candidate_state_after_round's precedence even for an
-    // inconsistent winner mask: a winner must still check accepted conflicts.
-    while query.valid && !accepted_conflict && (winner || !winner_conflict) {
+    while query.valid && !accepted_conflict && !winner_conflict {
         let other_slot = query.slot
         if other_slot < count && other_slot != slot {
             let other_state = load_generation_state<CAPACITY, WORDS>(workspace, parity, other_slot)
@@ -2155,7 +2164,7 @@ where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WOR
                 }
             }
         }
-        if !accepted_conflict && (winner || !winner_conflict) {
+        if !accepted_conflict && !winner_conflict {
             query = policy.next_neighbor(key,candidate,count,query)
         }
     }

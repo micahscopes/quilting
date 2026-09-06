@@ -515,6 +515,30 @@ pub const fn candidate_state_after_round(
     }
 }
 
+#[test]
+fn proposed_winner_can_accept_without_repeating_conflict_search() {
+    // Exhaust all abstract conflict summaries and states, including invalid.
+    // The implication relies on computing the mask from this generation;
+    // it deliberately makes no promise for an arbitrary or stale winner mask.
+    let mut state:u32=0
+    while state<4 {
+        let mut bits:u32=0
+        while bits<8 {
+            let accepted=(bits&1)!=0
+            let preceding=(bits&2)!=0
+            let winner_conflict=(bits&4)!=0
+            let winner=candidate_is_round_winner(state,accepted,preceding)
+            let reference=candidate_state_after_round(state,accepted,winner,winner_conflict)
+            let fast=if winner {CANDIDATE_ACCEPTED} else {
+                candidate_state_after_round(state,accepted,false,winner_conflict)
+            }
+            assert(fast==reference)
+            bits=bits+1
+        }
+        state=state+1
+    }
+}
+
 /// Dyadic density bucket used by a provider's multilevel candidate index.
 pub const fn candidate_density_bucket(_ key: AtlasKey, _ point: FixedBarycentric) -> u32 {
     density_exponent_q8(key, point) / 256
