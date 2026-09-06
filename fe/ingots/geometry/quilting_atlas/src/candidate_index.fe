@@ -3,6 +3,7 @@
 //! radius classes: a parent is exactly the union of its children's envelopes.
 use core::marker::Copy
 use super::sampling::BARYCENTRIC_SCALE
+use super::neighborhood::CandidateWindow
 
 pub const NODE_WORDS: usize = 5
 pub const LEAF_SLOTS: u32 = 16
@@ -72,6 +73,30 @@ pub const fn following_subtree(_ node:u32)->u32 {
 pub struct CandidateCursor {
     pub node:u32, pub offset:u32, pub slot:u32, pub valid:bool,
 }
+
+/// Immutable enumeration choices for one candidate in one generation. Prepare
+/// once, then pass alongside the changing cursor; no resource data is cached.
+pub struct CandidateQuery {
+    window:CandidateWindow,
+    indexed:bool,
+}
+impl Copy for CandidateQuery {}
+impl CandidateQuery {
+    pub const fn grid(_ window:CandidateWindow)->Self {
+        Self {window:window,indexed:false}
+    }
+    /// Only a provider with a conservative reference-metric hierarchy may
+    /// enable this route. Truncated resident sets retain exhaustive ordering.
+    pub const fn with_index(self,_ requested:u32,_ resident:u32)->Self {
+        Self {window:self.window,indexed:requested<=resident && self.window.count()>50}
+    }
+    pub const fn uses_index(self)->bool {self.indexed}
+    pub const fn next_grid(self,_ cursor:CandidateCursor)->CandidateCursor {
+        if cursor.offset>=self.window.count() {CandidateCursor::done()}
+        else {CandidateCursor {node:1,offset:cursor.offset+1,
+            slot:self.window.slot(cursor.offset),valid:true}}
+    }
+}
 impl Copy for CandidateCursor {}
 impl CandidateCursor {
     pub const fn start()->Self {Self {node:1,offset:0,slot:0xffffffff,valid:false}}
@@ -115,4 +140,57 @@ fn candidate_bounds_preserve_strict_bigger_disk_conflicts() {
     assert(!box_.excludes_reference_point(5,20,26)) // query's larger disk
     assert(!box_.excludes_reference_point(0xffffffff,20,1))
     assert(CandidateBounds::empty().excludes_reference_point(10,20,25))
+}
+
+#[test]
+fn prepared_candidate_query_preserves_grid_cursor_sequence() {
+    let mut lod:u32=0
+    while lod<=3 {
+        let side:u32=2*(1<<lod)
+        let mut minimum:u32=0
+        while minimum<=lod {
+            let mut place:u32=0
+            while place<3 {
+                let x=if place==0 {0} else if place==1 {BARYCENTRIC_SCALE/3} else {BARYCENTRIC_SCALE}
+                let y=if place==1 {BARYCENTRIC_SCALE/3} else {0}
+                let window=super::neighborhood::grid_window(side,minimum,x,y,true)
+                let plan=CandidateQuery::grid(window)
+                assert(!plan.uses_index())
+                let mut cursor=CandidateCursor::start()
+                let mut offset:u32=0
+                while offset<window.count() {
+                    cursor=plan.next_grid(cursor)
+                    assert(cursor.valid)
+                    assert(cursor.node==1)
+                    assert(cursor.offset==offset+1)
+                    assert(cursor.slot==window.slot(offset))
+                    offset=offset+1
+                }
+                cursor=plan.next_grid(cursor)
+                assert(!cursor.valid && cursor.node==0 && cursor.slot==0xffffffff)
+                place=place+1
+            }
+            minimum=minimum+1
+        }
+        lod=lod+1
+    }
+}
+
+#[test]
+fn prepared_candidate_query_preserves_route_and_truncation() {
+    let coarse=super::neighborhood::grid_window(512,0,5461,5461,true)
+    let uniform=super::neighborhood::grid_window(512,8,5461,5461,true)
+    assert(CandidateQuery::grid(coarse).with_index(262656,262656).uses_index())
+    assert(!CandidateQuery::grid(uniform).with_index(262656,262656).uses_index())
+    let truncated=CandidateQuery::grid(CandidateWindow::all(3)).with_index(262656,3)
+    assert(!truncated.uses_index())
+    let mut cursor=CandidateCursor::start()
+    let mut slot:u32=0
+    while slot<3 {
+        cursor=truncated.next_grid(cursor)
+        assert(cursor.valid && cursor.slot==slot)
+        slot=slot+1
+    }
+    assert(!truncated.next_grid(cursor).valid)
+    assert(!CandidateQuery::grid(CandidateWindow::all(0)).next_grid(CandidateCursor::start()).valid)
 }

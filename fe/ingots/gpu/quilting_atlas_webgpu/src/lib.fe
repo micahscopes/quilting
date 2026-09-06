@@ -54,7 +54,7 @@ use quilting_atlas::topology::{
 use std::webgpu::{AtomicStorageBuffer, ComputeInvocation, StorageBuffer}
 use quilting_atlas::planar::PlanarCoordinates
 use quilting_atlas::neighborhood::{CandidateWindow, grid_window}
-use quilting_atlas::candidate_index::CandidateCursor
+use quilting_atlas::candidate_index::{CandidateCursor,CandidateQuery}
 pub use quad
 pub use compaction
 pub use residency
@@ -146,14 +146,18 @@ pub trait CandidateConflictPolicy: core::marker::Copy {
         CandidateWindow::all(key.candidate_slots())
     }
 
-    /// A cursor separates candidate enumeration from the immutable MIS
-    /// decision. Indexed providers may skip only proven non-conflicts.
-    fn next_neighbor(self,_ key:Self::Key,_ candidate:Candidate<Self::Point>,
-        _ count:u32,_ cursor:CandidateCursor)->CandidateCursor {
+    /// Prepare invariant bounds once per candidate, not on every cursor step.
+    fn prepare_query(self,_ key:Self::Key,_ candidate:Candidate<Self::Point>,
+        _ count:u32)->CandidateQuery {
         let window=if key.candidate_slots()>count {CandidateWindow::all(count)}
             else {self.neighborhood(key,candidate)}
-        if cursor.offset>=window.count() {CandidateCursor::done()}
-        else {CandidateCursor {node:1,offset:cursor.offset+1,slot:window.slot(cursor.offset),valid:true}}
+        CandidateQuery::grid(window)
+    }
+
+    /// Advance only enumeration state; the immutable MIS decision is separate.
+    fn next_neighbor(self,_ candidate:Candidate<Self::Point>,_ count:u32,
+        _ plan:CandidateQuery,_ cursor:CandidateCursor)->CandidateCursor {
+        plan.next_grid(cursor)
     }
 }
 
@@ -2046,7 +2050,8 @@ where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WOR
     let candidate = load_candidate<P::Point, WORDS>(workspace, slot)
     let mut accepted_conflict = false
     let mut preceding_pending_conflict = false
-    let mut query = policy.next_neighbor(key,candidate,count,CandidateCursor::start())
+    let plan = policy.prepare_query(key,candidate,count)
+    let mut query = policy.next_neighbor(candidate,count,plan,CandidateCursor::start())
     // Either conflict already decides non-membership. The query only reads
     // this immutable generation, so visiting the remaining neighbors cannot
     // change the winner or publish any other effect.
@@ -2072,7 +2077,7 @@ where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WOR
             }
         }
         if !accepted_conflict && !preceding_pending_conflict {
-            query = policy.next_neighbor(key,candidate,count,query)
+            query = policy.next_neighbor(candidate,count,plan,query)
         }
     }
     workspace
@@ -2145,7 +2150,8 @@ where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WOR
     }
     let mut accepted_conflict = false
     let mut winner_conflict = false
-    let mut query = policy.next_neighbor(key,candidate,count,CandidateCursor::start())
+    let plan = policy.prepare_query(key,candidate,count)
+    let mut query = policy.next_neighbor(candidate,count,plan,CandidateCursor::start())
     while query.valid && !accepted_conflict && !winner_conflict {
         let other_slot = query.slot
         if other_slot < count && other_slot != slot {
@@ -2165,7 +2171,7 @@ where { WORDS == CAPACITY * SAMPLING_WORDS_PER_CANDIDATE + SAMPLING_PROGRESS_WOR
             }
         }
         if !accepted_conflict && !winner_conflict {
-            query = policy.next_neighbor(key,candidate,count,query)
+            query = policy.next_neighbor(candidate,count,plan,query)
         }
     }
     store_next_generation_state<CAPACITY, WORDS>(

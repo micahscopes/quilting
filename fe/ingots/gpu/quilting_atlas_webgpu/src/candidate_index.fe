@@ -6,7 +6,7 @@
 use core::marker::Copy
 use std::webgpu::{StorageBuffer,ComputeInvocation}
 use quilting_atlas::sampling::{Candidate,SampleSetKey}
-use quilting_atlas::candidate_index::{CandidateBounds,CandidateCursor,LEAF_SLOTS,following_subtree}
+use quilting_atlas::candidate_index::{CandidateBounds,CandidateCursor,CandidateQuery,LEAF_SLOTS,following_subtree}
 use super::{CandidateConflictPolicy,PackedSamplePoint,AtlasCandidateConflict}
 use super::quad::QuadCandidateConflict
 
@@ -82,14 +82,13 @@ where L>0,{(L&(L-1))==0},{N==1+(2*L-1)*5}
     fn conflicts(self,_ left:Candidate<P::Point>,_ right:Candidate<P::Point>)->bool {
         self.policy.conflicts(left,right)
     }
-    fn next_neighbor(self,_ key:P::Key,_ candidate:Candidate<P::Point>,
-        _ count:u32,_ cursor:CandidateCursor)->CandidateCursor {
-        // Uniform/small rectangular queries already have a tight bound and
-        // do not benefit from hierarchy traversal overhead. This choice must
-        // be stable throughout one query (key/candidate/count are immutable).
-        if key.candidate_slots()>count || self.policy.neighborhood(key,candidate).count()<=50 {
-            return self.policy.next_neighbor(key,candidate,count,cursor)
-        }
+    fn prepare_query(self,_ key:P::Key,_ candidate:Candidate<P::Point>,_ count:u32)->CandidateQuery {
+        self.policy.prepare_query(key,candidate,count).with_index(key.candidate_slots(),count)
+    }
+    fn next_neighbor(self,_ candidate:Candidate<P::Point>,_ count:u32,
+        _ plan:CandidateQuery,_ cursor:CandidateCursor)->CandidateCursor {
+        // Route and window were prepared once from immutable query inputs.
+        if !plan.uses_index() {return plan.next_grid(cursor)}
         let leaves:u32=L.downcast_truncate()
         let mut node=cursor.node
         let mut offset=cursor.offset
