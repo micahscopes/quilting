@@ -43,12 +43,14 @@ export function tileReplayPrefix(passes, stopAfter) {
 }
 
 export async function diagnoseAtlasPrefix(gpu, manifest, activeWords,
-  {stopAfter = 'initialize', passesPerSubmission = 1, onProgress = () => {}} = {}) {
+  {stopAfter = 'initialize', passesPerSubmission = 1, onProgress = () => {}, inspectSampling} = {}) {
   if (![7,10].includes(activeWords.length) || !activeWords.every(v => Number.isSafeInteger(v) && v >= 0 && v <= 0xffffffff)
       || activeWords[activeWords.length === 7 ? 4 : 5] !== 1)
     throw Error('expected a recorded valid atlas job');
   if (!Number.isSafeInteger(passesPerSubmission) || passesPerSubmission < 1 || passesPerSubmission > 256)
     throw Error('submission bound must be within 1..256');
+  if (inspectSampling !== undefined && typeof inspectSampling !== 'function')
+    throw Error('sampling inspection must be a diagnostic callback');
   const blocks = tileReplayPrefix(manifest.passes, stopAfter);
   const device = gpu.device, owned = [], resources = new Map(), prepared = new Map(), outputs = [];
   let allocatedBytes = 0;
@@ -123,9 +125,22 @@ export async function diagnoseAtlasPrefix(gpu, manifest, activeWords,
       device.queue.submit([copy.finish()]); await mapped.mapAsync(GPUMapMode.READ);
       stateSnapshots[name]=Array.from(new Uint32Array(mapped.getMappedRange())); mapped.unmap();
     }
+    // Optional offline observation, never an input to subsequent GPU work.
+    // The callback returns a compact census, not megabytes of raw snapshot JSON.
+    let samplingInspection;
+    if (inspectSampling) {
+      const buffer=resources.get('sampling');
+      if (!buffer || buffer.size>32*1024*1024) throw Error('sampling inspection exceeds diagnostic bounds');
+      const mapped=make(buffer.size,GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST);
+      const copy=device.createCommandEncoder(); copy.copyBufferToBuffer(buffer,0,mapped,0,buffer.size);
+      device.queue.submit([copy.finish()]); await mapped.mapAsync(GPUMapMode.READ);
+      try { samplingInspection=await inspectSampling(new Uint32Array(mapped.getMappedRange())); }
+      finally { mapped.unmap(); }
+    }
     const error=await device.popErrorScope(); scopeOpen=false;
     if (error) throw Error(error.message);
     return {stopAfter,passesPerSubmission,batches,allocatedBytes,lastInvocationTraps,stateSnapshots,
+      ...(inspectSampling?{samplingInspection}:{}),
       trapCoverage:'last stored invocation slots only; not a whole-epoch certificate'};
   } finally {
     try { if (scopeOpen) await device.popErrorScope(); }
