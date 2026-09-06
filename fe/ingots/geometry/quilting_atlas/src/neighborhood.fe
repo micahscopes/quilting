@@ -116,3 +116,56 @@ pub const fn grid_window(
         triangular: triangular,
     }
 }
+
+/// These are enumeration counts, not conflict tests or GPU timings. A coarse
+/// radius over a fine grid covers its enclosing square; triangular padding
+/// becomes sentinel slots and still costs cursor iterations in the grid path.
+#[test]
+fn grid_query_cardinality_accounts_for_domain_padding() {
+    let mut lod:u32=0
+    while lod<=8 {
+        let side:u32=2*(1<<lod)
+        let window=grid_window(side,0,BARYCENTRIC_SCALE/3,BARYCENTRIC_SCALE/3,true)
+        let slots=side*(side+1)
+        let padding=side*(side-1)
+        assert(window.count()==slots+padding)
+        assert(window.count()==2*side*side)
+        // Uniform-density queries have a bounded window independent of LoD.
+        let uniform=grid_window(side,lod,BARYCENTRIC_SCALE/3,BARYCENTRIC_SCALE/3,true)
+        assert(uniform.count()<=50)
+        lod=lod+1
+    }
+    assert(grid_window(512,0,5461,5461,true).count()==524288)
+    assert(grid_window(512,4,5461,5461,true).count()==8450)
+    assert(grid_window(512,8,5461,5461,true).count()==50)
+}
+
+#[test]
+fn coarse_grid_window_visits_each_triangle_slot_once() {
+    let mut lod:u32=0
+    // Enumerate manageable cases; the LoD-8 cardinality is tested above.
+    while lod<=4 {
+        let side:u32=2*(1<<lod)
+        let window=grid_window(side,0,BARYCENTRIC_SCALE/3,BARYCENTRIC_SCALE/3,true)
+        let square=grid_window(side,0,BARYCENTRIC_SCALE/3,BARYCENTRIC_SCALE/3,false)
+        let mut offset:u32=0
+        let mut valid:u32=0
+        let mut padding:u32=0
+        while offset<window.count() {
+            assert(square.slot(offset)==offset)
+            let slot=window.slot(offset)
+            if slot==0xffffffff {padding=padding+1}
+            else {
+                assert(slot==valid)
+                valid=valid+1
+            }
+            offset=offset+1
+        }
+        assert(valid==side*(side+1))
+        assert(padding==side*(side-1))
+        assert(window.slot(window.count())==0xffffffff)
+        assert(square.count()==window.count())
+        assert(square.slot(square.count())==0xffffffff)
+        lod=lod+1
+    }
+}
