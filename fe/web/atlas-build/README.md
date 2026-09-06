@@ -6,8 +6,12 @@ This is currently a **custom fixed-candidate conflict-graph sampler**, followed
 by parallel insertion and Delaunay repair. It is not an implementation of
 PixelPie or Wei's phase-group sampler. Exhausting its finite candidate set does
 not certify continuous coverage or blue-noise statistics. The triangle
-candidate generator also folds both trials into the same half of each interior
-grid square; a direct Fe probe has confirmed that missing proposal support.
+generator formerly folded both trials into the same half of every interior
+grid square. It now folds only diagonal-boundary cells. Focused Fe tests check
+both-half interior support and diagonal-cell containment through LoD 8, including
+slot addressing, under the release profile at optimization level 2. These tests
+use Fe's EVM test runner, not WebGPU. Saved GPU captures predate this correction;
+new sampling-quality, topology and GPU execution gates remain necessary.
 
 The latest independent review recommends preserving this pipeline as a measured
 baseline and parking the uncommitted retirement-occupancy experiment. A native

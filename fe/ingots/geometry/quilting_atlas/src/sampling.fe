@@ -356,7 +356,9 @@ pub const fn interior_candidate(
     let second_hash = mix32(first_hash ^ 0xa511e9b3)
     let mut jitter_b = first_hash % cell_width
     let mut jitter_c = second_hash % cell_width
-    if jitter_b + jitter_c >= cell_width {
+    // Only the final cell in a row intersects the domain diagonal. Interior
+    // cells are whole squares: folding those would remove half their support.
+    if cell_b + cell_c + 1 == side && jitter_b + jitter_c >= cell_width {
         jitter_b = cell_width - 1 - jitter_b
         jitter_c = cell_width - 1 - jitter_c
     }
@@ -565,4 +567,70 @@ pub const fn candidate_conflict_cell_span(
     if coarse > key.c { return 0 }
     let ratio = edge_resolution(key.c) / edge_resolution(coarse)
     ratio + ratio + 1
+}
+
+#[test]
+fn candidate_support_interior_cell_keeps_both_halves() {
+    let key = AtlasKey { a: 3, b: 3, c: 3 }
+    let width = BARYCENTRIC_SCALE / candidate_grid_side(key)
+    let mut upper: u32 = 0
+    let mut lower: u32 = 0
+    let mut seed: u32 = 0
+    while seed < 64 {
+        let mut trial: u32 = 0
+        while trial < CANDIDATE_TRIALS_PER_CELL {
+            let candidate = interior_candidate(key, 0, seed, 2, 2, trial)
+            assert(candidate.valid)
+            let b = candidate.point.b - 2 * width
+            let c = candidate.point.c - 2 * width
+            let first = candidate_priority(seed, 0, candidate.slot)
+            // Whole-square cells retain the original two hashed offsets.
+            assert(b == first % width)
+            assert(c == mix32(first ^ 0xa511e9b3) % width)
+            if b + c >= width { upper = upper + 1 } else { lower = lower + 1 }
+            trial = trial + 1
+        }
+        seed = seed + 1
+    }
+    assert(upper > 0)
+    assert(lower > 0)
+}
+
+#[test]
+fn candidate_support_diagonal_cells_remain_inside_at_every_lod() {
+    let mut level: u32 = 0
+    while level <= 8 {
+        let key = AtlasKey { a: 0, b: 0, c: level }
+        let side = candidate_grid_side(key)
+        let width = BARYCENTRIC_SCALE / side
+        let mut seed: u32 = 0
+        while seed < 16 {
+            // Test both ends and the middle of the sloping boundary.
+            let mut choice: u32 = 0
+            while choice < 3 {
+                let b = if choice == 0 { 0 } else {
+                    if choice == 1 { side / 2 } else { side - 1 }
+                }
+                let c = side - 1 - b
+                let mut trial: u32 = 0
+                while trial < CANDIDATE_TRIALS_PER_CELL {
+                    let candidate = interior_candidate(key, 0, seed, b, c, trial)
+                    let point = candidate.point
+                    assert(point.a + point.b + point.c == BARYCENTRIC_SCALE)
+                    assert(point.b >= b * width && point.b < (b + 1) * width)
+                    assert(point.c >= c * width && point.c < (c + 1) * width)
+                    assert(point.a > 0)
+                    assert(candidate.valid == (point.b > 0 && point.c > 0))
+                    let addressed = interior_candidate_at_slot(key, 0, seed, candidate.slot)
+                    assert(addressed.point.a == point.a)
+                    assert(addressed.point.b == point.b)
+                    assert(addressed.point.c == point.c)
+                    trial = trial + 1
+                }
+                choice = choice + 1
+            }
+            seed = seed + 1
+        }
+        level = level + 1
+    }
 }
