@@ -62,7 +62,7 @@ export async function diagnoseAtlasPrefix(gpu, manifest, activeWords,
   try {
     for (const r of manifest.resources.filter(r=>needed.has(r.name))) {
       if (r.artifact) throw Error('prefix must generate its own data');
-      resources.set(r.name,make(r.length*r.stride,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST
+      resources.set(r.name,make(r.length*r.stride,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC
         |(r.buffer_usage?.includes('indirect')?GPUBufferUsage.INDIRECT:0)));
     }
     if (resources.get('active')?.size !== activeWords.length*4) throw Error('recorded job layout mismatch');
@@ -113,9 +113,19 @@ export async function diagnoseAtlasPrefix(gpu, manifest, activeWords,
       for (const word of words) if (word) nonzero++;
       lastInvocationTraps.push({entry,words:words.length,nonzero}); mapped.unmap();
     }
+    const stateSnapshots={};
+    for (const name of ['active','receipt','repair_state']) {
+      const buffer=resources.get(name);
+      if (!buffer) continue;
+      if (buffer.size>4096) throw Error('state snapshot exceeds diagnostic bounds');
+      const mapped=make(buffer.size,GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST);
+      const copy=device.createCommandEncoder(); copy.copyBufferToBuffer(buffer,0,mapped,0,buffer.size);
+      device.queue.submit([copy.finish()]); await mapped.mapAsync(GPUMapMode.READ);
+      stateSnapshots[name]=Array.from(new Uint32Array(mapped.getMappedRange())); mapped.unmap();
+    }
     const error=await device.popErrorScope(); scopeOpen=false;
     if (error) throw Error(error.message);
-    return {stopAfter,passesPerSubmission,batches,allocatedBytes,lastInvocationTraps,
+    return {stopAfter,passesPerSubmission,batches,allocatedBytes,lastInvocationTraps,stateSnapshots,
       trapCoverage:'last stored invocation slots only; not a whole-epoch certificate'};
   } finally {
     try { if (scopeOpen) await device.popErrorScope(); }
