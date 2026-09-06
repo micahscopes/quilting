@@ -1,5 +1,33 @@
 # Full GPU atlas construction
 
+## Methodology audit — 2026-09-05
+
+This is currently a **custom fixed-candidate conflict-graph sampler**, followed
+by parallel insertion and Delaunay repair. It is not an implementation of
+PixelPie or Wei's phase-group sampler. Exhausting its finite candidate set does
+not certify continuous coverage or blue-noise statistics. The triangle
+candidate generator also folds both trials into the same half of each interior
+grid square; a direct Fe probe has confirmed that missing proposal support.
+
+The latest independent review recommends preserving this pipeline as a measured
+baseline and parking the uncommitted retirement-occupancy experiment. A native
+wgpu comparison must separate generated code, handwritten equivalent code,
+scheduling changes, and a faithful published algorithm. The existing handwritten
+sampling module covers only proposal/retirement, not that end-to-end control.
+
+Current full-corpus results are **not a complete certified atlas**. Historical
+receipts contain 49 failed triangle tiles and 295 failed quad tiles due to
+unfinished repair. No subsecond full-atlas result has been demonstrated.
+
+Reference candidates: [Wei's original code](https://github.com/1iyiwei/noise/tree/master/BlueNoise),
+[PixelPie](https://github.com/salivian/pixelpie), and the authors'
+[gDel2D distribution](https://www.comp.nus.edu.sg/~tants/gdel3d.html).
+These have distinct algorithmic, numerical, dependency and licensing conditions;
+none has yet been incorporated. Detailed evidence and review disposition live
+in `/laboratory/quilting/scratch/atlas-job-state-20260905/`.
+
+## Existing baseline
+
 `index.html` selects all 1,035 D4 quad keys; `triangles.html` selects all 165
 S3 triangle keys. Both include every exponent from 0 through 8. There is no
 edge-ratio restriction, density ladder, or downloaded geometry artifact.
