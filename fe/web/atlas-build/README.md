@@ -177,6 +177,24 @@ It rejects tapered graphs rather than guessing their iteration-dependent
 counts. This diagnostic is not imported by the application and supplies no
 production scheduling decisions.
 
+### Compiler-failure observation is a separate gate
+
+The checked-arithmetic compiler now emits per-invocation trap buffers. Atlas
+directory/geometry receipts alone do not prove that the compiler reported no
+failure. Repeated dispatches can overwrite earlier invocation status, and an
+indirect dispatch can exceed the statically allocated invocation-status span.
+In the captured triangle manifest `fe-render-dc98be48069b9cd1.json`, indirect
+repair passes have a 256-byte trap buffer. A final zero snapshot is therefore
+not a whole-run no-trap certificate.
+
+Typed graph-epoch failure status is being developed upstream. Integration must
+preserve failures across repetitions, cover indirect work, expose terminal
+status, and fit the portable eight-storage-binding budget: repair proposal,
+repair certification, and retention already reach eight bindings. Neither an
+extra ninth binding nor CPU readback after every dispatch is an acceptable
+solution. The private tile replay currently rejects compiler-output bindings
+rather than silently ignoring this missing observation contract.
+
 ### Commands
 
 ```sh
