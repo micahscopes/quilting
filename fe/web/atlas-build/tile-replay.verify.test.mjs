@@ -1,6 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {tileReplayBlocks,tileReplayPrefix,diagnoseAtlasPrefix,replayAtlasTile} from './tile-replay.verify.mjs';
+import {tileReplayBlocks,tileReplayPrefix,diagnoseAtlasPrefix,replayAtlasTile,summarizeGpuTimestamps} from './tile-replay.verify.mjs';
+
+test('GPU timestamp census subtracts before number conversion and sums repeated stages',()=>{
+  const epoch=2n**60n;
+  const result=summarizeGpuTimestamps(['propose','retire','propose'],new BigUint64Array([
+    epoch,epoch+2000000n,epoch+9000000n,epoch+12000000n,epoch+20000000n,epoch+21000000n]));
+  assert.equal(result.summedPassGpuMs,6);
+  assert.deepEqual(result.rows,[
+    {entry:'propose',dispatches:2,gpuMs:3,maxDispatchGpuMs:2},
+    {entry:'retire',dispatches:1,gpuMs:3,maxDispatchGpuMs:3}]);
+});
+test('timestamp census rejects missing or reversed intervals and admits zero-duration quantization',()=>{
+  assert.throws(()=>summarizeGpuTimestamps(['a'],new BigUint64Array()),/count/);
+  assert.throws(()=>summarizeGpuTimestamps(['a'],new BigUint64Array([3n,2n])),/reversed/);
+  assert.equal(summarizeGpuTimestamps(['a'],new BigUint64Array([3n,3n])).summedPassGpuMs,0);
+});
 const p = (name, inner) => ({source_entry:name,cycle:{group:0,repeat:1035,...(inner?{inner}: {})}});
 const cycle = {group:4,repeat:128};
 const fixture = () => [p('begin_atlas'),p('initialize'),p('repair_schedule',cycle),p('repair_apply',cycle),p('repair_advance',cycle),p('repair_finish'),p('reserve_tile')];

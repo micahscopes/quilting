@@ -42,8 +42,27 @@ export function tileReplayPrefix(passes, stopAfter) {
   return blocks.slice(0, end + 1);
 }
 
+export function summarizeGpuTimestamps(entries, words) {
+  if (!(words instanceof BigUint64Array) || words.length !== entries.length*2)
+    throw Error('timestamp result count mismatch');
+  const byEntry = new Map();
+  for (let i=0;i<entries.length;i++) {
+    const start=words[i*2], end=words[i*2+1];
+    if (end<start) throw Error('GPU timestamp interval reversed');
+    const elapsed=end-start;
+    if (elapsed>BigInt(Number.MAX_SAFE_INTEGER)) throw Error('GPU interval exceeds exact conversion');
+    const ms=Number(elapsed)/1e6;
+    const row=byEntry.get(entries[i]) ?? {entry:entries[i],dispatches:0,gpuMs:0,maxDispatchGpuMs:0};
+    row.dispatches++; row.gpuMs+=ms; row.maxDispatchGpuMs=Math.max(row.maxDispatchGpuMs,ms);
+    byEntry.set(entries[i],row);
+  }
+  const rows=[...byEntry.values()];
+  return {dispatches:entries.length,summedPassGpuMs:rows.reduce((sum,row)=>sum+row.gpuMs,0),rows,
+    scope:'compute-pass intervals; excludes queue gaps, encoding, compilation and final readback; timestamp precision is implementation-dependent'};
+}
+
 export async function diagnoseAtlasPrefix(gpu, manifest, activeWords,
-  {stopAfter = 'initialize', passesPerSubmission = 1, onProgress = () => {}, inspectSampling} = {}) {
+  {stopAfter = 'initialize', passesPerSubmission = 1, onProgress = () => {}, inspectSampling, gpuTimestamps = false} = {}) {
   if (![7,10].includes(activeWords.length) || !activeWords.every(v => Number.isSafeInteger(v) && v >= 0 && v <= 0xffffffff)
       || activeWords[activeWords.length === 7 ? 4 : 5] !== 1)
     throw Error('expected a recorded valid atlas job');
@@ -53,6 +72,13 @@ export async function diagnoseAtlasPrefix(gpu, manifest, activeWords,
     throw Error('sampling inspection must be a diagnostic callback');
   const blocks = tileReplayPrefix(manifest.passes, stopAfter);
   const device = gpu.device, owned = [], resources = new Map(), prepared = new Map(), outputs = [];
+  if (gpuTimestamps && !device.features.has('timestamp-query'))
+    throw Error('diagnostic device must enable timestamp-query');
+  const dispatchCount=blocks.reduce((n,b)=>n+b.repeat*b.passes.length,0);
+  if (gpuTimestamps && (!Number.isSafeInteger(dispatchCount) || dispatchCount<1 || dispatchCount*2>4096))
+    throw Error('timestamp prefix exceeds bounded query capacity');
+  let querySet;
+  const timestampEntries=[];
   let allocatedBytes = 0;
   const make = (size, usage) => {
     if (!Number.isSafeInteger(size) || size < 4 || size % 4 || allocatedBytes + size > 512*1024*1024)
@@ -62,6 +88,7 @@ export async function diagnoseAtlasPrefix(gpu, manifest, activeWords,
   const needed = new Set(blocks.flatMap(b=>b.passes.flatMap(p=>p.layout.bindings.filter(b=>b.role==='resource').map(b=>b.name))));
   device.pushErrorScope('validation'); let scopeOpen = true;
   try {
+    if (gpuTimestamps) querySet=device.createQuerySet({type:'timestamp',count:dispatchCount*2});
     for (const r of manifest.resources.filter(r=>needed.has(r.name))) {
       if (r.artifact) throw Error('prefix must generate its own data');
       resources.set(r.name,make(r.length*r.stride,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC
@@ -98,7 +125,10 @@ export async function diagnoseAtlasPrefix(gpu, manifest, activeWords,
       encoder=device.createCommandEncoder(); names=[];
     };
     for (const block of blocks) for (let n=0;n<block.repeat;n++) for (const p of block.passes) {
-      const r=prepared.get(p.source_entry), pass=encoder.beginComputePass();
+      const r=prepared.get(p.source_entry), queryIndex=timestampEntries.length*2;
+      const pass=encoder.beginComputePass(querySet?{timestampWrites:{querySet,
+        beginningOfPassWriteIndex:queryIndex,endOfPassWriteIndex:queryIndex+1}}:{});
+      if (querySet) timestampEntries.push(p.source_entry);
       pass.setPipeline(r.pipeline); pass.setBindGroup(0,r.group);
       if (p.dispatch_indirect) pass.dispatchWorkgroupsIndirect(resources.get(p.dispatch_indirect.resource),p.dispatch_indirect.offset??0);
       else pass.dispatchWorkgroups(...p.dispatch);
@@ -106,6 +136,19 @@ export async function diagnoseAtlasPrefix(gpu, manifest, activeWords,
       if (names.length===passesPerSubmission) await flush();
     }
     await flush();
+    let gpuTiming;
+    if (querySet) {
+      const size=dispatchCount*16;
+      const resolved=make(size,GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC);
+      const mapped=make(size,GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST);
+      const copy=device.createCommandEncoder();
+      copy.resolveQuerySet(querySet,0,dispatchCount*2,resolved,0);
+      copy.copyBufferToBuffer(resolved,0,mapped,0,size);
+      device.queue.submit([copy.finish()]);
+      await mapped.mapAsync(GPUMapMode.READ);
+      try { gpuTiming=summarizeGpuTimestamps(timestampEntries,new BigUint64Array(mapped.getMappedRange())); }
+      finally { mapped.unmap(); }
+    }
     const lastInvocationTraps=[];
     for (const {entry,buffer} of outputs) {
       const mapped=make(buffer.size,GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST);
@@ -140,11 +183,12 @@ export async function diagnoseAtlasPrefix(gpu, manifest, activeWords,
     const error=await device.popErrorScope(); scopeOpen=false;
     if (error) throw Error(error.message);
     return {stopAfter,passesPerSubmission,batches,allocatedBytes,lastInvocationTraps,stateSnapshots,
+      ...(gpuTiming?{gpuTiming}:{}),
       ...(inspectSampling?{samplingInspection}:{}),
       trapCoverage:'last stored invocation slots only; not a whole-epoch certificate'};
   } finally {
     try { if (scopeOpen) await device.popErrorScope(); }
-    finally { for (const buffer of owned) buffer.destroy(); }
+    finally { querySet?.destroy(); for (const buffer of owned) buffer.destroy(); }
   }
 }
 

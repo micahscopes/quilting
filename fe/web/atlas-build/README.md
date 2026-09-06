@@ -81,6 +81,18 @@ testing; exhausted tiles must remain failed.
 
 ## Bounded diagnostic replay
 
+`diagnoseAtlasPrefix(..., {gpuTimestamps: true})` optionally records timestamp
+pairs around each compute pass. The device must have explicitly enabled
+`timestamp-query`; unsupported devices fail rather than reporting queue waits
+as GPU time. Queries are resolved and read only after the prefix has completed,
+never used to steer its work. Reports aggregate measured pass intervals by
+entry point, separate from submission wall times. They exclude encoding,
+compilation and queue gaps; timestamp quantization can produce zero intervals.
+The diagnostic limits capture to 2,048 dispatches and destroys its query set.
+Unit tests cover aggregation, large absolute timestamps, invalid intervals and
+zero-duration quantization. Browser validation is pending: the restarted Chrome
+instance returned no adapter on 2026-09-05. No new GPU timing results are claimed.
+
 `readback.verify.mjs` reads only job state, directory, completion and receipts
 (at most 1 MiB). Its observation kernel copies storage into separate readback
 buffers; it does not change production buffers or feed scheduling decisions.
