@@ -1,7 +1,9 @@
 //! Geometric curve handles: one construction, planar and spatial views.
 use core::marker::Copy
+use core::option::Option
 use fmath::{abs, clamp, sqrt, smoothstep, wrap_pi}
-use quilting_domain::{Vec3F, vec3f, add3, scale3, sub3, dot3}
+use quilting_domain::{Vec3F, vec3f, vec2f, add3, scale3, sub3, dot3}
+use quilting_demo_view::handles::{HandleQuery,HandlePick}
 use quilting_patch::{ProjectiveAlgebra}
 use quilting_patch::arc_authoring::{
     ArcIntervalChart,
@@ -299,18 +301,15 @@ actor ArcCurveExplorer uses (GpuProgram<WebGpuBackend>,SurfaceQuality<Responsive
         if event.is_pointer_down() {
             s.selected=-1.0
             s.dragging=1.0
-            let mut best=225.0
+            let query=HandleQuery {pointer:vec2f(event.pointer_x,event.pointer_y),
+                extent:ScreenExtent {width:event.width,height:event.height},radius_pixels:15.0}
+            let mut pick=HandlePick::empty()
             let mut i:u32=0
             while i<3 {
-                let p=project(camera(s),point(s,i))
-                let dx=(p.clip.x/p.clip.w+1.0)*0.5*event.width-event.pointer_x
-                let dy=(1.0-p.clip.y/p.clip.w)*0.5*event.height-event.pointer_y
-                if p.depth>0.0 && dx*dx+dy*dy<best {
-                    best=dx*dx+dy*dy
-                    s.selected=number(i)
-                }
+                pick=pick.consider(query,i,project(camera(s),point(s,i)).clip)
                 i=i+1
             }
+            s.selected=match pick.selected {Option::Some(id)=>number(id),Option::None=>-1.0}
         }
         if event.is_pointer_move() && event.buttons!=0 && s.dragging>0.5 {
             if s.selected>=0.0 {

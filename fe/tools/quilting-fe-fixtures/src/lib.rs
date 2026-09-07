@@ -32,6 +32,9 @@ mod active_sampling_oracle;
 #[cfg(all(test, feature = "fe-oracle"))]
 mod cpu_atlas_oracle;
 
+#[cfg(all(test, feature = "fe-oracle"))]
+mod view_handles;
+
 #[cfg(all(test, feature = "fe-oracle", feature = "quilting-export"))]
 mod cpu_atlas_benchmark;
 

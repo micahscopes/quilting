@@ -88,6 +88,18 @@ fn display_rgba_alpha_preserves_rgb_and_all_alpha_bytes() {
         let actual = pack.call(&mut store, (0.2, 0.4, 0.6, a as f32 / 255.0)).unwrap() as u32;
         assert_eq!(actual, 51 | (102 << 8) | (153 << 16) | (a << 24));
     }
+    // Sweep every lane independently, including the signed high-bit boundary.
+    // The expected word is assembled from byte identities, not a copy of the
+    // authored float packing implementation.
+    for lane in 0..4 {
+        for value in 0..=255u8 {
+            let mut bytes = [17u8, 83, 149, 211];
+            bytes[lane] = value;
+            let channels = bytes.map(|byte| byte as f32 / 255.0);
+            let actual = pack.call(&mut store, (channels[0], channels[1], channels[2], channels[3])).unwrap();
+            assert_eq!(actual, i32::from_le_bytes(bytes), "lane={lane} value={value}");
+        }
+    }
     assert_eq!(pack.call(&mut store, (1.0, 0.0, 0.0, 0.5)).unwrap() as u32, 0x800000ff);
     assert_eq!(pack.call(&mut store, (1.0, 0.0, 0.0, -1.0)).unwrap() as u32, 0x000000ff);
     assert_eq!(pack.call(&mut store, (1.0, 0.0, 0.0, 2.0)).unwrap() as u32, 0xff0000ff);

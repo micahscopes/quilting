@@ -276,9 +276,9 @@ pub fn pack_rgba8_with_alpha(_ color: DisplayRgb, _ alpha: f32) -> i32 {
     let green = __i32_from_f32(clamp01(color.green) * 255.0 + 0.5)
     let blue = __i32_from_f32(clamp01(color.blue) * 255.0 + 0.5)
     let a = __i32_from_f32(clamp01(alpha) * 255.0 + 0.5)
-    // Use the signed high byte without overflowing an intermediate i32.
-    let high = if a < 128 { a } else { a - 256 }
-    red + green * 256 + blue * 65536 + high * 16777216
+    // RGBA8 is a bit layout, not signed arithmetic. Mask each lane so the
+    // representation contract is explicit and no intermediate can overflow.
+    (red & 255) | ((green & 255) << 8) | ((blue & 255) << 16) | ((a & 255) << 24)
 }
 
 /// The complete safe path for renderers that do not need intermediate RGB.

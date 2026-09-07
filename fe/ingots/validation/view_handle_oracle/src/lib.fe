@@ -1,0 +1,25 @@
+use core::option::Option
+use quilting_domain::vec2f
+use quilting_demo_view::ScreenExtent
+use quilting_demo_view::handles::{HandleQuery,HandlePick}
+use std::webgpu::ClipPosition
+fn query()->HandleQuery {
+    HandleQuery {pointer:vec2f(100.0,50.0),extent:ScreenExtent {width:200.0,height:100.0},radius_pixels:15.0}
+}
+fn selected(_ p:HandlePick)->i32 {match p.selected {Option::Some(id)=>id.downcast_unchecked(),Option::None=>-1}}
+pub fn single(_ x:f32,_ y:f32,_ z:f32,_ w:f32)->i32 {
+    selected(HandlePick::empty().consider(query(),7,ClipPosition {x:x,y:y,z:z,w:w}))
+}
+pub fn ordering(_ reverse:bool)->i32 {
+    let a=ClipPosition {x:0.0,y:0.0,z:0.6,w:1.0}
+    let b=ClipPosition {x:0.0,y:0.0,z:0.2,w:1.0}
+    let p=HandlePick::empty()
+    selected(if reverse {p.consider(query(),2,b).consider(query(),1,a)}
+        else {p.consider(query(),1,a).consider(query(),2,b)})
+}
+pub fn identity_tie(_ reverse:bool)->i32 {
+    let p=ClipPosition {x:0.0,y:0.0,z:0.2,w:1.0}
+    let a=HandlePick::empty()
+    selected(if reverse {a.consider(query(),9,p).consider(query(),3,p)}
+        else {a.consider(query(),3,p).consider(query(),9,p)})
+}

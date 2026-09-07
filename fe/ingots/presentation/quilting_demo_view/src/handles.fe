@@ -1,0 +1,35 @@
+//! Pure screen-space handle selection, independent of events and application state.
+use core::marker::Copy
+use core::option::Option
+use quilting_domain::Vec2F
+use std::webgpu::ClipPosition
+use super::ScreenExtent
+
+pub struct HandleQuery {pub pointer:Vec2F,pub extent:ScreenExtent,pub radius_pixels:f32}
+impl Copy for HandleQuery {}
+pub struct HandlePick {
+    pub selected:Option<u32>,
+    distance_squared:f32,
+    depth:f32,
+}
+impl Copy for HandlePick {}
+impl HandlePick {
+    pub fn empty()->Self {Self {selected:Option::None,distance_squared:0.0,depth:0.0}}
+    /// Nearest pixel center wins. At equal distance, prefer nearer depth then
+    /// lower identity. Reject handles outside the positive finite depth chart.
+    pub fn consider(self,_ query:HandleQuery,_ id:u32,_ clip:ClipPosition)->Self {
+        if !(query.extent.width>0.0 && query.extent.height>0.0 && query.radius_pixels>0.0
+            && clip.w>0.0 && clip.w-clip.w==0.0 && clip.z>=0.0 && clip.z<=clip.w) {return self}
+        let dx=(clip.x/clip.w+1.0)*0.5*query.extent.width-query.pointer.x
+        let dy=(1.0-clip.y/clip.w)*0.5*query.extent.height-query.pointer.y
+        let distance=dx*dx+dy*dy
+        let depth=clip.z/clip.w
+        if !(distance-distance==0.0 && distance<=query.radius_pixels*query.radius_pixels) {return self}
+        let better=match self.selected {
+            Option::None=>true,
+            Option::Some(previous)=>distance<self.distance_squared
+                || (distance==self.distance_squared && (depth<self.depth || (depth==self.depth && id<previous))),
+        }
+        if better {Self {selected:Option::Some(id),distance_squared:distance,depth:depth}} else {self}
+    }
+}

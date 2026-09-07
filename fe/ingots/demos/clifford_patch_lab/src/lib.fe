@@ -385,6 +385,7 @@ struct CornerWeights { w00: f32, w10: f32, w01: f32, w11: f32 }
 impl Copy for CornerWeights {}
 
 use quilting_demo_view::{CameraFrame,moved_in_camera_plane}
+use quilting_demo_view::handles::{HandleQuery,HandlePick}
 
 struct Projection { clip: ClipPosition, depth: f32, view_x: f32, view_y: f32 }
 impl Copy for Projection {}
@@ -3134,46 +3135,23 @@ fn selectable_handle_center(
     }
 }
 
-fn squared_distance_to_handle(
-    _ positions: ControlPositions,
-    _ weights: CornerWeights,
-    _ camera: CameraFrame,
-    _ index: u32,
-    _ pointer_x: f32,
-    _ pointer_y: f32,
-) -> f32 {
-    let clip = selectable_handle_center(positions, weights, camera, index)
-    let dx = pointer_x - clip.x / clip.w
-    let dy = pointer_y - clip.y / clip.w
-    dx * dx + dy * dy
-}
-
 fn nearest_handle(
     _ positions: ControlPositions,
     _ weights: CornerWeights,
     _ camera: CameraFrame,
     _ pointer_x: f32,
     _ pointer_y: f32,
+    _ width:f32,_ height:f32,
 ) -> f32 {
-    let mut selected: f32 = -1.0
-    let mut best: f32 = 0.0028
+    let query=HandleQuery {pointer:vec2f(pointer_x,pointer_y),
+        extent:quilting_demo_view::ScreenExtent {width:width,height:height},radius_pixels:15.0}
+    let mut pick=HandlePick::empty()
     let mut index: u32 = 0
     while index < 8 {
-        let distance = squared_distance_to_handle(
-            positions,
-            weights,
-            camera,
-            index,
-            pointer_x,
-            pointer_y,
-        )
-        if distance < best {
-            best = distance
-            selected = as_f32(index)
-        }
+        pick=pick.consider(query,index,selectable_handle_center(positions,weights,camera,index))
         index = index + 1
     }
-    selected
+    match pick.selected {Option::Some(id)=>as_f32(id),Option::None=>-1.0}
 }
 
 fn handle_clip(
@@ -4437,10 +4415,8 @@ actor CliffordPatchLab uses (
         }.apply_param_bindings(lab_params(), event)
 
         if event.is_pointer_down() {
-            let pointer_x = event.pointer_x * 2.0 / event.width - 1.0
-            let pointer_y = 1.0 - event.pointer_y * 2.0 / event.height
             state.selected = nearest_handle(
-                positions(state), weights(state), camera_frame(state), pointer_x, pointer_y,
+                positions(state), weights(state), camera_frame(state), event.pointer_x,event.pointer_y,event.width,event.height,
             )
             state.dragging = if state.selected >= 0.0 { 1.0 } else { 0.0 }
             state.orbiting = if state.selected < 0.0 { 1.0 } else { 0.0 }

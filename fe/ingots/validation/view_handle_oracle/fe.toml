@@ -1,0 +1,9 @@
+[ingot]
+name = "view_handle_oracle"
+version = "0.1.0"
+
+[dependencies]
+core = true
+std = true
+quilting_domain = true
+quilting_demo_view = true
