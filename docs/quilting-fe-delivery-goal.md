@@ -55,6 +55,16 @@ method, but must not be mislabeled as a directly generated quad atlas.
   and15 existing resource tests passing. Release CLI rebuilt successfully;
   the candidate compiled in65.8s (development cache hit218ms), with3 passes /
   30,193 WGSL bytes. These are build metrics, not generation/frame benchmarks.
+- The automatic-demand path now builds reusable17-sample cumulative density
+  tables; its total is the same16-midpoint estimate previously used for LoD.
+  `InverseCumulativeMap` adapts these tables to the existing interval-map API.
+  Release Wasm checks passed all6,561 outer combinations with257 fractions
+  each: strict monotonicity and represented-CDF residual below1e-6, plus an
+  unequal-density case requiring midpoint skew. This is not an analytic
+  integration-error bound and does not yet establish rendered compensation.
+  Evidence: `scratch/composite-cdf-regression-20260907.log` in quilting
+  (9.89s test runtime). Next: retained table publication and shared boundary /
+  interior application in the viewer.
 
 - Independent edge selection now reaches the served viewer; spacing
   compensation and acknowledged suffix uploads remain unfinished.

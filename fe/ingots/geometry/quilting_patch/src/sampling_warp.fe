@@ -5,6 +5,7 @@
 use core::marker::Copy
 use quilting_domain::{Bary3F, Vec2F, bary3f, vec2f, bary_to_cartesian, cartesian_to_bary}
 use fmath::{sin, cos}
+use super::arc_length::{CumulativeLengthSamples, inverse_length}
 
 /// A triangle sampling coordinate mapped into a patch's parameter domain.
 pub trait TriangleParameterMap: Copy {
@@ -17,6 +18,12 @@ pub trait TriangleParameterMap: Copy {
 /// The trait expresses the interface; callers/tests must establish these laws.
 pub trait IntervalSamplingMap: Copy {
     fn map(self, _ t: f32) -> f32
+}
+/// Reuse the same sampled measure for edge resolution and sample placement.
+pub struct InverseCumulativeMap<M: CumulativeLengthSamples> { pub samples: M }
+impl<M: CumulativeLengthSamples> Copy for InverseCumulativeMap<M> {}
+impl<M: CumulativeLengthSamples> IntervalSamplingMap for InverseCumulativeMap<M> {
+    fn map(self, _ t: f32) -> f32 { inverse_length(self.samples,t) }
 }
 pub struct ProjectiveIntervalBias { pub strength: f32 }
 impl Copy for ProjectiveIntervalBias {}

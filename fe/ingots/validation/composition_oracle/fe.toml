@@ -6,3 +6,4 @@ version = "0.1.0"
 core = true
 composite_atlas = true
 quilting_atlas_wasm = true
+quilting_patch = true

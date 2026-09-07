@@ -12,12 +12,21 @@ pub trait CumulativeLengthSamples: Copy {
     fn segments(self) -> u32
     fn cumulative(self, _ index: u32) -> f32
 }
+/// Owned samples for CPU planning; GPU storage views can implement the same
+/// interface without copying the table. Values obey CumulativeLengthSamples.
+pub struct SampledCumulativeLength<const N: usize> { pub values: [f32; N] }
+impl<const N: usize> Copy for SampledCumulativeLength<N> {}
+impl<const N: usize> CumulativeLengthSamples for SampledCumulativeLength<N> {
+    fn segments(self) -> u32 { if N == 0 {0} else {(N-1).downcast_truncate()} }
+    fn cumulative(self, _ index: u32) -> f32 { self.values[index as usize] }
+}
 pub fn inverse_length<M: CumulativeLengthSamples>(_ samples: M, _ fraction: f32) -> f32 {
     if fraction <= 0.0 { return 0.0 }
     if fraction >= 1.0 { return 1.0 }
     let n = samples.segments()
+    if n == 0 { return fraction }
     let total = samples.cumulative(n)
-    if n == 0 || !(total > 0.0) { return fraction }
+    if !(total > 0.0) { return fraction }
     let target = fraction * total
     let mut low: u32 = 0
     let mut high = n

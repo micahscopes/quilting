@@ -22,6 +22,15 @@ fn composition_wasm_density_and_coherent_selection() {
     }
     let outer=instance.get_typed_func::<(),(f32,f32,f32,f32)>(&mut store,"outer_integrals").unwrap();
     assert_eq!(outer.call(&mut store,()).unwrap(),(1.0,8.0,32.0,256.0));
+    let spacing=instance.get_typed_func::<i32,(f32,f32,i32)>(&mut store,"spacing_case").unwrap();
+    for code in 0..6561 {
+        let (residual,midpoint,monotone)=spacing.call(&mut store,code).unwrap();
+        assert!(residual<0.000001,"CDF residual {residual} for {code}");
+        assert_eq!(monotone,1,"nonmonotone map for {code}");
+        assert!(midpoint>0.0 && midpoint<1.0);
+    }
+    let (_,midpoint,_)=spacing.call(&mut store,8*9+8*81).unwrap();
+    assert!(midpoint>0.69 && midpoint<0.72,"expected density-driven skew, got {midpoint}");
     for name in ["manual_values_survive_automatic","coherent_pending_selection"] {
         let check=instance.get_typed_func::<(),i32>(&mut store,name).unwrap();
         assert_eq!(check.call(&mut store,()).unwrap(),1,"{name}");

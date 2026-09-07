@@ -3,6 +3,7 @@ use core::marker::Copy
 use fmath::sqrt
 use quilting_atlas::lod_as_f32
 use quilting_atlas::composition::{SquareSplit, SquareEdgeLods}
+use quilting_patch::arc_length::{SampledCumulativeLength, CumulativeLengthSamples}
 use std::web::view::{Param, ChoiceOptions, SurfaceState, SurfaceEvent, ApplyParamBindings, ParamBindingsProvider}
 
 pub struct Controls {
@@ -66,7 +67,7 @@ pub fn corner(_ id:u32,_ x:f32,_ y:f32) -> Point {
 
 /// A reference-domain density heuristic, not an interior-uniformity proof.
 /// The straight outer edges integrate to exactly their requested counts.
-pub fn edge_demand(_ controls:Controls,_ from:u32,_ to:u32) -> f32 {
+pub fn edge_cdf(_ controls:Controls,_ from:u32,_ to:u32) -> SampledCumulativeLength<17> {
     let a=corner(from,controls.center_x,controls.center_y)
     let b=corner(to,controls.center_x,controls.center_y)
     let dx=b.x-a.x
@@ -75,16 +76,19 @@ pub fn edge_demand(_ controls:Controls,_ from:u32,_ to:u32) -> f32 {
     let top=lod_as_f32(1<<level(controls.top_lod))
     let left=lod_as_f32(1<<level(controls.left_lod))
     let right=lod_as_f32(1<<level(controls.right_lod))
-    let mut demand=0.0
+    let mut values=[0.0;17]
     for i in 0 .. 16 {
         let t=(lod_as_f32(i.downcast_truncate())+0.5)/16.0
         let x=a.x+dx*t
         let y=a.y+dy*t
         let vx=((1.0-y)*bottom+y*top)*dx
         let vy=((1.0-x)*left+x*right)*dy
-        demand=demand+sqrt(vx*vx+vy*vy)/16.0
+        values[i+1]=values[i]+sqrt(vx*vx+vy*vy)/16.0
     }
-    demand
+    SampledCumulativeLength {values:values}
+}
+pub fn edge_demand(_ controls:Controls,_ from:u32,_ to:u32) -> f32 {
+    edge_cdf(controls,from,to).cumulative(16)
 }
 fn automatic_level(_ controls:Controls,_ from:u32,_ to:u32) -> u32 {
     let demand=edge_demand(controls,from,to)

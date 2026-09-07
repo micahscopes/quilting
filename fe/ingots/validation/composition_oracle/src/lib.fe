@@ -2,7 +2,35 @@
 use composite_atlas::model::{initial_controls,edge_demand,edge_lods}
 use quilting_atlas_wasm::{Claim,Completion,packed_triangle}
 use quilting_atlas_wasm::pool::PoolHandle
+use quilting_patch::arc_length::{CumulativeLengthSamples,inverse_length}
 extern {const fn __f32_from_i32(_:i32)->f32}
+/// Inverse of the represented CDF, not an exact-integral accuracy claim.
+pub fn spacing_case(_ code:u32)->(f32,f32,bool) {
+    let mut controls=initial_controls()
+    controls.bottom_lod=__f32_from_i32((code%9).downcast_unchecked())
+    controls.right_lod=__f32_from_i32(((code/9)%9).downcast_unchecked())
+    controls.top_lod=__f32_from_i32(((code/81)%9).downcast_unchecked())
+    controls.left_lod=__f32_from_i32(((code/729)%9).downcast_unchecked())
+    let cdf=composite_atlas::model::edge_cdf(controls,0,4)
+    let total=cdf.cumulative(16)
+    let mut previous=0.0
+    let mut residual=0.0
+    let mut monotone=true
+    for i in 0 .. 257 {
+        let fraction=__f32_from_i32(i.downcast_unchecked())/256.0
+        let t=inverse_length(cdf,fraction)
+        if i>0 && !(t>previous) {monotone=false}
+        previous=t
+        let mut low: u32=0
+        while low<15 && t>__f32_from_i32((low+1).downcast_unchecked())/16.0 {low+=1}
+        let local=t*16.0-__f32_from_i32(low.downcast_unchecked())
+        let observed=(cdf.cumulative(low)+(cdf.cumulative(low+1)-cdf.cumulative(low))*local)/total
+        let delta=observed-fraction
+        let error=if delta<0.0 {-delta} else {delta}
+        if error>residual {residual=error}
+    }
+    (residual,inverse_length(cdf,0.5),monotone)
+}
 pub fn uniform_case(_ level:u32)->(f32,f32,u32,u32) {
     let value=__f32_from_i32(level.downcast_unchecked())
     let mut c=initial_controls()

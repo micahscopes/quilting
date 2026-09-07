@@ -11,4 +11,5 @@ quilting_atlas_wasm = true
 quilting_atlas_workers = true
 quilting_domain = true
 quilting_qb = true
+quilting_patch = true
 quilting_oklch = { path = "../../color/quilting_oklch" }
