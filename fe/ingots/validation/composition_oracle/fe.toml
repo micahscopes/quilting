@@ -8,3 +8,4 @@ composite_atlas = true
 quilting_atlas_wasm = true
 quilting_atlas = true
 quilting_patch = true
+quilting_domain = true

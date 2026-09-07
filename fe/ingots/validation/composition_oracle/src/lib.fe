@@ -1,5 +1,6 @@
 //! Pure policy and real retained-selection Wasm acceptance exports.
 use core::option::Option
+use quilting_domain::bary3f
 use composite_atlas::model::{initial_controls,edge_demand,edge_lods}
 use quilting_atlas_wasm::{Claim,Completion,packed_triangle}
 use quilting_atlas_wasm::pool::PoolHandle
@@ -7,6 +8,45 @@ use quilting_patch::arc_length::{CumulativeLengthSamples,inverse_length}
 use quilting_patch::sampling_warp::{InverseCumulativeMap,OrientedIntervalMap,IntervalSamplingMap}
 use quilting_atlas::composition::{BoundaryUse,ChildTriangle,SquareEdgeLods}
 extern {const fn __f32_from_i32(_:i32)->f32}
+pub fn interior_policy_preserves_boundaries()->bool {
+    let mut c=initial_controls()
+    for focus in 0 .. 4 {
+        c.focus_a=if focus==1 {4.0} else if focus==2 {0.1} else {1.0}
+        c.focus_b=if focus==2 {4.0} else if focus==3 {0.1} else {1.0}
+        c.focus_c=if focus==3 {4.0} else if focus==1 {0.1} else {1.0}
+        for strength in [0.25,1.0,4.0] {
+            for twist in [-3.14159265,0.0,3.14159265] {
+                c.interior_concentration=strength
+                c.interior_twist=twist
+                let policy=composite_atlas::model::interior_policy(c)
+                for i in 0 .. 257 {
+                    let t=__f32_from_i32(i.downcast_unchecked())/256.0
+                    for p in [bary3f(0.0,1.0-t,t),bary3f(t,0.0,1.0-t),bary3f(1.0-t,t,0.0)] {
+                        let q=policy.apply(p)
+                        if q.a!=p.a || q.b!=p.b || q.c!=p.c {return false}
+                    }
+                }
+                for i in 0 .. 33 {
+                    for j in 0 .. (33-i) {
+                        let b=__f32_from_i32(i.downcast_unchecked())/32.0
+                        let d=__f32_from_i32(j.downcast_unchecked())/32.0
+                        let p=bary3f(1.0-b-d,b,d)
+                        let q=policy.apply(p)
+                        if !(q.a>=-0.00001 && q.b>=-0.00001 && q.c>=-0.00001
+                            && q.a<=1.00001 && q.b<=1.00001 && q.c<=1.00001) {return false}
+                        let sum=q.a+q.b+q.c
+                        if !(sum>0.99999 && sum<1.00001) {return false}
+                        if strength==1.0 && twist==0.0 && (q.a!=p.a || q.b!=p.b || q.c!=p.c) {return false}
+                    }
+                }
+            }
+        }
+    }
+    c.interior_enabled=0.0
+    let p=bary3f(0.2,0.3,0.5)
+    let q=composite_atlas::model::interior_policy(c).apply(p)
+    q.a==p.a && q.b==p.b && q.c==p.c
+}
 pub fn boundary_admission()->bool {
     for a in 0 .. 6 {
         for b in 0 .. 6 {
@@ -136,10 +176,19 @@ fn coherent_pending_for_split(_ split:f32)->bool {
     let revision=state.scene.spacing_revision
     state=composite_atlas::residency::refresh(state)
     if revision==0 || state.scene.spacing_revision!=revision {return false}
+    state.controls.interior_concentration=2.0
+    state=composite_atlas::residency::refresh(state)
+    if state.pending!=0 || state.scene.interior.map.concentration!=2.0
+        || state.scene.spacing_revision!=revision {return false}
     let before=state.scene
     state.controls.bottom_lod=8.0
     state.controls.center_x=0.2
+    state.controls.interior_concentration=4.0
+    state.controls.interior_twist=1.7
+    state.controls.focus_a=4.0
     state=composite_atlas::residency::refresh(state)
     state.pending>0 && state.scene.vertices==before.vertices && state.scene.active_center_x==before.active_center_x
         && state.scene.spacing_revision==before.spacing_revision && state.scene.active_bottom==before.active_bottom
+        && state.scene.interior.map.concentration==before.interior.map.concentration
+        && state.scene.interior.map.twist==before.interior.map.twist && state.scene.interior.focus.a==before.interior.focus.a
 }

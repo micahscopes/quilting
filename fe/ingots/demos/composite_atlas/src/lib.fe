@@ -72,7 +72,8 @@ fn point(_ atlas:Atlas,_ maps:Maps,_ scene:Scene,_ d:ChildDraw,_ index:u32,_ wid
         else if p.c==0.0 {shared_edge(maps,d.boundaries.ab,d.corner_a,d.corner_b,p.b,scene)}
         else if p.a==0.0 {shared_edge(maps,d.boundaries.bc,d.corner_b,d.corner_c,p.c,scene)}
         else {
-            let warped=if scene.active_compensation>0.5 {interior(maps,d,p)} else {p}
+            let spaced=if scene.active_compensation>0.5 {interior(maps,d,p)} else {p}
+            let warped=scene.interior.apply(spaced)
             let a=corner(d.corner_a,scene.active_center_x,scene.active_center_y)
             let b=corner(d.corner_b,scene.active_center_x,scene.active_center_y)
             let c=corner(d.corner_c,scene.active_center_x,scene.active_center_y)

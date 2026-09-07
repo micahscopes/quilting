@@ -90,6 +90,45 @@ interior crop. Canvas inspection followed automatic startup, not activation.
 Current runtime asset: `fe-render-runtime-0ba5548668c8cb5d.js`.
 Logs: `/laboratory/quilting/scratch/declarative-surface-upgrade-tests-20260907.log`
 and `/laboratory/quilting/scratch/composite-declarative-live-web-dev-20260907.log`.
+# Interior controls and continuous native sliders
+
+The composition viewer now exposes an interior enable/bypass checkbox,
+concentration (neutral 1), twist (neutral 0), and three positive relative
+weights locating the focus inside each child. Equal weights mean its
+barycenter. These controls do not move the geometric fan center or its spokes.
+`InteriorRedistribution` composes the existing shared concentration/twist maps
+for triangular and square domains. The viewer applies it after boundary-spacing
+extension and stores the complete policy in the compatible visible snapshot.
+
+Release Wasm checks cover four focus configurations, three concentration values
+and three twist values: 27,756 boundary sample checks are unchanged exactly;
+20,196 interior lattice points remain finite and in the triangle within the
+declared tolerance. Neutral and bypass preserve input coordinates exactly.
+Resident edits do not regenerate the CDF; pending primary requests retain the
+old interior policy along with the old geometry. Both split/fan retention
+fixtures and prior boundary tests pass (27.18 seconds including Fe compilation).
+Log: `/laboratory/quilting/scratch/composite-interior-controls-tests-20260907.log`.
+
+Chrome verified manifest `fe-render-39c4bd818dfc6df2.json`, 431,709 bytes parent
+Wasm and 142,644 bytes WGSL. Neutral versus bypass had zero changed bytes in the
+inspected 1,036,324-pixel region. Concentration 1.4, zero twist, equal focus
+weights rendered 4,296 vertices with zero exposed-background or red-marker
+pixels. The document height matched the viewport (1,281 pixels). The only
+console warning came from diagnostic Canvas2D readback.
+
+This is an exploration control, not automatic optimal redistribution. A tested
+stronger profile (approximately concentration 1.994, twist 0.4084, focus weights
+2.4985/1/1) produced 436 red-marker pixels despite unchanged boundaries. The
+continuous map and the straight triangulation have different validity gates.
+Do not hide these finite-mesh folds or call this a uniformity solution.
+
+This also exposed a shared UI bug: scalar sliders invented 200 equally spaced
+steps, silently rounding neutral and requested values. Shared mb2 commit
+`baedb99ad` removes that invented quantization (`step=any` for continuous values,
+`step=1` for integers), with 69 runtime tests passing. The actual Chrome controls
+now retain focus=1, twist=0 and requested concentration=1.4; Fe's f32 conversion
+remains expected. This is a shared host realization fix, not demo JavaScript.
+
 # Executed GPU/Wasm boundary agreement
 
 `composition_gpu_oracle` is an authored Fe validation ingot, not a handwritten

@@ -4,6 +4,8 @@ use fmath::sqrt
 use quilting_atlas::lod_as_f32
 use quilting_atlas::composition::{SquareSplit, SquareEdgeLods}
 use quilting_patch::arc_length::{SampledCumulativeLength, CumulativeLengthSamples}
+use quilting_patch::sampling_warp::InteriorRedistribution
+use quilting_domain::{Bary3F,bary3f}
 use std::web::view::{Param, ChoiceOptions, SurfaceState, SurfaceEvent, ApplyParamBindings, ParamBindingsProvider}
 
 pub struct Controls {
@@ -11,6 +13,8 @@ pub struct Controls {
     pub automatic_interior:f32, pub diagonal_lod:f32,
     pub spoke_0_lod:f32, pub spoke_1_lod:f32, pub spoke_2_lod:f32, pub spoke_3_lod:f32,
     pub split:f32, pub center_x:f32, pub center_y:f32, pub compensate_density:f32,
+    pub interior_enabled:f32, pub interior_concentration:f32, pub interior_twist:f32,
+    pub focus_a:f32, pub focus_b:f32, pub focus_c:f32,
     pub width:f32, pub height:f32,
 }
 impl Copy for Controls {}
@@ -19,6 +23,14 @@ pub struct Params {
     pub automatic_interior:Param, pub diagonal_lod:Param,
     pub spoke_0_lod:Param, pub spoke_1_lod:Param, pub spoke_2_lod:Param, pub spoke_3_lod:Param,
     pub split:Param, pub center_x:Param, pub center_y:Param, pub compensate_density:Param,
+    /// Redistribute each child's interior; all outer edges and spokes stay fixed.
+    pub interior_enabled:Param,
+    /// One is neutral. Larger values concentrate samples near the child focus.
+    pub interior_concentration:Param,
+    /// Twist within each child; red triangles indicate folds in the finite mesh.
+    pub interior_twist:Param,
+    /// Relative pull of the focus toward child corner A, B or C; not a corner position.
+    pub focus_a:Param, pub focus_b:Param, pub focus_c:Param,
     pub width:Param, pub height:Param,
 }
 impl SurfaceState for Controls { type Params = Params }
@@ -40,6 +52,12 @@ pub const fn params() -> Params {
         center_x:Param::range(min:0.02,max:0.98,init:0.5),
         center_y:Param::range(min:0.02,max:0.98,init:0.5),
         compensate_density:Param::toggle(init:true),
+        interior_enabled:Param::toggle(init:true),
+        interior_concentration:Param::range(min:0.25,max:4.0,init:1.0),
+        interior_twist:Param::range(min:-3.14159265,max:3.14159265,init:0.0),
+        focus_a:Param::range(min:0.1,max:4.0,init:1.0),
+        focus_b:Param::range(min:0.1,max:4.0,init:1.0),
+        focus_c:Param::range(min:0.1,max:4.0,init:1.0),
         width:Param::extent_x(),height:Param::extent_y(),
     }
 }
@@ -47,7 +65,22 @@ pub fn initial_controls() -> Controls {
     Controls {bottom_lod:4.0,right_lod:4.0,top_lod:4.0,left_lod:4.0,
         automatic_interior:1.0,diagonal_lod:4.0,spoke_0_lod:4.0,spoke_1_lod:4.0,
         spoke_2_lod:4.0,spoke_3_lod:4.0,split:2.0,center_x:0.5,center_y:0.5,
-        compensate_density:1.0,width:1200.0,height:1200.0}
+        compensate_density:1.0,interior_enabled:1.0,interior_concentration:1.0,interior_twist:0.0,
+        focus_a:1.0,focus_b:1.0,focus_c:1.0,width:1200.0,height:1200.0}
+}
+/// An immutable visible interior policy, published with its child geometry.
+pub struct InteriorPolicy {pub enabled:f32,pub map:InteriorRedistribution,pub focus:Bary3F}
+impl Copy for InteriorPolicy {}
+impl InteriorPolicy {
+    pub fn apply(self,_ p:Bary3F)->Bary3F {
+        if self.enabled>0.5 {self.map.triangle(p,self.focus)} else {p}
+    }
+}
+pub fn interior_policy(_ c:Controls)->InteriorPolicy {
+    let sum=c.focus_a+c.focus_b+c.focus_c
+    InteriorPolicy {enabled:c.interior_enabled,
+        map:InteriorRedistribution {concentration:c.interior_concentration,twist:c.interior_twist},
+        focus:bary3f(c.focus_a/sum,c.focus_b/sum,c.focus_c/sum)}
 }
 pub fn level(_ value:f32) -> u32 {
     let mut n:u32=0

@@ -277,3 +277,20 @@ impl InteriorConcentration {
             .quad(point, focus)
     }
 }
+
+/// Boundary-fixed sample redistribution, independent of edge density laws.
+/// Concentration is positive; the focus is strictly inside the chosen domain.
+/// Neutral concentration=1 and twist=0 preserve the input exactly. Continuous
+/// map injectivity does not guarantee that a finite straight mesh stays unfolded.
+pub struct InteriorRedistribution {pub concentration:f32,pub twist:f32}
+impl Copy for InteriorRedistribution {}
+impl InteriorRedistribution {
+    pub fn triangle(self,_ p:Bary3F,_ focus:Bary3F)->Bary3F {
+        let q=InteriorConcentration {strength:self.concentration}.triangle(p,focus)
+        InteriorTwist {angle:self.twist}.triangle(q,focus)
+    }
+    pub fn quad(self,_ p:Vec2F,_ focus:Vec2F)->Vec2F {
+        let q=InteriorConcentration {strength:self.concentration}.quad(p,focus)
+        InteriorTwist {angle:self.twist}.quad(q,focus)
+    }
+}
