@@ -47,18 +47,20 @@ fn cpu_atlas_compiles_typed_worker_payload() {
     eprintln!("worker lane export={export} exports={:?}",module.exports().map(|e|e.name().to_owned()).collect::<Vec<_>>());
     let call = instance.get_typed_func::<i32,i32>(&mut store,export).unwrap();
     let fe_codegen::CanonicalShape::Record {fields} = &lane.request.shape else {panic!("request record")};
-    for square in [false,true] {
+    for square in [false,true] { for dense in [false,true] {
         let mut request=vec![0u8;lane.request.size as usize];
         for field in fields {
             let value:u32 = match field.name.as_str() {
                 "epoch"=>17, "square"=>u32::from(square), "c"=>8, "seed"=>42,
-                "a"|"b"|"d"=>0, other=>panic!("unknown request field {other}"),
+                "a"|"b"|"d"=>if dense {8} else {0}, other=>panic!("unknown request field {other}"),
             };
             let offset=field.offset as usize;
             request[offset..offset+field.layout.size as usize].copy_from_slice(&value.to_le_bytes()[..field.layout.size as usize]);
         }
         memory.write(&mut store,64,&request).unwrap();
+        let start=std::time::Instant::now();
         let ptr=call.call(&mut store,64).unwrap();
+        let elapsed=start.elapsed();
         assert_eq!(lane.response.size,24);
         let mut response=[0u8;24];
         memory.read(&store,ptr as usize,&mut response).unwrap();
@@ -71,8 +73,8 @@ fn cpu_atlas_compiles_typed_worker_payload() {
         let mut bytes=vec![0;len as usize*4];
         memory.read(&store,payload as usize,&mut bytes).unwrap();
         assert!(bytes.iter().any(|b|*b!=0));
-        eprintln!("canonical worker square={square} epoch=17 points={points} triangles={triangles} bytes={}",bytes.len());
-    }
+        eprintln!("canonical worker square={square} dense={dense} epoch=17 points={points} triangles={triangles} bytes={} elapsed={elapsed:?}",bytes.len());
+    } }
 }
 
 #[test]
@@ -80,6 +82,11 @@ fn cpu_atlas_wasm_exports_packed_geometry() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../ingots/validation/cpu_atlas_oracle");
     let wasm = compile_ingot_at_level(&path, OptLevel::O2);
+    if let Some(directory)=std::env::var_os("QUILTING_ATLAS_WORKER_ARTIFACT_DIR") {
+        let directory=std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("validation.wasm"),&wasm).unwrap();
+    }
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, &wasm).unwrap();
     let mut store = wasmtime::Store::new(&engine, ());

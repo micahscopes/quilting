@@ -33,3 +33,24 @@ excluded packing and canonical transport, so it is not an identical timed path.
 Not yet verified: full1200tile browser corpus, multiple workers, pool scheduling,
 cancellation/stale publication under concurrent edits, separate phase/copy/upload
 timing, render integration, or final memory budget. This page is diagnostic only.
+
+## Follow-up: execution vs messaging
+
+The canonical actor compiler enables optimization. Executing its dense calls in
+Wasmtime gives triangle1.542s / quad1.091s (timed canonical entry, payload read
+excluded). The same worker artifact called directly in Chrome, without Worker
+messaging, gives triangle7.846s / quad5.655s. Messaging is therefore not the main
+explanation. Log: `scratch/dense-canonical-worker-timing-20260906.log`.
+
+Raw Fe validation exports in Chrome, triangle[8,8,8]: sampling4.646s,
+sampling+CDT8.374s, packed generation8.343s. Separate executions, not additive
+phase timings; this points to geometry execution, not packing. No host mesh
+audit is included. Rust/Wasm triangle[8,8,8] directly in the same Chrome instance
+took770/723/725ms over three calls (53511points/106252triangles), so the engine
+gap is not a universal equal slowdown. These are different generated algorithms
+and output densities; no compiler defect or V8-tier explanation is proven.
+
+The validation artifact is produced via the same optional artifact-directory
+environment variable in `cpu_atlas_wasm_exports_packed_geometry`. Both diagnostic
+artifacts are release builds. Do not change browser flags or resume speculative
+compiler optimization on the strength of these measurements alone.
