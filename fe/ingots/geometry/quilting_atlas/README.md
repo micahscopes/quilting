@@ -95,9 +95,10 @@ empty-circumcircle checks in each metric, vertex retention and total area),
 exact triangular boundary chains, location outcomes, hull-preserving flips,
 queue wrap/deduplication, legalization resumption and failure outcomes.
 The `cpu_atlas_oracle` now connects indexed sampling directly to this CDT in
-actual O2 Wasm, with no imported geometry implementation. Its seven-case gate
+actual O2 Wasm, with no imported geometry implementation. Its eleven-case gate
 includes triangle `[0,0,8]` (1,615 points, 2,970 faces) and square `[0,0,0,8]`
-(619 points, 977 faces), seed 42. All cases pass adjacency, positive orientation,
+(619 points, 977 faces), seed 42, plus uniform LoDs 0, 2, 4 and 5 in both
+domains. All cases pass adjacency, positive orientation,
 exact total area, prescribed hull, vertex retention, Euler count and local
 metric-Delaunay audits. Small scalar cases additionally use all-point
 empty-circumcircle checks. The large-case audits are not an independent

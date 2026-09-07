@@ -19,7 +19,7 @@ fn cpu_atlas_wasm_triangulates_mixed_lod8_domains() {
     let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
     type Probe = (i32, i32, i32, i32, i32, i32, i32, i32, i64);
     let triangle = instance.get_typed_func::<(i32, i32, i32, i32), Probe>(&mut store, "triangle").unwrap();
-    for key in [(0, 0, 0), (0, 0, 4), (0, 0, 8), (2, 2, 2)] {
+    for key in [(0, 0, 0), (0, 0, 4), (0, 0, 8), (2, 2, 2), (4, 4, 4), (5, 5, 5)] {
         store.set_fuel(100_000_000_000).unwrap();
         let start = std::time::Instant::now();
         let r = triangle.call(&mut store, (key.0, key.1, key.2, 42)).unwrap();
@@ -30,7 +30,7 @@ fn cpu_atlas_wasm_triangulates_mixed_lod8_domains() {
         assert_eq!(r.8, 16384 * 16384);
     }
     let square = instance.get_typed_func::<(i32, i32, i32, i32, i32), Probe>(&mut store, "square").unwrap();
-    for key in [(0, 0, 0, 0), (0, 0, 0, 8), (2, 2, 2, 2)] {
+    for key in [(0, 0, 0, 0), (0, 0, 0, 8), (2, 2, 2, 2), (4, 4, 4, 4), (5, 5, 5, 5)] {
         store.set_fuel(100_000_000_000).unwrap();
         let start = std::time::Instant::now();
         let r = square.call(&mut store, (key.0, key.1, key.2, key.3, 42)).unwrap();
