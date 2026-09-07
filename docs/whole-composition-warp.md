@@ -42,11 +42,28 @@ The initial release browser build exposed an upstream carrier limitation:
 `prepare` rejects kernel argument 62 (`i1`) as an unsupported boolean storage
 argument. Source checking and Wasm execution succeed. The policy intentionally
 keeps real boolean/enum types; it is not flattened into demo-specific float
-flags to bypass this. Sonatina fix `6bda54bb` now has five passing focused
-regressions, including real GPU decoding. It represents storage arguments as
-`u32` and decodes logical booleans inside the shader. The shared Fe release
-CLI is rebuilding against this exact pushed revision.
-The composite development server exited during this failed initial build;
-the old tab may retain its last rendered view, but a reload is not available
-until the corrected toolchain build is served. The separate arc server remains
-independent. This is an unresolved delivery gate, not a completed browser feature.
+flags to bypass this. Sonatina fix `6bda54bb` represents storage arguments as
+`u32` and decodes logical booleans inside the shader, with five passing focused
+regressions including real GPU decoding.
+
+That fix moved the failure one layer down rather than clearing it. The authored
+raster path keeps its own leaf-type gate, so the rebuilt toolchain reported
+`spirv raster: non-resource actor state admits only i32/u32 and f32 leaves`
+for the same policy. Sonatina `bb66aee8` extends the identical carrier to
+raster actor state: the state record holds a `u32` in the uniform four-byte
+member layout and each stage decodes it on load with the same nonzero rule.
+A new end-to-end regression compiles a vertex that never reads the flag with a
+fragment that branches on it, asserting the retained `u32` member, distinct
+state offsets, and a validating two-entry WGSL module. All seven authored-raster
+tests and all six boolean tests pass, the latter including GPU execution under
+the machine's Vulkan loader. Fe pin `ce86abb6b` carries that revision.
+
+Browser acceptance is now met. The release `fe web dev` build of
+`fe/web/composite-atlas` compiles (885,170 Wasm bytes, 208,057 WGSL bytes) and
+serves; the page loads every asset without a console error, and the typed
+policy's five booleans appear as live controls. Driving concentration to 2.41,
+twist to 2.657 and focal X to 0.277 on the curved quad visibly redistributes
+the assembled tessellation across internal seams. Strong settings still produce
+the sliver triangles the fold caveat above predicts; that remains a known
+limitation of coarse straight-edged meshes under aggressive warps, not a
+regression. Evidence: `/laboratory/quilting/scratch/composite-atlas-boolstate-20260907.log`.
