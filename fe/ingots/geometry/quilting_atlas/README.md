@@ -95,10 +95,10 @@ empty-circumcircle checks in each metric, vertex retention and total area),
 exact triangular boundary chains, location outcomes, hull-preserving flips,
 queue wrap/deduplication, legalization resumption and failure outcomes.
 The `cpu_atlas_oracle` now connects indexed sampling directly to this CDT in
-actual O2 Wasm, with no imported geometry implementation. Its eleven-case gate
+actual O2 Wasm, with no imported geometry implementation. Its thirteen-case gate
 includes triangle `[0,0,8]` (1,615 points, 2,970 faces) and square `[0,0,0,8]`
 (619 points, 977 faces), seed 42, plus uniform LoDs 0, 2, 4 and 5 in both
-domains. All cases pass adjacency, positive orientation,
+domains, and uniform LoD 8. All cases pass adjacency, positive orientation,
 exact total area, prescribed hull, vertex retention, Euler count and local
 metric-Delaunay audits. Small scalar cases additionally use all-point
 empty-circumcircle checks. The large-case audits are not an independent
@@ -106,10 +106,18 @@ exhaustive crossing test.
 
 Run from `fe/tools/quilting-fe-fixtures`:
 `cargo test --release --features fe-oracle cpu_atlas_wasm_triangulates_mixed_lod8_domains -- --nocapture`.
-The mixed cases took about 51ms and 24ms respectively for fuel-instrumented
-sampling + CDT + audit in Wasmtime. These are correctness probes, not production
-benchmarks. The 2,048-point allocation is a probe envelope that fails explicitly
-on exhaustion, not an atlas cap. Full-key capacity scaling, browser workers,
+The latest probe uses typed arena allocation and loop initialization: increasing
+scratch capacity from 2,048 to 65,536 points changes its Wasm size only from
+186,602 to 186,747 bytes. Previous expanded local array initialization produced
+1,053,380 bytes at the smaller capacity. No geometry algorithm changed.
+
+Uniform LoD-8 triangle generation produced 47,366 points / 93,962 faces; the
+square produced 39,714 points / 78,402 faces. Fuel-instrumented sampling + CDT +
+audit took 2.31s / 1.70s, respectively. Arena high-water marks were 353,466,873 /
+311,282,699 bytes: temporary allocation is still excessive and must be addressed
+before multiplying workers. These are correctness probes, not production or
+full-atlas benchmarks. The 65,536-point allocation is a probe envelope that fails
+explicitly on exhaustion, not an atlas cap. Full-key capacity scaling, browser workers,
 packed output, permutation/coverage checks at scale and full-atlas measurements
 remain required before calling the runtime atlas complete.
 

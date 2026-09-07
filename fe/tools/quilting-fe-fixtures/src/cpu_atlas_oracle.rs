@@ -21,7 +21,7 @@ fn cpu_atlas_wasm_triangulates_mixed_lod8_domains() {
     let alloc = instance.get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc").unwrap();
     type Probe = (i32, i32, i32, i32, i32, i32, i32, i32, i64);
     let triangle = instance.get_typed_func::<(i32, i32, i32, i32), Probe>(&mut store, "triangle").unwrap();
-    for key in [(0, 0, 0), (0, 0, 4), (0, 0, 8), (2, 2, 2), (4, 4, 4), (5, 5, 5)] {
+    for key in [(0, 0, 0), (0, 0, 4), (0, 0, 8), (2, 2, 2), (4, 4, 4), (5, 5, 5), (8, 8, 8)] {
         store.set_fuel(100_000_000_000).unwrap();
         reset.call(&mut store, ()).unwrap();
         let start = std::time::Instant::now();
@@ -34,7 +34,7 @@ fn cpu_atlas_wasm_triangulates_mixed_lod8_domains() {
         assert_eq!(r.8, 16384 * 16384);
     }
     let square = instance.get_typed_func::<(i32, i32, i32, i32, i32), Probe>(&mut store, "square").unwrap();
-    for key in [(0, 0, 0, 0), (0, 0, 0, 8), (2, 2, 2, 2), (4, 4, 4, 4), (5, 5, 5, 5)] {
+    for key in [(0, 0, 0, 0), (0, 0, 0, 8), (2, 2, 2, 2), (4, 4, 4, 4), (5, 5, 5, 5), (8, 8, 8, 8)] {
         store.set_fuel(100_000_000_000).unwrap();
         reset.call(&mut store, ()).unwrap();
         let start = std::time::Instant::now();

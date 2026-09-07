@@ -25,23 +25,23 @@ fn empty() -> AtlasProbe {
     AtlasProbe { sampling_status: 3, mesh_status: 5, points: 0, triangles: 0, errors: 0, location_steps: 0, edge_visits: 0, flips: 0, double_area: 0 }
 }
 
-struct AuditScratch { used: [bool; 2048] }
+struct AuditScratch { used: [bool; 65536] }
 
-fn initialize() uses (scratch: mut ActiveScratch<2048>, grid: mut AcceptedGrid<2048>, mesh: mut CpuMesh<4096>, queue: mut EdgeQueue<12288>, audit: mut AuditScratch) {
+fn initialize() uses (scratch: mut ActiveScratch<65536>, grid: mut AcceptedGrid<65536>, mesh: mut CpuMesh<131072>, queue: mut EdgeQueue<393216>, audit: mut AuditScratch) {
     scratch.initialize()
     grid.initialize()
     mesh.initialize()
     queue.initialize()
-    for i in 0 .. 2048 { audit.used[i] = false }
+    for i in 0 .. 65536 { audit.used[i] = false }
 }
 
 fn probe<D: ActiveDomain + ConstrainedBoundary, M: IntegerPlaneMetric>(
     _ domain: D, _ metric: M, _ roots: [u32; 4], _ root_count: u32, _ seed: u32,
 ) -> AtlasProbe {
-    let scratch: BrowserPtr<ActiveScratch<2048>> = alloc_browser_object<ActiveScratch<2048>>()
-    let grid: BrowserPtr<AcceptedGrid<2048>> = alloc_browser_object<AcceptedGrid<2048>>()
-    let mesh: BrowserPtr<CpuMesh<4096>> = alloc_browser_object<CpuMesh<4096>>()
-    let queue: BrowserPtr<EdgeQueue<12288>> = alloc_browser_object<EdgeQueue<12288>>()
+    let scratch: BrowserPtr<ActiveScratch<65536>> = alloc_browser_object<ActiveScratch<65536>>()
+    let grid: BrowserPtr<AcceptedGrid<65536>> = alloc_browser_object<AcceptedGrid<65536>>()
+    let mesh: BrowserPtr<CpuMesh<131072>> = alloc_browser_object<CpuMesh<131072>>()
+    let queue: BrowserPtr<EdgeQueue<393216>> = alloc_browser_object<EdgeQueue<393216>>()
     let audit: BrowserPtr<AuditScratch> = alloc_browser_object<AuditScratch>()
     if scratch.address() == 0 || grid.address() == 0 || mesh.address() == 0 || queue.address() == 0 || audit.address() == 0 { return empty() }
     with (scratch, grid, mesh, queue, audit) {
@@ -52,10 +52,10 @@ fn probe<D: ActiveDomain + ConstrainedBoundary, M: IntegerPlaneMetric>(
 
 fn probe_in_storage<D: ActiveDomain + ConstrainedBoundary, M: IntegerPlaneMetric>(
     _ domain: D, _ metric: M, _ roots: [u32; 4], _ root_count: u32, _ seed: u32,
-) -> AtlasProbe uses (scratch: mut ActiveScratch<2048>, grid: mut AcceptedGrid<2048>, mesh: mut CpuMesh<4096>, queue: mut EdgeQueue<12288>, audit: mut AuditScratch) {
+) -> AtlasProbe uses (scratch: mut ActiveScratch<65536>, grid: mut AcceptedGrid<65536>, mesh: mut CpuMesh<131072>, queue: mut EdgeQueue<393216>, audit: mut AuditScratch) {
     // Probe envelopes, not production atlas caps. Any exhaustion is a failed gate.
     let mut result = empty()
-    let sampled = sample_indexed(domain, ActiveConfig { seed: seed, attempts_per_active: 30, proposal_budget: 100000 }, 256, mut scratch, mut grid)
+    let sampled = sample_indexed(domain, ActiveConfig { seed: seed, attempts_per_active: 30, proposal_budget: 5000000 }, 256, mut scratch, mut grid)
     result.points = sampled.points
     result.sampling_status = match sampled.stop {
         SamplingStop::ExplorationExhausted => 0,
@@ -64,7 +64,7 @@ fn probe_in_storage<D: ActiveDomain + ConstrainedBoundary, M: IntegerPlaneMetric
         _ => 3,
     }
     if result.sampling_status != 0 { return result }
-    let built = triangulate(scratch, metric, roots, root_count, sampled.points, mut mesh, mut queue, 10000000)
+    let built = triangulate(scratch, metric, roots, root_count, sampled.points, mut mesh, mut queue, 100000000)
     result.mesh_status = match built.stop {
         TriangulationStop::Complete => 0,
         TriangulationStop::Budget => 1,
