@@ -142,3 +142,11 @@ pub fn square(_ bottom: u32, _ right: u32, _ top: u32, _ left: u32, _ seed: u32,
     let d = c + edge_resolution(top)
     probe(key, SquareMetric {}, [0, b, c, d], 4, seed, stage)
 }
+
+pub fn triangle_key(_ ordinal: u32) -> AtlasKey {
+    quilting_atlas::canonical_key_at(ordinal as usize)
+}
+
+pub fn quad_key(_ cursor: u32) -> quilting_atlas::quad::QuadKeyStep {
+    quilting_atlas::quad::next_canonical_key(8, cursor)
+}

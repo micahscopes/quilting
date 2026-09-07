@@ -3,6 +3,75 @@ use super::fe_oracle::compile_ingot_at_level;
 use fe_codegen::OptLevel;
 use std::path::Path;
 
+/// Opt-in exhaustive geometry gate. Fe owns key enumeration and all geometry;
+/// this host only calls exports, checks receipts and records wall-clock cost.
+#[test]
+#[ignore = "complete LoD-8 canonical atlas generation; run explicitly in release"]
+fn cpu_atlas_wasm_generates_every_canonical_key() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../ingots/validation/cpu_atlas_oracle");
+    let wasm = compile_ingot_at_level(&path, OptLevel::O2);
+    let mut config = wasmtime::Config::new();
+    config.consume_fuel(true);
+    let engine = wasmtime::Engine::new(&config).unwrap();
+    let module = wasmtime::Module::new(&engine, &wasm).unwrap();
+    assert_eq!(module.imports().count(), 0);
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let memory = instance.get_memory(&mut store, "memory").unwrap();
+    let reset = instance.get_typed_func::<(), ()>(&mut store, "fe_cabi_reset").unwrap();
+    let tri_key = instance.get_typed_func::<i32, (i32, i32, i32)>(&mut store, "triangle_key").unwrap();
+    let quad_key = instance.get_typed_func::<i32, (i32, i32, i32, i32, i32, i32)>(&mut store, "quad_key").unwrap();
+    type Probe = (i32, i32, i32, i32, i32, i32, i32, i32, i64);
+    let triangle = instance.get_typed_func::<(i32, i32, i32, i32, i32), Probe>(&mut store, "triangle").unwrap();
+    let square = instance.get_typed_func::<(i32, i32, i32, i32, i32, i32), Probe>(&mut store, "square").unwrap();
+    let start = std::time::Instant::now();
+    let mut points = 0_u64;
+    let mut faces = 0_u64;
+    let mut quad_cursor = 0;
+    let mut seen_tri = std::collections::BTreeSet::new();
+    let mut seen_quad = std::collections::BTreeSet::new();
+    for quad in [false, true] {
+        let count = if quad { 1035 } else { 165 };
+        for ordinal in 0..count {
+            store.set_fuel(100_000_000_000).unwrap();
+            reset.call(&mut store, ()).unwrap();
+            let key = if quad {
+                let k = quad_key.call(&mut store, quad_cursor).unwrap();
+                assert_eq!(k.5, 1);
+                assert!(k.4 > quad_cursor);
+                quad_cursor = k.4;
+                let key = [k.0, k.1, k.2, k.3];
+                assert!(seen_quad.insert(key));
+                key
+            } else {
+                let k = tri_key.call(&mut store, ordinal).unwrap();
+                let key = [k.0, k.1, k.2, -1];
+                assert!(seen_tri.insert(key));
+                key
+            };
+            let tile_start = std::time::Instant::now();
+            let r = if quad {
+                square.call(&mut store, (key[0], key[1], key[2], key[3], 42, 2))
+            } else {
+                triangle.call(&mut store, (key[0], key[1], key[2], 42, 2))
+            }.unwrap_or_else(|e| panic!("tile {key:?} trapped: {e}"));
+            eprintln!("full-atlas quad={quad} ordinal={ordinal} key={key:?} points={} faces={} status={}/{}/{} time={:?} memory={}",
+                r.2, r.3, r.0, r.1, r.4, tile_start.elapsed(), memory.data_size(&store));
+            assert_eq!((r.0, r.1, r.4), (0, 0, 0), "failed tile {key:?}");
+            let boundary: i32 = key.iter().filter(|&&e| e >= 0).map(|&e| 1 << e).sum();
+            assert_eq!(r.3, 2 * r.2 - boundary - 2);
+            assert_eq!(r.8, if quad { 536870912 } else { 268435456 });
+            assert!(memory.data_size(&store) <= 64 * 1024 * 1024);
+            points += r.2 as u64;
+            faces += r.3 as u64;
+        }
+    }
+    assert_eq!(quad_key.call(&mut store, quad_cursor).unwrap().5, 0);
+    assert_eq!((seen_tri.len(), seen_quad.len()), (165, 1035));
+    eprintln!("full-atlas complete: triangles=165 quads=1035 points={points} faces={faces} instrumented_total={:?} memory={}", start.elapsed(), memory.data_size(&store));
+}
+
 #[test]
 fn cpu_atlas_wasm_triangulates_mixed_lod8_domains() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))

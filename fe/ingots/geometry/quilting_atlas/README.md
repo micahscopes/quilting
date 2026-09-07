@@ -139,6 +139,21 @@ probe scratch envelope; worker packing/output and parallel execution still
 need their own measurements. See mb2's compiler observation notes for the
 zero-leaf range placeholder and associated-field normalization regression.
 
+The opt-in `cpu_atlas_wasm_generates_every_canonical_key` gate now passes all
+165 triangle and 1,035 D4-canonical quad jobs through LoD 8, seed 42. Fe exports
+the existing canonical enumeration; the host checks unique keys, exhaustion,
+all completion/audit receipts, exact area, Euler counts and bounded memory.
+No edge-ratio filtering is applied. Across all jobs: 2,170,006 points and
+4,074,447 triangles; single-instance fuel-instrumented generation **including
+all mesh audits** took 85.39s, with 37,224,448 bytes linear-memory high-water.
+Compilation is excluded from that time. This is neither a browser-worker
+benchmark nor a packed resident atlas: each validated tile is discarded after
+its receipt is checked. Packed output, worker scheduling, quality/seed studies
+and Rust comparisons remain separate acceptance gates.
+
+Run from `fe/tools/quilting-fe-fixtures`:
+`cargo test --release --features fe-oracle cpu_atlas_wasm_generates_every_canonical_key -- --ignored --nocapture`.
+
 The existing triangle atlas uses all 165 sorted edge-LoD triples through LoD 8.
 Its equilateral metric is intentional: barycentric coordinate lanes are not
 orthogonal Cartesian axes.
