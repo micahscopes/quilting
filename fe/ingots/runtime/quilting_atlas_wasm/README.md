@@ -24,14 +24,15 @@ Current acceptance:
   quad controls, mixed densities and uniform LoD8.
 - `validation/atlas_worker_oracle` compiles a real typed Worker child from this
   implementation, with request epoch and a packed response.
-- Its canonical entry executes mixed triangle/quad jobs in Wasmtime and returns
-  aligned payloads. This is NOT yet browser worker or worker-pool acceptance.
+- Its canonical entry executes mixed and dense triangle/quad jobs in Wasmtime
+  and in one persistent Chrome worker, with packed-payload audits. See
+  `docs/benchmarks/2026-09-06-browser-atlas-worker.md` in the repository root.
+  This is single-worker acceptance, NOT worker-pool acceptance.
 
 Remaining: persistent bounded browser pool, job scheduling and cancellation,
 strong stale-result handling, full packed-corpus audit, transfer/upload cost and
 browser demos. Per-call memory is reused by allocator reset between canonical
-jobs; a persistent worker process and retained scratch strategy still need actual
-browser evidence.
+jobs; persistent scratch objects and full-atlas peak memory remain unverified.
 
 `JobQueue<N>` is the placement-neutral ownership policy for that pool. It bounds
 outstanding jobs by N, identifies leases by batch epoch/ordinal/slot, rejects
