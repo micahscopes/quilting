@@ -121,6 +121,15 @@ explicitly on exhaustion, not an atlas cap. Full-key capacity scaling, browser w
 packed output, permutation/coverage checks at scale and full-atlas measurements
 remain required before calling the runtime atlas complete.
 
+The validation ingot's `ProbeStage` selects cumulative sampling, triangulation,
+or full audit through the same implementation. With uniform LoD8 and seed42,
+sampling alone leaves the arena at 13,571,398 bytes for either domain; adding
+CDT raises it to 323,917,212 (triangle) / 286,650,566 (square). Thus most retained
+temporary memory comes from triangulation rather than the accepted-point index.
+Partial phases deliberately leave area unverified; their completion is not a
+mesh-audit pass. These phase probes retain all scratch allocations so that their
+memory endpoints are comparable.
+
 The existing triangle atlas uses all 165 sorted edge-LoD triples through LoD 8.
 Its equilateral metric is intentional: barycentric coordinate lanes are not
 orthogonal Cartesian axes.
