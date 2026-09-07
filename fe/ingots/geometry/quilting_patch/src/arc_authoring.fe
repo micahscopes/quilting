@@ -116,6 +116,21 @@ pub fn arc_from_tangent<A: ArcAuthoringAlgebra>(
     )
 }
 
+/// The finite limit as the arc parameter tends to infinity. This is not the
+/// point where the denominator vanishes at a finite parameter. In the supported
+/// common-pole construction it recovers the shared inversion pole from an
+/// authored edge without sampling at an arbitrarily large parameter.
+/// Undefined can mean an infinite limit, a degenerate arc, or failed numerical
+/// conditioning; callers must not substitute an arbitrary finite point.
+pub fn arc_parameter_limit<A: ArcAuthoringAlgebra>(
+    _ algebra:A, _ arc:ArcControls<A>, _ policy:A::Policy,
+) -> QuotientSample<A::Quotient> {
+    let numerator=algebra.weighted_point(arc.end.point,arc.end.weight)
+        .plus(algebra.weighted_point(arc.start.point,arc.start.weight).scaled(-1.0))
+    let denominator=arc.end.weight.plus(arc.start.weight.scaled(-1.0))
+    algebra.right_quotient(numerator,denominator,policy)
+}
+
 /// Pure degree-one interpolation followed by the model's checked quotient.
 /// Admission into the geometric point space remains a separate model policy.
 pub fn evaluate_arc<A: ArcAuthoringAlgebra>(

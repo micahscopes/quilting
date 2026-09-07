@@ -64,8 +64,29 @@ No separate triangle/quad constructor or JavaScript substitute was introduced.
 
 ## Next integration
 
-Connect existing endpoint/middle-point arc authoring to this named family, then
-render it with the shared atlas, boundary spacing and camera widgets. Make any
+The new `controls_from_edge<A,N>` bridge derives the pole from one authored
+endpoint/middle-point/endpoint arc. For endpoint weights `wa`, `wb`, it uses
+
+    q = (pb*wb - pa*wa) / (wb - wa).
+
+This is the arc's parameter-infinity limit, not a finite-parameter denominator
+singularity. It is computed directly with the model's checked quotient, not by
+evaluating at an arbitrarily large parameter. The resulting common-pole net
+preserves the entire edited parameterized boundary, not merely its midpoint.
+Other boundary arcs change together with that edit. An affine edge has an
+infinite limit and is explicitly rejected by this finite-pole constructor;
+supporting that family remains unfinished, not a reason to invent a finite pole.
+
+Release Wasm test `edge_authored_patch_preserves_midpoint_corners_and_reversal`
+passes for every triangle/quad boundary, two spatial midpoint offsets, and both
+edge orientations. It compares 17 points along each authored arc against the
+independent dense Clifford oracle, checks all corners, and rejects invalid edge
+identities and the affine limit. The surrounding `patch_` selection passed all
+12 tests in 22.93 seconds. Receipt:
+`/laboratory/quilting/scratch/edge-patch-planned-20260907.log`.
+These are geometry/compilation checks, not yet browser-widget acceptance.
+
+Render this bridge with the shared atlas, boundary spacing and camera widgets. Make any
 coupling between edge edits explicit. Preserve the broader compatible-boundary
 construction and higher-degree controls on the delivery checklist; this one
 family is not completion of the patch-authoring goal.

@@ -1,13 +1,36 @@
 //! A compatible geometric control net from one shared inversion pole.
 //! This is a named family, not an admission rule for arbitrary arc networks.
 use core::option::Option
-use super::{ProjectiveControl, projective_control}
-use super::arc_authoring::ArcAuthoringAlgebra
+use super::{ProjectiveAlgebra,ProjectiveControl, QuotientSample, projective_control}
+use super::arc_authoring::{ArcAuthoringAlgebra,ArcConstruction,arc_through,arc_parameter_limit}
 
 /// The model warrants that inverse-displacement weights, with one common right
 /// gauge, keep partition-of-unity interpolation in its point space wherever
 /// the quotient exists. Arc support alone does not warrant this surface law.
-pub trait CommonPoleAlgebra: ArcAuthoringAlgebra {}
+pub trait CommonPoleAlgebra: ArcAuthoringAlgebra {
+    fn admit_pole(self,_ quotient:QuotientSample<<Self as ProjectiveAlgebra>::Quotient>,
+        _ policy:<Self as ProjectiveAlgebra>::Policy)
+        -> Option<<Self as ProjectiveAlgebra>::Point>
+}
+
+/// Edit one boundary arc by its endpoint identities and its on-arc midpoint.
+/// Other boundary arcs are coupled through the resulting pole; this does not
+/// pretend to preserve arbitrary independently authored arcs on other edges.
+/// An infinite/ill-conditioned limit is explicit rejection of this finite-pole
+/// family, not an arbitrary replacement pole or a weight-only reparameterization.
+pub fn controls_from_edge<A:CommonPoleAlgebra,const N:usize>(
+    _ algebra:A,_ points:[A::Point;N],_ first:usize,_ last:usize,
+    _ middle:A::Point,_ minimum:f32,_ policy:A::Policy,
+) -> Option<[ProjectiveControl<A>;N]> {
+    if first>=N || last>=N || first==last {return Option::None}
+    match arc_through(algebra,points[first],middle,points[last],minimum) {
+        ArcConstruction::Degenerate=>Option::None,
+        ArcConstruction::Ready(arc)=>match algebra.admit_pole(arc_parameter_limit(algebra,arc,policy),policy) {
+            Option::None=>Option::None,
+            Option::Some(pole)=>controls_from_pole(algebra,points,pole,points[first],minimum),
+        },
+    }
+}
 
 /// w_i = (p_i - pole)^-1 * (reference - pole).
 /// One invertible right factor changes the weight representation, not the

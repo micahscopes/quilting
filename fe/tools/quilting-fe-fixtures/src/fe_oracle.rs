@@ -161,6 +161,58 @@ fn common_pole_tri_and_quad_match_independent_inversion_and_shared_edges() {
 }
 
 #[test]
+fn edge_authored_patch_preserves_midpoint_corners_and_reversal() {
+    let (mut store,instance)=instantiate();
+    let sample=function::<(i32,f32,f32,i32,i32,f32,f32,f32,i32),f32>(
+        &mut store,&instance,"edge_patch_sample");
+    let corners=[[-1.0_f32,-0.5,0.0],[1.0,-0.5,0.2],[-0.7,1.0,0.4],[0.8,1.1,-0.3]];
+    for quad in [0,1] {
+        let edges=if quad==0 {vec![(0,1,[0.5,0.0]),(0,2,[0.0,0.5]),(1,2,[0.5,0.5])]}
+            else {vec![(0,1,[0.5,0.0]),(0,2,[0.0,0.5]),(1,3,[1.0,0.5]),(2,3,[0.5,1.0])]};
+        for (first,last,uv) in edges {
+            for offset in [[0.1_f32,0.4,0.7],[-0.2,0.3,-0.6]] {
+                let middle=std::array::from_fn::<_,3,_>(|k|(corners[first][k]+corners[last][k])*0.5+offset[k]);
+                for reverse in [false,true] {
+                    let (a,b)=if reverse {(last,first)} else {(first,last)};
+                    let mut value=|u:f32,v:f32,lane:i32|sample.call(&mut store,(quad,u,v,a as i32,b as i32,middle[0],middle[1],middle[2],lane)).unwrap();
+                    assert_eq!(value(uv[0],uv[1],4),1.0,"admitted edge midpoint");
+                    for lane in 0..3 {
+                        assert!((value(uv[0],uv[1],lane)-middle[lane as usize]).abs()<2e-5,
+                            "quad={quad} edge={a},{b} midpoint={middle:?} lane={lane}");
+                    }
+                    let coordinates=[[0.0_f32,0.0],[1.0,0.0],[0.0,1.0],[1.0,1.0]];
+                    for step in 0..=16 {
+                        let t=step as f32/16.0;
+                        let u=coordinates[a][0]*(1.0-t)+coordinates[b][0]*t;
+                        let v=coordinates[a][1]*(1.0-t)+coordinates[b][1]*t;
+                        let expected=crate::clifford_oracle::authored_arc_between_reference(
+                            [1.0;3],corners[a].map(f64::from),middle.map(f64::from),
+                            corners[b].map(f64::from),false,f64::from(t)).unwrap();
+                        assert_eq!(value(u,v,4),1.0);
+                        for lane in 0..3 {
+                            assert!((f64::from(value(u,v,lane))-expected[lane as usize]).abs()
+                                <2e-5*(1.0+expected[lane as usize].abs()),
+                                "whole boundary arc: quad={quad} edge={a},{b} t={t}");
+                        }
+                    }
+                    for (index,[u,v]) in [[0.0,0.0],[1.0,0.0],[0.0,1.0],[1.0,1.0]].into_iter().enumerate() {
+                        if quad==0 && index==3 {continue;}
+                        assert_eq!(value(u,v,4),1.0);
+                        for lane in 0..3 {assert!((value(u,v,lane)-corners[index][lane as usize]).abs()<2e-5,"corners stay fixed");}
+                    }
+                }
+            }
+        }
+    }
+    // An affine edge has its parameter-infinity limit at infinity. This finite
+    // pole family rejects that limit instead of inventing a finite substitute.
+    assert_eq!(sample.call(&mut store,(1,0.5,0.0,0,1,0.0,-0.5,0.1,4)).unwrap(),-1.0);
+    for (a,b) in [(0,4),(4,0),(0,0)] {
+        assert_eq!(sample.call(&mut store,(1,0.5,0.0,a,b,0.0,0.4,0.7,4)).unwrap(),-1.0);
+    }
+}
+
+#[test]
 fn authored_arc_weights_wasm_match_dense_algebras_and_geometric_handles() {
     let (mut store,instance)=instantiate();
     let sample=function::<(i32,i32,f32,f32,f32,f32,i32),f32>(&mut store,&instance,"authored_arc_sample");

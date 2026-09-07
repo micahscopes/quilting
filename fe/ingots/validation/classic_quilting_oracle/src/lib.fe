@@ -4,6 +4,10 @@ pub fn pole_patch_sample(_ quad:bool,_ u:f32,_ v:f32,_ px:f32,_ py:f32,_ pz:f32,
     _ reference:u32,_ lane:u32)->f32 {
     pole_patch::sample(quad,u,v,px,py,pz,reference,lane)
 }
+pub fn edge_patch_sample(_ quad:bool,_ u:f32,_ v:f32,_ first:usize,_ last:usize,
+    _ mx:f32,_ my:f32,_ mz:f32,_ lane:u32)->f32 {
+    pole_patch::edge_sample(quad,u,v,first,last,mx,my,mz,lane)
+}
 
 pub fn insertion_child_face_lane(_ a:u32,_ an:u32,_ b:u32,_ bn:u32,_ resident:u32,_ lane:u32)->u32 {
     let search=quilting_atlas::topology::child_face_search(a,an,b,bn,resident)

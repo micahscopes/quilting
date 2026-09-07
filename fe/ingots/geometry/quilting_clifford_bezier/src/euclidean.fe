@@ -65,7 +65,13 @@ impl Copy for EuclideanCliffordAlgebra {}
 // With S = sum B_i (p_i-q)^-1, the quotient is q+S^-1.
 // S is a Euclidean vector; the common right gauge cancels. Thus both triangular
 // and tensor-product partition-of-unity bases stay in the vector point space.
-impl quilting_patch::pole_authoring::CommonPoleAlgebra for EuclideanCliffordAlgebra {}
+impl quilting_patch::pole_authoring::CommonPoleAlgebra for EuclideanCliffordAlgebra {
+    fn admit_pole(self,_ quotient:QuotientSample<CliffordOdd3F>,_ policy:Clifford3Policy)
+        -> core::option::Option<Vec3F> {
+        let sample=EuclideanVectorAdmission {}.admit(quotient,policy)
+        if sample.defined {core::option::Option::Some(sample.value)} else {core::option::Option::None}
+    }
+}
 impl ProjectiveAlgebra for EuclideanCliffordAlgebra {
     type Metric = EuclideanMetric
     type Point = Vec3F
