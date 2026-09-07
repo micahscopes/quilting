@@ -1,6 +1,6 @@
 //! Pure policy and real retained-selection Wasm acceptance exports.
 use core::option::Option
-use quilting_domain::bary3f
+use quilting_domain::{bary3f,vec3f}
 use composite_atlas::model::{initial_controls,edge_demand,edge_lods}
 use quilting_atlas_wasm::{Claim,Completion,packed_triangle}
 use quilting_atlas_wasm::pool::PoolHandle
@@ -173,6 +173,64 @@ pub fn slid_arc_boundary(_ slide:f32,_ measured:u32,_ index:u32,_ lane:u32)->f32
     if t<0.0 {return -999.0}
     let p=composite_atlas::surface::evaluate(net,Point {x:t,y:0.0})
     if !p.valid {-999.0} else if lane==0 {p.point.x} else if lane==1 {p.point.y} else {p.point.z}
+}
+
+/// Interior diagonals and spokes restrict through the bilinear domain, so they
+/// have no affine rotor path and no closed-form arc law. Their spacing is
+/// integrated instead. Reports the worst relative deviation of adjacent surface
+/// chords along one interior segment, under uniform parameter or measured
+/// length, so the two laws can be compared on the same geometry.
+pub fn interior_chord_deviation(_ measured:u32,_ from:u32,_ to:u32,_ segments:u32)->f32 {
+    use composite_atlas::spacing::measured_cumulative
+    use composite_atlas::model::{corner,Point}
+    use quilting_patch::arc_length::{inverse_length,SampledCumulativeLength}
+    let mut c=initial_controls()
+    c.surface_kind=2.0
+    let net=composite_atlas::surface::authored(c)
+    if net.patch_valid!=1.0 {return -999.0}
+    let warp=composite_atlas::composition_warp::policy(c)
+    let a=corner(from,c.center_x,c.center_y)
+    let b=corner(to,c.center_x,c.center_y)
+    let mut table=SampledCumulativeLength {values:[0.0;17]}
+    let mut ready=measured==0
+    if measured!=0 {
+        match measured_cumulative(net,warp,c.center_x,c.center_y,from,to) {
+            Option::Some(built)=>{
+                table=built
+                ready=true
+            },
+            Option::None=>{},
+        }
+    }
+    if !ready {return -999.0}
+    let count=__f32_from_i32(segments.downcast_unchecked())
+    let mut previous=vec3f(0.0,0.0,0.0)
+    let mut total:f32=0.0
+    let mut shortest:f32=1000000.0
+    let mut longest:f32=0.0
+    let steps:usize=segments.downcast_unchecked()
+    for i in 0 .. (steps+1) {
+        let f=__f32_from_i32(i.downcast_unchecked())/count
+        let q=if measured==0 {f} else {inverse_length(table,f)}
+        let r=Point {x:a.x*(1.0-q)+b.x*q,y:a.y*(1.0-q)+b.y*q}
+        let sample=composite_atlas::surface::evaluate(net,warp.apply(r))
+        if !sample.valid {return -999.0}
+        if i>0 {
+            let dx=sample.point.x-previous.x
+            let dy=sample.point.y-previous.y
+            let dz=sample.point.z-previous.z
+            let d=fmath::sqrt(dx*dx+dy*dy+dz*dz)
+            total=total+d
+            if d<shortest {shortest=d}
+            if d>longest {longest=d}
+        }
+        previous=sample.point
+    }
+    let mean=total/count
+    if !(mean>0.0) {return -999.0}
+    let low=1.0-shortest/mean
+    let high=longest/mean-1.0
+    if low>high {low} else {high}
 }
 
 pub fn geometric_patch_view_laws()->bool {

@@ -87,6 +87,31 @@ the same points. Over slides of 0.30 to 0.70 on the default quad, whose edge
 spans two units, uniform-parameter spacing moved boundary samples by up to
 `0.558928188` while measured spacing moved them by `0.000000466`.
 
+## Interior segments: measured integration, September 7, 2026
+
+Diagonals and fan spokes restrict through the bilinear domain, so their
+denominator is quadratic rather than affine and this kernel's law does not
+apply. Under `automatic_density` they instead receive an integrated cumulative:
+sixteen published spans, each accumulated from four substeps of actual surface
+chord length through the same composition warp and patch evaluation the
+renderer uses. The existing cumulative inverse then places their samples, and
+the skew control biases that uniform base rather than correcting it.
+
+Worst relative deviation of adjacent surface chords at 64 segments on the
+default curved quad:
+
+| Interior segment | Uniform parameter | Measured length |
+|---|---|---|
+| spokes 0 and 1 to centre | 0.197562 | 0.013415 |
+| spokes 2 and 3 to centre | 0.246315 | 0.013836 |
+| diagonals 0-2 and 1-3 | 0.276497 | 0.027125 |
+
+Unlike the outer-side tables this carries a quadrature residual, and the two
+diagonals show roughly twice the spoke residual because they are longer and
+bend more inside each of the sixteen spans. Raising the published span count is
+the direct lever if that becomes visible; the substep count already controls
+length accuracy rather than inverse resolution.
+
 ## Integration still required
 
 Build each canonical physical boundary map once per compatible geometric
@@ -98,6 +123,9 @@ new weights or silently replace an inadmissible arc map with uniform UV spacing.
 The triangle's three edges and quad's four outer edges have this linear
 denominator structure. Quad diagonals and arbitrary spokes generally do not:
 their restriction through a bilinear parameter domain can be higher degree.
-They require their own measured integration or exact restriction machinery.
+They now take the measured integration above rather than an exact restriction.
+In a triangular patch every straight reference line does keep the affine
+structure, so its interior segments could take the exact law; that case is not
+yet split out from the shared interior path.
 Interior distortion, finite-triangle coverage near poles, and extreme f32
 parameter conditioning remain open requirements, not solved by this kernel.

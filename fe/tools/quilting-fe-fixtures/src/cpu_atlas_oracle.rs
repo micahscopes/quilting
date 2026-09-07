@@ -135,6 +135,38 @@ fn measured_arc_spacing_is_invariant_to_sliding_the_authored_midpoint() {
     assert!(worst[1]<worst[0]/20.0);
 }
 
+/// Interior diagonals and spokes get integrated spacing rather than the closed
+/// form the outer sides use, so this pins that the integration actually helps
+/// and reports how far it lands from uniform.
+#[test]
+fn measured_interior_spacing_beats_uniform_parameter_on_spokes_and_diagonals() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let deviation=instance.get_typed_func::<(i32,i32,i32,i32),f32>(&mut store,"interior_chord_deviation").unwrap();
+    // Four fan spokes to the movable centre, then the two diagonals.
+    let segments=[(0,4),(1,4),(2,4),(3,4),(0,2),(1,3)];
+    let mut worst_measured=0.0_f64;
+    let mut least_uniform=f64::INFINITY;
+    for (from,to) in segments {
+        let uniform=f64::from(deviation.call(&mut store,(0,from,to,64)).unwrap());
+        let measured=f64::from(deviation.call(&mut store,(1,from,to,64)).unwrap());
+        assert!(uniform>=0.0 && measured>=0.0,"segment {from}->{to} did not evaluate");
+        eprintln!("INTERIOR {from}->{to}: uniform parameter={uniform:.6}, measured length={measured:.6}");
+        assert!(measured<uniform,"segment {from}->{to}: {measured} !< {uniform}");
+        worst_measured=worst_measured.max(measured);
+        least_uniform=least_uniform.min(uniform);
+    }
+    eprintln!("INTERIOR worst measured deviation={worst_measured:.6}, smallest uniform deviation={least_uniform:.6}");
+    // Integration leaves a quadrature residual, unlike the exact outer tables.
+    // This bound records what the sixteen-span table actually achieves; it is
+    // not a claim of exact uniformity on a curve with no closed-form arc law.
+    assert!(worst_measured<0.05,"measured interior deviation regressed: {worst_measured}");
+}
+
 #[test]
 fn composition_wasm_boundary_locality_sweep() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");

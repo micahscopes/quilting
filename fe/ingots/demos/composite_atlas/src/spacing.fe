@@ -4,13 +4,14 @@ use core::{BrowserBytes,BrowserPtr,alloc_browser_object}
 use core::marker::Copy
 use quilting_atlas::composition::SquareBoundaryUse
 use core::option::Option
-use quilting_patch::arc_length::CumulativeLengthSamples
+use fmath::sqrt
+use quilting_patch::arc_length::{CumulativeLengthSamples,SampledCumulativeLength}
 use quilting_patch::arc_spacing::{dyadic_arc_samples,interpolate_parameters,IntervalMapSamples}
 use quilting_patch::sampling_warp::{InverseCumulativeMap,IntervalSamplingMap,OrientedIntervalMap}
 use quilting_clifford_bezier::euclidean::EuclideanArcMeasure
-use quilting_domain::Bary3F
+use quilting_domain::{Bary3F,Vec3F}
 use std::webgpu::{StorageBuffer,BufferPublication,PublicationVersion}
-use ingot::model::{initial_controls,edge_measure,redistribute_edge}
+use ingot::model::{initial_controls,corner,edge_measure,redistribute_edge}
 use ingot::residency::{Scene,State,ChildDraw}
 
 pub const SAMPLES:usize=17
@@ -22,6 +23,52 @@ pub const ARC_SLOTS:usize=4
 pub const ARC_BASE:usize=10*SAMPLES
 pub const MAP_WORDS:usize=ARC_BASE+ARC_SLOTS*ARC_SAMPLES
 pub type Maps=StorageBuffer<f32,MAP_WORDS>
+/// Substeps per published span. The interior curves have no closed-form arc
+/// law here, so their length is integrated; this keeps the table from being a
+/// sixteen-chord approximation of a curve that bends inside each span.
+const SUBSTEPS:usize=4
+extern {const fn __f32_from_i32(_:i32)->f32}
+fn fraction(_ index:usize,_ count:usize)->f32 {
+    let a:i32=index.downcast_unchecked()
+    let b:i32=count.downcast_unchecked()
+    __f32_from_i32(a)/__f32_from_i32(b)
+}
+struct MeasuredPoint {position:Vec3F,valid:bool}
+impl Copy for MeasuredPoint {}
+fn measured_point(_ net:ingot::surface::Net,_ warp:ingot::composition_warp::CompositionWarp,
+    _ a:ingot::model::Point,_ b:ingot::model::Point,_ q:f32)->MeasuredPoint {
+    let reference=ingot::model::Point {x:a.x*(1.0-q)+b.x*q,y:a.y*(1.0-q)+b.y*q}
+    let sample=ingot::surface::evaluate(net,warp.apply(reference))
+    MeasuredPoint {position:sample.point,valid:sample.valid}
+}
+/// Measured surface length along one reference segment, through the same warp
+/// and patch evaluation the renderer applies. This is the general law: it needs
+/// no affine rotor path and therefore covers the interior diagonals and spokes
+/// that the exact circular construction cannot admit. It is an integration, so
+/// unlike the outer-side tables it carries a quadrature error.
+pub fn measured_cumulative(_ net:ingot::surface::Net,_ warp:ingot::composition_warp::CompositionWarp,
+    _ center_x:f32,_ center_y:f32,_ from:u32,_ to:u32)->core::option::Option<SampledCumulativeLength<17>> {
+    let a=corner(from,center_x,center_y)
+    let b=corner(to,center_x,center_y)
+    let steps=16*SUBSTEPS
+    let mut values=[0.0;17]
+    let mut previous=measured_point(net,warp,a,b,0.0)
+    if !previous.valid {return core::option::Option::None}
+    let mut total:f32=0.0
+    for i in 0 .. steps {
+        let current=measured_point(net,warp,a,b,fraction(i+1,steps))
+        if !current.valid {return core::option::Option::None}
+        let dx=current.position.x-previous.position.x
+        let dy=current.position.y-previous.position.y
+        let dz=current.position.z-previous.position.z
+        total=total+sqrt(dx*dx+dy*dy+dz*dz)
+        previous=current
+        if (i+1)%SUBSTEPS==0 {values[(i+1)/SUBSTEPS]=total}
+    }
+    // A collapsed or non-finite segment must not be published as a map.
+    if !(total>0.0) || !(1.0/total>0.0) {return core::option::Option::None}
+    core::option::Option::Some(SampledCumulativeLength {values:values})
+}
 pub struct PublishSpacing {}
 impl PublishSpacing {
     pub fn publication(_ state:State)->BufferPublication<Maps> {
@@ -48,7 +95,16 @@ impl PublishSpacing {
                 else {(slot-6).downcast_truncate()}
             let to:u32=if slot<3 {(slot+1).downcast_truncate()} else if slot==3 || slot==5 {3}
                 else if slot==4 {2} else {4}
-            let cdf=redistribute_edge(edge_measure(c,from,to),scene.active_skews.at(slot))
+            // Neutral skew now means uniform surface spacing rather than
+            // uniform reference spacing; the slider stays a deliberate bias.
+            let raw=if scene.active_automatic_density>0.5 && scene.surface.patch_valid>0.5 {
+                match measured_cumulative(scene.surface,scene.composition_warp,
+                    scene.active_center_x,scene.active_center_y,from,to) {
+                    Option::Some(measured)=>measured,
+                    Option::None=>edge_measure(c,from,to),
+                }
+            } else {edge_measure(c,from,to)}
+            let cdf=redistribute_edge(raw,scene.active_skews.at(slot))
             for i in 0 .. SAMPLES {
                 let dst:BrowserPtr<f32>=BrowserPtr::from_u32(p.address()+((slot*SAMPLES+i)*4).downcast_truncate())
                 dst.write(cdf.values[i])
@@ -89,7 +145,6 @@ impl CumulativeLengthSamples for EdgeSamples {
     fn segments(self)->u32 {16}
     fn cumulative(self,_ index:u32)->f32 {self.maps.load(index:self.slot.wrapping_mul(17).wrapping_add(index))}
 }
-extern {const fn __f32_from_i32(_:i32)->f32}
 fn arc_segments()->u32 {(ARC_SAMPLES-1).downcast_truncate()}
 fn identity_fraction(_ index:u32)->f32 {
     let last:i32=(ARC_SAMPLES-1).downcast_unchecked()

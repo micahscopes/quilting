@@ -102,7 +102,7 @@ pub const fn params() -> Params {
         composition_enabled:Param::toggle(init:true),
         composition_focus_x:Param::range(min:0.02,max:0.98,init:0.5),
         composition_focus_y:Param::range(min:0.02,max:0.98,init:0.5),
-        composition_concentration:Param::log(min:0.25,max:4.0,init:1.0),
+        composition_concentration:Param::log(min:0.0625,max:16.0,init:1.0),
         composition_twist:Param::range(min:-6.2831853,max:6.2831853,init:0.0),
         composition_falloff:Param::choice(options:ChoiceOptions::three(first:"quadratic",second:"smoothstep",third:"smootherstep"),init:1.0),
         surface_kind:Param::choice(options:ChoiceOptions::three(first:"flat composition",
@@ -135,7 +135,7 @@ pub const fn params() -> Params {
         center_y:Param::range(min:0.02,max:0.98,init:0.5),
         compensate_density:Param::toggle(init:true),
         interior_enabled:Param::toggle(init:true),
-        interior_concentration:Param::range(min:0.25,max:4.0,init:1.0),
+        interior_concentration:Param::log(min:0.0625,max:16.0,init:1.0),
         interior_twist:Param::range(min:-3.14159265,max:3.14159265,init:0.0),
         focus_a:Param::range(min:0.1,max:4.0,init:1.0),
         focus_b:Param::range(min:0.1,max:4.0,init:1.0),
@@ -158,7 +158,9 @@ pub const fn params() -> Params {
         pending:Param::readout(ParamReadout::Integer),
     }
 }
-const fn skew_param()->Param {Param::range(min:0.25,max:4.0,init:1.0)}
+/// Logarithmic so neutral sits at the centre of its track, and wide because a
+/// deliberate bias is no longer competing with an uncorrected dilation.
+const fn skew_param()->Param {Param::log(min:0.0625,max:16.0,init:1.0)}
 /// Named spacing laws for the square's four sides, two diagonals and four spokes.
 pub struct EdgeSkews {
     pub bottom:f32,pub right:f32,pub top:f32,pub left:f32,
