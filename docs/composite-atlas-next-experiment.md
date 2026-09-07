@@ -3,8 +3,8 @@
 The user explicitly pivoted to **multiple methods of composition from primary
 tessellations** on September 7. The unfinished direct worker-atlas viewer and
 matched benchmarks are preserved, not prerequisites for this work. GPU atlas
-generation stays parked. Do not resume direct-atlas development merely because
-the automatic goal still contains its older priority order.
+generation stays parked. The consolidated delivery goal is recorded in
+`quilting-fe-delivery-goal.md`; old direct-atlas plans do not override it.
 
 Aim for visible usable tessellations in under one minute of opening an explorer;
 measure this, including runtime primary generation. Never gate the first view on
@@ -12,6 +12,68 @@ generating all 1,200 direct atlas entries. The direct generator remains a
 reference method, not the mandatory production construction.
 
 ## Comparison family
+
+### Next visible checkpoint — user clarification, September 7
+
+The current uniform-primary affine demo is a baseline, not completion. Do not
+pivot into another experiment before delivering the missing interaction:
+
+- Four independent outer-edge LoDs, each 0–8.
+- An **automatic interior LoDs** checkbox, enabled initially, with separate
+  manual diagonal/spoke values preserved when automatic mode is toggled.
+- Movable center/focus, boundary skews, and shared concentration/twist controls.
+- One shared spacing rule per interior edge, not independently fitted child
+  boundaries. Show resolved counts and when the LoD8 limit is insufficient.
+- Explicit compensation for edge spacing; distinguish it from unproven interior
+  uniformity. Show signed triangle orientation/fold diagnostics.
+
+Implementation order: shared boundary records → per-child canonical key,
+permutation and compact draw range → responsive mixed-primary availability →
+controls → shared inverse-cumulative edge maps and parent warps → diagnostics.
+The atlas edge convention is `{a: BC, b: CA, c: AB}`, not child ring order.
+
+Reuse `IntervalSamplingMap`, `TriangleEdgeMaps`, `TriangleParameterMap`,
+`CumulativeLengthSamples` and `inverse_length`. Reuse `SurfaceState` and derived
+`ApplyParamBindings`; do not extend hand-maintained numeric event indices.
+The user wants a concise, impressive example of Fe's real capabilities, not
+boilerplate or demo-specific bypasses.
+
+A proposed initial automatic policy interpolates directional segment densities:
+`rho_x(y)=lerp(2^bottom,2^top,y)` and
+`rho_y(x)=lerp(2^left,2^right,x)`. Integrate metric speed along each shared
+diagonal/spoke, round up to a dyadic count, and invert its cumulative measure
+for spacing. This matches the four straight outer-edge requests analytically.
+It is a heuristic for interior quality, not a claim that an affine primary
+realizes that metric. Warped geometry must be included in the measure when
+claiming compensation for that warp; otherwise label the reference domain.
+
+All165 canonical triangle primaries is an acceptable immediate staging option,
+not all1,200 triangle/quad entries. Prioritize the currently requested keys:
+the existing queue consumes from the **end**, not the beginning. Do not recreate
+64MiB pools on slider edits. Avoid repeated whole-prefix geometry uploads as
+the pool grows. Measure first-request and edit-to-visible latency separately.
+
+Acceptance includes all729 ordered triangular keys and all6,561 outer quad
+requests, matching final warped seam positions through LoD8, both diagonals,
+an off-center fan, uniform extremes, `[0,0,0,8]`, `[0,8,0,8]`, and asymmetric
+requests. No transient frame may combine incompatible shared-edge generations.
+
+### Refresh the existing suite with the same machinery
+
+After this checkpoint, refresh `tessellation_warp`,
+`two_triangle_uniformization`, and `paired_triangle_fans`, rather than leaving
+them on old uniform-only or artifact-backed paths. Keep focused standalone
+pages and add a common Fe-authored gallery with source inspection, using the
+shared mb2 `demos/sketches/gallery_page` and `source_inspector` facilities.
+Show decomposition alongside tessellation, with readable edge counts and a
+small quality display. New recursive/Wang experiments remain valuable later;
+they are not substitutes for this interaction.
+
+This direction was reviewed read-only at xhigh effort. Packet and response:
+`/laboratory/quilting/scratch/composition-direction-review-20260907.md` and
+`composition-direction-review-response-20260907.md`. Source review is not
+browser acceptance. Keep explicit requirements, proposed policies and verified
+implementation separate when reporting progress.
 
 Start with two diagonal splits and a movable-center four-triangle fan sharing
 the same primary-tessellation access, oriented boundary rules, parent warp,
