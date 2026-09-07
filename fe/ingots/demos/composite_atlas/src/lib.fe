@@ -1,0 +1,223 @@
+//! Composition control: runtime primary triangles, shared by placed children.
+//! Affine placement distorts sampling. This is not a surface-uniform sampler.
+use core::{Worker, BrowserBytes}
+use core::marker::Copy
+use core::actor::{ActorInstance, InitialState, ResidentTransition, ScopedTaskFamily}
+use fmath::{min, max, sqrt, abs, smoothstep}
+use quilting_atlas_wasm::packed_triangle
+use quilting_atlas::composition::{SquareSplit, ChildTriangle}
+use quilting_oklch::{display_rgb, mix_display_rgb, pack_rgba8}
+use quilting_atlas_wasm::pool::{self, PoolHandle, RetainedCursor, RetainedUpdate, RETAINED_CAPACITY, TileKey}
+use quilting_atlas_workers::{Request, Response, CompletionMessage, supervise, run}
+use std::web::{Surface, Extent, Param, SurfaceEvent}
+use std::web::view::ChoiceOptions
+use std::webgpu::{GpuProgram, WebGpuBackend, StorageBuffer, DrawIndirectBuffer,
+    ClipPosition, RasterVertex, VertexStage, FragmentStage, FragmentSurface,
+    IndirectTriangleList, ComputeSurface, Workgroup, FixedDispatch,
+    BufferPublication, PublicationVersion, PublishBuffer,
+    SurfaceTransition, SurfaceScheduling, LatestPerFrame,
+    SurfaceQuality, ResponsiveBacking}
+
+const WORKERS: u32 = 4
+const PRIMARY_COUNT: u32 = 9
+const CAPACITY: usize = WORKERS as usize
+type Atlas = StorageBuffer<u32, RETAINED_CAPACITY>
+struct Draw {}
+struct Slot<const I: u32> {}
+struct Event { changed: bool }
+impl CompletionMessage for Event { fn completed() -> Self { Self { changed: true } } }
+actor TileWorker {
+    fn generate(request: Request) -> Response uses (Worker) {
+        let k = request.key
+        let tile = packed_triangle(k.a,k.b,k.c,42)
+        Response { lease: request.lease, tile: tile }
+    }
+}
+struct State {
+    selected: f32, split: f32, center_x: f32, center_y: f32, address: u32, completed: u32, status: u32,
+    offset: u32, points: u32, triangles: u32, square: u32,
+    width: f32, height: f32,
+}
+impl Copy for State {}
+struct Params {
+    selected: Param, split: Param, center_x: Param, center_y: Param, address: Param, completed: Param, status: Param,
+    offset: Param, points: Param, triangles: Param, square: Param,
+    width: Param, height: Param,
+}
+extern { const fn __f32_from_i32(_: i32) -> f32 }
+fn number(_ n: u32) -> f32 { __f32_from_i32(n.downcast_unchecked()) }
+fn refresh(_ previous: State) -> State {
+    let mut next = previous
+    if next.address == 0 {
+        next.status = 3
+        return next
+    }
+    let pool: PoolHandle<CAPACITY> = PoolHandle::from_address(next.address)
+    let summary = pool.summary()
+    next.completed = summary.completed
+    next.status = summary.status
+    let mut ordinal: u32 = 0
+    while ordinal < 8 && next.selected >= number(ordinal) + 0.5 { ordinal += 1 }
+    let entry = pool.entry(ordinal)
+    let key = pool.key(ordinal)
+    next.offset = entry.offset
+    next.points = entry.points
+    next.triangles = if summary.status == 0 { entry.triangles } else { 0 }
+    next.square = if key.square { 1 } else { 0 }
+    next
+}
+struct PublishAtlas {}
+impl PublishAtlas {
+    pub fn publication(_ state: State) -> BufferPublication<Atlas> {
+        let empty = BufferPublication { version: PublicationVersion { epoch: 1, revision: 0 },
+            source: BrowserBytes { ptr: 0, len: 0 }, target_byte_offset: 0 }
+        if state.address == 0 || state.completed == 0 || state.status != 0 { return empty }
+        let pool: PoolHandle<CAPACITY> = PoolHandle::from_address(state.address)
+        match pool.updates_since(RetainedCursor { epoch: 0, words: 0 }) {
+            RetainedUpdate::Ready(range) => BufferPublication {
+                version: PublicationVersion { epoch: range.epoch, revision: range.revision },
+                source: BrowserBytes { ptr: range.words.ptr.address(), len: range.words.len * 4 },
+                target_byte_offset: 0,
+            },
+            _ => empty,
+        }
+    }
+}
+fn primary_keys() -> [TileKey;9] {
+    let mut keys = [TileKey { square:false,a:0,b:0,c:0,d:0 };9]
+    for i in 0 .. 9 {
+        let level: u32 = i.downcast_truncate()
+        keys[i] = TileKey { square:false,a:level,b:level,c:level,d:0 }
+    }
+    keys
+}
+fn recipe(_ value:f32) -> SquareSplit {
+    if value < 0.5 { SquareSplit::Diagonal02 }
+    else if value < 1.5 { SquareSplit::Diagonal13 }
+    else { SquareSplit::InteriorFan }
+}
+fn corner_point(_ id:u32,_ state:State) -> Point {
+    if id == 4 { Point { x:state.center_x,y:state.center_y } }
+    else { Point { x:if id == 1 || id == 2 {1.0} else {0.0},
+        y:if id == 2 || id == 3 {1.0} else {0.0} } }
+}
+fn shared_edge(_ from:u32,_ to:u32,_ parameter:f32,_ state:State) -> Point {
+    let edge = quilting_atlas::composition::BoundaryUse::between(from,to)
+    let t = if edge.reversed {1.0-parameter} else {parameter}
+    let a = corner_point(edge.low,state)
+    let b = corner_point(edge.high,state)
+    Point { x:a.x*(1.0-t)+b.x*t,y:a.y*(1.0-t)+b.y*t }
+}
+struct Point { x: f32, y: f32 }
+impl Copy for Point {}
+struct Varying { a: f32, b: f32, c: f32 }
+impl Copy for Varying {}
+fn point(_ atlas: Atlas, _ state: State, _ instance: u32, _ index: u32) -> Point {
+    // Pool retention validates the word ranges; Draw uses exactly the retained
+    // triangle count. Modular index arithmetic avoids unsupported raster traps
+    // without changing any result inside that bounded draw domain.
+    let indices = state.offset.wrapping_add(state.points)
+    let id = if state.points <= 65536 {
+        (atlas.load(index: indices.wrapping_add(index / 2)) >> ((index % 2).wrapping_mul(16))) & 65535
+    } else { atlas.load(index: indices.wrapping_add(index)) }
+    let packed = atlas.load(index: state.offset.wrapping_add(id))
+    let u = number(packed & 65535) / 16384.0
+    let v = number(packed >> 16) / 16384.0
+    // Hardware instance count is the recipe's child count. Out-of-range lookup
+    // still has defined behavior: a collapsed triangle, never arbitrary reads.
+    let child = recipe(state.split).child(instance).unwrap_or(default:ChildTriangle { a:0,b:0,c:0 })
+    let p0 = corner_point(child.a,state)
+    let p1 = corner_point(child.b,state)
+    let p2 = corner_point(child.c,state)
+    let placed = if u == 0.0 { shared_edge(child.a, child.c, v, state) }
+        else if v == 0.0 { shared_edge(child.a, child.b, u, state) }
+        else if u + v == 1.0 { shared_edge(child.b, child.c, v, state) }
+        else { Point { x:p0.x*(1.0-u-v)+p1.x*u+p2.x*v, y:p0.y*(1.0-u-v)+p1.y*u+p2.y*v } }
+    let x = placed.x - 0.5
+    let y = placed.y - 0.5
+    let scale = 1.7 * min(state.width, state.height)
+    Point { x: x * scale / max(state.width, 1.0), y: y * scale / max(state.height, 1.0) }
+}
+fn length(_ a: Point, _ b: Point, _ state: State) -> f32 {
+    let x = (a.x - b.x) * state.width * 0.5
+    let y = (a.y - b.y) * state.height * 0.5
+    sqrt(x*x + y*y)
+}
+actor CompositeAtlas uses (GpuProgram<WebGpuBackend>, SurfaceQuality<ResponsiveBacking>) {
+    atlas: Atlas,
+    draw: DrawIndirectBuffer<Draw>,
+    selected: f32, split: f32, center_x: f32, center_y: f32, address: u32, completed: u32, status: u32,
+    offset: u32, points: u32, triangles: u32, square: u32,
+    width: f32, height: f32,
+    const fn view() -> Surface<Params> {
+        Surface { extent: Extent::square(1200), params: Params {
+            selected: Param::int(min:0.0,max:8.0,init:4.0),
+            split: Param::choice(options:ChoiceOptions::three(
+                first:"two triangles: diagonal 0–2",second:"two triangles: diagonal 1–3",third:"four triangles: movable center"),init:0.0),
+            center_x: Param::range(min:0.02,max:0.98,init:0.5),
+            center_y: Param::range(min:0.02,max:0.98,init:0.5),
+            address: Param::fixed(0.0), completed: Param::fixed(0.0), status: Param::fixed(0.0),
+            offset: Param::fixed(0.0), points: Param::fixed(0.0), triangles: Param::fixed(0.0), square: Param::fixed(0.0),
+            width: Param::extent_x(), height: Param::extent_y(),
+        } }
+    }
+    fn initial() -> State uses (InitialState) {
+        State { selected:4.0, split:0.0, center_x:0.5, center_y:0.5,
+            address:pool::create_jobs<CAPACITY,9>(1,primary_keys()).address(),
+            completed:0,status:0,offset:0,points:0,triangles:0,square:0,width:1200.0,height:1200.0 }
+    }
+
+    fn receive(self, event: Event) -> State uses (ResidentTransition) { refresh(State { selected:self.selected,split:self.split,center_x:self.center_x,center_y:self.center_y,address:self.address,completed:self.completed,status:self.status,
+            offset:self.offset,points:self.points,triangles:self.triangles,square:self.square,width:self.width,height:self.height }) }
+    fn control(self, event: own SurfaceEvent) -> State uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>) {
+        let mut state = State { selected:self.selected,split:self.split,center_x:self.center_x,center_y:self.center_y,address:self.address,completed:self.completed,status:self.status,
+            offset:self.offset,points:self.points,triangles:self.triangles,square:self.square,width:self.width,height:self.height }
+        // selected is the first scalar field; all other metadata is read-only.
+        if event.is_param_edit() && event.param_index == 0 { state.selected = event.param_value.clamp(0.0,8.0) }
+        if event.is_param_edit() && event.param_index == 1 { state.split = event.param_value.clamp(0.0,2.0) }
+        if event.is_param_edit() && event.param_index == 2 { state.center_x = event.param_value.clamp(0.02,0.98) }
+        if event.is_param_edit() && event.param_index == 3 { state.center_y = event.param_value.clamp(0.02,0.98) }
+        state.width = event.width
+        state.height = event.height
+        refresh(state)
+    }
+    fn supervision<const I: u32>() -> u32 uses (ScopedTaskFamily<WORKERS>) {
+        supervise(ActorInstance<TileWorker,Slot<I>> {})
+    }
+    fn work<const I: u32>(state: State) -> u32 uses (ScopedTaskFamily<WORKERS>) {
+        run<CAPACITY,ActorInstance<TileWorker,Slot<I>>,Event>(state.address,I)
+    }
+    fn prepare(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+        self.draw.store(index:0,value:self.triangles*3)
+        self.draw.store(index:1,value:recipe(self.split).child_count())
+        self.draw.store(index:2,value:0)
+        self.draw.store(index:3,value:0)
+    }
+    fn background(self, px:i32, py:i32) -> i32 uses (FragmentSurface) {
+        if py < 5 && px >= 0 && __f32_from_i32(px) < self.width * number(self.completed) / 9.0 {
+            return if self.status == 0 { -11365973 } else { -3394796 }
+        }
+        (-15460836)
+    }
+    fn vertices(self, vertex_index:u32, instance_index:u32) -> RasterVertex<Varying>
+        uses (VertexStage<Varying,IndirectTriangleList<DrawIndirectBuffer<Draw>>>, PublishBuffer<PublishAtlas>) {
+        let state = State { selected:self.selected,split:self.split,center_x:self.center_x,center_y:self.center_y,address:self.address,completed:self.completed,status:self.status,
+            offset:self.offset,points:self.points,triangles:self.triangles,square:self.square,width:self.width,height:self.height }
+        let base = (vertex_index / 3).wrapping_mul(3)
+        let a = point(self.atlas,state,instance_index,base)
+        let b = point(self.atlas,state,instance_index,base.wrapping_add(1))
+        let c = point(self.atlas,state,instance_index,base.wrapping_add(2))
+        let twice_area = abs((b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x)) * state.width * state.height * 0.25
+        let corner = vertex_index % 3
+        let p = if corner == 0 { a } else { if corner == 1 { b } else { c } }
+        RasterVertex { position:ClipPosition{x:p.x,y:p.y,z:0.0,w:1.0}, varying:Varying {
+            a:if corner == 0 { twice_area/max(length(b,c,state),0.00001) } else { 0.0 },
+            b:if corner == 1 { twice_area/max(length(c,a,state),0.00001) } else { 0.0 },
+            c:if corner == 2 { twice_area/max(length(a,b,state),0.00001) } else { 0.0 },
+        } }
+    }
+    fn shade(self, v:Varying) -> i32 uses (FragmentStage<Varying>) {
+        let coverage = smoothstep(0.15,0.85,min(v.a,min(v.b,v.c)))
+        pack_rgba8(mix_display_rgb(display_rgb(0.08,0.12,0.16),display_rgb(0.65,0.77,0.78),coverage))
+    }
+}
