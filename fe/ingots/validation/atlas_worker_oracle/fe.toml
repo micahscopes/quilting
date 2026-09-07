@@ -1,8 +1,8 @@
 [ingot]
-name = "cpu_atlas_oracle"
+name = "atlas_worker_oracle"
 version = "0.1.0"
 
 [dependencies]
 core = true
-quilting_atlas = true
+std = true
 quilting_atlas_wasm = true

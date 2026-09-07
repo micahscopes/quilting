@@ -25,6 +25,7 @@ pub use active_sampling
 pub use accepted_index
 pub use cpu_mesh
 pub use cpu_cdt
+pub use packed_tile
 pub use topology
 pub use triangulation
 pub use planar

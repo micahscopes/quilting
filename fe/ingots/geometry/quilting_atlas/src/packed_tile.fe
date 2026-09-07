@@ -1,0 +1,223 @@
+//! Exact tile transport: one Q14 coordinate pair per word, followed by indices.
+//! Layout is explicit metadata, not a serialized/generated implementation.
+use core::marker::Copy
+use super::cpu_cdt::PointSource
+use super::cpu_mesh::CpuMesh
+use super::planar::FixedPoint2
+use super::sampling::BARYCENTRIC_SCALE
+
+pub enum IndexWidth { U16, U32 }
+impl Copy for IndexWidth {}
+
+pub struct TileLayout {
+    pub points: u32,
+    pub triangles: u32,
+    pub index_offset: u32,
+    pub index_words: u32,
+    pub words: u32,
+    pub width: IndexWidth,
+    pub valid: bool,
+}
+impl Copy for TileLayout {}
+
+/// The provider reserves capacity before packing; writes within it must succeed.
+pub trait WordSink {
+    fn capacity(self) -> u32
+    fn write(mut self, _ index: u32, _ word: u32)
+}
+
+pub enum PackStatus { Complete, InvalidLayout, InvalidPoint, InvalidMesh, Capacity }
+
+pub fn tile_layout(_ points: u32, _ triangles: u32) -> TileLayout {
+    let mut result = TileLayout { points: points, triangles: triangles, index_offset: points,
+        index_words: 0, words: 0, width: IndexWidth::U32, valid: false }
+    if points == 0 || triangles == 0 || triangles > 0xffffffff / 3 { return result }
+    let indices = triangles * 3
+    if points <= 65536 {
+        result.width = IndexWidth::U16
+        result.index_words = indices / 2 + indices % 2
+    } else {
+        result.index_words = indices
+    }
+    if points > 0xffffffff - result.index_words { return result }
+    result.words = points + result.index_words
+    result.valid = true
+    result
+}
+
+pub fn unpack_point(_ word: u32) -> FixedPoint2 {
+    FixedPoint2 { x: word & 65535, y: word >> 16 }
+}
+
+fn mesh_index<const T: usize>(_ mesh: CpuMesh<T>, _ index: u32) -> u32 {
+    let t = mesh.faces[(index / 3) as usize].triangle
+    match index % 3 { 0 => t.first, 1 => t.second, _ => t.third }
+}
+
+fn write_indices<W: WordSink, const T: usize>(
+    _ mesh: CpuMesh<T>, _ layout: TileLayout, _ output: mut W,
+) {
+    let count = layout.triangles * 3
+    match layout.width {
+        IndexWidth::U16 => {
+            let mut i: u32 = 0
+            while i < layout.index_words {
+                let low = mesh_index(mesh, i * 2)
+                let high = if i * 2 + 1 < count { mesh_index(mesh, i * 2 + 1) } else { 0 }
+                output.write(layout.index_offset + i, low | (high << 16))
+                i += 1
+            }
+        },
+        IndexWidth::U32 => {
+            for i in 0 .. (count as usize) {
+                output.write(layout.index_offset + i.downcast_truncate(), mesh_index(mesh, i.downcast_truncate()))
+            }
+        },
+    }
+}
+
+/// Reject invalid/capacity inputs before any writes. This packs an already
+/// validated mesh; it does not independently prove coverage or Delaunay legality.
+/// The source must expose at least `points` entries; PointSource has no length query.
+/// IDs and winding are unchanged. An odd U16 stream has zero upper padding.
+pub fn pack_tile<S: PointSource, W: WordSink, const T: usize>(
+    _ source: S, _ points: u32, _ mesh: CpuMesh<T>, _ output: mut W,
+) -> PackStatus {
+    let layout = tile_layout(points, mesh.count)
+    if !layout.valid { return PackStatus::InvalidLayout }
+    if layout.words > output.capacity() { return PackStatus::Capacity }
+    if (mesh.count as usize) > T { return PackStatus::InvalidMesh }
+    for i in 0 .. (points as usize) {
+        let p = source.point(i.downcast_truncate())
+        if p.x > BARYCENTRIC_SCALE || p.y > BARYCENTRIC_SCALE { return PackStatus::InvalidPoint }
+    }
+    for i in 0 .. (mesh.count as usize) {
+        let t = mesh.faces[i].triangle
+        if !t.valid || t.first >= points || t.second >= points || t.third >= points {
+            return PackStatus::InvalidMesh
+        }
+    }
+    for i in 0 .. (points as usize) {
+        let p = source.point(i.downcast_truncate())
+        output.write(i.downcast_truncate(), p.x | (p.y << 16))
+    }
+    write_indices(mesh, layout, mut output)
+    PackStatus::Complete
+}
+
+struct TestWords<const N: usize> { words: [u32; N] }
+impl<const N: usize> WordSink for TestWords<N> {
+    fn capacity(self) -> u32 { N.downcast_truncate() }
+    fn write(mut self, _ index: u32, _ word: u32) { self.words[index as usize] = word }
+}
+
+#[test]
+fn packed_tile_test_storage_initialization() {
+    let output = TestWords { words: [77; 5] }
+    assert(output.words[0] == 77)
+    assert(output.words[4] == 77)
+    for i in 0 .. 5 { assert(output.words[i] == 77) }
+}
+
+#[test]
+fn packed_tile_exact_points_indices_and_padding() {
+    use super::cpu_cdt::PointCloud
+    use super::topology::Triangle
+    let source = PointCloud { points: [FixedPoint2 { x: 0, y: 0 },
+        FixedPoint2 { x: 16384, y: 0 }, FixedPoint2 { x: 0, y: 16384 }] }
+    let mut mesh: CpuMesh<1> = CpuMesh::empty()
+    mesh.seed(Triangle { first: 0, second: 1, third: 2, valid: true })
+    let mut output = TestWords { words: [0xffffffff; 5] }
+    match pack_tile(source, 3, mesh, mut output) { PackStatus::Complete => {}, _ => assert(false) }
+    assert(output.words[0] == 0)
+    assert(output.words[1] == 16384)
+    assert(output.words[2] == 1073741824)
+    assert(output.words[3] == 65536)
+    assert(output.words[4] == 2)
+    let last = unpack_point(output.words[2])
+    assert(last.x == 0 && last.y == 16384)
+}
+
+#[test]
+fn packed_tile_capacity_before_publishing() {
+    use super::cpu_cdt::PointCloud
+    use super::topology::Triangle
+    let mut source = PointCloud { points: [FixedPoint2 { x: 0, y: 0 }; 3] }
+    let mut mesh: CpuMesh<1> = CpuMesh::empty()
+    mesh.seed(Triangle { first: 0, second: 1, third: 2, valid: true })
+    let mut small = TestWords { words: [77; 4] }
+    match pack_tile(source, 3, mesh, mut small) { PackStatus::Capacity => {}, _ => assert(false) }
+    for i in 0 .. 4 { assert(small.words[i] == 77) }
+}
+
+#[test]
+fn packed_tile_capacity_status_only() {
+    use super::cpu_cdt::PointCloud
+    use super::topology::Triangle
+    let source = PointCloud { points: [FixedPoint2 { x: 0, y: 0 }; 3] }
+    let mut mesh: CpuMesh<1> = CpuMesh::empty()
+    mesh.seed(Triangle { first: 0, second: 1, third: 2, valid: true })
+    let mut output = TestWords { words: [77; 4] }
+    match pack_tile(source, 3, mesh, mut output) { PackStatus::Capacity => {}, _ => assert(false) }
+}
+
+#[test]
+fn packed_tile_capacity_untouched_only() {
+    use super::cpu_cdt::PointCloud
+    use super::topology::Triangle
+    let source = PointCloud { points: [FixedPoint2 { x: 0, y: 0 }; 3] }
+    let mut mesh: CpuMesh<1> = CpuMesh::empty()
+    mesh.seed(Triangle { first: 0, second: 1, third: 2, valid: true })
+    let mut output = TestWords { words: [77; 4] }
+    pack_tile(source, 3, mesh, mut output)
+    assert(output.words[0] == 77)
+    assert(output.words[1] == 77)
+    assert(output.words[2] == 77)
+    assert(output.words[3] == 77)
+}
+
+#[test]
+fn packed_tile_invalid_point_before_publishing() {
+    use super::cpu_cdt::PointCloud
+    use super::topology::Triangle
+    let source = PointCloud { points: [FixedPoint2 { x: 0, y: 0 }, FixedPoint2 { x: 0, y: 0 }, FixedPoint2 { x: 0, y: 16385 }] }
+    let mut mesh: CpuMesh<1> = CpuMesh::empty()
+    mesh.seed(Triangle { first: 0, second: 1, third: 2, valid: true })
+    let mut output = TestWords { words: [77; 5] }
+    match pack_tile(source, 3, mesh, mut output) { PackStatus::InvalidPoint => {}, _ => assert(false) }
+    for i in 0 .. 5 { assert(output.words[i] == 77) }
+}
+
+#[test]
+fn packed_tile_invalid_mesh_before_publishing() {
+    use super::cpu_cdt::PointCloud
+    use super::topology::Triangle
+    let source = PointCloud { points: [FixedPoint2 { x: 0, y: 0 }; 3] }
+    let mut mesh: CpuMesh<1> = CpuMesh::empty()
+    mesh.seed(Triangle { first: 0, second: 1, third: 3, valid: true })
+    let mut output = TestWords { words: [77; 5] }
+    match pack_tile(source, 3, mesh, mut output) { PackStatus::InvalidMesh => {}, _ => assert(false) }
+    for i in 0 .. 5 { assert(output.words[i] == 77) }
+}
+
+#[test]
+fn packed_tile_width_selection_and_overflow() {
+    let small = tile_layout(65536, 1)
+    assert(small.valid && small.index_words == 2)
+    match small.width { IndexWidth::U16 => {}, _ => assert(false) }
+    let wide = tile_layout(65537, 1)
+    assert(wide.valid && wide.index_words == 3)
+    match wide.width { IndexWidth::U32 => {}, _ => assert(false) }
+    assert(!tile_layout(0xffffffff, 1).valid)
+    assert(!tile_layout(3, 0xffffffff).valid)
+    assert(!tile_layout(0, 1).valid)
+    // Exercise the wide write path without constructing 65k test points.
+    use super::topology::Triangle
+    let mut mesh: CpuMesh<1> = CpuMesh::empty()
+    mesh.seed(Triangle { first: 65536, second: 0, third: 1, valid: true })
+    let layout = TileLayout { points: 65537, triangles: 1, index_offset: 0,
+        index_words: 3, words: 3, width: IndexWidth::U32, valid: true }
+    let mut output = TestWords { words: [0; 3] }
+    write_indices(mesh, layout, mut output)
+    assert(output.words[0] == 65536 && output.words[1] == 0 && output.words[2] == 1)
+}

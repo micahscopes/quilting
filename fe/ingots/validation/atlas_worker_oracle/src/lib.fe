@@ -1,0 +1,65 @@
+//! Typed worker transport acceptance. The generator remains in one shared ingot.
+use core::Worker
+use core::actor::{ActorMailbox, InitialState, ProjectState, ResidentTransition, ScopedTask}
+use core::pending::{Pending, Suspend, TaskOutcome}
+use std::host::Resumable
+use std::runtime::{BrowserActorMailbox, ChildScopeExit, supervise_browser_child}
+use std::wasm::WasmBackend
+use quilting_atlas_wasm::{PackedTile, packed_triangle, packed_square}
+
+pub struct TileRequest {
+    pub epoch: u32, pub square: bool,
+    pub a: u32, pub b: u32, pub c: u32, pub d: u32, pub seed: u32,
+}
+pub struct TileResponse { pub epoch: u32, pub tile: PackedTile }
+
+actor AtlasWorker {
+    fn generate(request: TileRequest) -> TileResponse uses (Worker) {
+        let tile = if request.square {
+            packed_square(request.a, request.b, request.c, request.d, request.seed)
+        } else {
+            packed_triangle(request.a, request.b, request.c, request.seed)
+        }
+        TileResponse { epoch: request.epoch, tile: tile }
+    }
+}
+
+fn request_tile(_ request: own TileRequest) -> TaskOutcome<u32, TileResponse>
+uses (mailbox: mut ActorMailbox<WasmBackend, AtlasWorker>, suspend: Suspend<WasmBackend, u32>) {
+    let pending: Pending<WasmBackend, TileResponse> = mailbox.ask(request)
+    suspend.suspend(pending)
+}
+
+pub struct State { pub epoch: u32 }
+pub struct Event { pub epoch: u32 }
+pub struct Projection { pub epoch: u32 }
+actor AtlasTransportProbe {
+    epoch: u32,
+    fn initial() -> State uses (InitialState) { State { epoch: 1 } }
+    fn receive(self, event: Event) -> State uses (ResidentTransition) { State { epoch: event.epoch } }
+    fn project(self) -> Projection uses (ProjectState) { Projection { epoch: self.epoch } }
+    fn supervise() -> u32 uses (ScopedTask) {
+        match supervise_browser_child(child: AtlasWorker {}, max_restarts: 1,
+            window_ms: 1000, backoff_ms: 10, startup_timeout_ms: 10000) {
+            ChildScopeExit::Cancelled(epoch) => epoch,
+            ChildScopeExit::Exhausted(epoch, _) => epoch,
+            ChildScopeExit::TransportFailure(epoch, _) => epoch,
+            ChildScopeExit::InvariantViolation(epoch, _) => epoch,
+        }
+    }
+    fn calculate(self) -> u32 uses (ScopedTask) {
+        with (ActorMailbox<WasmBackend, AtlasWorker> = BrowserActorMailbox<AtlasWorker> {},
+            Suspend<WasmBackend, u32> = Resumable {}) {
+            match request_tile(TileRequest { epoch: self.epoch, square: false,
+                a: 0, b: 0, c: 8, d: 0, seed: 42 }) {
+                TaskOutcome::Success(response,) => {
+                    if response.epoch != self.epoch { 0 }
+                    else if response.tile.status != 0 { 0 }
+                    else { response.tile.words.len }
+                },
+                TaskOutcome::Failure(_,) => 0,
+                TaskOutcome::Cancelled => 0,
+            }
+        }
+    }
+}

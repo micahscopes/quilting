@@ -1,0 +1,227 @@
+//! Shared Wasm atlas job implementation; validation and workers use this same path.
+use core::{BrowserPtr, BrowserList, alloc_browser_object, alloc_browser_bytes}
+use core::marker::Copy
+use quilting_atlas::{AtlasKey, edge_resolution}
+use quilting_atlas::quad::QuadAtlasKey
+use quilting_atlas::active_sampling::{ActiveDomain, ActiveScratch, ActiveConfig, SamplingStop, sample_indexed}
+use quilting_atlas::accepted_index::AcceptedGrid
+use quilting_atlas::cpu_mesh::{CpuMesh, END}
+use quilting_atlas::cpu_cdt::{PointSource, EdgeQueue, TriangulationStop, triangulate}
+use quilting_atlas::planar::{IntegerPlaneMetric, EquilateralMetric, SquareMetric, orientation}
+use quilting_atlas::topology::{ConstrainedBoundary, triangle_edge_first, triangle_edge_second, triangle_edge_opposite, interior_edge_flip_decision_with_metric}
+
+pub struct AtlasProbe {
+    pub sampling_status: u32,
+    pub mesh_status: u32,
+    pub points: u32,
+    pub triangles: u32,
+    pub errors: u32,
+    pub location_steps: u32,
+    pub edge_visits: u32,
+    pub flips: u32,
+    pub double_area: u64,
+}
+
+/// Cumulative phases share one implementation; skipped audits are not success.
+pub enum ProbeStage { Sampling, Triangulation, Audit }
+impl Copy for ProbeStage {}
+
+fn empty() -> AtlasProbe {
+    AtlasProbe { sampling_status: 3, mesh_status: 5, points: 0, triangles: 0, errors: 0, location_steps: 0, edge_visits: 0, flips: 0, double_area: 0 }
+}
+
+struct AuditScratch { used: [bool; 65536] }
+
+fn initialize() uses (scratch: mut ActiveScratch<65536>, grid: mut AcceptedGrid<65536>, mesh: mut CpuMesh<131072>, queue: mut EdgeQueue<393216>, audit: mut AuditScratch) {
+    scratch.initialize()
+    grid.initialize()
+    mesh.initialize()
+    queue.initialize()
+    for i in 0 .. 65536 { audit.used[i] = false }
+}
+
+fn probe<D: ActiveDomain + ConstrainedBoundary, M: IntegerPlaneMetric>(
+    _ domain: D, _ metric: M, _ roots: [u32; 4], _ root_count: u32, _ seed: u32, _ stage: ProbeStage,
+) -> AtlasProbe {
+    let scratch: BrowserPtr<ActiveScratch<65536>> = alloc_browser_object<ActiveScratch<65536>>()
+    let grid: BrowserPtr<AcceptedGrid<65536>> = alloc_browser_object<AcceptedGrid<65536>>()
+    let mesh: BrowserPtr<CpuMesh<131072>> = alloc_browser_object<CpuMesh<131072>>()
+    let queue: BrowserPtr<EdgeQueue<393216>> = alloc_browser_object<EdgeQueue<393216>>()
+    let audit: BrowserPtr<AuditScratch> = alloc_browser_object<AuditScratch>()
+    if scratch.address() == 0 || grid.address() == 0 || mesh.address() == 0 || queue.address() == 0 || audit.address() == 0 { return empty() }
+    with (scratch, grid, mesh, queue, audit) {
+        initialize()
+        probe_in_storage(domain, metric, roots, root_count, seed, stage)
+    }
+}
+
+fn probe_in_storage<D: ActiveDomain + ConstrainedBoundary, M: IntegerPlaneMetric>(
+    _ domain: D, _ metric: M, _ roots: [u32; 4], _ root_count: u32, _ seed: u32, _ stage: ProbeStage,
+) -> AtlasProbe uses (scratch: mut ActiveScratch<65536>, grid: mut AcceptedGrid<65536>, mesh: mut CpuMesh<131072>, queue: mut EdgeQueue<393216>, audit: mut AuditScratch) {
+    // Probe envelopes, not production atlas caps. Any exhaustion is a failed gate.
+    let mut result = empty()
+    let sampled = sample_indexed(domain, ActiveConfig { seed: seed, attempts_per_active: 30, proposal_budget: 5000000 }, 256, mut scratch, mut grid)
+    result.points = sampled.points
+    result.sampling_status = match sampled.stop {
+        SamplingStop::ExplorationExhausted => 0,
+        SamplingStop::Capacity => 1,
+        SamplingStop::Budget => 2,
+        _ => 3,
+    }
+    if result.sampling_status != 0 { return result }
+    if let ProbeStage::Sampling = stage { return result }
+    let built = triangulate(scratch, metric, roots, root_count, sampled.points, mut mesh, mut queue, 100000000)
+    result.mesh_status = match built.stop {
+        TriangulationStop::Complete => 0,
+        TriangulationStop::Budget => 1,
+        TriangulationStop::Capacity => 2,
+        TriangulationStop::Duplicate => 3,
+        TriangulationStop::Outside => 4,
+        TriangulationStop::Invalid => 5,
+    }
+    result.triangles = mesh.count
+    result.location_steps = built.location_steps
+    result.edge_visits = built.edge_visits
+    result.flips = built.flips
+    if result.mesh_status != 0 { return result }
+    if let ProbeStage::Triangulation = stage { return result }
+    result.errors = mesh.adjacency_errors()
+    if built.inserted != sampled.points || mesh.count != 2 * sampled.points - sampled.boundary_points - 2 { result.errors += 1 }
+    let mut hull: u32 = 0
+    for f in 0 .. (mesh.count as usize) {
+        let face = mesh.faces[f]
+        let t = face.triangle
+        if t.first >= sampled.points || t.second >= sampled.points || t.third >= sampled.points {
+            result.errors += 1
+            continue
+        }
+        let signed_area = orientation(scratch.point(t.first), scratch.point(t.second), scratch.point(t.third))
+        if signed_area <= 0 { result.errors += 1 } else {
+            let area: u32 = signed_area.downcast_truncate()
+            result.double_area += area as u64
+        }
+        for e in 0 .. 3 {
+            let u = triangle_edge_first(t, e.downcast_truncate())
+            let v = triangle_edge_second(t, e.downcast_truncate())
+            audit.used[u as usize] = true
+            let neighbor = face.across[e]
+            if neighbor == END {
+                hull += 1
+                if !domain.contains_segment(u, v) { result.errors += 1 }
+            } else if neighbor / 3 < mesh.count {
+                let a = triangle_edge_opposite(t, e.downcast_truncate())
+                let b = triangle_edge_opposite(mesh.faces[(neighbor / 3) as usize].triangle, neighbor % 3)
+                if b >= sampled.points { result.errors += 1
+                    continue
+                }
+                let decision = interior_edge_flip_decision_with_metric(u, scratch.point(u), v, scratch.point(v), a, scratch.point(a), b, scratch.point(b), metric)
+                if decision.flip { result.errors += 1 }
+            }
+        }
+    }
+    if hull != sampled.boundary_points { result.errors += 1 }
+    for p in 0 .. (sampled.points as usize) { if !audit.used[p] { result.errors += 1 } }
+    let expected: u64 = if root_count == 3 { 268435456 } else { 536870912 }
+    if result.double_area != expected { result.errors += 1 }
+    result
+}
+
+pub fn triangle(_ a: u32, _ b: u32, _ c: u32, _ seed: u32, _ stage: ProbeStage) -> AtlasProbe {
+    let key = AtlasKey { a: a, b: b, c: c }
+    if !key.valid() { return empty() }
+    let corner_b = edge_resolution(c)
+    let corner_c = corner_b + edge_resolution(b)
+    probe(key, EquilateralMetric {}, [0, corner_b, corner_c, END], 3, seed, stage)
+}
+
+pub fn square(_ bottom: u32, _ right: u32, _ top: u32, _ left: u32, _ seed: u32, _ stage: ProbeStage) -> AtlasProbe {
+    let key = QuadAtlasKey { bottom: bottom, right: right, top: top, left: left }
+    if !key.valid() { return empty() }
+    let b = edge_resolution(bottom)
+    let c = b + edge_resolution(right)
+    let d = c + edge_resolution(top)
+    probe(key, SquareMetric {}, [0, b, c, d], 4, seed, stage)
+}
+
+pub fn triangle_key(_ ordinal: u32) -> AtlasKey {
+    quilting_atlas::canonical_key_at(ordinal as usize)
+}
+
+pub fn quad_key(_ cursor: u32) -> quilting_atlas::quad::QuadKeyStep {
+    quilting_atlas::quad::next_canonical_key(8, cursor)
+}
+
+struct PackedStorage { address: u32 }
+impl quilting_atlas::packed_tile::WordSink for PackedStorage {
+    fn capacity(self) -> u32 { 262144 }
+    fn write(mut self, _ index: u32, _ word: u32) {
+        let slot: BrowserPtr<u32> = BrowserPtr::from_u32(self.address + index * 4)
+        slot.write(word)
+    }
+}
+
+/// Transport proof before worker integration. Capacity exhaustion is explicit;
+/// no list is published on a failed generation or packing operation.
+pub struct PackedTile {
+    pub status: u32,
+    pub points: u32,
+    pub triangles: u32,
+    pub words: BrowserList<u32, 262144>,
+}
+
+fn packed_failure(_ status: u32) -> PackedTile {
+    PackedTile { status: status, points: 0, triangles: 0,
+        words: BrowserList { ptr: BrowserPtr::from_u32(0), len: 0 } }
+}
+
+fn pack_in_storage(_ points: u32, _ output: mut PackedStorage) -> quilting_atlas::packed_tile::PackStatus
+uses (scratch: mut ActiveScratch<65536>, mesh: mut CpuMesh<131072>) {
+    quilting_atlas::packed_tile::pack_tile(scratch, points, mesh, mut output)
+}
+
+fn packed_domain<D: ActiveDomain + ConstrainedBoundary, M: IntegerPlaneMetric>(
+    _ domain: D, _ metric: M, _ roots: [u32; 4], _ root_count: u32, _ seed: u32,
+) -> PackedTile {
+    use quilting_atlas::packed_tile::{PackStatus, tile_layout}
+    let scratch: BrowserPtr<ActiveScratch<65536>> = alloc_browser_object<ActiveScratch<65536>>()
+    let grid: BrowserPtr<AcceptedGrid<65536>> = alloc_browser_object<AcceptedGrid<65536>>()
+    let mesh: BrowserPtr<CpuMesh<131072>> = alloc_browser_object<CpuMesh<131072>>()
+    let queue: BrowserPtr<EdgeQueue<393216>> = alloc_browser_object<EdgeQueue<393216>>()
+    let audit: BrowserPtr<AuditScratch> = alloc_browser_object<AuditScratch>()
+    // Byte allocation has byte alignment; the canonical u32 list needs four.
+    let output = alloc_browser_bytes(262144 * 4 + 3)
+    if scratch.address() == 0 || grid.address() == 0 || mesh.address() == 0 || queue.address() == 0 || audit.address() == 0 || output.address() == 0 { return packed_failure(1) }
+    let address = (output.address() + 3) & 0xfffffffc
+    let mut sink = PackedStorage { address: address }
+    with (scratch, grid, mesh, queue, audit) {
+        initialize()
+        let result = probe_in_storage(domain, metric, roots, root_count, seed, ProbeStage::Triangulation)
+        if result.sampling_status != 0 { return packed_failure(10 + result.sampling_status) }
+        if result.mesh_status != 0 { return packed_failure(20 + result.mesh_status) }
+        match pack_in_storage(result.points, mut sink) {
+            PackStatus::Complete => {
+                let layout = tile_layout(result.points, result.triangles)
+                PackedTile { status: 0, points: result.points, triangles: result.triangles,
+                    words: BrowserList { ptr: BrowserPtr::from_u32(address), len: layout.words } }
+            },
+            _ => packed_failure(30),
+        }
+    }
+}
+
+pub fn packed_triangle(_ a: u32, _ b: u32, _ c: u32, _ seed: u32) -> PackedTile {
+    let key = AtlasKey { a: a, b: b, c: c }
+    if !key.valid() { return packed_failure(2) }
+    let corner_b = edge_resolution(c)
+    let corner_c = corner_b + edge_resolution(b)
+    packed_domain(key, EquilateralMetric {}, [0, corner_b, corner_c, END], 3, seed)
+}
+
+pub fn packed_square(_ bottom: u32, _ right: u32, _ top: u32, _ left: u32, _ seed: u32) -> PackedTile {
+    let key = QuadAtlasKey { bottom: bottom, right: right, top: top, left: left }
+    if !key.valid() { return packed_failure(2) }
+    let b = edge_resolution(bottom)
+    let c = b + edge_resolution(right)
+    let d = c + edge_resolution(top)
+    packed_domain(key, SquareMetric {}, [0, b, c, d], 4, seed)
+}
