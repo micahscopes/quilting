@@ -46,6 +46,9 @@ pub struct Params {
     /// One means this finite-pole family accepts the authored arc; zero is not
     /// repaired by projecting weights or inventing a replacement pole.
     pub patch_valid:Param,
+    /// Certified lower bound on the denominator norm across the patch. Zero
+    /// means the pole reaches the domain and part of the patch is unbounded.
+    pub pole_margin:Param,
     /// Editing this arc changes the other arcs through one common pole.
     pub arc_edge:Param,
     pub p0x:Param,pub p0y:Param,pub p0z:Param,pub p1x:Param,pub p1y:Param,pub p1z:Param,
@@ -103,6 +106,7 @@ pub const fn params() -> Params {
         composition_focus_x:Param::range(min:0.02,max:0.98,init:0.5),
         composition_focus_y:Param::range(min:0.02,max:0.98,init:0.5),
         composition_concentration:Param::log(min:0.0625,max:16.0,init:1.0),
+        pole_margin:Param::readout(ParamReadout::Scalar),
         composition_twist:Param::range(min:-6.2831853,max:6.2831853,init:0.0),
         composition_falloff:Param::choice(options:ChoiceOptions::three(first:"quadratic",second:"smoothstep",third:"smootherstep"),init:1.0),
         surface_kind:Param::choice(options:ChoiceOptions::three(first:"flat composition",
@@ -110,6 +114,10 @@ pub const fn params() -> Params {
         patch_valid:Param::readout(ParamReadout::Scalar),
         arc_edge:Param::choice(options:ChoiceOptions::four(first:"first boundary",second:"second boundary",
             third:"third boundary",fourth:"fourth boundary (quad)"),init:0.0),
+        // Hidden again now that the authored net can be reproduced another way.
+        // The parameter API has no grouping, so a visible readout cannot be
+        // collapsed; flip these to `Param::readout(ParamReadout::Scalar)` when a
+        // running configuration needs to be read back, and hide them after.
         p0x:Param::fixed(-1.0),p0y:Param::fixed(-0.7),p0z:Param::fixed(0.0),
         p1x:Param::fixed(1.0),p1y:Param::fixed(-0.7),p1z:Param::fixed(0.0),
         p2x:Param::fixed(1.0),p2y:Param::fixed(0.7),p2z:Param::fixed(0.0),

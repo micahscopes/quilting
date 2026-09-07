@@ -571,7 +571,7 @@ fn density_placement_evens_surface_triangle_area() {
     let spread=instance.get_typed_func::<(i32,i32,f32,i32,i32),f32>(&mut store,"domain_area_spread").unwrap();
     let mut worst_ratio_after=0.0_f64;
     for (kind,name) in [(0,"triangle"),(1,"quad")] {
-        for bulge in [0.6_f32,2.4,4.8] {
+        for bulge in [0.6_f32,2.4,4.8,9.6,19.2] {
             let mut line=format!("AREA_SPREAD {name} bulge={bulge}:");
             for (density,label) in [(0,"reference"),(1,"density")] {
                 let cv=f64::from(spread.call(&mut store,(kind,5,bulge,density,0)).unwrap());
@@ -584,6 +584,258 @@ fn density_placement_evens_surface_triangle_area() {
         }
     }
     eprintln!("AREA_SPREAD worst max-over-min after placement={worst_ratio_after:.4}");
+}
+
+/// Are all three edges of the curved triangle patch really circular arcs? The
+/// affine-rotor argument says yes, since every straight line in a triangular
+/// blend's domain images to a circle, and a great deal is built on that. The
+/// circle is defined by three samples and every other sample is checked
+/// against it, so the fitter is validated by the edges that must pass.
+#[test]
+fn every_edge_of_the_triangle_patch_is_a_circular_arc() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let sample=instance.get_typed_func::<(i32,i32,i32,i32,f32,f32,f32,f32),f32>(&mut store,"triangle_edge_sample_at").unwrap();
+    const N:i32=64;
+    let cross=|a:[f64;3],b:[f64;3]| [a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+    let dot=|a:[f64;3],b:[f64;3]| a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+    let sub=|a:[f64;3],b:[f64;3]| [a[0]-b[0],a[1]-b[1],a[2]-b[2]];
+    // Sweep the authored midpoint and which edge is authored, so this is a claim
+    // about the construction rather than about one authoring.
+    let mut worst_overall=0.0_f64;
+    let mut checked=0usize;
+    let mut skipped=0usize;
+    for arc_edge in [0.0_f32,1.0,2.0] {
+    for mz in [0.6_f32,2.4,6.0] {
+    for (mx,my) in [(0.0_f32,-0.7_f32),(0.6,-0.4),(-0.5,-0.2),(0.2,0.3)] {
+        for edge in 0..3 {
+            let mut pts=Vec::new();
+            let mut ok=true;
+            for i in 0..=N {
+                let mut p=[0.0_f64;3];
+                for lane in 0..3 {
+                    let value=sample.call(&mut store,(edge,i,N,lane,mx,my,mz,arc_edge)).unwrap();
+                    if !value.is_finite() || value==-999.0 {ok=false; break;}
+                    p[lane as usize]=f64::from(value);
+                }
+                if !ok {break;}
+                pts.push(p);
+            }
+            if !ok {skipped+=1; continue;}
+            // Circumcentre of the first, middle and last samples, in their plane.
+            let (a,b,c)=(pts[0],pts[(N/2) as usize],pts[N as usize]);
+            let u=sub(b,a); let v=sub(c,a); let n=cross(u,v);
+            let nn=dot(n,n);
+            assert!(nn>1e-18,"edge {edge} samples are collinear, cannot fit");
+            let uu=dot(u,u); let vv=dot(v,v);
+            let t1=cross(v,n); let t2=cross(n,u);
+            let centre=[a[0]+(uu*t1[0]+vv*t2[0])/(2.0*nn),
+                        a[1]+(uu*t1[1]+vv*t2[1])/(2.0*nn),
+                        a[2]+(uu*t1[2]+vv*t2[2])/(2.0*nn)];
+            let radius=dot(sub(a,centre),sub(a,centre)).sqrt();
+            let unit=[n[0]/nn.sqrt(),n[1]/nn.sqrt(),n[2]/nn.sqrt()];
+            let mut worst_radial=0.0_f64;
+            let mut worst_planar=0.0_f64;
+            for p in &pts {
+                let d=sub(*p,centre);
+                worst_radial=worst_radial.max((dot(d,d).sqrt()/radius-1.0).abs());
+                worst_planar=worst_planar.max(dot(d,unit).abs()/radius);
+            }
+            let worst=worst_radial.max(worst_planar);
+            checked+=1;
+            if worst>worst_overall {
+                worst_overall=worst;
+                eprintln!("ARC_FIT new worst: arc_edge={arc_edge} midpoint=({mx},{my},{mz}) edge={edge} radius={radius:.5} radial={worst_radial:.8} planar={worst_planar:.8}");
+            }
+        }
+    }}}
+    eprintln!("ARC_FIT swept {checked} edges, {skipped} rejected by the construction, worst deviation from a circle={worst_overall:.8}");
+    assert!(worst_overall<1e-4,"an edge of the triangle patch is not a circular arc: {worst_overall}");
+}
+
+/// The quotient is admitted into the vector point space by a per-sample
+/// tolerance rather than by a structural guarantee, so this reports how large
+/// the trivector residual actually gets. Near the tolerance would mean the
+/// weights are being tolerated rather than constrained.
+#[test]
+fn the_quotient_stays_in_the_vector_point_space() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let residual=instance.get_typed_func::<(i32,f32,f32,f32,i32,f32,f32),f32>(&mut store,"trivector_residual_at").unwrap();
+    for (kind,name) in [(0,"triangle"),(1,"quad")] {
+        let mut worst=0.0_f64;
+        let mut samples=0usize;
+        // The default control net is coplanar. Dragging a handle in depth is
+        // what could reach outside the paper's admissible family, so lift two
+        // corners out of that plane rather than only varying the midpoint.
+        for (lift2,lift3) in [(0.0_f32,0.0_f32),(0.8,0.0),(0.0,-1.1),(1.5,-1.5),(3.0,2.0)] {
+        for bulge in [0.6_f32,2.4,6.0,12.0] {
+            let mut local=0.0_f64;
+            for i in 1..16 { for j in 1..16 {
+                let u=f64::from(i)/16.0;
+                let v=f64::from(j)/16.0;
+                if kind==0 && u+v>0.98 {continue;}
+                let r=residual.call(&mut store,(kind,u as f32,v as f32,bulge,0,lift2,lift3)).unwrap();
+                if r==-999.0 {continue;}
+                assert!(r.is_finite(),"{name} residual not finite at {u},{v}");
+                local=local.max(f64::from(r));
+                samples+=1;
+            }}
+            if local>worst {
+                worst=local;
+                eprintln!("TRIVECTOR {name} new worst: lift=({lift2},{lift3}) bulge={bulge} residual={local:.9}");
+            }
+        }}
+        eprintln!("TRIVECTOR {name}: {samples} samples, worst residual relative to the vector part={worst:.9}");
+        // The admission tolerance is 0.0001. Landing far below it means the
+        // construction actually lands in the vector space rather than skirting it.
+        assert!(worst<1e-5,"{name} quotient is only being tolerated as a vector: {worst}");
+    }
+}
+
+/// Krasauskas and Zube, Proposition 5: any linear QB triangle in Im H is
+/// spherical. Our triangle patch is built by their formula 13, weights
+/// (p_i - pole)^-1, so if the construction really produces their surfaces then
+/// every triangle patch must lie exactly on a sphere. This tests the code
+/// against the paper rather than against our expectations, and it is a check
+/// of the Euclidean instance, not a design assumption for other metrics.
+#[test]
+fn the_linear_triangle_patch_is_spherical_as_the_paper_requires() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let point=instance.get_typed_func::<(i32,f32,f32,i32,f32,f32,f32,f32),f32>(&mut store,"authored_patch_point").unwrap();
+    let mut worst_overall=0.0_f64;
+    for arc_edge in [0.0_f32,1.0,2.0] {
+    for mz in [0.6_f32,2.4,6.0] {
+    for (mx,my) in [(0.0_f32,-0.7_f32),(0.6,-0.4),(-0.5,-0.2)] {
+        let mut pts=Vec::new();
+        for i in 1..14 { for j in 1..(14-i) {
+            let (u,v)=(f64::from(i)/14.0,f64::from(j)/14.0);
+            let mut p=[0.0_f64;3];
+            let mut ok=true;
+            for lane in 0..3 {
+                let value=point.call(&mut store,(0,u as f32,v as f32,lane,mx,my,mz,arc_edge)).unwrap();
+                if !value.is_finite()||value==-999.0 {ok=false;break;}
+                p[lane as usize]=f64::from(value);
+            }
+            if ok {pts.push(p);}
+        }}
+        if pts.len()<20 {continue;}
+        // |p-c|^2 = r^2 is linear in (c, r^2-|c|^2).
+        let mut ata=[[0.0_f64;4];4];
+        let mut atb=[0.0_f64;4];
+        for p in &pts {
+            let row=[2.0*p[0],2.0*p[1],2.0*p[2],1.0];
+            let rhs=p[0]*p[0]+p[1]*p[1]+p[2]*p[2];
+            for a in 0..4 { for b in 0..4 {ata[a][b]+=row[a]*row[b];} atb[a]+=row[a]*rhs; }
+        }
+        for col in 0..4 {
+            let pivot=(col..4).max_by(|&a,&b| ata[a][col].abs().partial_cmp(&ata[b][col].abs()).unwrap()).unwrap();
+            ata.swap(col,pivot); atb.swap(col,pivot);
+            let d=ata[col][col];
+            if d.abs()<1e-12 {continue;}
+            for row in 0..4 {
+                if row==col {continue;}
+                let f=ata[row][col]/d;
+                for k in 0..4 {ata[row][k]-=f*ata[col][k];}
+                atb[row]-=f*atb[col];
+            }
+        }
+        let sol:Vec<f64>=(0..4).map(|i| atb[i]/ata[i][i]).collect();
+        let centre=[sol[0],sol[1],sol[2]];
+        let radius=(sol[3]+centre.iter().map(|c| c*c).sum::<f64>()).sqrt();
+        let worst=pts.iter().map(|p| {
+            let d=((p[0]-centre[0]).powi(2)+(p[1]-centre[1]).powi(2)+(p[2]-centre[2]).powi(2)).sqrt();
+            (d/radius-1.0).abs()
+        }).fold(0.0_f64,f64::max);
+        if worst>worst_overall {
+            worst_overall=worst;
+            eprintln!("SPHERICAL new worst: arc_edge={arc_edge} midpoint=({mx},{my},{mz}) radius={radius:.5} worst radial error={worst:.9}");
+        }
+    }}}
+    eprintln!("SPHERICAL worst deviation from a sphere across the sweep={worst_overall:.9}");
+    assert!(worst_overall<1e-4,"the triangle patch is NOT spherical, so it is not the paper's linear QB triangle: {worst_overall}");
+}
+
+/// Can the demo's controls put the pole inside the patch's own domain? That is
+/// the regime where a bounded spherical triangle becomes an unbounded piece of
+/// the same sphere, which looks wild without any weight constraint being
+/// violated. Reports how much of a wide authoring sweep lands there.
+#[test]
+fn the_controls_can_place_the_pole_inside_the_domain() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let bound=instance.get_typed_func::<(f32,f32,f32,f32,f32,i32),f32>(&mut store,"domain_pole_bound").unwrap();
+    let mut total=0; let mut uncertified=0; let mut rejected=0; let mut worst_ratio=0.0_f64;
+    for arc_edge in [0.0_f32,1.0,2.0] {
+    for mz in [0.2_f32,0.6,1.5,3.0,6.0,12.0] {
+    for mx in [-1.2_f32,-0.4,0.0,0.4,1.2] {
+    for my in [-1.4_f32,-0.7,0.0,0.5] {
+    for lift in [0.0_f32,1.5] {
+        let low=bound.call(&mut store,(mx,my,mz,arc_edge,lift,0)).unwrap();
+        if low==-999.0 {rejected+=1; continue;}
+        let high=bound.call(&mut store,(mx,my,mz,arc_edge,lift,1)).unwrap();
+        let cert=bound.call(&mut store,(mx,my,mz,arc_edge,lift,2)).unwrap();
+        total+=1;
+        if cert!=1.0 {uncertified+=1;}
+        else if low>0.0 {worst_ratio=worst_ratio.max(f64::from(high/low));}
+    }}}}}
+    eprintln!("POLE_INSIDE swept {total} authorings, {rejected} rejected by the construction, {uncertified} could not certify a positive norm, worst certified norm ratio={worst_ratio:.2}");
+}
+
+/// Krasauskas and Zube, Proposition 4 formula 11: a QB curve lies in the point
+/// space exactly when Im(w1 w0^-1) is orthogonal to p1 - p0. This checks that
+/// condition on the weights the demo's controls actually derive, and prints
+/// them, rather than inferring admissibility from the rendered surface.
+#[test]
+fn derived_weights_satisfy_the_papers_curve_condition() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let f=instance.get_typed_func::<(i32,i32,i32,f32,f32,f32,f32,f32,i32),f32>(&mut store,"edge_weight_condition").unwrap();
+    let mut worst=0.0_f64; let mut checked=0usize;
+    let mut printed=0usize;
+    for (kind,edges) in [(0,vec![(0,1),(1,3),(3,0)]),(1,vec![(0,1),(1,2),(2,3),(3,0)])] {
+        for arc_edge in [0.0_f32,1.0,2.0] {
+        for mz in [0.6_f32,3.0,9.0] {
+        for (mx,my,lift) in [(0.0_f32,-0.7_f32,0.0_f32),(0.7,-0.3,1.5),(-0.9,0.4,-1.2)] {
+            for (a,b) in &edges {
+                let v=f.call(&mut store,(kind,*a,*b,mx,my,mz,arc_edge,lift,0)).unwrap();
+                if v==-999.0 {continue;}
+                assert!(v.is_finite(),"non-finite condition for edge {a}-{b}");
+                if printed<4 {
+                    let mut w=[0.0_f32;8];
+                    for k in 0..8 {w[k]=f.call(&mut store,(kind,*a,*b,mx,my,mz,arc_edge,lift,10+k as i32)).unwrap();}
+                    eprintln!("WEIGHTS kind={kind} edge {a}-{b} midpoint=({mx},{my},{mz}) lift={lift}\n   w_a=[{:.5},{:.5},{:.5},{:.5}]  w_b=[{:.5},{:.5},{:.5},{:.5}]  condition={v:.9}",
+                        w[0],w[1],w[2],w[3],w[4],w[5],w[6],w[7]);
+                    printed+=1;
+                }
+                worst=worst.max(f64::from(v));
+                checked+=1;
+            }
+        }}}
+    }
+    eprintln!("WEIGHT_CONDITION checked {checked} edges, worst normalized violation of formula 11={worst:.9}");
+    assert!(worst<1e-4,"derived weights violate the paper's curve condition: {worst}");
 }
 
 #[test]

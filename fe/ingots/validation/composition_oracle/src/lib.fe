@@ -597,6 +597,178 @@ fn placed_surface(_ net:composite_atlas::surface::Net,
     surface_probe(net,x,y)
 }
 
+/// A point on one edge of the curved TRIANGLE patch, in that edge's own
+/// barycentric parameter. The affine-rotor argument says every straight line in
+/// a triangular blend's domain images to a circular arc, so all three edges
+/// should be arcs. This lets that be checked rather than assumed.
+pub fn triangle_edge_sample(_ edge:u32,_ index:u32,_ count:u32,_ lane:u32,_ bulge:f32)->f32 {
+    triangle_edge_sample_at(edge,index,count,lane,0.0,0.0,bulge,0.0)
+}
+/// The same sampler with the authored midpoint and which edge is authored under
+/// control, so the circular-arc property can be swept over configurations
+/// rather than checked at one authoring.
+pub fn triangle_edge_sample_at(_ edge:u32,_ index:u32,_ count:u32,_ lane:u32,
+    _ mx:f32,_ my:f32,_ mz:f32,_ arc_edge:f32)->f32 {
+    use composite_atlas::model::Point
+    let mut c=initial_controls()
+    c.surface_kind=1.0
+    c.arc_edge=arc_edge
+    c.midpoint_x=mx
+    c.midpoint_y=my
+    c.midpoint_z=mz
+    let net=composite_atlas::surface::authored(c)
+    if net.patch_valid!=1.0 {return -999.0}
+    let t=__f32_from_i32(index.downcast_unchecked())/__f32_from_i32(count.downcast_unchecked())
+    // Reference triangle corners in (u,v): (0,0), (1,0), (0,1).
+    let (u,v)=if edge==0 {(t,0.0)}
+        else if edge==1 {(1.0-t,t)}
+        else {(0.0,1.0-t)}
+    let p=composite_atlas::surface::evaluate(net,Point {x:u,y:v})
+    if !p.valid {-999.0} else if lane==0 {p.point.x} else if lane==1 {p.point.y} else {p.point.z}
+}
+
+/// Trivector residual of the quotient, relative to the vector part it is
+/// admitted alongside. The admission is a per-sample tolerance rather than a
+/// structural guarantee, so this reports whether the construction actually
+/// lands in the vector point space or is merely being tolerated there.
+/// `which` selects the relative residual or the vector magnitude.
+pub fn trivector_residual(_ kind:u32,_ u:f32,_ v:f32,_ bulge:f32,_ which:u32)->f32 {
+    trivector_residual_at(kind,u,v,bulge,which,0.0,0.0)
+}
+/// The same residual with two corners lifted out of the default common plane,
+/// which is what dragging a handle in depth actually does. The paper's weight
+/// conditions are the ones that could fail here, so a residual that grows with
+/// `lift` would mean the controls reach outside the admissible family.
+pub fn trivector_residual_at(_ kind:u32,_ u:f32,_ v:f32,_ bulge:f32,_ which:u32,
+    _ lift2:f32,_ lift3:f32)->f32 {
+    use quilting_patch::{ProjectiveAlgebra,ProjectiveInterpolation,
+        LinearBarycentric,BilinearBernstein,
+        triangular_projective_controls,bilinear_projective_controls}
+    use quilting_clifford_bezier::euclidean::EuclideanCliffordAlgebra
+    use quilting_domain::vec2f
+    let mut c=initial_controls()
+    c.surface_kind=if kind==0 {1.0} else {2.0}
+    c.midpoint_z=bulge
+    c.p2z=lift2
+    c.p3z=lift3
+    let net=composite_atlas::surface::authored(c)
+    if net.patch_valid!=1.0 {return -999.0}
+    let algebra=EuclideanCliffordAlgebra {}
+    let frame=if net.kind<1.5 {
+        LinearBarycentric {}.frame(algebra,
+            triangular_projective_controls(net.a,net.b,net.d),bary3f(1.0-u-v,u,v))
+    } else {
+        BilinearBernstein {}.frame(algebra,
+            bilinear_projective_controls(net.a,net.b,net.d,net.c),vec2f(u,v))
+    }
+    let q=algebra.right_quotient(frame.numerator,frame.denominator,composite_atlas::surface::policy())
+    if !q.defined {return -999.0}
+    let magnitude=fmath::sqrt(q.value.e1*q.value.e1+q.value.e2*q.value.e2+q.value.e3*q.value.e3)
+    if which==1 {return magnitude}
+    let residual=if q.value.e123<0.0 {-q.value.e123} else {q.value.e123}
+    if magnitude>0.0 {residual/magnitude} else {residual}
+}
+
+/// Any point of the authored patch, for checking it against the paper's own
+/// classification rather than against our expectations of it.
+pub fn authored_patch_point(_ kind:u32,_ u:f32,_ v:f32,_ lane:u32,
+    _ mx:f32,_ my:f32,_ mz:f32,_ arc_edge:f32)->f32 {
+    use composite_atlas::model::Point
+    let mut c=initial_controls()
+    c.surface_kind=if kind==0 {1.0} else {2.0}
+    c.arc_edge=arc_edge
+    c.midpoint_x=mx
+    c.midpoint_y=my
+    c.midpoint_z=mz
+    let net=composite_atlas::surface::authored(c)
+    if net.patch_valid!=1.0 {return -999.0}
+    let p=composite_atlas::surface::evaluate(net,Point {x:u,y:v})
+    if !p.valid {-999.0} else if lane==0 {p.point.x} else if lane==1 {p.point.y} else {p.point.z}
+}
+
+/// Smallest denominator norm over the triangular domain, certified by the
+/// Bernstein hull rather than sampled. A non-positive result means the pole
+/// lies inside the patch's own domain, which sends part of the patch through
+/// infinity: still the paper's surface, but no longer a bounded piece of it.
+pub fn domain_pole_bound(_ mx:f32,_ my:f32,_ mz:f32,_ arc_edge:f32,_ lift:f32,_ which:u32)->f32 {
+    use quilting_patch::depth_field::{triangle_gram,TriangleGram}
+    use quilting_clifford_bezier::euclidean::EuclideanWeightNorm
+    let mut c=initial_controls()
+    c.surface_kind=1.0
+    c.arc_edge=arc_edge
+    c.midpoint_x=mx
+    c.midpoint_y=my
+    c.midpoint_z=mz
+    c.p3z=lift
+    let net=composite_atlas::surface::authored(c)
+    if net.patch_valid!=1.0 {return -999.0}
+    let gram=triangle_gram(EuclideanWeightNorm {},net.a.weight,net.b.weight,net.d.weight)
+    let interval=gram.sub_interval(bary3f(1.0,0.0,0.0),bary3f(0.0,1.0,0.0),bary3f(0.0,0.0,1.0))
+    if which==0 {interval.low} else if which==1 {interval.high}
+    else if interval.certified {1.0} else {0.0}
+}
+
+fn net_control(_ net:composite_atlas::surface::Net,_ i:u32)
+    ->quilting_patch::ProjectiveControl<quilting_clifford_bezier::euclidean::EuclideanCliffordAlgebra> {
+    if i==0 {net.a} else if i==1 {net.b} else if i==2 {net.c} else {net.d}
+}
+fn even_product(_ a:quilting_clifford_bezier::CliffordEven3F,
+    _ b:quilting_clifford_bezier::CliffordEven3F)->quilting_clifford_bezier::CliffordEven3F {
+    // Cl(3,0) even product: e12e12=e13e13=e23e23=-1, e12e13=-e23, e12e23=e13,
+    // e13e23=-e12, and the reversed pairs carry the opposite sign.
+    quilting_clifford_bezier::CliffordEven3F {
+        scalar:a.scalar*b.scalar-a.e12*b.e12-a.e13*b.e13-a.e23*b.e23,
+        e12:a.scalar*b.e12+a.e12*b.scalar-a.e13*b.e23+a.e23*b.e13,
+        e13:a.scalar*b.e13+a.e13*b.scalar+a.e12*b.e23-a.e23*b.e12,
+        e23:a.scalar*b.e23+a.e23*b.scalar-a.e12*b.e13+a.e13*b.e12,
+    }
+}
+/// Krasauskas and Zube, Proposition 4 formula 11: a QB curve lies in the point
+/// space exactly when Im(w1 w0^-1) is orthogonal to p1 - p0. Reports that
+/// orthogonality on one authored edge, normalized, so it can be read as a
+/// violation rather than as an absolute magnitude. `which` also exposes the
+/// raw weight components so the derived weights can be inspected directly.
+pub fn edge_weight_condition(_ kind:u32,_ corner_a:u32,_ corner_b:u32,
+    _ mx:f32,_ my:f32,_ mz:f32,_ arc_edge:f32,_ lift:f32,_ which:u32)->f32 {
+    let mut c=initial_controls()
+    c.surface_kind=if kind==0 {1.0} else {2.0}
+    c.arc_edge=arc_edge
+    c.midpoint_x=mx
+    c.midpoint_y=my
+    c.midpoint_z=mz
+    c.p3z=lift
+    let net=composite_atlas::surface::authored(c)
+    if net.patch_valid!=1.0 {return -999.0}
+    let ca=net_control(net,corner_a)
+    let cb=net_control(net,corner_b)
+    if which>=10 {
+        let w=if which<14 {ca.weight} else {cb.weight}
+        let k=which%4
+        return if k==0 {w.scalar} else if k==1 {w.e12} else if k==2 {w.e13} else {w.e23}
+    }
+    // w1 w0^-1, with the inverse as reverse over norm.
+    let n0=ca.weight.scalar*ca.weight.scalar+ca.weight.e12*ca.weight.e12
+        +ca.weight.e13*ca.weight.e13+ca.weight.e23*ca.weight.e23
+    if !(n0>0.0) {return -999.0}
+    let inverse=quilting_clifford_bezier::CliffordEven3F {
+        scalar:ca.weight.scalar/n0, e12:-ca.weight.e12/n0,
+        e13:-ca.weight.e13/n0, e23:-ca.weight.e23/n0}
+    let ratio=even_product(cb.weight,inverse)
+    // Dual of the bivector part to a vector: e12 -> e3, e13 -> -e2, e23 -> e1.
+    let vx=ratio.e23
+    let vy=-ratio.e13
+    let vz=ratio.e12
+    let dx=cb.point.x-ca.point.x
+    let dy=cb.point.y-ca.point.y
+    let dz=cb.point.z-ca.point.z
+    let dot=vx*dx+vy*dy+vz*dz
+    let magnitude=fmath::sqrt((vx*vx+vy*vy+vz*vz)*(dx*dx+dy*dy+dz*dz))
+    if which==1 {return ratio.scalar}
+    if !(magnitude>0.0) {return -999.0}
+    let relative=dot/magnitude
+    if relative<0.0 {-relative} else {relative}
+}
+
 pub fn geometric_patch_view_laws()->bool {
     let mut c=initial_controls()
     for kind in [1.0,2.0] {

@@ -27,26 +27,43 @@ pub fn place_with_locality<M:IntervalSamplingMap,L:IntervalSamplingMap>(_ scene:
     _ ab:OrientedIntervalMap<M>,_ bc:OrientedIntervalMap<M>,_ ca:OrientedIntervalMap<M>,_ locality:L)->Point {
     scene.composition_warp.apply(assemble(scene,d,p,ab,bc,ca,locality))
 }
+/// Undisplaced position of a boundary sample, in the edge's canonical low to
+/// high direction so both adjacent uses feed identical inputs downstream.
+fn boundary_raw(_ scene:Scene,_ from:u32,_ to:u32,_ t:f32,_ reversed:bool)->Point {
+    let edge=BoundaryUse::between(from,to)
+    let q=if reversed {1.0-t} else {t}
+    let a=corner(edge.low,scene.active_center_x,scene.active_center_y)
+    let b=corner(edge.high,scene.active_center_x,scene.active_center_y)
+    Point {x:a.x*(1.0-q)+b.x*q,y:a.y*(1.0-q)+b.y*q}
+}
+/// One law for the whole domain. Boundary and interior differ only in how the
+/// undisplaced point is found; both are then placed by the same two slice laws.
+/// That is what removes the seam step: an internal seam is not a separate law
+/// meeting the interior, it is the same map restricted to a line, and the two
+/// sides evaluate it at bit-identical inputs because the raw point is built in
+/// the edge's canonical direction.
+fn density_place(_ scene:Scene,_ raw:Point)->Point {
+    let x=segment_parameter(scene.domain_norm,0.0,raw.y,1.0,raw.y,raw.x,PLACEMENT_LEVELS)
+    let y=segment_parameter(scene.domain_norm,x,0.0,x,1.0,raw.y,PLACEMENT_LEVELS)
+    Point {x:x,y:y}
+}
 fn assemble<M:IntervalSamplingMap,L:IntervalSamplingMap>(_ scene:Scene,_ d:ChildDraw,_ p:Bary3F,
     _ ab:OrientedIntervalMap<M>,_ bc:OrientedIntervalMap<M>,_ ca:OrientedIntervalMap<M>,_ locality:L)->Point {
+    if scene.density_placement {
+        let raw=if p.b==0.0 {boundary_raw(scene,d.corner_c,d.corner_a,p.a,ca.reversed)}
+            else if p.c==0.0 {boundary_raw(scene,d.corner_a,d.corner_b,p.b,ab.reversed)}
+            else if p.a==0.0 {boundary_raw(scene,d.corner_b,d.corner_c,p.c,bc.reversed)}
+            else {
+                let a=corner(d.corner_a,scene.active_center_x,scene.active_center_y)
+                let b=corner(d.corner_b,scene.active_center_x,scene.active_center_y)
+                let c=corner(d.corner_c,scene.active_center_x,scene.active_center_y)
+                Point {x:a.x*p.a+b.x*p.b+c.x*p.c,y:a.y*p.a+b.y*p.b+c.y*p.c}
+            }
+        return density_place(scene,raw)
+    }
     if p.b==0.0 {boundary(scene,d.corner_c,d.corner_a,p.a,ca)}
     else if p.c==0.0 {boundary(scene,d.corner_a,d.corner_b,p.b,ab)}
     else if p.a==0.0 {boundary(scene,d.corner_b,d.corner_c,p.c,bc)}
-    else if scene.density_placement {
-        // Place against the patch's own density over the WHOLE domain rather
-        // than by carrying three edge laws inward. Being a function of the
-        // square and not of the child, the two sides of an internal seam
-        // cannot disagree just inside a seam they agree on exactly. On each
-        // side the slice law reduces to that side's published boundary table,
-        // so this meets the boundary it must respect.
-        let a=corner(d.corner_a,scene.active_center_x,scene.active_center_y)
-        let b=corner(d.corner_b,scene.active_center_x,scene.active_center_y)
-        let c=corner(d.corner_c,scene.active_center_x,scene.active_center_y)
-        let raw=Point {x:a.x*p.a+b.x*p.b+c.x*p.c,y:a.y*p.a+b.y*p.b+c.y*p.c}
-        let x=segment_parameter(scene.domain_norm,0.0,raw.y,1.0,raw.y,raw.x,PLACEMENT_LEVELS)
-        let y=segment_parameter(scene.domain_norm,x,0.0,x,1.0,raw.y,PLACEMENT_LEVELS)
-        Point {x:x,y:y}
-    }
     else {
         let spaced=if scene.active_compensation>0.5 {TriangleEdgeMaps {a:bc,b:ca,c:ab}.map_with_locality(p,locality)} else {p}
         let warped=scene.interior.apply(spaced)

@@ -15,7 +15,11 @@ use std::web::view::SurfaceEvent
 use ingot::model::{Controls,Point,is_triangle}
 
 type Control=ProjectiveControl<EuclideanCliffordAlgebra>
-pub struct Net {pub a:Control,pub b:Control,pub c:Control,pub d:Control,pub kind:f32,pub patch_valid:f32}
+pub struct Net {pub a:Control,pub b:Control,pub c:Control,pub d:Control,pub kind:f32,pub patch_valid:f32,
+    /// Certified lower bound on the denominator norm over the whole patch.
+    /// Positive means the patch never reaches the point at infinity. Zero means
+    /// the pole is at or inside the weights' hull and the patch is unbounded.
+    pub pole_margin:f32}
 impl Copy for Net {}
 pub struct Sample {pub point:Vec3F,pub valid:bool}
 impl Copy for Sample {}
@@ -24,7 +28,7 @@ pub fn policy()->Clifford3Policy {
 }
 pub fn empty()->Net {
     let p=projective_control<EuclideanCliffordAlgebra>(vec3f(0.0,0.0,0.0),even(1.0,0.0,0.0,0.0))
-    Net {a:p,b:p,c:p,d:p,kind:0.0,patch_valid:0.0}
+    Net {a:p,b:p,c:p,d:p,kind:0.0,patch_valid:0.0,pole_margin:0.0}
 }
 pub fn point(_ c:Controls,_ id:u32)->Vec3F {
     if id==0 {vec3f(c.p0x,c.p0y,c.p0z)}
@@ -78,7 +82,7 @@ pub fn authored(_ c:Controls)->Net {
             },
             // c is inactive in the triangular basis. No fourth authored
             // corner participates in its construction or validity decision.
-            Option::Some(p)=>Net {a:p[0],b:p[1],c:p[2],d:p[2],kind:c.surface_kind,patch_valid:1.0},
+            Option::Some(p)=>with_weight_condition(Net {a:p[0],b:p[1],c:p[2],d:p[2],kind:c.surface_kind,patch_valid:1.0,pole_margin:0.0}),
         }
     }
     match controls_from_edge(EuclideanCliffordAlgebra {},
@@ -88,7 +92,7 @@ pub fn authored(_ c:Controls)->Net {
             n.kind=c.surface_kind
             n
         },
-        Option::Some(p)=>Net {a:p[0],b:p[1],c:p[2],d:p[3],kind:c.surface_kind,patch_valid:1.0},
+        Option::Some(p)=>with_weight_condition(Net {a:p[0],b:p[1],c:p[2],d:p[3],kind:c.surface_kind,patch_valid:1.0,pole_margin:0.0}),
     }
 }
 /// The same generic projective evaluators as the independently checked oracle.
@@ -130,6 +134,67 @@ pub fn same_weights(_ a:Net,_ b:Net)->bool {
 /// A triangular blend read over that square is affine in the domain, and the
 /// bilinear form represents an affine map exactly once its fourth control is
 /// chosen accordingly, so both kinds share a single evaluator downstream.
+/// Distance from the origin to the convex hull of the four denominator
+/// weights, as a lower bound from separating directions.
+///
+/// The denominator is a partition-of-unity blend of these weights, so it lies
+/// in their convex hull and its norm is at least this distance. A positive
+/// value therefore certifies that the patch never passes through the point at
+/// infinity, which is the real admissibility question here: the weights cannot
+/// leave the paper's family, because they are derived rather than authored, but
+/// the pole CAN land so that part of the patch becomes unbounded.
+///
+/// This is a lower bound from a finite candidate set, so it fails closed. It is
+/// tighter than bounding the squared norm through its Bernstein hull, which
+/// reports a negative floor on nets that are in fact bounded.
+fn hull_margin(_ net:Net)->f32 {
+    let count=if net.kind<1.5 {3} else {4}
+    let mut best:f32=0.0
+    let mut c:usize=0
+    while c<=count {
+        // Candidates: each weight, then their mean.
+        let mut ux:f32=0.0
+        let mut uy:f32=0.0
+        let mut uz:f32=0.0
+        let mut uw:f32=0.0
+        let mut k:usize=0
+        while k<count {
+            let w=weight_at(net,k)
+            let take=if c==count {1.0} else if k==c {1.0} else {0.0}
+            ux=ux+w.scalar*take
+            uy=uy+w.e12*take
+            uz=uz+w.e13*take
+            uw=uw+w.e23*take
+            k=k+1
+        }
+        let length=fmath::sqrt(ux*ux+uy*uy+uz*uz+uw*uw)
+        if length>0.0 {
+            let mut lowest:f32=0.0
+            let mut first=true
+            let mut m:usize=0
+            while m<count {
+                let w=weight_at(net,m)
+                let value=(ux*w.scalar+uy*w.e12+uz*w.e13+uw*w.e23)/length
+                if first || value<lowest {lowest=value
+                    first=false}
+                m=m+1
+            }
+            if lowest>best {best=lowest}
+        }
+        c=c+1
+    }
+    best
+}
+fn weight_at(_ net:Net,_ i:usize)->CliffordEven3F {
+    if i==0 {net.a.weight} else if i==1 {net.b.weight}
+    else if i==2 {if net.kind<1.5 {net.d.weight} else {net.c.weight}}
+    else {net.d.weight}
+}
+fn with_weight_condition(_ net:Net)->Net {
+    let mut result=net
+    result.pole_margin=hull_margin(net)
+    result
+}
 pub fn domain_gram(_ net:Net)->quilting_patch::depth_field::QuadGram {
     use quilting_patch::depth_field::quad_gram
     use quilting_clifford_bezier::euclidean::EuclideanWeightNorm
