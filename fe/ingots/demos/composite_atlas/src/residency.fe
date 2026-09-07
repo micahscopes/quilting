@@ -18,6 +18,7 @@ pub struct Scene {
     pub active_bottom:f32,pub active_right:f32,pub active_top:f32,pub active_left:f32,
     pub active_compensation:f32,pub spacing_revision:u32,
     pub active_skews:EdgeSkews,
+    pub active_boundary_reach:f32,
     pub interior:InteriorPolicy,
     pub resolution:EdgeResolution,
 }
@@ -35,7 +36,7 @@ pub fn empty_scene() -> Scene {
     Scene {first:empty_child(),second:empty_child(),third:empty_child(),fourth:empty_child(),
         vertices:0,active_center_x:0.5,active_center_y:0.5,
         active_bottom:4.0,active_right:4.0,active_top:4.0,active_left:4.0,
-        active_compensation:1.0,spacing_revision:0,active_skews:edge_skews(initial_controls()),interior:interior_policy(initial_controls()),resolution:EdgeResolution::empty()}
+        active_compensation:1.0,spacing_revision:0,active_boundary_reach:1.0,active_skews:edge_skews(initial_controls()),interior:interior_policy(initial_controls()),resolution:EdgeResolution::empty()}
 }
 fn tile_key(_ a:u32,_ b:u32,_ c:u32) -> TileKey {TileKey {square:false,a:a,b:b,c:c,d:0}}
 fn primary_keys() -> [TileKey;CANONICAL_KEY_COUNT] {
@@ -88,6 +89,7 @@ pub fn refresh(_ previous:State) -> State {
     scene.active_left=next.controls.left_lod
     scene.active_compensation=next.controls.compensate_density
     scene.active_skews=edge_skews(next.controls)
+    scene.active_boundary_reach=next.controls.boundary_reach
     scene.interior=interior_policy(next.controls)
     let old=previous.scene
     let mut changed=old.spacing_revision==0 || old.active_center_x!=scene.active_center_x

@@ -60,6 +60,11 @@ method, but must not be mislabeled as a directly generated quad atlas.
   the controllable patch/gallery milestones. The current fan visibly contains
   abrupt density transitions and skinny triangles; boundary agreement alone
   does not establish good interior distribution.
+- A bounded boundary-reach comparison is now executable and interactive:
+  `docs/composition-boundary-reach-20260907.md`. Reach.25 improves measured
+  average density fit versus1 in the uneven cases, with boundaries unchanged.
+  The stronger-skew tail and twist folds remain; this is not a completed fitting
+  algorithm. Default1 is retained, and the next delivery lane is the patch viewer.
 
 Evidence: the readout follow-up and preceding executed checks in
 `docs/composite-spacing-browser-receipt-20260907.md`. The following checkpoints

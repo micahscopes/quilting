@@ -3,7 +3,7 @@ use core::BrowserPtr
 use composite_atlas::{model,residency,placement}
 use quilting_atlas::edge_permutation_index
 use quilting_atlas_wasm::packed_triangle
-use quilting_patch::sampling_warp::{InverseCumulativeMap,OrientedIntervalMap}
+use quilting_patch::sampling_warp::{InverseCumulativeMap,OrientedIntervalMap,ProjectiveIntervalBias,TriangleEdgeMaps}
 use quilting_patch::triangle_quality::measure
 use quilting_domain::{bary3f,vec2f}
 use quilting_qb::{remap_barycentric,permutation_parity}
@@ -15,6 +15,18 @@ fn word(_ base:BrowserPtr<u32>,_ index:u32)->u32 {
     p.read()
 }
 pub fn laws()->bool {
+    let maps=TriangleEdgeMaps {a:ProjectiveIntervalBias {strength:0.25},b:ProjectiveIntervalBias {strength:4.0},c:ProjectiveIntervalBias {strength:2.0}}
+    for reach in [0.0625,0.25,1.0,4.0,16.0] {
+        let locality=ProjectiveIntervalBias {strength:reach}
+        for i in 0 .. 257 {
+            let t=number(i.downcast_truncate())/256.0
+            for p in [bary3f(0.0,1.0-t,t),bary3f(t,0.0,1.0-t),bary3f(1.0-t,t,0.0)] {
+                let expected=maps.map(p)
+                let actual=maps.map_with_locality(p,locality)
+                if expected.a!=actual.a || expected.b!=actual.b || expected.c!=actual.c {return false}
+            }
+        }
+    }
     let a=vec2f(0.0,0.0)
     let b=vec2f(1.0,0.0)
     let c=vec2f(0.5,0.8660254)
@@ -28,6 +40,9 @@ pub fn laws()->bool {
 }
 /// status, triangles, folds/degeneracies, shape<0.1, min/mean shape, signed/absolute area.
 pub fn audit(_ case:u32,_ compensation:u32)->(u32,u32,u32,u32,f32,f32,f32,f32,f32,f32) {
+    audit_with_locality(case,compensation,1.0)
+}
+pub fn audit_with_locality(_ case:u32,_ compensation:u32,_ reach:f32)->(u32,u32,u32,u32,f32,f32,f32,f32,f32,f32) {
     let mut c=model::initial_controls()
     c.compensate_density=number(compensation)
     if case==1 || case==4 {
@@ -91,7 +106,7 @@ pub fn audit(_ case:u32,_ compensation:u32)->(u32,u32,u32,u32,f32,f32,f32,f32,f3
                 let u=number(packed&65535)/16384.0
                 let v=number(packed>>16)/16384.0
                 let p=remap_barycentric(d.permutation,bary3f(1.0-u-v,u,v))
-                let placed=placement::place(scene,d,p,lab,lbc,lca)
+                let placed=placement::place_with_locality(scene,d,p,lab,lbc,lca,ProjectiveIntervalBias {strength:reach})
                 points[lane]=vec2f(placed.x,placed.y)
             }
             let q=measure(points[0],points[1],points[2])

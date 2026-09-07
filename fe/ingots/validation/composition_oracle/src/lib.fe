@@ -12,6 +12,9 @@ pub fn quality_laws()->bool {ingot::quality::laws()}
 pub fn quality_case(_ case:u32,_ compensation:u32)->(u32,u32,u32,u32,f32,f32,f32,f32,f32,f32) {
     ingot::quality::audit(case,compensation)
 }
+pub fn quality_locality(_ case:u32,_ reach:f32)->(u32,u32,u32,u32,f32,f32,f32,f32,f32,f32) {
+    ingot::quality::audit_with_locality(case,1,reach)
+}
 pub fn edge_skew_preserves_mass_and_shared_positions()->bool {
     let mut c=initial_controls()
     c.bottom_lod=1.0
@@ -276,6 +279,9 @@ fn coherent_pending_for_split(_ split:f32)->bool {
     state.controls.spoke_0_skew=2.0
     state=composite_atlas::residency::refresh(state)
     if state.scene.spacing_revision!=revision+1 || state.scene.active_skews.spoke0!=2.0 {return false}
+    state.controls.boundary_reach=0.25
+    state=composite_atlas::residency::refresh(state)
+    if state.scene.active_boundary_reach!=0.25 || state.scene.spacing_revision!=revision+1 {return false}
     let before=state.scene
     state.controls.bottom_lod=8.0
     state.controls.center_x=0.2
@@ -283,10 +289,12 @@ fn coherent_pending_for_split(_ split:f32)->bool {
     state.controls.interior_twist=1.7
     state.controls.focus_a=4.0
     state.controls.spoke_0_skew=4.0
+    state.controls.boundary_reach=4.0
     state=composite_atlas::residency::refresh(state)
     state.pending>0 && state.scene.vertices==before.vertices && state.scene.active_center_x==before.active_center_x
         && state.scene.spacing_revision==before.spacing_revision && state.scene.active_bottom==before.active_bottom
         && state.scene.active_skews.spoke0==before.active_skews.spoke0
+        && state.scene.active_boundary_reach==before.active_boundary_reach
         && state.scene.interior.map.concentration==before.interior.map.concentration
         && state.scene.interior.map.twist==before.interior.map.twist && state.scene.interior.focus.a==before.interior.focus.a
         && state.scene.resolution.diagonal_02_segments==before.resolution.diagonal_02_segments

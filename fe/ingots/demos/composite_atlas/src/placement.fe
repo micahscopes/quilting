@@ -1,7 +1,7 @@
 //! Shared host/shader placement. Storage and atlas decoding are separate.
 use quilting_domain::Bary3F
 use quilting_atlas::composition::BoundaryUse
-use quilting_patch::sampling_warp::{IntervalSamplingMap,OrientedIntervalMap,TriangleEdgeMaps}
+use quilting_patch::sampling_warp::{IntervalSamplingMap,OrientedIntervalMap,TriangleEdgeMaps,ProjectiveIntervalBias}
 use ingot::model::{Point,corner}
 use ingot::residency::{Scene,ChildDraw}
 
@@ -16,11 +16,15 @@ fn boundary<M:IntervalSamplingMap>(_ scene:Scene,_ from:u32,_ to:u32,_ t:f32,_ m
 /// shared exactly. Interior extension uses opposite-corner A/B/C ordering.
 pub fn place<M:IntervalSamplingMap>(_ scene:Scene,_ d:ChildDraw,_ p:Bary3F,
     _ ab:OrientedIntervalMap<M>,_ bc:OrientedIntervalMap<M>,_ ca:OrientedIntervalMap<M>)->Point {
+    place_with_locality(scene,d,p,ab,bc,ca,ProjectiveIntervalBias {strength:scene.active_boundary_reach})
+}
+pub fn place_with_locality<M:IntervalSamplingMap,L:IntervalSamplingMap>(_ scene:Scene,_ d:ChildDraw,_ p:Bary3F,
+    _ ab:OrientedIntervalMap<M>,_ bc:OrientedIntervalMap<M>,_ ca:OrientedIntervalMap<M>,_ locality:L)->Point {
     if p.b==0.0 {boundary(scene,d.corner_c,d.corner_a,p.a,ca)}
     else if p.c==0.0 {boundary(scene,d.corner_a,d.corner_b,p.b,ab)}
     else if p.a==0.0 {boundary(scene,d.corner_b,d.corner_c,p.c,bc)}
     else {
-        let spaced=if scene.active_compensation>0.5 {TriangleEdgeMaps {a:bc,b:ca,c:ab}.map(p)} else {p}
+        let spaced=if scene.active_compensation>0.5 {TriangleEdgeMaps {a:bc,b:ca,c:ab}.map_with_locality(p,locality)} else {p}
         let warped=scene.interior.apply(spaced)
         let a=corner(d.corner_a,scene.active_center_x,scene.active_center_y)
         let b=corner(d.corner_b,scene.active_center_x,scene.active_center_y)

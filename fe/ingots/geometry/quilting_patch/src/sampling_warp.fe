@@ -79,9 +79,16 @@ impl<A: IntervalSamplingMap, B: IntervalSamplingMap, C: IntervalSamplingMap> Tri
     C,
 > {
     pub fn map(self, _ point: Bary3F) -> Bary3F {
-        let a = edge_slice(point, self.a)
-        let b = edge_slice(bary3f(a.b, a.c, a.a), self.b)
-        let c = edge_slice(bary3f(b.b, b.c, b.a), self.c)
+        self.map_with_locality(point,ProjectiveIntervalBias {strength:1.0})
+    }
+    /// The locality law weights the edge displacement by distance from its
+    /// opposite vertex. Lawful interval maps keep the full boundary rule and
+    /// a convex blend with identity on each slice. Continuous orientation
+    /// preservation does not guarantee an unfolded finite straight mesh.
+    pub fn map_with_locality<L:IntervalSamplingMap>(self,_ point:Bary3F,_ locality:L)->Bary3F {
+        let a = edge_slice(point, self.a,locality)
+        let b = edge_slice(bary3f(a.b, a.c, a.a), self.b,locality)
+        let c = edge_slice(bary3f(b.b, b.c, b.a), self.c,locality)
         bary3f(c.b, c.c, c.a)
     }
 }
@@ -240,7 +247,7 @@ impl TriangleBoundaryWarp {
             .map(point)
     }
 }
-fn edge_slice<M: IntervalSamplingMap>(_ p: Bary3F, _ law: M) -> Bary3F {
+fn edge_slice<M: IntervalSamplingMap,L:IntervalSamplingMap>(_ p: Bary3F, _ law: M,_ locality:L) -> Bary3F {
     if p.b == 0.0 || p.c == 0.0 {
         return p
     }
@@ -248,7 +255,8 @@ fn edge_slice<M: IntervalSamplingMap>(_ p: Bary3F, _ law: M) -> Bary3F {
     let t = p.c / span
     let mapped = law.map(t)
     if mapped == t { return p }
-    let c = span * ((1.0 - span) * t + span * mapped)
+    let weight=locality.map(span)
+    let c = span * ((1.0 - weight) * t + weight * mapped)
     bary3f(p.a, span - c, c)
 }
 

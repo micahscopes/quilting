@@ -4,6 +4,26 @@ use fe_codegen::OptLevel;
 use std::path::Path;
 
 #[test]
+fn composition_wasm_boundary_locality_sweep() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    for case in 0..6 {
+        for reach in [0.0625_f32,0.25,1.0,4.0,16.0] {
+            let mut store=wasmtime::Store::new(&engine,());
+            let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+            let audit=instance.get_typed_func::<(i32,f32),(i32,i32,i32,i32,f32,f32,f32,f32,f32,f32)>(&mut store,"quality_locality").unwrap();
+            let (status,triangles,folds,poor,minimum,mean,signed,absolute,metric_mean,mass_cv)=audit.call(&mut store,(case,reach)).unwrap();
+            assert_eq!(status,0);
+            assert!(triangles>0 && [minimum,mean,signed,absolute,metric_mean,mass_cv].into_iter().all(f32::is_finite));
+            assert!((signed-1.0).abs()<0.001);
+            eprintln!("LOCALITY case={case} reach={reach} triangles={triangles} folds={folds} poor={poor} min={minimum:.7} metric_mean={metric_mean:.7} mass_cv={mass_cv:.7} absolute_area={absolute:.7}");
+        }
+    }
+}
+
+#[test]
 fn composition_wasm_actual_mesh_quality() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
     let wasm=compile_ingot_at_level(&path,OptLevel::O2);
