@@ -18,34 +18,37 @@ fn compile_oracle_gate() -> &'static [u8] {
     ORACLE_WASM.get_or_init(|| {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../ingots/validation/classic_quilting_oracle");
-        let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
-        let mut db = DriverDataBase::default();
-        db.compilation_settings()
-            .set_profile(&mut db)
-            .to("release".into());
-        assert!(
-            !driver::init_ingot(&mut db, &url),
-            "classic Quilting oracle ingot initialization diagnostics"
-        );
-        let ingot = db
-            .workspace()
-            .containing_ingot(&db, url)
-            .expect("classic Quilting oracle ingot");
-        let top_mod = ingot.root_mod(&db);
-        let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
-        assert!(
-            diagnostics.is_empty(),
-            "unexpected classic Quilting diagnostics:\n{diagnostics}"
-        );
-        let wasm = BackendKind::Wasm
-            .create()
-            .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O2)
-            .expect("classic Quilting oracle should compile to Wasm")
-            .into_bytecode()
-            .expect("Wasm output should be bytecode");
-        wasmparser::validate(&wasm).expect("classic Quilting oracle Wasm should validate");
-        wasm
+        compile_ingot(&path)
     })
+}
+
+/// Shared compiler/validation setup for focused Fe-to-Wasm oracle ingots.
+pub(crate) fn compile_ingot(path: &Path) -> Vec<u8> {
+    compile_ingot_at_level(path, OptLevel::O2)
+}
+
+pub(crate) fn compile_ingot_at_level(path: &Path, opt: OptLevel) -> Vec<u8> {
+    let url = Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
+    let mut db = DriverDataBase::default();
+    db.compilation_settings()
+        .set_profile(&mut db)
+        .to("release".into());
+    assert!(
+        !driver::init_ingot(&mut db, &url),
+        "oracle ingot initialization diagnostics: {}", path.display()
+    );
+    let ingot = db.workspace().containing_ingot(&db, url).expect("oracle ingot");
+    let top_mod = ingot.root_mod(&db);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "unexpected oracle diagnostics:\n{diagnostics}");
+    let wasm = BackendKind::Wasm
+        .create()
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), opt)
+        .unwrap_or_else(|error| panic!("{} should compile to Wasm: {error}", path.display()))
+        .into_bytecode()
+        .expect("Wasm output should be bytecode");
+    wasmparser::validate(&wasm).expect("oracle Wasm should validate");
+    wasm
 }
 
 fn instantiate() -> (Store<()>, Instance) {

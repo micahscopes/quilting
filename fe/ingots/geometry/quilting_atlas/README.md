@@ -21,10 +21,30 @@ or atlas, and scalar test timings are not Wasm-worker benchmarks.
 
 Known coverage counterexample: with seed 42, triangle `[0,0,4]` exhausts its
 boundary-seeded active list with no interior samples even though the centroid
-is admissible. The reference test explicitly demonstrates that gap. Production
-sampling needs additional domain exploration; faster indexing alone cannot
-repair it. Large scratch arrays also exceed the EVM test target's stack: the
+is admissible. The reference test explicitly demonstrates that gap.
+`sample_with_exploration` adds configurable whole-domain darts after active
+growth stalls, resuming growth when one is admitted. Both proposal sources use
+the same exclusion rule. A regression verifies that this reaches the missed
+interior. Finite rejected-dart budgets are statistical exploration, not
+maximality certificates; domain proposals have their own work counter.
+Large scratch arrays also exceed the EVM test target's stack: the
 LoD-8 boundary-only contract test is not full LoD-8 Wasm sampling evidence.
+
+The `active_sampling_oracle` validation ingot now executes the actual sampler
+in Wasmtime at O0 and O2, without imports or a Rust sampling implementation.
+Seed-42 mixed cases complete within a 4,096-point probe allocation:
+triangle `[0,0,8]` produces 1,615 points (258 boundary), and square `[0,0,0,8]`
+produces 619 points (259 boundary). Both optimization levels give the same
+receipts, with zero exact-boundary or pairwise-exclusion violations. Triangle
+runs also check deterministic replay. Exhaustive neighbor scans perform
+10,788,031 and 3,101,542 comparisons respectively: this is a correctness
+reference awaiting a sound variable-radius spatial index, not the fast atlas.
+Fuel-instrumented sampling-plus-validation times are not generation benchmarks.
+
+Run from `fe/tools/quilting-fe-fixtures`:
+`cargo test --release --features fe-oracle active_sampling_wasm_ -- --nocapture --test-threads=1`.
+This gate does not yet prove triangulation, browser worker behavior, all-key
+coverage, maximality, or blue-noise spectral quality.
 
 The existing triangle atlas uses all 165 sorted edge-LoD triples through LoD 8.
 Its equilateral metric is intentional: barycentric coordinate lanes are not

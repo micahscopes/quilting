@@ -1,0 +1,7 @@
+[ingot]
+name = "active_sampling_oracle"
+version = "0.1.0"
+
+[dependencies]
+core = true
+quilting_atlas = true

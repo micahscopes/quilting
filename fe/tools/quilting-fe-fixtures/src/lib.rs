@@ -26,6 +26,9 @@ pub mod quilting_export;
 #[cfg(all(test, feature = "fe-oracle"))]
 mod fe_oracle;
 
+#[cfg(all(test, feature = "fe-oracle"))]
+mod active_sampling_oracle;
+
 #[cfg(all(test, feature = "raster-oracle"))]
 mod raster_oracle;
 

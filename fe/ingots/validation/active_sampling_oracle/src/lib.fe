@@ -1,0 +1,89 @@
+//! Executable Wasm probes over the production sampler, not a Rust sampler.
+use quilting_atlas::{AtlasKey, active_sampling}
+use quilting_atlas::quad::QuadAtlasKey
+use quilting_atlas::active_sampling::{ActiveDomain, ActiveConfig, ActiveScratch, SamplingStop}
+
+pub struct SamplingProbe {
+    pub points: u32,
+    pub boundary_points: u32,
+    pub proposals: u32,
+    pub domain_proposals: u32,
+    pub comparisons: u64,
+    pub stop: u32,
+    pub violations: u32,
+}
+
+fn probe<D: ActiveDomain>(_ domain: D, _ seed: u32, _ exploration: u32, _ budget: u32) -> SamplingProbe {
+    // Probe capacity, not an atlas LoD cap. Capacity exhaustion is reported.
+    let mut scratch: ActiveScratch<4096> = ActiveScratch::empty()
+    let r = active_sampling::sample_with_exploration(
+        domain,
+        ActiveConfig { seed: seed, attempts_per_active: 30, proposal_budget: budget },
+        exploration,
+        mut scratch,
+    )
+    let mut violations: u32 = 0
+    for i in 0 .. (r.boundary_points as usize) {
+        let expected = domain.boundary_point(i.downcast_truncate())
+        let actual = scratch.samples[i].point
+        if expected.x != actual.x || expected.y != actual.y {
+            violations += 1
+        }
+    }
+    for i in (r.boundary_points as usize) .. (r.points as usize) {
+        let p = scratch.samples[i]
+        if !domain.interior(p.point) {
+            violations += 1
+        }
+        for j in 0 .. i {
+            let q = scratch.samples[j]
+            let radius = if p.radius_squared > q.radius_squared {
+                p.radius_squared
+            } else {
+                q.radius_squared
+            }
+            if domain.distance_squared(p.point, q.point) < radius {
+                violations += 1
+            }
+        }
+    }
+    SamplingProbe {
+        points: r.points,
+        boundary_points: r.boundary_points,
+        proposals: r.proposals,
+        domain_proposals: r.domain_proposals,
+        comparisons: r.comparisons,
+        stop: match r.stop {
+            SamplingStop::ActiveListEmpty => 0,
+            SamplingStop::ExplorationExhausted => 1,
+            SamplingStop::Capacity => 2,
+            SamplingStop::Budget => 3,
+            SamplingStop::InvalidInput => 4,
+        },
+        violations: violations,
+    }
+}
+
+pub fn triangle(_ a: u32, _ b: u32, _ c: u32, _ seed: u32, _ exploration: u32) -> SamplingProbe {
+    probe(AtlasKey { a: a, b: b, c: c }, seed, exploration, 100000)
+}
+
+pub fn triangle_budget(_ a: u32, _ b: u32, _ c: u32, _ seed: u32, _ exploration: u32, _ budget: u32) -> SamplingProbe {
+    probe(AtlasKey { a: a, b: b, c: c }, seed, exploration, budget)
+}
+
+pub fn square(
+    _ bottom: u32,
+    _ right: u32,
+    _ top: u32,
+    _ left: u32,
+    _ seed: u32,
+    _ exploration: u32,
+) -> SamplingProbe {
+    probe(
+        QuadAtlasKey { bottom: bottom, right: right, top: top, left: left },
+        seed,
+        exploration,
+        100000,
+    )
+}
