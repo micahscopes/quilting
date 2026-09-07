@@ -111,6 +111,16 @@ method, but must not be mislabeled as a directly generated quad atlas.
   curve explorer and midpoint/arc construction where it fits the actual patch
   family. Expose direction, magnitude and relevant vector components rather
   than only accidental scalar reparameterization controls.
+- [ ] Specifically carry the existing Bézier arc widgets into the patch viewer:
+  reuse `arc_curve_explorer`'s endpoint/middle-point picking, camera-plane drag,
+  planar/spatial editing, curve rendering, depth/blending and horizon handling,
+  together with `quilting_patch::arc_authoring`. Extract shared widgets where
+  useful; do not replace this progress with generic weight sliders. The current
+  source has three-point arc authoring, not finished higher-degree controls.
+- [ ] Keep higher-degree authoring as an explicit follow-on: define the meaning
+  of additional controls and supported curve/patch families, then extend the
+  widget abstraction with appropriate continuity/degree tests. It must not block
+  applying the existing working arc controls to tri and quad patches now.
 - [ ] Resolve the supported family's weight/control constraints automatically
   by default, with a clearly labeled exploratory unconstrained mode. Explain
   when a constraint resolution changes shape versus merely its parameterization;
