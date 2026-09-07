@@ -4,6 +4,43 @@ const Q=16384;
 const edgeId=(a,b)=>Math.min(a,b)*65536+Math.max(a,b);
 const pointWord=(x,y)=>(x|(y<<16))>>>0;
 
+// Exact independent oracle: JS Number cannot represent the Q14 determinant.
+// Triangle coordinates use the equilateral metric x²+y²+xy, not the metric
+// of the right triangle used to store barycentric coordinates.
+export function incircleDeterminant(a,b,c,d,square) {
+  const delta=p=>[BigInt(p[0]-d[0]),BigInt(p[1]-d[1])];
+  const [ax,ay]=delta(a),[bx,by]=delta(b),[cx,cy]=delta(c);
+  const lift=(x,y)=>x*x+y*y+(square?0n:x*y);
+  return lift(ax,ay)*(bx*cy-by*cx)
+    -lift(bx,by)*(ax*cy-ay*cx)+lift(cx,cy)*(ax*by-ay*bx);
+}
+
+// First establish a valid disk with the requested constrained boundary, then
+// check every interior edge. Boundary segments are constrained, never flipped.
+// Cocircular ties are valid Delaunay; generator-specific tie ordering is not
+// part of this independent geometric contract.
+export function auditDelaunay(tile,square,key) {
+  audit(tile,square,key);
+  const {points,triangles,words}=tile;
+  const index=i=>(words[points+(i>>1)]>>>(16*(i&1)))&65535;
+  const point=i=>[words[i]&65535,words[i]>>>16];
+  const pending=new Map();
+  let interiorEdges=0,cocircularEdges=0;
+  for(let f=0;f<triangles;f++) {
+    const ids=[index(3*f),index(3*f+1),index(3*f+2)];
+    for(let e=0;e<3;e++) {
+      const a=ids[e],b=ids[(e+1)%3],c=ids[(e+2)%3],id=edgeId(a,b);
+      const opposite=pending.get(id);
+      if(opposite===undefined){pending.set(id,c);continue;}
+      pending.delete(id);
+      const determinant=incircleDeterminant(point(a),point(b),point(c),point(opposite),square);
+      if(determinant>0n)throw Error(`non-Delaunay edge ${a}:${b}, opposite ${c}:${opposite}, determinant ${determinant}`);
+      interiorEdges++;if(determinant===0n)cocircularEdges++;
+    }
+  }
+  return {interiorEdges,cocircularEdges};
+}
+
 export function audit(tile,square,key=null) {
   const {points,triangles,words,status}=tile;
   if(status!==0||!(words instanceof Uint32Array))throw Error('failed typed payload');

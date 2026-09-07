@@ -51,6 +51,32 @@ It does not replace the Fe canonicalization tests or prove Delaunay optimality.
 Receipt: `/laboratory/quilting/scratch/atlas-pool-boundary-audit-20260906.json`.
 Run the oracle tests with `bun test fe/web/atlas-worker/packed-audit.test.mjs`.
 
+### Independent exact Delaunay gate (2026-09-07)
+
+The next full four-worker run checked all **5,980,088 interior edges** with an
+independent JavaScript BigInt incircle determinant. All 1,200 tiles passed;
+32 edges were exactly cocircular (valid ties). This uses the equilateral
+quadratic metric `x²+y²+xy` for triangular barycentric coordinates and the
+Euclidean square metric `x²+y²` for quads. Treating triangle storage coordinates
+as an ordinary right-triangle metric would test the wrong geometry.
+
+The check runs after the disk/incidence, winding, coverage and exact constrained
+boundary checks. It establishes local constrained Delaunay legality of the
+returned packed meshes, not blue-noise quality, retained-copy correctness or
+the renderer's permutation implementation. Tests deliberately supply a valid
+boundary-preserving mesh with an illegal diagonal to prove that topology-only
+success is insufficient; all six triangle and eight square symmetries also
+pass the stronger predicate checks. Seven oracle tests / 44 assertions pass.
+
+This run took **100.3195 seconds**, including **3.0148 seconds** of synchronous
+host auditing. Geometry and packed totals are unchanged: 4,074,447 triangles,
+33,127,372 bytes. Coordinator memory was 67,960,832 bytes; worker job counts
+were 325, 301, 303 and 271. This is another uncontrolled warm measurement,
+not an algorithm speedup or a matched worker-scaling result. Production does
+not need to run this independent JavaScript test oracle.
+
+Receipt: `/laboratory/quilting/scratch/atlas-pool-delaunay-audit-20260907.json`.
+
 ## Cancellation and ownership
 
 Cancellation after 100 ms also passed: four in-flight results arrived, zero tiles
