@@ -1,0 +1,7 @@
+[ingot]
+name = "atlas_pool_oracle"
+version = "0.1.0"
+
+[dependencies]
+core = true
+quilting_atlas_wasm = true

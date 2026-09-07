@@ -3,7 +3,7 @@
 import {compileActorAdapter,canonicalInterfaceManifest} from './generated/interface.js';
 import {createCanonicalModuleWorkerActor} from './generated/runtime/module-worker-actor.js';
 
-function audit(tile,square) {
+export function audit(tile,square) {
   const {points,triangles,words,status}=tile;
   if(status!==0 || !(words instanceof Uint32Array)) throw Error('failed typed payload');
   if(words.length!==points+Math.ceil(triangles*3/2)) throw Error('layout');

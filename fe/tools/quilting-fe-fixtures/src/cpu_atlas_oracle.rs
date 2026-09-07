@@ -4,6 +4,90 @@ use fe_codegen::OptLevel;
 use std::path::Path;
 
 #[test]
+fn cpu_atlas_compiles_four_worker_pool() {
+    use common::InputDb;
+    use hir::hir_def::HirIngot;
+    use salsa::Setter;
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../ingots/validation/atlas_pool_workers").canonicalize().unwrap();
+    let url = url::Url::from_directory_path(path).unwrap();
+    let mut db = driver::DriverDataBase::default();
+    db.compilation_settings().set_profile(&mut db).to("release".into());
+    assert!(!driver::init_ingot(&mut db,&url));
+    let ingot = db.workspace().containing_ingot(&db,url).unwrap();
+    let top = ingot.root_mod(&db);
+    let diagnostics = db.run_on_top_mod(top).format_diags(&db);
+    assert!(diagnostics.is_empty(),"{diagnostics}");
+    let artifact = fe_codegen::compile_resident_actor(&db,top).unwrap().unwrap();
+    assert_eq!(artifact.structured_children.len(),4);
+    assert_eq!(artifact.scoped_tasks.len(),8);
+    let package=fe_codegen::materialize_scoped_task_package(&artifact.scoped_tasks,&artifact.structured_children)
+        .unwrap().unwrap();
+    wasmparser::validate(&artifact.wasm).unwrap();
+    for child in &artifact.structured_children { wasmparser::validate(&child.wasm).unwrap(); }
+    if let Some(directory)=std::env::var_os("QUILTING_ATLAS_POOL_ARTIFACT_DIR") {
+        let directory=std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("parent.wasm"),&artifact.wasm).unwrap();
+        for file in &package.files {
+            let path=directory.join(&file.path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path,&file.bytes).unwrap();
+        }
+        eprintln!("pool package entry: {}",package.entry_path);
+    }
+    eprintln!("four-worker Fe pool: parent {} bytes, children {:?}",artifact.wasm.len(),
+        artifact.structured_children.iter().map(|child|child.wasm.len()).collect::<Vec<_>>());
+}
+
+#[test]
+fn cpu_atlas_wasm_pool_retains_tiles_and_rejects_cancelled_results() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../ingots/validation/atlas_pool_oracle");
+    let wasm = compile_ingot_at_level(&path, OptLevel::O2);
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &wasm).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let create = instance.get_typed_func::<i32, i32>(&mut store, "create").unwrap();
+    let summary = instance.get_typed_func::<i32, (i32,i32,i32,i32,i32,i32,i32)>(&mut store, "summary").unwrap();
+    let generate = instance.get_typed_func::<(i32,i32,i32),i32>(&mut store, "generate_one").unwrap();
+    let entry = instance.get_typed_func::<(i32,i32),(i32,i32,i32,i32)>(&mut store, "entry").unwrap();
+    let storage = instance.get_typed_func::<i32,i32>(&mut store, "storage").unwrap();
+    let memory = instance.get_memory(&mut store, "memory").unwrap();
+    let reset = instance.get_typed_func::<(),()>(&mut store,"fe_cabi_reset").unwrap();
+    // Enumerate the entire requested key space without generating expensive
+    // geometry in this ownership regression. Full generation has separate gates.
+    let full = create.call(&mut store, 8).unwrap();
+    assert_ne!(full,0);
+    assert_eq!(summary.call(&mut store,full).unwrap(),(1,1200,0,0,0,0,0));
+    reset.call(&mut store,()).unwrap();
+    let pool = create.call(&mut store,0).unwrap();
+    assert_eq!(summary.call(&mut store,pool).unwrap(),(1,2,0,0,0,0,0));
+    assert_eq!(generate.call(&mut store,(pool,0,0)).unwrap(),0);
+    let first = entry.call(&mut store,(pool,1)).unwrap();
+    assert!(first.1>0 && first.2>0 && first.3>0);
+    let base = storage.call(&mut store,pool).unwrap() as usize;
+    let mut before=vec![0;first.1 as usize*4];
+    memory.read(&store,base+first.0 as usize*4,&mut before).unwrap();
+    assert_eq!(generate.call(&mut store,(pool,1,0)).unwrap(),0);
+    let second=entry.call(&mut store,(pool,0)).unwrap();
+    assert_eq!(second.0,first.1);
+    let mut after=vec![0;before.len()];
+    memory.read(&store,base+first.0 as usize*4,&mut after).unwrap();
+    assert_eq!(before,after,"another tile must not overwrite retained geometry");
+    assert_eq!(generate.call(&mut store,(pool,2,0)).unwrap(),4);
+    let done=summary.call(&mut store,pool).unwrap();
+    assert_eq!(done.2,2); assert_eq!(done.3,first.1+second.1); assert_eq!(done.6,0);
+    reset.call(&mut store,()).unwrap();
+    let cancelled=create.call(&mut store,0).unwrap();
+    assert_eq!(generate.call(&mut store,(cancelled,0,1)).unwrap(),2);
+    assert_eq!(summary.call(&mut store,cancelled).unwrap(),(1,2,0,0,0,0,1));
+    assert_eq!(entry.call(&mut store,(cancelled,1)).unwrap(),(0,0,0,0));
+    eprintln!("retained pool ownership passed; Wasm linear memory {} bytes",memory.data_size(&store));
+}
+
+#[test]
 fn cpu_atlas_compiles_typed_worker_payload() {
     use common::InputDb;
     use hir::hir_def::HirIngot;

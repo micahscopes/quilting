@@ -1,0 +1,121 @@
+//! Full canonical atlas in four persistent typed workers. All job policy is Fe.
+use core::{BrowserPtr, BrowserList, Worker}
+use core::actor::{ActorInstance, ActorMailbox, ActorSink, Handles,
+    InitialState, ProjectState, ResidentTransition, ScopedTaskFamily}
+use core::pending::{Pending, Suspend, TaskOutcome}
+use std::actor::{ActorMessage, BrowserActorSink}
+use std::host::Resumable
+use std::runtime::{BrowserActorMailbox, ChildScopeExit, supervise_browser_child}
+use std::wasm::WasmBackend
+use quilting_atlas_wasm::{Claim, Completion, Lease, PackedTile, packed_triangle, packed_square}
+use quilting_atlas_wasm::pool
+use quilting_atlas_wasm::pool::{PoolHandle, TileKey, PoolSummary}
+
+struct Slot<const I: u32> {}
+const WORKERS: u32 = 4
+const CAPACITY: usize = WORKERS as usize
+pub struct Request { pub lease: Lease, pub key: TileKey }
+pub struct Response { pub lease: Lease, pub tile: PackedTile }
+actor AtlasWorker {
+    fn generate(request: Request) -> Response uses (Worker) {
+        let key = request.key
+        let tile = if key.square { packed_square(key.a, key.b, key.c, key.d, 42) }
+            else { packed_triangle(key.a, key.b, key.c, 42) }
+        Response { lease: request.lease, tile: tile }
+    }
+}
+
+pub struct State { pub address: u32, pub revision: u32 }
+pub struct Event { pub cancel: bool }
+pub struct Projection { pub address: u32, pub revision: u32, pub batch: PoolSummary }
+
+fn supervise<C>(_ child: C) -> u32 {
+    match supervise_browser_child(child: child, max_restarts: 1, window_ms: 1000,
+        backoff_ms: 10, startup_timeout_ms: 10000) {
+        ChildScopeExit::Cancelled(epoch) => epoch,
+        ChildScopeExit::Exhausted(epoch, _) => epoch,
+        ChildScopeExit::TransportFailure(epoch, _) => epoch,
+        ChildScopeExit::InvariantViolation(epoch, _) => epoch,
+    }
+}
+
+fn drain<C>(_ address: u32, _ slot: u32) -> u32
+uses (mailbox: mut ActorMailbox<WasmBackend, C>, sink: mut ActorSink<WasmBackend, Event>,
+    suspend: Suspend<WasmBackend, u32>) where C: Handles<Request, Response> {
+    if address == 0 { return 0 }
+    let handle: PoolHandle<CAPACITY> = PoolHandle::from_address(address)
+    let mut count: u32 = 0
+    while true {
+        let claim = handle.claim(slot)
+        match claim {
+            Claim::Job(lease) => {
+                let key = handle.key(lease.ordinal)
+                let pending: Pending<WasmBackend, Response> = mailbox.ask(Request { lease: lease, key: key })
+                let response = suspend.suspend(pending)
+                let completion = match response {
+                    TaskOutcome::Success(value,) => {
+                        // Return ownership is checked against the originally
+                        // issued lease, never a worker-selected atlas slot.
+                        let same = value.lease.epoch == lease.epoch
+                            && value.lease.ordinal == lease.ordinal && value.lease.slot == lease.slot
+                        if same { handle.finish(lease, value.tile) }
+                        else { fail(handle, lease) }
+                    },
+                    _ => fail(handle, lease),
+                }
+                let accepted = if let Completion::Accepted = completion { true } else { false }
+                match ActorMessage::new(Event { cancel: false }).send() {
+                    TaskOutcome::Success(_,) => {},
+                    _ => {
+                        handle.cancel()
+                        return count
+                    },
+                }
+                if !accepted { return count }
+                count += 1
+            },
+            _ => return count,
+        }
+    }
+    count
+}
+
+fn fail(_ handle: PoolHandle<CAPACITY>, _ lease: Lease) -> Completion {
+    handle.finish(lease, PackedTile { status: 1, points: 0, triangles: 0,
+        words: BrowserList { ptr: BrowserPtr::from_u32(0), len: 0 } })
+}
+fn run<C>(_ address: u32, _ slot: u32) -> u32 where C: Handles<Request, Response> {
+    with (ActorMailbox<WasmBackend, C> = BrowserActorMailbox<C> {},
+        ActorSink<WasmBackend, Event> = BrowserActorSink {},
+        Suspend<WasmBackend, u32> = Resumable {}) { drain<C>(address, slot) }
+}
+
+actor AtlasPoolRunner {
+    address: u32,
+    revision: u32,
+    fn initial() -> State uses (InitialState) {
+        State { address: pool::create<CAPACITY>(1, 8).address(), revision: 0 }
+    }
+    fn receive(self, event: Event) -> State uses (ResidentTransition) {
+        if event.cancel && self.address != 0 {
+            let handle: PoolHandle<CAPACITY> = PoolHandle::from_address(self.address)
+            handle.cancel()
+        }
+        State { address: self.address, revision: self.revision + 1 }
+    }
+    fn project(self) -> Projection uses (ProjectState) {
+        let batch = if self.address == 0 {
+            PoolSummary { epoch: 1, total: 0, completed: 0, words: 0, points: 0, triangles: 0, status: 3 }
+        } else {
+            let handle: PoolHandle<CAPACITY> = PoolHandle::from_address(self.address)
+            handle.summary()
+        }
+        Projection { address: self.address, revision: self.revision, batch: batch }
+    }
+    fn supervision<const I: u32>() -> u32 uses (ScopedTaskFamily<WORKERS>) {
+        supervise(ActorInstance<AtlasWorker, Slot<I>> {})
+    }
+    fn work<const I: u32>(self) -> u32 uses (ScopedTaskFamily<WORKERS>) {
+        run<ActorInstance<AtlasWorker, Slot<I>>>(self.address, I)
+    }
+}

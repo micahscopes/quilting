@@ -1,0 +1,166 @@
+//! Main-actor ownership of independent canonical jobs and retained packed tiles.
+//! Calls here must run to completion on one Wasm actor; never suspend while
+//! holding this mutable provider. Worker modules own separate generation memory.
+use core::{BrowserPtr, alloc_browser_object, alloc_browser_bytes}
+use core::marker::Copy
+use super::{JobQueue, Claim, Completion, Lease, PackedTile}
+use quilting_atlas::canonical_key_at
+use quilting_atlas::quad::QuadAtlasJobs
+
+pub const MAX_TILES: usize = 1200
+pub const RETAINED_WORDS: u32 = 16777216
+
+pub struct TileKey { pub square: bool, pub a: u32, pub b: u32, pub c: u32, pub d: u32 }
+impl Copy for TileKey {}
+pub struct TileEntry { pub offset: u32, pub words: u32, pub points: u32, pub triangles: u32 }
+impl Copy for TileEntry {}
+pub struct PoolSummary {
+    pub epoch: u32, pub total: u32, pub completed: u32, pub words: u32,
+    pub points: u32, pub triangles: u32, pub status: u32,
+}
+impl Copy for PoolSummary {}
+
+pub struct AtlasPool<const N: usize> {
+    queue: JobQueue<N>,
+    keys: [TileKey; MAX_TILES],
+    entries: [TileEntry; MAX_TILES],
+    summary: PoolSummary,
+    storage: u32,
+}
+
+/// A handle into the owning actor's retained arena, not a live memory borrow.
+/// Each method opens and closes its typed provider before returning. It may
+/// cross an await only while that actor and arena remain alive; arena reset or
+/// actor destruction invalidates it. It must never be sent to another worker.
+pub struct PoolHandle<const N: usize> { address: u32 }
+impl<const N: usize> Copy for PoolHandle<N> {}
+impl<const N: usize> PoolHandle<N> {
+    pub fn from_address(_ address: u32) -> Self { Self { address: address } }
+    pub fn claim(self, _ slot: u32) -> Claim {
+        let p: BrowserPtr<AtlasPool<N>> = BrowserPtr::from_u32(self.address)
+        with (p) { ingot::pool::claim<N>(slot) }
+    }
+    pub fn key(self, _ ordinal: u32) -> TileKey {
+        let p: BrowserPtr<AtlasPool<N>> = BrowserPtr::from_u32(self.address)
+        with (p) { ingot::pool::key<N>(ordinal) }
+    }
+    pub fn finish(self, _ lease: Lease, _ tile: PackedTile) -> Completion {
+        let p: BrowserPtr<AtlasPool<N>> = BrowserPtr::from_u32(self.address)
+        with (p) { ingot::pool::finish<N>(lease, tile) }
+    }
+    pub fn cancel(self) {
+        let p: BrowserPtr<AtlasPool<N>> = BrowserPtr::from_u32(self.address)
+        with (p) { ingot::pool::cancel<N>() }
+    }
+    pub fn summary(self) -> PoolSummary {
+        let p: BrowserPtr<AtlasPool<N>> = BrowserPtr::from_u32(self.address)
+        with (p) { ingot::pool::summary<N>() }
+    }
+}
+
+pub fn create<const N: usize>(_ epoch: u32, _ maximum_lod: u32) -> BrowserPtr<AtlasPool<N>> {
+    let ptr = alloc_browser_object<AtlasPool<N>>()
+    if ptr.address() == 0 { return ptr }
+    with (ptr) { initialize<N>(epoch, maximum_lod) }
+    ptr
+}
+
+fn initialize<const N: usize>(_ epoch: u32, _ maximum_lod: u32)
+uses (pool: mut AtlasPool<N>) {
+    pool.summary = PoolSummary { epoch: epoch, total: 0, completed: 0,
+        words: 0, points: 0, triangles: 0, status: 0 }
+    pool.storage = 0
+    pool.queue = JobQueue::new(epoch, 0)
+    if maximum_lod > 8 || N == 0 { pool.summary.status = 2; return }
+    let bytes = alloc_browser_bytes(RETAINED_WORDS * 4 + 3)
+    if bytes.address() == 0 { pool.summary.status = 3; return }
+    pool.storage = (bytes.address() + 3) & 0xfffffffc
+    let mut count: u32 = 0
+    for ordinal in 0 .. 165 {
+        let key = canonical_key_at(ordinal)
+        if key.c <= maximum_lod {
+            pool.keys[count as usize] = TileKey { square: false, a: key.a, b: key.b, c: key.c, d: 0 }
+            count += 1
+        }
+    }
+    let mut jobs = QuadAtlasJobs::new(maximum_lod)
+    let mut job = jobs.next()
+    while job.valid {
+        let key = job.key
+        pool.keys[count as usize] = TileKey { square: true,
+            a: key.bottom, b: key.right, c: key.top, d: key.left }
+        count += 1
+        job = jobs.next()
+    }
+    for ordinal in 0 .. (count as usize) {
+        pool.entries[ordinal] = TileEntry { offset: 0, words: 0, points: 0, triangles: 0 }
+    }
+    pool.summary.total = count
+    pool.queue = JobQueue::new(epoch, count)
+}
+
+pub fn claim<const N: usize>(_ slot: u32) -> Claim uses (pool: mut AtlasPool<N>) {
+    if pool.summary.status == 1 { return Claim::Cancelled }
+    if pool.summary.status != 0 { return Claim::Failed }
+    pool.queue.claim(slot)
+}
+pub fn key<const N: usize>(_ ordinal: u32) -> TileKey uses (pool: AtlasPool<N>) {
+    if ordinal >= pool.summary.total {
+        return TileKey { square: false, a: 9, b: 9, c: 9, d: 9 }
+    }
+    pool.keys[ordinal as usize]
+}
+pub fn summary<const N: usize>() -> PoolSummary uses (pool: AtlasPool<N>) { pool.summary }
+pub fn entry<const N: usize>(_ ordinal: u32) -> TileEntry uses (pool: AtlasPool<N>) {
+    if ordinal >= pool.summary.total {
+        return TileEntry { offset: 0, words: 0, points: 0, triangles: 0 }
+    }
+    pool.entries[ordinal as usize]
+}
+pub fn storage<const N: usize>() -> u32 uses (pool: AtlasPool<N>) { pool.storage }
+
+pub fn cancel<const N: usize>() uses (pool: mut AtlasPool<N>) {
+    if pool.summary.total > 0 && pool.summary.completed == pool.summary.total { return }
+    pool.queue.cancel()
+    pool.summary.status = 1
+}
+
+/// The input descriptor is borrowed only for this non-suspending call. Copy it
+/// into the retained atlas before the canonical response arena can be reclaimed.
+pub fn finish<const N: usize>(_ lease: Lease, _ tile: PackedTile) -> Completion
+uses (pool: mut AtlasPool<N>) {
+    let valid = tile.status == 0 && tile.points > 0 && tile.points <= 65536
+        && tile.triangles > 0 && tile.triangles <= 131072
+        && tile.words.len == tile.points + (tile.triangles * 3 + 1) / 2
+        && tile.words.ptr.address() != 0 && (tile.words.ptr.address() & 3) == 0
+        && pool.summary.words <= RETAINED_WORDS
+        && tile.words.len <= RETAINED_WORDS - pool.summary.words
+    let result = pool.queue.finish(lease, valid)
+    match result {
+    Completion::Accepted => {
+        let offset = pool.summary.words
+        let mut source = tile.words.ptr.address()
+        let mut destination = pool.storage + offset * 4
+        for _ in 0 .. (tile.words.len as usize) {
+            let src: BrowserPtr<u32> = BrowserPtr::from_u32(source)
+            let dst: BrowserPtr<u32> = BrowserPtr::from_u32(destination)
+            dst.write(src.read())
+            source += 4
+            destination += 4
+        }
+        pool.entries[lease.ordinal as usize] = TileEntry { offset: offset,
+            words: tile.words.len, points: tile.points, triangles: tile.triangles }
+        pool.summary.words += tile.words.len
+        pool.summary.points += tile.points
+        pool.summary.triangles += tile.triangles
+        pool.summary.completed = pool.queue.completed()
+        Completion::Accepted
+    },
+    Completion::Failed => {
+        pool.summary.status = 4
+        Completion::Failed
+    },
+    Completion::Stale => Completion::Stale,
+    Completion::Invalid => Completion::Invalid,
+    }
+}

@@ -1,0 +1,40 @@
+//! Actual Wasm acceptance for retained pool ownership, not a host scheduler.
+use core::BrowserPtr
+use quilting_atlas_wasm::{Claim, Completion, packed_triangle, packed_square}
+use quilting_atlas_wasm::pool
+use quilting_atlas_wasm::pool::{AtlasPool, PoolSummary, TileEntry}
+
+pub fn create(_ maximum_lod: u32) -> u32 { pool::create<4>(1, maximum_lod).address() }
+pub fn summary(_ address: u32) -> PoolSummary {
+    let p: BrowserPtr<AtlasPool<4>> = BrowserPtr::from_u32(address)
+    with (p) { pool::summary<4>() }
+}
+pub fn entry(_ address: u32, _ ordinal: u32) -> TileEntry {
+    let p: BrowserPtr<AtlasPool<4>> = BrowserPtr::from_u32(address)
+    with (p) { pool::entry<4>(ordinal) }
+}
+pub fn storage(_ address: u32) -> u32 {
+    let p: BrowserPtr<AtlasPool<4>> = BrowserPtr::from_u32(address)
+    with (p) { pool::storage<4>() }
+}
+pub fn generate_one(_ address: u32, _ slot: u32, _ cancel_before_finish: bool) -> u32 {
+    let p: BrowserPtr<AtlasPool<4>> = BrowserPtr::from_u32(address)
+    let claim = with (p) { pool::claim<4>(slot) }
+    match claim {
+        Claim::Job(lease) => {
+            let key = with (p) { pool::key<4>(lease.ordinal) }
+            let tile = if key.square { packed_square(key.a, key.b, key.c, key.d, 42) }
+                else { packed_triangle(key.a, key.b, key.c, 42) }
+            if cancel_before_finish { with (p) { pool::cancel<4>() } }
+            with (p) {
+                match pool::finish<4>(lease, tile) {
+                    Completion::Accepted => 0,
+                    Completion::Failed => 1,
+                    Completion::Stale => 2,
+                    Completion::Invalid => 3,
+                }
+            }
+        },
+        Claim::Complete => 4, Claim::Busy => 5, Claim::Cancelled => 6, Claim::Failed => 7,
+    }
+}
