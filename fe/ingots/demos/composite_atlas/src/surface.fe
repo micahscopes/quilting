@@ -8,8 +8,8 @@ use quilting_demo_view::handles::{HandleQuery,HandlePick}
 use quilting_patch::{ProjectiveControl,ProjectiveAlgebra,ProjectiveInterpolation,projective_control,
     LinearBarycentric,BilinearBernstein,triangular_projective_controls,bilinear_projective_controls}
 use quilting_patch::pole_authoring::controls_from_edge
-use quilting_clifford_bezier::{Clifford3Policy,even}
-use quilting_clifford_bezier::euclidean::EuclideanCliffordAlgebra
+use quilting_clifford_bezier::{Clifford3Policy,CliffordEven3F,even}
+use quilting_clifford_bezier::euclidean::{EuclideanArcMeasure,EuclideanCliffordAlgebra}
 use std::web::view::SurfaceEvent
 use ingot::model::{Controls,Point,is_triangle}
 
@@ -101,6 +101,29 @@ pub fn evaluate(_ net:Net,_ p:Point)->Sample {
     }
     let q=algebra.right_quotient(frame.numerator,frame.denominator,policy())
     Sample {point:vec3f(q.value.e1,q.value.e2,q.value.e3),valid:net.patch_valid>0.5 && q.defined}
+}
+/// Endpoint denominator weights of one outer square edge, in that edge's
+/// canonical low-to-high direction. Square corners 0..3 are ring ordered and
+/// correspond to controls a..d, so every outer side restricts the blend to an
+/// affine rotor path and its image is a circular arc. Interior diagonals and
+/// spokes do not have that structure and are not offered here.
+pub fn outer_arc(_ net:Net,_ slot:u32)->EuclideanArcMeasure {
+    let (first,last)=if slot==0 {(net.a,net.b)}
+        else if slot==1 {(net.b,net.c)}
+        else if slot==2 {(net.c,net.d)}
+        else {(net.a,net.d)}
+    EuclideanArcMeasure {first:first.weight,last:last.weight,
+        minimum_denominator_norm_squared:0.000000000001}
+}
+fn same_weight(_ a:CliffordEven3F,_ b:CliffordEven3F)->bool {
+    a.scalar==b.scalar && a.e12==b.e12 && a.e13==b.e13 && a.e23==b.e23
+}
+/// Boundary spacing tables derive from these weights, so a published table is
+/// stale whenever they change. Reference LoDs and skews are not sufficient.
+pub fn same_weights(_ a:Net,_ b:Net)->bool {
+    a.kind==b.kind && a.patch_valid==b.patch_valid
+        && same_weight(a.a.weight,b.a.weight) && same_weight(a.b.weight,b.b.weight)
+        && same_weight(a.c.weight,b.c.weight) && same_weight(a.d.weight,b.d.weight)
 }
 pub fn camera(_ c:Controls)->CameraFrame {
     orbit_camera(OrbitCamera {target:vec3f(0.0,0.0,0.0),yaw:c.orbit_yaw,pitch:c.orbit_pitch,

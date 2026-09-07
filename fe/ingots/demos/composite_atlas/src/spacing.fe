@@ -3,15 +3,24 @@
 use core::{BrowserBytes,BrowserPtr,alloc_browser_object}
 use core::marker::Copy
 use quilting_atlas::composition::SquareBoundaryUse
+use core::option::Option
 use quilting_patch::arc_length::CumulativeLengthSamples
-use quilting_patch::sampling_warp::{InverseCumulativeMap,OrientedIntervalMap}
+use quilting_patch::arc_spacing::{dyadic_arc_samples,interpolate_parameters,IntervalMapSamples}
+use quilting_patch::sampling_warp::{InverseCumulativeMap,IntervalSamplingMap,OrientedIntervalMap}
+use quilting_clifford_bezier::euclidean::EuclideanArcMeasure
 use quilting_domain::Bary3F
 use std::webgpu::{StorageBuffer,BufferPublication,PublicationVersion}
 use ingot::model::{initial_controls,edge_measure,redistribute_edge}
 use ingot::residency::{Scene,State,ChildDraw}
 
 pub const SAMPLES:usize=17
-pub const MAP_WORDS:usize=10*SAMPLES
+/// One 2^8+1 table per outer side. Because the construction is nested, every
+/// coarser LoD reads its own samples out of this one table exactly, so a single
+/// published size serves LoD0 through LoD8 without a second resolution.
+pub const ARC_SAMPLES:usize=257
+pub const ARC_SLOTS:usize=4
+pub const ARC_BASE:usize=10*SAMPLES
+pub const MAP_WORDS:usize=ARC_BASE+ARC_SLOTS*ARC_SAMPLES
 pub type Maps=StorageBuffer<f32,MAP_WORDS>
 pub struct PublishSpacing {}
 impl PublishSpacing {
@@ -45,6 +54,31 @@ impl PublishSpacing {
                 dst.write(cdf.values[i])
             }
         }
+        // Measured surface spacing for the four outer sides. This replaces the
+        // reference-domain map only where the authored weights admit the exact
+        // circular construction; a rejected or disabled side writes the leading
+        // sentinel and keeps the reference map in use.
+        for slot in 0 .. ARC_SLOTS {
+            let base=ARC_BASE+slot*ARC_SAMPLES
+            let samples=if scene.active_automatic_density>0.5 && scene.surface.patch_valid>0.5 {
+                dyadic_arc_samples<EuclideanArcMeasure,ARC_SAMPLES>(
+                    ingot::surface::outer_arc(scene.surface,slot.downcast_truncate()))
+            } else {Option::None}
+            match samples {
+                Option::Some(table)=>{
+                    for i in 0 .. ARC_SAMPLES {
+                        let dst:BrowserPtr<f32>=BrowserPtr::from_u32(p.address()+((base+i)*4).downcast_truncate())
+                        dst.write(table.parameter(i.downcast_truncate()))
+                    }
+                },
+                Option::None=>{
+                    for i in 0 .. ARC_SAMPLES {
+                        let dst:BrowserPtr<f32>=BrowserPtr::from_u32(p.address()+((base+i)*4).downcast_truncate())
+                        dst.write(if i==0 {-1.0} else {identity_fraction(i.downcast_truncate())})
+                    }
+                },
+            }
+        }
         BufferPublication {version:version,source:BrowserBytes {ptr:p.address(),len:(MAP_WORDS*4).downcast_truncate()},target_byte_offset:0}
     }
 }
@@ -55,9 +89,45 @@ impl CumulativeLengthSamples for EdgeSamples {
     fn segments(self)->u32 {16}
     fn cumulative(self,_ index:u32)->f32 {self.maps.load(index:self.slot.wrapping_mul(17).wrapping_add(index))}
 }
-pub type DirectedMap=OrientedIntervalMap<InverseCumulativeMap<EdgeSamples>>
+extern {const fn __f32_from_i32(_:i32)->f32}
+fn arc_segments()->u32 {(ARC_SAMPLES-1).downcast_truncate()}
+fn identity_fraction(_ index:u32)->f32 {
+    let last:i32=(ARC_SAMPLES-1).downcast_unchecked()
+    __f32_from_i32(index.downcast_unchecked())/__f32_from_i32(last)
+}
+/// A published outer-side arc table read directly out of shared storage. Its
+/// values are already the inverse map, so exact dyadic inputs select a stored
+/// sample rather than interpolating between two of them.
+pub struct ArcSamples {pub maps:Maps,pub slot:u32}
+impl Copy for ArcSamples {}
+impl IntervalMapSamples for ArcSamples {
+    fn segments(self)->u32 {arc_segments()}
+    fn parameter(self,_ index:u32)->f32 {
+        let base:u32=ARC_BASE.downcast_truncate()
+        let stride:u32=ARC_SAMPLES.downcast_truncate()
+        self.maps.load(index:base.wrapping_add(self.slot.wrapping_mul(stride)).wrapping_add(index))
+    }
+}
+/// One canonical law per boundary. Both neighbouring uses of a shared edge
+/// resolve the same branch from the same published table, so the choice cannot
+/// desynchronize a seam.
+pub struct EdgeSpacing {pub maps:Maps,pub slot:u32,pub measured:bool}
+impl Copy for EdgeSpacing {}
+impl IntervalSamplingMap for EdgeSpacing {
+    fn map(self,_ t:f32)->f32 {
+        if self.measured {interpolate_parameters(ArcSamples {maps:self.maps,slot:self.slot},t)}
+        else {InverseCumulativeMap {samples:EdgeSamples {maps:self.maps,slot:self.slot}}.map(t)}
+    }
+}
+pub type DirectedMap=OrientedIntervalMap<EdgeSpacing>
 fn edge_map(_ maps:Maps,_ edge:SquareBoundaryUse)->DirectedMap {
-    OrientedIntervalMap {law:InverseCumulativeMap {samples:EdgeSamples {maps:maps,slot:edge.slot()}},reversed:edge.reversed()}
+    let slot=edge.slot()
+    let outer:u32=ARC_SLOTS.downcast_truncate()
+    let table=ArcSamples {maps:maps,slot:slot}
+    // A published table always starts at zero; the sentinel marks a side that
+    // was disabled or whose arc the measure refused.
+    let measured=slot<outer && table.parameter(0)==0.0
+    OrientedIntervalMap {law:EdgeSpacing {maps:maps,slot:slot,measured:measured},reversed:edge.reversed()}
 }
 pub fn canonical_parameter(_ maps:Maps,_ edge:SquareBoundaryUse,_ t:f32,_ enabled:bool)->f32 {
     let m=edge_map(maps,edge)

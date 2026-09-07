@@ -84,6 +84,57 @@ fn dyadic_arc_spacing_has_uniform_geometric_chords_and_nested_samples() {
     assert!(worst_patch_chord_error<0.002);
 }
 
+/// Micah's observation: dragging the arc handle along its own edge changed the
+/// density. That is a reparameterization, not a shape change, so it is exactly
+/// what measured arc-length spacing must be blind to. Uniform-parameter spacing
+/// is not blind to it, and this pins both halves of that claim.
+#[test]
+fn measured_arc_spacing_is_invariant_to_sliding_the_authored_midpoint() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let boundary=instance.get_typed_func::<(f32,i32,i32,i32),f32>(&mut store,"slid_arc_boundary").unwrap();
+    let mut collect=|store:&mut wasmtime::Store<()>,slide:f32,measured:i32| {
+        let mut points=Vec::new();
+        for index in 0..=256 {
+            let mut point=[0.0_f64;3];
+            for lane in 0..3 {
+                let value=boundary.call(&mut *store,(slide,measured,index,lane)).unwrap();
+                assert!(value.is_finite() && value!=-999.0,"slide={slide} measured={measured}");
+                point[lane as usize]=f64::from(value);
+            }
+            points.push(point);
+        }
+        points
+    };
+    let distance=|a:&[f64;3],b:&[f64;3]| {
+        ((a[0]-b[0]).powi(2)+(a[1]-b[1]).powi(2)+(a[2]-b[2]).powi(2)).sqrt()
+    };
+    // The authored edge spans two units between its fixed endpoints, so these
+    // displacements are already in a meaningful scale for this patch.
+    let mut worst=[0.0_f64;2];
+    for measured in 0..2 {
+        let reference=collect(&mut store,0.5,measured);
+        for slide in [0.30_f32,0.40,0.60,0.70] {
+            let moved=collect(&mut store,slide,measured);
+            for (a,b) in reference.iter().zip(moved.iter()) {
+                worst[measured as usize]=worst[measured as usize].max(distance(a,b));
+            }
+        }
+    }
+    eprintln!("SLID_ARC worst sample displacement: uniform parameter={:.9}, measured arc length={:.9}",worst[0],worst[1]);
+    // The reparameterization must actually be visible, otherwise the test would
+    // pass for the trivial reason that sliding did nothing.
+    assert!(worst[0]>0.02,"sliding must move uniform-parameter samples: {}",worst[0]);
+    // And measured spacing must not follow it. The residual is f32 evaluation
+    // noise through a different weight representation of the same circle.
+    assert!(worst[1]<1e-3,"measured spacing must be reparameterization invariant: {}",worst[1]);
+    assert!(worst[1]<worst[0]/20.0);
+}
+
 #[test]
 fn composition_wasm_boundary_locality_sweep() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");

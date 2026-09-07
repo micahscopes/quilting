@@ -1,6 +1,7 @@
 # Circular-edge spacing without trigonometry
 
-This is a reusable Fe kernel, not yet enabled in the composite viewer.
+This is a reusable Fe kernel. The composite viewer now uses it for the
+four outer sides; see Integration below for what is and is not covered.
 
 ## Construction
 
@@ -66,6 +67,25 @@ The complete test passed in 30.53 seconds including Fe compilation and many
 repeated constructions to query individual samples. This is not a production
 map-generation benchmark. Receipt:
 `/laboratory/quilting/scratch/arc-spacing-geometric-wasm-20260907.log`.
+
+## Integration: outer sides, September 7, 2026
+
+The composite viewer publishes one 2^8+1 parameter table per outer side beside
+the existing reference cumulatives, behind the `automatic_density` control.
+Because the construction is nested, every coarser LoD selects its own samples
+out of that single table exactly, so one published size serves LoD0 to LoD8.
+A side whose arc the measure refuses, and the flat view, keep the reference map
+through a leading sentinel rather than silently falling back to uniform UV.
+
+Publication now also invalidates on the authored denominator weights, not only
+on reference LoDs and skews. Without that an arc drag kept spacing built for the
+previous surface.
+
+Acceptance beyond chord uniformity: sliding the authored midpoint along its own
+arc reparameterizes that edge without moving it, so measured spacing must return
+the same points. Over slides of 0.30 to 0.70 on the default quad, whose edge
+spans two units, uniform-parameter spacing moved boundary samples by up to
+`0.558928188` while measured spacing moved them by `0.000000466`.
 
 ## Integration still required
 

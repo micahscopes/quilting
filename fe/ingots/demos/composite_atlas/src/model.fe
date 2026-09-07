@@ -31,6 +31,7 @@ pub struct Controls {
     pub diagonal_02_skew:f32,pub diagonal_13_skew:f32,
     pub spoke_0_skew:f32,pub spoke_1_skew:f32,pub spoke_2_skew:f32,pub spoke_3_skew:f32,
     pub boundary_reach:f32,
+    pub automatic_density:f32,
 }
 impl Copy for Controls {}
 pub struct Params {
@@ -78,6 +79,10 @@ pub struct Params {
     /// One preserves the original extension. Smaller values localize edge
     /// warps; very small values can create skinny triangles. Boundaries stay fixed.
     pub boundary_reach:Param,
+    /// Space the four outer sides by measured surface arc length instead of the
+    /// reference-domain density. Applies only where an authored patch admits the
+    /// exact circular map; diagonals, spokes and the flat view are unaffected.
+    pub automatic_density:Param,
     /// Visible segment counts, not saved manual requests. Zero means inactive.
     pub diagonal_02_segments:Param,pub diagonal_13_segments:Param,
     pub spoke_0_segments:Param,pub spoke_1_segments:Param,pub spoke_2_segments:Param,pub spoke_3_segments:Param,
@@ -140,6 +145,7 @@ pub const fn params() -> Params {
         diagonal_02_skew:skew_param(),diagonal_13_skew:skew_param(),
         spoke_0_skew:skew_param(),spoke_1_skew:skew_param(),spoke_2_skew:skew_param(),spoke_3_skew:skew_param(),
         boundary_reach:Param::log(min:0.0625,max:16.0,init:1.0),
+        automatic_density:Param::toggle(init:true),
         diagonal_02_segments:Param::readout(ParamReadout::Integer),
         diagonal_13_segments:Param::readout(ParamReadout::Integer),
         spoke_0_segments:Param::readout(ParamReadout::Integer),
@@ -185,7 +191,8 @@ pub fn initial_controls() -> Controls {
         compensate_density:1.0,interior_enabled:1.0,interior_concentration:1.0,interior_twist:0.0,
         focus_a:1.0,focus_b:1.0,focus_c:1.0,width:1200.0,height:1200.0,
         bottom_skew:1.0,right_skew:1.0,top_skew:1.0,left_skew:1.0,diagonal_02_skew:1.0,diagonal_13_skew:1.0,
-        spoke_0_skew:1.0,spoke_1_skew:1.0,spoke_2_skew:1.0,spoke_3_skew:1.0,boundary_reach:1.0}
+        spoke_0_skew:1.0,spoke_1_skew:1.0,spoke_2_skew:1.0,spoke_3_skew:1.0,boundary_reach:1.0,
+        automatic_density:1.0}
 }
 /// An immutable visible interior policy, published with its child geometry.
 pub struct InteriorPolicy {pub enabled:f32,pub map:InteriorRedistribution,pub focus:Bary3F}

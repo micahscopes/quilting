@@ -141,6 +141,40 @@ pub fn authored_uniform_arc(_ kind:u32,_ edge:u32,_ index:u32,_ lane:u32)->f32 {
     }
 }
 
+/// Sliding the authored midpoint along its own arc reparameterizes that edge
+/// without moving it: the circle through the two fixed endpoints and any third
+/// point of the same circle is the same circle, while the derived denominator
+/// weights are not the same. Arc length is a property of the curve, so measured
+/// spacing must return the same points and uniform-parameter spacing must not.
+/// `measured` selects the law and `slide` picks where the new midpoint is read.
+pub fn slid_arc_boundary(_ slide:f32,_ measured:u32,_ index:u32,_ lane:u32)->f32 {
+    use quilting_patch::arc_spacing::{dyadic_arc_samples,IntervalMapSamples}
+    use quilting_clifford_bezier::euclidean::EuclideanArcMeasure
+    use composite_atlas::model::Point
+    let mut c=initial_controls()
+    c.surface_kind=2.0
+    c.arc_edge=0.0
+    let base=composite_atlas::surface::authored(c)
+    if base.patch_valid!=1.0 {return -999.0}
+    let moved=composite_atlas::surface::evaluate(base,Point {x:slide,y:0.0})
+    if !moved.valid {return -999.0}
+    c.midpoint_x=moved.point.x
+    c.midpoint_y=moved.point.y
+    c.midpoint_z=moved.point.z
+    let net=composite_atlas::surface::authored(c)
+    if net.patch_valid!=1.0 {return -999.0}
+    let t=if measured==0 {__f32_from_i32(index.downcast_unchecked())/256.0}
+        else {
+            match dyadic_arc_samples<EuclideanArcMeasure,257>(composite_atlas::surface::outer_arc(net,0)) {
+                Option::None=>-1.0,
+                Option::Some(samples)=>samples.parameter(index),
+            }
+        }
+    if t<0.0 {return -999.0}
+    let p=composite_atlas::surface::evaluate(net,Point {x:t,y:0.0})
+    if !p.valid {-999.0} else if lane==0 {p.point.x} else if lane==1 {p.point.y} else {p.point.z}
+}
+
 pub fn geometric_patch_view_laws()->bool {
     let mut c=initial_controls()
     for kind in [1.0,2.0] {
