@@ -3,6 +3,29 @@
 This ingot owns deterministic sampling and topology rules, independently of
 where they execute. Storage, dispatch, and residency belong to providers.
 
+## Wasm-worker direction
+
+`active_sampling` is the CPU active-list sampler, sharing prescribed boundaries,
+Q14 geometry and density laws across triangle and square domains. It generates
+proposals around accepted samples instead of allocating a finest-grid candidate
+population. Caller-owned scratch is reusable and capacity/budget failures are
+explicit. Receipts count executed proposals and neighbor comparisons.
+
+The initial exhaustive accepted-point query is a correctness reference for the
+worker spatial index, not the intended full-atlas performance implementation.
+Interior points obey symmetric larger-radius exclusion; prescribed boundary
+points are exempt from mutual exclusion, not from excluding interior points.
+Finite-attempt active-list exhaustion does not prove maximal coverage or a
+continuous blue-noise spectrum. Sampling alone is not a completed triangulation
+or atlas, and scalar test timings are not Wasm-worker benchmarks.
+
+Known coverage counterexample: with seed 42, triangle `[0,0,4]` exhausts its
+boundary-seeded active list with no interior samples even though the centroid
+is admissible. The reference test explicitly demonstrates that gap. Production
+sampling needs additional domain exploration; faster indexing alone cannot
+repair it. Large scratch arrays also exceed the EVM test target's stack: the
+LoD-8 boundary-only contract test is not full LoD-8 Wasm sampling evidence.
+
 The existing triangle atlas uses all 165 sorted edge-LoD triples through LoD 8.
 Its equilateral metric is intentional: barycentric coordinate lanes are not
 orthogonal Cartesian axes.

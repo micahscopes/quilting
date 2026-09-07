@@ -21,6 +21,7 @@ extern {
 }
 
 pub use sampling
+pub use active_sampling
 pub use topology
 pub use triangulation
 pub use planar

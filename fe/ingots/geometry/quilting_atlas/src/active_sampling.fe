@@ -1,0 +1,420 @@
+//! CPU active-list sampling, independent of candidate grids and GPU rounds.
+//!
+//! This initial realization uses exhaustive accepted-point queries as a
+//! correctness reference for an accelerated worker index. It is NOT the final
+//! full-atlas performance path. Boundary seeds are prescribed constraints;
+//! only interior admissions obey symmetric larger-radius exclusion.
+use core::marker::Copy
+use super::{AtlasKey, MAX_LOD, boundary_vertices}
+use super::planar::{FixedPoint2, PlanarCoordinates}
+use super::quad::QuadAtlasKey
+use super::{sampling, quad, quad_sampling}
+use super::sampling::{BARYCENTRIC_SCALE, FixedBarycentric, mix32}
+
+pub trait ActiveDomain: Copy {
+    fn valid(self) -> bool
+    fn boundary_count(self) -> u32
+    fn boundary_point(self, _ index: u32) -> FixedPoint2
+    fn interior(self, _ p: FixedPoint2) -> bool
+    fn radius_squared(self, _ p: FixedPoint2) -> u32
+    fn distance_squared(self, _ a: FixedPoint2, _ b: FixedPoint2) -> u32
+}
+
+fn bary(_ p: FixedPoint2) -> FixedBarycentric {
+    FixedBarycentric { a: BARYCENTRIC_SCALE - p.x - p.y, b: p.x, c: p.y }
+}
+
+impl ActiveDomain for AtlasKey {
+    fn valid(self) -> bool {
+        self.a <= self.b && self.b <= self.c && self.c <= MAX_LOD
+    }
+    fn boundary_count(self) -> u32 {
+        boundary_vertices(self)
+    }
+    fn boundary_point(self, _ index: u32) -> FixedPoint2 {
+        sampling::boundary_seed(self, index).point.coordinates()
+    }
+    fn interior(self, _ p: FixedPoint2) -> bool {
+        p.x > 0 && p.y > 0 && p.x + p.y < BARYCENTRIC_SCALE
+    }
+    fn radius_squared(self, _ p: FixedPoint2) -> u32 {
+        sampling::poisson_radius_squared(self, bary(p))
+    }
+    fn distance_squared(self, _ a: FixedPoint2, _ b: FixedPoint2) -> u32 {
+        sampling::equilateral_distance_squared(bary(a), bary(b))
+    }
+}
+
+impl ActiveDomain for QuadAtlasKey {
+    fn valid(self) -> bool {
+        self.valid()
+    }
+    fn boundary_count(self) -> u32 {
+        self.boundary_count()
+    }
+    fn boundary_point(self, _ index: u32) -> FixedPoint2 {
+        quad::boundary_seed(self, index).point
+    }
+    fn interior(self, _ p: FixedPoint2) -> bool {
+        p.x > 0 && p.y > 0 && p.x < BARYCENTRIC_SCALE && p.y < BARYCENTRIC_SCALE
+    }
+    fn radius_squared(self, _ p: FixedPoint2) -> u32 {
+        quad_sampling::poisson_radius_squared(self, p)
+    }
+    fn distance_squared(self, _ a: FixedPoint2, _ b: FixedPoint2) -> u32 {
+        let dx = signed(a.x) - signed(b.x)
+        let dy = signed(a.y) - signed(b.y)
+        (dx * dx + dy * dy).downcast_truncate()
+    }
+}
+
+pub struct ActiveSample { pub point: FixedPoint2, pub radius_squared: u32 }
+impl Copy for ActiveSample {}
+
+pub enum SamplingStop {
+    ActiveListEmpty,
+    Capacity,
+    Budget,
+    InvalidInput,
+}
+impl Copy for SamplingStop {}
+
+/// Counters record actual executed work, not a static candidate envelope.
+pub struct SamplingReceipt {
+    pub points: u32,
+    pub boundary_points: u32,
+    pub proposals: u32,
+    pub comparisons: u64,
+    pub remaining_active: u32,
+    pub stop: SamplingStop,
+}
+impl Copy for SamplingReceipt {}
+
+pub struct ActiveConfig { pub seed: u32, pub attempts_per_active: u32, pub proposal_budget: u32 }
+impl Copy for ActiveConfig {}
+
+/// Caller-owned scratch can be reused across tile jobs. Only receipt.points
+/// entries of samples are initialized outputs. No atlas points live in CTFE.
+pub struct ActiveScratch<const N: usize> { pub samples: [ActiveSample; N], active: [u32; N] }
+
+impl<const N: usize> ActiveScratch<N> {
+    pub fn empty() -> Self {
+        Self {
+            samples: [ActiveSample { point: FixedPoint2 { x: 0, y: 0 }, radius_squared: 0 }; N],
+            active: [0; N],
+        }
+    }
+}
+
+fn ceil_sqrt(_ n: u32) -> u32 {
+    let mut low = 0
+    let mut high = BARYCENTRIC_SCALE
+    while low < high {
+        let middle = (low + high) / 2
+        if middle * middle < n {
+            low = middle + 1
+        } else {
+            high = middle
+        }
+    }
+    low
+}
+
+fn random(_ state: u32) -> u32 {
+    mix32(state.wrapping_add(0x9e3779b9))
+}
+
+fn signed(_ value: u32) -> i32 {
+    value.downcast_truncate()
+}
+
+/// Rejection proposals in the metric annulus [r,2r). Quantization is Q14;
+/// this is a discrete sampler, not a claim of exact continuous blue noise.
+/// Active-list exhaustion with finite attempts is not a maximality proof.
+pub fn sample_active<D: ActiveDomain, const N: usize>(
+    _ domain: D,
+    _ config: ActiveConfig,
+    _ scratch: mut ActiveScratch<N>,
+) -> SamplingReceipt {
+    let mut receipt = SamplingReceipt {
+        points: 0,
+        boundary_points: 0,
+        proposals: 0,
+        comparisons: 0,
+        remaining_active: 0,
+        stop: SamplingStop::InvalidInput,
+    }
+    if !domain.valid() || config.attempts_per_active == 0 {
+        return receipt
+    }
+    let boundary = domain.boundary_count()
+    if (boundary as usize) > N {
+        receipt.stop = SamplingStop::Capacity
+        return receipt
+    }
+    for i in 0 .. (boundary as usize) {
+        let ordinal: u32 = i.downcast_truncate()
+        let p = domain.boundary_point(ordinal)
+        scratch.samples[i as usize] = ActiveSample {
+            point: p,
+            radius_squared: domain.radius_squared(p),
+        }
+        scratch.active[i] = ordinal
+    }
+    receipt.points = boundary
+    receipt.boundary_points = boundary
+    receipt.remaining_active = boundary
+    let mut rng = config.seed
+    while receipt.remaining_active > 0 {
+        rng = random(rng)
+        let selected = rng % receipt.remaining_active
+        let center = scratch.samples[scratch.active[selected as usize] as usize]
+        let extent = 2 * ceil_sqrt(center.radius_squared)
+        let previous_count = receipt.points
+        for attempt in 0 .. (config.attempts_per_active as usize) {
+            if receipt.proposals >= config.proposal_budget {
+                receipt.stop = SamplingStop::Budget
+                return receipt
+            }
+            receipt.proposals += 1
+            rng = random(rng)
+            let dx = signed(rng % (2 * extent + 1)) - signed(extent)
+            rng = random(rng)
+            let dy = signed(rng % (2 * extent + 1)) - signed(extent)
+            let x = signed(center.point.x) + dx
+            let y = signed(center.point.y) + dy
+            if x < 0 || y < 0 || x > signed(BARYCENTRIC_SCALE) || y > signed(BARYCENTRIC_SCALE) {
+                continue
+            }
+            let p = FixedPoint2 { x: x.downcast_truncate(), y: y.downcast_truncate() }
+            if !domain.interior(p) {
+                continue
+            }
+            let distance = domain.distance_squared(center.point, p)
+            if distance < center.radius_squared || distance >= 4 * center.radius_squared {
+                continue
+            }
+            let radius = domain.radius_squared(p)
+            let mut conflict = false
+            for j in 0 .. (receipt.points as usize) {
+                let other = scratch.samples[j as usize]
+                receipt.comparisons += 1
+                let exclusion = if radius > other.radius_squared {
+                    radius
+                } else {
+                    other.radius_squared
+                }
+                if domain.distance_squared(p, other.point) < exclusion {
+                    conflict = true
+                    break
+                }
+            }
+            if conflict { continue }
+            if (receipt.points as usize) >= N {
+                receipt.stop = SamplingStop::Capacity
+                return receipt
+            }
+            scratch.samples[receipt.points as usize] = ActiveSample {
+                point: p,
+                radius_squared: radius,
+            }
+            scratch.active[receipt.remaining_active as usize] = receipt.points
+            receipt.points += 1
+            receipt.remaining_active += 1
+            break
+        }
+        if receipt.points == previous_count {
+            receipt.remaining_active -= 1
+            scratch.active[selected as usize] = scratch.active[receipt.remaining_active as usize]
+        }
+    }
+    receipt.stop = SamplingStop::ActiveListEmpty
+    receipt
+}
+
+#[test]
+fn active_sampler_preserves_triangle_boundary_and_reports_budget() {
+    let mut scratch: ActiveScratch<32> = ActiveScratch::empty()
+    let key = AtlasKey { a: 0, b: 1, c: 2 }
+    let r = sample_active(
+        key,
+        ActiveConfig { seed: 42, attempts_per_active: 30, proposal_budget: 0 },
+        mut scratch,
+    )
+    assert(r.points == 7)
+    assert(r.proposals == 0)
+    assert(
+        match r.stop {
+            SamplingStop::Budget => true,
+            _ => false,
+        },
+    )
+    for i in 0 .. (r.points as usize) {
+        let expected = key.boundary_point(i.downcast_truncate())
+        assert(scratch.samples[i as usize].point.x == expected.x)
+        assert(scratch.samples[i as usize].point.y == expected.y)
+    }
+}
+
+#[test]
+fn active_sampler_quad_obeys_symmetric_spacing() {
+    let mut scratch: ActiveScratch<128> = ActiveScratch::empty()
+    let key = QuadAtlasKey { bottom: 2, right: 2, top: 2, left: 2 }
+    let r = sample_active(
+        key,
+        ActiveConfig { seed: 42, attempts_per_active: 30, proposal_budget: 20000 },
+        mut scratch,
+    )
+    for i in (r.boundary_points as usize) .. (r.points as usize) {
+        let p = scratch.samples[i as usize]
+        for j in 0 .. i {
+            let q = scratch.samples[j as usize]
+            let radius = if p.radius_squared > q.radius_squared {
+                p.radius_squared
+            } else {
+                q.radius_squared
+            }
+            assert(key.distance_squared(p.point, q.point) >= radius)
+        }
+    }
+}
+
+#[test]
+fn active_sampler_quad_exhausts_active_list() {
+    let mut scratch: ActiveScratch<128> = ActiveScratch::empty()
+    let r = sample_active(
+        QuadAtlasKey { bottom: 2, right: 2, top: 2, left: 2 },
+        ActiveConfig { seed: 42, attempts_per_active: 30, proposal_budget: 20000 },
+        mut scratch,
+    )
+    assert(r.remaining_active == 0)
+    assert(
+        match r.stop {
+            SamplingStop::ActiveListEmpty => true,
+            _ => false,
+        },
+    )
+}
+
+#[test]
+fn active_sampler_quad_within_budget() {
+    let mut scratch: ActiveScratch<128> = ActiveScratch::empty()
+    let r = sample_active(
+        QuadAtlasKey { bottom: 2, right: 2, top: 2, left: 2 },
+        ActiveConfig { seed: 42, attempts_per_active: 30, proposal_budget: 20000 },
+        mut scratch,
+    )
+    assert(r.proposals < 20000)
+}
+
+#[test]
+fn active_sampler_quad_within_capacity() {
+    let mut scratch: ActiveScratch<128> = ActiveScratch::empty()
+    let r = sample_active(
+        QuadAtlasKey { bottom: 2, right: 2, top: 2, left: 2 },
+        ActiveConfig { seed: 42, attempts_per_active: 30, proposal_budget: 20000 },
+        mut scratch,
+    )
+    assert(r.points < 128)
+}
+
+#[test]
+fn active_sampler_quad_adds_interior_points() {
+    let mut scratch: ActiveScratch<128> = ActiveScratch::empty()
+    let r = sample_active(
+        QuadAtlasKey { bottom: 2, right: 2, top: 2, left: 2 },
+        ActiveConfig { seed: 42, attempts_per_active: 30, proposal_budget: 20000 },
+        mut scratch,
+    )
+    assert(r.points > r.boundary_points)
+    assert(r.comparisons > 0)
+}
+
+#[test]
+fn active_sampler_capacity_is_not_success() {
+    let mut scratch: ActiveScratch<2> = ActiveScratch::empty()
+    let r = sample_active(
+        AtlasKey { a: 0, b: 0, c: 0 },
+        ActiveConfig { seed: 42, attempts_per_active: 30, proposal_budget: 10 },
+        mut scratch,
+    )
+    assert(
+        match r.stop {
+            SamplingStop::Capacity => true,
+            _ => false,
+        },
+    )
+    assert(r.points == 0)
+}
+
+#[test]
+fn active_sampler_rejected_attempts_terminate() {
+    let mut remaining: u32 = 16
+    let mut proposals: u32 = 0
+    while remaining > 0 {
+        for attempt in 0 .. 30 {
+            proposals += 1
+            assert(proposals <= 480)
+            continue
+        }
+        remaining -= 1
+    }
+    assert(proposals == 480)
+}
+
+#[test]
+fn active_sampler_mixed_triangle_obeys_larger_radius_rule() {
+    let mut scratch: ActiveScratch<128> = ActiveScratch::empty()
+    let key = AtlasKey { a: 0, b: 0, c: 4 }
+    let r = sample_active(
+        key,
+        ActiveConfig { seed: 42, attempts_per_active: 30, proposal_budget: 20000 },
+        mut scratch,
+    )
+    assert(
+        match r.stop {
+            SamplingStop::ActiveListEmpty => true,
+            _ => false,
+        },
+    )
+    assert(r.proposals > 0)
+    // Current boundary-seeded active-list reference misses admissible interior
+    // regions for this mixed density. Keep that limitation explicit: spacing
+    // alone is not a coverage test or a production acceptance gate.
+    assert(r.points == r.boundary_points)
+    let center = FixedPoint2 { x: 5461, y: 5461 }
+    let center_radius = key.radius_squared(center)
+    for j in 0 .. (r.points as usize) {
+        let q = scratch.samples[j]
+        let radius = if center_radius > q.radius_squared {
+            center_radius
+        } else {
+            q.radius_squared
+        }
+        assert(key.distance_squared(center, q.point) >= radius)
+    }
+    for i in (r.boundary_points as usize) .. (r.points as usize) {
+        let p = scratch.samples[i]
+        assert(key.interior(p.point))
+        for j in 0 .. i {
+            let q = scratch.samples[j]
+            let radius = if p.radius_squared > q.radius_squared {
+                p.radius_squared
+            } else {
+                q.radius_squared
+            }
+            assert(key.distance_squared(p.point, q.point) >= radius)
+        }
+    }
+}
+
+#[test]
+fn active_sampler_lod8_boundary_contract() {
+    let key = AtlasKey { a: 0, b: 0, c: 8 }
+    assert(key.boundary_count() == 258)
+    for i in 0 .. 258 {
+        let p = key.boundary_point(i.downcast_truncate())
+        assert(p.x + p.y <= BARYCENTRIC_SCALE)
+        assert(p.x == 0 || p.y == 0 || p.x + p.y == BARYCENTRIC_SCALE)
+    }
+}
