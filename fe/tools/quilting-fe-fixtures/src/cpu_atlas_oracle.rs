@@ -322,6 +322,52 @@ fn quadratic_patch_density_correction_is_degree_four() {
     assert!(minimal<=2,"correction needed degree {minimal}, higher than the blend predicts");
 }
 
+/// Recursion can only act on whole octaves of the density field, so its range
+/// decides whether recursive substitution is worth building at all. Under one
+/// octave it is a no-op and the interior residual is sub-dyadic. This needs no
+/// geometry, only the closed-form field, so it is the cheap early falsifier.
+#[test]
+fn density_field_octave_range_decides_whether_recursion_helps() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let density=instance.get_typed_func::<(i32,f32,f32,f32,f32),f32>(&mut store,"measured_area_density_at").unwrap();
+    // The default authoring is a mild bulge. Sweep the out-of-plane offset so the
+    // answer is "beyond what curvature does recursion earn its place", not just
+    // a verdict on one patch.
+    for bulge in [0.6_f32,1.2,2.4,4.8,9.6] {
+    for (kind,name) in [(0,"triangle"),(1,"quad")] {
+        let mut values=Vec::new();
+        let mut invalid=0;
+        for i in 1..40 {
+            for j in 1..40 {
+                let u=f64::from(i)/40.0;
+                let v=f64::from(j)/40.0;
+                if kind==0 && u+v>0.97 {continue}
+                let d=f64::from(density.call(&mut store,(kind,u as f32,v as f32,1.0/1024.0,bulge)).unwrap());
+                if !(d>0.0) {invalid+=1; continue;}
+                values.push(d);
+            }
+        }
+        if values.len()<100 {eprintln!("DEPTH_RANGE {name} bulge={bulge}: mostly invalid ({invalid})"); continue;}
+        let lo=values.iter().cloned().fold(f64::INFINITY,f64::min);
+        let hi=values.iter().cloned().fold(0.0_f64,f64::max);
+        // Depth is half the log2 of density, since each level quarters area.
+        let octaves=0.5*(hi/lo).log2();
+        // Fractional part of depth, relative to the coarsest point.
+        let mut buckets=[0usize;4];
+        for d in &values {
+            let depth=0.5*(d/lo).log2();
+            buckets[((depth.fract()*4.0) as usize).min(3)]+=1;
+        }
+        eprintln!("DEPTH_RANGE {name} bulge={bulge}: {} samples, depth span={octaves:.4} levels, fractional quartiles={buckets:?}",values.len());
+    }
+    }
+}
+
 #[test]
 fn composition_wasm_boundary_locality_sweep() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");

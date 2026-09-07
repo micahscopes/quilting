@@ -16,9 +16,13 @@ remains is the blend's own Jacobian.
 triangle   dA = K / |W(lambda)|^4                    K constant
            |W|^2 = lambda^T G lambda                 G = 3x3 Gram, 6 entries
 
-quad       dA = sqrt(Q(u,v)) / |W(u,v)|^4            Q tensor-product quadratic
+quad       dA = sqrt(Q(u,v)) / |W(u,v)|^4            Q total degree two
            |W|^2 = B(u,v)^T G B(u,v)                 G = 4x4 Gram, 10 entries
 ```
+
+`Q` is total degree two rather than tensor-product degree (2,2), so it carries
+six coefficients and not nine. The nine-node check below is therefore sufficient
+but not minimal; the degree ladder in the higher-order section is what pins it.
 
 The triangular blend is affine, so its Jacobian is constant and the reciprocal
 fourth power is the entire law. The bilinear blend's Jacobian varies with
@@ -70,6 +74,30 @@ established here.
 path along the edge, which only the degree-one blend provides. A higher-degree
 boundary is not a circle, so the dyadic midpoint construction does not apply
 and such edges need the measured integration used for interior segments.
+
+## Depth range
+
+Recursive substitution can only act on whole octaves of this field, so its range
+decides whether recursion is worth building. Measured by sweeping the authored
+midpoint's out-of-plane offset, which is what "how curved is this patch" means
+for the default control net:
+
+| Midpoint offset | Triangle depth span | Quad depth span |
+|---|---|---|
+| 0.6, the default | 0.81 | 0.65 |
+| 1.2 | 1.72 | 1.49 |
+| 2.4 | 2.90 | 2.78 |
+| 4.8 | 4.50 | 4.47 |
+| 9.6 | 6.34 | 6.38 |
+
+At the default authoring the span is under one level, so recursion would be a
+no-op there and any visible interior imbalance is sub-dyadic. The span crosses
+one level at roughly 0.8 and then grows by about 1.3 to 1.5 levels per doubling.
+
+The fractional part of depth is spread nearly uniformly across quartiles once
+the span exceeds about two levels. So recursion alone leaves a residual up to a
+factor of two in area, which is its ceiling and the place a ranking or a derived
+residual map would have to earn its keep.
 
 ## Cost
 

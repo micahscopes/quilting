@@ -329,6 +329,41 @@ pub fn quadratic_area_density_ratio(_ x:f32,_ y:f32,_ h:f32)->f32 {
     measured*norm*norm
 }
 
+/// Central-difference surface area density at one reference point, in surface
+/// units per reference unit squared. Feeds the depth-range measurement that
+/// decides whether recursive substitution is warranted at all: recursion can
+/// only act on whole octaves of this field.
+pub fn measured_area_density(_ kind:u32,_ u:f32,_ v:f32,_ h:f32)->f32 {
+    measured_area_density_at(kind,u,v,h,0.6)
+}
+/// The same field with the authored midpoint's out-of-plane offset as a knob,
+/// so the depth range can be reported as a function of how curved the patch is
+/// rather than only at the default authoring.
+pub fn measured_area_density_at(_ kind:u32,_ u:f32,_ v:f32,_ h:f32,_ bulge:f32)->f32 {
+    use composite_atlas::model::Point
+    let mut c=initial_controls()
+    c.surface_kind=if kind==0 {1.0} else {2.0}
+    c.midpoint_z=bulge
+    let net=composite_atlas::surface::authored(c)
+    if net.patch_valid!=1.0 {return -999.0}
+    let pu=composite_atlas::surface::evaluate(net,Point {x:u+h,y:v})
+    let mu=composite_atlas::surface::evaluate(net,Point {x:u-h,y:v})
+    let pv=composite_atlas::surface::evaluate(net,Point {x:u,y:v+h})
+    let mv=composite_atlas::surface::evaluate(net,Point {x:u,y:v-h})
+    if !pu.valid || !mu.valid || !pv.valid || !mv.valid {return -999.0}
+    let scale=1.0/(2.0*h)
+    let ax=(pu.point.x-mu.point.x)*scale
+    let ay=(pu.point.y-mu.point.y)*scale
+    let az=(pu.point.z-mu.point.z)*scale
+    let bx=(pv.point.x-mv.point.x)*scale
+    let by=(pv.point.y-mv.point.y)*scale
+    let bz=(pv.point.z-mv.point.z)*scale
+    let cx=ay*bz-az*by
+    let cy=az*bx-ax*bz
+    let cz=ax*by-ay*bx
+    fmath::sqrt(cx*cx+cy*cy+cz*cz)
+}
+
 pub fn geometric_patch_view_laws()->bool {
     let mut c=initial_controls()
     for kind in [1.0,2.0] {
