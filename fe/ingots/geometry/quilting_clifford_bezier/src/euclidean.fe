@@ -13,6 +13,8 @@ use quilting_patch::{
 }
 use quilting_patch::arc_authoring::{ArcAuthoringAlgebra, ArcWeight}
 use quilting_patch::arc_authoring::ArcIntervalChart
+use quilting_patch::LinearElement
+use quilting_patch::arc_spacing::CircularArcMeasure
 use super::interval_component_distance
 use super::{
     CliffordEven3F,
@@ -62,6 +64,35 @@ derive EvaluateGaF32 for NormOperands using CompileGaF32<
 
 pub struct EuclideanCliffordAlgebra {}
 impl Copy for EuclideanCliffordAlgebra {}
+
+/// Arc-length measure for compatible Euclidean circular controls. A common
+/// right gauge scales all magnitudes equally and cancels from the midpoint
+/// construction. This does not assert the same law for indefinite metrics.
+pub struct EuclideanArcMeasure {
+    pub first:CliffordEven3F,
+    pub last:CliffordEven3F,
+    pub minimum_denominator_norm_squared:f32,
+}
+impl Copy for EuclideanArcMeasure {}
+impl EuclideanArcMeasure {
+    fn weight(self,_ t:f32)->CliffordEven3F {
+        self.first.scaled(1.0-t).plus(self.last.scaled(t))
+    }
+}
+impl CircularArcMeasure for EuclideanArcMeasure {
+    fn magnitude(self,_ t:f32)->f32 {
+        let squared=<NormOperands as EvaluateGaF32>::evaluate(
+            NormOperands {weight:weight_coefficients(self.weight(t))},
+        ).0
+        fmath::sqrt(squared)
+    }
+    fn regular(self,_ a:f32,_ b:f32)->bool {
+        let algebra=EuclideanCliffordAlgebra {}
+        self.minimum_denominator_norm_squared>0.0
+            && algebra.interval_denominator_bound(self.weight(a),self.weight(b))
+                >self.minimum_denominator_norm_squared
+    }
+}
 // With S = sum B_i (p_i-q)^-1, the quotient is q+S^-1.
 // S is a Euclidean vector; the common right gauge cancels. Thus both triangular
 // and tensor-product partition-of-unity bases stay in the vector point space.

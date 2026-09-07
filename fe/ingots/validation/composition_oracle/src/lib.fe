@@ -8,6 +8,67 @@ use quilting_patch::arc_length::{CumulativeLengthSamples,inverse_length}
 use quilting_patch::sampling_warp::{InverseCumulativeMap,OrientedIntervalMap,IntervalSamplingMap}
 use quilting_atlas::composition::{BoundaryUse,ChildTriangle,SquareEdgeLods}
 extern {const fn __f32_from_i32(_:i32)->f32}
+
+struct InvertedLine {first:f32,last_x:f32,last_y:f32}
+impl core::marker::Copy for InvertedLine {}
+impl quilting_patch::arc_spacing::CircularArcMeasure for InvertedLine {
+    fn magnitude(self,_ t:f32)->f32 {
+        let x=self.first*(1.0-t)+self.last_x*t
+        let y=self.last_y*t
+        fmath::sqrt(x*x+y*y)
+    }
+    fn regular(self,_ a:f32,_ b:f32)->bool {
+        let ax=self.first*(1.0-a)+self.last_x*a
+        let bx=self.first*(1.0-b)+self.last_x*b
+        let ay=self.last_y*a
+        let by=self.last_y*b
+        let x=if ax*bx<=0.0 {0.0} else {fmath::min(fmath::abs(ax),fmath::abs(bx))}
+        let y=if ay*by<=0.0 {0.0} else {fmath::min(fmath::abs(ay),fmath::abs(by))}
+        x*x+y*y>0.000000000001
+    }
+}
+pub fn dyadic_arc_parameter(_ first:f32,_ x:f32,_ y:f32,_ index:u32)->f32 {
+    use quilting_patch::arc_spacing::{dyadic_arc_samples,IntervalMapSamples}
+    match dyadic_arc_samples<InvertedLine,257>(InvertedLine {first:first,last_x:x,last_y:y}) {
+        Option::Some(samples)=>samples.parameter(index),
+        Option::None=>-1.0,
+    }
+}
+pub fn dyadic_arc_nesting(_ first:f32,_ x:f32,_ y:f32)->bool {
+    use quilting_patch::arc_spacing::{dyadic_arc_samples,IntervalMapSamples}
+    let line=InvertedLine {first:first,last_x:x,last_y:y}
+    match (dyadic_arc_samples<InvertedLine,129>(line),dyadic_arc_samples<InvertedLine,257>(line)) {
+        (Option::Some(a),Option::Some(b))=>{
+            for i in 0..129 {if a.parameter(i.downcast_truncate())!=b.parameter((i*2).downcast_truncate()) {return false}}
+            true
+        },
+        _=>false,
+    }
+}
+
+pub fn authored_uniform_arc(_ kind:u32,_ edge:u32,_ index:u32,_ lane:u32)->f32 {
+    use quilting_patch::arc_spacing::{dyadic_arc_samples,IntervalMapSamples}
+    use quilting_clifford_bezier::euclidean::EuclideanArcMeasure
+    let mut c=initial_controls()
+    c.surface_kind=if kind==0 {1.0} else {2.0}
+    let net=composite_atlas::surface::authored(c)
+    let (first,last)=if edge==0 {(net.a,net.b)}
+        else if edge==1 {if kind==0 {(net.b,net.d)} else {(net.b,net.c)}}
+        else if edge==2 && kind!=0 {(net.c,net.d)} else {(net.d,net.a)}
+    let measure=EuclideanArcMeasure {first:first.weight,last:last.weight,minimum_denominator_norm_squared:0.000000000001}
+    match dyadic_arc_samples<EuclideanArcMeasure,257>(measure) {
+        Option::None=>-999.0,
+        Option::Some(samples)=>{
+            let t=samples.parameter(index)
+            let (u,v)=if edge==0 {(t,0.0)}
+                else if edge==1 {if kind==0 {(1.0-t,t)} else {(1.0,t)}}
+                else if edge==2 && kind!=0 {(1.0-t,1.0)} else {(0.0,1.0-t)}
+            let p=composite_atlas::surface::evaluate(net,composite_atlas::model::Point {x:u,y:v})
+            if !p.valid {-999.0} else if lane==0 {p.point.x} else if lane==1 {p.point.y} else {p.point.z}
+        },
+    }
+}
+
 pub fn geometric_patch_view_laws()->bool {
     let mut c=initial_controls()
     for kind in [1.0,2.0] {

@@ -1,0 +1,94 @@
+//! Equal-length dyadic samples for a regular rational circular arc.
+//! The model supplies a norm of its affine denominator. This is not a rule
+//! for arbitrary positive speed functions or indefinite metrics.
+use core::marker::Copy
+use core::option::Option
+use super::sampling_warp::IntervalSamplingMap
+
+/// Law: speed is a fixed positive constant divided by magnitude(t)^2,
+/// where magnitude is the positive norm of an affine denominator vector.
+/// regular(a,b) must conservatively admit the ENTIRE interval, not just its
+/// endpoints. Other geometric models may implement this only with that law.
+pub trait CircularArcMeasure: Copy {
+    fn magnitude(self,_ t:f32)->f32
+    fn regular(self,_ a:f32,_ b:f32)->bool
+}
+
+/// A direct parameter map sampled at equally spaced input fractions.
+/// Unlike cumulative-length tables these values already contain the inverse.
+pub trait IntervalMapSamples: Copy {
+    fn segments(self)->u32
+    fn parameter(self,_ index:u32)->f32
+}
+pub struct DyadicArcSamples<const N:usize> {pub parameters:[f32;N]}
+impl<const N:usize> Copy for DyadicArcSamples<N> {}
+impl<const N:usize> IntervalMapSamples for DyadicArcSamples<N> {
+    fn segments(self)->u32 {(N-1).downcast_truncate()}
+    fn parameter(self,_ index:u32)->f32 {self.parameters[index as usize]}
+}
+impl<const N:usize> IntervalSamplingMap for DyadicArcSamples<N> {
+    fn map(self,_ t:f32)->f32 {interpolate_parameters(self,t)}
+}
+extern {
+    const fn __i32_from_f32(_:f32)->i32
+    const fn __f32_from_i32(_:i32)->f32
+}
+/// Exact table selection on represented dyadic fractions; linear interpolation
+/// elsewhere. That interpolation is not an exact continuous arc-length inverse.
+pub fn interpolate_parameters<S:IntervalMapSamples>(_ samples:S,_ t:f32)->f32 {
+    if t<=0.0 {return 0.0}
+    if t>=1.0 {return 1.0}
+    let n=samples.segments()
+    if n==0 {return t}
+    let x=t*__f32_from_i32(n.downcast_unchecked())
+    let i:u32=__i32_from_f32(x).downcast_unchecked()
+    if i>=n {return 1.0}
+    let local=x-__f32_from_i32(i.downcast_unchecked())
+    let a=samples.parameter(i)
+    let b=samples.parameter(i+1)
+    a+(b-a)*local
+}
+
+fn positive_finite(_ value:f32)->bool {value>0.0 && 1.0/value>0.0}
+
+/// N must be 2^L+1. Each midpoint bisects the denominator's angle and hence
+/// the circular arc's length. Parent samples are retained bit-for-bit at all
+/// finer levels. There is no transcendental function, convergence loop, or
+/// independent fitting on neighboring uses of an edge.
+pub fn dyadic_arc_samples<M:CircularArcMeasure,const N:usize>(
+    _ measure:M,
+)->Option<DyadicArcSamples<N>> {
+    if N<2 {return Option::None}
+    let count=N-1
+    if (count & (count-1))!=0 {return Option::None}
+    let mut positions:[f32;N]=[0.0;N]
+    let mut magnitudes:[f32;N]=[0.0;N]
+    positions[count]=1.0
+    magnitudes[0]=measure.magnitude(0.0)
+    magnitudes[count]=measure.magnitude(1.0)
+    if !positive_finite(magnitudes[0]) || !positive_finite(magnitudes[count]) {return Option::None}
+    let mut width=count
+    while width>1 {
+        let mut left:usize=0
+        while left<count {
+            let right=left+width
+            let middle=left+width/2
+            let a=magnitudes[left]
+            let b=magnitudes[right]
+            let scale=if a>b {a} else {b}
+            let fraction=(a/scale)/((a/scale)+(b/scale))
+            let t=positions[left]+(positions[right]-positions[left])*fraction
+            if !(t>positions[left] && t<positions[right]) {return Option::None}
+            let magnitude=measure.magnitude(t)
+            if !positive_finite(magnitude) {return Option::None}
+            positions[middle]=t
+            magnitudes[middle]=magnitude
+            left=right
+        }
+        width=width/2
+    }
+    for i in 0..count {
+        if !measure.regular(positions[i],positions[i+1]) {return Option::None}
+    }
+    Option::Some(DyadicArcSamples {parameters:positions})
+}

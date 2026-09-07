@@ -4,6 +4,87 @@ use fe_codegen::OptLevel;
 use std::path::Path;
 
 #[test]
+fn dyadic_arc_spacing_has_uniform_geometric_chords_and_nested_samples() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let parameter=instance.get_typed_func::<(f32,f32,f32,i32),f32>(&mut store,"dyadic_arc_parameter").unwrap();
+    let nested=instance.get_typed_func::<(f32,f32,f32),i32>(&mut store,"dyadic_arc_nesting").unwrap();
+    let mut worst_mass_error=0.0_f64;
+    let mut worst_chord_error=0.0_f64;
+    for ratio in [0.1_f32,1.0,10.0] {
+        for angle in [0.0_f64,0.01,0.3,1.5,2.8,3.1] {
+            let x=(f64::from(ratio)*angle.cos()) as f32;
+            let y=(f64::from(ratio)*angle.sin()) as f32;
+            let theta=f64::from(y).atan2(f64::from(x));
+            let end_norm=f64::from(x).hypot(f64::from(y));
+            let end=[f64::from(x)/end_norm.powi(2),f64::from(y)/end_norm.powi(2)];
+            let endpoint_chord=(end[0]-1.0).hypot(end[1]);
+            let expected=if theta==0.0 {endpoint_chord/256.0}
+                else {endpoint_chord*(theta/256.0).sin()/theta.sin()};
+            assert_eq!(nested.call(&mut store,(1.0,x,y)).unwrap(),1);
+            let mut previous_t=-1.0;
+            let mut previous_point=[1.0,0.0];
+            for i in 0..=256 {
+                let t=parameter.call(&mut store,(1.0,x,y,i)).unwrap();
+                assert!(t>=0.0 && t<=1.0 && t>previous_t,"ratio={ratio} angle={angle} i={i} t={t}");
+                if i==0 {assert_eq!(t,0.0)}
+                if i==256 {assert_eq!(t,1.0)}
+                let t64=f64::from(t);
+                let w=[1.0-t64+f64::from(x)*t64,f64::from(y)*t64];
+                let norm=w[0]*w[0]+w[1]*w[1];
+                let point=[w[0]/norm,w[1]/norm];
+                if theta>0.0 {
+                    let mass=w[1].atan2(w[0])/theta;
+                    worst_mass_error=worst_mass_error.max((mass-f64::from(i)/256.0).abs());
+                }
+                if i>0 && expected>1e-12 {
+                    let chord=(point[0]-previous_point[0]).hypot(point[1]-previous_point[1]);
+                    worst_chord_error=worst_chord_error.max((chord/expected-1.0).abs());
+                }
+                previous_t=t;
+                previous_point=point;
+            }
+        }
+    }
+    for (a,x,y) in [(0.0,1.0,0.0),(1.0,0.0,0.0),(1.0,-1.0,0.0),(f32::NAN,1.0,0.0)] {
+        assert_eq!(parameter.call(&mut store,(a,x,y,128)).unwrap(),-1.0,"singular input must reject");
+    }
+    eprintln!("DYADIC_ARC 18 families x 257 points: worst normalized mass error={worst_mass_error:.9}, relative chord error={worst_chord_error:.9}");
+    assert!(worst_mass_error<2e-5);
+    assert!(worst_chord_error<0.002);
+    // Exercise the actual sparse-Clifford weights and patch evaluator, rather
+    // than only the two-dimensional inverse-line reference above.
+    let actual=instance.get_typed_func::<(i32,i32,i32,i32),f32>(&mut store,"authored_uniform_arc").unwrap();
+    let mut worst_patch_chord_error=0.0_f64;
+    for kind in 0..2 {
+        for edge in 0..if kind==0 {3} else {4} {
+            let mut points=Vec::new();
+            for index in 0..=256 {
+                let mut point=[0.0_f64;3];
+                for lane in 0..3 {
+                    let value=actual.call(&mut store,(kind,edge,index,lane)).unwrap();
+                    assert!(value.is_finite() && value != -999.0);
+                    point[lane as usize]=f64::from(value);
+                }
+                points.push(point);
+            }
+            let chords:Vec<f64>=points.windows(2).map(|p| {
+                ((p[1][0]-p[0][0]).powi(2)+(p[1][1]-p[0][1]).powi(2)+(p[1][2]-p[0][2]).powi(2)).sqrt()
+            }).collect();
+            let mean=chords.iter().sum::<f64>()/256.0;
+            assert!(mean>0.0);
+            for chord in chords {worst_patch_chord_error=worst_patch_chord_error.max((chord/mean-1.0).abs());}
+        }
+    }
+    eprintln!("DYADIC_PATCH 7 actual circular boundaries: relative chord deviation={worst_patch_chord_error:.9}");
+    assert!(worst_patch_chord_error<0.002);
+}
+
+#[test]
 fn composition_wasm_boundary_locality_sweep() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
     let wasm=compile_ingot_at_level(&path,OptLevel::O2);

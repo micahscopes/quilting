@@ -8,6 +8,7 @@ composite_atlas = true
 quilting_atlas_wasm = true
 quilting_atlas = true
 quilting_patch = true
+quilting_clifford_bezier = true
 quilting_domain = true
 quilting_qb = true
 fmath = true
