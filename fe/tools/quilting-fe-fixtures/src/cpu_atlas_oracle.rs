@@ -498,6 +498,32 @@ fn depth_field_gram_reproduces_the_density_law_and_certifies_regions() {
     }
 }
 
+/// The shipped fold witness counts negative signed area in the reference square
+/// and never calls the surface evaluator, so a chord triangle that inverts
+/// around a pole funnel has positive chart area, is culled, and reads as a
+/// crack. This measures that population against resolution and curvature.
+#[test]
+fn inverted_surface_chords_appear_only_when_resolution_loses_the_pole() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let inverted=instance.get_typed_func::<(i32,i32,f32),f32>(&mut store,"inverted_chord_fraction").unwrap();
+    for (kind,name) in [(0,"triangle"),(1,"quad")] {
+        for bulge in [0.6_f32,2.4,9.6] {
+            let mut line=format!("INVERTED {name} bulge={bulge}:");
+            for level in 2..7 {
+                let f=inverted.call(&mut store,(kind,level,bulge)).unwrap();
+                assert!(f>=0.0,"probe failed at {name} bulge {bulge} level {level}");
+                line.push_str(&format!("  L{level}={f:.4}"));
+            }
+            eprintln!("{line}");
+        }
+    }
+}
+
 #[test]
 fn composition_wasm_boundary_locality_sweep() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");

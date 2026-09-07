@@ -399,6 +399,75 @@ pub fn gram_region_level(_ a1:f32,_ a2:f32,_ b1:f32,_ b2:f32,_ c1:f32,_ c2:f32,
     DepthLadder {reference_norm:reference_norm,reference_level:0}.region_level(interval)
 }
 
+struct SurfaceProbe {x:f32,y:f32,z:f32,ok:bool}
+impl core::marker::Copy for SurfaceProbe {}
+fn surface_probe(_ net:composite_atlas::surface::Net,_ u:f32,_ v:f32)->SurfaceProbe {
+    use composite_atlas::model::Point
+    let s=composite_atlas::surface::evaluate(net,Point {x:u,y:v})
+    SurfaceProbe {x:s.point.x,y:s.point.y,z:s.point.z,ok:s.valid}
+}
+/// Fraction of uniform chord triangles whose flat normal opposes the analytic
+/// surface normal at their centroid. The shipped fold witness counts negative
+/// signed area in the REFERENCE square and never calls the evaluator, so an
+/// inverted chord near a pole funnel has positive chart area, gets culled, and
+/// reads as a crack. This measures that population directly.
+pub fn inverted_chord_fraction(_ kind:u32,_ level:u32,_ bulge:f32)->f32 {
+    let mut c=initial_controls()
+    c.surface_kind=if kind==0 {1.0} else {2.0}
+    c.midpoint_z=bulge
+    let net=composite_atlas::surface::authored(c)
+    if net.patch_valid!=1.0 {return -999.0}
+    let cells:u32=1<<level
+    let step=1.0/__f32_from_i32(cells.downcast_unchecked())
+    let h=step*0.25
+    let mut total:u32=0
+    let mut inverted:u32=0
+    for i in 0 .. (cells as usize) {
+        for j in 0 .. (cells as usize) {
+            let u0=__f32_from_i32(i.downcast_unchecked())*step
+            let v0=__f32_from_i32(j.downcast_unchecked())*step
+            let u1=u0+step
+            let v1=v0+step
+            if kind==0 && u1+v1>1.0 {continue}
+            let a=surface_probe(net,u0,v0)
+            let b=surface_probe(net,u1,v0)
+            let d=surface_probe(net,u0,v1)
+            if !a.ok || !b.ok || !d.ok {continue}
+            // Flat chord normal of the reference-positive-oriented triangle.
+            let e1x=b.x-a.x
+            let e1y=b.y-a.y
+            let e1z=b.z-a.z
+            let e2x=d.x-a.x
+            let e2y=d.y-a.y
+            let e2z=d.z-a.z
+            let nx=e1y*e2z-e1z*e2y
+            let ny=e1z*e2x-e1x*e2z
+            let nz=e1x*e2y-e1y*e2x
+            // Analytic normal at the centroid, from the same evaluator.
+            let cu=u0+step/3.0
+            let cv=v0+step/3.0
+            let pu=surface_probe(net,cu+h,cv)
+            let mu=surface_probe(net,cu-h,cv)
+            let pv=surface_probe(net,cu,cv+h)
+            let mv=surface_probe(net,cu,cv-h)
+            if !pu.ok || !mu.ok || !pv.ok || !mv.ok {continue}
+            let ax=pu.x-mu.x
+            let ay=pu.y-mu.y
+            let az=pu.z-mu.z
+            let bx=pv.x-mv.x
+            let by=pv.y-mv.y
+            let bz=pv.z-mv.z
+            let mx=ay*bz-az*by
+            let my=az*bx-ax*bz
+            let mz=ax*by-ay*bx
+            total+=1
+            if nx*mx+ny*my+nz*mz<0.0 {inverted+=1}
+        }
+    }
+    if total==0 {return -999.0}
+    __f32_from_i32(inverted.downcast_unchecked())/__f32_from_i32(total.downcast_unchecked())
+}
+
 pub fn geometric_patch_view_laws()->bool {
     let mut c=initial_controls()
     for kind in [1.0,2.0] {
