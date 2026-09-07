@@ -58,6 +58,10 @@ impl<const N: usize> PoolHandle<N> {
         let p: BrowserPtr<AtlasPool<N>> = BrowserPtr::from_u32(self.address)
         with (p) { ingot::pool::tile<N>(ordinal) }
     }
+    pub fn entry(self, _ ordinal: u32) -> TileEntry {
+        let p: BrowserPtr<AtlasPool<N>> = BrowserPtr::from_u32(self.address)
+        with (p) { ingot::pool::entry<N>(ordinal) }
+    }
     pub fn updates_since(self, _ cursor: RetainedCursor) -> RetainedUpdate {
         let p: BrowserPtr<AtlasPool<N>> = BrowserPtr::from_u32(self.address)
         with (p) { ingot::pool::updates_since<N>(cursor) }

@@ -23,6 +23,7 @@ members = [
   { path = "ingots/validation/atlas_worker_oracle", name = "atlas_worker_oracle" },
   { path = "ingots/validation/atlas_pool_oracle", name = "atlas_pool_oracle" },
   { path = "ingots/validation/atlas_pool_workers", name = "atlas_pool_workers" },
+  { path = "ingots/demos/worker_atlas_explorer", name = "worker_atlas_explorer" },
   { path = "ingots/demos/classic_quilting_fixed_raster", name = "classic_quilting_fixed_raster" },
   { path = "ingots/demos/classic_quilting_atlas", name = "classic_quilting_atlas" },
   { path = "ingots/demos/classic_quilting_lod", name = "classic_quilting_lod" },

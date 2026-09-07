@@ -1,0 +1,170 @@
+//! Runtime Fe/Wasm worker atlas, retained once and rendered without readback.
+use core::{Worker, BrowserBytes}
+use core::marker::Copy
+use core::actor::{ActorInstance, InitialState, ResidentTransition, ScopedTaskFamily}
+use fmath::{min, max, sqrt, abs, smoothstep}
+use quilting_atlas_wasm::{packed_triangle, packed_square}
+use quilting_atlas_wasm::pool::{self, PoolHandle, RetainedCursor, RetainedUpdate, RETAINED_CAPACITY}
+use quilting_atlas_workers::{Request, Response, CompletionMessage, supervise, run}
+use std::web::{Surface, Extent, Param, SurfaceEvent}
+use std::webgpu::{GpuProgram, WebGpuBackend, StorageBuffer, DrawIndirectBuffer,
+    ClipPosition, RasterVertex, VertexStage, FragmentStage, FragmentSurface,
+    IndirectTriangleList, ComputeSurface, Workgroup, FixedDispatch,
+    BufferPublication, PublicationVersion, PublishBuffer,
+    SurfaceTransition, SurfaceScheduling, LatestPerFrame,
+    SurfaceQuality, ResponsiveBacking}
+
+const WORKERS: u32 = 4
+const CAPACITY: usize = WORKERS as usize
+type Atlas = StorageBuffer<u32, RETAINED_CAPACITY>
+struct Draw {}
+struct Slot<const I: u32> {}
+struct Event { changed: bool }
+impl CompletionMessage for Event { fn completed() -> Self { Self { changed: true } } }
+actor TileWorker {
+    fn generate(request: Request) -> Response uses (Worker) {
+        let k = request.key
+        let tile = if k.square { packed_square(k.a,k.b,k.c,k.d,42) }
+            else { packed_triangle(k.a,k.b,k.c,42) }
+        Response { lease: request.lease, tile: tile }
+    }
+}
+struct State {
+    selected: f32, address: u32, completed: u32, status: u32,
+    offset: u32, points: u32, triangles: u32, square: u32,
+    width: f32, height: f32,
+}
+impl Copy for State {}
+struct Params {
+    selected: Param, address: Param, completed: Param, status: Param,
+    offset: Param, points: Param, triangles: Param, square: Param,
+    width: Param, height: Param,
+}
+extern { const fn __f32_from_i32(_: i32) -> f32 }
+fn number(_ n: u32) -> f32 { __f32_from_i32(n.downcast_unchecked()) }
+fn refresh(_ previous: State) -> State {
+    let mut next = previous
+    if next.address == 0 { next.status = 3; return next }
+    let pool: PoolHandle<CAPACITY> = PoolHandle::from_address(next.address)
+    let summary = pool.summary()
+    next.completed = summary.completed
+    next.status = summary.status
+    let mut ordinal: u32 = 0
+    while ordinal < 1199 && next.selected >= number(ordinal) + 0.5 { ordinal += 1 }
+    let entry = pool.entry(ordinal)
+    let key = pool.key(ordinal)
+    next.offset = entry.offset
+    next.points = entry.points
+    next.triangles = if summary.completed == summary.total && summary.status == 0 { entry.triangles } else { 0 }
+    next.square = if key.square { 1 } else { 0 }
+    next
+}
+struct PublishAtlas {}
+impl PublishAtlas {
+    pub fn publication(_ state: State) -> BufferPublication<Atlas> {
+        let empty = BufferPublication { version: PublicationVersion { epoch: 1, revision: 0 },
+            source: BrowserBytes { ptr: 0, len: 0 }, target_byte_offset: 0 }
+        if state.address == 0 || state.completed != 1200 || state.status != 0 { return empty }
+        let pool: PoolHandle<CAPACITY> = PoolHandle::from_address(state.address)
+        match pool.updates_since(RetainedCursor { epoch: 0, words: 0 }) {
+            RetainedUpdate::Ready(range) => BufferPublication {
+                version: PublicationVersion { epoch: range.epoch, revision: range.revision },
+                source: BrowserBytes { ptr: range.words.ptr.address(), len: range.words.len * 4 },
+                target_byte_offset: 0,
+            },
+            _ => empty,
+        }
+    }
+}
+struct Point { x: f32, y: f32 }
+impl Copy for Point {}
+struct Varying { a: f32, b: f32, c: f32 }
+impl Copy for Varying {}
+fn point(_ atlas: Atlas, _ state: State, _ index: u32) -> Point {
+    let indices = state.offset + state.points
+    let id = if state.points <= 65536 {
+        (atlas.load(index: indices + index / 2) >> ((index % 2) * 16)) & 65535
+    } else { atlas.load(index: indices + index) }
+    let packed = atlas.load(index: state.offset + id)
+    let u = number(packed & 65535) / 16384.0
+    let v = number(packed >> 16) / 16384.0
+    let x = if state.square == 1 { u - 0.5 } else { u + v * 0.5 - 0.5 }
+    let y = if state.square == 1 { v - 0.5 } else { v * 0.8660254 - 0.4330127 }
+    let scale = 1.7 * min(state.width, state.height)
+    Point { x: x * scale / max(state.width, 1.0), y: y * scale / max(state.height, 1.0) }
+}
+fn length(_ a: Point, _ b: Point, _ state: State) -> f32 {
+    let x = (a.x - b.x) * state.width * 0.5
+    let y = (a.y - b.y) * state.height * 0.5
+    sqrt(x*x + y*y)
+}
+actor WorkerAtlas uses (GpuProgram<WebGpuBackend>, SurfaceQuality<ResponsiveBacking>) {
+    atlas: Atlas,
+    draw: DrawIndirectBuffer<Draw>,
+    selected: f32, address: u32, completed: u32, status: u32,
+    offset: u32, points: u32, triangles: u32, square: u32,
+    width: f32, height: f32,
+    const fn view() -> Surface<Params> {
+        Surface { extent: Extent::square(1200), params: Params {
+            selected: Param::int(min:0.0,max:1199.0,init:0.0),
+            address: Param::fixed(0.0), completed: Param::fixed(0.0), status: Param::fixed(0.0),
+            offset: Param::fixed(0.0), points: Param::fixed(0.0), triangles: Param::fixed(0.0), square: Param::fixed(0.0),
+            width: Param::extent_x(), height: Param::extent_y(),
+        } }
+    }
+    fn initial() -> State uses (InitialState) {
+        State { selected:0.0, address:pool::create<CAPACITY>(1,8).address(),
+            completed:0,status:0,offset:0,points:0,triangles:0,square:0,width:1200.0,height:1200.0 }
+    }
+    fn snapshot(self) -> State {
+        State { selected:self.selected,address:self.address,completed:self.completed,status:self.status,
+            offset:self.offset,points:self.points,triangles:self.triangles,square:self.square,width:self.width,height:self.height }
+    }
+    fn receive(self, event: Event) -> State uses (ResidentTransition) { refresh(self.snapshot()) }
+    fn control(self, event: own SurfaceEvent) -> State uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>) {
+        let mut state = self.snapshot()
+        // selected is the first scalar field; all other metadata is read-only.
+        if event.is_param_edit() && event.param_index == 0 { state.selected = event.param_value.clamp(0.0,1199.0) }
+        state.width = event.width
+        state.height = event.height
+        refresh(state)
+    }
+    fn supervision<const I: u32>() -> u32 uses (ScopedTaskFamily<WORKERS>) {
+        supervise(ActorInstance<TileWorker,Slot<I>> {})
+    }
+    fn work<const I: u32>(state: State) -> u32 uses (ScopedTaskFamily<WORKERS>) {
+        run<CAPACITY,ActorInstance<TileWorker,Slot<I>>,Event>(state.address,I)
+    }
+    fn prepare(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+        self.draw.store(index:0,value:self.triangles*3)
+        self.draw.store(index:1,value:1)
+        self.draw.store(index:2,value:0)
+        self.draw.store(index:3,value:0)
+    }
+    fn background(self, px:i32, py:i32) -> i32 uses (FragmentSurface) {
+        if py < 5 && px >= 0 && __f32_from_i32(px) < self.width * number(self.completed) / 1200.0 {
+            return if self.status == 0 { -11365973 } else { -3394796 }
+        }
+        -15460836
+    }
+    fn vertices(self, vertex_index:u32) -> RasterVertex<Varying>
+        uses (VertexStage<Varying,IndirectTriangleList<DrawIndirectBuffer<Draw>>>, PublishBuffer<PublishAtlas>) {
+        let state = self.snapshot()
+        let base = vertex_index / 3 * 3
+        let a = point(self.atlas,state,base)
+        let b = point(self.atlas,state,base+1)
+        let c = point(self.atlas,state,base+2)
+        let twice_area = abs((b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x)) * state.width * state.height * 0.25
+        let corner = vertex_index % 3
+        let p = if corner == 0 { a } else { if corner == 1 { b } else { c } }
+        RasterVertex { position:ClipPosition{x:p.x,y:p.y,z:0.0,w:1.0}, varying:Varying {
+            a:if corner == 0 { twice_area/max(length(b,c,state),0.00001) } else { 0.0 },
+            b:if corner == 1 { twice_area/max(length(c,a,state),0.00001) } else { 0.0 },
+            c:if corner == 2 { twice_area/max(length(a,b,state),0.00001) } else { 0.0 },
+        } }
+    }
+    fn shade(self, v:Varying) -> u32 uses (FragmentStage<Varying>) {
+        let coverage = smoothstep(0.15,0.85,min(v.a,min(v.b,v.c)))
+        if coverage > 0.5 { 4288655034 } else { 4281613920 }
+    }
+}

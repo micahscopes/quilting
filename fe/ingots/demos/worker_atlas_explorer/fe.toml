@@ -1,0 +1,10 @@
+[ingot]
+name = "worker_atlas_explorer"
+version = "0.1.0"
+
+[dependencies]
+core = true
+std = true
+fmath = true
+quilting_atlas_wasm = true
+quilting_atlas_workers = true
