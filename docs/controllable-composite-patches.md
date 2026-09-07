@@ -82,8 +82,12 @@ and 201,298 total WGSL bytes. These are build/artifact observations, not a
 runtime performance comparison.
 
 Upstream positive and missing-label-negative web binding regressions also
-passed (2 tests, 2.64 seconds after compilation). The full reflection suite is
-still a separate running gate. Source checks passed for arc curves,
+passed (2 tests, 2.64 seconds after compilation). The full reflection suite
+finished **45 passed, 1 failed**: its forwarded-ground-parameter rejection
+fixture now receives no diagnostics, contrary to its expectation. That fixture
+does not exercise string comparisons; an unchanged-baseline run has not been
+made, so this record does not claim the suite was previously green or that the
+failure is resolved. Source checks passed for arc curves,
 tessellation warp and paired triangle fans; this does not substitute for their
 browser acceptance.
 
