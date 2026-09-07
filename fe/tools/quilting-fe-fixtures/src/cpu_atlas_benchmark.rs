@@ -24,6 +24,18 @@ fn cpu_atlas_triangle_rust_fe_baseline() {
     type Probe = (i32, i32, i32, i32, i32, i32, i32, i32, i64);
     let triangle = instance.get_typed_func::<(i32,i32,i32,i32,i32), Probe>(&mut store, "triangle").unwrap();
     let memory = instance.get_memory(&mut store, "memory").unwrap();
+    let rust_wasm = std::env::var_os("QUILTING_RUST_ATLAS_WASM").map(|path| {
+        let bytes = std::fs::read(path).unwrap();
+        let module = wasmtime::Module::new(&engine, bytes).unwrap();
+        assert_eq!(module.imports().count(),0,"seeded Rust benchmark must be self-contained");
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+        let call = instance.get_typed_func::<(i32,i32,i32,i32,i32),i64>(&mut store,"triangle").unwrap();
+        let memory = instance.get_memory(&mut store,"memory").unwrap();
+        call.call(&mut store,(2,2,2,42,1)).unwrap();
+        (store,call,memory)
+    });
+    let mut rust_wasm = rust_wasm;
     let config = PatchConfig { k_candidates: 30, seed: 42 };
     let mut keys = Vec::new();
     for a in 0..=8 { for b in a..=8 { for c in b..=8 { keys.push([a,b,c]); } } }
@@ -37,6 +49,9 @@ fn cpu_atlas_triangle_rust_fe_baseline() {
         let mut rust_cdt = Duration::ZERO;
         let mut fe_sampling = Duration::ZERO;
         let mut fe_combined = Duration::ZERO;
+        let mut rw_sampling = Duration::ZERO;
+        let mut rw_combined = Duration::ZERO;
+        let (mut rwp,mut rwf)=(0u64,0u64);
         let (mut rp, mut rf, mut fp, mut ff) = (0usize,0usize,0usize,0usize);
         for &[a,b,c] in &keys {
             let start = Instant::now();
@@ -48,6 +63,18 @@ fn cpu_atlas_triangle_rust_fe_baseline() {
             rust_sampling += rs;
             rust_cdt += rt;
             rp += sample.positions.len(); rf += mesh.triangles.len();
+            if let Some((store,call,_)) = rust_wasm.as_mut() {
+                let start = Instant::now();
+                let s=call.call(&mut *store,(a,b,c,42,0)).unwrap() as u64;
+                let ws=start.elapsed();
+                let start = Instant::now();
+                let t=call.call(&mut *store,(a,b,c,42,1)).unwrap() as u64;
+                let wt=start.elapsed();
+                assert_eq!(s,t&0xffffffff);
+                assert!(s>0 && t>>32>0);
+                rw_sampling+=ws; rw_combined+=wt; rwp+=s; rwf+=t>>32;
+                eprintln!("rust-wasm-tile round={round} key={a},{b},{c} points={s} faces={} sampling_us={} combined_us={}",t>>32,ws.as_micros(),wt.as_micros());
+            }
             reset.call(&mut store, ()).unwrap();
             let start = Instant::now();
             let s = triangle.call(&mut store, (a,b,c,42,0)).unwrap();
@@ -64,6 +91,8 @@ fn cpu_atlas_triangle_rust_fe_baseline() {
                 sample.positions.len(),mesh.triangles.len(),rs.as_micros(),rt.as_micros(),t.2,t.3,fs.as_micros(),ft.as_micros());
         }
         eprintln!("paired-summary round={round} keys=165 rust_points={rp} rust_faces={rf} rust_sampling={rust_sampling:?} rust_cdt={rust_cdt:?} rust_total={:?} fe_points={fp} fe_faces={ff} fe_sampling={fe_sampling:?} fe_combined={fe_combined:?} fe_memory={}", rust_sampling+rust_cdt,memory.data_size(&store));
+        if let Some((store,_,memory)) = rust_wasm.as_ref() {
+            eprintln!("rust-wasm-summary round={round} keys=165 points={rwp} faces={rwf} sampling={rw_sampling:?} combined={rw_combined:?} memory={}",memory.data_size(store));
+        }
     }
 }
-

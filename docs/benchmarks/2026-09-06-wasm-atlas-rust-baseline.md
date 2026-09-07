@@ -74,3 +74,33 @@ After moving the benchmark into its own module, all three rounds passed again:
 Rust combined 3.314 / 3.300 / 3.267 s; Fe combined 11.399 / 11.435 / 11.187 s.
 Point/triangle counts were unchanged. The second raw log is
 `/laboratory/quilting/scratch/rust-fe-atlas-baseline-relocated-20260906.log`.
+
+## Rust/Wasm added: same engine, no workers
+
+The measurement-only crate `fe/tools/rust-atlas-baseline` exports the existing
+Rust implementations to wasm32-unknown-unknown (release O3, thin LTO). Fe remains
+O2. Both Wasm modules run in the same default Wasmtime engine, no fuel. Native
+Rust is measured in the same process. This is still not a matched-quality test.
+
+| Round | Rust native combined | Rust/Wasm sampling | Rust/Wasm combined | Fe/Wasm sampling | Fe/Wasm combined |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 3.2020 s | 4.7484 s | 5.1861 s | 4.8567 s | 11.2846 s |
+| 2 | 3.1750 s | 4.7129 s | 5.1052 s | 4.8174 s | 11.1645 s |
+| 3 | 3.2282 s | 4.7569 s | 5.1411 s | 4.8792 s | 11.2521 s |
+
+Median combined: native3.202s, Rust/Wasm5.141s, Fe/Wasm11.252s. Fe is
+2.19× slower than Rust **in the same Wasm engine**, versus3.51× native.
+Sampling time is close; the cumulative phase difference points toward Fe
+triangulation/setup, but does not isolate those costs or diagnose the compiler.
+
+Rust/Wasm outputs527,720points/1,027,005triangles each round, slightly different
+from native527,523/1,026,611. Same seed does not imply cross-platform identical
+floating-point point streams. Fe remains464,872/901,309. Rust/Wasm memory
+high-water18,022,400bytes, Fe16,318,464bytes: linear memory only, no retained
+packed atlas or full process accounting. All tiles succeed; no geometry audits
+are timed in this comparison. No browser workers or worker pool have been tested.
+
+Raw log: `/laboratory/quilting/scratch/three-way-atlas-baseline-20260906.log`.
+Build/invocation: `fe/tools/rust-atlas-baseline/README.md`. Both Rust entropy
+and host imports are absent from this seeded benchmark; unexpected entropy
+requests fail rather than acquiring an unmeasured host dependency.
