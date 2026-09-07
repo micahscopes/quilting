@@ -17,6 +17,16 @@ pub fn storage(_ address: u32) -> u32 {
     let p: BrowserPtr<AtlasPool<4>> = BrowserPtr::from_u32(address)
     with (p) { pool::storage<4>() }
 }
+pub fn tile_info(_ address: u32, _ ordinal: u32) -> (u32, u32, u32, u32, u32) {
+    let handle: pool::PoolHandle<4> = pool::PoolHandle::from_address(address)
+    match handle.tile(ordinal) {
+        pool::TileLookup::Ready(tile) => {
+            (0, tile.points, tile.triangles, tile.words.ptr.address(), tile.words.len)
+        },
+        pool::TileLookup::NotReady => (1, 0, 0, 0, 0),
+        pool::TileLookup::OutOfRange => (2, 0, 0, 0, 0),
+    }
+}
 pub fn generate_one(_ address: u32, _ slot: u32, _ cancel_before_finish: bool) -> u32 {
     let p: BrowserPtr<AtlasPool<4>> = BrowserPtr::from_u32(address)
     let claim = with (p) { pool::claim<4>(slot) }

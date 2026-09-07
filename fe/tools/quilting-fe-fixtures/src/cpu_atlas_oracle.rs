@@ -54,6 +54,7 @@ fn cpu_atlas_wasm_pool_retains_tiles_and_rejects_cancelled_results() {
     let generate = instance.get_typed_func::<(i32,i32,i32),i32>(&mut store, "generate_one").unwrap();
     let entry = instance.get_typed_func::<(i32,i32),(i32,i32,i32,i32)>(&mut store, "entry").unwrap();
     let storage = instance.get_typed_func::<i32,i32>(&mut store, "storage").unwrap();
+    let tile_info = instance.get_typed_func::<(i32,i32),(i32,i32,i32,i32,i32)>(&mut store, "tile_info").unwrap();
     let memory = instance.get_memory(&mut store, "memory").unwrap();
     let reset = instance.get_typed_func::<(),()>(&mut store,"fe_cabi_reset").unwrap();
     // Enumerate the entire requested key space without generating expensive
@@ -64,15 +65,21 @@ fn cpu_atlas_wasm_pool_retains_tiles_and_rejects_cancelled_results() {
     reset.call(&mut store,()).unwrap();
     let pool = create.call(&mut store,0).unwrap();
     assert_eq!(summary.call(&mut store,pool).unwrap(),(1,2,0,0,0,0,0));
+    assert_eq!(tile_info.call(&mut store,(pool,1)).unwrap(),(1,0,0,0,0));
+    assert_eq!(tile_info.call(&mut store,(pool,2)).unwrap(),(2,0,0,0,0));
     assert_eq!(generate.call(&mut store,(pool,0,0)).unwrap(),0);
     let first = entry.call(&mut store,(pool,1)).unwrap();
     assert!(first.1>0 && first.2>0 && first.3>0);
     let base = storage.call(&mut store,pool).unwrap() as usize;
+    assert_eq!(tile_info.call(&mut store,(pool,1)).unwrap(),
+        (0,first.2,first.3,(base+first.0 as usize*4) as i32,first.1));
     let mut before=vec![0;first.1 as usize*4];
     memory.read(&store,base+first.0 as usize*4,&mut before).unwrap();
     assert_eq!(generate.call(&mut store,(pool,1,0)).unwrap(),0);
     let second=entry.call(&mut store,(pool,0)).unwrap();
     assert_eq!(second.0,first.1);
+    assert_eq!(tile_info.call(&mut store,(pool,0)).unwrap(),
+        (0,second.2,second.3,(base+second.0 as usize*4) as i32,second.1));
     let mut after=vec![0;before.len()];
     memory.read(&store,base+first.0 as usize*4,&mut after).unwrap();
     assert_eq!(before,after,"another tile must not overwrite retained geometry");
@@ -84,6 +91,18 @@ fn cpu_atlas_wasm_pool_retains_tiles_and_rejects_cancelled_results() {
     assert_eq!(generate.call(&mut store,(cancelled,0,1)).unwrap(),2);
     assert_eq!(summary.call(&mut store,cancelled).unwrap(),(1,2,0,0,0,0,1));
     assert_eq!(entry.call(&mut store,(cancelled,1)).unwrap(),(0,0,0,0));
+    assert_eq!(tile_info.call(&mut store,(cancelled,1)).unwrap(),(1,0,0,0,0));
+    reset.call(&mut store,()).unwrap();
+    let partial=create.call(&mut store,0).unwrap();
+    assert_eq!(generate.call(&mut store,(partial,0,0)).unwrap(),0);
+    let published=tile_info.call(&mut store,(partial,1)).unwrap();
+    assert_eq!(published.0,0);
+    assert_eq!(generate.call(&mut store,(partial,1,1)).unwrap(),2);
+    assert_eq!(tile_info.call(&mut store,(partial,1)).unwrap(),published);
+    assert_eq!(tile_info.call(&mut store,(partial,0)).unwrap(),(1,0,0,0,0));
+    let partial_summary=summary.call(&mut store,partial).unwrap();
+    assert_eq!(partial_summary.2,1);
+    assert_eq!(partial_summary.6,1);
     eprintln!("retained pool ownership passed; Wasm linear memory {} bytes",memory.data_size(&store));
 }
 

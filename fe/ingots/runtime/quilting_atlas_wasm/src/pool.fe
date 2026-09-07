@@ -1,7 +1,7 @@
 //! Main-actor ownership of independent canonical jobs and retained packed tiles.
 //! Calls here must run to completion on one Wasm actor; never suspend while
 //! holding this mutable provider. Worker modules own separate generation memory.
-use core::{BrowserPtr, alloc_browser_object, alloc_browser_bytes}
+use core::{BrowserPtr, BrowserList, alloc_browser_object, alloc_browser_bytes}
 use core::marker::Copy
 use super::{JobQueue, Claim, Completion, Lease, PackedTile}
 use quilting_atlas::canonical_key_at
@@ -14,6 +14,7 @@ pub struct TileKey { pub square: bool, pub a: u32, pub b: u32, pub c: u32, pub d
 impl Copy for TileKey {}
 pub struct TileEntry { pub offset: u32, pub words: u32, pub points: u32, pub triangles: u32 }
 impl Copy for TileEntry {}
+pub enum TileLookup { NotReady, OutOfRange, Ready(PackedTile) }
 pub struct PoolSummary {
     pub epoch: u32, pub total: u32, pub completed: u32, pub words: u32,
     pub points: u32, pub triangles: u32, pub status: u32,
@@ -43,6 +44,10 @@ impl<const N: usize> PoolHandle<N> {
     pub fn key(self, _ ordinal: u32) -> TileKey {
         let p: BrowserPtr<AtlasPool<N>> = BrowserPtr::from_u32(self.address)
         with (p) { ingot::pool::key<N>(ordinal) }
+    }
+    pub fn tile(self, _ ordinal: u32) -> TileLookup {
+        let p: BrowserPtr<AtlasPool<N>> = BrowserPtr::from_u32(self.address)
+        with (p) { ingot::pool::tile<N>(ordinal) }
     }
     pub fn finish(self, _ lease: Lease, _ tile: PackedTile) -> Completion {
         let p: BrowserPtr<AtlasPool<N>> = BrowserPtr::from_u32(self.address)
@@ -118,6 +123,20 @@ pub fn entry<const N: usize>(_ ordinal: u32) -> TileEntry uses (pool: AtlasPool<
     pool.entries[ordinal as usize]
 }
 pub fn storage<const N: usize>() -> u32 uses (pool: AtlasPool<N>) { pool.storage }
+
+/// Borrow a published tile from the owning actor's retained storage. No copy or
+/// allocation is performed. The descriptor lives only as long as this pool's
+/// arena; callers must copy/finish upload before reset or actor destruction.
+/// A cancelled batch retains already published tiles, but never publishes late
+/// results. An unissued/unpublished ordinal is not an empty successful tile.
+pub fn tile<const N: usize>(_ ordinal: u32) -> TileLookup uses (pool: AtlasPool<N>) {
+    if ordinal >= pool.summary.total { return TileLookup::OutOfRange }
+    let item = pool.entries[ordinal as usize]
+    if item.words == 0 { return TileLookup::NotReady }
+    TileLookup::Ready(PackedTile { status: 0, points: item.points, triangles: item.triangles,
+        words: BrowserList { ptr: BrowserPtr::from_u32(pool.storage + item.offset * 4),
+            len: item.words } })
+}
 
 pub fn cancel<const N: usize>() uses (pool: mut AtlasPool<N>) {
     if pool.summary.total > 0 && pool.summary.completed == pool.summary.total { return }

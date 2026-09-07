@@ -69,3 +69,14 @@ replacing allocation behavior. All four cancelled responses now return to the
 same checkpoint and publish zero tiles. The separate Wasm ownership test also
 passes small-tile retention and cancelled-publication checks. Full-pool rendering,
 retained-buffer audits and complete process/worker memory measurements remain pending.
+
+`packed-audit.mjs` now additionally verifies exact requested boundary chains and
+oriented interior-edge incidence; all 1,200 tiles pass this stronger gate. Its
+small independent tests run with `bun test fe/web/atlas-worker/packed-audit.test.mjs`.
+
+Fe consumers can inspect a published tile through `PoolHandle<N>.tile(ordinal)`:
+`TileLookup::Ready(PackedTile)`, `NotReady`, or `OutOfRange`. A ready descriptor
+borrows retained storage without another allocation or copy; it must not outlive
+the owning actor/arena. Cancellation preserves already published tiles but does
+not make unfinished tiles readable. This access path passes the Wasm ownership
+regression; the renderer has not been connected to it yet.
