@@ -1,4 +1,5 @@
 //! Shared Wasm atlas job implementation; validation and workers use this same path.
+pub use job_queue::{JobQueue, Lease, Claim, Completion, BatchState}
 use core::{BrowserPtr, BrowserList, alloc_browser_object, alloc_browser_bytes}
 use core::marker::Copy
 use quilting_atlas::{AtlasKey, edge_resolution}

@@ -1,0 +1,142 @@
+//! Placement-neutral bounded job ownership. No timers, workers or host policy.
+//! Ordinals name canonical tiles; a batch supplies their separate key table.
+use core::marker::Copy
+
+pub struct Lease { pub epoch: u32, pub ordinal: u32, pub slot: u32 }
+impl Copy for Lease {}
+pub enum Claim { Job(Lease), Busy, Complete, Cancelled, Failed }
+pub enum Completion { Accepted, Failed, Stale, Invalid }
+pub enum BatchState { Running, Complete, Cancelled, Failed }
+impl Copy for BatchState {}
+struct Slot { ordinal: u32, busy: bool }
+impl Copy for Slot {}
+
+pub struct JobQueue<const N: usize> {
+    epoch: u32,
+    next: u32,
+    total: u32,
+    completed: u32,
+    slots: [Slot; N],
+    state: BatchState,
+}
+
+impl<const N: usize> JobQueue<N> {
+    pub fn new(_ epoch: u32, _ total: u32) -> Self {
+        Self { epoch: epoch, next: total, total: total, completed: 0,
+            slots: [Slot { ordinal: 0, busy: false }; N],
+            state: if total == 0 { BatchState::Complete }
+                else if N == 0 { BatchState::Failed } else { BatchState::Running } }
+    }
+
+    /// Restart requires a strictly newer epoch. Never wrap and resurrect leases.
+    pub fn restart(mut self, _ epoch: u32, _ total: u32) -> bool {
+        if epoch <= self.epoch { return false }
+        self.epoch = epoch
+        self.next = total
+        self.total = total
+        self.completed = 0
+        for i in 0 .. N { self.slots[i].busy = false }
+        self.state = if total == 0 { BatchState::Complete }
+            else if N == 0 { BatchState::Failed } else { BatchState::Running }
+        true
+    }
+
+    /// Caller chooses a free worker slot, not a job. Reverse table order allows
+    /// the key-table builder to put expensive tiles at the tail; no cost claim
+    /// is made unless that table is actually cost-ordered.
+    pub fn claim(mut self, _ slot: u32) -> Claim {
+        if let BatchState::Complete = self.state { return Claim::Complete }
+        if let BatchState::Cancelled = self.state { return Claim::Cancelled }
+        if let BatchState::Failed = self.state { return Claim::Failed }
+        if (slot as usize) >= N { return Claim::Failed }
+        if self.slots[slot as usize].busy || self.next == 0 { return Claim::Busy }
+        self.next -= 1
+        self.slots[slot as usize] = Slot { ordinal: self.next, busy: true }
+        Claim::Job(Lease { epoch: self.epoch, ordinal: self.next, slot: slot })
+    }
+
+    /// Publication is allowed only after Accepted. Duplicate, cancelled and
+    /// prior-batch results cannot increment counters or release another lease.
+    pub fn finish(mut self, _ lease: Lease, _ success: bool) -> Completion {
+        if lease.epoch != self.epoch { return Completion::Stale }
+        if let BatchState::Running = self.state {} else { return Completion::Stale }
+        if (lease.slot as usize) >= N || lease.ordinal >= self.total { return Completion::Invalid }
+        let slot = self.slots[lease.slot as usize]
+        if !slot.busy || slot.ordinal != lease.ordinal { return Completion::Stale }
+        self.slots[lease.slot as usize].busy = false
+        if !success { self.state = BatchState::Failed
+            return Completion::Failed
+        }
+        self.completed += 1
+        if self.completed == self.total { self.state = BatchState::Complete }
+        Completion::Accepted
+    }
+
+    pub fn cancel(mut self) {
+        if let BatchState::Running = self.state { self.state = BatchState::Cancelled }
+    }
+    pub fn completed(self) -> u32 { self.completed }
+}
+
+#[test]
+fn atlas_queue_rejects_duplicate_and_restarted_results() {
+    let mut q: JobQueue<2> = JobQueue::new(1, 3)
+    let a = match q.claim(0) { Claim::Job(v) => v, _ => Lease { epoch: 0, ordinal: 0, slot: 0 } }
+    let b = match q.claim(1) { Claim::Job(v) => v, _ => a }
+    assert(a.ordinal == 2 && b.ordinal == 1)
+    if let Claim::Busy = q.claim(0) {} else { assert(false) }
+    if let Completion::Accepted = q.finish(a, true) {} else { assert(false) }
+    if let Completion::Stale = q.finish(a, true) {} else { assert(false) }
+    assert(q.completed() == 1)
+    assert(q.restart(2, 1))
+    if let Completion::Stale = q.finish(b, true) {} else { assert(false) }
+    let c = match q.claim(0) { Claim::Job(v) => v, _ => a }
+    assert(c.epoch == 2 && c.ordinal == 0)
+    if let Completion::Accepted = q.finish(c, true) {} else { assert(false) }
+    if let Claim::Complete = q.claim(1) {} else { assert(false) }
+    assert(!q.restart(2, 3))
+}
+
+#[test]
+fn atlas_queue_cancel_and_failure_stop_publication() {
+    let mut q: JobQueue<1> = JobQueue::new(7, 1200)
+    let a = match q.claim(0) { Claim::Job(v) => v, _ => Lease { epoch: 0, ordinal: 0, slot: 0 } }
+    assert(a.ordinal == 1199)
+    q.cancel()
+    if let Completion::Stale = q.finish(a, true) {} else { assert(false) }
+    if let Claim::Cancelled = q.claim(0) {} else { assert(false) }
+    assert(q.restart(8, 1200))
+    let b = match q.claim(0) { Claim::Job(v) => v, _ => a }
+    assert(b.epoch == 8 && b.ordinal == 1199)
+    if let Completion::Failed = q.finish(b, false) {} else { assert(false) }
+    if let Claim::Failed = q.claim(0) {} else { assert(false) }
+    assert(q.completed() == 0)
+}
+
+#[test]
+fn atlas_queue_full_corpus_drains_without_reissuing_ordinals() {
+    let mut q: JobQueue<4> = JobQueue::new(1, 1200)
+    let mut expected: u32 = 1200
+    for _ in 0 .. 300 {
+        let mut leases = [Lease { epoch: 0, ordinal: 0, slot: 0 }; 4]
+        for slot in 0 .. 4 {
+            let lease = match q.claim(slot.downcast_truncate()) {
+                Claim::Job(v) => v,
+                _ => Lease { epoch: 0, ordinal: 0, slot: 0 },
+            }
+            expected -= 1
+            assert(lease.epoch == 1 && lease.ordinal == expected)
+            leases[slot] = lease
+        }
+        // Deliver in reverse order to exercise independent outstanding owners.
+        for i in 0 .. 4 {
+            if let Completion::Accepted = q.finish(leases[3 - i], true) {} else { assert(false) }
+        }
+    }
+    assert(expected == 0 && q.completed() == 1200)
+    if let Claim::Complete = q.claim(0) {} else { assert(false) }
+    let mut empty: JobQueue<0> = JobQueue::new(1, 0)
+    if let Claim::Complete = empty.claim(0) {} else { assert(false) }
+    assert(empty.restart(2, 1))
+    if let Claim::Failed = empty.claim(0) {} else { assert(false) }
+}

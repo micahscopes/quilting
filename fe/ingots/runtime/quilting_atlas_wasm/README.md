@@ -33,6 +33,14 @@ browser demos. Per-call memory is reused by allocator reset between canonical
 jobs; a persistent worker process and retained scratch strategy still need actual
 browser evidence.
 
+`JobQueue<N>` is the placement-neutral ownership policy for that pool. It bounds
+outstanding jobs by N, identifies leases by batch epoch/ordinal/slot, rejects
+duplicate or stale completion, and stops publication after cancellation/failure.
+Three release Fe tests pass, including1200jobs with four outstanding slots and
+reverse-order completion. This is policy testing, not proof of parallel worker
+execution. The current browser mailbox selects one scope per nominal actor type;
+reusing that API for multiple instances still requires an explicit typed design.
+
 Known separate limitation: EVM tests of `packed_tile` leave-output-untouched
 guards fail while the equivalent actual Wasm tests pass. Retained tests must not
 be represented as globally green. Also, a mutable local sink containing a
