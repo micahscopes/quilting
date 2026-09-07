@@ -1,129 +1,123 @@
-# Density-honest patch tessellation
+# Even tessellation on curved patches
 
-Goal set September 7, 2026, after boundary spacing became measured and the
-interior density field was established in closed form. This narrows and
-sequences the interior half of the composition programme. It does not replace
-[the delivery checklist](quilting-fe-delivery-goal.md) or
-[the composition and recursive atlas goal](composition-and-recursive-atlas-goal.md),
-whose unfinished requirements all remain in scope.
+Goal set September 7, 2026. Scope is the interior of a composed patch. It does
+not replace [the delivery checklist](quilting-fe-delivery-goal.md) or
+[the composition and recursive atlas goal](composition-and-recursive-atlas-goal.md).
 
-## Goal
+## What you will be able to do
 
-Make the tessellation of a curved patch honest about the surface rather than
-about its chart: uniform surface triangle area under one declared target, no
-density discontinuity at any internal seam, and every claim carried by a
-measurement of the surface rather than of the reference square. Do it by
-reusing the precomputed atlas, with maps published once per geometry edit, and
-without assuming a Clifford signature.
+Open the composed patch demo, drag an arc handle as far as you like, and the
+triangles stay about the same size on the surface. No slider touching. Today
+that only holds along the four outer sides; the interior still bunches and
+thins, worst near the pole, and the fix is to go hunting in a panel of
+forty-four controls for the ones that happen to compensate.
 
-## What is established
+Specifically, after this:
 
-Boundary spacing is measured, not reference-domain. Outer sides carry an exact
-nested arc-length table; interior spokes and diagonals carry an integrated one.
-Worst adjacent-chord deviation at 64 segments fell from 0.197562 to 0.000726 on
-spokes and 0.276497 to 0.001783 on diagonals. Sliding the authored midpoint
-along its own arc, a pure reparameterization, moves boundary samples by
-0.000000466 rather than 0.558928188.
+- Every slider at neutral gives the best tessellation, not a starting point to
+  correct from.
+- No visible density step where two children meet at a spoke or diagonal.
+- Visibly less twisting at neutral, without a twist control being involved.
+- One target size control instead of four level sliders, with levels derived.
+- The panel reports how even the surface actually is, so you can see it work.
 
-Surface area density is closed form. For the triangle it is a constant over the
-denominator norm squared, verified against central differences to 0.000019; the
-quad adds a total-degree-two correction. The norm is a Gram contraction, and
-the Gram comes from the algebra's own norm by polarization, so no signature is
-assumed. Depth selection needs no logarithm: one subdivision level is exactly
-one factor of two in the norm, and whole regions are certified through the
-Bernstein hull, which fails closed and refines.
+## What ships
 
-Three things are measured and settled. Recursion has 0.81 levels to act on at
-the default authoring and 2.9 to 6.3 at working curvatures, so it is a no-op on
-mild patches and useful on the ones being authored. Finer fan counts do not
-help, flat from 2 to 16 children, because fan children all meet at the centre
-and each spans the full radial range of a field whose level sets are conics.
-Inverted surface chords need both extreme curvature and coarse resolution,
-reaching 16.7 percent only at level 2 on an extreme triangle and vanishing by
-level 4, so the visible interior defect is not chord inversion.
+- An interior placement table in the published spacing buffer, built once per
+  geometry edit from the patch's own density, read identically by the Wasm
+  audit and the WebGPU draw. Same shape as the edge tables that shipped today.
+- `placement.fe` reads that table instead of composing three edge laws inward.
+- Surface-space audits: triangle mass against the closed-form density, chord
+  normal against the analytic normal, and a per-triangle pole-proximity bound.
+  These replace the reference-domain heuristic that currently scores quality.
+- A resolved-size readout beside the existing segment counts.
+- The level-of-detail atlas landscape demo running on the current atlas and maps.
 
-## The defect this goal addresses
+Nothing regenerates per patch configuration. Connectivity does not change,
+index buffers are reused, and no triangulator runs at edit or draw time.
 
-Interior points are placed by composing three one-dimensional boundary laws.
-The closed-form density is consulted nowhere in placement, the audited density
-is an admitted reference-domain heuristic, and the fold witness counts signed
-area in the reference square. So after the boundary became surface-measured the
-interior still interpolates the rim. Two consequences follow, and the evidence
-above says they are the ones that matter:
+## Acceptance
 
-- Interior triangle area varies with the interior-to-rim ratio of the field,
-  which no boundary-interpolated map can equalize, since one-dimensional
-  density inversion is exact while two-dimensional area equalization is not an
-  inversion.
-- The slice composition applies edges in a fixed order, so the two sides of an
-  internal seam receive different interior densities while sharing bit-identical
-  boundary points. That is a density crease, not a geometric crack.
+Measured on the surface, not in the reference square, on the same authoring
+before and after:
 
-Twist is not a separate problem. For a conformal map the rotation field's
-gradient equals the log-density gradient, so resolving density resolves twist
-without an explicit frame.
+| Check | Now | Target |
+|---|---|---|
+| Interior triangle area, max over min | unmeasured | below 2 at working curvatures |
+| Density step across an internal seam | visible | not measurable |
+| Outer-side chord deviation | 0.000019 | unchanged |
+| Interior segment chord deviation | 0.00178 | unchanged |
+| Seam points identical from both sides | exact | exact |
+
+Plus: the browser shows it on the real served build, and every audit that
+claims a surface property calls the surface evaluator.
 
 ## Order
 
-1. **Publish a two-dimensional interior map driven by the density.** A function
-   of the assembled domain, not of the child, which removes the seam crease by
-   construction. Smallest form on existing machinery: three-direction slice
-   composition whose one-dimensional law along each direction is the inverse
-   cumulative of the square root of the density, published like the arc tables
-   and blended by the existing locality weight. Boundary and spoke points do not
-   move. Compare against a Dacorogna-Moser map from a small Poisson solve before
-   accepting the slice form as final.
-2. **Add surface-space witnesses.** Chord normal against the analytic normal,
-   minimum certified norm per triangle as the pole witness, and triangle mass
-   against the closed-form density reported as coefficient of variation and
-   max-over-min. Replace the reference-domain heuristic in the quality audit.
-3. **Carry the boundary flag from assembly into the warp** instead of
-   re-deriving barycentrics and testing exact zeros, which drifts at about
-   3e-8 for arbitrary parameters.
-4. **Drive levels from one declared target** rather than four manual sliders,
-   using the certified per-region norm interval.
-5. **Then choose between recursion and ranking**, on evidence. The depth field
-   already exists. Recursion's ceiling is a factor of two in area, because the
-   fractional part of depth spreads evenly once the span passes two levels;
-   closing that needs ranked tiles, whose parent inclusion is what breaks when
-   better primaries are substituted.
-6. **Refresh the other demos** onto the current atlas and maps, the level-of-
-   detail atlas landscape first.
+1. Publish the interior placement table and switch `placement.fe` to it. This
+   is the bulk of the work and the only item with a real design choice: whether
+   three-direction slice composition suffices, or whether it needs a small
+   Poisson solve. Both publish through the same plumbing, so start with slices.
+2. Add the three surface-space audits and retire the reference-domain heuristic.
+3. Carry the boundary flag from assembly into the warp rather than re-deriving
+   barycentrics and testing exact zeros, which drifts near 3e-8.
+4. Derive levels from one target size using the certified norm intervals.
+5. Refresh the other demos, landscape first.
+6. Only then revisit recursion or ranked tiles, on the evidence in
+   [the density document](patch-area-density.md).
+
+## Why this and not recursion
+
+Recursion has 0.81 levels of density to act on at the default authoring and 2.9
+to 6.3 at working curvatures, so it does nothing on mild patches and cannot do
+better than a factor of two in area anywhere, because the fractional part of
+depth spreads evenly. Finer fan counts do nothing at all: worst per-child span
+is flat from 2 through 16 children, since every fan child meets at the centre
+and spans the full radial range. And the visible interior defect is not the
+surface folding over: inverted chords need extreme curvature and coarse
+resolution together, reaching 16.7 percent only at level 2 and vanishing by
+level 4.
+
+What is left is placement. Interior points are positioned by composing three
+one-dimensional boundary laws, and the closed-form density is consulted nowhere
+in placement, so the interior still interpolates the rim. The seam step follows
+from the same code applying those laws in a fixed order, so two children
+disagree just inside a seam they agree on exactly.
+
+Twisting is not separate. For an angle-preserving map the local rotation and
+the local stretch are locked together, so fixing density fixes twist.
 
 ## Constraints
 
-Every undirected edge keeps one canonical identity, resolution, orientation rule
-and sampling map, and both adjacent uses produce bit-identical points. Maps are
-published once per geometry edit and shared by CPU audit and GPU, never solved
-per configuration or per frame. Point relaxation, if any, belongs in the atlas
-build in the reference frame, once. Reuse the 165 canonical keys; do not
-generate a tessellation per patch configuration.
+Every undirected edge keeps one canonical identity, resolution, orientation
+rule and sampling map, and both adjacent uses produce bit-identical points.
+Maps are published once per geometry edit, never solved per configuration or
+per frame. Point relaxation, if it ever happens, belongs in the atlas build in
+the reference frame, once. Reuse the 165 canonical keys.
 
-No construction may rest on Euclidean-only classification. The patches are
+No construction may rest on Euclidean-only classification: these patches are
 Dupin cyclides under the Euclidean instance and something else under another,
-so sphere and cyclide facts are not available as design assumptions. Where a
-metric is required for a claim to mean anything, say so at the claim.
+so sphere and cyclide facts are not design assumptions. Where a claim needs a
+definite metric to mean anything, say so at the claim.
 
-Publication revisions must change when the authored weights change, not only
-when reference levels or skews do.
+Publication revisions change when the authored weights change, not only when
+levels or skews do.
 
 ## Non-goals
 
-Screen-space or pixel uniformity, which is not conformal and re-couples every
-field to the camera. Twist in any automatic solve. Fitted skew or concentration
-parameters as a correction mechanism; both are one-parameter Möbius families
-whose derivative is a constant over a perfect square, so they can match a
-curved segment's endpoints and never its interior. Curvature-driven refinement,
-which answers a sag question rather than an area question.
+Screen-space or pixel uniformity, which is not angle-preserving and re-couples
+every field to the camera. Twist in any automatic solve. Fitted skew or
+concentration parameters as a correction mechanism, since both are
+one-parameter families that can match a curved segment's endpoints and never
+its interior. Curvature-driven refinement, which answers a sag question rather
+than an area question.
 
-## Completion
+## Already true
 
-- Interior triangle mass, measured on the surface, has a coefficient of
-  variation and a max-over-min ratio reported per published snapshot, and both
-  improve against the current pipeline on the same authoring.
-- No density discontinuity is measurable across any internal seam.
-- Seam points remain bit-identical from both sides, verified as now.
-- Every audit that claims a surface property calls the surface evaluator.
-- The browser shows it on the real served build, not only in tests.
-- Where an experiment fails, its fixture and negative result are preserved
-  rather than deleted, as with fan count above.
+Boundary spacing is measured rather than reference-domain, and the density
+field is closed form and cheap. Sliding the authored midpoint along its own arc
+moves boundary samples 0.000000466 instead of 0.558928188. Interior segment
+deviation is 0.00178, down from 0.276. Depth for recursion is already
+computable and certified over whole regions. Evidence and method are in
+[the density document](patch-area-density.md) and
+[the spacing document](dyadic-circular-edge-spacing.md).
