@@ -1,0 +1,152 @@
+//! Append-only spatial index for accepted samples, not proposal candidates.
+//!
+//! Callers supply squared coordinate-radius bounds: a conflict must imply
+//! Euclidean coordinate distance squared < max(candidate bound, stored bound).
+//! Square distance satisfies this exactly; quilting's equilateral metric
+//! 3*(dx²+dy²+dx*dy) >= dx²+dy² does too. Other metrics must supply a proven
+//! bound rather than silently inheriting this index's Euclidean assumption.
+use super::planar::FixedPoint2
+use super::sampling::BARYCENTRIC_SCALE
+
+pub const END: u32 = 0xffffffff
+const SIDE: u32 = 16
+const WIDTH: u32 = BARYCENTRIC_SCALE / SIDE
+
+pub struct Query {
+    point: FixedPoint2,
+    radius_squared: u32,
+    cell: u32,
+    item: u32,
+    pub cells_tested: u32,
+    pub points_visited: u32,
+}
+
+/// Fixed grid size affects acceleration only, never accepted geometry or the
+/// supported LoD range. Linked chains retain arbitrarily crowded cells up to N.
+pub struct AcceptedGrid<const N: usize> {
+    heads: [u32; 256],
+    maxima: [u32; 256],
+    links: [u32; N],
+    count: u32,
+}
+
+fn axis_cell(_ x: u32) -> u32 {
+    let c = x / WIDTH
+    if c < SIDE { c } else { SIDE - 1 }
+}
+
+fn gap(_ x: u32, _ lo: u32, _ hi: u32) -> u32 {
+    if x < lo {
+        lo - x
+    } else if x > hi { x - hi } else { 0 }
+}
+
+/// Inclusive cell boxes are conservative at shared boundaries, including S.
+pub fn cell_may_conflict(_ cell: u32, _ p: FixedPoint2, _ radius_squared: u32) -> bool {
+    let x = (cell % SIDE) * WIDTH
+    let y = (cell / SIDE) * WIDTH
+    let dx = gap(p.x, x, x + WIDTH)
+    let dy = gap(p.y, y, y + WIDTH)
+    dx * dx + dy * dy < radius_squared
+}
+
+impl<const N: usize> AcceptedGrid<N> {
+    pub fn empty() -> Self {
+        Self { heads: [END; 256], maxima: [0; 256], links: [END; N], count: 0 }
+    }
+
+    /// Reuses the allocation. Old links are unreachable after resetting heads.
+    pub fn reset(mut self) {
+        for i in 0 .. 256 {
+            self.heads[i] = END
+            self.maxima[i] = 0
+        }
+        self.count = 0
+    }
+
+    /// Consecutive stable indices prevent duplicate insertion/cyclic chains.
+    pub fn insert(mut self, _ index: u32, _ p: FixedPoint2, _ bound_squared: u32) -> bool {
+        if index != self.count
+            || (index as usize) >= N
+            || p.x > BARYCENTRIC_SCALE
+            || p.y > BARYCENTRIC_SCALE {
+            return false
+        }
+        let cell = (axis_cell(p.y) * SIDE + axis_cell(p.x)) as usize
+        self.links[index as usize] = self.heads[cell]
+        self.heads[cell] = index
+        if bound_squared > self.maxima[cell] {
+            self.maxima[cell] = bound_squared
+        }
+        self.count += 1
+        true
+    }
+    pub fn query(self, _ p: FixedPoint2, _ bound_squared: u32) -> Query {
+        Query {
+            point: p,
+            radius_squared: bound_squared,
+            cell: 0,
+            item: END,
+            cells_tested: 0,
+            points_visited: 0,
+        }
+    }
+
+    /// Returns a conservative candidate index. The caller still performs its
+    /// exact metric/exclusion test. Query order does not change admission truth.
+    pub fn next(self, _ query: mut Query) -> u32 {
+        while query.item == END && query.cell < SIDE * SIDE {
+            let cell = query.cell
+            query.cell += 1
+            query.cells_tested += 1
+            let bound = self.maxima[cell as usize]
+            let radius = if bound > query.radius_squared {
+                bound
+            } else {
+                query.radius_squared
+            }
+            if self.heads[cell as usize] != END && cell_may_conflict(cell, query.point, radius) {
+                query.item = self.heads[cell as usize]
+            }
+        }
+        if query.item == END {
+            return END
+        }
+        let result = query.item
+        query.item = self.links[result as usize]
+        query.points_visited += 1
+        result
+    }
+}
+
+#[test]
+fn accepted_grid_keeps_crowded_cells_and_larger_neighbor_radii() {
+    let mut grid: AcceptedGrid<4> = AcceptedGrid::empty()
+    assert(grid.insert(0, FixedPoint2 { x: 0, y: 0 }, 200000000))
+    assert(grid.insert(1, FixedPoint2 { x: 1, y: 1 }, 1))
+    assert(grid.insert(2, FixedPoint2 { x: 2, y: 2 }, 1))
+    assert(!grid.insert(2, FixedPoint2 { x: 3, y: 3 }, 1))
+    let mut query = grid.query(FixedPoint2 { x: 8192, y: 8192 }, 1)
+    // The far-away cell remains a candidate because its largest stored radius
+    // can exclude this point. All three records survive, not only the last one.
+    assert(grid.next(mut query) == 2)
+    assert(grid.next(mut query) == 1)
+    assert(grid.next(mut query) == 0)
+    assert(grid.next(mut query) == END)
+    assert(query.points_visited == 3)
+    grid.reset()
+    let mut empty = grid.query(FixedPoint2 { x: 0, y: 0 }, 200000000)
+    assert(grid.next(mut empty) == END)
+    assert(grid.insert(0, FixedPoint2 { x: 16384, y: 16384 }, 1))
+}
+
+#[test]
+fn accepted_grid_cell_bound_respects_exact_ties() {
+    // Cell 0 occupies [0,1024]². A candidate at x=1027 is three units away.
+    let p = FixedPoint2 { x: 1027, y: 512 }
+    assert(!cell_may_conflict(0, p, 9))
+    assert(cell_may_conflict(0, p, 10))
+    assert(
+        cell_may_conflict(255, FixedPoint2 { x: 16384, y: 16384 }, 1),
+    )
+}
