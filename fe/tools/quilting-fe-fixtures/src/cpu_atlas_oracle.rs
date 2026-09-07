@@ -162,9 +162,9 @@ fn measured_interior_spacing_beats_uniform_parameter_on_spokes_and_diagonals() {
     }
     eprintln!("INTERIOR worst measured deviation={worst_measured:.6}, smallest uniform deviation={least_uniform:.6}");
     // Integration leaves a quadrature residual, unlike the exact outer tables.
-    // This bound records what the sixteen-span table actually achieves; it is
+    // This bound records what the sixty-four-span table actually achieves; it is
     // not a claim of exact uniformity on a curve with no closed-form arc law.
-    assert!(worst_measured<0.05,"measured interior deviation regressed: {worst_measured}");
+    assert!(worst_measured<0.004,"measured interior deviation regressed: {worst_measured}");
 }
 
 /// Settles whether surface area density has the closed form one over the fourth

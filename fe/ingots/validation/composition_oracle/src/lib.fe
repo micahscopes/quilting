@@ -191,7 +191,7 @@ pub fn interior_chord_deviation(_ measured:u32,_ from:u32,_ to:u32,_ segments:u3
     let warp=composite_atlas::composition_warp::policy(c)
     let a=corner(from,c.center_x,c.center_y)
     let b=corner(to,c.center_x,c.center_y)
-    let mut table=SampledCumulativeLength {values:[0.0;17]}
+    let mut table=SampledCumulativeLength {values:[0.0;65]}
     let mut ready=measured==0
     if measured!=0 {
         match measured_cumulative(net,warp,c.center_x,c.center_y,from,to) {
@@ -465,7 +465,7 @@ pub fn edge_skew_preserves_mass_and_shared_positions()->bool {
             for high in (low+1) .. 5 {
                 let raw=composite_atlas::model::edge_measure(c,low.downcast_truncate(),high.downcast_truncate())
                 let table=composite_atlas::model::edge_cdf(c,low.downcast_truncate(),high.downcast_truncate())
-                if table.values[0]!=0.0 || table.values[16]!=raw.values[16] {return false}
+                if table.values[0]!=0.0 || table.values[64]!=raw.values[64] {return false}
                 for i in 1 .. 17 {
                     if !(table.values[i]>table.values[i-1]) {return false}
                     if skew==1.0 && table.values[i]!=raw.values[i] {return false}
@@ -615,7 +615,7 @@ pub fn spacing_case(_ code:u32)->(f32,f32,bool) {
     controls.top_lod=__f32_from_i32(((code/81)%9).downcast_unchecked())
     controls.left_lod=__f32_from_i32(((code/729)%9).downcast_unchecked())
     let cdf=composite_atlas::model::edge_cdf(controls,0,4)
-    let total=cdf.cumulative(16)
+    let total=cdf.cumulative(64)
     let mut previous=0.0
     let mut residual=0.0
     let mut monotone=true
@@ -625,8 +625,8 @@ pub fn spacing_case(_ code:u32)->(f32,f32,bool) {
         if i>0 && !(t>previous) {monotone=false}
         previous=t
         let mut low: u32=0
-        while low<15 && t>__f32_from_i32((low+1).downcast_unchecked())/16.0 {low+=1}
-        let local=t*16.0-__f32_from_i32(low.downcast_unchecked())
+        while low<63 && t>__f32_from_i32((low+1).downcast_unchecked())/64.0 {low+=1}
+        let local=t*64.0-__f32_from_i32(low.downcast_unchecked())
         let observed=(cdf.cumulative(low)+(cdf.cumulative(low+1)-cdf.cumulative(low))*local)/total
         let delta=observed-fraction
         let error=if delta<0.0 {-delta} else {delta}

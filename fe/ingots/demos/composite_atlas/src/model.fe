@@ -251,41 +251,41 @@ pub fn corner(_ id:u32,_ x:f32,_ y:f32) -> Point {
 
 /// A reference-domain density heuristic, not an interior-uniformity proof.
 /// The straight outer edges integrate to exactly their requested counts.
-pub fn edge_cdf(_ controls:Controls,_ from:u32,_ to:u32) -> SampledCumulativeLength<17> {
+pub fn edge_cdf(_ controls:Controls,_ from:u32,_ to:u32) -> SampledCumulativeLength<65> {
     let raw=edge_measure(controls,from,to)
     let edge=BoundaryUse::between(from,to)
     let skew=edge_skews(controls).at(edge.square_slot().unwrap() as usize)
     redistribute_edge(raw,if edge.reversed {1.0/skew} else {skew})
 }
-pub fn redistribute_edge(_ raw:SampledCumulativeLength<17>,_ skew:f32)->SampledCumulativeLength<17> {
+pub fn redistribute_edge(_ raw:SampledCumulativeLength<65>,_ skew:f32)->SampledCumulativeLength<65> {
     if skew==1.0 {return raw}
     let measure=RedistributedCumulative {samples:raw,law:ProjectiveIntervalBias {strength:skew}}
-    let mut values=[0.0;17]
-    for i in 0 .. 17 {values[i]=measure.cumulative(i.downcast_truncate())}
+    let mut values=[0.0;65]
+    for i in 0 .. 65 {values[i]=measure.cumulative(i.downcast_truncate())}
     SampledCumulativeLength {values:values}
 }
 /// The integrated reference density controls the count; skew redistributes
 /// that same total rather than silently promoting the requested edge LoD.
-pub fn edge_measure(_ controls:Controls,_ from:u32,_ to:u32) -> SampledCumulativeLength<17> {
+pub fn edge_measure(_ controls:Controls,_ from:u32,_ to:u32) -> SampledCumulativeLength<65> {
     let a=corner(from,controls.center_x,controls.center_y)
     let b=corner(to,controls.center_x,controls.center_y)
     let dx=b.x-a.x
     let dy=b.y-a.y
     let field=density_field(controls)
-    let mut values=[0.0;17]
-    for i in 0 .. 16 {
-        let t=(lod_as_f32(i.downcast_truncate())+0.5)/16.0
+    let mut values=[0.0;65]
+    for i in 0 .. 64 {
+        let t=(lod_as_f32(i.downcast_truncate())+0.5)/64.0
         let x=a.x+dx*t
         let y=a.y+dy*t
         let density=field.at(Point {x:x,y:y})
         let vx=density.x*dx
         let vy=density.y*dy
-        values[i+1]=values[i]+sqrt(vx*vx+vy*vy)/16.0
+        values[i+1]=values[i]+sqrt(vx*vx+vy*vy)/64.0
     }
     SampledCumulativeLength {values:values}
 }
 pub fn edge_demand(_ controls:Controls,_ from:u32,_ to:u32) -> f32 {
-    edge_measure(controls,from,to).cumulative(16)
+    edge_measure(controls,from,to).cumulative(64)
 }
 fn automatic_level(_ controls:Controls,_ from:u32,_ to:u32) -> u32 {
     let demand=edge_demand(controls,from,to)

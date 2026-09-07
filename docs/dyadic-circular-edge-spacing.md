@@ -100,17 +100,19 @@ the skew control biases that uniform base rather than correcting it.
 Worst relative deviation of adjacent surface chords at 64 segments on the
 default curved quad:
 
-| Interior segment | Uniform parameter | Measured length |
-|---|---|---|
-| spokes 0 and 1 to centre | 0.197562 | 0.013415 |
-| spokes 2 and 3 to centre | 0.246315 | 0.013836 |
-| diagonals 0-2 and 1-3 | 0.276497 | 0.027125 |
+| Interior segment | Uniform parameter | Measured, 16 spans | Measured, 64 spans |
+|---|---|---|---|
+| spokes 0 and 1 to centre | 0.197562 | 0.013415 | 0.000726 |
+| spokes 2 and 3 to centre | 0.246315 | 0.013836 | 0.000856 |
+| diagonals 0-2 and 1-3 | 0.276497 | 0.027125 | 0.001783 |
 
-Unlike the outer-side tables this carries a quadrature residual, and the two
-diagonals show roughly twice the spoke residual because they are longer and
-bend more inside each of the sixteen spans. Raising the published span count is
-the direct lever if that becomes visible; the substep count already controls
-length accuracy rather than inverse resolution.
+Unlike the outer-side tables this carries a quadrature residual. At sixteen
+spans the diagonals showed roughly twice the spoke residual, because they are
+longer and bend more inside each span. Widening the shared cumulative to
+sixty-four spans cut every residual by about sixteen, which is the quadratic
+convergence of the interpolated inverse, and the substep count was halved since
+each span now covers less curve. The span count is the lever here; substeps
+control length accuracy rather than inverse resolution.
 
 ## Integration still required
 

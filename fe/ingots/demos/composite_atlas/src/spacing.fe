@@ -14,7 +14,7 @@ use std::webgpu::{StorageBuffer,BufferPublication,PublicationVersion}
 use ingot::model::{initial_controls,corner,edge_measure,redistribute_edge}
 use ingot::residency::{Scene,State,ChildDraw}
 
-pub const SAMPLES:usize=17
+pub const SAMPLES:usize=65
 /// One 2^8+1 table per outer side. Because the construction is nested, every
 /// coarser LoD reads its own samples out of this one table exactly, so a single
 /// published size serves LoD0 through LoD8 without a second resolution.
@@ -26,7 +26,7 @@ pub type Maps=StorageBuffer<f32,MAP_WORDS>
 /// Substeps per published span. The interior curves have no closed-form arc
 /// law here, so their length is integrated; this keeps the table from being a
 /// sixteen-chord approximation of a curve that bends inside each span.
-const SUBSTEPS:usize=4
+const SUBSTEPS:usize=2
 extern {const fn __f32_from_i32(_:i32)->f32}
 fn fraction(_ index:usize,_ count:usize)->f32 {
     let a:i32=index.downcast_unchecked()
@@ -47,11 +47,11 @@ fn measured_point(_ net:ingot::surface::Net,_ warp:ingot::composition_warp::Comp
 /// that the exact circular construction cannot admit. It is an integration, so
 /// unlike the outer-side tables it carries a quadrature error.
 pub fn measured_cumulative(_ net:ingot::surface::Net,_ warp:ingot::composition_warp::CompositionWarp,
-    _ center_x:f32,_ center_y:f32,_ from:u32,_ to:u32)->core::option::Option<SampledCumulativeLength<17>> {
+    _ center_x:f32,_ center_y:f32,_ from:u32,_ to:u32)->core::option::Option<SampledCumulativeLength<65>> {
     let a=corner(from,center_x,center_y)
     let b=corner(to,center_x,center_y)
-    let steps=16*SUBSTEPS
-    let mut values=[0.0;17]
+    let steps=64*SUBSTEPS
+    let mut values=[0.0;65]
     let mut previous=measured_point(net,warp,a,b,0.0)
     if !previous.valid {return core::option::Option::None}
     let mut total:f32=0.0
@@ -142,8 +142,8 @@ impl PublishSpacing {
 pub struct EdgeSamples {pub maps:Maps,pub slot:u32}
 impl Copy for EdgeSamples {}
 impl CumulativeLengthSamples for EdgeSamples {
-    fn segments(self)->u32 {16}
-    fn cumulative(self,_ index:u32)->f32 {self.maps.load(index:self.slot.wrapping_mul(17).wrapping_add(index))}
+    fn segments(self)->u32 {64}
+    fn cumulative(self,_ index:u32)->f32 {self.maps.load(index:self.slot.wrapping_mul(65).wrapping_add(index))}
 }
 fn arc_segments()->u32 {(ARC_SAMPLES-1).downcast_truncate()}
 fn identity_fraction(_ index:u32)->f32 {
