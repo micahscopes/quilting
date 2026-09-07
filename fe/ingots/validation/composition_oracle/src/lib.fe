@@ -45,6 +45,39 @@ pub fn whole_composition_warp_laws()->bool {
             if fmath::abs(q.x-p.x)+fmath::abs(q.y-p.y)<0.001 {return false}
         }
     }
+    whole_composition_shared_seam()
+}
+
+fn whole_composition_shared_seam()->bool {
+    use composite_atlas::{residency,placement}
+    use quilting_patch::sampling_warp::ProjectiveIntervalBias
+    let mut c=initial_controls()
+    c.composition_focus_x=0.23
+    c.composition_focus_y=0.71
+    c.composition_twist=2.1
+    c.composition_concentration=1.8
+    let mut scene=residency::empty_scene()
+    scene.composition_warp=composite_atlas::composition_warp::policy(c)
+    let mut first=residency::empty_child()
+    first.corner_a=0
+    first.corner_b=1
+    first.corner_c=2
+    let mut second=residency::empty_child()
+    second.corner_a=0
+    second.corner_b=2
+    second.corner_c=3
+    let forward=OrientedIntervalMap {law:ProjectiveIntervalBias {strength:3.0},reversed:false}
+    let reverse=OrientedIntervalMap {law:ProjectiveIntervalBias {strength:3.0},reversed:true}
+    for mode in [0.0,1.0,2.0] {
+        c.composition_falloff=mode
+        scene.composition_warp=composite_atlas::composition_warp::policy(c)
+        for i in 0..257 {
+            let t=__f32_from_i32(i.downcast_unchecked())/256.0
+            let a=placement::place(scene,first,bary3f(1.0-t,0.0,t),forward,forward,reverse)
+            let b=placement::place(scene,second,bary3f(1.0-t,t,0.0),forward,forward,reverse)
+            if a.x!=b.x || a.y!=b.y {return false}
+        }
+    }
     true
 }
 
