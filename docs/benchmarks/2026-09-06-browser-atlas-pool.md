@@ -38,6 +38,19 @@ These checks are not a new proof of Delaunay optimality, boundary permutations,
 non-overlap, or the byte-for-byte correctness of every retained tile. Those need
 their corresponding algorithmic tests and retained-buffer/rendering gates.
 
+### Stronger packed-boundary gate
+
+A subsequent full run also passed exact dyadic boundary-point and segment
+checks, oppositely paired interior-edge incidence, duplicate-point rejection,
+triangle-domain containment, zero U16 padding and the disk Euler relation.
+All 1,200 tiles passed in 117.695 seconds, with 1.956 seconds spent in the
+independent host audit. Geometry/packed totals were unchanged. The test oracle
+has negative cases for skipped collinear points and malformed data, plus all
+six triangle relabelings and eight square symmetries on asymmetric controls.
+It does not replace the Fe canonicalization tests or prove Delaunay optimality.
+Receipt: `/laboratory/quilting/scratch/atlas-pool-boundary-audit-20260906.json`.
+Run the oracle tests with `bun test fe/web/atlas-worker/packed-audit.test.mjs`.
+
 ## Cancellation and ownership
 
 Cancellation after 100 ms also passed: four in-flight results arrived, zero tiles

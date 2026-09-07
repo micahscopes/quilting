@@ -2,7 +2,7 @@
 import {createStructuredWorkerScopes,createStructuredWorkerMailboxes,
   createMaterializedTaskRegistry} from './generated-pool/tasks.js';
 import {createHostCompletionBroker} from './generated-pool/host-completion.js';
-import {audit} from './browser-acceptance.mjs';
+import {audit} from './packed-audit.mjs';
 
 export async function verifyAtlasPool({cancelAfterMs=null,onProgress=()=>{},onMemoryEvent=null}={}) {
   const start=performance.now();
@@ -22,7 +22,7 @@ export async function verifyAtlasPool({cancelAfterMs=null,onProgress=()=>{},onMe
         if(response.lease.epoch!==payload.lease.epoch||response.lease.ordinal!==payload.lease.ordinal
           ||response.lease.slot!==payload.lease.slot) throw Error('lease mismatch');
         const auditStart=performance.now();
-        audit(response.tile,payload.key.square);
+        audit(response.tile,payload.key.square,payload.key);
         receipts.push({worker:index,ordinal:payload.lease.ordinal,key:payload.key,
           points:response.tile.points,triangles:response.tile.triangles,
           bytes:response.tile.words.byteLength,roundtripMs,auditMs:performance.now()-auditStart});
