@@ -2,7 +2,7 @@
 //! Boundary evaluation bypasses interior extension to preserve shared arithmetic.
 use core::{BrowserBytes,BrowserPtr,alloc_browser_object}
 use core::marker::Copy
-use quilting_atlas::composition::BoundaryUse
+use quilting_atlas::composition::SquareBoundaryUse
 use quilting_patch::arc_length::CumulativeLengthSamples
 use quilting_patch::sampling_warp::{InverseCumulativeMap,OrientedIntervalMap,TriangleEdgeMaps}
 use quilting_domain::Bary3F
@@ -56,17 +56,15 @@ impl CumulativeLengthSamples for EdgeSamples {
     fn cumulative(self,_ index:u32)->f32 {self.maps.load(index:self.slot.wrapping_mul(17).wrapping_add(index))}
 }
 pub type DirectedMap=OrientedIntervalMap<InverseCumulativeMap<EdgeSamples>>
-fn edge_map(_ maps:Maps,_ from:u32,_ to:u32)->DirectedMap {
-    let edge=BoundaryUse::between(from,to)
-    let slot=match edge.square_slot() {Some(slot)=>slot,None=>0}
-    OrientedIntervalMap {law:InverseCumulativeMap {samples:EdgeSamples {maps:maps,slot:slot}},reversed:edge.reversed}
+fn edge_map(_ maps:Maps,_ edge:SquareBoundaryUse)->DirectedMap {
+    OrientedIntervalMap {law:InverseCumulativeMap {samples:EdgeSamples {maps:maps,slot:edge.slot()}},reversed:edge.reversed()}
 }
-pub fn canonical_parameter(_ maps:Maps,_ from:u32,_ to:u32,_ t:f32,_ enabled:bool)->f32 {
-    let m=edge_map(maps,from,to)
+pub fn canonical_parameter(_ maps:Maps,_ edge:SquareBoundaryUse,_ t:f32,_ enabled:bool)->f32 {
+    let m=edge_map(maps,edge)
     let q=if m.reversed {1.0-t} else {t}
     if enabled {m.canonical(t)} else {q}
 }
 pub fn interior(_ maps:Maps,_ d:ChildDraw,_ p:Bary3F)->Bary3F {
-    TriangleEdgeMaps {a:edge_map(maps,d.corner_b,d.corner_c),
-        b:edge_map(maps,d.corner_c,d.corner_a),c:edge_map(maps,d.corner_a,d.corner_b)}.map(p)
+    TriangleEdgeMaps {a:edge_map(maps,d.boundaries.bc),
+        b:edge_map(maps,d.boundaries.ca),c:edge_map(maps,d.boundaries.ab)}.map(p)
 }

@@ -90,6 +90,39 @@ interior crop. Canvas inspection followed automatic startup, not activation.
 Current runtime asset: `fe-render-runtime-0ba5548668c8cb5d.js`.
 Logs: `/laboratory/quilting/scratch/declarative-surface-upgrade-tests-20260907.log`
 and `/laboratory/quilting/scratch/composite-declarative-live-web-dev-20260907.log`.
+# Checked boundary admission follow-up
+
+`SquareBoundaryUse` now admits a square boundary once in host planning and
+stores its canonical identity and traversal direction in one private word.
+`ChildRequest` carries these witnesses into each resident child. GPU spacing
+consumes them directly; the `None => 0` fallback has been removed. Invalid
+triangles do not resolve to a request. Empty draw ranges carry valid inactive
+topology rather than repeated corner zero.
+
+The release Wasm gate adds all 216 triples over corner IDs 0..5 and an extreme
+invalid ID, checking rejection of repeated/out-of-domain corners and agreement
+of every admitted identity/direction with the original boundary. The existing
+16.86 million warped samples and retained-snapshot checks still pass. Log:
+`/laboratory/quilting/scratch/composite-admitted-boundary-tests-20260907.log`.
+
+Release browser manifest `fe-render-c97b1107ab64a99b.json` rendered the default
+fan and mixed outer LoDs 1/6/6/1. The latter drew 24,396 vertices. Inspection of
+the 1,036,324-pixel interior found zero exposed-background pixels and zero red
+fold-marker pixels. Large sparse-edge triangles remain; this is not a claim
+of satisfactory density interpolation or a general mesh-coverage proof.
+
+Cost tradeoff: emitted WGSL 158,987 -> 132,381 bytes; parent Wasm
+358,989 -> 397,602 bytes. No measured runtime-speed claim. The development
+server was restarted after its last-good-build retention failed to pick up the
+corrected source; the inspected manifest is the corrected one.
+
+Upstream limitation encountered: a boolean field in a host scene argument
+failed compute lowering with `kernel arg 25 is i1; boolean storage-buffer
+arguments are unsupported`. The boundary representation deliberately uses one
+word for twenty directed identities, but general typed boolean ABI support
+remains unfinished upstream. This representation is not evidence that the
+general limitation has been fixed.
+
 # Shared orientation follow-up
 
 The composition now uses `quilting_patch::sampling_warp::OrientedIntervalMap`
@@ -113,6 +146,6 @@ default square without visible holes or red fold markers. Total emitted WGSL
 was 158,987 bytes (previous checkpoint 196,297); this is a size observation,
 not an execution-speed measurement or a complete causal bloat diagnosis.
 
-Still pending: typed boundary admission replacing the invalid-edge slot-zero
-fallback, nonidentity GPU/CPU position comparisons, and broader mesh-distortion
-checks. The generic extraction does not claim those are solved.
+At that checkpoint, typed boundary admission was still pending; it is addressed
+above. Nonidentity GPU/CPU position comparisons and broader mesh-distortion
+checks remain pending.

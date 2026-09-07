@@ -12,6 +12,27 @@ impl Copy for SquareSplit {}
 /// endpoints and density owner; only their traversal direction differs.
 pub struct BoundaryUse { pub low: u32, pub high: u32, pub reversed: bool }
 impl Copy for BoundaryUse {}
+/// An admitted use of one of the square composition's ten boundaries.
+/// Construction checks the topology on the host; shaders consume the witness
+/// without inventing an edge when admission fails.
+/// One compact word: twice the canonical slot, plus the traversal bit.
+/// Twenty legal directed identities; construction is the admission boundary.
+pub struct SquareBoundaryUse { code:u32 }
+impl Copy for SquareBoundaryUse {}
+impl SquareBoundaryUse {
+    pub fn admit(_ edge:BoundaryUse)->Option<Self> {
+        match edge.square_slot() {
+            Option::Some(slot)=>Option::Some(Self {code:slot*2+if edge.reversed {1} else {0}}),
+            Option::None=>Option::None,
+        }
+    }
+    pub fn slot(self)->u32 {self.code/2}
+    pub fn reversed(self)->bool {self.code%2!=0}
+}
+pub struct SquareChildBoundaries {
+    pub ab:SquareBoundaryUse,pub bc:SquareBoundaryUse,pub ca:SquareBoundaryUse,
+}
+impl Copy for SquareChildBoundaries {}
 impl BoundaryUse {
     pub fn between(_ from: u32, _ to: u32) -> Self {
         if from < to {
@@ -44,20 +65,27 @@ impl BoundaryUse {
 /// neither promotes outer requests nor invents a density interpolation policy.
 pub struct SquareEdgeLods { pub levels: [u32; 10] }
 impl Copy for SquareEdgeLods {}
-pub struct ChildRequest { pub triangle: ChildTriangle, pub primary: CanonicalKey }
+pub struct ChildRequest { pub triangle: ChildTriangle, pub primary: CanonicalKey, pub boundaries:SquareChildBoundaries }
 impl Copy for ChildRequest {}
 
 pub struct ChildTriangle { pub a: u32, pub b: u32, pub c: u32 }
 impl Copy for ChildTriangle {}
 impl ChildTriangle {
+    pub fn square_boundaries(self)->Option<SquareChildBoundaries> {
+        let ab=match SquareBoundaryUse::admit(BoundaryUse::between(self.a,self.b)) {Option::Some(v)=>v,_=>return Option::None}
+        let bc=match SquareBoundaryUse::admit(BoundaryUse::between(self.b,self.c)) {Option::Some(v)=>v,_=>return Option::None}
+        let ca=match SquareBoundaryUse::admit(BoundaryUse::between(self.c,self.a)) {Option::Some(v)=>v,_=>return Option::None}
+        Option::Some(SquareChildBoundaries {ab:ab,bc:bc,ca:ca})
+    }
     pub fn resolve(self, _ edges: SquareEdgeLods) -> Option<ChildRequest> {
-        let ab = match BoundaryUse::between(self.a,self.b).square_slot() { Option::Some(slot) => edges.levels[slot as usize], _ => return Option::None }
-        let bc = match BoundaryUse::between(self.b,self.c).square_slot() { Option::Some(slot) => edges.levels[slot as usize], _ => return Option::None }
-        let ca = match BoundaryUse::between(self.c,self.a).square_slot() { Option::Some(slot) => edges.levels[slot as usize], _ => return Option::None }
+        let boundaries=match self.square_boundaries() {Option::Some(v)=>v,_=>return Option::None}
+        let ab=edges.levels[boundaries.ab.slot() as usize]
+        let bc=edges.levels[boundaries.bc.slot() as usize]
+        let ca=edges.levels[boundaries.ca.slot() as usize]
         if ab > 8 || bc > 8 || ca > 8 { return Option::None }
         // Sampler lanes are opposite the corresponding barycentric vertex,
         // not the counterclockwise ring order used by the topology recipe.
-        Option::Some(ChildRequest { triangle:self,
+        Option::Some(ChildRequest { triangle:self,boundaries:boundaries,
             primary:canonicalize(AtlasKey { a:bc,b:ca,c:ab }) })
     }
     /// Edge lanes follow the child's counterclockwise ring, not an implicit

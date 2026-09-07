@@ -1,6 +1,7 @@
 //! Semantic child requests become one coherent resident draw snapshot.
 use core::marker::Copy
 use quilting_atlas::{CANONICAL_KEY_COUNT, canonical_key_at, edge_permutation_index}
+use quilting_atlas::composition::{ChildTriangle,SquareChildBoundaries}
 use quilting_atlas_wasm::pool::{self, PoolHandle, TileKey}
 use ingot::model::{Controls, recipe, edge_lods}
 pub const WORKERS:u32=4
@@ -8,6 +9,7 @@ pub const CAPACITY:usize=WORKERS as usize
 pub struct ChildDraw {
     pub begin:u32, pub end:u32, pub offset:u32, pub points:u32, pub permutation:u32,
     pub corner_a:u32, pub corner_b:u32, pub corner_c:u32,
+    pub boundaries:SquareChildBoundaries,
 }
 impl Copy for ChildDraw {}
 pub struct Scene {
@@ -23,7 +25,8 @@ pub struct State {
 }
 impl Copy for State {}
 pub fn empty_child() -> ChildDraw {
-    ChildDraw {begin:0,end:0,offset:0,points:0,permutation:0,corner_a:0,corner_b:0,corner_c:0}
+    ChildDraw {begin:0,end:0,offset:0,points:0,permutation:0,corner_a:0,corner_b:1,corner_c:2,
+        boundaries:ChildTriangle {a:0,b:1,c:2}.square_boundaries().unwrap()}
 }
 pub fn empty_scene() -> Scene {
     Scene {first:empty_child(),second:empty_child(),third:empty_child(),fourth:empty_child(),
@@ -93,6 +96,7 @@ pub fn refresh(_ previous:State) -> State {
         let end=scene.vertices+entry.triangles*3
         let d=ChildDraw {begin:scene.vertices,end:end,offset:entry.offset,points:entry.points,
             permutation:edge_permutation_index(request.primary.permutation),
+            boundaries:request.boundaries,
             corner_a:request.triangle.a,corner_b:request.triangle.b,corner_c:request.triangle.c}
         if i==0 {scene.first=d} else if i==1 {scene.second=d}
         else if i==2 {scene.third=d} else {scene.fourth=d}

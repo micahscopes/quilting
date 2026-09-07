@@ -1,11 +1,36 @@
 //! Pure policy and real retained-selection Wasm acceptance exports.
+use core::option::Option
 use composite_atlas::model::{initial_controls,edge_demand,edge_lods}
 use quilting_atlas_wasm::{Claim,Completion,packed_triangle}
 use quilting_atlas_wasm::pool::PoolHandle
 use quilting_patch::arc_length::{CumulativeLengthSamples,inverse_length}
 use quilting_patch::sampling_warp::{InverseCumulativeMap,OrientedIntervalMap,IntervalSamplingMap}
-use quilting_atlas::composition::BoundaryUse
+use quilting_atlas::composition::{BoundaryUse,ChildTriangle,SquareEdgeLods}
 extern {const fn __f32_from_i32(_:i32)->f32}
+pub fn boundary_admission()->bool {
+    for a in 0 .. 6 {
+        for b in 0 .. 6 {
+            for c in 0 .. 6 {
+                let triangle=ChildTriangle {a:a.downcast_truncate(),b:b.downcast_truncate(),c:c.downcast_truncate()}
+                let valid=a<5 && b<5 && c<5 && a!=b && b!=c && c!=a
+                let resolved=triangle.resolve(SquareEdgeLods {levels:[0;10]})
+                let request=match resolved {
+                    Option::Some(request)=>{if !valid {return false}
+                        request},
+                    Option::None=>{if valid {return false}
+                        continue},
+                }
+                let boundaries=[request.boundaries.ab,request.boundaries.bc,request.boundaries.ca]
+                for side in 0 .. 3 {
+                    let raw=triangle.boundary(side.downcast_truncate()).unwrap()
+                    if boundaries[side].slot()!=raw.square_slot().unwrap()
+                        || boundaries[side].reversed()!=raw.reversed {return false}
+                }
+            }
+        }
+    }
+    ChildTriangle {a:0,b:1,c:0xffffffff}.square_boundaries().is_none()
+}
 /// Exercise the same orientation abstraction as GPU storage views, with a
 /// canonical CPU table. Dyadic inputs are exactly representable through LoD8.
 pub fn warped_boundary_case(_ code:u32)->bool {
