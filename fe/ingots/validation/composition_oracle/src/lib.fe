@@ -277,6 +277,58 @@ pub fn area_density_ratio(_ kind:u32,_ u:f32,_ v:f32,_ h:f32)->f32 {
     measured*norm*norm
 }
 
+struct QuadraticProbe {x:f32,y:f32,z:f32,ok:bool}
+impl core::marker::Copy for QuadraticProbe {}
+fn quadratic_probe(
+    _ controls:quilting_patch::QuadraticTriangularProjectiveControls<
+        quilting_clifford_bezier::euclidean::EuclideanCliffordAlgebra>,
+    _ x:f32,_ y:f32)->QuadraticProbe {
+    use quilting_patch::{ProjectiveAlgebra,ProjectiveInterpolation,QuadraticBarycentric}
+    let algebra=quilting_clifford_bezier::euclidean::EuclideanCliffordAlgebra {}
+    let frame=QuadraticBarycentric {}.frame(algebra,controls,bary3f(1.0-x-y,x,y))
+    let q=algebra.right_quotient(frame.numerator,frame.denominator,composite_atlas::surface::policy())
+    QuadraticProbe {x:q.value.e1,y:q.value.e2,z:q.value.e3,ok:q.defined}
+}
+/// Does the closed form extend to a genuinely degree-two patch? Takes the exact
+/// degree-two triangular restriction of the authored quad, so this is real
+/// higher-order geometry rather than a degree-elevated rewrite of a linear one.
+/// Returns a central-difference area density times the fourth power of the
+/// denominator norm, in the restricted patch's own barycentric coordinates.
+pub fn quadratic_area_density_ratio(_ x:f32,_ y:f32,_ h:f32)->f32 {
+    use quilting_patch::{bilinear_projective_controls,evaluate_quadratic_triangle,
+        restrict_bilinear_projective_controls_to_triangle,TriangleDomain2}
+    use quilting_clifford_bezier::{CliffordEven3F,euclidean::EuclideanCliffordAlgebra}
+    use quilting_domain::vec2f
+    let algebra=EuclideanCliffordAlgebra {}
+    let mut c=initial_controls()
+    c.surface_kind=2.0
+    let net=composite_atlas::surface::authored(c)
+    if net.patch_valid!=1.0 {return -999.0}
+    let flat=bilinear_projective_controls(net.a,net.b,net.d,net.c)
+    let domain=TriangleDomain2 {a:vec2f(0.12,0.10),b:vec2f(0.86,0.16),c:vec2f(0.20,0.82)}
+    let controls=restrict_bilinear_projective_controls_to_triangle(algebra,flat,domain)
+    let px=quadratic_probe(controls,x+h,y)
+    let mx=quadratic_probe(controls,x-h,y)
+    let py=quadratic_probe(controls,x,y+h)
+    let my=quadratic_probe(controls,x,y-h)
+    if !px.ok || !mx.ok || !py.ok || !my.ok {return -999.0}
+    let scale=1.0/(2.0*h)
+    let ax=(px.x-mx.x)*scale
+    let ay=(px.y-mx.y)*scale
+    let az=(px.z-mx.z)*scale
+    let bx=(py.x-my.x)*scale
+    let by=(py.y-my.y)*scale
+    let bz=(py.z-my.z)*scale
+    let cx=ay*bz-az*by
+    let cy=az*bx-ax*bz
+    let cz=ax*by-ay*bx
+    let measured=fmath::sqrt(cx*cx+cy*cy+cz*cz)
+    let w=evaluate_quadratic_triangle<CliffordEven3F>(controls.denominator,bary3f(1.0-x-y,x,y))
+    let norm=w.scalar*w.scalar+w.e12*w.e12+w.e13*w.e13+w.e23*w.e23
+    if !(norm>0.0) {return -999.0}
+    measured*norm*norm
+}
+
 pub fn geometric_patch_view_laws()->bool {
     let mut c=initial_controls()
     for kind in [1.0,2.0] {

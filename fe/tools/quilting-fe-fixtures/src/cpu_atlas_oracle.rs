@@ -256,6 +256,72 @@ fn quad_area_density_correction_is_a_tensor_product_quadratic() {
     assert!(worst<5e-3,"quad correction is not a tensor-product quadratic: {worst}");
 }
 
+/// Extends the density law to genuinely degree-two geometry, using the exact
+/// triangular restriction of the authored quad rather than a degree-elevated
+/// rewrite of a linear patch. Predicted structure: the blend is total degree
+/// two, so its Jacobian is degree one, the cross product degree two, and the
+/// squared correction degree four. Checked on lines, where a bivariate degree
+/// four restricts to a univariate degree four.
+#[test]
+fn quadratic_patch_density_correction_is_degree_four() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let ratio=instance.get_typed_func::<(f32,f32,f32),f32>(&mut store,"quadratic_area_density_ratio").unwrap();
+    // Lines chosen to stay well inside the restricted triangular domain.
+    let lines=[((0.10_f64,0.15_f64),(0.60_f64,0.0_f64)),
+               ((0.15,0.10),(0.0,0.60)),
+               ((0.08,0.08),(0.35,0.30))];
+    // Lagrange value at `t` through nodes at parameters `ts` with values `ys`.
+    let lagrange=|ts:&[f64],ys:&[f64],t:f64| {
+        let mut total=0.0;
+        for i in 0..ts.len() {
+            let mut term=ys[i];
+            for j in 0..ts.len() {
+                if i!=j {term*=(t-ts[j])/(ts[i]-ts[j]);}
+            }
+            total+=term;
+        }
+        total
+    };
+    // Report a degree ladder rather than asserting one guess: the smallest
+    // degree that fits is the structural answer.
+    let mut worst=[0.0_f64;5];
+    for ((x0,y0),(dx,dy)) in lines {
+        let mut squared=|store:&mut wasmtime::Store<()>,t:f64| -> f64 {
+            let r=f64::from(ratio.call(&mut *store,((x0+dx*t) as f32,(y0+dy*t) as f32,1.0/1024.0)).unwrap());
+            assert!(r>0.0,"degree-two probe failed at t={t}: {r}");
+            r*r
+        };
+        let mut nodes=Vec::new();
+        for degree in 0..5 {
+            let ts:Vec<f64>=(0..=degree).map(|i| if degree==0 {0.5} else {f64::from(i)/f64::from(degree)}).collect();
+            let ys:Vec<f64>=ts.iter().map(|&t| squared(&mut store,t)).collect();
+            nodes.push((ts,ys));
+        }
+        for k in 1..10 {
+            let t=f64::from(k)/10.0;
+            let actual=squared(&mut store,t);
+            for degree in 0..5 {
+                let (ts,ys)=&nodes[degree];
+                worst[degree]=worst[degree].max((lagrange(ts,ys,t)/actual-1.0).abs());
+            }
+        }
+    }
+    for degree in 0..5 {
+        eprintln!("QUADRATIC_DENSITY squared correction, degree {degree} fit: worst relative error={:.8}",worst[degree]);
+    }
+    // Whatever the minimal degree is, it must be small and exact, because that
+    // is what makes the field a closed form rather than a runtime derivative.
+    assert!(worst[4]<5e-3,"squared correction is not a low-degree polynomial: {}",worst[4]);
+    let minimal=(0..5).find(|&d| worst[d]<5e-4).expect("no low degree fits");
+    eprintln!("QUADRATIC_DENSITY minimal fitting degree={minimal}");
+    assert!(minimal<=2,"correction needed degree {minimal}, higher than the blend predicts");
+}
+
 #[test]
 fn composition_wasm_boundary_locality_sweep() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
