@@ -21,14 +21,14 @@ impl BoundaryUse {
     /// Reverse the integer index BEFORE evaluating a shared edge warp. Never
     /// approximate the reversed chain by a separately fitted parameterization.
     pub fn canonical_sample(self, _ index: u32, _ segments: u32) -> u32 {
-        assert(index <= segments)
+        assert!(index <= segments)
         if self.reversed { segments - index } else { index }
     }
 
     /// Stable slots: four outer edges, two diagonals, four corner-to-center
     /// spokes. Traversal direction never changes the shared density owner.
-    pub fn square_slot(self) -> Option<usize> {
-        if self.high == 4 && self.low < 4 { return Option::Some((6 + self.low) as usize) }
+    pub fn square_slot(self) -> Option<u32> {
+        if self.high == 4 && self.low < 4 { return Option::Some(6 + self.low) }
         if self.low == 0 && self.high == 1 { Option::Some(0) }
         else if self.low == 1 && self.high == 2 { Option::Some(1) }
         else if self.low == 2 && self.high == 3 { Option::Some(2) }
@@ -51,9 +51,9 @@ pub struct ChildTriangle { pub a: u32, pub b: u32, pub c: u32 }
 impl Copy for ChildTriangle {}
 impl ChildTriangle {
     pub fn resolve(self, _ edges: SquareEdgeLods) -> Option<ChildRequest> {
-        let ab = match self.boundary(0).square_slot() { Option::Some(slot) => edges.levels[slot], _ => return Option::None }
-        let bc = match self.boundary(1).square_slot() { Option::Some(slot) => edges.levels[slot], _ => return Option::None }
-        let ca = match self.boundary(2).square_slot() { Option::Some(slot) => edges.levels[slot], _ => return Option::None }
+        let ab = match BoundaryUse::between(self.a,self.b).square_slot() { Option::Some(slot) => edges.levels[slot as usize], _ => return Option::None }
+        let bc = match BoundaryUse::between(self.b,self.c).square_slot() { Option::Some(slot) => edges.levels[slot as usize], _ => return Option::None }
+        let ca = match BoundaryUse::between(self.c,self.a).square_slot() { Option::Some(slot) => edges.levels[slot as usize], _ => return Option::None }
         if ab > 8 || bc > 8 || ca > 8 { return Option::None }
         // Sampler lanes are opposite the corresponding barycentric vertex,
         // not the counterclockwise ring order used by the topology recipe.
@@ -62,11 +62,11 @@ impl ChildTriangle {
     }
     /// Edge lanes follow the child's counterclockwise ring, not an implicit
     /// sampler convention. The primary-atlas adapter must map lanes explicitly.
-    pub fn boundary(self, _ side: usize) -> BoundaryUse {
-        assert(side < 3)
-        if side == 0 { BoundaryUse::between(self.a, self.b) }
-        else if side == 1 { BoundaryUse::between(self.b, self.c) }
-        else { BoundaryUse::between(self.c, self.a) }
+    pub fn boundary(self, _ side: u32) -> Option<BoundaryUse> {
+        if side == 0 { Option::Some(BoundaryUse::between(self.a, self.b)) }
+        else if side == 1 { Option::Some(BoundaryUse::between(self.b, self.c)) }
+        else if side == 2 { Option::Some(BoundaryUse::between(self.c, self.a)) }
+        else { Option::None }
     }
 }
 
@@ -83,9 +83,9 @@ fn composition_resolves_every_outer_request_without_promotion() {
                 let requested = permute_key(resolved.primary.key,resolved.primary.permutation)
                 let ring = [requested.c,requested.a,requested.b]
                 for side in 0 .. 3 {
-                    let edge = child.boundary(side)
+                    let edge = child.boundary(side.downcast_truncate()).unwrap()
                     let slot = edge.square_slot().unwrap()
-                    assert(ring[side] == edges.levels[slot])
+                    assert(ring[side] == edges.levels[slot as usize])
                     let reverse = BoundaryUse::between(edge.high,edge.low)
                     assert(reverse.square_slot().unwrap() == slot)
                 }
@@ -126,13 +126,13 @@ fn composition_shared_edges_reverse_exactly() {
         for child in 0 .. (recipe.child_count() as usize) {
             for side in 0 .. 3 {
                 let triangle = recipe.child(child.downcast_truncate()).unwrap()
-                let edge = triangle.boundary(side)
+                let edge = triangle.boundary(side.downcast_truncate()).unwrap()
                 let mut matches: u32 = 0
                 for other in 0 .. (recipe.child_count() as usize) {
                     if other != child {
                         for lane in 0 .. 3 {
                             let neighbor = recipe.child(other.downcast_truncate()).unwrap()
-                            let peer = neighbor.boundary(lane)
+                            let peer = neighbor.boundary(lane.downcast_truncate()).unwrap()
                             if edge.low == peer.low && edge.high == peer.high {
                                 matches += 1
                                 assert(edge.reversed != peer.reversed)

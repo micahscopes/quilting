@@ -25,6 +25,7 @@ members = [
   { path = "ingots/validation/atlas_pool_workers", name = "atlas_pool_workers" },
   { path = "ingots/demos/worker_atlas_explorer", name = "worker_atlas_explorer" },
   { path = "ingots/demos/composite_atlas", name = "composite_atlas" },
+  { path = "ingots/validation/composition_oracle", name = "composition_oracle" },
   { path = "ingots/demos/classic_quilting_fixed_raster", name = "classic_quilting_fixed_raster" },
   { path = "ingots/demos/classic_quilting_atlas", name = "classic_quilting_atlas" },
   { path = "ingots/demos/classic_quilting_lod", name = "classic_quilting_lod" },

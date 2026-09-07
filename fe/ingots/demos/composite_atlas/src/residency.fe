@@ -1,0 +1,92 @@
+//! Semantic child requests become one coherent resident draw snapshot.
+use core::marker::Copy
+use quilting_atlas::{CANONICAL_KEY_COUNT, canonical_key_at, edge_permutation_index}
+use quilting_atlas_wasm::pool::{self, PoolHandle, TileKey}
+use ingot::model::{Controls, recipe, edge_lods}
+pub const WORKERS:u32=4
+pub const CAPACITY:usize=WORKERS as usize
+pub struct ChildDraw {
+    pub begin:u32, pub end:u32, pub offset:u32, pub points:u32, pub permutation:u32,
+    pub corner_a:u32, pub corner_b:u32, pub corner_c:u32,
+}
+impl Copy for ChildDraw {}
+pub struct Scene {
+    pub first:ChildDraw,pub second:ChildDraw,pub third:ChildDraw,pub fourth:ChildDraw,
+    pub vertices:u32,pub active_center_x:f32,pub active_center_y:f32,
+}
+impl Copy for Scene {}
+pub struct State {
+    pub controls:Controls,pub scene:Scene,pub address:u32,
+    pub completed:u32,pub status:u32,pub pending:u32,pub required_words:u32,
+}
+impl Copy for State {}
+pub fn empty_child() -> ChildDraw {
+    ChildDraw {begin:0,end:0,offset:0,points:0,permutation:0,corner_a:0,corner_b:0,corner_c:0}
+}
+pub fn empty_scene() -> Scene {
+    Scene {first:empty_child(),second:empty_child(),third:empty_child(),fourth:empty_child(),
+        vertices:0,active_center_x:0.5,active_center_y:0.5}
+}
+fn tile_key(_ a:u32,_ b:u32,_ c:u32) -> TileKey {TileKey {square:false,a:a,b:b,c:c,d:0}}
+fn primary_keys() -> [TileKey;CANONICAL_KEY_COUNT] {
+    let mut keys=[TileKey {square:false,a:0,b:0,c:0,d:0};CANONICAL_KEY_COUNT]
+    for i in 0 .. CANONICAL_KEY_COUNT {
+        let k=canonical_key_at(i)
+        keys[i]=tile_key(k.a,k.b,k.c)
+    }
+    keys
+}
+pub fn initial() -> State {
+    refresh(State {controls:ingot::model::initial_controls(),scene:empty_scene(),
+        address:pool::create_jobs<CAPACITY,CANONICAL_KEY_COUNT>(1,primary_keys()).address(),
+        completed:0,status:0,pending:0,required_words:0})
+}
+pub fn refresh(_ previous:State) -> State {
+    let mut next=previous
+    if next.address==0 {next.status=3
+        return next
+    }
+    let handle:PoolHandle<CAPACITY>=PoolHandle::from_address(next.address)
+    let summary=handle.summary()
+    next.completed=summary.completed
+    next.status=summary.status
+    let split=recipe(next.controls.split)
+    let edges=edge_lods(next.controls)
+    for i in 0 .. (split.child_count() as usize) {
+        let request=split.child(i.downcast_truncate()).unwrap().resolve(edges).unwrap()
+        let k=request.primary.key
+        handle.prioritize(tile_key(k.a,k.b,k.c))
+    }
+    let mut scene=empty_scene()
+    scene.active_center_x=next.controls.center_x
+    scene.active_center_y=next.controls.center_y
+    next.pending=0
+    let mut required=next.required_words
+    for i in 0 .. (split.child_count() as usize) {
+        let request=split.child(i.downcast_truncate()).unwrap().resolve(edges).unwrap()
+        let k=request.primary.key
+        let entry=handle.entry(handle.find(tile_key(k.a,k.b,k.c)))
+        if entry.triangles==0 {next.pending+=1}
+        let word_end=entry.offset+entry.words
+        if word_end>required {required=word_end}
+        let end=scene.vertices+entry.triangles*3
+        let d=ChildDraw {begin:scene.vertices,end:end,offset:entry.offset,points:entry.points,
+            permutation:edge_permutation_index(request.primary.permutation),
+            corner_a:request.triangle.a,corner_b:request.triangle.b,corner_c:request.triangle.c}
+        if i==0 {scene.first=d} else if i==1 {scene.second=d}
+        else if i==2 {scene.third=d} else {scene.fourth=d}
+        scene.vertices=end
+    }
+    // Publish only complete compatible snapshots, never partially ready seams.
+    if next.pending==0 && next.status==0 {
+        next.scene=scene
+        next.required_words=required
+    }
+    next
+}
+pub fn child_at(_ scene:Scene,_ vertex:u32) -> ChildDraw {
+    if vertex<scene.first.end {scene.first}
+    else if vertex<scene.second.end {scene.second}
+    else if vertex<scene.third.end {scene.third}
+    else {scene.fourth}
+}

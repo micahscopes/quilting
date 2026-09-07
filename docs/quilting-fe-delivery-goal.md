@@ -40,11 +40,24 @@ method, but must not be mislabeled as a directly generated quad atlas.
 - Evidence: `/laboratory/quilting/scratch/composite-requests-test-20260907.log`
   (two Fe tests passed) and `composite-priority-regression-20260907.log`
   (release Wasm pool regression passed, 14.49s test runtime, not an atlas benchmark).
-- Doing next: per-child resident/draw descriptors, mixed primary access and UI
-  integration. The served affine demo has not gained the new controls yet.
+- Mixed-edge source now includes per-child resident/draw descriptors, all165
+  prioritized triangle primaries, four outer controls and automatic/manual
+  interior requests. The candidate is served by release `fe web dev` on38331.
+  Chrome66 shows the mixed fan with outer2/4/7/7 and a complete165-tile cache;
+  no console errors. This is partial visual acceptance, not the full interaction
+  and pathology gate. Uneven interior transitions remain visible and unresolved.
+- Release Wasm policy/retention acceptance passed (8.57s test runtime): all9
+  uniform-density levels, exact outer integrals, preserved manual settings and
+  keeping the previous scene while a changed request lacks a tile. Evidence:
+  `/laboratory/quilting/scratch/composite-model-regression-20260907.log`.
+- The candidate exposed flattened-state resource positioning in the compiler.
+  Fix8b9a43050 is committed and pushed on shared mb2, with a focused regression
+  and15 existing resource tests passing. Release CLI rebuilt successfully;
+  the candidate compiled in65.8s (development cache hit218ms), with3 passes /
+  30,193 WGSL bytes. These are build metrics, not generation/frame benchmarks.
 
-- The composition source currently repeats one uniform primary across two or
-  four children. Independent edge selection and compensation are unfinished.
+- Independent edge selection now reaches the served viewer; spacing
+  compensation and acknowledged suffix uploads remain unfinished.
 - Shared directed-boundary recipes and tests exist; those tests do not yet
   establish equality of final warped seam positions.
 - Fe/Wasm generation, typed workers, retained tile output, canonical triangle

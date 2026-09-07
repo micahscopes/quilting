@@ -1,0 +1,47 @@
+//! Pure policy and real retained-selection Wasm acceptance exports.
+use composite_atlas::model::{initial_controls,edge_demand,edge_lods}
+use quilting_atlas_wasm::{Claim,Completion,packed_triangle}
+use quilting_atlas_wasm::pool::PoolHandle
+extern {const fn __f32_from_i32(_:i32)->f32}
+pub fn uniform_case(_ level:u32)->(f32,f32,u32,u32) {
+    let value=__f32_from_i32(level.downcast_unchecked())
+    let mut c=initial_controls()
+    c.bottom_lod=value
+    c.top_lod=value
+    c.left_lod=value
+    c.right_lod=value
+    let edges=edge_lods(c)
+    (edge_demand(c,0,2),edge_demand(c,0,4),edges.levels[4],edges.levels[6])
+}
+pub fn outer_integrals()->(f32,f32,f32,f32) {
+    let mut c=initial_controls()
+    c.bottom_lod=0.0
+    c.right_lod=3.0
+    c.top_lod=5.0
+    c.left_lod=8.0
+    (edge_demand(c,0,1),edge_demand(c,1,2),edge_demand(c,2,3),edge_demand(c,3,0))
+}
+pub fn manual_values_survive_automatic()->bool {
+    let mut c=initial_controls()
+    c.diagonal_lod=7.0
+    c.spoke_0_lod=1.0
+    if edge_lods(c).levels[4]!=5 {return false}
+    c.automatic_interior=0.0
+    let e=edge_lods(c)
+    e.levels[4]==7 && e.levels[6]==1 && c.diagonal_lod==7.0 && c.spoke_0_lod==1.0
+}
+pub fn coherent_pending_selection()->bool {
+    let mut state=composite_atlas::residency::initial()
+    let handle:PoolHandle<4> = PoolHandle::from_address(state.address)
+    let lease=match handle.claim(0) {Claim::Job(v)=>v,_=>return false}
+    let k=handle.key(lease.ordinal)
+    if k.a!=4 || k.b!=4 || k.c!=5 {return false}
+    if let Completion::Accepted = handle.finish(lease,packed_triangle(k.a,k.b,k.c,42)) {} else {return false}
+    state=composite_atlas::residency::refresh(state)
+    if state.pending!=0 || state.scene.vertices==0 || state.required_words==0 {return false}
+    let before=state.scene
+    state.controls.bottom_lod=8.0
+    state.controls.center_x=0.2
+    state=composite_atlas::residency::refresh(state)
+    state.pending>0 && state.scene.vertices==before.vertices && state.scene.active_center_x==before.active_center_x
+}

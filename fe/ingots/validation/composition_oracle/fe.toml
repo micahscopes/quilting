@@ -1,0 +1,8 @@
+[ingot]
+name = "composition_oracle"
+version = "0.1.0"
+
+[dependencies]
+core = true
+composite_atlas = true
+quilting_atlas_wasm = true

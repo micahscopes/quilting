@@ -4,6 +4,31 @@ use fe_codegen::OptLevel;
 use std::path::Path;
 
 #[test]
+fn composition_wasm_density_and_coherent_selection() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let uniform=instance.get_typed_func::<i32,(f32,f32,i32,i32)>(&mut store,"uniform_case").unwrap();
+    for lod in 0..=8 {
+        let (diagonal,spoke,diagonal_lod,spoke_lod)=uniform.call(&mut store,lod).unwrap();
+        let density=(1_u32<<lod) as f32;
+        assert!((diagonal-density*2_f32.sqrt()).abs()<density*0.00001);
+        assert!((spoke-density/2_f32.sqrt()).abs()<density*0.00001);
+        assert_eq!(diagonal_lod,(lod+1).min(8));
+        assert_eq!(spoke_lod,lod);
+    }
+    let outer=instance.get_typed_func::<(),(f32,f32,f32,f32)>(&mut store,"outer_integrals").unwrap();
+    assert_eq!(outer.call(&mut store,()).unwrap(),(1.0,8.0,32.0,256.0));
+    for name in ["manual_values_survive_automatic","coherent_pending_selection"] {
+        let check=instance.get_typed_func::<(),i32>(&mut store,name).unwrap();
+        assert_eq!(check.call(&mut store,()).unwrap(),1,"{name}");
+    }
+}
+
+#[test]
 fn cpu_atlas_compiles_four_worker_pool() {
     use common::InputDb;
     use hir::hir_def::HirIngot;
