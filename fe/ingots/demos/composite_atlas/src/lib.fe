@@ -17,7 +17,7 @@ use std::webgpu::{GpuProgram,WebGpuBackend,StorageBuffer,DrawIndirectBuffer,
     BufferPublication,PublicationVersion,PublishBuffer,
     SurfaceTransition,SurfaceScheduling,LatestPerFrame,SurfaceQuality,ResponsiveBacking}
 use ingot::model::{Controls,Params,Point,params,corner}
-use ingot::residency::{State,Scene,ChildDraw,WORKERS,CAPACITY,refresh,child_at}
+use ingot::residency::{State,Scene,ChildDraw,WORKERS,CAPACITY,refresh,refresh_completion,child_at}
 use ingot::spacing::{Maps,PublishSpacing,canonical_parameter,interior}
 
 type Atlas=StorageBuffer<u32,RETAINED_CAPACITY>
@@ -95,7 +95,7 @@ actor CompositeAtlas uses (GpuProgram<WebGpuBackend>,SurfaceQuality<ResponsiveBa
     const fn view()->Surface<Params> {Surface {extent:Extent::square(1200),params:params()}}
     fn initial()->State uses (InitialState) {ingot::residency::initial()}
     fn receive(self,event:Event)->State uses (ResidentTransition) {
-        refresh(State {controls:self.controls,scene:self.scene,address:self.address,
+        refresh_completion(State {controls:self.controls,scene:self.scene,address:self.address,
             completed:self.completed,status:self.status,pending:self.pending,required_words:self.required_words})
     }
     fn control(self,event:own SurfaceEvent)->State uses (SurfaceTransition,SurfaceScheduling<LatestPerFrame>) {

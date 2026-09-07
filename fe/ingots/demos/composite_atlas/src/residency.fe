@@ -51,6 +51,18 @@ pub fn initial() -> State {
         address:pool::create_jobs<CAPACITY,CANONICAL_KEY_COUNT>(1,primary_keys()).address(),
         completed:0,status:0,pending:0,required_words:0})
 }
+/// A completion changes residency, not authored controls. Once the visible
+/// request is complete, background cache growth cannot change its geometry or
+/// spacing policy. Keep progress/error observations fresh without replanning.
+pub fn refresh_completion(_ previous:State)->State {
+    if previous.pending!=0 || previous.address==0 {return refresh(previous)}
+    let handle:PoolHandle<CAPACITY>=PoolHandle::from_address(previous.address)
+    let summary=handle.summary()
+    let mut next=previous
+    next.completed=summary.completed
+    next.status=summary.status
+    next
+}
 pub fn refresh(_ previous:State) -> State {
     let mut next=previous
     if next.address==0 {next.status=3
