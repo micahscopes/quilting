@@ -47,11 +47,15 @@ method, but must not be mislabeled as a directly generated quad atlas.
   The real build has3 passes,196,297 WGSL bytes and358,989 parent Wasm bytes.
   Site compilation took57.9s; the new dev server reused its cache in196ms.
   Generation, edit and frame latency still need separate measurements.
-- Startup remains incomplete: the initial empty poster can remain visible
-  after worker completion until live mode is entered. Screenshot capture
-  stalled; canvas pixels were instead inspected through Chrome MCP. The normal
-  live/freeze API was used for testing, not patched into the application.
-- Still pending: automatic first-visible behavior, exact GPU warped-seam
+- Standalone startup now uses the existing declarative `fe-surface state="live"`
+  API. Shared mb2 fix49c4abaae prevents initial custom-element attribute
+  reactions from booting competing Wasm/task instances. All68 runtime tests
+  pass. A fresh page load entered live mode with4,296 vertices at452ms, without
+  manual activation or console errors (warm browser shader cache, new workers).
+  The automatically rendered square also passed the interior pixel census.
+  Screenshot capture stalled; actual canvas pixels were inspected through
+  Chrome MCP instead. General gallery/inactive lifecycle acceptance remains.
+- Still pending: exact GPU warped-seam
   fixtures, distortion/error diagnostics, acknowledged suffix uploads, richer
   density controls and the remaining patch/gallery delivery requirements.
 

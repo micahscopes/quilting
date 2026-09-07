@@ -53,6 +53,9 @@ the composition shader's full geometry.
 
 ## Remaining defects and limits
 
+This list records the initial spacing checkpoint. The startup item is resolved
+by the follow-up below; the other acceptance limits remain.
+
 - The initial empty poster may outlive background generation. Entering live
   mode renders correctly; standalone activation/late-poster refresh needs fixing.
 - Chrome MCP screenshot calls stalled. The actual poster canvas was inspected
@@ -62,3 +65,28 @@ the composition shader's full geometry.
 - Shader size/performance, upload acknowledgments, staging allocations, extreme
   requests, moving-center pathologies and the broader UI remain to be measured
   and improved. The existing delivery checklist remains authoritative.
+
+## Declarative startup follow-up
+
+The standalone page now uses the supported `<fe-surface src="..." state="live">`
+form. No imperative activation script was added. This exposed an upstream
+custom-element upgrade race: initial `manifest` and scoped-task attribute
+reactions started competing boots before `connectedCallback`, mixing Wasm/task
+owners and producing memory-out-of-bounds errors. Shared mb2 `49c4abaae` makes
+connection own initial boot; attribute reactions only reload an already booted
+surface. All68 runtime unit tests pass, including automatic/manual upgrade and
+later source replacement. This does not prove arbitrary rapid reconfiguration
+or disconnected-in-flight ownership behavior.
+
+Release CLI rebuilt, then the real page was checked through Chrome MCP without
+calling `.live()` or editing controls. One measurement recorded `fe-ready` at
+411.8ms and `fe-live` at452ms, both with4,296 vertices. This is navigation-to-
+lifecycle timing with a warm browser shader cache and newly started workers,
+not a cold-device GPU timestamp or the full165-tile generation time.
+No console errors/warnings occurred. A prior fresh-load run's actual rendered
+canvas had zero background/fold-marker pixels across the same1,036,324-pixel
+interior crop. Canvas inspection followed automatic startup, not activation.
+
+Current runtime asset: `fe-render-runtime-0ba5548668c8cb5d.js`.
+Logs: `/laboratory/quilting/scratch/declarative-surface-upgrade-tests-20260907.log`
+and `/laboratory/quilting/scratch/composite-declarative-live-web-dev-20260907.log`.
