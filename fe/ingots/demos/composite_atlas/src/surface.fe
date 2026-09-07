@@ -1,0 +1,154 @@
+//! Geometric authoring and its immutable render value; atlas ownership is separate.
+use core::marker::Copy
+use core::option::Option
+use fmath::{clamp,wrap_pi}
+use quilting_domain::{Vec3F,vec3f,vec2f,bary3f,add3,scale3}
+use quilting_demo_view::{CameraFrame,OrbitCamera,ScreenExtent,orbit_camera,project,moved_in_camera_plane}
+use quilting_demo_view::handles::{HandleQuery,HandlePick}
+use quilting_patch::{ProjectiveControl,ProjectiveAlgebra,ProjectiveInterpolation,projective_control,
+    LinearBarycentric,BilinearBernstein,triangular_projective_controls,bilinear_projective_controls}
+use quilting_patch::pole_authoring::controls_from_edge
+use quilting_clifford_bezier::{Clifford3Policy,even}
+use quilting_clifford_bezier::euclidean::EuclideanCliffordAlgebra
+use std::web::view::SurfaceEvent
+use ingot::model::{Controls,Point,is_triangle}
+
+type Control=ProjectiveControl<EuclideanCliffordAlgebra>
+pub struct Net {pub a:Control,pub b:Control,pub c:Control,pub d:Control,pub kind:f32,pub patch_valid:f32}
+impl Copy for Net {}
+pub struct Sample {pub point:Vec3F,pub valid:bool}
+impl Copy for Sample {}
+pub fn policy()->Clifford3Policy {
+    Clifford3Policy {minimum_denominator_norm_squared:0.000000000001,maximum_trivector_residual:0.0001}
+}
+pub fn empty()->Net {
+    let p=projective_control<EuclideanCliffordAlgebra>(vec3f(0.0,0.0,0.0),even(1.0,0.0,0.0,0.0))
+    Net {a:p,b:p,c:p,d:p,kind:0.0,patch_valid:0.0}
+}
+pub fn point(_ c:Controls,_ id:u32)->Vec3F {
+    if id==0 {vec3f(c.p0x,c.p0y,c.p0z)}
+    else if id==1 {vec3f(c.p1x,c.p1y,c.p1z)}
+    else if id==2 {vec3f(c.p2x,c.p2y,c.p2z)}
+    else if id==3 {vec3f(c.p3x,c.p3y,c.p3z)}
+    else {vec3f(c.midpoint_x,c.midpoint_y,c.midpoint_z)}
+}
+fn set_point(_ c:Controls,_ id:u32,_ p:Vec3F)->Controls {
+    let mut n=c
+    if id==0 {
+        n.p0x=p.x
+        n.p0y=p.y
+        n.p0z=p.z
+    } else if id==1 {
+        n.p1x=p.x
+        n.p1y=p.y
+        n.p1z=p.z
+    } else if id==2 {
+        n.p2x=p.x
+        n.p2y=p.y
+        n.p2z=p.z
+    } else if id==3 {
+        n.p3x=p.x
+        n.p3y=p.y
+        n.p3z=p.z
+    } else {
+        n.midpoint_x=p.x
+        n.midpoint_y=p.y
+        n.midpoint_z=p.z
+    }
+    n
+}
+fn edge(_ c:Controls)->(u32,u32) {
+    if c.arc_edge<0.5 {(0,1)}
+    else if c.arc_edge<1.5 {if is_triangle(c) {(1,3)} else {(1,2)}}
+    else if c.arc_edge<2.5 && !is_triangle(c) {(2,3)}
+    else {(3,0)}
+}
+pub fn authored(_ c:Controls)->Net {
+    let (a,b)=edge(c)
+    if is_triangle(c) {
+        let first:usize=if a==3 {2} else {a as usize}
+        let last:usize=if b==3 {2} else {b as usize}
+        return match controls_from_edge(EuclideanCliffordAlgebra {},
+            [point(c,0),point(c,1),point(c,3)],first,last,point(c,4),0.0000001,policy()) {
+            Option::None=>{
+                let mut n=empty()
+                n.kind=c.surface_kind
+                n
+            },
+            // c is inactive in the triangular basis. No fourth authored
+            // corner participates in its construction or validity decision.
+            Option::Some(p)=>Net {a:p[0],b:p[1],c:p[2],d:p[2],kind:c.surface_kind,patch_valid:1.0},
+        }
+    }
+    match controls_from_edge(EuclideanCliffordAlgebra {},
+        [point(c,0),point(c,1),point(c,2),point(c,3)],a as usize,b as usize,point(c,4),0.0000001,policy()) {
+        Option::None=>{
+            let mut n=empty()
+            n.kind=c.surface_kind
+            n
+        },
+        Option::Some(p)=>Net {a:p[0],b:p[1],c:p[2],d:p[3],kind:c.surface_kind,patch_valid:1.0},
+    }
+}
+/// The same generic projective evaluators as the independently checked oracle.
+/// Quad controls are ring-ordered here, tensor-product ordered at the boundary.
+pub fn evaluate(_ net:Net,_ p:Point)->Sample {
+    let algebra=EuclideanCliffordAlgebra {}
+    let frame=if net.kind<1.5 {
+        LinearBarycentric {}.frame(algebra,triangular_projective_controls(net.a,net.b,net.d),bary3f(1.0-p.x-p.y,p.x,p.y))
+    } else {
+        BilinearBernstein {}.frame(algebra,bilinear_projective_controls(net.a,net.b,net.d,net.c),vec2f(p.x,p.y))
+    }
+    let q=algebra.right_quotient(frame.numerator,frame.denominator,policy())
+    Sample {point:vec3f(q.value.e1,q.value.e2,q.value.e3),valid:net.patch_valid>0.5 && q.defined}
+}
+pub fn camera(_ c:Controls)->CameraFrame {
+    orbit_camera(OrbitCamera {target:vec3f(0.0,0.0,0.0),yaw:c.orbit_yaw,pitch:c.orbit_pitch,
+        distance:c.orbit_distance,focal:1.65,near:0.01,far:250.0},ScreenExtent {width:c.width,height:c.height})
+}
+fn id(_ value:f32)->u32 {
+    if value<0.5 {0} else if value<1.5 {1} else if value<2.5 {2} else if value<3.5 {3} else {4}
+}
+pub fn transition(_ before:Controls,_ changed:Controls,_ event:SurfaceEvent)->Controls {
+    let mut c=changed
+    if c.surface_kind<0.5 {return c}
+    if is_triangle(c) && c.arc_edge>2.0 {c.arc_edge=2.0}
+    if c.arc_edge!=before.arc_edge || c.surface_kind!=before.surface_kind {
+        let previous=authored(before)
+        let (a,b)=edge(c)
+        let ua=ingot::model::corner(a,0.5,0.5)
+        let ub=ingot::model::corner(b,0.5,0.5)
+        let middle=evaluate(previous,Point {x:(ua.x+ub.x)*0.5,y:(ua.y+ub.y)*0.5})
+        if middle.valid {c=set_point(c,4,middle.point)}
+    }
+    if event.is_pointer_down() {
+        let query=HandleQuery {pointer:vec2f(event.pointer_x,event.pointer_y),
+            extent:ScreenExtent {width:event.width,height:event.height},radius_pixels:15.0}
+        let mut pick=HandlePick::empty()
+        let mut i:u32=0
+        while i<5 {
+            if i!=2 || !is_triangle(c) {pick=pick.consider(query,i,project(camera(c),point(c,i)).clip)}
+            i+=1
+        }
+        c.selected=match pick.selected {Option::Some(i)=>quilting_atlas::lod_as_f32(i),Option::None=>-1.0}
+        c.dragging=1.0
+    }
+    if event.is_pointer_move() && event.buttons!=0 && c.dragging>0.5 {
+        if c.selected>=0.0 {
+            let i=id(c.selected)
+            c=set_point(c,i,moved_in_camera_plane(point(c,i),camera(c),event.delta_x*2.0/event.width,-event.delta_y*2.0/event.height))
+        } else {
+            c.orbit_yaw=wrap_pi(c.orbit_yaw-event.delta_x*0.008)
+            c.orbit_pitch=clamp(c.orbit_pitch-event.delta_y*0.008,-1.35,1.35)
+        }
+    }
+    if event.is_pointer_up() {c.dragging=0.0}
+    if event.wheel_delta!=0.0 {
+        if c.selected>=0.0 {
+            let i=id(c.selected)
+            let direction=if event.wheel_delta<0.0 {-1.0} else {1.0}
+            c=set_point(c,i,add3(point(c,i),scale3(camera(c).forward,direction*c.orbit_distance*0.025)))
+        } else {c.orbit_distance=clamp(c.orbit_distance*if event.wheel_delta<0.0 {0.9} else {1.1},1.0,40.0)}
+    }
+    c
+}

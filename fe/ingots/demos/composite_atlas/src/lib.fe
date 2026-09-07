@@ -6,7 +6,8 @@ use fmath::{min,max,sqrt,abs,smoothstep}
 use quilting_atlas_wasm::packed_triangle
 use quilting_atlas_wasm::pool::{PoolHandle,RetainedCursor,RetainedUpdate,RETAINED_CAPACITY}
 use quilting_atlas_workers::{Request,Response,CompletionMessage,supervise,run}
-use quilting_domain::bary3f
+use quilting_domain::{bary3f,Vec3F,vec3f,sub3,cross3,normalize3_or,dot3}
+use quilting_demo_view::project
 use quilting_qb::{remap_barycentric,permutation_parity}
 use quilting_oklch::{display_rgb,mix_display_rgb,pack_rgba8}
 use std::web::view::{Surface,Extent,SurfaceEvent,ApplyParamBindings}
@@ -15,6 +16,9 @@ use std::webgpu::{GpuProgram,WebGpuBackend,StorageBuffer,DrawIndirectBuffer,
     IndirectTriangleList,ComputeSurface,Workgroup,FixedDispatch,
     BufferPublication,PublicationVersion,PublishBuffer,
     SurfaceTransition,SurfaceScheduling,LatestPerFrame,SurfaceQuality,ResponsiveBacking}
+use std::webgpu::{RasterConfiguration,RasterPlan,RasterState,DepthTest,Depth24Plus,
+    CompareLessEqual,DepthWrite,ClearThenLoadStore,Samples4,CullNone,ColorTarget,
+    OpaqueBlack,StraightAlpha,COLOR_WRITE_ALL,raster_plan,TriangleList}
 use ingot::model::{Controls,Params,Point,params}
 use ingot::residency::{State,Scene,ChildDraw,WORKERS,CAPACITY,refresh,refresh_completion,child_at}
 use ingot::spacing::{Maps,PublishSpacing,place}
@@ -32,6 +36,8 @@ actor TileWorker {
 }
 extern {const fn __f32_from_i32(_:i32)->f32}
 fn number(_ n:u32)->f32 {__f32_from_i32(n.downcast_unchecked())}
+type PatchRaster=RasterState<DepthTest<Depth24Plus,CompareLessEqual,DepthWrite,ClearThenLoadStore>,
+    Samples4,CullNone,ColorTarget<OpaqueBlack<ClearThenLoadStore>,StraightAlpha,COLOR_WRITE_ALL>>
 struct PublishAtlas {}
 impl PublishAtlas {
     pub fn publication(_ state:State)->BufferPublication<Atlas> {
@@ -51,7 +57,7 @@ impl PublishAtlas {
         }
     }
 }
-fn point(_ atlas:Atlas,_ maps:Maps,_ scene:Scene,_ d:ChildDraw,_ index:u32,_ width:f32,_ height:f32)->Point {
+fn point(_ atlas:Atlas,_ maps:Maps,_ scene:Scene,_ d:ChildDraw,_ index:u32)->Point {
     let indices=d.offset.wrapping_add(d.points)
     let id=if d.points<=65536 {
         (atlas.load(index:indices.wrapping_add(index/2))>>((index%2).wrapping_mul(16)))&65535
@@ -60,20 +66,36 @@ fn point(_ atlas:Atlas,_ maps:Maps,_ scene:Scene,_ d:ChildDraw,_ index:u32,_ wid
     let u=number(packed&65535)/16384.0
     let v=number(packed>>16)/16384.0
     let p=remap_barycentric(d.permutation,bary3f(1.0-u-v,u,v))
-    let placed=place(maps,scene,d,p)
-    let scale=1.7*min(width,height)
-    Point {x:(placed.x-0.5)*scale/max(width,1.0),y:(placed.y-0.5)*scale/max(height,1.0)}
+    place(maps,scene,d,p)
+}
+struct Projected {clip:ClipPosition,screen:Point,world:Vec3F,valid:bool}
+fn projected(_ scene:Scene,_ c:Controls,_ p:Point)->Projected {
+    if scene.surface.kind<0.5 {
+        let scale=1.7*min(c.width,c.height)
+        let x=(p.x-0.5)*scale/max(c.width,1.0)
+        let y=(p.y-0.5)*scale/max(c.height,1.0)
+        Projected {clip:ClipPosition {x:x,y:y,z:0.0,w:1.0},screen:Point {x:x,y:y},world:vec3f(p.x,p.y,0.0),valid:true}
+    } else {
+        let sample=ingot::surface::evaluate(scene.surface,p)
+        let result=project(ingot::surface::camera(c),sample.point)
+        let w=if abs(result.clip.w)>0.000001 {result.clip.w} else {0.000001}
+        Projected {clip:result.clip,screen:Point {x:result.clip.x/w,y:result.clip.y/w},
+            world:sample.point,valid:sample.valid}
+    }
 }
 fn length(_ a:Point,_ b:Point,_ width:f32,_ height:f32)->f32 {
     let x=(a.x-b.x)*width*0.5
     let y=(a.y-b.y)*height*0.5
     sqrt(x*x+y*y)
 }
-struct Varying {a:f32,b:f32,c:f32,signed:f32}
+struct Varying {a:f32,b:f32,c:f32,signed:f32,light:f32}
 impl Copy for Varying {}
+struct HandleVarying {kind:f32,selected:f32}
+impl Copy for HandleVarying {}
 actor CompositeAtlas uses (GpuProgram<WebGpuBackend>,SurfaceQuality<ResponsiveBacking>) {
     controls:Controls,scene:Scene,address:u32,completed:u32,status:u32,pending:u32,required_words:u32,
     atlas:Atlas,maps:Maps,draw:DrawIndirectBuffer<Draw>,
+    const fn raster()->RasterPlan uses (RasterConfiguration) {raster_plan<PatchRaster>()}
     const fn view()->Surface<Params> {Surface {extent:Extent::square(1200),params:params()}}
     fn initial()->State uses (InitialState) {ingot::residency::initial()}
     fn receive(self,event:Event)->State uses (ResidentTransition) {
@@ -81,7 +103,8 @@ actor CompositeAtlas uses (GpuProgram<WebGpuBackend>,SurfaceQuality<ResponsiveBa
             completed:self.completed,status:self.status,pending:self.pending,required_words:self.required_words})
     }
     fn control(self,event:own SurfaceEvent)->State uses (SurfaceTransition,SurfaceScheduling<LatestPerFrame>) {
-        refresh(State {controls:self.controls.apply_param_bindings(params(),event),scene:self.scene,address:self.address,
+        let changed=self.controls.apply_param_bindings(params(),event)
+        refresh(State {controls:ingot::surface::transition(self.controls,changed,event),scene:self.scene,address:self.address,
             completed:self.completed,status:self.status,pending:self.pending,required_words:self.required_words})
     }
     fn supervision<const I:u32>()->u32 uses (ScopedTaskFamily<WORKERS>) {
@@ -109,20 +132,39 @@ actor CompositeAtlas uses (GpuProgram<WebGpuBackend>,SurfaceQuality<ResponsiveBa
         let reversed=permutation_parity(d.permutation)<0.0
         let width=self.controls.width
         let height=self.controls.height
-        let a=point(self.atlas,self.maps,self.scene,d,base,width,height)
-        let b=point(self.atlas,self.maps,self.scene,d,base.wrapping_add(if reversed {2} else {1}),width,height)
-        let c=point(self.atlas,self.maps,self.scene,d,base.wrapping_add(if reversed {1} else {2}),width,height)
-        let signed=(b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x)
+        let a=projected(self.scene,self.controls,point(self.atlas,self.maps,self.scene,d,base))
+        let b=projected(self.scene,self.controls,point(self.atlas,self.maps,self.scene,d,base.wrapping_add(if reversed {2} else {1})))
+        let c=projected(self.scene,self.controls,point(self.atlas,self.maps,self.scene,d,base.wrapping_add(if reversed {1} else {2})))
+        let signed=(b.screen.x-a.screen.x)*(c.screen.y-a.screen.y)-(b.screen.y-a.screen.y)*(c.screen.x-a.screen.x)
         let area=abs(signed)*width*height*0.25
         let local=vertex_index%3
-        let p=if local==0 {a} else if local==1 {b} else {c}
-        RasterVertex {position:ClipPosition{x:p.x,y:p.y,z:0.0,w:1.0},varying:Varying {
-            a:if local==0 {area/max(length(b,c,width,height),0.00001)} else {0.0},
-            b:if local==1 {area/max(length(c,a,width,height),0.00001)} else {0.0},
-            c:if local==2 {area/max(length(a,b,width,height),0.00001)} else {0.0},signed:signed}}
+        let p=if local==0 {a.clip} else if local==1 {b.clip} else {c.clip}
+        let normal=normalize3_or(cross3(sub3(b.world,a.world),sub3(c.world,a.world)),vec3f(0.0,0.0,1.0),0.000000000001)
+        let light=if self.scene.surface.kind<0.5 {1.0} else {0.45+0.55*abs(dot3(normal,ingot::surface::camera(self.controls).forward))}
+        RasterVertex {position:if a.valid && b.valid && c.valid {p} else {ClipPosition{x:2.0,y:2.0,z:0.0,w:1.0}},varying:Varying {
+            a:if local==0 {area/max(length(b.screen,c.screen,width,height),0.00001)} else {0.0},
+            b:if local==1 {area/max(length(c.screen,a.screen,width,height),0.00001)} else {0.0},
+            c:if local==2 {area/max(length(a.screen,b.screen,width,height),0.00001)} else {0.0},signed:signed,light:light}}
     }
     fn shade(self,v:Varying)->i32 uses (FragmentStage<Varying>) {
-        let fill=if v.signed<=0.0 {display_rgb(0.9,0.3,0.25)} else {display_rgb(0.65,0.77,0.78)}
-        pack_rgba8(mix_display_rgb(display_rgb(0.08,0.12,0.16),fill,smoothstep(0.15,0.85,min(v.a,min(v.b,v.c)))))
+        let fill=if v.signed<=0.0 && self.scene.surface.kind<0.5 {display_rgb(0.9,0.3,0.25)}
+            else {display_rgb(0.65*v.light,0.77*v.light,0.78*v.light)}
+        let coverage=if self.controls.wires>0.5 {0.4+0.6*smoothstep(0.10,0.65,min(v.a,min(v.b,v.c)))} else {1.0}
+        pack_rgba8(mix_display_rgb(display_rgb(0.08,0.12,0.16),fill,coverage))
+    }
+    fn handles(self,index:u32)->RasterVertex<HandleVarying> uses (VertexStage<HandleVarying,TriangleList<30>>) {
+        let c=self.controls
+        let i=index/6
+        let hidden=c.surface_kind<0.5 || (i==2 && ingot::model::is_triangle(c))
+        let clip=project(ingot::surface::camera(c),ingot::surface::point(c,i)).clip
+        let selected=c.selected==number(i)
+        let radius=if selected {8.5} else {6.5}
+        RasterVertex {position:quilting_demo_view::handles::square_glyph(clip,
+            quilting_demo_view::ScreenExtent {width:c.width,height:c.height},index%6,radius,!hidden),
+            varying:HandleVarying {kind:number(i),selected:if selected {1.0} else {0.0}}}
+    }
+    fn handle_color(self,v:HandleVarying)->i32 uses (FragmentStage<HandleVarying>) {
+        let color=if v.kind>3.5 {display_rgb(0.95,0.65,0.48)} else {display_rgb(0.7,0.8,0.95)}
+        pack_rgba8(mix_display_rgb(color,display_rgb(1.0,0.96,0.87),v.selected*0.3))
     }
 }

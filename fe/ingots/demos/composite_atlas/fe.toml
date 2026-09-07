@@ -12,4 +12,6 @@ quilting_atlas_workers = true
 quilting_domain = true
 quilting_qb = true
 quilting_patch = true
+quilting_clifford_bezier = true
+quilting_demo_view = true
 quilting_oklch = { path = "../../color/quilting_oklch" }

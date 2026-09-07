@@ -3,7 +3,7 @@ use core::marker::Copy
 use quilting_atlas::{CANONICAL_KEY_COUNT, canonical_key_at, edge_permutation_index}
 use quilting_atlas::composition::{ChildTriangle,SquareChildBoundaries}
 use quilting_atlas_wasm::pool::{self, PoolHandle, TileKey}
-use ingot::model::{Controls,InteriorPolicy,EdgeResolution,EdgeSkews,edge_resolution,interior_policy,initial_controls,recipe,edge_lods,edge_skews}
+use ingot::model::{Controls,InteriorPolicy,EdgeResolution,EdgeSkews,edge_resolution,interior_policy,initial_controls,child_count,child,edge_lods,edge_skews}
 pub const WORKERS:u32=4
 pub const CAPACITY:usize=WORKERS as usize
 pub struct ChildDraw {
@@ -13,6 +13,7 @@ pub struct ChildDraw {
 }
 impl Copy for ChildDraw {}
 pub struct Scene {
+    pub surface:ingot::surface::Net,
     pub first:ChildDraw,pub second:ChildDraw,pub third:ChildDraw,pub fourth:ChildDraw,
     pub vertices:u32,pub active_center_x:f32,pub active_center_y:f32,
     pub active_bottom:f32,pub active_right:f32,pub active_top:f32,pub active_left:f32,
@@ -34,6 +35,7 @@ pub fn empty_child() -> ChildDraw {
 }
 pub fn empty_scene() -> Scene {
     Scene {first:empty_child(),second:empty_child(),third:empty_child(),fourth:empty_child(),
+        surface:ingot::surface::empty(),
         vertices:0,active_center_x:0.5,active_center_y:0.5,
         active_bottom:4.0,active_right:4.0,active_top:4.0,active_left:4.0,
         active_compensation:1.0,spacing_revision:0,active_boundary_reach:1.0,active_skews:edge_skews(initial_controls()),interior:interior_policy(initial_controls()),resolution:EdgeResolution::empty()}
@@ -73,14 +75,14 @@ pub fn refresh(_ previous:State) -> State {
     let summary=handle.summary()
     next.completed=summary.completed
     next.status=summary.status
-    let split=recipe(next.controls.split)
     let edges=edge_lods(next.controls)
-    for i in 0 .. (split.child_count() as usize) {
-        let request=split.child(i.downcast_truncate()).unwrap().resolve(edges).unwrap()
+    for i in 0 .. (child_count(next.controls) as usize) {
+        let request=child(next.controls,i.downcast_truncate()).resolve(edges).unwrap()
         let k=request.primary.key
         handle.prioritize(tile_key(k.a,k.b,k.c))
     }
     let mut scene=empty_scene()
+    if next.controls.surface_kind>0.5 {scene.surface=ingot::surface::authored(next.controls)}
     scene.active_center_x=next.controls.center_x
     scene.active_center_y=next.controls.center_y
     scene.active_bottom=next.controls.bottom_lod
@@ -106,8 +108,8 @@ pub fn refresh(_ previous:State) -> State {
     }
     next.pending=0
     let mut required=next.required_words
-    for i in 0 .. (split.child_count() as usize) {
-        let request=split.child(i.downcast_truncate()).unwrap().resolve(edges).unwrap()
+    for i in 0 .. (child_count(next.controls) as usize) {
+        let request=child(next.controls,i.downcast_truncate()).resolve(edges).unwrap()
         let k=request.primary.key
         let entry=handle.entry(handle.find(tile_key(k.a,k.b,k.c)))
         if entry.triangles==0 {next.pending+=1}

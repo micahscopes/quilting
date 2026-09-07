@@ -2,13 +2,19 @@
 use core::marker::Copy
 use fmath::sqrt
 use quilting_atlas::lod_as_f32
-use quilting_atlas::composition::{SquareSplit, SquareEdgeLods,BoundaryUse}
+use quilting_atlas::composition::{SquareSplit, SquareEdgeLods,BoundaryUse,ChildTriangle}
 use quilting_patch::arc_length::{SampledCumulativeLength, CumulativeLengthSamples}
 use quilting_patch::sampling_warp::{InteriorRedistribution,RedistributedCumulative,ProjectiveIntervalBias}
 use quilting_domain::{Bary3F,bary3f}
 use std::web::view::{Param,ParamReadout,ChoiceOptions,SurfaceState,SurfaceEvent,ApplyParamBindings,ParamBindingsProvider}
 
 pub struct Controls {
+    pub surface_kind:f32,pub arc_edge:f32,
+    pub p0x:f32,pub p0y:f32,pub p0z:f32,pub p1x:f32,pub p1y:f32,pub p1z:f32,
+    pub p2x:f32,pub p2y:f32,pub p2z:f32,pub p3x:f32,pub p3y:f32,pub p3z:f32,
+    pub midpoint_x:f32,pub midpoint_y:f32,pub midpoint_z:f32,
+    pub orbit_yaw:f32,pub orbit_pitch:f32,pub orbit_distance:f32,
+    pub selected:f32,pub dragging:f32,pub wires:f32,
     pub bottom_lod:f32, pub right_lod:f32, pub top_lod:f32, pub left_lod:f32,
     pub automatic_interior:f32,
     /// Saved manual LoD exponent, used only when automatic interior selection is off.
@@ -26,6 +32,18 @@ pub struct Controls {
 }
 impl Copy for Controls {}
 pub struct Params {
+    /// Patch modes share the same generated primaries and composition maps.
+    pub surface_kind:Param,
+    /// One means this finite-pole family accepts the authored arc; zero is not
+    /// repaired by projecting weights or inventing a replacement pole.
+    pub patch_valid:Param,
+    /// Editing this arc changes the other arcs through one common pole.
+    pub arc_edge:Param,
+    pub p0x:Param,pub p0y:Param,pub p0z:Param,pub p1x:Param,pub p1y:Param,pub p1z:Param,
+    pub p2x:Param,pub p2y:Param,pub p2z:Param,pub p3x:Param,pub p3y:Param,pub p3z:Param,
+    pub midpoint_x:Param,pub midpoint_y:Param,pub midpoint_z:Param,
+    pub orbit_yaw:Param,pub orbit_pitch:Param,pub orbit_distance:Param,
+    pub selected:Param,pub dragging:Param,pub wires:Param,
     pub bottom_lod:Param, pub right_lod:Param, pub top_lod:Param, pub left_lod:Param,
     pub automatic_interior:Param, pub diagonal_lod:Param,
     pub spoke_0_lod:Param, pub spoke_1_lod:Param, pub spoke_2_lod:Param, pub spoke_3_lod:Param,
@@ -65,9 +83,23 @@ pub struct Params {
     pub pending:Param,
 }
 impl SurfaceState for Controls { type Params = Params }
-derive ApplyParamBindings for Controls using ParamBindingsProvider
+derive ApplyParamBindings for Controls using ParamBindingsProvider<Params>
 pub const fn params() -> Params {
     Params {
+        surface_kind:Param::choice(options:ChoiceOptions::three(first:"flat composition",
+            second:"curved triangle",third:"curved quad"),init:0.0),
+        patch_valid:Param::readout(ParamReadout::Scalar),
+        arc_edge:Param::choice(options:ChoiceOptions::four(first:"first boundary",second:"second boundary",
+            third:"third boundary",fourth:"fourth boundary (quad)"),init:0.0),
+        p0x:Param::fixed(-1.0),p0y:Param::fixed(-0.7),p0z:Param::fixed(0.0),
+        p1x:Param::fixed(1.0),p1y:Param::fixed(-0.7),p1z:Param::fixed(0.0),
+        p2x:Param::fixed(1.0),p2y:Param::fixed(0.7),p2z:Param::fixed(0.0),
+        p3x:Param::fixed(-1.0),p3y:Param::fixed(0.7),p3z:Param::fixed(0.0),
+        midpoint_x:Param::fixed(0.0),midpoint_y:Param::fixed(-0.7),midpoint_z:Param::fixed(0.6),
+        orbit_yaw:Param::range(min:-3.14159,max:3.14159,init:0.25),
+        orbit_pitch:Param::range(min:-1.35,max:1.35,init:0.15),
+        orbit_distance:Param::log(min:1.0,max:40.0,init:5.0),
+        selected:Param::fixed(-1.0),dragging:Param::fixed(0.0),wires:Param::toggle(init:true),
         bottom_lod:Param::int(min:0.0,max:8.0,init:4.0),
         right_lod:Param::int(min:0.0,max:8.0,init:4.0),
         top_lod:Param::int(min:0.0,max:8.0,init:4.0),
@@ -127,6 +159,11 @@ pub fn edge_skews(_ c:Controls)->EdgeSkews {
 }
 pub fn initial_controls() -> Controls {
     Controls {bottom_lod:4.0,right_lod:4.0,top_lod:4.0,left_lod:4.0,
+        surface_kind:0.0,arc_edge:0.0,
+        p0x:-1.0,p0y:-0.7,p0z:0.0,p1x:1.0,p1y:-0.7,p1z:0.0,
+        p2x:1.0,p2y:0.7,p2z:0.0,p3x:-1.0,p3y:0.7,p3z:0.0,
+        midpoint_x:0.0,midpoint_y:-0.7,midpoint_z:0.6,
+        orbit_yaw:0.25,orbit_pitch:0.15,orbit_distance:5.0,selected:-1.0,dragging:0.0,wires:1.0,
         automatic_interior:1.0,diagonal_lod:4.0,spoke_0_lod:4.0,spoke_1_lod:4.0,
         spoke_2_lod:4.0,spoke_3_lod:4.0,split:2.0,center_x:0.5,center_y:0.5,
         compensate_density:1.0,interior_enabled:1.0,interior_concentration:1.0,interior_twist:0.0,
@@ -157,6 +194,12 @@ pub fn recipe(_ value:f32) -> SquareSplit {
     if value<0.5 {SquareSplit::Diagonal02}
     else if value<1.5 {SquareSplit::Diagonal13}
     else {SquareSplit::InteriorFan}
+}
+pub fn is_triangle(_ c:Controls)->bool {c.surface_kind>0.5 && c.surface_kind<1.5}
+pub fn child_count(_ c:Controls)->u32 {if is_triangle(c) {1} else {recipe(c.split).child_count()}}
+pub fn child(_ c:Controls,_ index:u32)->ChildTriangle {
+    if is_triangle(c) {ChildTriangle {a:0,b:1,c:3}}
+    else {recipe(c.split).child(index).unwrap()}
 }
 pub struct Point {pub x:f32,pub y:f32}
 impl Copy for Point {}
@@ -238,6 +281,9 @@ pub fn edge_lods(_ controls:Controls) -> SquareEdgeLods {
         levels[5]=automatic_level(controls,1,3)
         for i in 0 .. 4 { levels[6+i]=automatic_level(controls,i.downcast_truncate(),4) }
     }
+    // In triangle mode 1–3 is an OUTER edge, controlled by the right LoD;
+    // it must not be promoted by the square's automatic diagonal heuristic.
+    if is_triangle(controls) {levels[5]=level(controls.right_lod)}
     SquareEdgeLods {levels:levels}
 }
 
@@ -262,11 +308,10 @@ impl EdgeResolution {
     }
 }
 pub fn edge_resolution(_ controls:Controls,_ edges:SquareEdgeLods)->EdgeResolution {
-    let split=recipe(controls.split)
     let mut counts=[0;10]
     let mut result=EdgeResolution::empty()
-    for i in 0 .. (split.child_count() as usize) {
-        let triangle=split.child(i.downcast_truncate()).unwrap()
+    for i in 0 .. (child_count(controls) as usize) {
+        let triangle=child(controls,i.downcast_truncate())
         for side in 0 .. 3 {
             let boundary=triangle.boundary(side.downcast_truncate()).unwrap()
             let slot=boundary.square_slot().unwrap() as usize

@@ -82,7 +82,7 @@ fn composition_wasm_density_and_coherent_selection() {
     for code in 0..6561 {
         assert_eq!(boundary.call(&mut store,code).unwrap(),1,"warped boundary {code}");
     }
-    for name in ["edge_skew_preserves_mass_and_shared_positions","resolution_reports_visible_counts_and_caps","interior_policy_preserves_boundaries","boundary_admission","manual_values_survive_automatic","coherent_pending_selection"] {
+    for name in ["geometric_patch_view_laws","edge_skew_preserves_mass_and_shared_positions","resolution_reports_visible_counts_and_caps","interior_policy_preserves_boundaries","boundary_admission","manual_values_survive_automatic","coherent_pending_selection"] {
         let check=instance.get_typed_func::<(),i32>(&mut store,name).unwrap();
         assert_eq!(check.call(&mut store,()).unwrap(),1,"{name}");
     }

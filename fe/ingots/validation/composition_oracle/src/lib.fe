@@ -8,6 +8,39 @@ use quilting_patch::arc_length::{CumulativeLengthSamples,inverse_length}
 use quilting_patch::sampling_warp::{InverseCumulativeMap,OrientedIntervalMap,IntervalSamplingMap}
 use quilting_atlas::composition::{BoundaryUse,ChildTriangle,SquareEdgeLods}
 extern {const fn __f32_from_i32(_:i32)->f32}
+pub fn geometric_patch_view_laws()->bool {
+    let mut c=initial_controls()
+    for kind in [1.0,2.0] {
+        c.surface_kind=kind
+        let net=composite_atlas::surface::authored(c)
+        if net.patch_valid!=1.0 {return false}
+        let sample=composite_atlas::surface::evaluate(net,composite_atlas::model::Point {x:0.5,y:0.0})
+        if !sample.valid || fmath::abs(sample.point.x-c.midpoint_x)>0.00001
+            || fmath::abs(sample.point.y-c.midpoint_y)>0.00001
+            || fmath::abs(sample.point.z-c.midpoint_z)>0.00001 {return false}
+        for index in 0 .. 4 {
+            if kind==1.0 && index==2 {continue}
+            let id=index.downcast_truncate()
+            let uv=composite_atlas::model::corner(id,0.5,0.5)
+            let sample=composite_atlas::surface::evaluate(net,uv)
+            let expected=composite_atlas::surface::point(c,id)
+            if !sample.valid || fmath::abs(sample.point.x-expected.x)>0.00001
+                || fmath::abs(sample.point.y-expected.y)>0.00001
+                || fmath::abs(sample.point.z-expected.z)>0.00001 {return false}
+        }
+    }
+    c.surface_kind=1.0
+    c.p2x=0.0/0.0
+    // The hidden fourth corner cannot invalidate a three-corner surface.
+    if composite_atlas::surface::authored(c).patch_valid!=1.0 {return false}
+    let child=composite_atlas::model::child(c,0)
+    if child.a!=0 || child.b!=1 || child.c!=3 || composite_atlas::model::child_count(c)!=1 {return false}
+    for level in 0 .. 9 {
+        c.right_lod=__f32_from_i32(level.downcast_unchecked())
+        if edge_lods(c).levels[5]!=level.downcast_truncate() {return false}
+    }
+    true
+}
 pub fn quality_laws()->bool {ingot::quality::laws()}
 pub fn quality_case(_ case:u32,_ compensation:u32)->(u32,u32,u32,u32,f32,f32,f32,f32,f32,f32) {
     ingot::quality::audit(case,compensation)
