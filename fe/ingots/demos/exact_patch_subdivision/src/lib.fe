@@ -145,7 +145,7 @@ impl SurfaceState for PatchSubdivisionState {
     type Params = PatchSubdivisionParams
 }
 
-derive ApplyParamBindings for PatchSubdivisionState using ParamBindingsProvider
+derive ApplyParamBindings for PatchSubdivisionState using ParamBindingsProvider<PatchSubdivisionParams>
 
 const fn patch_subdivision_params() -> PatchSubdivisionParams {
     PatchSubdivisionParams {

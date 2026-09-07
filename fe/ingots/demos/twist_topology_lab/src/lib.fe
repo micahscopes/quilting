@@ -133,7 +133,7 @@ impl SurfaceState for TopologyState {
     type Params = TopologyParams
 }
 
-derive ApplyParamBindings for TopologyState using ParamBindingsProvider
+derive ApplyParamBindings for TopologyState using ParamBindingsProvider<TopologyParams>
 
 const fn topology_params() -> TopologyParams {
     TopologyParams {

@@ -122,7 +122,7 @@ impl SurfaceState for LocusState {
     type Params = LocusParams
 }
 
-derive ApplyParamBindings for LocusState using ParamBindingsProvider
+derive ApplyParamBindings for LocusState using ParamBindingsProvider<LocusParams>
 
 const fn locus_params() -> LocusParams {
     LocusParams {

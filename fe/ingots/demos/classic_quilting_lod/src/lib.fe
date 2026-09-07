@@ -129,7 +129,7 @@ impl SurfaceState for AtlasLodState {
     type Params = AtlasLodParams
 }
 
-derive ApplyParamBindings for AtlasLodState using ParamBindingsProvider
+derive ApplyParamBindings for AtlasLodState using ParamBindingsProvider<AtlasLodParams>
 
 const fn atlas_lod_params() -> AtlasLodParams {
     AtlasLodParams {

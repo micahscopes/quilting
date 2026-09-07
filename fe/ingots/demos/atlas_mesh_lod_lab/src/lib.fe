@@ -212,7 +212,7 @@ impl SurfaceState for MeshLabState {
     type Params = MeshLabParams
 }
 
-derive ApplyParamBindings for MeshLabState using ParamBindingsProvider
+derive ApplyParamBindings for MeshLabState using ParamBindingsProvider<MeshLabParams>
 
 const fn mesh_lab_params() -> MeshLabParams {
     MeshLabParams {

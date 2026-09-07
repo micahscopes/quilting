@@ -32,7 +32,7 @@ struct FanState {
 }
 impl Copy for FanState {}
 impl SurfaceState for FanState { type Params = FanParams }
-derive ApplyParamBindings for FanState using ParamBindingsProvider
+derive ApplyParamBindings for FanState using ParamBindingsProvider<FanParams>
 
 const fn params() -> FanParams {
     FanParams {

@@ -112,7 +112,7 @@ impl Copy for State {}
 impl SurfaceState for State {
     type Params = Params
 }
-derive ApplyParamBindings for State using ParamBindingsProvider
+derive ApplyParamBindings for State using ParamBindingsProvider<Params>
 const fn params() -> Params {
     Params {
         domain: Param::choice(

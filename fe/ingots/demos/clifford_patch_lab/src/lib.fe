@@ -1403,7 +1403,7 @@ impl SurfaceState for CliffordLabState {
     type Params = CliffordLabParams
 }
 
-derive ApplyParamBindings for CliffordLabState using ParamBindingsProvider
+derive ApplyParamBindings for CliffordLabState using ParamBindingsProvider<CliffordLabParams>
 
 const fn lab_params() -> CliffordLabParams {
     CliffordLabParams {
