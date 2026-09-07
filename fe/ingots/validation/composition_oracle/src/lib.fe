@@ -468,6 +468,53 @@ pub fn inverted_chord_fraction(_ kind:u32,_ level:u32,_ bulge:f32)->f32 {
     __f32_from_i32(inverted.downcast_unchecked())/__f32_from_i32(total.downcast_unchecked())
 }
 
+fn authored_quad_norm(_ bulge:f32)->quilting_patch::depth_field::QuadDomainNorm {
+    use quilting_patch::depth_field::{quad_gram,QuadDomainNorm}
+    use quilting_clifford_bezier::euclidean::EuclideanWeightNorm
+    let mut c=initial_controls()
+    c.surface_kind=2.0
+    c.midpoint_z=bulge
+    let net=composite_atlas::surface::authored(c)
+    // Tensor order 00, 10, 01, 11 matches the evaluator's a, b, d, c.
+    QuadDomainNorm {gram:quad_gram(EuclideanWeightNorm {},
+        net.a.weight,net.b.weight,net.d.weight,net.c.weight)}
+}
+/// The interior segment law and the published boundary table must agree where
+/// they meet, otherwise switching interior placement to the density would
+/// introduce a discontinuity at the very boundary it is meant to respect.
+/// `which` selects the published arc table or the on-demand segment law.
+pub fn boundary_segment_agreement(_ slot:u32,_ index:u32,_ which:u32,_ bulge:f32,_ levels:u32)->f32 {
+    use quilting_patch::arc_spacing::{dyadic_arc_samples,IntervalMapSamples}
+    use quilting_patch::depth_field::segment_parameter
+    use quilting_clifford_bezier::euclidean::EuclideanArcMeasure
+    let mut c=initial_controls()
+    c.surface_kind=2.0
+    c.midpoint_z=bulge
+    let net=composite_atlas::surface::authored(c)
+    if net.patch_valid!=1.0 {return -999.0}
+    if which==0 {
+        return match dyadic_arc_samples<EuclideanArcMeasure,257>(
+            composite_atlas::surface::outer_arc(net,slot)) {
+            Option::None=>-999.0,
+            Option::Some(samples)=>samples.parameter(index),
+        }
+    }
+    // Square domain corners 0..3 in ring order, matching the ring-ordered net.
+    let (x0,y0,x1,y1)=if slot==0 {(0.0,0.0,1.0,0.0)}
+        else if slot==1 {(1.0,0.0,1.0,1.0)}
+        else if slot==2 {(1.0,1.0,0.0,1.0)}
+        else {(0.0,0.0,0.0,1.0)}
+    let fraction=__f32_from_i32(index.downcast_unchecked())/256.0
+    segment_parameter(authored_quad_norm(bulge),x0,y0,x1,y1,fraction,levels)
+}
+/// The same law on an interior line, which has no published table. Reported so
+/// the interior can be compared against measured surface length directly.
+pub fn interior_segment_parameter(_ x0:f32,_ y0:f32,_ x1:f32,_ y1:f32,
+    _ fraction:f32,_ bulge:f32,_ levels:u32)->f32 {
+    use quilting_patch::depth_field::segment_parameter
+    segment_parameter(authored_quad_norm(bulge),x0,y0,x1,y1,fraction,levels)
+}
+
 pub fn geometric_patch_view_laws()->bool {
     let mut c=initial_controls()
     for kind in [1.0,2.0] {

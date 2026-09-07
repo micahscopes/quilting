@@ -524,6 +524,39 @@ fn inverted_surface_chords_appear_only_when_resolution_loses_the_pole() {
     }
 }
 
+/// Switching interior placement to the density field is only safe if the
+/// interior law and the published boundary table agree where they meet.
+/// Otherwise the interior would step away from the very boundary it must
+/// respect. They should agree exactly, since both reduce to the same
+/// endpoint-magnitude midpoint rule on the same affine rotor path.
+#[test]
+fn the_interior_segment_law_matches_the_published_boundary_table() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let f=instance.get_typed_func::<(i32,i32,i32,f32,i32),f32>(&mut store,"boundary_segment_agreement").unwrap();
+    for bulge in [0.6_f32,2.4] {
+        for levels in [6,8,10] {
+            let mut worst=0.0_f64;
+            for slot in 0..4 {
+                for index in [1,17,64,101,128,192,255] {
+                    let table=f64::from(f.call(&mut store,(slot,index,0,bulge,levels)).unwrap());
+                    let lazy=f64::from(f.call(&mut store,(slot,index,1,bulge,levels)).unwrap());
+                    assert!(table>0.0 && lazy>0.0,"slot {slot} index {index}: {table} vs {lazy}");
+                    worst=worst.max((lazy-table).abs());
+                }
+            }
+            eprintln!("SEGMENT_MATCH bulge={bulge} levels={levels}: worst absolute parameter difference={worst:.9}");
+            if levels>=8 {
+                assert!(worst<1e-4,"interior law disagrees with the boundary table: {worst}");
+            }
+        }
+    }
+}
+
 #[test]
 fn composition_wasm_boundary_locality_sweep() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");

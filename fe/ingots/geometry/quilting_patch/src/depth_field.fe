@@ -114,3 +114,116 @@ impl DepthLadder {
         if coarse == fine { coarse } else { UNCERTIFIED_LEVEL }
     }
 }
+
+
+/// Gram of a bilinear patch's four control weights, tensor order 00, 10, 01, 11.
+pub struct QuadGram {
+    pub g00:f32, pub g11:f32, pub g22:f32, pub g33:f32,
+    pub g01:f32, pub g02:f32, pub g03:f32,
+    pub g12:f32, pub g13:f32, pub g23:f32,
+}
+impl Copy for QuadGram {}
+
+pub fn quad_gram<W: LinearElement, N: WeightNormSquared<W>>(
+    _ norm: N, _ p00: W, _ p10: W, _ p01: W, _ p11: W,
+) -> QuadGram {
+    let g00=norm.norm_squared(p00)
+    let g11=norm.norm_squared(p10)
+    let g22=norm.norm_squared(p01)
+    let g33=norm.norm_squared(p11)
+    QuadGram {
+        g00:g00, g11:g11, g22:g22, g33:g33,
+        g01:(norm.norm_squared(p00.plus(p10))-g00-g11)*0.5,
+        g02:(norm.norm_squared(p00.plus(p01))-g00-g22)*0.5,
+        g03:(norm.norm_squared(p00.plus(p11))-g00-g33)*0.5,
+        g12:(norm.norm_squared(p10.plus(p01))-g11-g22)*0.5,
+        g13:(norm.norm_squared(p10.plus(p11))-g11-g33)*0.5,
+        g23:(norm.norm_squared(p01.plus(p11))-g22-g33)*0.5,
+    }
+}
+
+/// The denominator norm as a function of a domain point, whichever blend the
+/// patch uses. Restricted to any axis-parallel line the underlying rotor path
+/// stays affine, which is what makes the segment rule below exact there.
+pub trait DomainNorm: Copy {
+    fn norm_squared_at(self, _ x: f32, _ y: f32) -> f32
+}
+
+/// A triangular blend read over the composite demo's square domain, whose
+/// barycentric lift is affine and so preserves the quadratic form.
+pub struct TriangleDomainNorm { pub gram: TriangleGram }
+impl Copy for TriangleDomainNorm {}
+impl DomainNorm for TriangleDomainNorm {
+    fn norm_squared_at(self,_ x:f32,_ y:f32)->f32 {
+        self.gram.at(quilting_domain::bary3f(1.0-x-y,x,y))
+    }
+}
+pub struct QuadDomainNorm { pub gram: QuadGram }
+impl Copy for QuadDomainNorm {}
+impl DomainNorm for QuadDomainNorm {
+    fn norm_squared_at(self,_ x:f32,_ y:f32)->f32 {
+        let g=self.gram
+        let b0=(1.0-x)*(1.0-y)
+        let b1=x*(1.0-y)
+        let b2=(1.0-x)*y
+        let b3=x*y
+        b0*b0*g.g00 + b1*b1*g.g11 + b2*b2*g.g22 + b3*b3*g.g33
+            + 2.0*(b0*b1*g.g01 + b0*b2*g.g02 + b0*b3*g.g03
+                 + b1*b2*g.g12 + b1*b3*g.g13 + b2*b3*g.g23)
+    }
+}
+
+fn segment_norm<N: DomainNorm>(_ norm:N,_ x0:f32,_ y0:f32,_ x1:f32,_ y1:f32,_ t:f32)->f32 {
+    norm.norm_squared_at(x0+(x1-x0)*t, y0+(y1-y0)*t)
+}
+
+/// Place a fraction along a straight domain segment so that equal fractions
+/// land at equal surface length.
+///
+/// This is the interior form of the published boundary law, not a different
+/// one: the same endpoint-magnitude midpoint rule, because surface speed along
+/// an affine rotor path is a constant over the squared norm either way. It is
+/// evaluated on demand rather than tabulated, since an interior line has no
+/// published table. One norm evaluation and one square root per level, the
+/// carried magnitudes making the other endpoint free.
+///
+/// Exactness needs the rotor path along this segment to be affine. That holds
+/// for the boundary, for a triangular blend along ANY straight domain line, and
+/// for a bilinear blend along axis-parallel lines. It does not hold for a
+/// bilinear blend along a diagonal, where this becomes an approximation.
+pub fn segment_parameter<N: DomainNorm>(
+    _ norm: N, _ x0: f32, _ y0: f32, _ x1: f32, _ y1: f32,
+    _ fraction: f32, _ levels: u32,
+) -> f32 {
+    if !(fraction > 0.0) { return 0.0 }
+    if fraction >= 1.0 { return 1.0 }
+    let mut low: f32 = 0.0
+    let mut high: f32 = 1.0
+    let mut low_magnitude = fmath::sqrt(segment_norm(norm, x0, y0, x1, y1, 0.0))
+    let mut high_magnitude = fmath::sqrt(segment_norm(norm, x0, y0, x1, y1, 1.0))
+    if !(low_magnitude > 0.0) || !(high_magnitude > 0.0) { return fraction }
+    let mut remaining = fraction
+    let mut level: u32 = 0
+    while level < levels {
+        // Equal-measure midpoint from the two endpoint magnitudes alone.
+        let scale = if low_magnitude > high_magnitude { low_magnitude } else { high_magnitude }
+        let a = low_magnitude / scale
+        let b = high_magnitude / scale
+        let split = a / (a + b)
+        let middle = low + (high - low) * split
+        if !(middle > low) || !(middle < high) { return low + (high - low) * remaining }
+        let magnitude = fmath::sqrt(segment_norm(norm, x0, y0, x1, y1, middle))
+        if !(magnitude > 0.0) { return low + (high - low) * remaining }
+        if remaining < 0.5 {
+            high = middle
+            high_magnitude = magnitude
+            remaining = remaining * 2.0
+        } else {
+            low = middle
+            low_magnitude = magnitude
+            remaining = remaining * 2.0 - 1.0
+        }
+        level = level + 1
+    }
+    low + (high - low) * remaining
+}
