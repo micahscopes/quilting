@@ -39,4 +39,14 @@ fn shared_handle_selection_obeys_screen_radius_depth_and_identity() {
             assert_eq!(check.call(&mut store, reversed).unwrap(), expected);
         }
     }
+    let glyph=instance.get_typed_func::<(i32,f32,f32,i32),(f32,f32,f32,f32)>(&mut store,"glyph").unwrap();
+    for corner in 0..6 {
+        let (x,y,z,w)=glyph.call(&mut store,(corner,1.0,2.0,1)).unwrap();
+        assert!((x.abs()/w*100.0-5.0).abs()<1e-5);
+        assert!((y.abs()/w*50.0-5.0).abs()<1e-5);
+        assert_eq!(z,0.0);
+    }
+    for (z,w,visible) in [(0.0,1.0,0),(-1.0,1.0,1),(2.0,1.0,1),(0.0,-1.0,1),(0.0,f32::INFINITY,1)] {
+        assert_eq!(glyph.call(&mut store,(0,z,w,visible)).unwrap(),(2.0,2.0,0.0,1.0));
+    }
 }

@@ -7,6 +7,21 @@ use super::ScreenExtent
 
 pub struct HandleQuery {pub pointer:Vec2F,pub extent:ScreenExtent,pub radius_pixels:f32}
 impl Copy for HandleQuery {}
+
+/// A screen-sized square glyph sharing the picker's finite camera chart.
+/// The caller chooses color and identity; the six vertices are a triangle list.
+pub fn square_glyph(_ clip:ClipPosition,_ extent:ScreenExtent,_ corner:u32,
+    _ radius:f32,_ visible:bool)->ClipPosition {
+    if !visible || !(clip.w>0.0 && clip.w-clip.w==0.0 && clip.x-clip.x==0.0 && clip.y-clip.y==0.0
+        && clip.z>=0.0 && clip.z<=clip.w
+        && extent.width>0.0 && extent.height>0.0) {
+        return ClipPosition {x:2.0,y:2.0,z:0.0,w:1.0}
+    }
+    let x=if corner==1 || corner==2 || corner==4 {1.0} else {-1.0}
+    let y=if corner==2 || corner==4 || corner==5 {1.0} else {-1.0}
+    ClipPosition {x:clip.x+x*radius*2.0/extent.width*clip.w,
+        y:clip.y+y*radius*2.0/extent.height*clip.w,z:0.0,w:clip.w}
+}
 pub struct HandlePick {
     pub selected:Option<u32>,
     distance_squared:f32,

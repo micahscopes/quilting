@@ -23,3 +23,8 @@ pub fn identity_tie(_ reverse:bool)->i32 {
     selected(if reverse {a.consider(query(),9,p).consider(query(),3,p)}
         else {a.consider(query(),3,p).consider(query(),9,p)})
 }
+pub fn glyph(_ corner:u32,_ z:f32,_ w:f32,_ visible:bool)->(f32,f32,f32,f32) {
+    let clip=quilting_demo_view::handles::square_glyph(
+        ClipPosition {x:0.0,y:0.0,z:z,w:w},query().extent,corner,5.0,visible)
+    (clip.x,clip.y,clip.z,clip.w)
+}

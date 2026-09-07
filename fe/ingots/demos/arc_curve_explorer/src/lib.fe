@@ -346,12 +346,10 @@ actor ArcCurveExplorer uses (GpuProgram<WebGpuBackend>,SurfaceQuality<Responsive
         let s=self.state
         let i=index/6
         let c=project(camera(s),point(s,i)).clip
-        let corner=index%6
-        let x=if corner==1 || corner==2 || corner==4 {1.0} else {-1.0}
-        let y=if corner==2 || corner==4 || corner==5 {1.0} else {-1.0}
         let selected=s.selected==number(i)
         let radius=if selected {8.5} else {6.5}
-        RasterVertex {position:ClipPosition {x:c.x+x*radius*2.0/s.res_x*c.w,y:c.y+y*radius*2.0/s.res_y*c.w,z:0.0,w:c.w},
+        RasterVertex {position:quilting_demo_view::handles::square_glyph(c,
+            ScreenExtent {width:s.res_x,height:s.res_y},index%6,radius,true),
             varying:HandleVarying {kind:number(i),selected:if selected {1.0} else {0.0}}}
     }
     fn handle_fragment(self,v:HandleVarying)->i32 uses (FragmentStage<HandleVarying>) {
