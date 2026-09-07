@@ -188,8 +188,24 @@ impl<M: IntervalSamplingMap> InteriorRadialMap<M> {
 /// still fold if their resolution does not resolve the twisting map.
 pub struct InteriorTwist { pub angle: f32 }
 impl Copy for InteriorTwist {}
+/// Radius-to-angle envelopes. All vanish at the outer contour.
+pub enum TwistFalloff { Quadratic, Smoothstep, Smootherstep }
+impl Copy for TwistFalloff {}
+impl IntervalSamplingMap for TwistFalloff {
+    fn map(self,_ r:f32)->f32 {
+        let t=1.0-r
+        match self {
+            Self::Quadratic=>t*t,
+            Self::Smoothstep=>t*t*(3.0-2.0*t),
+            Self::Smootherstep=>t*t*t*(10.0+t*(-15.0+6.0*t)),
+        }
+    }
+}
 impl InteriorTwist {
     pub fn triangle(self, _ p: Bary3F, _ f: Bary3F) -> Bary3F {
+        self.triangle_with_falloff(p,f,TwistFalloff::Quadratic)
+    }
+    pub fn triangle_with_falloff<M:IntervalSamplingMap>(self,_ p:Bary3F,_ f:Bary3F,_ falloff:M)->Bary3F {
         if self.angle == 0.0 || triangle_boundary(p) {
             return p
         }
@@ -199,7 +215,7 @@ impl InteriorTwist {
         let rotated = rotate_about(
             bary_to_cartesian(p),
             center,
-            self.angle * (1.0 - r) * (1.0 - r),
+            self.angle * falloff.map(r),
         )
         let q = cartesian_to_bary(rotated)
         let s = r / triangle_radius(q, f)
@@ -210,12 +226,15 @@ impl InteriorTwist {
         )
     }
     pub fn quad(self, _ p: Vec2F, _ f: Vec2F) -> Vec2F {
+        self.quad_with_falloff(p,f,TwistFalloff::Quadratic)
+    }
+    pub fn quad_with_falloff<M:IntervalSamplingMap>(self,_ p:Vec2F,_ f:Vec2F,_ falloff:M)->Vec2F {
         if self.angle == 0.0 || quad_boundary(p) {
             return p
         }
         let r = quad_radius(p, f)
         if r == 0.0 { return p }
-        let q = rotate_about(p, f, self.angle * (1.0 - r) * (1.0 - r))
+        let q = rotate_about(p, f, self.angle * falloff.map(r))
         let s = r / quad_radius(q, f)
         vec2f(f.x + (q.x - f.x) * s, f.y + (q.y - f.y) * s)
     }

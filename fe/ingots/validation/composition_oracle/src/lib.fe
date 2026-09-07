@@ -9,6 +9,45 @@ use quilting_patch::sampling_warp::{InverseCumulativeMap,OrientedIntervalMap,Int
 use quilting_atlas::composition::{BoundaryUse,ChildTriangle,SquareEdgeLods}
 extern {const fn __f32_from_i32(_:i32)->f32}
 
+pub fn whole_composition_warp_laws()->bool {
+    use composite_atlas::composition_warp::policy
+    use composite_atlas::model::Point
+    let mut c=initial_controls()
+    for kind in [0.0,1.0,2.0] {
+        c.surface_kind=kind
+        c.composition_concentration=1.0
+        c.composition_twist=0.0
+        let p=Point {x:0.2,y:0.3}
+        let neutral=policy(c).apply(p)
+        if neutral.x!=p.x || neutral.y!=p.y {return false}
+        for mode in [0.0,1.0,2.0] {
+            c.composition_falloff=mode
+            c.composition_twist=2.0
+            c.composition_concentration=1.7
+            let warp=policy(c)
+            for i in 0..17 {
+                let t=__f32_from_i32(i.downcast_unchecked())/16.0
+                for edge in 0..4 {
+                    let b=if edge==0 {Point {x:t,y:0.0}}
+                        else if edge==1 {if kind==1.0 {Point {x:1.0-t,y:t}} else {Point {x:1.0,y:t}}}
+                        else if edge==2 && kind!=1.0 {Point {x:t,y:1.0}}
+                        else {Point {x:0.0,y:t}}
+                    let q=warp.apply(b)
+                    if q.x!=b.x || q.y!=b.y {return false}
+                }
+            }
+            // An interior point on the quad's original diagonal MUST move:
+            // the post-map must not preserve every child contour separately.
+            let p=Point {x:0.2,y:0.2}
+            let q=warp.apply(p)
+            if !(q.x>=0.0 && q.y>=0.0 && q.x<=1.0 && q.y<=1.0) {return false}
+            if kind==1.0 && q.x+q.y>1.000001 {return false}
+            if fmath::abs(q.x-p.x)+fmath::abs(q.y-p.y)<0.001 {return false}
+        }
+    }
+    true
+}
+
 struct InvertedLine {first:f32,last_x:f32,last_y:f32}
 impl core::marker::Copy for InvertedLine {}
 impl quilting_patch::arc_spacing::CircularArcMeasure for InvertedLine {

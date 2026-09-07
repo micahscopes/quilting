@@ -1,0 +1,39 @@
+//! One domain map AFTER child assembly, before geometric patch evaluation.
+//! Shared input positions follow the same arithmetic regardless of child ID.
+use core::marker::Copy
+use quilting_domain::{bary3f,vec2f}
+use quilting_patch::sampling_warp::{InteriorConcentration,InteriorTwist,TwistFalloff}
+use ingot::model::{Controls,Point,is_triangle}
+
+pub struct CompositionWarp {
+    pub enabled:bool,pub triangular:bool,
+    pub focus:Point,pub concentration:f32,pub twist:f32,pub falloff:TwistFalloff,
+}
+impl Copy for CompositionWarp {}
+impl CompositionWarp {
+    pub fn apply(self,_ p:Point)->Point {
+        if !self.enabled {return p}
+        let radial=InteriorConcentration {strength:self.concentration}
+        let angular=InteriorTwist {angle:self.twist}
+        if self.triangular {
+            let f=bary3f(1.0-self.focus.x-self.focus.y,self.focus.x,self.focus.y)
+            let q=radial.triangle(bary3f(1.0-p.x-p.y,p.x,p.y),f)
+            let w=angular.triangle_with_falloff(q,f,self.falloff)
+            Point {x:w.b,y:w.c}
+        } else {
+            let f=vec2f(self.focus.x,self.focus.y)
+            let q=radial.quad(vec2f(p.x,p.y),f)
+            let w=angular.quad_with_falloff(q,f,self.falloff)
+            Point {x:w.x,y:w.y}
+        }
+    }
+}
+pub fn policy(_ c:Controls)->CompositionWarp {
+    // In a triangle, the second slider spans the remaining height. This keeps
+    // the focus strictly inside without clamping it onto an edge.
+    CompositionWarp {enabled:c.composition_enabled>0.5,triangular:is_triangle(c),
+        focus:Point {x:c.composition_focus_x,y:if is_triangle(c) {(1.0-c.composition_focus_x)*c.composition_focus_y} else {c.composition_focus_y}},
+        concentration:c.composition_concentration,twist:c.composition_twist,
+        falloff:if c.composition_falloff<0.5 {TwistFalloff::Quadratic}
+            else if c.composition_falloff<1.5 {TwistFalloff::Smoothstep} else {TwistFalloff::Smootherstep}}
+}

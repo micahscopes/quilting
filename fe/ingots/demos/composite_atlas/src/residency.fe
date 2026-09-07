@@ -13,6 +13,7 @@ pub struct ChildDraw {
 }
 impl Copy for ChildDraw {}
 pub struct Scene {
+    pub composition_warp:ingot::composition_warp::CompositionWarp,
     pub surface:ingot::surface::Net,
     pub first:ChildDraw,pub second:ChildDraw,pub third:ChildDraw,pub fourth:ChildDraw,
     pub vertices:u32,pub active_center_x:f32,pub active_center_y:f32,
@@ -35,6 +36,7 @@ pub fn empty_child() -> ChildDraw {
 }
 pub fn empty_scene() -> Scene {
     Scene {first:empty_child(),second:empty_child(),third:empty_child(),fourth:empty_child(),
+        composition_warp:ingot::composition_warp::policy(initial_controls()),
         surface:ingot::surface::empty(),
         vertices:0,active_center_x:0.5,active_center_y:0.5,
         active_bottom:4.0,active_right:4.0,active_top:4.0,active_left:4.0,
@@ -93,6 +95,7 @@ pub fn refresh(_ previous:State) -> State {
     scene.active_skews=edge_skews(next.controls)
     scene.active_boundary_reach=next.controls.boundary_reach
     scene.interior=interior_policy(next.controls)
+    scene.composition_warp=ingot::composition_warp::policy(next.controls)
     let old=previous.scene
     let mut changed=old.spacing_revision==0 || old.active_center_x!=scene.active_center_x
         || old.active_center_y!=scene.active_center_y || old.active_bottom!=scene.active_bottom

@@ -9,6 +9,8 @@ use quilting_domain::{Bary3F,bary3f}
 use std::web::view::{Param,ParamReadout,ChoiceOptions,SurfaceState,SurfaceEvent,ApplyParamBindings,ParamBindingsProvider}
 
 pub struct Controls {
+    pub composition_enabled:f32,pub composition_focus_x:f32,pub composition_focus_y:f32,
+    pub composition_concentration:f32,pub composition_twist:f32,pub composition_falloff:f32,
     pub surface_kind:f32,pub arc_edge:f32,
     pub p0x:f32,pub p0y:f32,pub p0z:f32,pub p1x:f32,pub p1y:f32,pub p1z:f32,
     pub p2x:f32,pub p2y:f32,pub p2z:f32,pub p3x:f32,pub p3y:f32,pub p3z:f32,
@@ -32,6 +34,12 @@ pub struct Controls {
 }
 impl Copy for Controls {}
 pub struct Params {
+    /// Applied once across the whole assembled domain, including internal seams.
+    pub composition_enabled:Param,
+    pub composition_focus_x:Param,
+    /// In triangle mode this is the fraction of the available height at focus X.
+    pub composition_focus_y:Param,
+    pub composition_concentration:Param,pub composition_twist:Param,pub composition_falloff:Param,
     /// Patch modes share the same generated primaries and composition maps.
     pub surface_kind:Param,
     /// One means this finite-pole family accepts the authored arc; zero is not
@@ -86,6 +94,12 @@ impl SurfaceState for Controls { type Params = Params }
 derive ApplyParamBindings for Controls using ParamBindingsProvider<Params>
 pub const fn params() -> Params {
     Params {
+        composition_enabled:Param::toggle(init:true),
+        composition_focus_x:Param::range(min:0.02,max:0.98,init:0.5),
+        composition_focus_y:Param::range(min:0.02,max:0.98,init:0.5),
+        composition_concentration:Param::log(min:0.25,max:4.0,init:1.0),
+        composition_twist:Param::range(min:-6.2831853,max:6.2831853,init:0.0),
+        composition_falloff:Param::choice(options:ChoiceOptions::three(first:"quadratic",second:"smoothstep",third:"smootherstep"),init:1.0),
         surface_kind:Param::choice(options:ChoiceOptions::three(first:"flat composition",
             second:"curved triangle",third:"curved quad"),init:0.0),
         patch_valid:Param::readout(ParamReadout::Scalar),
@@ -159,6 +173,8 @@ pub fn edge_skews(_ c:Controls)->EdgeSkews {
 }
 pub fn initial_controls() -> Controls {
     Controls {bottom_lod:4.0,right_lod:4.0,top_lod:4.0,left_lod:4.0,
+        composition_enabled:1.0,composition_focus_x:0.5,composition_focus_y:0.5,
+        composition_concentration:1.0,composition_twist:0.0,composition_falloff:1.0,
         surface_kind:0.0,arc_edge:0.0,
         p0x:-1.0,p0y:-0.7,p0z:0.0,p1x:1.0,p1y:-0.7,p1z:0.0,
         p2x:1.0,p2y:0.7,p2z:0.0,p3x:-1.0,p3y:0.7,p3z:0.0,
