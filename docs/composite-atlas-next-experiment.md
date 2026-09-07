@@ -1,11 +1,42 @@
-# Composite atlas: next experiment after the direct worker baseline
+# Compositional tessellations: active direction
 
-The next focused explorer after the working direct triangle/quad worker-atlas
-viewer and matched baseline is **composition from primary tessellations**.
-Do not postpone it behind the entire QuiltPatch gallery or speculative compiler
-optimization. Do not replace the direct full atlas baseline with composition.
+The user explicitly pivoted to **multiple methods of composition from primary
+tessellations** on September 7. The unfinished direct worker-atlas viewer and
+matched benchmarks are preserved, not prerequisites for this work. GPU atlas
+generation stays parked. Do not resume direct-atlas development merely because
+the automatic goal still contains its older priority order.
 
-## First comparison
+Aim for visible usable tessellations in under one minute of opening an explorer;
+measure this, including runtime primary generation. Never gate the first view on
+generating all 1,200 direct atlas entries. The direct generator remains a
+reference method, not the mandatory production construction.
+
+## Comparison family
+
+Start with two diagonal splits and a movable-center four-triangle fan sharing
+the same primary-tessellation access, oriented boundary rules, parent warp,
+renderer, and diagnostics. Show their decomposition next to the actual triangles.
+Do not claim that one fan settles the design space.
+
+Then add recursive primary subdivision/tiling and Wang-style compatible tiles
+as distinct experiments. Compare generation cost, unique primary requests,
+assembly cost, triangle quality, shared boundaries, coverage/folds, storage, and
+discrete LoD transitions. Each method should have a focused standalone view,
+with a common comparison index rather than one overloaded mode dropdown.
+
+The first affine-composition control is explicitly a distortion control. It
+does not claim surface-uniform sampling, global blue noise, or global Delaunay.
+Keep that distinction visible while adding shape-aware and warped variants.
+
+## Four-child shape-aware comparison
+
+Implementation checkpoint: `quilting_atlas::composition` defines both diagonal
+recipes and the interior fan, with canonical endpoint identities and directed
+boundary uses. Its Fe test checks outer-edge coverage, unique reversed seam
+incidence, and matching sample indices for every dyadic boundary level 0–8.
+This is a topological contract only: placement, primary-atlas lane adaptation,
+runtime generation, warping, and the rendered comparison are not implemented by
+that module. It supplies no guarantee of interior triangle quality.
 
 Construct a square from four triangular children meeting at its center. Generate
 primary children using their actual placed shape's metric for both sampling and

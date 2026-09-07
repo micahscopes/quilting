@@ -35,6 +35,7 @@ pub use neighborhood
 pub use candidate_index
 pub use residency
 pub use scan
+pub use composition
 
 pub const MIN_LOD: u32 = 0
 pub const MAX_LOD: u32 = 8

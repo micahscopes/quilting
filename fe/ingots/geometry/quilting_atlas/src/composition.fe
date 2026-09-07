@@ -1,0 +1,93 @@
+//! Topological recipes, independent of primary sampling and physical placement.
+//! Square corners 0..3 run counterclockwise; 4 denotes an interior point.
+//! A recipe proves neither sampling quality nor injectivity of a later warp.
+use core::marker::Copy
+
+pub enum SquareSplit { Diagonal02, Diagonal13, InteriorFan }
+impl Copy for SquareSplit {}
+
+/// A directed use of one undirected boundary. Adjacent children share the
+/// endpoints and density owner; only their traversal direction differs.
+pub struct BoundaryUse { pub low: u32, pub high: u32, pub reversed: bool }
+impl Copy for BoundaryUse {}
+impl BoundaryUse {
+    pub fn between(_ from: u32, _ to: u32) -> Self {
+        if from < to {
+            Self { low: from, high: to, reversed: false }
+        } else { Self { low: to, high: from, reversed: true } }
+    }
+    /// Reverse the integer index BEFORE evaluating a shared edge warp. Never
+    /// approximate the reversed chain by a separately fitted parameterization.
+    pub fn canonical_sample(self, _ index: u32, _ segments: u32) -> u32 {
+        assert(index <= segments)
+        if self.reversed { segments - index } else { index }
+    }
+}
+
+pub struct ChildTriangle { pub vertices: [u32; 3] }
+impl Copy for ChildTriangle {}
+impl ChildTriangle {
+    /// Edge lanes follow the child's counterclockwise ring, not an implicit
+    /// sampler convention. The primary-atlas adapter must map lanes explicitly.
+    pub fn boundary(self, _ side: usize) -> BoundaryUse {
+        assert(side < 3)
+        BoundaryUse::between(self.vertices[side], self.vertices[(side + 1) % 3])
+    }
+}
+impl SquareSplit {
+    pub fn child_count(self) -> u32 {
+        match self { Self::InteriorFan => 4, _ => 2 }
+    }
+    pub fn child(self, _ index: u32) -> ChildTriangle {
+        assert(index < self.child_count())
+        let vertices = match self {
+            Self::Diagonal02 => if index == 0 { [0, 1, 2] } else { [0, 2, 3] },
+            Self::Diagonal13 => if index == 0 { [0, 1, 3] } else { [1, 2, 3] },
+            Self::InteriorFan => [index, (index + 1) % 4, 4],
+        }
+        ChildTriangle { vertices: vertices }
+    }
+}
+
+#[test]
+fn composition_shared_edges_reverse_exactly() {
+    let recipes = [SquareSplit::Diagonal02, SquareSplit::Diagonal13, SquareSplit::InteriorFan]
+    for recipe in recipes {
+        let mut seams: u32 = 0
+        let mut outer: u32 = 0
+        for child in 0 .. (recipe.child_count() as usize) {
+            for side in 0 .. 3 {
+                let edge = recipe.child(child.downcast_truncate()).boundary(side)
+                let mut matches: u32 = 0
+                for other in 0 .. (recipe.child_count() as usize) {
+                    if other != child {
+                        for lane in 0 .. 3 {
+                            let peer = recipe.child(other.downcast_truncate()).boundary(lane)
+                            if edge.low == peer.low && edge.high == peer.high {
+                                matches += 1
+                                assert(edge.reversed != peer.reversed)
+                                for lod in 0 .. 9 {
+                                    let level: u32 = lod.downcast_truncate()
+                                    let segments: u32 = 1 << level
+                                    for i in 0 .. ((segments + 1) as usize) {
+                                        let sample: u32 = i.downcast_truncate()
+                                        assert(edge.canonical_sample(sample, segments)
+                                            == peer.canonical_sample(segments - sample, segments))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                assert(matches <= 1)
+                if matches == 1 { seams += 1 } else {
+                    outer += 1
+                    assert(edge.high < 4)
+                    assert(edge.high == edge.low + 1 || (edge.low == 0 && edge.high == 3))
+                }
+            }
+        }
+        assert(outer == 4)
+        assert(seams == 3 * recipe.child_count() - 4)
+    }
+}
