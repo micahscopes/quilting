@@ -167,6 +167,95 @@ fn measured_interior_spacing_beats_uniform_parameter_on_spokes_and_diagonals() {
     assert!(worst_measured<0.05,"measured interior deviation regressed: {worst_measured}");
 }
 
+/// Settles whether surface area density has the closed form one over the fourth
+/// power of the denominator norm, or whether the numerator contributes its own
+/// affine scalar. Everything downstream of a density field depends on which.
+#[test]
+fn surface_area_density_is_the_reciprocal_fourth_power_of_the_denominator_norm() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let ratio=instance.get_typed_func::<(i32,f32,f32,f32),f32>(&mut store,"area_density_ratio").unwrap();
+    for (kind,name) in [(0,"triangle"),(1,"quad")] {
+        let mut values=Vec::new();
+        for i in 1..12 {
+            for j in 1..12 {
+                let u=f64::from(i)/12.0;
+                let v=f64::from(j)/12.0;
+                // Stay inside the triangular domain where u+v<1.
+                if kind==0 && u+v>0.92 {continue}
+                let r=f64::from(ratio.call(&mut store,(kind,u as f32,v as f32,1.0/512.0)).unwrap());
+                assert!(r>0.0,"{name} at {u},{v} did not evaluate: {r}");
+                values.push(r);
+            }
+        }
+        let mean=values.iter().sum::<f64>()/values.len() as f64;
+        let spread=values.iter().map(|r| (r/mean-1.0).abs()).fold(0.0_f64,f64::max);
+        eprintln!("AREA_DENSITY {name}: {} samples, mean ratio={mean:.6}, worst relative spread={spread:.6}",values.len());
+        if kind==0 {
+            // The triangular blend is affine, so its Jacobian is constant and
+            // the reciprocal fourth power is the whole law. The tolerance is
+            // central-difference truncation, not slack.
+            assert!(spread<2e-3,"triangle ratio should be constant: {spread}");
+        } else {
+            // The bilinear blend's Jacobian varies with position, so the same
+            // law is NOT sufficient for a quad. Pinned as a measured fact so a
+            // later change cannot quietly adopt the triangle's formula here.
+            assert!(spread>0.05,"quad departure disappeared, recheck the law: {spread}");
+        }
+    }
+}
+
+/// The quad's departure from the reciprocal fourth power is the bilinear
+/// blend's own Jacobian. If that is what it is, the squared correction must be
+/// exactly a tensor-product quadratic, so a nine-node interpolant built at
+/// three nodes per axis must reproduce it everywhere else. Deciding this
+/// decides whether a quad density field is closed form and cheap, or needs
+/// runtime differentiation.
+#[test]
+fn quad_area_density_correction_is_a_tensor_product_quadratic() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let ratio=instance.get_typed_func::<(i32,f32,f32,f32),f32>(&mut store,"area_density_ratio").unwrap();
+    let mut squared=|store:&mut wasmtime::Store<()>,u:f64,v:f64| -> f64 {
+        let r=f64::from(ratio.call(&mut *store,(1,u as f32,v as f32,1.0/512.0)).unwrap());
+        assert!(r>0.0,"quad ratio at {u},{v}: {r}");
+        r*r
+    };
+    let nodes=[0.2_f64,0.5,0.8];
+    let mut node_values=[[0.0_f64;3];3];
+    for (i,&u) in nodes.iter().enumerate() {
+        for (j,&v) in nodes.iter().enumerate() {node_values[i][j]=squared(&mut store,u,v);}
+    }
+    // Tensor-product Lagrange basis on three nodes per axis.
+    let basis=|t:f64,k:usize| {
+        let (a,b,c)=(nodes[k],nodes[(k+1)%3],nodes[(k+2)%3]);
+        (t-b)*(t-c)/((a-b)*(a-c))
+    };
+    let mut worst=0.0_f64;
+    for i in 1..10 {
+        for j in 1..10 {
+            let u=f64::from(i)/10.0;
+            let v=f64::from(j)/10.0;
+            let mut predicted=0.0;
+            for k in 0..3 {
+                for l in 0..3 {predicted+=node_values[k][l]*basis(u,k)*basis(v,l);}
+            }
+            let actual=squared(&mut store,u,v);
+            worst=worst.max((predicted/actual-1.0).abs());
+        }
+    }
+    eprintln!("QUAD_DENSITY squared correction vs 9-node tensor quadratic: worst relative error={worst:.8}");
+    assert!(worst<5e-3,"quad correction is not a tensor-product quadratic: {worst}");
+}
+
 #[test]
 fn composition_wasm_boundary_locality_sweep() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");

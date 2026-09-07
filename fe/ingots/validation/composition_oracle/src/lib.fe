@@ -233,6 +233,50 @@ pub fn interior_chord_deviation(_ measured:u32,_ from:u32,_ to:u32,_ segments:u3
     if low>high {low} else {high}
 }
 
+fn denominator_norm_squared(_ net:composite_atlas::surface::Net,_ u:f32,_ v:f32)->f32 {
+    let (wa,wb,wc,wd)=(net.a.weight,net.b.weight,net.c.weight,net.d.weight)
+    // Control order matches the evaluator: triangular uses a,b,d against
+    // barycentric (1-u-v,u,v); bilinear uses a,b,d,c in tensor order 00,10,01,11.
+    let (ka,kb,kd,kc)=if net.kind<1.5 {(1.0-u-v,u,v,0.0)}
+        else {((1.0-u)*(1.0-v),u*(1.0-v),(1.0-u)*v,u*v)}
+    let scalar=ka*wa.scalar+kb*wb.scalar+kd*wd.scalar+kc*wc.scalar
+    let e12=ka*wa.e12+kb*wb.e12+kd*wd.e12+kc*wc.e12
+    let e13=ka*wa.e13+kb*wb.e13+kd*wd.e13+kc*wc.e13
+    let e23=ka*wa.e23+kb*wb.e23+kd*wd.e23+kc*wc.e23
+    scalar*scalar+e12*e12+e13*e13+e23*e23
+}
+/// Is surface area density exactly proportional to one over the fourth power of
+/// the denominator norm? The review left this open because the numerator could
+/// contribute its own affine scalar. Returns a central-difference area density
+/// multiplied by that candidate's reciprocal, so a ratio that is constant across
+/// the domain confirms the closed form and a varying one refutes it.
+pub fn area_density_ratio(_ kind:u32,_ u:f32,_ v:f32,_ h:f32)->f32 {
+    use composite_atlas::model::Point
+    let mut c=initial_controls()
+    c.surface_kind=if kind==0 {1.0} else {2.0}
+    let net=composite_atlas::surface::authored(c)
+    if net.patch_valid!=1.0 {return -999.0}
+    let pu=composite_atlas::surface::evaluate(net,Point {x:u+h,y:v})
+    let mu=composite_atlas::surface::evaluate(net,Point {x:u-h,y:v})
+    let pv=composite_atlas::surface::evaluate(net,Point {x:u,y:v+h})
+    let mv=composite_atlas::surface::evaluate(net,Point {x:u,y:v-h})
+    if !pu.valid || !mu.valid || !pv.valid || !mv.valid {return -999.0}
+    let scale=1.0/(2.0*h)
+    let ax=(pu.point.x-mu.point.x)*scale
+    let ay=(pu.point.y-mu.point.y)*scale
+    let az=(pu.point.z-mu.point.z)*scale
+    let bx=(pv.point.x-mv.point.x)*scale
+    let by=(pv.point.y-mv.point.y)*scale
+    let bz=(pv.point.z-mv.point.z)*scale
+    let cx=ay*bz-az*by
+    let cy=az*bx-ax*bz
+    let cz=ax*by-ay*bx
+    let measured=fmath::sqrt(cx*cx+cy*cy+cz*cz)
+    let norm=denominator_norm_squared(net,u,v)
+    if !(norm>0.0) {return -999.0}
+    measured*norm*norm
+}
+
 pub fn geometric_patch_view_laws()->bool {
     let mut c=initial_controls()
     for kind in [1.0,2.0] {
