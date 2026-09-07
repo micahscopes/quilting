@@ -1,5 +1,6 @@
 //! Actual Fe sampling + CPU CDT, with an independent mesh audit in Wasm.
 use core::{BrowserPtr, alloc_browser_object}
+use core::marker::Copy
 use quilting_atlas::{AtlasKey, edge_resolution}
 use quilting_atlas::quad::QuadAtlasKey
 use quilting_atlas::active_sampling::{ActiveDomain, ActiveScratch, ActiveConfig, SamplingStop, sample_indexed}
@@ -21,6 +22,10 @@ pub struct AtlasProbe {
     pub double_area: u64,
 }
 
+/// Cumulative phases share one implementation; skipped audits are not success.
+pub enum ProbeStage { Sampling, Triangulation, Audit }
+impl Copy for ProbeStage {}
+
 fn empty() -> AtlasProbe {
     AtlasProbe { sampling_status: 3, mesh_status: 5, points: 0, triangles: 0, errors: 0, location_steps: 0, edge_visits: 0, flips: 0, double_area: 0 }
 }
@@ -36,7 +41,7 @@ fn initialize() uses (scratch: mut ActiveScratch<65536>, grid: mut AcceptedGrid<
 }
 
 fn probe<D: ActiveDomain + ConstrainedBoundary, M: IntegerPlaneMetric>(
-    _ domain: D, _ metric: M, _ roots: [u32; 4], _ root_count: u32, _ seed: u32,
+    _ domain: D, _ metric: M, _ roots: [u32; 4], _ root_count: u32, _ seed: u32, _ stage: ProbeStage,
 ) -> AtlasProbe {
     let scratch: BrowserPtr<ActiveScratch<65536>> = alloc_browser_object<ActiveScratch<65536>>()
     let grid: BrowserPtr<AcceptedGrid<65536>> = alloc_browser_object<AcceptedGrid<65536>>()
@@ -46,12 +51,12 @@ fn probe<D: ActiveDomain + ConstrainedBoundary, M: IntegerPlaneMetric>(
     if scratch.address() == 0 || grid.address() == 0 || mesh.address() == 0 || queue.address() == 0 || audit.address() == 0 { return empty() }
     with (scratch, grid, mesh, queue, audit) {
         initialize()
-        probe_in_storage(domain, metric, roots, root_count, seed)
+        probe_in_storage(domain, metric, roots, root_count, seed, stage)
     }
 }
 
 fn probe_in_storage<D: ActiveDomain + ConstrainedBoundary, M: IntegerPlaneMetric>(
-    _ domain: D, _ metric: M, _ roots: [u32; 4], _ root_count: u32, _ seed: u32,
+    _ domain: D, _ metric: M, _ roots: [u32; 4], _ root_count: u32, _ seed: u32, _ stage: ProbeStage,
 ) -> AtlasProbe uses (scratch: mut ActiveScratch<65536>, grid: mut AcceptedGrid<65536>, mesh: mut CpuMesh<131072>, queue: mut EdgeQueue<393216>, audit: mut AuditScratch) {
     // Probe envelopes, not production atlas caps. Any exhaustion is a failed gate.
     let mut result = empty()
@@ -64,6 +69,7 @@ fn probe_in_storage<D: ActiveDomain + ConstrainedBoundary, M: IntegerPlaneMetric
         _ => 3,
     }
     if result.sampling_status != 0 { return result }
+    if let ProbeStage::Sampling = stage { return result }
     let built = triangulate(scratch, metric, roots, root_count, sampled.points, mut mesh, mut queue, 100000000)
     result.mesh_status = match built.stop {
         TriangulationStop::Complete => 0,
@@ -78,6 +84,7 @@ fn probe_in_storage<D: ActiveDomain + ConstrainedBoundary, M: IntegerPlaneMetric
     result.edge_visits = built.edge_visits
     result.flips = built.flips
     if result.mesh_status != 0 { return result }
+    if let ProbeStage::Triangulation = stage { return result }
     result.errors = mesh.adjacency_errors()
     if built.inserted != sampled.points || mesh.count != 2 * sampled.points - sampled.boundary_points - 2 { result.errors += 1 }
     let mut hull: u32 = 0
@@ -119,19 +126,19 @@ fn probe_in_storage<D: ActiveDomain + ConstrainedBoundary, M: IntegerPlaneMetric
     result
 }
 
-pub fn triangle(_ a: u32, _ b: u32, _ c: u32, _ seed: u32) -> AtlasProbe {
+pub fn triangle(_ a: u32, _ b: u32, _ c: u32, _ seed: u32, _ stage: ProbeStage) -> AtlasProbe {
     let key = AtlasKey { a: a, b: b, c: c }
     if !key.valid() { return empty() }
     let corner_b = edge_resolution(c)
     let corner_c = corner_b + edge_resolution(b)
-    probe(key, EquilateralMetric {}, [0, corner_b, corner_c, END], 3, seed)
+    probe(key, EquilateralMetric {}, [0, corner_b, corner_c, END], 3, seed, stage)
 }
 
-pub fn square(_ bottom: u32, _ right: u32, _ top: u32, _ left: u32, _ seed: u32) -> AtlasProbe {
+pub fn square(_ bottom: u32, _ right: u32, _ top: u32, _ left: u32, _ seed: u32, _ stage: ProbeStage) -> AtlasProbe {
     let key = QuadAtlasKey { bottom: bottom, right: right, top: top, left: left }
     if !key.valid() { return empty() }
     let b = edge_resolution(bottom)
     let c = b + edge_resolution(right)
     let d = c + edge_resolution(top)
-    probe(key, SquareMetric {}, [0, b, c, d], 4, seed)
+    probe(key, SquareMetric {}, [0, b, c, d], 4, seed, stage)
 }

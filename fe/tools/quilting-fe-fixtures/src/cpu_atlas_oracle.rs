@@ -20,12 +20,12 @@ fn cpu_atlas_wasm_triangulates_mixed_lod8_domains() {
     let reset = instance.get_typed_func::<(), ()>(&mut store, "fe_cabi_reset").unwrap();
     let alloc = instance.get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc").unwrap();
     type Probe = (i32, i32, i32, i32, i32, i32, i32, i32, i64);
-    let triangle = instance.get_typed_func::<(i32, i32, i32, i32), Probe>(&mut store, "triangle").unwrap();
+    let triangle = instance.get_typed_func::<(i32, i32, i32, i32, i32), Probe>(&mut store, "triangle").unwrap();
     for key in [(0, 0, 0), (0, 0, 4), (0, 0, 8), (2, 2, 2), (4, 4, 4), (5, 5, 5), (8, 8, 8)] {
         store.set_fuel(100_000_000_000).unwrap();
         reset.call(&mut store, ()).unwrap();
         let start = std::time::Instant::now();
-        let r = triangle.call(&mut store, (key.0, key.1, key.2, 42)).unwrap();
+        let r = triangle.call(&mut store, (key.0, key.1, key.2, 42, 2)).unwrap();
         eprintln!("triangle arena end: {}", alloc.call(&mut store, (1, 1)).unwrap());
         eprintln!("CPU atlas triangle {key:?}: {r:?}, instrumented sampling+CDT+audit {:?}", start.elapsed());
         assert_eq!((r.0, r.1, r.4), (0, 0, 0), "sampling/CDT/audit must all succeed for {key:?}");
@@ -33,17 +33,37 @@ fn cpu_atlas_wasm_triangulates_mixed_lod8_domains() {
         assert_eq!(r.3, 2 * r.2 - boundary - 2);
         assert_eq!(r.8, 16384 * 16384);
     }
-    let square = instance.get_typed_func::<(i32, i32, i32, i32, i32), Probe>(&mut store, "square").unwrap();
+    let square = instance.get_typed_func::<(i32, i32, i32, i32, i32, i32), Probe>(&mut store, "square").unwrap();
     for key in [(0, 0, 0, 0), (0, 0, 0, 8), (2, 2, 2, 2), (4, 4, 4, 4), (5, 5, 5, 5), (8, 8, 8, 8)] {
         store.set_fuel(100_000_000_000).unwrap();
         reset.call(&mut store, ()).unwrap();
         let start = std::time::Instant::now();
-        let r = square.call(&mut store, (key.0, key.1, key.2, key.3, 42)).unwrap();
+        let r = square.call(&mut store, (key.0, key.1, key.2, key.3, 42, 2)).unwrap();
         eprintln!("square arena end: {}", alloc.call(&mut store, (1, 1)).unwrap());
         eprintln!("CPU atlas square {key:?}: {r:?}, instrumented sampling+CDT+audit {:?}", start.elapsed());
         assert_eq!((r.0, r.1, r.4), (0, 0, 0), "sampling/CDT/audit must all succeed for {key:?}");
         let boundary = (1 << key.0) + (1 << key.1) + (1 << key.2) + (1 << key.3);
         assert_eq!(r.3, 2 * r.2 - boundary - 2);
         assert_eq!(r.8, 2 * 16384 * 16384);
+    }
+    for stage in 0..2 {
+        for quad in [false, true] {
+            store.set_fuel(100_000_000_000).unwrap();
+            reset.call(&mut store, ()).unwrap();
+            let start = std::time::Instant::now();
+            let r = if quad {
+                square.call(&mut store, (8, 8, 8, 8, 42, stage)).unwrap()
+            } else {
+                triangle.call(&mut store, (8, 8, 8, 42, stage)).unwrap()
+            };
+            let elapsed = start.elapsed();
+            let end = alloc.call(&mut store, (1, 1)).unwrap();
+            eprintln!("phase probe quad={quad} stage={stage}: {r:?}, elapsed={elapsed:?}, arena_end={end}");
+            assert_eq!(r.0, 0);
+            assert_eq!(r.2, if quad { 39714 } else { 47366 });
+            assert_eq!(r.1, if stage == 0 { 5 } else { 0 });
+            assert_eq!(r.3, if stage == 0 { 0 } else if quad { 78402 } else { 93962 });
+            assert_eq!(r.8, 0, "phase probe must not pretend to have run its area audit");
+        }
     }
 }
