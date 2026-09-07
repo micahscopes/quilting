@@ -3,6 +3,29 @@
 September 7, 2026. This is a partial delivery checkpoint, not a claim that the
 controllable triangular and quad Patch views are complete.
 
+## Latest: arc viewer restored
+
+Shared mb2 `f98385077`, pinned to pushed Sonatina `568f5514`, now derives the
+vertex/instance index bounds from the compiler-owned direct draw declaration.
+The unchanged `segment_index + 1` compiles without discarding safety checks on
+unbounded inputs or introducing wrapping arithmetic. Six targeted Fe cases and
+seven raster regressions passed; the original and bounded-increment variants
+produce the same expected pixels on the Radeon GPU.
+
+The release `fe web dev` standalone is live at `http://127.0.0.1:38332/`, Chrome
+MCP page 67, manifest `assets/fe-render-a8cb5e504f803334.json`: three passes,
+26,250 Wasm bytes, 68,796 total WGSL bytes. Fresh compilation took 50.3 seconds;
+that is compiler time, not per-frame or curve-generation time.
+
+Browser captures show the default arc and all three handles. A down/move/up
+sequence through the shared runtime's transition entry selected middle handle
+1, moved it from `(0,1.1,0.5)` to approximately `(0.3151,0.9385,0.4110)`, left both
+endpoints fixed, changed the rendered curve and ended dragging. No browser
+warnings/errors were reported. This verifies Fe picking/transition/rendering;
+native pointer capture, touch behavior and all degenerate geometry cases remain
+separate gates. The earlier compiler failures below are retained as diagnosis
+history, not current blockers.
+
 ## Shared Fe behavior
 
 `quilting_demo_view::handles` now owns pure screen-space picking: a pixel radius,
