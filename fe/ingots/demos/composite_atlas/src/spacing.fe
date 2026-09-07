@@ -3,8 +3,8 @@
 use core::{BrowserBytes,BrowserPtr,alloc_browser_object}
 use core::marker::Copy
 use quilting_atlas::composition::BoundaryUse
-use quilting_patch::arc_length::{CumulativeLengthSamples,inverse_length}
-use quilting_patch::sampling_warp::{IntervalSamplingMap,TriangleEdgeMaps}
+use quilting_patch::arc_length::CumulativeLengthSamples
+use quilting_patch::sampling_warp::{InverseCumulativeMap,OrientedIntervalMap,TriangleEdgeMaps}
 use quilting_domain::Bary3F
 use std::webgpu::{StorageBuffer,BufferPublication,PublicationVersion}
 use ingot::model::{initial_controls,edge_cdf}
@@ -55,23 +55,16 @@ impl CumulativeLengthSamples for EdgeSamples {
     fn segments(self)->u32 {16}
     fn cumulative(self,_ index:u32)->f32 {self.maps.load(index:self.slot.wrapping_mul(17).wrapping_add(index))}
 }
-pub struct DirectedMap {pub samples:EdgeSamples,pub reversed:bool}
-impl Copy for DirectedMap {}
-impl IntervalSamplingMap for DirectedMap {
-    fn map(self,_ t:f32)->f32 {
-        if self.reversed {1.0-inverse_length(self.samples,1.0-t)}
-        else {inverse_length(self.samples,t)}
-    }
-}
+pub type DirectedMap=OrientedIntervalMap<InverseCumulativeMap<EdgeSamples>>
 fn edge_map(_ maps:Maps,_ from:u32,_ to:u32)->DirectedMap {
     let edge=BoundaryUse::between(from,to)
     let slot=match edge.square_slot() {Some(slot)=>slot,None=>0}
-    DirectedMap {samples:EdgeSamples {maps:maps,slot:slot},reversed:edge.reversed}
+    OrientedIntervalMap {law:InverseCumulativeMap {samples:EdgeSamples {maps:maps,slot:slot}},reversed:edge.reversed}
 }
 pub fn canonical_parameter(_ maps:Maps,_ from:u32,_ to:u32,_ t:f32,_ enabled:bool)->f32 {
     let m=edge_map(maps,from,to)
     let q=if m.reversed {1.0-t} else {t}
-    if enabled {inverse_length(m.samples,q)} else {q}
+    if enabled {m.canonical(t)} else {q}
 }
 pub fn interior(_ maps:Maps,_ d:ChildDraw,_ p:Bary3F)->Bary3F {
     TriangleEdgeMaps {a:edge_map(maps,d.corner_b,d.corner_c),

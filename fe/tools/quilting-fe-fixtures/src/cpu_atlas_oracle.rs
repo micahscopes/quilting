@@ -31,6 +31,10 @@ fn composition_wasm_density_and_coherent_selection() {
     }
     let (_,midpoint,_)=spacing.call(&mut store,8*9+8*81).unwrap();
     assert!(midpoint>0.69 && midpoint<0.72,"expected density-driven skew, got {midpoint}");
+    let boundary=instance.get_typed_func::<i32,i32>(&mut store,"warped_boundary_case").unwrap();
+    for code in 0..6561 {
+        assert_eq!(boundary.call(&mut store,code).unwrap(),1,"warped boundary {code}");
+    }
     for name in ["manual_values_survive_automatic","coherent_pending_selection"] {
         let check=instance.get_typed_func::<(),i32>(&mut store,name).unwrap();
         assert_eq!(check.call(&mut store,()).unwrap(),1,"{name}");

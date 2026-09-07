@@ -90,3 +90,29 @@ interior crop. Canvas inspection followed automatic startup, not activation.
 Current runtime asset: `fe-render-runtime-0ba5548668c8cb5d.js`.
 Logs: `/laboratory/quilting/scratch/declarative-surface-upgrade-tests-20260907.log`
 and `/laboratory/quilting/scratch/composite-declarative-live-web-dev-20260907.log`.
+# Shared orientation follow-up
+
+The composition now uses `quilting_patch::sampling_warp::OrientedIntervalMap`
+over `InverseCumulativeMap`, instead of a demo-local reversal implementation.
+The same generic law accepts owned Wasm CDFs and GPU storage views. Canonical
+placement reverses the input only; local interior extension also reverses the
+output. These are deliberately distinct operations.
+
+Release Wasm acceptance checks all 6,561 outer-LoD combinations, all ten
+undirected boundaries, and 257 dyadic samples per boundary (16,861,770 sample
+checks), with the geometric center fixed at (0.17, 0.83). Reversed canonical
+evaluations agree exactly; local reversal, endpoints and strict monotonicity
+pass. This tests the represented CDF, not exact continuous uniformity or all
+GPU/CPU positions. Evidence:
+`/laboratory/quilting/scratch/composite-oriented-boundary-tests-20260907.log`.
+
+The release development build compiled and served manifest
+`fe-render-e55e0259d2528602.json`. Chrome page 65 entered live mode with 4,296
+vertices and no console errors/warnings. Canvas inspection showed the complete
+default square without visible holes or red fold markers. Total emitted WGSL
+was 158,987 bytes (previous checkpoint 196,297); this is a size observation,
+not an execution-speed measurement or a complete causal bloat diagnosis.
+
+Still pending: typed boundary admission replacing the invalid-edge slot-zero
+fallback, nonidentity GPU/CPU position comparisons, and broader mesh-distortion
+checks. The generic extraction does not claim those are solved.

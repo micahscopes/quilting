@@ -19,6 +19,23 @@ pub trait TriangleParameterMap: Copy {
 pub trait IntervalSamplingMap: Copy {
     fn map(self, _ t: f32) -> f32
 }
+/// A directed use of a canonical boundary law. Shared physical placement must
+/// use `canonical`: reversing its output again can introduce rounding cracks.
+/// `map` instead returns the coordinate in this use's local orientation, for
+/// extending the law into a child's interior.
+pub struct OrientedIntervalMap<M: IntervalSamplingMap> { pub law: M, pub reversed: bool }
+impl<M: IntervalSamplingMap> Copy for OrientedIntervalMap<M> {}
+impl<M: IntervalSamplingMap> OrientedIntervalMap<M> {
+    pub fn canonical(self, _ t: f32) -> f32 {
+        self.law.map(if self.reversed {1.0-t} else {t})
+    }
+}
+impl<M: IntervalSamplingMap> IntervalSamplingMap for OrientedIntervalMap<M> {
+    fn map(self, _ t: f32) -> f32 {
+        let q=self.canonical(t)
+        if self.reversed {1.0-q} else {q}
+    }
+}
 /// Reuse the same sampled measure for edge resolution and sample placement.
 pub struct InverseCumulativeMap<M: CumulativeLengthSamples> { pub samples: M }
 impl<M: CumulativeLengthSamples> Copy for InverseCumulativeMap<M> {}

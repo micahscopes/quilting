@@ -3,7 +3,42 @@ use composite_atlas::model::{initial_controls,edge_demand,edge_lods}
 use quilting_atlas_wasm::{Claim,Completion,packed_triangle}
 use quilting_atlas_wasm::pool::PoolHandle
 use quilting_patch::arc_length::{CumulativeLengthSamples,inverse_length}
+use quilting_patch::sampling_warp::{InverseCumulativeMap,OrientedIntervalMap,IntervalSamplingMap}
+use quilting_atlas::composition::BoundaryUse
 extern {const fn __f32_from_i32(_:i32)->f32}
+/// Exercise the same orientation abstraction as GPU storage views, with a
+/// canonical CPU table. Dyadic inputs are exactly representable through LoD8.
+pub fn warped_boundary_case(_ code:u32)->bool {
+    let mut c=initial_controls()
+    c.bottom_lod=__f32_from_i32((code%9).downcast_unchecked())
+    c.right_lod=__f32_from_i32(((code/9)%9).downcast_unchecked())
+    c.top_lod=__f32_from_i32(((code/81)%9).downcast_unchecked())
+    c.left_lod=__f32_from_i32(((code/729)%9).downcast_unchecked())
+    c.center_x=0.17
+    c.center_y=0.83
+    for low in 0 .. 4 {
+        for high in (low+1) .. 5 {
+            let edge=BoundaryUse::between(low.downcast_truncate(),high.downcast_truncate())
+            if edge.square_slot().is_none() {return false}
+            let law=InverseCumulativeMap {samples:composite_atlas::model::edge_cdf(c,edge.low,edge.high)}
+            let forward=OrientedIntervalMap {law:law,reversed:false}
+            let reverse=OrientedIntervalMap {law:law,reversed:true}
+            if forward.map(0.0)!=0.0 || forward.map(1.0)!=1.0
+                || reverse.map(0.0)!=0.0 || reverse.map(1.0)!=1.0 {return false}
+            let mut previous=0.0
+            for i in 0 .. 257 {
+                let t=__f32_from_i32(i.downcast_unchecked())/256.0
+                let q=forward.canonical(t)
+                if q!=reverse.canonical(1.0-t) {return false}
+                if i>0 && !(q>previous) {return false}
+                previous=q
+                // Local-coordinate output is not the shared placement path.
+                if reverse.map(1.0-t)!=1.0-q {return false}
+            }
+        }
+    }
+    true
+}
 /// Inverse of the represented CDF, not an exact-integral accuracy claim.
 pub fn spacing_case(_ code:u32)->(f32,f32,bool) {
     let mut controls=initial_controls()
