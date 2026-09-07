@@ -1,0 +1,69 @@
+//! Backend agreement probe. Production sampling functions, no substitute WGSL.
+use core::option::Option
+use quilting_atlas::composition::{BoundaryUse,SquareBoundaryUse}
+use quilting_patch::arc_length::{CumulativeLengthSamples,SampledCumulativeLength}
+use quilting_patch::sampling_warp::{InverseCumulativeMap,OrientedIntervalMap,IntervalSamplingMap}
+use composite_atlas::model::{initial_controls,edge_cdf,corner}
+use composite_atlas::spacing::{Maps,EdgeSamples,canonical_parameter}
+use std::webgpu::{GpuProgram,WebGpuBackend,StorageBuffer,ComputeSurface,ComputeInvocation,Workgroup,FixedDispatch}
+
+extern {const fn __f32_from_i32(_:i32)->f32}
+fn number(_ n:u32)->f32 {__f32_from_i32(n.downcast_unchecked())}
+pub const SAMPLES:u32=257
+pub const QUERIES:u32=10*2*SAMPLES
+pub const WORDS:usize=QUERIES as usize*4
+
+fn boundary(_ slot:u32,_ reversed:bool)->BoundaryUse {
+    let low=if slot<3 {slot} else if slot==5 {1} else if slot<6 {0} else {slot-6}
+    let high=if slot<3 {slot+1} else if slot==3 || slot==5 {3} else if slot==4 {2} else {4}
+    if reversed {BoundaryUse::between(high,low)} else {BoundaryUse::between(low,high)}
+}
+fn table(_ code:u32,_ slot:u32)->SampledCumulativeLength<17> {
+    let mut c=initial_controls()
+    c.bottom_lod=number(code%9)
+    c.right_lod=number((code/9)%9)
+    c.top_lod=number((code/81)%9)
+    c.left_lod=number((code/729)%9)
+    c.center_x=0.17
+    c.center_y=0.83
+    let edge=boundary(slot,false)
+    edge_cdf(c,edge.low,edge.high)
+}
+pub fn table_word(_ code:u32,_ slot:u32,_ index:u32)->f32 {
+    table(code,slot).cumulative(index)
+}
+/// Physical positions use canonical endpoints in both backends.
+fn position(_ edge:BoundaryUse,_ t:f32)->(f32,f32) {
+    let a=corner(edge.low,0.17,0.83)
+    let b=corner(edge.high,0.17,0.83)
+    (a.x*(1.0-t)+b.x*t,a.y*(1.0-t)+b.y*t)
+}
+pub fn expected(_ code:u32,_ query:u32)->(f32,f32,f32,f32) {
+    let slot=query/(2*SAMPLES)
+    let reversed=(query/SAMPLES)%2!=0
+    let t=number(query%SAMPLES)/256.0
+    let map=OrientedIntervalMap {law:InverseCumulativeMap {samples:table(code,slot)},reversed:reversed}
+    let q=map.canonical(t)
+    let (x,y)=position(boundary(slot,reversed),q)
+    (q,map.map(t),x,y)
+}
+actor CompositionProbe uses (GpuProgram<WebGpuBackend>) {
+    maps:Maps,
+    captured:StorageBuffer<f32,WORDS>,
+    fn probe(self,i:ComputeInvocation) uses (ComputeSurface<Workgroup<64,1,1>,FixedDispatch<81,1,1>>) {
+        let query=i.global.x
+        if query>=QUERIES {return}
+        let slot=query/(2*SAMPLES)
+        let reversed=(query/SAMPLES)%2!=0
+        let t=number(query%SAMPLES)/256.0
+        let edge=boundary(slot,reversed)
+        let admitted=match SquareBoundaryUse::admit(edge) {Option::Some(v)=>v,Option::None=>return}
+        let q=canonical_parameter(self.maps,admitted,t,true)
+        let map=OrientedIntervalMap {law:InverseCumulativeMap {samples:EdgeSamples {maps:self.maps,slot:admitted.slot()}},reversed:admitted.reversed()}
+        let (x,y)=position(edge,q)
+        self.captured.store(index:query*4,value:q)
+        self.captured.store(index:query*4+1,value:map.map(t))
+        self.captured.store(index:query*4+2,value:x)
+        self.captured.store(index:query*4+3,value:y)
+    }
+}

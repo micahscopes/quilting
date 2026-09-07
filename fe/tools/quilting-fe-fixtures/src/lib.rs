@@ -37,6 +37,8 @@ mod cpu_atlas_benchmark;
 
 #[cfg(all(test, feature = "raster-oracle"))]
 mod raster_oracle;
+#[cfg(all(test, feature = "raster-oracle"))]
+mod composition_gpu_oracle;
 
 pub const MAGIC: [u8; 8] = *b"CQATLAS\0";
 pub const SCHEMA_VERSION: u32 = 1;

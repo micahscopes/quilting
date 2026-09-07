@@ -1,0 +1,10 @@
+[ingot]
+name = "composition_gpu_oracle"
+version = "0.1.0"
+
+[dependencies]
+core = true
+std = true
+composite_atlas = true
+quilting_atlas = true
+quilting_patch = true

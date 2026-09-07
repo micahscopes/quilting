@@ -330,7 +330,7 @@ fn capture(@builtin(global_invocation_id) invocation: vec3<u32>) {
     shader
 }
 
-fn device() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
+pub(super) fn device() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
     let allow_skip = std::env::var_os("QUILTING_FE_ALLOW_GPU_SKIP").is_some();
     let instance = wgpu::Instance::default();
     let adapter = match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -355,7 +355,7 @@ fn device() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
     Some((adapter, device, queue))
 }
 
-fn readback(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Vec<u8> {
+pub(super) fn readback(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Vec<u8> {
     let slice = buffer.slice(..);
     let (sender, receiver) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |result| {

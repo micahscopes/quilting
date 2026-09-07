@@ -90,6 +90,42 @@ interior crop. Canvas inspection followed automatic startup, not activation.
 Current runtime asset: `fe-render-runtime-0ba5548668c8cb5d.js`.
 Logs: `/laboratory/quilting/scratch/declarative-surface-upgrade-tests-20260907.log`
 and `/laboratory/quilting/scratch/composite-declarative-live-web-dev-20260907.log`.
+# Executed GPU/Wasm boundary agreement
+
+`composition_gpu_oracle` is an authored Fe validation ingot, not a handwritten
+WGSL substitute. Its compute actor calls the production `canonical_parameter`
+and `EdgeSamples` storage view; the Wasm reference uses the shared generic
+`OrientedIntervalMap` over owned CDFs. Both use canonical endpoint arithmetic
+for physical placement. The Rust fixture only compiles, allocates, dispatches,
+reads back and compares; it does not implement a delivered sampler.
+
+Release execution on AMD Radeon 780M (RADV PHOENIX) passed thirteen density
+fixtures, all ten boundaries, both directions and 257 sample coordinates:
+66,820 queries / 267,280 scalar comparisons. The center was (0.17, 0.83).
+Cases include uniform LoD0/8, 1/6/6/1, alternating 0/8, the single dense edge
+0/0/0/8, rotated gradients and asymmetric 3/7/2/6. Output is prefilled with
+NaNs, so missing writes fail the comparison.
+
+- Maximum GPU/Wasm absolute error: 0.000000059604645 (tolerance 0.000002).
+- Reversed GPU canonical parameters and physical positions: bit-identical.
+- Probe artifacts: 10,972 bytes Wasm; 36,723 bytes WGSL.
+- Test execution including Fe compilation: 11.35 seconds. The initial Rust
+  harness/dependency build took 5m43s; neither is an atlas-generation benchmark.
+- Evidence: `/laboratory/quilting/scratch/composition-gpu-agreement-20260907.log`.
+
+This establishes agreement for the tested production boundary functions in a
+compute probe, alongside the separately inspected raster demo. It is not yet
+a capture of every final raster vertex, an all-permutation mesh audit, an
+interior-distortion guarantee, or exact continuous-density integration. The
+remaining coarse interiors should not be attributed to a boundary-backend
+discrepancy without new evidence.
+
+Reproduction uses the fixture crate's `raster-oracle` feature and test
+`composition_gpu_boundary_positions_match_wasm`, in release mode. A real GPU
+is required; this gate does not accept a GPU-skip result. On this Nix machine,
+the successful run supplied the Vulkan loader through process-local
+`LD_LIBRARY_PATH` and the Radeon ICD through `VK_DRIVER_FILES`.
+
 # Checked boundary admission follow-up
 
 `SquareBoundaryUse` now admits a square boundary once in host planning and
