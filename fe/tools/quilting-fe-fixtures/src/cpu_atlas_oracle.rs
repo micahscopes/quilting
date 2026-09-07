@@ -17,6 +17,7 @@ fn cpu_atlas_wasm_triangulates_mixed_lod8_domains() {
     assert!(module.imports().next().is_none(), "no imported host geometry implementation");
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let memory = instance.get_memory(&mut store, "memory").unwrap();
     let reset = instance.get_typed_func::<(), ()>(&mut store, "fe_cabi_reset").unwrap();
     let alloc = instance.get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc").unwrap();
     type Probe = (i32, i32, i32, i32, i32, i32, i32, i32, i64);
@@ -27,6 +28,7 @@ fn cpu_atlas_wasm_triangulates_mixed_lod8_domains() {
         let start = std::time::Instant::now();
         let r = triangle.call(&mut store, (key.0, key.1, key.2, 42, 2)).unwrap();
         eprintln!("triangle arena end: {}", alloc.call(&mut store, (1, 1)).unwrap());
+        eprintln!("linear-memory high-water: {} bytes", memory.data_size(&store));
         eprintln!("CPU atlas triangle {key:?}: {r:?}, instrumented sampling+CDT+audit {:?}", start.elapsed());
         assert_eq!((r.0, r.1, r.4), (0, 0, 0), "sampling/CDT/audit must all succeed for {key:?}");
         let boundary = (1 << key.0) + (1 << key.1) + (1 << key.2);
@@ -40,6 +42,7 @@ fn cpu_atlas_wasm_triangulates_mixed_lod8_domains() {
         let start = std::time::Instant::now();
         let r = square.call(&mut store, (key.0, key.1, key.2, key.3, 42, 2)).unwrap();
         eprintln!("square arena end: {}", alloc.call(&mut store, (1, 1)).unwrap());
+        eprintln!("linear-memory high-water: {} bytes", memory.data_size(&store));
         eprintln!("CPU atlas square {key:?}: {r:?}, instrumented sampling+CDT+audit {:?}", start.elapsed());
         assert_eq!((r.0, r.1, r.4), (0, 0, 0), "sampling/CDT/audit must all succeed for {key:?}");
         let boundary = (1 << key.0) + (1 << key.1) + (1 << key.2) + (1 << key.3);
@@ -66,4 +69,8 @@ fn cpu_atlas_wasm_triangulates_mixed_lod8_domains() {
             assert_eq!(r.8, 0, "phase probe must not pretend to have run its area audit");
         }
     }
+    // Observed full-density peak is ~36MiB. Keep a bounded per-worker guard,
+    // separate from the much smaller live arena after a completed scalar probe.
+    assert!(memory.data_size(&store) <= 64 * 1024 * 1024,
+        "single-worker probe exceeded 64MiB linear memory: {}", memory.data_size(&store));
 }
