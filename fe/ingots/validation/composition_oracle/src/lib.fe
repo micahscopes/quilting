@@ -8,6 +8,10 @@ use quilting_patch::arc_length::{CumulativeLengthSamples,inverse_length}
 use quilting_patch::sampling_warp::{InverseCumulativeMap,OrientedIntervalMap,IntervalSamplingMap}
 use quilting_atlas::composition::{BoundaryUse,ChildTriangle,SquareEdgeLods}
 extern {const fn __f32_from_i32(_:i32)->f32}
+pub fn quality_laws()->bool {ingot::quality::laws()}
+pub fn quality_case(_ case:u32,_ compensation:u32)->(u32,u32,u32,u32,f32,f32,f32,f32,f32,f32) {
+    ingot::quality::audit(case,compensation)
+}
 pub fn edge_skew_preserves_mass_and_shared_positions()->bool {
     let mut c=initial_controls()
     c.bottom_lod=1.0

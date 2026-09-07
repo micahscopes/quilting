@@ -155,6 +155,22 @@ pub fn recipe(_ value:f32) -> SquareSplit {
 }
 pub struct Point {pub x:f32,pub y:f32}
 impl Copy for Point {}
+/// The reference square's interpolated directional segment densities.
+pub struct DirectionalDensity {pub bottom:f32,pub right:f32,pub top:f32,pub left:f32}
+impl Copy for DirectionalDensity {}
+impl DirectionalDensity {
+    pub fn at(self,_ p:Point)->Point {
+        Point {x:(1.0-p.y)*self.bottom+p.y*self.top,y:(1.0-p.x)*self.left+p.x*self.right}
+    }
+    pub fn area_density(self,_ p:Point)->f32 {
+        let d=self.at(p)
+        d.x*d.y
+    }
+}
+pub fn density_field(_ c:Controls)->DirectionalDensity {
+    DirectionalDensity {bottom:lod_as_f32(1<<level(c.bottom_lod)),right:lod_as_f32(1<<level(c.right_lod)),
+        top:lod_as_f32(1<<level(c.top_lod)),left:lod_as_f32(1<<level(c.left_lod))}
+}
 pub fn corner(_ id:u32,_ x:f32,_ y:f32) -> Point {
     if id==4 {Point{x:x,y:y}}
     else {Point{x:if id==1 || id==2 {1.0} else {0.0},y:if id==2 || id==3 {1.0} else {0.0}}}
@@ -182,17 +198,15 @@ pub fn edge_measure(_ controls:Controls,_ from:u32,_ to:u32) -> SampledCumulativ
     let b=corner(to,controls.center_x,controls.center_y)
     let dx=b.x-a.x
     let dy=b.y-a.y
-    let bottom=lod_as_f32(1<<level(controls.bottom_lod))
-    let top=lod_as_f32(1<<level(controls.top_lod))
-    let left=lod_as_f32(1<<level(controls.left_lod))
-    let right=lod_as_f32(1<<level(controls.right_lod))
+    let field=density_field(controls)
     let mut values=[0.0;17]
     for i in 0 .. 16 {
         let t=(lod_as_f32(i.downcast_truncate())+0.5)/16.0
         let x=a.x+dx*t
         let y=a.y+dy*t
-        let vx=((1.0-y)*bottom+y*top)*dx
-        let vy=((1.0-x)*left+x*right)*dy
+        let density=field.at(Point {x:x,y:y})
+        let vx=density.x*dx
+        let vy=density.y*dy
         values[i+1]=values[i]+sqrt(vx*vx+vy*vy)/16.0
     }
     SampledCumulativeLength {values:values}

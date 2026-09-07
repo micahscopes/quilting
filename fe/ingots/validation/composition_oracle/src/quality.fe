@@ -1,0 +1,127 @@
+//! Real packed primaries, production placement, quantitative mesh observations.
+use core::BrowserPtr
+use composite_atlas::{model,residency,placement}
+use quilting_atlas::edge_permutation_index
+use quilting_atlas_wasm::packed_triangle
+use quilting_patch::sampling_warp::{InverseCumulativeMap,OrientedIntervalMap}
+use quilting_patch::triangle_quality::measure
+use quilting_domain::{bary3f,vec2f}
+use quilting_qb::{remap_barycentric,permutation_parity}
+use fmath::sqrt
+extern {const fn __f32_from_i32(_:i32)->f32}
+fn number(_ v:u32)->f32 {__f32_from_i32(v.downcast_unchecked())}
+fn word(_ base:BrowserPtr<u32>,_ index:u32)->u32 {
+    let p:BrowserPtr<u32>=BrowserPtr::from_u32(base.address()+index*4)
+    p.read()
+}
+pub fn laws()->bool {
+    let a=vec2f(0.0,0.0)
+    let b=vec2f(1.0,0.0)
+    let c=vec2f(0.5,0.8660254)
+    let q=measure(a,b,c)
+    let reversed=measure(a,c,b)
+    let scaled=measure(a,vec2f(3.0,0.0),vec2f(1.5,2.5980762))
+    q.mean_ratio>0.99999 && q.mean_ratio<1.00001 && q.signed_double_area>0.0
+        && reversed.signed_double_area<0.0 && reversed.mean_ratio==q.mean_ratio
+        && scaled.mean_ratio>0.99999 && scaled.mean_ratio<1.00001
+        && measure(a,a,a).mean_ratio==0.0 && measure(a,b,vec2f(2.0,0.0)).mean_ratio==0.0
+}
+/// status, triangles, folds/degeneracies, shape<0.1, min/mean shape, signed/absolute area.
+pub fn audit(_ case:u32,_ compensation:u32)->(u32,u32,u32,u32,f32,f32,f32,f32,f32,f32) {
+    let mut c=model::initial_controls()
+    c.compensate_density=number(compensation)
+    if case==1 || case==4 {
+        c.bottom_lod=1.0
+        c.right_lod=6.0
+        c.top_lod=6.0
+        c.left_lod=1.0
+    }
+    if case==2 {c.spoke_0_skew=4.0}
+    if case==3 {
+        c.interior_concentration=2.0
+        c.interior_twist=0.4
+        c.focus_a=2.5
+    }
+    if case==4 {c.center_x=0.17
+        c.center_y=0.83}
+    if case==5 {c.split=0.0}
+    let mut scene=residency::empty_scene()
+    scene.active_center_x=c.center_x
+    scene.active_center_y=c.center_y
+    scene.active_compensation=c.compensate_density
+    scene.interior=model::interior_policy(c)
+    let recipe=model::recipe(c.split)
+    let edges=model::edge_lods(c)
+    let field=model::density_field(c)
+    let mut count:u32=0
+    let mut folds:u32=0
+    let mut poor:u32=0
+    let mut minimum:f32=1.0
+    let mut sum:f32=0.0
+    let mut signed_area:f32=0.0
+    let mut absolute_area:f32=0.0
+    let mut metric_shape:f32=0.0
+    let mut mass_sum:f32=0.0
+    let mut mass_squared:f32=0.0
+    for child in 0 .. (recipe.child_count() as usize) {
+        let request=recipe.child(child.downcast_truncate()).unwrap().resolve(edges).unwrap()
+        let k=request.primary.key
+        let tile=packed_triangle(k.a,k.b,k.c,42)
+        if tile.status!=0 {return (tile.status,0,0,0,0.0,0.0,0.0,0.0,0.0,0.0)}
+        let mut d=residency::empty_child()
+        d.corner_a=request.triangle.a
+        d.corner_b=request.triangle.b
+        d.corner_c=request.triangle.c
+        d.boundaries=request.boundaries
+        d.permutation=edge_permutation_index(request.primary.permutation)
+        let ab=quilting_atlas::composition::BoundaryUse::between(d.corner_a,d.corner_b)
+        let bc=quilting_atlas::composition::BoundaryUse::between(d.corner_b,d.corner_c)
+        let ca=quilting_atlas::composition::BoundaryUse::between(d.corner_c,d.corner_a)
+        let lab=OrientedIntervalMap {law:InverseCumulativeMap {samples:model::edge_cdf(c,ab.low,ab.high)},reversed:ab.reversed}
+        let lbc=OrientedIntervalMap {law:InverseCumulativeMap {samples:model::edge_cdf(c,bc.low,bc.high)},reversed:bc.reversed}
+        let lca=OrientedIntervalMap {law:InverseCumulativeMap {samples:model::edge_cdf(c,ca.low,ca.high)},reversed:ca.reversed}
+        for triangle in 0 .. (tile.triangles as usize) {
+            let mut points=[vec2f(0.0,0.0);3]
+            for lane in 0 .. 3 {
+                let local=if lane==0 || permutation_parity(d.permutation)>0.0 {lane} else {3-lane}
+                let index:u32=(triangle*3+local).downcast_truncate()
+                let id=if tile.points<=65536 {(word(tile.words.ptr,tile.points+index/2)>>((index%2)*16))&65535}
+                    else {word(tile.words.ptr,tile.points+index)}
+                let packed=word(tile.words.ptr,id)
+                let u=number(packed&65535)/16384.0
+                let v=number(packed>>16)/16384.0
+                let p=remap_barycentric(d.permutation,bary3f(1.0-u-v,u,v))
+                let placed=placement::place(scene,d,p,lab,lbc,lca)
+                points[lane]=vec2f(placed.x,placed.y)
+            }
+            let q=measure(points[0],points[1],points[2])
+            let density=field.at(model::Point {
+                x:(points[0].x+points[1].x+points[2].x)/3.0,
+                y:(points[0].y+points[1].y+points[2].y)/3.0})
+            let metric=measure(vec2f(0.0,0.0),
+                vec2f((points[1].x-points[0].x)*density.x,(points[1].y-points[0].y)*density.y),
+                vec2f((points[2].x-points[0].x)*density.x,(points[2].y-points[0].y)*density.y))
+            // Three edge-midpoint quadrature is exact for this quadratic
+            // density product over each straight triangle, up to f32 rounding.
+            let area=if q.signed_double_area<0.0 {-q.signed_double_area*0.5} else {q.signed_double_area*0.5}
+            let mass=area*(
+                field.area_density(model::Point {x:(points[0].x+points[1].x)*0.5,y:(points[0].y+points[1].y)*0.5})+
+                field.area_density(model::Point {x:(points[1].x+points[2].x)*0.5,y:(points[1].y+points[2].y)*0.5})+
+                field.area_density(model::Point {x:(points[2].x+points[0].x)*0.5,y:(points[2].y+points[0].y)*0.5}))/3.0
+            metric_shape=metric_shape+metric.mean_ratio
+            mass_sum=mass_sum+mass
+            mass_squared=mass_squared+mass*mass
+            count+=1
+            if q.signed_double_area<=0.0 {folds+=1}
+            if q.mean_ratio<0.1 {poor+=1}
+            if q.mean_ratio<minimum {minimum=q.mean_ratio}
+            sum=sum+q.mean_ratio
+            signed_area=signed_area+q.signed_double_area*0.5
+            absolute_area=absolute_area+if q.signed_double_area<0.0 {-q.signed_double_area*0.5} else {q.signed_double_area*0.5}
+        }
+    }
+    let mean_mass=mass_sum/number(count)
+    let variance=mass_squared/number(count)-mean_mass*mean_mass
+    (0,count,folds,poor,minimum,sum/number(count),signed_area,absolute_area,
+        metric_shape/number(count),if variance>0.0 {sqrt(variance)/mean_mass} else {0.0})
+}

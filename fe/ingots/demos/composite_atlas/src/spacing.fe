@@ -4,7 +4,7 @@ use core::{BrowserBytes,BrowserPtr,alloc_browser_object}
 use core::marker::Copy
 use quilting_atlas::composition::SquareBoundaryUse
 use quilting_patch::arc_length::CumulativeLengthSamples
-use quilting_patch::sampling_warp::{InverseCumulativeMap,OrientedIntervalMap,TriangleEdgeMaps}
+use quilting_patch::sampling_warp::{InverseCumulativeMap,OrientedIntervalMap}
 use quilting_domain::Bary3F
 use std::webgpu::{StorageBuffer,BufferPublication,PublicationVersion}
 use ingot::model::{initial_controls,edge_measure,redistribute_edge}
@@ -64,7 +64,6 @@ pub fn canonical_parameter(_ maps:Maps,_ edge:SquareBoundaryUse,_ t:f32,_ enable
     let q=if m.reversed {1.0-t} else {t}
     if enabled {m.canonical(t)} else {q}
 }
-pub fn interior(_ maps:Maps,_ d:ChildDraw,_ p:Bary3F)->Bary3F {
-    TriangleEdgeMaps {a:edge_map(maps,d.boundaries.bc),
-        b:edge_map(maps,d.boundaries.ca),c:edge_map(maps,d.boundaries.ab)}.map(p)
+pub fn place(_ maps:Maps,_ scene:Scene,_ d:ChildDraw,_ p:Bary3F)->ingot::model::Point {
+    ingot::placement::place(scene,d,p,edge_map(maps,d.boundaries.ab),edge_map(maps,d.boundaries.bc),edge_map(maps,d.boundaries.ca))
 }

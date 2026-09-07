@@ -50,7 +50,12 @@ method, but must not be mislabeled as a directly generated quad atlas.
   Release Wasm checks and200,460 actual GPU boundary queries passed; reversed
   GPU positions remained bit-identical. All native inputs were exercised in
   Chrome65. Details and limitations: `docs/composition-edge-skew.md`.
-- Still pending: measured interior distortion and edit/
+- Actual-mesh quality is now measured using shared production placement: see
+  `docs/composition-quality-baseline-20260907.md`. The two uneven-density cases
+  get worse under the current extension in both reference-metric shape and
+  mass variation. Strong optional warps produce12 flipped triangles. This is
+  a concrete failing quality baseline, not a completed uniformization milestone.
+- Still pending: improved interior distribution and edit/
   upload costs, acknowledged suffix uploads, avoiding redundant staging, and
   the controllable patch/gallery milestones. The current fan visibly contains
   abrupt density transitions and skinny triangles; boundary agreement alone

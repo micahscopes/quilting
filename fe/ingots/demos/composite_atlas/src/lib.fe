@@ -4,7 +4,6 @@ use core::marker::Copy
 use core::actor::{ActorInstance, InitialState, ResidentTransition, ScopedTaskFamily}
 use fmath::{min,max,sqrt,abs,smoothstep}
 use quilting_atlas_wasm::packed_triangle
-use quilting_atlas::composition::{BoundaryUse,SquareBoundaryUse}
 use quilting_atlas_wasm::pool::{PoolHandle,RetainedCursor,RetainedUpdate,RETAINED_CAPACITY}
 use quilting_atlas_workers::{Request,Response,CompletionMessage,supervise,run}
 use quilting_domain::bary3f
@@ -16,9 +15,9 @@ use std::webgpu::{GpuProgram,WebGpuBackend,StorageBuffer,DrawIndirectBuffer,
     IndirectTriangleList,ComputeSurface,Workgroup,FixedDispatch,
     BufferPublication,PublicationVersion,PublishBuffer,
     SurfaceTransition,SurfaceScheduling,LatestPerFrame,SurfaceQuality,ResponsiveBacking}
-use ingot::model::{Controls,Params,Point,params,corner}
+use ingot::model::{Controls,Params,Point,params}
 use ingot::residency::{State,Scene,ChildDraw,WORKERS,CAPACITY,refresh,refresh_completion,child_at}
-use ingot::spacing::{Maps,PublishSpacing,canonical_parameter,interior}
+use ingot::spacing::{Maps,PublishSpacing,place}
 
 type Atlas=StorageBuffer<u32,RETAINED_CAPACITY>
 struct Draw {}
@@ -52,13 +51,6 @@ impl PublishAtlas {
         }
     }
 }
-fn shared_edge(_ maps:Maps,_ admitted:SquareBoundaryUse,_ from:u32,_ to:u32,_ parameter:f32,_ scene:Scene)->Point {
-    let edge=BoundaryUse::between(from,to)
-    let t=canonical_parameter(maps,admitted,parameter,scene.active_compensation>0.5)
-    let a=corner(edge.low,scene.active_center_x,scene.active_center_y)
-    let b=corner(edge.high,scene.active_center_x,scene.active_center_y)
-    Point {x:a.x*(1.0-t)+b.x*t,y:a.y*(1.0-t)+b.y*t}
-}
 fn point(_ atlas:Atlas,_ maps:Maps,_ scene:Scene,_ d:ChildDraw,_ index:u32,_ width:f32,_ height:f32)->Point {
     let indices=d.offset.wrapping_add(d.points)
     let id=if d.points<=65536 {
@@ -68,17 +60,7 @@ fn point(_ atlas:Atlas,_ maps:Maps,_ scene:Scene,_ d:ChildDraw,_ index:u32,_ wid
     let u=number(packed&65535)/16384.0
     let v=number(packed>>16)/16384.0
     let p=remap_barycentric(d.permutation,bary3f(1.0-u-v,u,v))
-    let placed=if p.b==0.0 {shared_edge(maps,d.boundaries.ca,d.corner_c,d.corner_a,p.a,scene)}
-        else if p.c==0.0 {shared_edge(maps,d.boundaries.ab,d.corner_a,d.corner_b,p.b,scene)}
-        else if p.a==0.0 {shared_edge(maps,d.boundaries.bc,d.corner_b,d.corner_c,p.c,scene)}
-        else {
-            let spaced=if scene.active_compensation>0.5 {interior(maps,d,p)} else {p}
-            let warped=scene.interior.apply(spaced)
-            let a=corner(d.corner_a,scene.active_center_x,scene.active_center_y)
-            let b=corner(d.corner_b,scene.active_center_x,scene.active_center_y)
-            let c=corner(d.corner_c,scene.active_center_x,scene.active_center_y)
-            Point {x:a.x*warped.a+b.x*warped.b+c.x*warped.c,y:a.y*warped.a+b.y*warped.b+c.y*warped.c}
-        }
+    let placed=place(maps,scene,d,p)
     let scale=1.7*min(width,height)
     Point {x:(placed.x-0.5)*scale/max(width,1.0),y:(placed.y-0.5)*scale/max(height,1.0)}
 }

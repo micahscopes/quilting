@@ -4,6 +4,33 @@ use fe_codegen::OptLevel;
 use std::path::Path;
 
 #[test]
+fn composition_wasm_actual_mesh_quality() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    for case in 0..6 {
+        for compensation in 0..2 {
+            let mut store=wasmtime::Store::new(&engine,());
+            let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+            let laws=instance.get_typed_func::<(),i32>(&mut store,"quality_laws").unwrap();
+            assert_eq!(laws.call(&mut store,()).unwrap(),1);
+            let audit=instance.get_typed_func::<(i32,i32),(i32,i32,i32,i32,f32,f32,f32,f32,f32,f32)>(&mut store,"quality_case").unwrap();
+            let (status,triangles,folds,poor,minimum,mean,signed,absolute,metric_mean,mass_cv)=audit.call(&mut store,(case,compensation)).unwrap();
+            assert_eq!(status,0,"case {case}");
+            assert!(triangles>0 && folds>=0 && poor>=0);
+            assert!([minimum,mean,signed,absolute,metric_mean,mass_cv].into_iter().all(f32::is_finite));
+            assert!((0.0..=1.00001).contains(&metric_mean) && mass_cv>=0.0);
+            assert!((0.0..=1.00001).contains(&minimum) && (minimum..=1.00001).contains(&mean));
+            assert!((signed-1.0).abs()<0.001,"square signed area {signed}");
+            assert!(absolute>=signed-0.00001);
+            if case==0 {assert_eq!(folds,0);}
+            eprintln!("QUALITY case={case} compensation={compensation} triangles={triangles} folds={folds} shape_lt_0_1={poor} min={minimum:.7} mean={mean:.7} signed_area={signed:.7} absolute_area={absolute:.7} metric_mean={metric_mean:.7} mass_cv={mass_cv:.7}");
+        }
+    }
+}
+
+#[test]
 fn composition_wasm_density_and_coherent_selection() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
     let wasm=compile_ingot_at_level(&path,OptLevel::O2);
