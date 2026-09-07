@@ -2,8 +2,13 @@
 use quilting_domain::Bary3F
 use quilting_atlas::composition::BoundaryUse
 use quilting_patch::sampling_warp::{IntervalSamplingMap,OrientedIntervalMap,TriangleEdgeMaps,ProjectiveIntervalBias}
+use quilting_patch::depth_field::segment_parameter
 use ingot::model::{Point,corner}
 use ingot::residency::{Scene,ChildDraw}
+
+/// Bisection budget for on-demand interior placement. Eight levels agree with
+/// the published boundary tables to f32 rounding; six leave 0.000765.
+const PLACEMENT_LEVELS:u32=8
 
 fn boundary<M:IntervalSamplingMap>(_ scene:Scene,_ from:u32,_ to:u32,_ t:f32,_ map:OrientedIntervalMap<M>)->Point {
     let edge=BoundaryUse::between(from,to)
@@ -27,6 +32,21 @@ fn assemble<M:IntervalSamplingMap,L:IntervalSamplingMap>(_ scene:Scene,_ d:Child
     if p.b==0.0 {boundary(scene,d.corner_c,d.corner_a,p.a,ca)}
     else if p.c==0.0 {boundary(scene,d.corner_a,d.corner_b,p.b,ab)}
     else if p.a==0.0 {boundary(scene,d.corner_b,d.corner_c,p.c,bc)}
+    else if scene.density_placement {
+        // Place against the patch's own density over the WHOLE domain rather
+        // than by carrying three edge laws inward. Being a function of the
+        // square and not of the child, the two sides of an internal seam
+        // cannot disagree just inside a seam they agree on exactly. On each
+        // side the slice law reduces to that side's published boundary table,
+        // so this meets the boundary it must respect.
+        let a=corner(d.corner_a,scene.active_center_x,scene.active_center_y)
+        let b=corner(d.corner_b,scene.active_center_x,scene.active_center_y)
+        let c=corner(d.corner_c,scene.active_center_x,scene.active_center_y)
+        let raw=Point {x:a.x*p.a+b.x*p.b+c.x*p.c,y:a.y*p.a+b.y*p.b+c.y*p.c}
+        let x=segment_parameter(scene.domain_norm,0.0,raw.y,1.0,raw.y,raw.x,PLACEMENT_LEVELS)
+        let y=segment_parameter(scene.domain_norm,x,0.0,x,1.0,raw.y,PLACEMENT_LEVELS)
+        Point {x:x,y:y}
+    }
     else {
         let spaced=if scene.active_compensation>0.5 {TriangleEdgeMaps {a:bc,b:ca,c:ab}.map_with_locality(p,locality)} else {p}
         let warped=scene.interior.apply(spaced)

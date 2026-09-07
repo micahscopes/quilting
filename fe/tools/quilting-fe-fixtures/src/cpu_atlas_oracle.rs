@@ -557,6 +557,35 @@ fn the_interior_segment_law_matches_the_published_boundary_table() {
     }
 }
 
+/// The goal's headline number: how even are surface triangles, measured on the
+/// surface, with points left where the reference grid puts them versus placed
+/// against the patch's own density.
+#[test]
+fn density_placement_evens_surface_triangle_area() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let spread=instance.get_typed_func::<(i32,i32,f32,i32,i32),f32>(&mut store,"domain_area_spread").unwrap();
+    let mut worst_ratio_after=0.0_f64;
+    for (kind,name) in [(0,"triangle"),(1,"quad")] {
+        for bulge in [0.6_f32,2.4,4.8] {
+            let mut line=format!("AREA_SPREAD {name} bulge={bulge}:");
+            for (density,label) in [(0,"reference"),(1,"density")] {
+                let cv=f64::from(spread.call(&mut store,(kind,5,bulge,density,0)).unwrap());
+                let ratio=f64::from(spread.call(&mut store,(kind,5,bulge,density,1)).unwrap());
+                assert!(cv>=0.0 && ratio>0.0,"{name} {label} did not evaluate");
+                line.push_str(&format!("  {label} cv={cv:.4} maxmin={ratio:.3}"));
+                if density==1 {worst_ratio_after=worst_ratio_after.max(ratio);}
+            }
+            eprintln!("{line}");
+        }
+    }
+    eprintln!("AREA_SPREAD worst max-over-min after placement={worst_ratio_after:.4}");
+}
+
 #[test]
 fn composition_wasm_boundary_locality_sweep() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");

@@ -19,6 +19,9 @@ pub struct Scene {
     pub vertices:u32,pub active_center_x:f32,pub active_center_y:f32,
     pub active_bottom:f32,pub active_right:f32,pub active_top:f32,pub active_left:f32,
     pub active_compensation:f32,pub active_automatic_density:f32,pub spacing_revision:u32,
+    /// Interior placement reads this instead of composing edge laws inward.
+    pub domain_norm:quilting_patch::depth_field::QuadDomainNorm,
+    pub density_placement:bool,
     pub active_skews:EdgeSkews,
     pub active_boundary_reach:f32,
     pub interior:InteriorPolicy,
@@ -40,7 +43,10 @@ pub fn empty_scene() -> Scene {
         surface:ingot::surface::empty(),
         vertices:0,active_center_x:0.5,active_center_y:0.5,
         active_bottom:4.0,active_right:4.0,active_top:4.0,active_left:4.0,
-        active_compensation:1.0,active_automatic_density:1.0,spacing_revision:0,active_boundary_reach:1.0,active_skews:edge_skews(initial_controls()),interior:interior_policy(initial_controls()),resolution:EdgeResolution::empty()}
+        active_compensation:1.0,active_automatic_density:1.0,spacing_revision:0,
+        domain_norm:quilting_patch::depth_field::QuadDomainNorm {
+            gram:ingot::surface::domain_gram(ingot::surface::empty())},
+        density_placement:false,active_boundary_reach:1.0,active_skews:edge_skews(initial_controls()),interior:interior_policy(initial_controls()),resolution:EdgeResolution::empty()}
 }
 fn tile_key(_ a:u32,_ b:u32,_ c:u32) -> TileKey {TileKey {square:false,a:a,b:b,c:c,d:0}}
 fn primary_keys() -> [TileKey;CANONICAL_KEY_COUNT] {
@@ -93,6 +99,9 @@ pub fn refresh(_ previous:State) -> State {
     scene.active_left=next.controls.left_lod
     scene.active_compensation=next.controls.compensate_density
     scene.active_automatic_density=next.controls.automatic_density
+    scene.domain_norm=quilting_patch::depth_field::QuadDomainNorm {
+        gram:ingot::surface::domain_gram(scene.surface)}
+    scene.density_placement=next.controls.automatic_density>0.5 && scene.surface.patch_valid>0.5
     scene.active_skews=edge_skews(next.controls)
     scene.active_boundary_reach=next.controls.boundary_reach
     scene.interior=interior_policy(next.controls)

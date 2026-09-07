@@ -43,7 +43,7 @@ before and after:
 
 | Check | Now | Target |
 |---|---|---|
-| Interior triangle area, max over min | unmeasured | below 2 at working curvatures |
+| Interior triangle area, max over min | see below | below 2 at working curvatures |
 | Density step across an internal seam | visible | not measurable |
 | Outer-side chord deviation | 0.000019 | unchanged |
 | Interior segment chord deviation | 0.00178 | unchanged |
@@ -52,12 +52,35 @@ before and after:
 Plus: the browser shows it on the real served build, and every audit that
 claims a surface property calls the surface evaluator.
 
+## Measured so far
+
+Surface triangle area over the whole domain, comparing points left where the
+reference grid puts them against points placed by the density law. The
+reference column is a floor rather than the shipped path, which carries
+measured edge laws inward and so sits between the two columns.
+
+| Patch and curvature | Reference max/min | Density max/min | Reference CV | Density CV |
+|---|---|---|---|---|
+| triangle, 0.6 | 3.27 | 1.98 | 0.242 | 0.116 |
+| triangle, 2.4 | 64.2 | 8.12 | 0.822 | 0.338 |
+| triangle, 4.8 | 601 | 27.7 | 1.514 | 0.529 |
+| quad, 0.6 | 2.59 | 1.55 | 0.188 | 0.088 |
+| quad, 2.4 | 53.3 | 11.0 | 0.959 | 0.449 |
+| quad, 4.8 | 553 | 52.0 | 2.018 | 0.744 |
+
+So the separable slice form meets the target at the default authoring and does
+not meet it at aggressive curvature, where it still improves the ratio eight to
+twenty times. That settles the design question in the order below: slices are
+worth shipping and are not sufficient, so the Poisson-solve map is required
+rather than optional if the target is to hold at all curvatures.
+
 ## Order
 
-1. Publish the interior placement table and switch `placement.fe` to it. This
-   is the bulk of the work and the only item with a real design choice: whether
-   three-direction slice composition suffices, or whether it needs a small
-   Poisson solve. Both publish through the same plumbing, so start with slices.
+1. Interior placement from the density rather than from carried edge laws.
+   Slice form done and measured above. Remaining: the Poisson-solve map for
+   the residual at aggressive curvature, which the numbers now show is needed
+   rather than optional, and a decision on whether to tabulate the placement or
+   keep evaluating it on demand.
 2. Add the three surface-space audits and retire the reference-domain heuristic.
 3. Carry the boundary flag from assembly into the warp rather than re-deriving
    barycentrics and testing exact zeros, which drifts near 3e-8.

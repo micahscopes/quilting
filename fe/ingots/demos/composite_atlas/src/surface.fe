@@ -8,6 +8,7 @@ use quilting_demo_view::handles::{HandleQuery,HandlePick}
 use quilting_patch::{ProjectiveControl,ProjectiveAlgebra,ProjectiveInterpolation,projective_control,
     LinearBarycentric,BilinearBernstein,triangular_projective_controls,bilinear_projective_controls}
 use quilting_patch::pole_authoring::controls_from_edge
+use quilting_patch::LinearElement
 use quilting_clifford_bezier::{Clifford3Policy,CliffordEven3F,even}
 use quilting_clifford_bezier::euclidean::{EuclideanArcMeasure,EuclideanCliffordAlgebra}
 use std::web::view::SurfaceEvent
@@ -124,6 +125,19 @@ pub fn same_weights(_ a:Net,_ b:Net)->bool {
     a.kind==b.kind && a.patch_valid==b.patch_valid
         && same_weight(a.a.weight,b.a.weight) && same_weight(a.b.weight,b.b.weight)
         && same_weight(a.c.weight,b.c.weight) && same_weight(a.d.weight,b.d.weight)
+}
+/// One denominator Gram over the composite square domain, for either patch.
+/// A triangular blend read over that square is affine in the domain, and the
+/// bilinear form represents an affine map exactly once its fourth control is
+/// chosen accordingly, so both kinds share a single evaluator downstream.
+pub fn domain_gram(_ net:Net)->quilting_patch::depth_field::QuadGram {
+    use quilting_patch::depth_field::quad_gram
+    use quilting_clifford_bezier::euclidean::EuclideanWeightNorm
+    let (p00,p10,p01,p11)=if net.kind<1.5 {
+        (net.a.weight,net.b.weight,net.d.weight,
+            net.b.weight.plus(net.d.weight).plus(net.a.weight.scaled(-1.0)))
+    } else {(net.a.weight,net.b.weight,net.d.weight,net.c.weight)}
+    quad_gram(EuclideanWeightNorm {},p00,p10,p01,p11)
 }
 pub fn camera(_ c:Controls)->CameraFrame {
     orbit_camera(OrbitCamera {target:vec3f(0.0,0.0,0.0),yaw:c.orbit_yaw,pitch:c.orbit_pitch,

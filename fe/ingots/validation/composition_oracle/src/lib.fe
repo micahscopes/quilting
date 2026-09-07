@@ -515,6 +515,88 @@ pub fn interior_segment_parameter(_ x0:f32,_ y0:f32,_ x1:f32,_ y1:f32,
     segment_parameter(authored_quad_norm(bulge),x0,y0,x1,y1,fraction,levels)
 }
 
+/// Surface triangle area evenness over the whole domain, comparing placement
+/// laws directly. `density` selects between leaving points where the reference
+/// grid puts them, which is what interior placement effectively does today away
+/// from the rim, and placing them against the patch's own density. `which`
+/// selects the coefficient of variation or the max-over-min ratio.
+pub fn domain_area_spread(_ kind:u32,_ level:u32,_ bulge:f32,_ density:u32,_ which:u32)->f32 {
+    use composite_atlas::model::Point
+    use quilting_patch::depth_field::{segment_parameter,QuadDomainNorm}
+    let mut c=initial_controls()
+    c.surface_kind=if kind==0 {1.0} else {2.0}
+    c.midpoint_z=bulge
+    let net=composite_atlas::surface::authored(c)
+    if net.patch_valid!=1.0 {return -999.0}
+    let norm=QuadDomainNorm {gram:composite_atlas::surface::domain_gram(net)}
+    let cells:u32=1<<level
+    let step=1.0/__f32_from_i32(cells.downcast_unchecked())
+    let mut total:f32=0.0
+    let mut count:u32=0
+    let mut sum_squares:f32=0.0
+    let mut low:f32=1000000.0
+    let mut high:f32=0.0
+    for i in 0 .. (cells as usize) {
+        for j in 0 .. (cells as usize) {
+            let u0=__f32_from_i32(i.downcast_unchecked())*step
+            let v0=__f32_from_i32(j.downcast_unchecked())*step
+            let u1=u0+step
+            let v1=v0+step
+            if kind==0 && u1+v1>1.0 {continue}
+            let mut areas:[f32;2]=[0.0;2]
+            let mut ok=true
+            for corner in 0 .. 2 {
+                let (pu,pv,qu,qv,ru,rv)=if corner==0 {(u0,v0,u1,v0,u0,v1)}
+                    else {(u1,v0,u1,v1,u0,v1)}
+                let a=placed_surface(net,norm,pu,pv,density)
+                let b=placed_surface(net,norm,qu,qv,density)
+                let d=placed_surface(net,norm,ru,rv,density)
+                if !a.ok || !b.ok || !d.ok {ok=false} else {
+                    let e1x=b.x-a.x
+                    let e1y=b.y-a.y
+                    let e1z=b.z-a.z
+                    let e2x=d.x-a.x
+                    let e2y=d.y-a.y
+                    let e2z=d.z-a.z
+                    let nx=e1y*e2z-e1z*e2y
+                    let ny=e1z*e2x-e1x*e2z
+                    let nz=e1x*e2y-e1y*e2x
+                    areas[corner]=fmath::sqrt(nx*nx+ny*ny+nz*nz)*0.5
+                }
+            }
+            if !ok {continue}
+            for corner in 0 .. 2 {
+                let area=areas[corner]
+                if !(area>0.0) {continue}
+                total=total+area
+                sum_squares=sum_squares+area*area
+                if area<low {low=area}
+                if area>high {high=area}
+                count+=1
+            }
+        }
+    }
+    if count<4 {return -999.0}
+    let n=__f32_from_i32(count.downcast_unchecked())
+    let mean=total/n
+    if !(mean>0.0) {return -999.0}
+    if which==0 {
+        let variance=sum_squares/n-mean*mean
+        let deviation=if variance>0.0 {fmath::sqrt(variance)} else {0.0}
+        deviation/mean
+    } else {high/low}
+}
+fn placed_surface(_ net:composite_atlas::surface::Net,
+    _ norm:quilting_patch::depth_field::QuadDomainNorm,
+    _ u:f32,_ v:f32,_ density:u32)->SurfaceProbe {
+    use composite_atlas::model::Point
+    use quilting_patch::depth_field::segment_parameter
+    if density==0 {return surface_probe(net,u,v)}
+    let x=segment_parameter(norm,0.0,v,1.0,v,u,8)
+    let y=segment_parameter(norm,x,0.0,x,1.0,v,8)
+    surface_probe(net,x,y)
+}
+
 pub fn geometric_patch_view_laws()->bool {
     let mut c=initial_controls()
     for kind in [1.0,2.0] {
