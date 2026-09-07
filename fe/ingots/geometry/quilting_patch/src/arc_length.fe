@@ -30,8 +30,10 @@ pub fn inverse_length<M: CumulativeLengthSamples>(_ samples: M, _ fraction: f32)
     let target = fraction * total
     let mut low: u32 = 0
     let mut high = n
-    while low + 1 < high {
-        let middle = (low + high) / 2
+    // The search maintains 0 <= low < high <= n. Difference-based midpoint
+    // cannot overflow; explicit bounded arithmetic also permits shader use.
+    while low.wrapping_add(1) < high {
+        let middle = low.wrapping_add(high.wrapping_sub(low) / 2)
         if samples.cumulative(middle) < target { low = middle } else { high = middle }
     }
     let before = samples.cumulative(low)

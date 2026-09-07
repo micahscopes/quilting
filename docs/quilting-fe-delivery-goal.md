@@ -27,7 +27,38 @@ method, but must not be mislabeled as a directly generated quad atlas.
 
 ## Starting truth
 
-### Implementation checkpoint: shared requests and priority
+### Current checkpoint: rendered shared spacing
+
+- The composition viewer now publishes ten canonical 17-sample density tables
+  with its compatible visible scene and applies them to shared boundaries and
+  triangle interiors. Compensation varies sample positions along fixed edges;
+  it does not move the authored fan center. The four-triangle fan is the default.
+- Release Wasm tests passed all6,561 outer combinations and retained-state
+  checks for both diagonal and fan recipes (9.57s test runtime). These test the
+  represented CDF, not exact continuous integration or arbitrary fold freedom.
+- Chrome65 rendered uniform4/4/4/4 and unequal1/6/6/1 fans. The compensation
+  toggle visibly changes the unequal case. Each toggle state had zero red fold
+  pixels and zero exposed-background pixels in a1,036,324-pixel interior crop.
+  This is a representative screen-space check, not exhaustive mesh acceptance.
+- A diagnostic GPU copy of all170 spacing samples matched an independent
+  midpoint-integral calculation to max absolute error4.7362e-6; all ten tables
+  were strictly increasing. Diagnostic JavaScript is not application machinery.
+- Compiler fixes are pushed in Sonatina9ff01864 and shared mb2 94d3fe9f7.
+  The real build has3 passes,196,297 WGSL bytes and358,989 parent Wasm bytes.
+  Site compilation took57.9s; the new dev server reused its cache in196ms.
+  Generation, edit and frame latency still need separate measurements.
+- Startup remains incomplete: the initial empty poster can remain visible
+  after worker completion until live mode is entered. Screenshot capture
+  stalled; canvas pixels were instead inspected through Chrome MCP. The normal
+  live/freeze API was used for testing, not patched into the application.
+- Still pending: automatic first-visible behavior, exact GPU warped-seam
+  fixtures, distortion/error diagnostics, acknowledged suffix uploads, richer
+  density controls and the remaining patch/gallery delivery requirements.
+
+Evidence: `docs/composite-spacing-browser-receipt-20260907.md` and the logs it
+links. The following earlier checkpoint records the pre-spacing baseline.
+
+### Earlier checkpoint: shared requests and priority
 
 - Implemented `SquareEdgeLods` and per-child canonical/permutation resolution;
   tested all6,561 outer requests across both diagonals and the interior fan,

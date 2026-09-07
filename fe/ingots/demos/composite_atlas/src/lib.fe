@@ -18,6 +18,7 @@ use std::webgpu::{GpuProgram,WebGpuBackend,StorageBuffer,DrawIndirectBuffer,
     SurfaceTransition,SurfaceScheduling,LatestPerFrame,SurfaceQuality,ResponsiveBacking}
 use ingot::model::{Controls,Params,Point,params,corner}
 use ingot::residency::{State,Scene,ChildDraw,WORKERS,CAPACITY,refresh,child_at}
+use ingot::spacing::{Maps,PublishSpacing,canonical_parameter,interior}
 
 type Atlas=StorageBuffer<u32,RETAINED_CAPACITY>
 struct Draw {}
@@ -51,14 +52,14 @@ impl PublishAtlas {
         }
     }
 }
-fn shared_edge(_ from:u32,_ to:u32,_ parameter:f32,_ scene:Scene)->Point {
+fn shared_edge(_ maps:Maps,_ from:u32,_ to:u32,_ parameter:f32,_ scene:Scene)->Point {
     let edge=BoundaryUse::between(from,to)
-    let t=if edge.reversed {1.0-parameter} else {parameter}
+    let t=canonical_parameter(maps,from,to,parameter,scene.active_compensation>0.5)
     let a=corner(edge.low,scene.active_center_x,scene.active_center_y)
     let b=corner(edge.high,scene.active_center_x,scene.active_center_y)
     Point {x:a.x*(1.0-t)+b.x*t,y:a.y*(1.0-t)+b.y*t}
 }
-fn point(_ atlas:Atlas,_ scene:Scene,_ d:ChildDraw,_ index:u32,_ width:f32,_ height:f32)->Point {
+fn point(_ atlas:Atlas,_ maps:Maps,_ scene:Scene,_ d:ChildDraw,_ index:u32,_ width:f32,_ height:f32)->Point {
     let indices=d.offset.wrapping_add(d.points)
     let id=if d.points<=65536 {
         (atlas.load(index:indices.wrapping_add(index/2))>>((index%2).wrapping_mul(16)))&65535
@@ -67,13 +68,16 @@ fn point(_ atlas:Atlas,_ scene:Scene,_ d:ChildDraw,_ index:u32,_ width:f32,_ hei
     let u=number(packed&65535)/16384.0
     let v=number(packed>>16)/16384.0
     let p=remap_barycentric(d.permutation,bary3f(1.0-u-v,u,v))
-    let a=corner(d.corner_a,scene.active_center_x,scene.active_center_y)
-    let b=corner(d.corner_b,scene.active_center_x,scene.active_center_y)
-    let c=corner(d.corner_c,scene.active_center_x,scene.active_center_y)
-    let placed=if p.b==0.0 {shared_edge(d.corner_a,d.corner_c,p.c,scene)}
-        else if p.c==0.0 {shared_edge(d.corner_a,d.corner_b,p.b,scene)}
-        else if p.a==0.0 {shared_edge(d.corner_b,d.corner_c,p.c,scene)}
-        else {Point {x:a.x*p.a+b.x*p.b+c.x*p.c,y:a.y*p.a+b.y*p.b+c.y*p.c}}
+    let placed=if p.b==0.0 {shared_edge(maps,d.corner_a,d.corner_c,p.c,scene)}
+        else if p.c==0.0 {shared_edge(maps,d.corner_a,d.corner_b,p.b,scene)}
+        else if p.a==0.0 {shared_edge(maps,d.corner_b,d.corner_c,p.c,scene)}
+        else {
+            let warped=if scene.active_compensation>0.5 {interior(maps,d,p)} else {p}
+            let a=corner(d.corner_a,scene.active_center_x,scene.active_center_y)
+            let b=corner(d.corner_b,scene.active_center_x,scene.active_center_y)
+            let c=corner(d.corner_c,scene.active_center_x,scene.active_center_y)
+            Point {x:a.x*warped.a+b.x*warped.b+c.x*warped.c,y:a.y*warped.a+b.y*warped.b+c.y*warped.c}
+        }
     let scale=1.7*min(width,height)
     Point {x:(placed.x-0.5)*scale/max(width,1.0),y:(placed.y-0.5)*scale/max(height,1.0)}
 }
@@ -86,7 +90,7 @@ struct Varying {a:f32,b:f32,c:f32,signed:f32}
 impl Copy for Varying {}
 actor CompositeAtlas uses (GpuProgram<WebGpuBackend>,SurfaceQuality<ResponsiveBacking>) {
     controls:Controls,scene:Scene,address:u32,completed:u32,status:u32,pending:u32,required_words:u32,
-    atlas:Atlas,draw:DrawIndirectBuffer<Draw>,
+    atlas:Atlas,maps:Maps,draw:DrawIndirectBuffer<Draw>,
     const fn view()->Surface<Params> {Surface {extent:Extent::square(1200),params:params()}}
     fn initial()->State uses (InitialState) {ingot::residency::initial()}
     fn receive(self,event:Event)->State uses (ResidentTransition) {
@@ -103,7 +107,7 @@ actor CompositeAtlas uses (GpuProgram<WebGpuBackend>,SurfaceQuality<ResponsiveBa
     fn work<const I:u32>(state:State)->u32 uses (ScopedTaskFamily<WORKERS>) {
         run<CAPACITY,ActorInstance<TileWorker,Slot<I>>,Event>(state.address,I)
     }
-    fn prepare(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
+    fn prepare(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>,PublishBuffer<PublishSpacing>) {
         self.draw.store(index:0,value:self.scene.vertices)
         self.draw.store(index:1,value:1)
         self.draw.store(index:2,value:0)
@@ -122,9 +126,9 @@ actor CompositeAtlas uses (GpuProgram<WebGpuBackend>,SurfaceQuality<ResponsiveBa
         let reversed=permutation_parity(d.permutation)<0.0
         let width=self.controls.width
         let height=self.controls.height
-        let a=point(self.atlas,self.scene,d,base,width,height)
-        let b=point(self.atlas,self.scene,d,base.wrapping_add(if reversed {2} else {1}),width,height)
-        let c=point(self.atlas,self.scene,d,base.wrapping_add(if reversed {1} else {2}),width,height)
+        let a=point(self.atlas,self.maps,self.scene,d,base,width,height)
+        let b=point(self.atlas,self.maps,self.scene,d,base.wrapping_add(if reversed {2} else {1}),width,height)
+        let c=point(self.atlas,self.maps,self.scene,d,base.wrapping_add(if reversed {1} else {2}),width,height)
         let signed=(b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x)
         let area=abs(signed)*width*height*0.25
         let local=vertex_index%3

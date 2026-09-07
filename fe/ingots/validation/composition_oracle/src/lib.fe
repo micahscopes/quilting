@@ -59,17 +59,27 @@ pub fn manual_values_survive_automatic()->bool {
     e.levels[4]==7 && e.levels[6]==1 && c.diagonal_lod==7.0 && c.spoke_0_lod==1.0
 }
 pub fn coherent_pending_selection()->bool {
+    coherent_pending_for_split(0.0) && coherent_pending_for_split(2.0)
+}
+fn coherent_pending_for_split(_ split:f32)->bool {
     let mut state=composite_atlas::residency::initial()
+    state.controls.split=split
+    state=composite_atlas::residency::refresh(state)
     let handle:PoolHandle<4> = PoolHandle::from_address(state.address)
     let lease=match handle.claim(0) {Claim::Job(v)=>v,_=>return false}
     let k=handle.key(lease.ordinal)
-    if k.a!=4 || k.b!=4 || k.c!=5 {return false}
+    let expected:u32=if split<0.5 {5} else {4}
+    if k.a!=4 || k.b!=4 || k.c!=expected {return false}
     if let Completion::Accepted = handle.finish(lease,packed_triangle(k.a,k.b,k.c,42)) {} else {return false}
     state=composite_atlas::residency::refresh(state)
     if state.pending!=0 || state.scene.vertices==0 || state.required_words==0 {return false}
+    let revision=state.scene.spacing_revision
+    state=composite_atlas::residency::refresh(state)
+    if revision==0 || state.scene.spacing_revision!=revision {return false}
     let before=state.scene
     state.controls.bottom_lod=8.0
     state.controls.center_x=0.2
     state=composite_atlas::residency::refresh(state)
     state.pending>0 && state.scene.vertices==before.vertices && state.scene.active_center_x==before.active_center_x
+        && state.scene.spacing_revision==before.spacing_revision && state.scene.active_bottom==before.active_bottom
 }

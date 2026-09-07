@@ -1,0 +1,79 @@
+//! One canonical density map per shared boundary, sampled by the Wasm actor.
+//! Boundary evaluation bypasses interior extension to preserve shared arithmetic.
+use core::{BrowserBytes,BrowserPtr,alloc_browser_object}
+use core::marker::Copy
+use quilting_atlas::composition::BoundaryUse
+use quilting_patch::arc_length::{CumulativeLengthSamples,inverse_length}
+use quilting_patch::sampling_warp::{IntervalSamplingMap,TriangleEdgeMaps}
+use quilting_domain::Bary3F
+use std::webgpu::{StorageBuffer,BufferPublication,PublicationVersion}
+use ingot::model::{initial_controls,edge_cdf}
+use ingot::residency::{Scene,State,ChildDraw}
+
+pub const SAMPLES:usize=17
+pub const MAP_WORDS:usize=10*SAMPLES
+pub type Maps=StorageBuffer<f32,MAP_WORDS>
+pub struct PublishSpacing {}
+impl PublishSpacing {
+    pub fn publication(_ state:State)->BufferPublication<Maps> {
+        // The publication arena owns this temporary staging allocation. It is
+        // derived from the supplied immutable scene, never a mutable newer edit.
+        let scene=state.scene
+        let version=PublicationVersion {epoch:1,revision:scene.spacing_revision}
+        if scene.spacing_revision==0 {
+            return BufferPublication {version:version,source:BrowserBytes {ptr:0,len:0},target_byte_offset:0}
+        }
+        let p=alloc_browser_object<[f32;MAP_WORDS]>()
+        if p.address()==0 {
+            return BufferPublication {version:version,source:BrowserBytes {ptr:0,len:0},target_byte_offset:0}
+        }
+        let mut c=initial_controls()
+        c.bottom_lod=scene.active_bottom
+        c.right_lod=scene.active_right
+        c.top_lod=scene.active_top
+        c.left_lod=scene.active_left
+        c.center_x=scene.active_center_x
+        c.center_y=scene.active_center_y
+        for slot in 0 .. 10 {
+            let from:u32=if slot<3 {slot.downcast_truncate()} else if slot<6 {if slot==5 {1} else {0}}
+                else {(slot-6).downcast_truncate()}
+            let to:u32=if slot<3 {(slot+1).downcast_truncate()} else if slot==3 || slot==5 {3}
+                else if slot==4 {2} else {4}
+            let cdf=edge_cdf(c,from,to)
+            for i in 0 .. SAMPLES {
+                let dst:BrowserPtr<f32>=BrowserPtr::from_u32(p.address()+((slot*SAMPLES+i)*4).downcast_truncate())
+                dst.write(cdf.values[i])
+            }
+        }
+        BufferPublication {version:version,source:BrowserBytes {ptr:p.address(),len:(MAP_WORDS*4).downcast_truncate()},target_byte_offset:0}
+    }
+}
+
+pub struct EdgeSamples {pub maps:Maps,pub slot:u32}
+impl Copy for EdgeSamples {}
+impl CumulativeLengthSamples for EdgeSamples {
+    fn segments(self)->u32 {16}
+    fn cumulative(self,_ index:u32)->f32 {self.maps.load(index:self.slot.wrapping_mul(17).wrapping_add(index))}
+}
+pub struct DirectedMap {pub samples:EdgeSamples,pub reversed:bool}
+impl Copy for DirectedMap {}
+impl IntervalSamplingMap for DirectedMap {
+    fn map(self,_ t:f32)->f32 {
+        if self.reversed {1.0-inverse_length(self.samples,1.0-t)}
+        else {inverse_length(self.samples,t)}
+    }
+}
+fn edge_map(_ maps:Maps,_ from:u32,_ to:u32)->DirectedMap {
+    let edge=BoundaryUse::between(from,to)
+    let slot=match edge.square_slot() {Some(slot)=>slot,None=>0}
+    DirectedMap {samples:EdgeSamples {maps:maps,slot:slot},reversed:edge.reversed}
+}
+pub fn canonical_parameter(_ maps:Maps,_ from:u32,_ to:u32,_ t:f32,_ enabled:bool)->f32 {
+    let m=edge_map(maps,from,to)
+    let q=if m.reversed {1.0-t} else {t}
+    if enabled {inverse_length(m.samples,q)} else {q}
+}
+pub fn interior(_ maps:Maps,_ d:ChildDraw,_ p:Bary3F)->Bary3F {
+    TriangleEdgeMaps {a:edge_map(maps,d.corner_b,d.corner_c),
+        b:edge_map(maps,d.corner_c,d.corner_a),c:edge_map(maps,d.corner_a,d.corner_b)}.map(p)
+}

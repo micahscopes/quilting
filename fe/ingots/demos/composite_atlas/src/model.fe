@@ -10,7 +10,7 @@ pub struct Controls {
     pub bottom_lod:f32, pub right_lod:f32, pub top_lod:f32, pub left_lod:f32,
     pub automatic_interior:f32, pub diagonal_lod:f32,
     pub spoke_0_lod:f32, pub spoke_1_lod:f32, pub spoke_2_lod:f32, pub spoke_3_lod:f32,
-    pub split:f32, pub center_x:f32, pub center_y:f32,
+    pub split:f32, pub center_x:f32, pub center_y:f32, pub compensate_density:f32,
     pub width:f32, pub height:f32,
 }
 impl Copy for Controls {}
@@ -18,7 +18,7 @@ pub struct Params {
     pub bottom_lod:Param, pub right_lod:Param, pub top_lod:Param, pub left_lod:Param,
     pub automatic_interior:Param, pub diagonal_lod:Param,
     pub spoke_0_lod:Param, pub spoke_1_lod:Param, pub spoke_2_lod:Param, pub spoke_3_lod:Param,
-    pub split:Param, pub center_x:Param, pub center_y:Param,
+    pub split:Param, pub center_x:Param, pub center_y:Param, pub compensate_density:Param,
     pub width:Param, pub height:Param,
 }
 impl SurfaceState for Controls { type Params = Params }
@@ -36,17 +36,18 @@ pub const fn params() -> Params {
         spoke_2_lod:Param::int(min:0.0,max:8.0,init:4.0),
         spoke_3_lod:Param::int(min:0.0,max:8.0,init:4.0),
         split:Param::choice(options:ChoiceOptions::three(first:"two triangles: diagonal 0–2",
-            second:"two triangles: diagonal 1–3",third:"four triangles: movable center"),init:0.0),
+            second:"two triangles: diagonal 1–3",third:"four triangles: movable center"),init:2.0),
         center_x:Param::range(min:0.02,max:0.98,init:0.5),
         center_y:Param::range(min:0.02,max:0.98,init:0.5),
+        compensate_density:Param::toggle(init:true),
         width:Param::extent_x(),height:Param::extent_y(),
     }
 }
 pub fn initial_controls() -> Controls {
     Controls {bottom_lod:4.0,right_lod:4.0,top_lod:4.0,left_lod:4.0,
         automatic_interior:1.0,diagonal_lod:4.0,spoke_0_lod:4.0,spoke_1_lod:4.0,
-        spoke_2_lod:4.0,spoke_3_lod:4.0,split:0.0,center_x:0.5,center_y:0.5,
-        width:1200.0,height:1200.0}
+        spoke_2_lod:4.0,spoke_3_lod:4.0,split:2.0,center_x:0.5,center_y:0.5,
+        compensate_density:1.0,width:1200.0,height:1200.0}
 }
 pub fn level(_ value:f32) -> u32 {
     let mut n:u32=0
