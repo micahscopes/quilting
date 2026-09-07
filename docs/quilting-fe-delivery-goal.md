@@ -45,7 +45,12 @@ method, but must not be mislabeled as a directly generated quad atlas.
 - Shared mb2 `a7c0804ef` supplies the reusable Fe readout declaration and native
   host realization, with compiler ownership gates and70 runtime tests. Release
   composition Wasm policy/retention tests pass in24.52s, including cap checks.
-- Still pending: independent edge skews, measured interior distortion and edit/
+- Independent edge skews now redistribute cumulative density along each of the
+  ten canonical boundaries without moving endpoints or changing segment counts.
+  Release Wasm checks and200,460 actual GPU boundary queries passed; reversed
+  GPU positions remained bit-identical. All native inputs were exercised in
+  Chrome65. Details and limitations: `docs/composition-edge-skew.md`.
+- Still pending: measured interior distortion and edit/
   upload costs, acknowledged suffix uploads, avoiding redundant staging, and
   the controllable patch/gallery milestones. The current fan visibly contains
   abrupt density transitions and skinny triangles; boundary agreement alone

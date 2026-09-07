@@ -3,7 +3,7 @@ use core::marker::Copy
 use quilting_atlas::{CANONICAL_KEY_COUNT, canonical_key_at, edge_permutation_index}
 use quilting_atlas::composition::{ChildTriangle,SquareChildBoundaries}
 use quilting_atlas_wasm::pool::{self, PoolHandle, TileKey}
-use ingot::model::{Controls,InteriorPolicy,EdgeResolution,edge_resolution,interior_policy,initial_controls,recipe,edge_lods}
+use ingot::model::{Controls,InteriorPolicy,EdgeResolution,EdgeSkews,edge_resolution,interior_policy,initial_controls,recipe,edge_lods,edge_skews}
 pub const WORKERS:u32=4
 pub const CAPACITY:usize=WORKERS as usize
 pub struct ChildDraw {
@@ -17,6 +17,7 @@ pub struct Scene {
     pub vertices:u32,pub active_center_x:f32,pub active_center_y:f32,
     pub active_bottom:f32,pub active_right:f32,pub active_top:f32,pub active_left:f32,
     pub active_compensation:f32,pub spacing_revision:u32,
+    pub active_skews:EdgeSkews,
     pub interior:InteriorPolicy,
     pub resolution:EdgeResolution,
 }
@@ -34,7 +35,7 @@ pub fn empty_scene() -> Scene {
     Scene {first:empty_child(),second:empty_child(),third:empty_child(),fourth:empty_child(),
         vertices:0,active_center_x:0.5,active_center_y:0.5,
         active_bottom:4.0,active_right:4.0,active_top:4.0,active_left:4.0,
-        active_compensation:1.0,spacing_revision:0,interior:interior_policy(initial_controls()),resolution:EdgeResolution::empty()}
+        active_compensation:1.0,spacing_revision:0,active_skews:edge_skews(initial_controls()),interior:interior_policy(initial_controls()),resolution:EdgeResolution::empty()}
 }
 fn tile_key(_ a:u32,_ b:u32,_ c:u32) -> TileKey {TileKey {square:false,a:a,b:b,c:c,d:0}}
 fn primary_keys() -> [TileKey;CANONICAL_KEY_COUNT] {
@@ -74,12 +75,14 @@ pub fn refresh(_ previous:State) -> State {
     scene.active_top=next.controls.top_lod
     scene.active_left=next.controls.left_lod
     scene.active_compensation=next.controls.compensate_density
+    scene.active_skews=edge_skews(next.controls)
     scene.interior=interior_policy(next.controls)
     let old=previous.scene
-    let changed=old.spacing_revision==0 || old.active_center_x!=scene.active_center_x
+    let mut changed=old.spacing_revision==0 || old.active_center_x!=scene.active_center_x
         || old.active_center_y!=scene.active_center_y || old.active_bottom!=scene.active_bottom
         || old.active_right!=scene.active_right || old.active_top!=scene.active_top
         || old.active_left!=scene.active_left
+    for i in 0 .. 10 {if old.active_skews.at(i)!=scene.active_skews.at(i) {changed=true}}
     scene.spacing_revision=old.spacing_revision
     if changed {
         if old.spacing_revision==0xffffffff {next.status=2

@@ -3,7 +3,7 @@ use core::option::Option
 use quilting_atlas::composition::{BoundaryUse,SquareBoundaryUse}
 use quilting_patch::arc_length::{CumulativeLengthSamples,SampledCumulativeLength}
 use quilting_patch::sampling_warp::{InverseCumulativeMap,OrientedIntervalMap,IntervalSamplingMap}
-use composite_atlas::model::{initial_controls,edge_cdf,corner}
+use composite_atlas::model::{initial_controls,edge_cdf,corner,redistribute_edge}
 use composite_atlas::spacing::{Maps,EdgeSamples,canonical_parameter}
 use std::webgpu::{GpuProgram,WebGpuBackend,StorageBuffer,ComputeSurface,ComputeInvocation,Workgroup,FixedDispatch}
 
@@ -27,7 +27,8 @@ fn table(_ code:u32,_ slot:u32)->SampledCumulativeLength<17> {
     c.center_x=0.17
     c.center_y=0.83
     let edge=boundary(slot,false)
-    edge_cdf(c,edge.low,edge.high)
+    let skew=if code/6561==0 {1.0} else if (code/6561+slot)%2==0 {0.25} else {4.0}
+    redistribute_edge(edge_cdf(c,edge.low,edge.high),skew)
 }
 pub fn table_word(_ code:u32,_ slot:u32,_ index:u32)->f32 {
     table(code,slot).cumulative(index)

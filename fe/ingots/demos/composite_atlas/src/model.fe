@@ -2,9 +2,9 @@
 use core::marker::Copy
 use fmath::sqrt
 use quilting_atlas::lod_as_f32
-use quilting_atlas::composition::{SquareSplit, SquareEdgeLods}
+use quilting_atlas::composition::{SquareSplit, SquareEdgeLods,BoundaryUse}
 use quilting_patch::arc_length::{SampledCumulativeLength, CumulativeLengthSamples}
-use quilting_patch::sampling_warp::InteriorRedistribution
+use quilting_patch::sampling_warp::{InteriorRedistribution,RedistributedCumulative,ProjectiveIntervalBias}
 use quilting_domain::{Bary3F,bary3f}
 use std::web::view::{Param,ParamReadout,ChoiceOptions,SurfaceState,SurfaceEvent,ApplyParamBindings,ParamBindingsProvider}
 
@@ -19,13 +19,18 @@ pub struct Controls {
     pub interior_enabled:f32, pub interior_concentration:f32, pub interior_twist:f32,
     pub focus_a:f32, pub focus_b:f32, pub focus_c:f32,
     pub width:f32, pub height:f32,
+    pub bottom_skew:f32,pub right_skew:f32,pub top_skew:f32,pub left_skew:f32,
+    pub diagonal_02_skew:f32,pub diagonal_13_skew:f32,
+    pub spoke_0_skew:f32,pub spoke_1_skew:f32,pub spoke_2_skew:f32,pub spoke_3_skew:f32,
 }
 impl Copy for Controls {}
 pub struct Params {
     pub bottom_lod:Param, pub right_lod:Param, pub top_lod:Param, pub left_lod:Param,
     pub automatic_interior:Param, pub diagonal_lod:Param,
     pub spoke_0_lod:Param, pub spoke_1_lod:Param, pub spoke_2_lod:Param, pub spoke_3_lod:Param,
-    pub split:Param, pub center_x:Param, pub center_y:Param, pub compensate_density:Param,
+    pub split:Param, pub center_x:Param, pub center_y:Param,
+    /// Apply the shared density maps, including edge skew controls. Off bypasses both.
+    pub compensate_density:Param,
     /// Redistribute each child's interior; all outer edges and spokes stay fixed.
     pub interior_enabled:Param,
     /// One is neutral. Larger values concentrate samples near the child focus.
@@ -35,6 +40,14 @@ pub struct Params {
     /// Relative pull of the focus toward child corner A, B or C; not a corner position.
     pub focus_a:Param, pub focus_b:Param, pub focus_c:Param,
     pub width:Param, pub height:Param,
+    /// One is neutral; larger values concentrate toward the first named endpoint.
+    /// Corner order: 0 bottom-left, 1 bottom-right, 2 top-right, 3 top-left, 4 center.
+    /// Outer directions are bottom 0→1, right 1→2, top 2→3, left 0→3.
+    pub bottom_skew:Param,pub right_skew:Param,pub top_skew:Param,pub left_skew:Param,
+    /// Density redistribution along fixed diagonals 0→2 and 1→3, not midpoint motion.
+    pub diagonal_02_skew:Param,pub diagonal_13_skew:Param,
+    /// Each spoke runs from its numbered corner toward the fixed fan center.
+    pub spoke_0_skew:Param,pub spoke_1_skew:Param,pub spoke_2_skew:Param,pub spoke_3_skew:Param,
     /// Visible segment counts, not saved manual requests. Zero means inactive.
     pub diagonal_02_segments:Param,pub diagonal_13_segments:Param,
     pub spoke_0_segments:Param,pub spoke_1_segments:Param,pub spoke_2_segments:Param,pub spoke_3_segments:Param,
@@ -73,6 +86,9 @@ pub const fn params() -> Params {
         focus_b:Param::range(min:0.1,max:4.0,init:1.0),
         focus_c:Param::range(min:0.1,max:4.0,init:1.0),
         width:Param::extent_x(),height:Param::extent_y(),
+        bottom_skew:skew_param(),right_skew:skew_param(),top_skew:skew_param(),left_skew:skew_param(),
+        diagonal_02_skew:skew_param(),diagonal_13_skew:skew_param(),
+        spoke_0_skew:skew_param(),spoke_1_skew:skew_param(),spoke_2_skew:skew_param(),spoke_3_skew:skew_param(),
         diagonal_02_segments:Param::readout(ParamReadout::Integer),
         diagonal_13_segments:Param::readout(ParamReadout::Integer),
         spoke_0_segments:Param::readout(ParamReadout::Integer),
@@ -85,12 +101,33 @@ pub const fn params() -> Params {
         pending:Param::readout(ParamReadout::Integer),
     }
 }
+const fn skew_param()->Param {Param::range(min:0.25,max:4.0,init:1.0)}
+/// Named spacing laws for the square's four sides, two diagonals and four spokes.
+pub struct EdgeSkews {
+    pub bottom:f32,pub right:f32,pub top:f32,pub left:f32,
+    pub diagonal02:f32,pub diagonal13:f32,
+    pub spoke0:f32,pub spoke1:f32,pub spoke2:f32,pub spoke3:f32,
+}
+impl Copy for EdgeSkews {}
+impl EdgeSkews {
+    pub fn at(self,_ slot:usize)->f32 {
+        [self.bottom,self.right,self.top,self.left,self.diagonal02,self.diagonal13,
+            self.spoke0,self.spoke1,self.spoke2,self.spoke3][slot]
+    }
+}
+pub fn edge_skews(_ c:Controls)->EdgeSkews {
+    EdgeSkews {bottom:c.bottom_skew,right:c.right_skew,top:c.top_skew,left:c.left_skew,
+        diagonal02:c.diagonal_02_skew,diagonal13:c.diagonal_13_skew,
+        spoke0:c.spoke_0_skew,spoke1:c.spoke_1_skew,spoke2:c.spoke_2_skew,spoke3:c.spoke_3_skew}
+}
 pub fn initial_controls() -> Controls {
     Controls {bottom_lod:4.0,right_lod:4.0,top_lod:4.0,left_lod:4.0,
         automatic_interior:1.0,diagonal_lod:4.0,spoke_0_lod:4.0,spoke_1_lod:4.0,
         spoke_2_lod:4.0,spoke_3_lod:4.0,split:2.0,center_x:0.5,center_y:0.5,
         compensate_density:1.0,interior_enabled:1.0,interior_concentration:1.0,interior_twist:0.0,
-        focus_a:1.0,focus_b:1.0,focus_c:1.0,width:1200.0,height:1200.0}
+        focus_a:1.0,focus_b:1.0,focus_c:1.0,width:1200.0,height:1200.0,
+        bottom_skew:1.0,right_skew:1.0,top_skew:1.0,left_skew:1.0,diagonal_02_skew:1.0,diagonal_13_skew:1.0,
+        spoke_0_skew:1.0,spoke_1_skew:1.0,spoke_2_skew:1.0,spoke_3_skew:1.0}
 }
 /// An immutable visible interior policy, published with its child geometry.
 pub struct InteriorPolicy {pub enabled:f32,pub map:InteriorRedistribution,pub focus:Bary3F}
@@ -126,6 +163,21 @@ pub fn corner(_ id:u32,_ x:f32,_ y:f32) -> Point {
 /// A reference-domain density heuristic, not an interior-uniformity proof.
 /// The straight outer edges integrate to exactly their requested counts.
 pub fn edge_cdf(_ controls:Controls,_ from:u32,_ to:u32) -> SampledCumulativeLength<17> {
+    let raw=edge_measure(controls,from,to)
+    let edge=BoundaryUse::between(from,to)
+    let skew=edge_skews(controls).at(edge.square_slot().unwrap() as usize)
+    redistribute_edge(raw,if edge.reversed {1.0/skew} else {skew})
+}
+pub fn redistribute_edge(_ raw:SampledCumulativeLength<17>,_ skew:f32)->SampledCumulativeLength<17> {
+    if skew==1.0 {return raw}
+    let measure=RedistributedCumulative {samples:raw,law:ProjectiveIntervalBias {strength:skew}}
+    let mut values=[0.0;17]
+    for i in 0 .. 17 {values[i]=measure.cumulative(i.downcast_truncate())}
+    SampledCumulativeLength {values:values}
+}
+/// The integrated reference density controls the count; skew redistributes
+/// that same total rather than silently promoting the requested edge LoD.
+pub fn edge_measure(_ controls:Controls,_ from:u32,_ to:u32) -> SampledCumulativeLength<17> {
     let a=corner(from,controls.center_x,controls.center_y)
     let b=corner(to,controls.center_x,controls.center_y)
     let dx=b.x-a.x
@@ -146,7 +198,7 @@ pub fn edge_cdf(_ controls:Controls,_ from:u32,_ to:u32) -> SampledCumulativeLen
     SampledCumulativeLength {values:values}
 }
 pub fn edge_demand(_ controls:Controls,_ from:u32,_ to:u32) -> f32 {
-    edge_cdf(controls,from,to).cumulative(16)
+    edge_measure(controls,from,to).cumulative(16)
 }
 fn automatic_level(_ controls:Controls,_ from:u32,_ to:u32) -> u32 {
     let demand=edge_demand(controls,from,to)

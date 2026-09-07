@@ -152,8 +152,11 @@ fn composition_gpu_boundary_positions_match_wasm() {
         [3, 7, 2, 6],
     ];
     let mut maximum = 0.0_f32;
-    for levels in cases {
-        let code = levels[0] + 9 * levels[1] + 81 * levels[2] + 729 * levels[3];
+    for (levels, profile) in cases
+        .into_iter()
+        .flat_map(|levels| (0..3).map(move |profile| (levels, profile)))
+    {
+        let code = levels[0] + 9 * levels[1] + 81 * levels[2] + 729 * levels[3] + 6561 * profile;
         let mut bytes = Vec::new();
         for slot in 0..10 {
             for sample in 0..17 {
@@ -214,6 +217,6 @@ fn composition_gpu_boundary_positions_match_wasm() {
     }
     eprintln!(
         "{} boundary queries; max GPU/Wasm error {maximum}; reversed GPU positions bit-exact",
-        cases.len() * 5140
+        cases.len() * 3 * 5140
     );
 }

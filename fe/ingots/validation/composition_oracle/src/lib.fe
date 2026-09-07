@@ -8,6 +8,56 @@ use quilting_patch::arc_length::{CumulativeLengthSamples,inverse_length}
 use quilting_patch::sampling_warp::{InverseCumulativeMap,OrientedIntervalMap,IntervalSamplingMap}
 use quilting_atlas::composition::{BoundaryUse,ChildTriangle,SquareEdgeLods}
 extern {const fn __f32_from_i32(_:i32)->f32}
+pub fn edge_skew_preserves_mass_and_shared_positions()->bool {
+    let mut c=initial_controls()
+    c.bottom_lod=1.0
+    c.right_lod=6.0
+    c.top_lod=8.0
+    c.left_lod=0.0
+    c.center_x=0.17
+    c.center_y=0.83
+    let counts=edge_lods(c)
+    for skew in [0.25,1.0,4.0] {
+        c.bottom_skew=skew
+        c.right_skew=skew
+        c.top_skew=skew
+        c.left_skew=skew
+        c.diagonal_02_skew=skew
+        c.diagonal_13_skew=skew
+        c.spoke_0_skew=skew
+        c.spoke_1_skew=skew
+        c.spoke_2_skew=skew
+        c.spoke_3_skew=skew
+        let changed=edge_lods(c)
+        for slot in 0 .. 10 {if counts.levels[slot]!=changed.levels[slot] {return false}}
+        for low in 0 .. 4 {
+            for high in (low+1) .. 5 {
+                let raw=composite_atlas::model::edge_measure(c,low.downcast_truncate(),high.downcast_truncate())
+                let table=composite_atlas::model::edge_cdf(c,low.downcast_truncate(),high.downcast_truncate())
+                if table.values[0]!=0.0 || table.values[16]!=raw.values[16] {return false}
+                for i in 1 .. 17 {
+                    if !(table.values[i]>table.values[i-1]) {return false}
+                    if skew==1.0 && table.values[i]!=raw.values[i] {return false}
+                }
+                let law=InverseCumulativeMap {samples:table}
+                let forward=OrientedIntervalMap {law:law,reversed:false}
+                let reverse=OrientedIntervalMap {law:law,reversed:true}
+                let mut last:f32=-1.0
+                for i in 0 .. 257 {
+                    let t=__f32_from_i32(i.downcast_unchecked())/256.0
+                    let q=forward.canonical(t)
+                    if !(q>last && q>=0.0 && q<=1.0) || q!=reverse.canonical(1.0-t) {return false}
+                    last=q
+                }
+                let neutral=inverse_length(raw,0.5)
+                let biased=law.map(0.5)
+                if skew>1.0 && !(biased<neutral) {return false}
+                if skew<1.0 && !(biased>neutral) {return false}
+            }
+        }
+    }
+    true
+}
 pub fn resolution_reports_visible_counts_and_caps()->bool {
     let mut c=initial_controls()
     c.bottom_lod=8.0
@@ -202,15 +252,20 @@ fn coherent_pending_for_split(_ split:f32)->bool {
     state=composite_atlas::residency::refresh(state)
     if state.pending!=0 || state.scene.interior.map.concentration!=2.0
         || state.scene.spacing_revision!=revision {return false}
+    state.controls.spoke_0_skew=2.0
+    state=composite_atlas::residency::refresh(state)
+    if state.scene.spacing_revision!=revision+1 || state.scene.active_skews.spoke0!=2.0 {return false}
     let before=state.scene
     state.controls.bottom_lod=8.0
     state.controls.center_x=0.2
     state.controls.interior_concentration=4.0
     state.controls.interior_twist=1.7
     state.controls.focus_a=4.0
+    state.controls.spoke_0_skew=4.0
     state=composite_atlas::residency::refresh(state)
     state.pending>0 && state.scene.vertices==before.vertices && state.scene.active_center_x==before.active_center_x
         && state.scene.spacing_revision==before.spacing_revision && state.scene.active_bottom==before.active_bottom
+        && state.scene.active_skews.spoke0==before.active_skews.spoke0
         && state.scene.interior.map.concentration==before.interior.map.concentration
         && state.scene.interior.map.twist==before.interior.map.twist && state.scene.interior.focus.a==before.interior.focus.a
         && state.scene.resolution.diagonal_02_segments==before.resolution.diagonal_02_segments

@@ -50,6 +50,23 @@ impl IntervalSamplingMap for ProjectiveIntervalBias {
     }
 }
 
+/// Redistribute a sampled positive measure without changing its total mass.
+/// The law acts on normalized cumulative mass, not on geometric endpoints.
+/// Inversion remains exact for the resulting piecewise-linear table only.
+pub struct RedistributedCumulative<M: CumulativeLengthSamples, L: IntervalSamplingMap> {
+    pub samples:M, pub law:L,
+}
+impl<M: CumulativeLengthSamples,L: IntervalSamplingMap> Copy for RedistributedCumulative<M,L> {}
+impl<M: CumulativeLengthSamples,L: IntervalSamplingMap> CumulativeLengthSamples for RedistributedCumulative<M,L> {
+    fn segments(self)->u32 {self.samples.segments()}
+    fn cumulative(self,_ index:u32)->f32 {
+        let n=self.samples.segments()
+        let total=self.samples.cumulative(n)
+        if index==0 {0.0} else if index==n {total}
+        else {total*self.law.map(self.samples.cumulative(index)/total)}
+    }
+}
+
 /// Independent boundary laws extended by monotone slice composition.
 pub struct TriangleEdgeMaps<
     A: IntervalSamplingMap,

@@ -7,7 +7,7 @@ use quilting_patch::arc_length::CumulativeLengthSamples
 use quilting_patch::sampling_warp::{InverseCumulativeMap,OrientedIntervalMap,TriangleEdgeMaps}
 use quilting_domain::Bary3F
 use std::webgpu::{StorageBuffer,BufferPublication,PublicationVersion}
-use ingot::model::{initial_controls,edge_cdf}
+use ingot::model::{initial_controls,edge_measure,redistribute_edge}
 use ingot::residency::{Scene,State,ChildDraw}
 
 pub const SAMPLES:usize=17
@@ -39,7 +39,7 @@ impl PublishSpacing {
                 else {(slot-6).downcast_truncate()}
             let to:u32=if slot<3 {(slot+1).downcast_truncate()} else if slot==3 || slot==5 {3}
                 else if slot==4 {2} else {4}
-            let cdf=edge_cdf(c,from,to)
+            let cdf=redistribute_edge(edge_measure(c,from,to),scene.active_skews.at(slot))
             for i in 0 .. SAMPLES {
                 let dst:BrowserPtr<f32>=BrowserPtr::from_u32(p.address()+((slot*SAMPLES+i)*4).downcast_truncate())
                 dst.write(cdf.values[i])
