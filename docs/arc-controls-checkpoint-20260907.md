@@ -51,6 +51,18 @@ Executed evidence:
 - The production arc build passes its background stage, then fails admission of
   the curve vertex stage. No successful new browser build is claimed.
 
+The vertex-stage capture now narrows that second failure: the entry retains
+`uaddo segment_index, 1` and an overflow trap for `number(segment_index + 1)`.
+The authored stage declares `Instanced<TriangleStrip<4>,256>`, but that invocation
+bound has not removed this guard before raster admission. This is a different
+problem from RGBA packing. Do not replace the integer operation with wrapping
+arithmetic or remove the trap without establishing the applicable draw bound.
+Other helper trap sites are also present in the pre-normalization snapshot;
+they need inspection after the entry issue is resolved, not blanket removal.
+
+Shared-mb2 regression commit: `2e54cda72`. Both it and the Quilting implementation
+checkpoint were pushed. The compiler range/admission repair remains unfinished.
+
 Logs and captures are in `/laboratory/quilting/scratch/` with prefixes
 `shared-handle`, `arc-color-helper`, `arc-bitwise-color` and `arc-raster` dated
 `20260907`. In particular the small decisive IR is
