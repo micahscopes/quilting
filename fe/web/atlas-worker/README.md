@@ -40,8 +40,8 @@ artifacts. This is not automatic compilation of a finished demo application.
 The four-worker driver is authored in `validation/atlas_pool_workers`. It uses
 two `ScopedTaskFamily<WORKERS>` declarations, with one const pool size and no
 numbered methods or host-owned job queue. This requires shared mb2 at
-`b65a27dc0` or newer: the task-family support landed in `4fd919320`, and
-`b65a27dc0` fixes concurrent response allocation/cleanup in the shared runtime.
+`c1e75094a` or newer: task families landed in `4fd919320`; `b65a27dc0`
+fixes concurrent response ordering and `c1e75094a` fixes task scratch cleanup.
 
 Build its compiler-derived package from the fixture crate:
 
@@ -57,16 +57,15 @@ responses, observes concurrency and reads Fe's retained-atlas summary. It does
 not select jobs or implement the queue. Both generation and ownership remain
 Fe. The pool reserves a 64MiB packed-output budget and reports exhaustion.
 
-This gate is still being integrated: do not infer a passing browser run or
-multi-worker speedup from these instructions. The separate Wasm ownership test
-has passed retention and cancelled-publication checks on small generated tiles,
-plus full canonical key enumeration. Full-pool rendering remains pending.
+Full browser generation and cancellation now pass. The first run generated
+all 1,200 tiles (4,074,447 triangles, 33,127,372 packed bytes) in 125.531 seconds
+while a compiler build was also active. Do not infer a clean throughput result
+or a Rust/one-worker speedup from that acceptance measurement. A second warm
+run with our compiler builds stopped passed in 110.511 seconds. See the
+[detailed receipt and limits](../../../docs/benchmarks/2026-09-06-browser-atlas-pool.md).
 
-Current browser failure: four requests run concurrently, but response cleanup
-traps after resume. After the shared runtime concurrency fix, one observed
-325,860-byte response allocation ends at arena cursor 67,522,572; resume leaves
-the cursor at 67,522,752 (180 extra bytes), so its checked post-return fails.
-The optional `onMemoryEvent` callback observes allocator calls/checkpoints for
-this investigation without replacing allocator behavior. Cancellation publishes
-no tiles in that test, but cleanup has not passed. This is not a throughput
-benchmark or a reason to bypass checked ownership.
+The optional `onMemoryEvent` callback observes allocator checkpoints without
+replacing allocation behavior. All four cancelled responses now return to the
+same checkpoint and publish zero tiles. The separate Wasm ownership test also
+passes small-tile retention and cancelled-publication checks. Full-pool rendering,
+retained-buffer audits and complete process/worker memory measurements remain pending.
