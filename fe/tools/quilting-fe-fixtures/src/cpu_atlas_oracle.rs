@@ -23,6 +23,17 @@ fn cpu_atlas_compiles_typed_worker_payload() {
     let child = &artifact.structured_children[0];
     assert_eq!(child.interface.lanes.len(),1);
     wasmparser::validate(&child.wasm).unwrap();
+    if let Some(directory)=std::env::var_os("QUILTING_ATLAS_WORKER_ARTIFACT_DIR") {
+        let directory=std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("child.wasm"),&child.wasm).unwrap();
+        std::fs::write(directory.join("interface.js"),fe_codegen::emit_canonical_interface_js(&child.interface).unwrap()).unwrap();
+        for (relative,source) in fe_codegen::browser_actor_runtime_files() {
+            let path=directory.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path,source).unwrap();
+        }
+    }
     eprintln!("atlas worker package: parent={}bytes child={}bytes response={:?}",
         artifact.wasm.len(),child.wasm.len(),child.interface.lanes[0].response);
     let engine = wasmtime::Engine::default();
