@@ -8,6 +8,28 @@ use quilting_patch::arc_length::{CumulativeLengthSamples,inverse_length}
 use quilting_patch::sampling_warp::{InverseCumulativeMap,OrientedIntervalMap,IntervalSamplingMap}
 use quilting_atlas::composition::{BoundaryUse,ChildTriangle,SquareEdgeLods}
 extern {const fn __f32_from_i32(_:i32)->f32}
+pub fn resolution_reports_visible_counts_and_caps()->bool {
+    let mut c=initial_controls()
+    c.bottom_lod=8.0
+    c.right_lod=8.0
+    c.top_lod=8.0
+    c.left_lod=8.0
+    c.split=0.0
+    let r=composite_atlas::model::edge_resolution(c,edge_lods(c))
+    if r.diagonal_02_segments!=256 || r.diagonal_13_segments!=0 || r.spoke_0_segments!=0
+        || r.capped_edges!=1 || r.unmet_edges!=1 || !(r.max_unmet_segments>106.0 && r.max_unmet_segments<107.0) {return false}
+    c.split=2.0
+    let fan=composite_atlas::model::edge_resolution(c,edge_lods(c))
+    if fan.diagonal_02_segments!=0 || fan.diagonal_13_segments!=0 || fan.spoke_0_segments!=256
+        || fan.spoke_1_segments!=256 || fan.spoke_2_segments!=256 || fan.spoke_3_segments!=256
+        || fan.capped_edges!=0 || fan.unmet_edges!=0 {return false}
+    c.split=0.0
+    c.automatic_interior=0.0
+    c.diagonal_lod=0.0
+    let manual=composite_atlas::model::edge_resolution(c,edge_lods(c))
+    manual.diagonal_02_segments==1 && manual.capped_edges==0 && manual.unmet_edges==1
+        && manual.max_unmet_segments>361.0
+}
 pub fn interior_policy_preserves_boundaries()->bool {
     let mut c=initial_controls()
     for focus in 0 .. 4 {
@@ -191,4 +213,7 @@ fn coherent_pending_for_split(_ split:f32)->bool {
         && state.scene.spacing_revision==before.spacing_revision && state.scene.active_bottom==before.active_bottom
         && state.scene.interior.map.concentration==before.interior.map.concentration
         && state.scene.interior.map.twist==before.interior.map.twist && state.scene.interior.focus.a==before.interior.focus.a
+        && state.scene.resolution.diagonal_02_segments==before.resolution.diagonal_02_segments
+        && state.scene.resolution.spoke_0_segments==before.resolution.spoke_0_segments
+        && state.scene.resolution.max_unmet_segments==before.resolution.max_unmet_segments
 }

@@ -3,7 +3,7 @@ use core::marker::Copy
 use quilting_atlas::{CANONICAL_KEY_COUNT, canonical_key_at, edge_permutation_index}
 use quilting_atlas::composition::{ChildTriangle,SquareChildBoundaries}
 use quilting_atlas_wasm::pool::{self, PoolHandle, TileKey}
-use ingot::model::{Controls,InteriorPolicy,interior_policy,initial_controls,recipe,edge_lods}
+use ingot::model::{Controls,InteriorPolicy,EdgeResolution,edge_resolution,interior_policy,initial_controls,recipe,edge_lods}
 pub const WORKERS:u32=4
 pub const CAPACITY:usize=WORKERS as usize
 pub struct ChildDraw {
@@ -18,6 +18,7 @@ pub struct Scene {
     pub active_bottom:f32,pub active_right:f32,pub active_top:f32,pub active_left:f32,
     pub active_compensation:f32,pub spacing_revision:u32,
     pub interior:InteriorPolicy,
+    pub resolution:EdgeResolution,
 }
 impl Copy for Scene {}
 pub struct State {
@@ -33,7 +34,7 @@ pub fn empty_scene() -> Scene {
     Scene {first:empty_child(),second:empty_child(),third:empty_child(),fourth:empty_child(),
         vertices:0,active_center_x:0.5,active_center_y:0.5,
         active_bottom:4.0,active_right:4.0,active_top:4.0,active_left:4.0,
-        active_compensation:1.0,spacing_revision:0,interior:interior_policy(initial_controls())}
+        active_compensation:1.0,spacing_revision:0,interior:interior_policy(initial_controls()),resolution:EdgeResolution::empty()}
 }
 fn tile_key(_ a:u32,_ b:u32,_ c:u32) -> TileKey {TileKey {square:false,a:a,b:b,c:c,d:0}}
 fn primary_keys() -> [TileKey;CANONICAL_KEY_COUNT] {
@@ -106,6 +107,7 @@ pub fn refresh(_ previous:State) -> State {
     }
     // Publish only complete compatible snapshots, never partially ready seams.
     if next.pending==0 && next.status==0 {
+        scene.resolution=edge_resolution(next.controls,edges)
         next.scene=scene
         next.required_words=required
     }

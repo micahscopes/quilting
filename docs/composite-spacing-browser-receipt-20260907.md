@@ -3,6 +3,53 @@
 September7,2026. Release `fe web dev`, http://127.0.0.1:38331/, Chrome page65.
 This receipt does not complete the delivery or recursive-atlas goal.
 
+## Actor-owned readout follow-up
+
+Shared mb2 `a7c0804ef` adds Fe `Param::readout` with native HTML output
+realization. Composition calculations remain in Fe: `EdgeResolution` is
+published only with a complete compatible visible scene, rather than reflecting
+unavailable requests. No demo JavaScript or host-side LoD calculation was added.
+
+Release `fe web dev` served `fe-render-8f6dd9f867b3a7d5.json` on38331:
+491,351 parent Wasm bytes and143,666 WGSL bytes across3 passes. Initial site
+build59.349s, not generation or interaction timing. Chrome65 was reloaded only
+after the new server was ready; Chrome66 was not changed.
+
+Actual native output checks using ordinary DOM input events:
+
+| Case | Visible interior segments | Unmet / capped edges |
+| --- | --- | --- |
+| Uniform outer LoD4, automatic fan | 16 /16 /16 /16 | 0 /0 |
+| Same outer levels, automatic diagonal02 | 32 | 0 /0 |
+| Same diagonal, saved manual LoD4 | 16 | 1 /0; shortfall6.6274128 |
+| Uniform outer LoD8, automatic diagonal02 | 256 | 1 /1; shortfall106.0386 |
+| Outer1/6/6/1, automatic fan | 16 /32 /64 /32 | 0 /0 |
+
+Inactive diagonals/spokes display zero. Each observed snapshot had pending0;
+the LoD8 case rendered563,772 vertices with status0. A scripted assignment to
+`surface.params.diagonal_02_segments` threw the expected read-only TypeError,
+without changing the value. Saved manual diagonal LoD remained4. The document
+height and viewport height were both1281; the console had no errors/warnings
+before the final canvas capture.
+
+The final canvas was inspected through Chrome MCP using the surface's public
+freeze/live methods. It rendered the unequal-density fan with concentration1.4,
+zero twist and equal focus weights. This is not an interior-quality pass: skinny
+triangles and pronounced transitions remain visible. No claim of uniformly
+distributed interior geometry follows from correct boundary/readout behavior.
+
+Release policy tests include the LoD8 cap, manual under-resolution and retention
+of diagnostics during pending changes (24.52s test runtime):
+`/laboratory/quilting/scratch/composition-readout-policy-tests-20260907.log`.
+Compiler positive/negative ownership tests and70 runtime tests also passed:
+`surface-readout-compiler-tests-20260907.log` and
+`surface-readout-runtime-tests-20260907.log` in the same scratch directory.
+Server log: `composite-readouts-web-dev-20260907.log`.
+
+Current input derive limitation is documented upstream: inputs form the matching
+prefix of the parameter declaration; readouts are appended. Arbitrary input/
+observation interleaving needs proper field-ordinal derivation, not host remapping.
+
 ## Build identity
 
 - Fe shared mb2: `94d3fe9f7`; Sonatina: `9ff01864`.

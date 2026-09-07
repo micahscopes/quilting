@@ -27,7 +27,35 @@ method, but must not be mislabeled as a directly generated quad atlas.
 
 ## Starting truth
 
-### Current checkpoint: rendered shared spacing
+### Current checkpoint: shared boundaries, interior controls and visible diagnostics
+
+- Shared directed sampling maps now have an executed Fe/Wasm-versus-WebGPU
+  regression: 66,820 queries, 267,280 scalar comparisons, maximum error
+  5.96e-8. Reversed GPU canonical parameters and positions were bit-identical.
+- Interior concentration, twist and normalized focus controls preserve boundary
+  positions. Neutral controls match the bypass; strong warps can still fold the
+  straight rendered mesh. These controls are not an automatic uniformizer.
+- Native actor-owned readouts show resolved diagonal/spoke counts, unmet demand,
+  capped edges and pending tiles. Fe computes these with the visible snapshot;
+  the host only presents them and rejects input edits. The manual requests
+  remain separate and survive automatic/manual switching.
+- Chrome65 verified both automatic and manual diagonal counts, the uniform-LoD8
+  cap (256 segments versus approximately362 required), and an unequal-density
+  fan. No browser errors; the outer document has no extra vertical scroll.
+- Shared mb2 `a7c0804ef` supplies the reusable Fe readout declaration and native
+  host realization, with compiler ownership gates and70 runtime tests. Release
+  composition Wasm policy/retention tests pass in24.52s, including cap checks.
+- Still pending: independent edge skews, measured interior distortion and edit/
+  upload costs, acknowledged suffix uploads, avoiding redundant staging, and
+  the controllable patch/gallery milestones. The current fan visibly contains
+  abrupt density transitions and skinny triangles; boundary agreement alone
+  does not establish good interior distribution.
+
+Evidence: the readout follow-up and preceding executed checks in
+`docs/composite-spacing-browser-receipt-20260907.md`. The following checkpoints
+are historical; their then-pending items are superseded where stated above.
+
+### Earlier checkpoint: rendered shared spacing
 
 - The composition viewer now publishes ten canonical 17-sample density tables
   with its compatible visible scene and applies them to shared boundaries and

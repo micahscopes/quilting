@@ -6,11 +6,14 @@ use quilting_atlas::composition::{SquareSplit, SquareEdgeLods}
 use quilting_patch::arc_length::{SampledCumulativeLength, CumulativeLengthSamples}
 use quilting_patch::sampling_warp::InteriorRedistribution
 use quilting_domain::{Bary3F,bary3f}
-use std::web::view::{Param, ChoiceOptions, SurfaceState, SurfaceEvent, ApplyParamBindings, ParamBindingsProvider}
+use std::web::view::{Param,ParamReadout,ChoiceOptions,SurfaceState,SurfaceEvent,ApplyParamBindings,ParamBindingsProvider}
 
 pub struct Controls {
     pub bottom_lod:f32, pub right_lod:f32, pub top_lod:f32, pub left_lod:f32,
-    pub automatic_interior:f32, pub diagonal_lod:f32,
+    pub automatic_interior:f32,
+    /// Saved manual LoD exponent, used only when automatic interior selection is off.
+    pub diagonal_lod:f32,
+    /// Saved manual spoke exponents. Automatic mode preserves these requests.
     pub spoke_0_lod:f32, pub spoke_1_lod:f32, pub spoke_2_lod:f32, pub spoke_3_lod:f32,
     pub split:f32, pub center_x:f32, pub center_y:f32, pub compensate_density:f32,
     pub interior_enabled:f32, pub interior_concentration:f32, pub interior_twist:f32,
@@ -32,6 +35,17 @@ pub struct Params {
     /// Relative pull of the focus toward child corner A, B or C; not a corner position.
     pub focus_a:Param, pub focus_b:Param, pub focus_c:Param,
     pub width:Param, pub height:Param,
+    /// Visible segment counts, not saved manual requests. Zero means inactive.
+    pub diagonal_02_segments:Param,pub diagonal_13_segments:Param,
+    pub spoke_0_segments:Param,pub spoke_1_segments:Param,pub spoke_2_segments:Param,pub spoke_3_segments:Param,
+    /// Visible edges whose declared density demand exceeds their segment count.
+    pub unmet_edges:Param,
+    /// Visible edges still below demand at the maximum LoD8 count.
+    pub capped_edges:Param,
+    /// Largest demand minus actual count among visible edges.
+    pub max_unmet_segments:Param,
+    /// Requested primaries still pending; counts above describe the retained visible scene.
+    pub pending:Param,
 }
 impl SurfaceState for Controls { type Params = Params }
 derive ApplyParamBindings for Controls using ParamBindingsProvider
@@ -59,6 +73,16 @@ pub const fn params() -> Params {
         focus_b:Param::range(min:0.1,max:4.0,init:1.0),
         focus_c:Param::range(min:0.1,max:4.0,init:1.0),
         width:Param::extent_x(),height:Param::extent_y(),
+        diagonal_02_segments:Param::readout(ParamReadout::Integer),
+        diagonal_13_segments:Param::readout(ParamReadout::Integer),
+        spoke_0_segments:Param::readout(ParamReadout::Integer),
+        spoke_1_segments:Param::readout(ParamReadout::Integer),
+        spoke_2_segments:Param::readout(ParamReadout::Integer),
+        spoke_3_segments:Param::readout(ParamReadout::Integer),
+        unmet_edges:Param::readout(ParamReadout::Integer),
+        capped_edges:Param::readout(ParamReadout::Integer),
+        max_unmet_segments:Param::readout(ParamReadout::Scalar),
+        pending:Param::readout(ParamReadout::Integer),
     }
 }
 pub fn initial_controls() -> Controls {
@@ -144,4 +168,53 @@ pub fn edge_lods(_ controls:Controls) -> SquareEdgeLods {
         for i in 0 .. 4 { levels[6+i]=automatic_level(controls,i.downcast_truncate(),4) }
     }
     SquareEdgeLods {levels:levels}
+}
+
+/// Observations of one resolved visible topology, separate from input state.
+pub struct EdgeResolution {
+    /// Visible segment count; zero means this diagonal is inactive.
+    pub diagonal_02_segments:u32,pub diagonal_13_segments:u32,
+    /// Visible segment counts; zero means the four-child fan is inactive.
+    pub spoke_0_segments:u32,pub spoke_1_segments:u32,pub spoke_2_segments:u32,pub spoke_3_segments:u32,
+    /// Edges below the reference density demand, including manual under-resolution.
+    pub unmet_edges:u32,
+    /// Edges below demand even at LoD8 (256 segments).
+    pub capped_edges:u32,
+    /// Largest demand-minus-count shortfall; numerical noise below 0.0001 is ignored.
+    pub max_unmet_segments:f32,
+}
+impl Copy for EdgeResolution {}
+impl EdgeResolution {
+    pub fn empty()->Self {
+        Self {diagonal_02_segments:0,diagonal_13_segments:0,spoke_0_segments:0,spoke_1_segments:0,
+            spoke_2_segments:0,spoke_3_segments:0,unmet_edges:0,capped_edges:0,max_unmet_segments:0.0}
+    }
+}
+pub fn edge_resolution(_ controls:Controls,_ edges:SquareEdgeLods)->EdgeResolution {
+    let split=recipe(controls.split)
+    let mut counts=[0;10]
+    let mut result=EdgeResolution::empty()
+    for i in 0 .. (split.child_count() as usize) {
+        let triangle=split.child(i.downcast_truncate()).unwrap()
+        for side in 0 .. 3 {
+            let boundary=triangle.boundary(side.downcast_truncate()).unwrap()
+            let slot=boundary.square_slot().unwrap() as usize
+            if counts[slot]!=0 {continue}
+            let segments:u32=1<<edges.levels[slot]
+            counts[slot]=segments
+            let shortfall=edge_demand(controls,boundary.low,boundary.high)-lod_as_f32(segments)
+            if shortfall>0.0001 {
+                result.unmet_edges+=1
+                if segments==256 {result.capped_edges+=1}
+                if shortfall>result.max_unmet_segments {result.max_unmet_segments=shortfall}
+            }
+        }
+    }
+    result.diagonal_02_segments=counts[4]
+    result.diagonal_13_segments=counts[5]
+    result.spoke_0_segments=counts[6]
+    result.spoke_1_segments=counts[7]
+    result.spoke_2_segments=counts[8]
+    result.spoke_3_segments=counts[9]
+    result
 }
