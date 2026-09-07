@@ -65,6 +65,18 @@ derive EvaluateGaF32 for NormOperands using CompileGaF32<
 pub struct EuclideanCliffordAlgebra {}
 impl Copy for EuclideanCliffordAlgebra {}
 
+/// This instance's weight norm, taken from the compiled GA program rather than
+/// written out as a sum of squares, so a different signature supplies its own.
+pub struct EuclideanWeightNorm {}
+impl Copy for EuclideanWeightNorm {}
+impl quilting_patch::depth_field::WeightNormSquared<CliffordEven3F> for EuclideanWeightNorm {
+    fn norm_squared(self,_ weight:CliffordEven3F)->f32 {
+        <NormOperands as EvaluateGaF32>::evaluate(
+            NormOperands {weight:weight_coefficients(weight)},
+        ).0
+    }
+}
+
 /// Arc-length measure for compatible Euclidean circular controls. A common
 /// right gauge scales all magnitudes equally and cancels from the midpoint
 /// construction. This does not assert the same law for indefinite metrics.

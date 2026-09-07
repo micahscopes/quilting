@@ -364,6 +364,41 @@ pub fn measured_area_density_at(_ kind:u32,_ u:f32,_ v:f32,_ h:f32,_ bulge:f32)-
     fmath::sqrt(cx*cx+cy*cy+cz*cz)
 }
 
+fn authored_triangle_gram(_ bulge:f32)->quilting_patch::depth_field::TriangleGram {
+    use quilting_patch::depth_field::triangle_gram
+    use quilting_clifford_bezier::euclidean::EuclideanWeightNorm
+    let mut c=initial_controls()
+    c.surface_kind=1.0
+    c.midpoint_z=bulge
+    let net=composite_atlas::surface::authored(c)
+    // Controls a, b, d match the evaluator's triangular ordering.
+    triangle_gram(EuclideanWeightNorm {},net.a.weight,net.b.weight,net.d.weight)
+}
+/// The denominator norm from the Gram alone, with no re-blending of weights and
+/// no hard-coded signature. Validates the depth field's own arithmetic path.
+pub fn gram_norm(_ u:f32,_ v:f32,_ bulge:f32)->f32 {
+    authored_triangle_gram(bulge).at(bary3f(1.0-u-v,u,v))
+}
+/// Certified bound of that norm over a sub-triangle given by its three
+/// barycentric corners. `which` selects low, high, or the certification flag.
+pub fn gram_sub_bound(_ a1:f32,_ a2:f32,_ b1:f32,_ b2:f32,_ c1:f32,_ c2:f32,
+    _ which:u32,_ bulge:f32)->f32 {
+    let interval=authored_triangle_gram(bulge).sub_interval(
+        bary3f(1.0-a1-a2,a1,a2),bary3f(1.0-b1-b2,b1,b2),bary3f(1.0-c1-c2,c1,c2))
+    if which==0 {interval.low}
+    else if which==1 {interval.high}
+    else if interval.certified {1.0} else {0.0}
+}
+/// Level a whole region can be given unambiguously, or the uncertified marker.
+pub fn gram_region_level(_ a1:f32,_ a2:f32,_ b1:f32,_ b2:f32,_ c1:f32,_ c2:f32,
+    _ reference_norm:f32,_ bulge:f32)->i32 {
+    use quilting_patch::depth_field::DepthLadder
+    let gram=authored_triangle_gram(bulge)
+    let interval=gram.sub_interval(
+        bary3f(1.0-a1-a2,a1,a2),bary3f(1.0-b1-b2,b1,b2),bary3f(1.0-c1-c2,c1,c2))
+    DepthLadder {reference_norm:reference_norm,reference_level:0}.region_level(interval)
+}
+
 pub fn geometric_patch_view_laws()->bool {
     let mut c=initial_controls()
     for kind in [1.0,2.0] {

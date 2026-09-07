@@ -1,0 +1,116 @@
+//! Certified subdivision depth from the denominator's quadratic form.
+//!
+//! Recursive tile substitution has to know, for a whole sub-triangle rather
+//! than for samples of it, which subdivision depth keeps surface triangle area
+//! inside a target. Surface area density is a constant over the denominator
+//! norm squared, so that entire decision reduces to bounding the norm. This
+//! bounds it exactly through the Bernstein hull, and evaluates no logarithm:
+//! a depth threshold is a comparison against a geometric ladder of norms.
+//!
+//! Nothing here assumes a signature. Gram entries come from whatever norm the
+//! algebra supplies, recovered by polarization, so an indefinite metric is
+//! representable. That is not the same as safe: a norm reaching zero inside the
+//! region is a pole or a null crossing, and the certificate says so rather than
+//! reporting a merely large density.
+
+use core::marker::Copy
+use quilting_domain::Bary3F
+use super::LinearElement
+
+/// The algebra's own weight norm. Implement this instead of assuming a sum of
+/// squares; the polarization below is valid for any symmetric bilinear form.
+pub trait WeightNormSquared<W: LinearElement>: Copy {
+    fn norm_squared(self, _ weight: W) -> f32
+}
+
+/// Symmetric Gram of a triangular patch's three control weights.
+pub struct TriangleGram {
+    pub g00: f32, pub g11: f32, pub g22: f32,
+    pub g01: f32, pub g02: f32, pub g12: f32,
+}
+impl Copy for TriangleGram {}
+
+/// Six norm evaluations, once per geometry edit. Polarization keeps this free
+/// of any assumption about the metric beyond bilinearity of its scalar product.
+pub fn triangle_gram<W: LinearElement, N: WeightNormSquared<W>>(
+    _ norm: N, _ a: W, _ b: W, _ c: W,
+) -> TriangleGram {
+    let g00 = norm.norm_squared(a)
+    let g11 = norm.norm_squared(b)
+    let g22 = norm.norm_squared(c)
+    TriangleGram {
+        g00: g00, g11: g11, g22: g22,
+        g01: (norm.norm_squared(a.plus(b)) - g00 - g11) * 0.5,
+        g02: (norm.norm_squared(a.plus(c)) - g00 - g22) * 0.5,
+        g12: (norm.norm_squared(b.plus(c)) - g11 - g22) * 0.5,
+    }
+}
+
+/// A conservative interval for the denominator norm over a whole region.
+/// `certified` is false when the region can reach a non-positive norm.
+pub struct NormInterval { pub low: f32, pub high: f32, pub certified: bool }
+impl Copy for NormInterval {}
+
+impl TriangleGram {
+    /// The symmetric bilinear form whose diagonal is the denominator norm.
+    pub fn bilinear(self, _ x: Bary3F, _ y: Bary3F) -> f32 {
+        self.g00 * x.a * y.a + self.g11 * x.b * y.b + self.g22 * x.c * y.c
+            + self.g01 * (x.a * y.b + x.b * y.a)
+            + self.g02 * (x.a * y.c + x.c * y.a)
+            + self.g12 * (x.b * y.c + x.c * y.b)
+    }
+    pub fn at(self, _ p: Bary3F) -> f32 { self.bilinear(p, p) }
+    /// Exact degree-two Bernstein coefficients of the restriction to a
+    /// sub-triangle. For a quadratic form those coefficients ARE its polar
+    /// values at the corner pairs, so the hull of these six numbers bounds the
+    /// form over the whole sub-triangle rather than at sampled points.
+    pub fn sub_interval(self, _ a: Bary3F, _ b: Bary3F, _ c: Bary3F) -> NormInterval {
+        let coefficients = [self.at(a), self.at(b), self.at(c),
+            self.bilinear(a, b), self.bilinear(a, c), self.bilinear(b, c)]
+        let mut low = coefficients[0]
+        let mut high = coefficients[0]
+        for i in 1 .. 6 {
+            let value = coefficients[i]
+            if value < low { low = value }
+            if value > high { high = value }
+        }
+        NormInterval { low: low, high: high, certified: low > 0.0 }
+    }
+}
+
+/// Depth without a logarithm. Each level quarters reference area while density
+/// is the reciprocal square of the norm, so one level of depth is exactly one
+/// factor of two in the norm. `UNCERTIFIED_LEVEL` marks a region whose norm can
+/// vanish; callers must clamp and flag it rather than subdividing blindly.
+pub const UNCERTIFIED_LEVEL: i32 = 127
+const LADDER_LIMIT: i32 = 40
+pub struct DepthLadder { pub reference_norm: f32, pub reference_level: i32 }
+impl Copy for DepthLadder {}
+impl DepthLadder {
+    /// Largest level whose rung still admits this norm.
+    pub fn level(self, _ norm: f32) -> i32 {
+        if !(norm > 0.0) || !(1.0 / norm > 0.0) { return UNCERTIFIED_LEVEL }
+        let mut value = self.reference_norm
+        let mut level = self.reference_level
+        let mut steps: i32 = 0
+        while value * 0.5 >= norm && steps < LADDER_LIMIT {
+            value = value * 0.5
+            level = level + 1
+            steps = steps + 1
+        }
+        while value < norm && steps < LADDER_LIMIT {
+            value = value * 2.0
+            level = level - 1
+            steps = steps + 1
+        }
+        level
+    }
+    /// The level a whole region can be given unambiguously, or `UNCERTIFIED_LEVEL`
+    /// when its own interval straddles a rung and the caller must decide.
+    pub fn region_level(self, _ interval: NormInterval) -> i32 {
+        if !interval.certified { return UNCERTIFIED_LEVEL }
+        let coarse = self.level(interval.high)
+        let fine = self.level(interval.low)
+        if coarse == fine { coarse } else { UNCERTIFIED_LEVEL }
+    }
+}

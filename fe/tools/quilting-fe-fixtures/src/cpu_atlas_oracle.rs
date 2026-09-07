@@ -368,6 +368,136 @@ fn density_field_octave_range_decides_whether_recursion_helps() {
     }
 }
 
+/// A single atlas tile is uniform in the reference domain, so whatever density
+/// varies WITHIN one child is residual the composition cannot correct. Splitting
+/// the square into more children shrinks each child and therefore that residual,
+/// which makes fan count a cheaper lever than recursion. This reports the worst
+/// per-child depth span for each candidate recipe on the quad domain.
+#[test]
+fn finer_fan_counts_shrink_the_within_child_depth_span() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let density=instance.get_typed_func::<(i32,f32,f32,f32,f32),f32>(&mut store,"measured_area_density_at").unwrap();
+    let corner=|i:usize| -> (f64,f64) {[(0.0,0.0),(1.0,0.0),(1.0,1.0),(0.0,1.0)][i]};
+    let mid=|a:(f64,f64),b:(f64,f64)| ((a.0+b.0)/2.0,(a.1+b.1)/2.0);
+    let centre=(0.5,0.5);
+    // Each recipe as a list of child triangles in reference coordinates.
+    let mut recipes:Vec<(&str,Vec<[(f64,f64);3]>)>=Vec::new();
+    recipes.push(("whole square",vec![[corner(0),corner(1),corner(2)],[corner(0),corner(2),corner(3)]]));
+    recipes.push(("4-fan",(0..4).map(|i| [corner(i),corner((i+1)%4),centre]).collect()));
+    recipes.push(("8-fan",(0..4).flat_map(|i| {
+        let (a,b)=(corner(i),corner((i+1)%4));
+        let m=mid(a,b);
+        [[a,m,centre],[m,b,centre]]
+    }).collect()));
+    recipes.push(("16-fan",(0..4).flat_map(|i| {
+        let (a,b)=(corner(i),corner((i+1)%4));
+        let (m,p,q)=(mid(a,b),mid(a,mid(a,b)),mid(mid(a,b),b));
+        [[a,p,centre],[p,m,centre],[m,q,centre],[q,b,centre]]
+    }).collect()));
+    for bulge in [1.2_f32,2.4,4.8] {
+        let mut line=format!("FAN_SPAN bulge={bulge}:");
+        for (name,children) in &recipes {
+            let mut worst=0.0_f64;
+            for tri in children {
+                let (mut lo,mut hi)=(f64::INFINITY,0.0_f64);
+                // Barycentric sampling strictly inside the child.
+                for i in 1..14 { for j in 1..(14-i) {
+                    let (a,b)=(f64::from(i)/14.0,f64::from(j)/14.0);
+                    let c=1.0-a-b;
+                    let u=tri[0].0*a+tri[1].0*b+tri[2].0*c;
+                    let v=tri[0].1*a+tri[1].1*b+tri[2].1*c;
+                    let d=f64::from(density.call(&mut store,(1,u as f32,v as f32,1.0/1024.0,bulge)).unwrap());
+                    if !(d>0.0) {continue;}
+                    lo=lo.min(d); hi=hi.max(d);
+                }}
+                if lo.is_finite() && hi>0.0 {worst=worst.max(0.5*(hi/lo).log2());}
+            }
+            line.push_str(&format!("  {name}={worst:.3}"));
+        }
+        eprintln!("{line}");
+    }
+}
+
+/// Acceptance for the depth field: the Gram path must reproduce the measured
+/// density law, and its sub-triangle intervals must be certificates over whole
+/// regions rather than sampled ranges. A hull bound that a sample escapes would
+/// make recursive depth selection unsound.
+#[test]
+fn depth_field_gram_reproduces_the_density_law_and_certifies_regions() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let norm=instance.get_typed_func::<(f32,f32,f32),f32>(&mut store,"gram_norm").unwrap();
+    let bound=instance.get_typed_func::<(f32,f32,f32,f32,f32,f32,i32,f32),f32>(&mut store,"gram_sub_bound").unwrap();
+    let density=instance.get_typed_func::<(i32,f32,f32,f32,f32),f32>(&mut store,"measured_area_density_at").unwrap();
+    let level=instance.get_typed_func::<(f32,f32,f32,f32,f32,f32,f32,f32),i32>(&mut store,"gram_region_level").unwrap();
+    for bulge in [0.6_f32,2.4] {
+        // 1. Density times the squared Gram norm must be constant, which is the
+        // same law verified against central differences but reached through the
+        // polarized Gram rather than by re-blending weights.
+        let mut ratios=Vec::new();
+        for i in 1..12 { for j in 1..(12-i) {
+            let (u,v)=(f64::from(i)/12.0,f64::from(j)/12.0);
+            let n=f64::from(norm.call(&mut store,(u as f32,v as f32,bulge)).unwrap());
+            let d=f64::from(density.call(&mut store,(0,u as f32,v as f32,1.0/1024.0,bulge)).unwrap());
+            assert!(n>0.0 && d>0.0,"gram norm {n} density {d} at {u},{v}");
+            ratios.push(d*n*n);
+        }}
+        let mean=ratios.iter().sum::<f64>()/ratios.len() as f64;
+        let spread=ratios.iter().map(|r| (r/mean-1.0).abs()).fold(0.0_f64,f64::max);
+        eprintln!("DEPTH_FIELD bulge={bulge}: {} samples, density*norm^2 spread={spread:.8}",ratios.len());
+        assert!(spread<2e-3,"gram path does not reproduce the density law: {spread}");
+
+        // 2. The hull bound is conservative, so a large region at high curvature
+        // may refuse to certify. That is correct fail-closed behaviour, not a
+        // defect: what must hold is that certified intervals never lie, and that
+        // subdivision converges to certification.
+        let root=[(0.02_f64,0.02_f64),(0.96,0.02),(0.02,0.96)];
+        let mut regions=vec![root];
+        for depth in 0..4 {
+            let mut certified_count=0usize;
+            let mut worst_ratio=0.0_f64;
+            for tri in &regions {
+                let a=(tri[0].0 as f32,tri[0].1 as f32,tri[1].0 as f32,tri[1].1 as f32,
+                       tri[2].0 as f32,tri[2].1 as f32);
+                let certified=bound.call(&mut store,(a.0,a.1,a.2,a.3,a.4,a.5,2,bulge)).unwrap();
+                if certified!=1.0 {continue;}
+                certified_count+=1;
+                let lo=f64::from(bound.call(&mut store,(a.0,a.1,a.2,a.3,a.4,a.5,0,bulge)).unwrap());
+                let hi=f64::from(bound.call(&mut store,(a.0,a.1,a.2,a.3,a.4,a.5,1,bulge)).unwrap());
+                worst_ratio=worst_ratio.max(hi/lo);
+                for i in 0..13 { for j in 0..(13-i) {
+                    let (x,y)=(f64::from(i)/12.0,f64::from(j)/12.0);
+                    let z=1.0-x-y;
+                    let u=tri[0].0*x+tri[1].0*y+tri[2].0*z;
+                    let v=tri[0].1*x+tri[1].1*y+tri[2].1*z;
+                    let n=f64::from(norm.call(&mut store,(u as f32,v as f32,bulge)).unwrap());
+                    assert!(n>=lo*(1.0-1e-4) && n<=hi*(1.0+1e-4),
+                        "certified hull escaped at bulge {bulge}: {n} outside {lo}..{hi}");
+                }}
+            }
+            eprintln!("DEPTH_FIELD bulge={bulge} depth {depth}: {certified_count}/{} certified, worst interval ratio={worst_ratio:.4}",regions.len());
+            if depth==3 {
+                assert_eq!(certified_count,regions.len(),
+                    "subdivision must converge to certification by depth 3 at bulge {bulge}");
+            }
+            let mid=|a:(f64,f64),b:(f64,f64)| ((a.0+b.0)/2.0,(a.1+b.1)/2.0);
+            regions=regions.iter().flat_map(|t| {
+                let (m01,m02,m12)=(mid(t[0],t[1]),mid(t[0],t[2]),mid(t[1],t[2]));
+                [[t[0],m01,m02],[m01,t[1],m12],[m02,m12,t[2]],[m01,m12,m02]]
+            }).collect();
+        }
+    }
+}
+
 #[test]
 fn composition_wasm_boundary_locality_sweep() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
