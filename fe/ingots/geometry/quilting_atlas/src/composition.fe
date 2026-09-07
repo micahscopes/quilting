@@ -2,6 +2,8 @@
 //! Square corners 0..3 run counterclockwise; 4 denotes an interior point.
 //! A recipe proves neither sampling quality nor injectivity of a later warp.
 use core::marker::Copy
+use core::option::Option
+use super::{AtlasKey, CanonicalKey, canonicalize, permute_key}
 
 pub enum SquareSplit { Diagonal02, Diagonal13, InteriorFan }
 impl Copy for SquareSplit {}
@@ -22,30 +24,94 @@ impl BoundaryUse {
         assert(index <= segments)
         if self.reversed { segments - index } else { index }
     }
+
+    /// Stable slots: four outer edges, two diagonals, four corner-to-center
+    /// spokes. Traversal direction never changes the shared density owner.
+    pub fn square_slot(self) -> Option<usize> {
+        if self.high == 4 && self.low < 4 { return Option::Some((6 + self.low) as usize) }
+        if self.low == 0 && self.high == 1 { Option::Some(0) }
+        else if self.low == 1 && self.high == 2 { Option::Some(1) }
+        else if self.low == 2 && self.high == 3 { Option::Some(2) }
+        else if self.low == 0 && self.high == 3 { Option::Some(3) }
+        else if self.low == 0 && self.high == 2 { Option::Some(4) }
+        else if self.low == 1 && self.high == 3 { Option::Some(5) }
+        else { Option::None }
+    }
 }
 
-pub struct ChildTriangle { pub vertices: [u32; 3] }
+/// Authored or resolved exponents, before any canonical primary selection.
+/// Automatic policies produce this same value as manual controls; topology
+/// neither promotes outer requests nor invents a density interpolation policy.
+pub struct SquareEdgeLods { pub levels: [u32; 10] }
+impl Copy for SquareEdgeLods {}
+pub struct ChildRequest { pub triangle: ChildTriangle, pub primary: CanonicalKey }
+impl Copy for ChildRequest {}
+
+pub struct ChildTriangle { pub a: u32, pub b: u32, pub c: u32 }
 impl Copy for ChildTriangle {}
 impl ChildTriangle {
+    pub fn resolve(self, _ edges: SquareEdgeLods) -> Option<ChildRequest> {
+        let ab = match self.boundary(0).square_slot() { Option::Some(slot) => edges.levels[slot], _ => return Option::None }
+        let bc = match self.boundary(1).square_slot() { Option::Some(slot) => edges.levels[slot], _ => return Option::None }
+        let ca = match self.boundary(2).square_slot() { Option::Some(slot) => edges.levels[slot], _ => return Option::None }
+        if ab > 8 || bc > 8 || ca > 8 { return Option::None }
+        // Sampler lanes are opposite the corresponding barycentric vertex,
+        // not the counterclockwise ring order used by the topology recipe.
+        Option::Some(ChildRequest { triangle:self,
+            primary:canonicalize(AtlasKey { a:bc,b:ca,c:ab }) })
+    }
     /// Edge lanes follow the child's counterclockwise ring, not an implicit
     /// sampler convention. The primary-atlas adapter must map lanes explicitly.
     pub fn boundary(self, _ side: usize) -> BoundaryUse {
         assert(side < 3)
-        BoundaryUse::between(self.vertices[side], self.vertices[(side + 1) % 3])
+        if side == 0 { BoundaryUse::between(self.a, self.b) }
+        else if side == 1 { BoundaryUse::between(self.b, self.c) }
+        else { BoundaryUse::between(self.c, self.a) }
     }
+}
+
+#[test]
+fn composition_resolves_every_outer_request_without_promotion() {
+    let recipes = [SquareSplit::Diagonal02,SquareSplit::Diagonal13,SquareSplit::InteriorFan]
+    for encoded in 0 .. 6561 {
+        let n:u32 = encoded.downcast_truncate()
+        let edges = SquareEdgeLods { levels:[n%9,(n/9)%9,(n/81)%9,(n/729)%9,0,8,1,3,5,7] }
+        for recipe in recipes {
+            for i in 0 .. (recipe.child_count() as usize) {
+                let child = recipe.child(i.downcast_truncate()).unwrap()
+                let resolved = child.resolve(edges).unwrap()
+                let requested = permute_key(resolved.primary.key,resolved.primary.permutation)
+                let ring = [requested.c,requested.a,requested.b]
+                for side in 0 .. 3 {
+                    let edge = child.boundary(side)
+                    let slot = edge.square_slot().unwrap()
+                    assert(ring[side] == edges.levels[slot])
+                    let reverse = BoundaryUse::between(edge.high,edge.low)
+                    assert(reverse.square_slot().unwrap() == slot)
+                }
+            }
+        }
+    }
+    let invalid = ChildTriangle {a:0,b:0,c:4}
+    assert(invalid.resolve(SquareEdgeLods {levels:[0;10]}).is_none())
+    assert(ChildTriangle {a:0,b:1,c:2}.resolve(SquareEdgeLods {levels:[9;10]}).is_none())
 }
 impl SquareSplit {
     pub fn child_count(self) -> u32 {
         match self { Self::InteriorFan => 4, _ => 2 }
     }
-    pub fn child(self, _ index: u32) -> ChildTriangle {
-        assert(index < self.child_count())
-        let vertices = match self {
-            Self::Diagonal02 => if index == 0 { [0, 1, 2] } else { [0, 2, 3] },
-            Self::Diagonal13 => if index == 0 { [0, 1, 3] } else { [1, 2, 3] },
-            Self::InteriorFan => [index, (index + 1) % 4, 4],
+    pub fn child(self, _ index: u32) -> Option<ChildTriangle> {
+        if index >= self.child_count() { return Option::None }
+        let triangle = match self {
+            Self::Diagonal02 => if index == 0 { ChildTriangle { a:0,b:1,c:2 } }
+                else { ChildTriangle { a:0,b:2,c:3 } },
+            Self::Diagonal13 => if index == 0 { ChildTriangle { a:0,b:1,c:3 } }
+                else { ChildTriangle { a:1,b:2,c:3 } },
+            // The range check above bounds index to 0..4; explicit modular
+            // arithmetic also admits this pure recipe in trap-free shaders.
+            Self::InteriorFan => ChildTriangle { a:index,b:index.wrapping_add(1) % 4,c:4 },
         }
-        ChildTriangle { vertices: vertices }
+        Option::Some(triangle)
     }
 }
 
@@ -53,16 +119,20 @@ impl SquareSplit {
 fn composition_shared_edges_reverse_exactly() {
     let recipes = [SquareSplit::Diagonal02, SquareSplit::Diagonal13, SquareSplit::InteriorFan]
     for recipe in recipes {
+        assert(recipe.child(recipe.child_count()).is_none())
+        assert(recipe.child(0xffffffff).is_none())
         let mut seams: u32 = 0
         let mut outer: u32 = 0
         for child in 0 .. (recipe.child_count() as usize) {
             for side in 0 .. 3 {
-                let edge = recipe.child(child.downcast_truncate()).boundary(side)
+                let triangle = recipe.child(child.downcast_truncate()).unwrap()
+                let edge = triangle.boundary(side)
                 let mut matches: u32 = 0
                 for other in 0 .. (recipe.child_count() as usize) {
                     if other != child {
                         for lane in 0 .. 3 {
-                            let peer = recipe.child(other.downcast_truncate()).boundary(lane)
+                            let neighbor = recipe.child(other.downcast_truncate()).unwrap()
+                            let peer = neighbor.boundary(lane)
                             if edge.low == peer.low && edge.high == peer.high {
                                 matches += 1
                                 assert(edge.reversed != peer.reversed)

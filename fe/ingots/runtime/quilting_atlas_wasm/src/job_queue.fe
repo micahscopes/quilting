@@ -76,6 +76,12 @@ impl<const N: usize> JobQueue<N> {
         if let BatchState::Running = self.state { self.state = BatchState::Cancelled }
     }
     pub fn completed(self) -> u32 { self.completed }
+
+    /// The unclaimed prefix of the caller's key table. Only this prefix may
+    /// be reordered: issued ordinals retain their identity through completion.
+    pub fn unclaimed(self) -> u32 {
+        if let BatchState::Running = self.state { self.next } else { 0 }
+    }
 }
 
 #[test]

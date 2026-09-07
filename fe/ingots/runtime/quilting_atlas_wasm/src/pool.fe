@@ -78,6 +78,45 @@ impl<const N: usize> PoolHandle<N> {
         let p: BrowserPtr<AtlasPool<N>> = BrowserPtr::from_u32(self.address)
         with (p) { ingot::pool::summary<N>() }
     }
+    /// Promote a not-yet-issued key without changing any live lease or tile.
+    /// Pending ordinals are queue positions, not stable cache identities.
+    pub fn prioritize(self, _ requested: TileKey) -> bool {
+        let p: BrowserPtr<AtlasPool<N>> = BrowserPtr::from_u32(self.address)
+        with (p) { ingot::pool::prioritize<N>(requested) }
+    }
+    pub fn find(self, _ requested: TileKey) -> u32 {
+        let p: BrowserPtr<AtlasPool<N>> = BrowserPtr::from_u32(self.address)
+        with (p) { ingot::pool::find<N>(requested) }
+    }
+}
+
+fn same_key(_ a: TileKey, _ b: TileKey) -> bool {
+    a.square == b.square && a.a == b.a && a.b == b.b && a.c == b.c && a.d == b.d
+}
+
+/// Look up by semantic key after any priority edits. Issued/retained entries
+/// never move; only not-yet-issued keys can exchange queue positions.
+pub fn find<const N: usize>(_ requested: TileKey) -> u32 uses (pool: AtlasPool<N>) {
+    for i in 0 .. (pool.summary.total as usize) {
+        if same_key(pool.keys[i], requested) { return i.downcast_truncate() }
+    }
+    0xffffffff
+}
+
+pub fn prioritize<const N: usize>(_ requested: TileKey) -> bool uses (pool: mut AtlasPool<N>) {
+    if pool.summary.status != 0 { return false }
+    let pending = pool.queue.unclaimed()
+    if pending == 0 { return false }
+    let last = (pending - 1) as usize
+    for i in 0 .. (pending as usize) {
+        if same_key(pool.keys[i], requested) {
+            let displaced = pool.keys[last]
+            pool.keys[last] = pool.keys[i]
+            pool.keys[i] = displaced
+            return true
+        }
+    }
+    false
 }
 
 pub fn create<const N: usize>(_ epoch: u32, _ maximum_lod: u32) -> BrowserPtr<AtlasPool<N>> {
@@ -87,16 +126,66 @@ pub fn create<const N: usize>(_ epoch: u32, _ maximum_lod: u32) -> BrowserPtr<At
     ptr
 }
 
-fn initialize<const N: usize>(_ epoch: u32, _ maximum_lod: u32)
+/// Generate an explicit set of primary tiles, not the whole direct atlas.
+/// Initially ordinals follow the caller's order. Explicit `prioritize` may
+/// reorder unissued keys; consumers using it must resolve via `find`. No hidden
+/// deduplication or density promotion occurs. The retained copy owns its input.
+pub fn create_jobs<const N: usize, const M: usize>(
+    _ epoch: u32, _ keys: own [TileKey; M],
+) -> BrowserPtr<AtlasPool<N>> {
+    let ptr = alloc_browser_object<AtlasPool<N>>()
+    if ptr.address() == 0 { return ptr }
+    with (ptr) { initialize_jobs<N, M>(epoch, keys) }
+    ptr
+}
+
+fn initialize_jobs<const N: usize, const M: usize>(_ epoch: u32, _ keys: [TileKey; M])
+uses (pool: mut AtlasPool<N>) {
+    initialize_storage<N>(epoch)
+    if pool.summary.status != 0 { return }
+    if M == 0 || M > MAX_TILES {
+        pool.summary.status = 2
+        return
+    }
+    for i in 0 .. M {
+        let k = keys[i]
+        if k.a > 8 || k.b > 8 || k.c > 8 || k.d > 8 {
+            pool.summary.status = 2
+            return
+        }
+        pool.keys[i] = k
+        pool.entries[i] = TileEntry { offset: 0, words: 0, points: 0, triangles: 0 }
+    }
+    pool.summary.total = M.downcast_truncate()
+    pool.queue = JobQueue::new(epoch, pool.summary.total)
+}
+
+fn initialize_storage<const N: usize>(_ epoch: u32)
 uses (pool: mut AtlasPool<N>) {
     pool.summary = PoolSummary { epoch: epoch, total: 0, completed: 0,
         words: 0, points: 0, triangles: 0, status: 0 }
     pool.storage = 0
     pool.queue = JobQueue::new(epoch, 0)
-    if maximum_lod > 8 || N == 0 { pool.summary.status = 2; return }
+    if N == 0 {
+        pool.summary.status = 2
+        return
+    }
     let bytes = alloc_browser_bytes(RETAINED_WORDS * 4 + 3)
-    if bytes.address() == 0 { pool.summary.status = 3; return }
+    if bytes.address() == 0 {
+        pool.summary.status = 3
+        return
+    }
     pool.storage = (bytes.address() + 3) & 0xfffffffc
+}
+
+fn initialize<const N: usize>(_ epoch: u32, _ maximum_lod: u32)
+uses (pool: mut AtlasPool<N>) {
+    initialize_storage<N>(epoch)
+    if pool.summary.status != 0 { return }
+    if maximum_lod > 8 {
+        pool.summary.status = 2
+        return
+    }
     let mut count: u32 = 0
     for ordinal in 0 .. 165 {
         let key = canonical_key_at(ordinal)

@@ -5,6 +5,36 @@ use quilting_atlas_wasm::pool
 use quilting_atlas_wasm::pool::{AtlasPool, PoolSummary, TileEntry}
 
 pub fn create(_ maximum_lod: u32) -> u32 { pool::create<4>(1, maximum_lod).address() }
+pub fn create_primaries(_ invalid: bool) -> u32 {
+    pool::create_jobs<4,2>(7,[
+        pool::TileKey { square:false,a:0,b:0,c:0,d:0 },
+        pool::TileKey { square:false,a:0,b:1,c:if invalid {9} else {1},d:0 },
+    ]).address()
+}
+pub fn create_empty() -> u32 { pool::create_jobs<4,0>(8,[]).address() }
+pub fn priority_preserves_live_leases() -> bool {
+    let small = pool::TileKey { square:false,a:0,b:0,c:0,d:0 }
+    let middle = pool::TileKey { square:false,a:0,b:1,c:1,d:0 }
+    let large = pool::TileKey { square:false,a:0,b:2,c:2,d:0 }
+    let p = pool::create_jobs<4,3>(9,[small,middle,large])
+    let handle: pool::PoolHandle<4> = pool::PoolHandle::from_address(p.address())
+    let a = match handle.claim(0) { Claim::Job(lease) => lease, _ => return false }
+    if a.ordinal != 2 || handle.prioritize(large) { return false }
+    if !handle.prioritize(small) || !handle.prioritize(small) { return false }
+    if handle.find(small) != 1 || handle.find(middle) != 0 || handle.find(large) != 2 { return false }
+    let b = match handle.claim(1) { Claim::Job(lease) => lease, _ => return false }
+    if b.ordinal != 1 || handle.prioritize(small) { return false }
+    // The first lease remains tied to the original key, even after promotion.
+    let key = handle.key(a.ordinal)
+    if key.b != 2 || key.c != 2 { return false }
+    if let Completion::Accepted = handle.finish(b,packed_triangle(0,0,0,42)) {} else { return false }
+    if let Completion::Accepted = handle.finish(a,packed_triangle(0,2,2,42)) {} else { return false }
+    if !handle.prioritize(middle) { return false }
+    let c = match handle.claim(2) { Claim::Job(lease) => lease, _ => return false }
+    if c.ordinal != 0 { return false }
+    if let Completion::Accepted = handle.finish(c,packed_triangle(0,1,1,42)) {} else { return false }
+    handle.summary().completed == 3 && !handle.prioritize(middle)
+}
 pub fn summary(_ address: u32) -> PoolSummary {
     let p: BrowserPtr<AtlasPool<4>> = BrowserPtr::from_u32(address)
     with (p) { pool::summary<4>() }

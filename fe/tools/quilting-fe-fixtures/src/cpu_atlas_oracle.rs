@@ -50,6 +50,8 @@ fn cpu_atlas_wasm_pool_retains_tiles_and_rejects_cancelled_results() {
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
     let create = instance.get_typed_func::<i32, i32>(&mut store, "create").unwrap();
+    let primaries = instance.get_typed_func::<i32, i32>(&mut store, "create_primaries").unwrap();
+    let empty = instance.get_typed_func::<(), i32>(&mut store, "create_empty").unwrap();
     let summary = instance.get_typed_func::<i32, (i32,i32,i32,i32,i32,i32,i32)>(&mut store, "summary").unwrap();
     let generate = instance.get_typed_func::<(i32,i32,i32),i32>(&mut store, "generate_one").unwrap();
     let entry = instance.get_typed_func::<(i32,i32),(i32,i32,i32,i32)>(&mut store, "entry").unwrap();
@@ -58,6 +60,27 @@ fn cpu_atlas_wasm_pool_retains_tiles_and_rejects_cancelled_results() {
     let update_info = instance.get_typed_func::<(i32,i32,i32),(i32,i32,i32,i32,i32,i32)>(&mut store, "update_info").unwrap();
     let memory = instance.get_memory(&mut store, "memory").unwrap();
     let reset = instance.get_typed_func::<(),()>(&mut store,"fe_cabi_reset").unwrap();
+    let priority = instance.get_typed_func::<(),i32>(&mut store,"priority_preserves_live_leases").unwrap();
+    assert_eq!(priority.call(&mut store,()).unwrap(),1);
+    reset.call(&mut store,()).unwrap();
+    // Explicit primary requests retain their caller's ordinal, independently
+    // of full-atlas enumeration. Neither invalid nor empty recipes can run.
+    let chosen = primaries.call(&mut store, 0).unwrap();
+    assert_eq!(summary.call(&mut store, chosen).unwrap(), (7,2,0,0,0,0,0));
+    assert_eq!(generate.call(&mut store, (chosen,0,0)).unwrap(), 0);
+    assert!(entry.call(&mut store, (chosen,1)).unwrap().3 > 0);
+    assert_eq!(tile_info.call(&mut store, (chosen,0)).unwrap().0, 1);
+    assert_eq!(generate.call(&mut store, (chosen,1,0)).unwrap(), 0);
+    assert!(entry.call(&mut store, (chosen,0)).unwrap().3 > 0);
+    assert_eq!(generate.call(&mut store, (chosen,0,0)).unwrap(), 4);
+    reset.call(&mut store, ()).unwrap();
+    let bad = primaries.call(&mut store, 1).unwrap();
+    assert_eq!(summary.call(&mut store, bad).unwrap(), (7,0,0,0,0,0,2));
+    assert_eq!(generate.call(&mut store, (bad,0,0)).unwrap(), 7);
+    reset.call(&mut store, ()).unwrap();
+    let absent = empty.call(&mut store, ()).unwrap();
+    assert_eq!(summary.call(&mut store, absent).unwrap(), (8,0,0,0,0,0,2));
+    reset.call(&mut store, ()).unwrap();
     // Enumerate the entire requested key space without generating expensive
     // geometry in this ownership regression. Full generation has separate gates.
     let full = create.call(&mut store, 8).unwrap();

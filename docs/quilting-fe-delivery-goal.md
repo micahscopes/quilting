@@ -27,6 +27,22 @@ method, but must not be mislabeled as a directly generated quad atlas.
 
 ## Starting truth
 
+### Implementation checkpoint: shared requests and priority
+
+- Implemented `SquareEdgeLods` and per-child canonical/permutation resolution;
+  tested all6,561 outer requests across both diagonals and the interior fan,
+  with distinct interior values and explicit invalid-input rejection. This
+  verifies request planning, not rendered seam positions or spacing quality.
+- Implemented promotion of unclaimed worker jobs plus semantic-key lookup;
+  running leases and retained tiles do not move. The release Wasm pool test
+  passed, including promotion with live work, idempotent requests, retained
+  completion and existing cancellation/recovery ownership checks.
+- Evidence: `/laboratory/quilting/scratch/composite-requests-test-20260907.log`
+  (two Fe tests passed) and `composite-priority-regression-20260907.log`
+  (release Wasm pool regression passed, 14.49s test runtime, not an atlas benchmark).
+- Doing next: per-child resident/draw descriptors, mixed primary access and UI
+  integration. The served affine demo has not gained the new controls yet.
+
 - The composition source currently repeats one uniform primary across two or
   four children. Independent edge selection and compensation are unfinished.
 - Shared directed-boundary recipes and tests exist; those tests do not yet
