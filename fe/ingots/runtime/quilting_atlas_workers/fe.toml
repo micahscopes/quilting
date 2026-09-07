@@ -1,9 +1,8 @@
 [ingot]
-name = "atlas_pool_workers"
+name = "quilting_atlas_workers"
 version = "0.1.0"
 
 [dependencies]
 core = true
 std = true
 quilting_atlas_wasm = true
-quilting_atlas_workers = true

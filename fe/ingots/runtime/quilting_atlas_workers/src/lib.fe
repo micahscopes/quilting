@@ -1,0 +1,76 @@
+//! Persistent worker orchestration shared by atlas validation and viewers.
+//! Fe owns job claims, lease checks, retention, cancellation, and notification.
+use core::{BrowserPtr, BrowserList}
+use core::actor::{ActorMailbox, ActorSink, Handles}
+use core::pending::{Pending, Suspend, TaskOutcome}
+use std::actor::{ActorMessage, BrowserActorSink}
+use std::host::Resumable
+use std::runtime::{BrowserActorMailbox, ChildScopeExit, supervise_browser_child}
+use std::wasm::WasmBackend
+use quilting_atlas_wasm::{Claim, Completion, Lease, PackedTile}
+use quilting_atlas_wasm::pool::{PoolHandle, TileKey}
+
+pub struct Request { pub lease: Lease, pub key: TileKey }
+pub struct Response { pub lease: Lease, pub tile: PackedTile }
+pub trait CompletionMessage { fn completed() -> Self }
+
+pub fn supervise<C>(_ child: C) -> u32 {
+    match supervise_browser_child(child: child, max_restarts: 1, window_ms: 1000,
+        backoff_ms: 10, startup_timeout_ms: 10000) {
+        ChildScopeExit::Cancelled(epoch) => epoch,
+        ChildScopeExit::Exhausted(epoch, _) => epoch,
+        ChildScopeExit::TransportFailure(epoch, _) => epoch,
+        ChildScopeExit::InvariantViolation(epoch, _) => epoch,
+    }
+}
+
+fn drain<const N: usize, C, M>(_ address: u32, _ slot: u32) -> u32
+uses (mailbox: mut ActorMailbox<WasmBackend, C>, sink: mut ActorSink<WasmBackend, M>,
+    suspend: Suspend<WasmBackend, u32>) where C: Handles<Request, Response>, M: CompletionMessage {
+    if address == 0 { return 0 }
+    let handle: PoolHandle<N> = PoolHandle::from_address(address)
+    let mut count: u32 = 0
+    while true {
+        let claim = handle.claim(slot)
+        match claim {
+            Claim::Job(lease) => {
+                let key = handle.key(lease.ordinal)
+                let pending: Pending<WasmBackend, Response> = mailbox.ask(Request { lease: lease, key: key })
+                let response = suspend.suspend(pending)
+                let completion = match response {
+                    TaskOutcome::Success(value,) => {
+                        // Return ownership is checked against the originally
+                        // issued lease, never a worker-selected atlas slot.
+                        let same = value.lease.epoch == lease.epoch
+                            && value.lease.ordinal == lease.ordinal && value.lease.slot == lease.slot
+                        if same { handle.finish(lease, value.tile) }
+                        else { fail(handle, lease) }
+                    },
+                    _ => fail(handle, lease),
+                }
+                let accepted = if let Completion::Accepted = completion { true } else { false }
+                match ActorMessage::new(M::completed()).send() {
+                    TaskOutcome::Success(_,) => {},
+                    _ => {
+                        handle.cancel()
+                        return count
+                    },
+                }
+                if !accepted { return count }
+                count += 1
+            },
+            _ => return count,
+        }
+    }
+    count
+}
+
+fn fail<const N: usize>(_ handle: PoolHandle<N>, _ lease: Lease) -> Completion {
+    handle.finish(lease, PackedTile { status: 1, points: 0, triangles: 0,
+        words: BrowserList { ptr: BrowserPtr::from_u32(0), len: 0 } })
+}
+pub fn run<const N: usize, C, M>(_ address: u32, _ slot: u32) -> u32 where C: Handles<Request, Response>, M: CompletionMessage {
+    with (ActorMailbox<WasmBackend, C> = BrowserActorMailbox<C> {},
+        ActorSink<WasmBackend, M> = BrowserActorSink {},
+        Suspend<WasmBackend, u32> = Resumable {}) { drain<N, C, M>(address, slot) }
+}
