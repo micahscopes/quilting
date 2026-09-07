@@ -1,0 +1,543 @@
+//! Local triangle adjacency for CPU/worker triangulation.
+//! Each directed edge stores its reverse edge, or END at the domain boundary.
+//! Edits replace at most two faces with at most four: no global soup sort.
+use core::marker::Copy
+use super::topology::{Triangle, triangle_edge_first, triangle_edge_second}
+use super::topology::{split_triangle_interior, split_triangle_edge}
+use super::planar::{FixedPoint2, orientation}
+
+pub const END: u32 = 0xffffffff
+
+pub enum EditStatus {
+    Applied,
+    Capacity,
+    InvalidTopology,
+    InvalidGeometry,
+}
+
+pub struct Face { pub triangle: Triangle, pub across: [u32; 3] }
+impl Copy for Face {}
+
+fn empty_face() -> Face {
+    Face {
+        triangle: Triangle { first: END, second: END, third: END, valid: false },
+        across: [END; 3],
+    }
+}
+
+pub struct CpuMesh<const T: usize> { pub faces: [Face; T], pub count: u32 }
+
+impl<const T: usize> CpuMesh<T> {
+    pub fn empty() -> Self {
+        Self { faces: [empty_face(); T], count: 0 }
+    }
+
+    /// One CCW root triangle. The caller owns geometric validation.
+    pub fn seed(mut self, _ triangle: Triangle) -> EditStatus {
+        if T == 0 {
+            return EditStatus::Capacity
+        }
+        if !triangle.valid
+            || triangle.first == END
+            || triangle.second == END
+            || triangle.third == END
+            || triangle.first == triangle.second
+            || triangle.first == triangle.third
+            || triangle.second == triangle.third {
+            return EditStatus::InvalidTopology
+        }
+        self.faces[0] = Face { triangle: triangle, across: [END; 3] }
+        self.count = 1
+        EditStatus::Applied
+    }
+    pub fn seed_quad(mut self, _ ids: [u32; 4], _ points: [FixedPoint2; 4]) -> EditStatus {
+        if T < 2 {
+            return EditStatus::Capacity
+        }
+        for i in 0 .. 4 {
+            if ids[i] == END {
+                return EditStatus::InvalidTopology
+            }
+            for j in 0 .. i {
+                if ids[i] == ids[j] {
+                    return EditStatus::InvalidTopology
+                }
+            }
+            if orientation(points[i], points[(i + 1) % 4], points[(i + 2) % 4]) <= 0 {
+                return EditStatus::InvalidGeometry
+            }
+        }
+        self.faces[0] = Face { triangle: tri(ids[0], ids[1], ids[2]), across: [END, END, 3] }
+        self.faces[1] = Face { triangle: tri(ids[0], ids[2], ids[3]), across: [2, END, END] }
+        self.count = 2
+        EditStatus::Applied
+    }
+    pub fn split_interior(
+        mut self,
+        _ face: u32,
+        _ corners: [FixedPoint2; 3],
+        _ id: u32,
+        _ point: FixedPoint2,
+    ) -> EditStatus {
+        if face >= self.count {
+            return EditStatus::InvalidTopology
+        }
+        let children = split_triangle_interior(
+            self.faces[face as usize].triangle,
+            corners[0],
+            corners[1],
+            corners[2],
+            id,
+            point,
+        )
+        if !children.valid {
+            return EditStatus::InvalidGeometry
+        }
+        self.replace(
+            [face, END],
+            1,
+            [children.first, children.second, children.third, empty_face().triangle],
+            3,
+        )
+    }
+
+    /// Coordinates follow the selected directed edge, then each opposite vertex.
+    /// At a boundary the second opposite coordinate is ignored.
+    pub fn split_edge(
+        mut self,
+        _ edge: u32,
+        _ endpoints: [FixedPoint2; 2],
+        _ opposites: [FixedPoint2; 2],
+        _ id: u32,
+        _ point: FixedPoint2,
+    ) -> EditStatus {
+        let face = edge / 3
+        if face >= self.count {
+            return EditStatus::InvalidTopology
+        }
+        let first = self.faces[face as usize]
+        let children = split_triangle_edge(
+            first.triangle,
+            edge % 3,
+            endpoints[0],
+            endpoints[1],
+            opposites[0],
+            id,
+            point,
+        )
+        if !children.valid {
+            return EditStatus::InvalidGeometry
+        }
+        let neighbor = first.across[(edge % 3) as usize]
+        if neighbor == END {
+            return self.replace(
+                [face, END],
+                1,
+                [children.first, children.second, empty_face().triangle, empty_face().triangle],
+                2,
+            )
+        }
+        if neighbor / 3 >= self.count {
+            return EditStatus::InvalidTopology
+        }
+        let other = self.faces[(neighbor / 3) as usize]
+        let other_children = split_triangle_edge(
+            other.triangle,
+            neighbor % 3,
+            endpoints[1],
+            endpoints[0],
+            opposites[1],
+            id,
+            point,
+        )
+        if !other_children.valid {
+            return EditStatus::InvalidGeometry
+        }
+        self.replace(
+            [face, neighbor / 3],
+            2,
+            [children.first, children.second, other_children.first, other_children.second],
+            4,
+        )
+    }
+
+    /// Replace a connected local region using already geometrically validated
+    /// split/flip triangles. Stable face IDs are reused; new ones append.
+    /// Validation finishes before changing any resident face or neighbor link.
+    pub fn replace(
+        mut self,
+        _ old: [u32; 2],
+        _ old_count: u32,
+        _ triangles: [Triangle; 4],
+        _ new_count: u32,
+    ) -> EditStatus {
+        if old_count == 0 || old_count > 2 || new_count < old_count || new_count > 4 {
+            return EditStatus::InvalidTopology
+        }
+        if (self.count as usize) + (new_count - old_count) as usize > T {
+            return EditStatus::Capacity
+        }
+        for i in 0 .. (old_count as usize) {
+            if old[i] >= self.count || !self.faces[old[i] as usize].triangle.valid {
+                return EditStatus::InvalidTopology
+            }
+        }
+        if old_count == 2 && old[0] == old[1] {
+            return EditStatus::InvalidTopology
+        }
+        if old_count == 2 {
+            let mut shared: u32 = 0
+            for e in 0 .. 3 {
+                let neighbor = self.faces[old[0] as usize].across[e]
+                if neighbor != END && neighbor / 3 == old[1] {
+                    if self.faces[old[1] as usize].across[(neighbor % 3) as usize]
+                        != old[0] * 3 + e.downcast_truncate() {
+                        return EditStatus::InvalidTopology
+                    }
+                    shared += 1
+                }
+            }
+            if shared != 1 {
+                return EditStatus::InvalidTopology
+            }
+        }
+        let mut ids: [u32; 4] = [END; 4]
+        let mut fresh: [Face; 4] = [empty_face(); 4]
+        for i in 0 .. (new_count as usize) {
+            let t = triangles[i]
+            if !t.valid
+                || t.first == END
+                || t.second == END
+                || t.third == END
+                || t.first == t.second
+                || t.first == t.third
+                || t.second == t.third {
+                return EditStatus::InvalidTopology
+            }
+            ids[i] = if i < old_count as usize {
+                old[i]
+            } else {
+                self.count + i.downcast_truncate() - old_count
+            }
+            fresh[i] = Face { triangle: triangles[i], across: [END; 3] }
+        }
+        // Match internal edges in the tiny replacement region.
+        for i in 0 .. (new_count as usize) {
+            for e in 0 .. 3 {
+                let a = triangle_edge_first(triangles[i], e.downcast_truncate())
+                let b = triangle_edge_second(triangles[i], e.downcast_truncate())
+                for j in 0 .. (new_count as usize) {
+                    if i == j { continue }
+                    for f in 0 .. 3 {
+                        if a == triangle_edge_first(triangles[j], f.downcast_truncate())
+                            && b == triangle_edge_second(triangles[j], f.downcast_truncate()) {
+                            return EditStatus::InvalidTopology
+                        }
+                        if a == triangle_edge_second(triangles[j], f.downcast_truncate())
+                            && b == triangle_edge_first(triangles[j], f.downcast_truncate()) {
+                            if fresh[i].across[e] != END {
+                                return EditStatus::InvalidTopology
+                            }
+                            fresh[i].across[e] = ids[j] * 3 + f.downcast_truncate()
+                        }
+                    }
+                }
+            }
+        }
+        // Every external neighbor must be preserved exactly once. Old hull
+        // edges may subdivide into multiple new hull edges, remaining END.
+        for i in 0 .. (old_count as usize) {
+            let previous = self.faces[old[i] as usize]
+            for e in 0 .. 3 {
+                let neighbor = previous.across[e]
+                if neighbor == END {
+                    continue
+                }
+                let other = neighbor / 3
+                if other == old[0] || (old_count == 2 && other == old[1]) {
+                    continue
+                }
+                if other >= self.count
+                    || self.faces[other as usize].across[(neighbor % 3) as usize]
+                        != old[i] * 3 + e.downcast_truncate() {
+                    return EditStatus::InvalidTopology
+                }
+                let a = triangle_edge_first(previous.triangle, e.downcast_truncate())
+                let b = triangle_edge_second(previous.triangle, e.downcast_truncate())
+                let mut matches: u32 = 0
+                for j in 0 .. (new_count as usize) {
+                    for f in 0 .. 3 {
+                        if a == triangle_edge_first(triangles[j], f.downcast_truncate())
+                            && b == triangle_edge_second(triangles[j], f.downcast_truncate()) {
+                            if fresh[j].across[f] != END {
+                                return EditStatus::InvalidTopology
+                            }
+                            fresh[j].across[f] = neighbor
+                            matches += 1
+                        }
+                    }
+                }
+                if matches != 1 {
+                    return EditStatus::InvalidTopology
+                }
+            }
+        }
+        // Publication: all local validation succeeded.
+        for i in 0 .. (new_count as usize) {
+            self.faces[ids[i] as usize] = fresh[i]
+        }
+        self.count += new_count - old_count
+        for i in 0 .. (new_count as usize) {
+            for e in 0 .. 3 {
+                let neighbor = fresh[i].across[e]
+                if neighbor != END {
+                    self.faces[(neighbor / 3) as usize].across[(neighbor % 3) as usize] = ids[i] * 3
+                        + e.downcast_truncate()
+                }
+            }
+        }
+        EditStatus::Applied
+    }
+
+    /// Topological audit, not an overlap/coverage or Delaunay certificate.
+    pub fn adjacency_errors(self) -> u32 {
+        let mut errors: u32 = 0
+        for i in 0 .. (self.count as usize) {
+            let face = self.faces[i]
+            let face_id: u32 = i.downcast_truncate()
+            if !face.triangle.valid {
+                errors += 1
+            }
+            for e in 0 .. 3 {
+                let neighbor = face.across[e]
+                if neighbor == END {
+                    continue
+                }
+                if neighbor / 3 >= self.count {
+                    errors += 1
+                    continue
+                }
+                let other = self.faces[(neighbor / 3) as usize]
+                let f = neighbor % 3
+                if other.across[f as usize] != face_id * 3 + e.downcast_truncate()
+                    || triangle_edge_first(face.triangle, e.downcast_truncate())
+                        != triangle_edge_second(other.triangle, f)
+                    || triangle_edge_second(face.triangle, e.downcast_truncate())
+                        != triangle_edge_first(other.triangle, f) {
+                    errors += 1
+                }
+            }
+        }
+        errors
+    }
+}
+
+fn tri(_ a: u32, _ b: u32, _ c: u32) -> Triangle {
+    Triangle { first: a, second: b, third: c, valid: true }
+}
+
+fn applied(_ result: EditStatus) -> bool {
+    match result {
+        EditStatus::Applied => true,
+        _ => false,
+    }
+}
+
+#[test]
+fn cpu_mesh_quad_diagonal_and_boundary_splits_preserve_area() {
+    let points = [
+        FixedPoint2 { x: 0, y: 0 },
+        FixedPoint2 { x: 10, y: 0 },
+        FixedPoint2 { x: 10, y: 10 },
+        FixedPoint2 { x: 0, y: 10 },
+        FixedPoint2 { x: 5, y: 5 },
+        FixedPoint2 { x: 10, y: 5 },
+    ]
+    let mut mesh: CpuMesh<8> = CpuMesh::empty()
+    assert(
+        applied(
+            mesh.seed_quad(
+                [0, 1, 2, 3],
+                [points[0], points[1], points[2], points[3]],
+            ),
+        ),
+    )
+    assert(mesh.adjacency_errors() == 0)
+    assert(
+        applied(
+            mesh.split_edge(
+                2,
+                [points[2], points[0]],
+                [points[1], points[3]],
+                4,
+                points[4],
+            ),
+        ),
+    )
+    assert(mesh.count == 4)
+    assert(mesh.adjacency_errors() == 0)
+    assert(
+        applied(
+            mesh.split_edge(
+                2,
+                [points[1], points[2]],
+                [points[4], points[0]],
+                5,
+                points[5],
+            ),
+        ),
+    )
+    assert(mesh.count == 5)
+    assert(mesh.adjacency_errors() == 0)
+    let mut area: i32 = 0
+    let mut hull: u32 = 0
+    let mut seen: [bool; 6] = [false; 6]
+    for i in 0 .. (mesh.count as usize) {
+        let face = mesh.faces[i]
+        let t = face.triangle
+        let a = orientation(
+            points[t.first as usize],
+            points[t.second as usize],
+            points[t.third as usize],
+        )
+        assert(a > 0)
+        area += a
+        for e in 0 .. 3 {
+            let first = triangle_edge_first(t, e.downcast_truncate())
+            let second = triangle_edge_second(t, e.downcast_truncate())
+            seen[first as usize] = true
+            if face.across[e] == END {
+                hull += 1
+                assert(
+                    (first == 0 && second == 1)
+                        || (first == 1 && second == 5)
+                        || (first == 5 && second == 2)
+                        || (first == 2 && second == 3)
+                        || (first == 3 && second == 0),
+                )
+            }
+        }
+    }
+    assert(area == 200)
+    assert(hull == 5)
+    for i in 0 .. 6 {
+        assert(seen[i])
+    }
+}
+
+#[test]
+fn cpu_mesh_interior_split_preserves_external_neighbors() {
+    let mut mesh: CpuMesh<8> = CpuMesh::empty()
+    assert(applied(mesh.seed(tri(0, 1, 2))))
+    assert(
+        applied(
+            mesh.replace(
+                [0, END],
+                1,
+                [tri(0, 1, 3), tri(1, 2, 3), tri(2, 0, 3), tri(0, 0, 0)],
+                3,
+            ),
+        ),
+    )
+    assert(mesh.count == 3)
+    assert(mesh.adjacency_errors() == 0)
+    assert(
+        applied(
+            mesh.replace(
+                [1, END],
+                1,
+                [tri(1, 2, 4), tri(2, 3, 4), tri(3, 1, 4), tri(0, 0, 0)],
+                3,
+            ),
+        ),
+    )
+    assert(mesh.count == 5)
+    assert(mesh.adjacency_errors() == 0)
+}
+
+#[test]
+fn cpu_mesh_shared_edge_split_updates_both_sides() {
+    let mut mesh: CpuMesh<8> = CpuMesh::empty()
+    assert(applied(mesh.seed(tri(0, 1, 2))))
+    assert(
+        applied(
+            mesh.replace(
+                [0, END],
+                1,
+                [tri(0, 1, 3), tri(1, 2, 3), tri(2, 0, 3), tri(0, 0, 0)],
+                3,
+            ),
+        ),
+    )
+    // Point4 splits shared edge1--3. Both adjacent faces must change together.
+    assert(
+        applied(
+            mesh.replace(
+                [0, 1],
+                2,
+                [tri(1, 4, 0), tri(4, 3, 0), tri(3, 4, 2), tri(4, 1, 2)],
+                4,
+            ),
+        ),
+    )
+    assert(mesh.count == 5)
+    assert(mesh.adjacency_errors() == 0)
+}
+
+#[test]
+fn cpu_mesh_missing_external_edge_rejects_before_mutation() {
+    let mut mesh: CpuMesh<8> = CpuMesh::empty()
+    assert(applied(mesh.seed(tri(0, 1, 2))))
+    assert(
+        applied(
+            mesh.replace(
+                [0, END],
+                1,
+                [tri(0, 1, 3), tri(1, 2, 3), tri(2, 0, 3), tri(0, 0, 0)],
+                3,
+            ),
+        ),
+    )
+    assert(
+        !applied(
+            mesh.replace(
+                [1, END],
+                1,
+                [tri(4, 5, 6), tri(0, 0, 0), tri(0, 0, 0), tri(0, 0, 0)],
+                1,
+            ),
+        ),
+    )
+    assert(mesh.count == 3)
+    assert(mesh.faces[1].triangle.first == 1)
+    assert(mesh.adjacency_errors() == 0)
+}
+
+#[test]
+fn cpu_mesh_rejected_edit_does_not_publish() {
+    let mut mesh: CpuMesh<3> = CpuMesh::empty()
+    assert(applied(mesh.seed(tri(0, 1, 2))))
+    assert(
+        applied(
+            mesh.replace(
+                [0, END],
+                1,
+                [tri(0, 1, 3), tri(1, 2, 3), tri(2, 0, 3), tri(0, 0, 0)],
+                3,
+            ),
+        ),
+    )
+    assert(
+        !applied(
+            mesh.replace(
+                [1, END],
+                1,
+                [tri(1, 2, 4), tri(2, 3, 4), tri(3, 1, 4), tri(0, 0, 0)],
+                3,
+            ),
+        ),
+    )
+    assert(mesh.count == 3)
+    assert(mesh.faces[1].triangle.third == 3)
+    assert(mesh.adjacency_errors() == 0)
+}

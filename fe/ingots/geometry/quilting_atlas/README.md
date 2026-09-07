@@ -74,6 +74,16 @@ triangulation costs or full-atlas performance claims. Small-radius windows
 matter: before adding them, uniform square sampling regressed despite fewer
 point comparisons. Keep both cell work and exact comparisons observable.
 
+`cpu_mesh` provides the worker triangulator's local adjacency operations.
+Each triangle edge references its reverse or the hull sentinel. A bounded
+replacement validates the affected region before publishing changes to faces
+and external neighbors. Exact interior/edge splits reuse `topology` predicates;
+a shared-edge insertion updates both sides together. Five scalar tests cover
+adjacency, failure atomicity, and a quad diagonal/boundary split with exact
+area, hull-chain and vertex-retention checks. This is not yet a complete CDT:
+point location, local Delaunay legalization and full sampled-mesh Wasm gates
+remain required. Adjacency validity alone is not a geometric coverage proof.
+
 The existing triangle atlas uses all 165 sorted edge-LoD triples through LoD 8.
 Its equilateral metric is intentional: barycentric coordinate lanes are not
 orthogonal Cartesian axes.

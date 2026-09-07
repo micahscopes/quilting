@@ -23,6 +23,7 @@ extern {
 pub use sampling
 pub use active_sampling
 pub use accepted_index
+pub use cpu_mesh
 pub use topology
 pub use triangulation
 pub use planar
