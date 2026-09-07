@@ -80,9 +80,23 @@ replacement validates the affected region before publishing changes to faces
 and external neighbors. Exact interior/edge splits reuse `topology` predicates;
 a shared-edge insertion updates both sides together. Five scalar tests cover
 adjacency, failure atomicity, and a quad diagonal/boundary split with exact
-area, hull-chain and vertex-retention checks. This is not yet a complete CDT:
-point location, local Delaunay legalization and full sampled-mesh Wasm gates
-remain required. Adjacency validity alone is not a geometric coverage proof.
+area, hull-chain and vertex-retention checks. Adjacency validity alone is not
+a geometric coverage proof.
+
+`cpu_cdt` now connects exact bounded neighbor-walk location, metric-aware flips,
+a deduplicated local edge queue and incremental insertion for convex triangle
+or quad roots. Existing point IDs are retained; edge hits split both adjacent
+faces. Only a completed run is usable, and budget/capacity/duplicate/outside
+stops are explicit. This is hull-constrained triangulation, not an API for
+arbitrary internal segments or holes.
+
+Seven scalar Fe tests cover complete small triangle/quad builds (all-points
+empty-circumcircle checks in each metric, vertex retention and total area),
+exact triangular boundary chains, location outcomes, hull-preserving flips,
+queue wrap/deduplication, legalization resumption and failure outcomes.
+These are not yet full sampled-LoD-8 Wasm or browser-worker triangulation
+gates. Those gates, permutation/coverage checks at scale, and cost measurements
+remain required before calling the runtime atlas complete.
 
 The existing triangle atlas uses all 165 sorted edge-LoD triples through LoD 8.
 Its equilateral metric is intentional: barycentric coordinate lanes are not

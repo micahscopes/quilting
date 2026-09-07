@@ -1,0 +1,961 @@
+//! Exact point location and local legalization for the worker mesh.
+use super::cpu_mesh::{CpuMesh, EditStatus, END}
+use core::marker::Copy
+use super::planar::{FixedPoint2, IntegerPlaneMetric, orientation}
+use super::topology::{
+    Triangle,
+    triangle_edge_first,
+    triangle_edge_second,
+    triangle_edge_opposite,
+    interior_edge_flip_decision_with_metric,
+    flipped_triangle_pair,
+}
+
+/// The caller supplies coordinates for every resident vertex identity.
+pub trait PointSource {
+    fn point(self, _ id: u32) -> FixedPoint2
+}
+
+pub struct PointCloud<const P: usize> { pub points: [FixedPoint2; P] }
+impl<const P: usize> PointSource for PointCloud<P> {
+    fn point(self, _ id: u32) -> FixedPoint2 {
+        self.points[id as usize]
+    }
+}
+
+pub enum LocationKind {
+    Interior,
+    Edge,
+    Vertex,
+    Outside,
+    Exhausted,
+    InvalidTopology,
+}
+pub struct Location {
+    pub kind: LocationKind,
+    pub face: u32,
+    pub edge: u32,
+    pub vertex: u32,
+    pub steps: u32,
+}
+
+fn location(
+    _ kind: LocationKind,
+    _ face: u32,
+    _ edge: u32,
+    _ vertex: u32,
+    _ steps: u32,
+) -> Location {
+    Location { kind: kind, face: face, edge: edge, vertex: vertex, steps: steps }
+}
+
+/// Bounded neighbor walk. Exhaustion is explicit; it is not Outside and is
+/// not evidence of a hole. A caller may retry or use an exhaustive fallback.
+pub fn locate<S: PointSource, const T: usize>(
+    _ mesh: CpuMesh<T>,
+    _ source: S,
+    _ query: FixedPoint2,
+    _ start: u32,
+    _ budget: u32,
+) -> Location {
+    if mesh.count == 0 {
+        return location(LocationKind::InvalidTopology, END, END, END, 0)
+    }
+    let mut current = if start < mesh.count { start } else { 0 }
+    let mut steps: u32 = 0
+    while steps < budget {
+        if current >= mesh.count {
+            return location(LocationKind::InvalidTopology, current, END, END, steps)
+        }
+        let face = mesh.faces[current as usize]
+        if !face.triangle.valid {
+            return location(LocationKind::InvalidTopology, current, END, END, steps)
+        }
+        steps += 1
+        let mut crossing = END
+        let mut on_edge = END
+        let mut zeros: u32 = 0
+        for e in 0 .. 3 {
+            let a = source.point(triangle_edge_first(face.triangle, e.downcast_truncate()))
+            let b = source.point(triangle_edge_second(face.triangle, e.downcast_truncate()))
+            let side = orientation(a, b, query)
+            if side < 0 && crossing == END {
+                crossing = e.downcast_truncate()
+            }
+            if side == 0 {
+                zeros += 1
+                on_edge = e.downcast_truncate()
+            }
+        }
+        if crossing != END {
+            let neighbor = face.across[crossing as usize]
+            if neighbor == END {
+                return location(
+                    LocationKind::Outside,
+                    current,
+                    current * 3 + crossing,
+                    END,
+                    steps,
+                )
+            }
+            current = neighbor / 3
+        } else {
+            if zeros == 0 {
+                return location(LocationKind::Interior, current, END, END, steps)
+            }
+            if zeros == 1 {
+                return location(
+                    LocationKind::Edge,
+                    current,
+                    current * 3 + on_edge,
+                    END,
+                    steps,
+                )
+            }
+            for e in 0 .. 3 {
+                let id = triangle_edge_first(face.triangle, e.downcast_truncate())
+                let p = source.point(id)
+                if p.x == query.x && p.y == query.y {
+                    return location(LocationKind::Vertex, current, END, id, steps)
+                }
+            }
+            return location(LocationKind::InvalidTopology, current, END, END, steps)
+        }
+    }
+    location(LocationKind::Exhausted, current, END, END, steps)
+}
+
+pub enum FlipStatus {
+    Flipped,
+    Unchanged,
+    InvalidTopology,
+    InvalidGeometry,
+    Capacity,
+}
+
+/// One pending entry per directed-edge slot. Slots are rechecked after edits;
+/// a queued identity is not a promise that its old vertex pair still exists.
+pub struct EdgeQueue<const Q: usize> {
+    items: [u32; Q],
+    marked: [bool; Q],
+    head: u32,
+    pub length: u32,
+}
+
+impl<const Q: usize> EdgeQueue<Q> {
+    pub fn empty() -> Self {
+        Self { items: [END; Q], marked: [false; Q], head: 0, length: 0 }
+    }
+    pub fn reset(mut self) {
+        for i in 0 .. Q {
+            self.marked[i] = false
+        }
+        self.head = 0
+        self.length = 0
+    }
+    pub fn push(mut self, _ edge: u32) -> bool {
+        if edge as usize >= Q {
+            return false
+        }
+        if self.marked[edge as usize] {
+            return true
+        }
+        if self.length as usize >= Q {
+            return false
+        }
+        let tail = ((self.head as usize) + self.length as usize) % Q
+        self.items[tail] = edge
+        self.marked[edge as usize] = true
+        self.length += 1
+        true
+    }
+    pub fn pop(mut self) -> u32 {
+        if self.length == 0 {
+            return END
+        }
+        let edge = self.items[self.head as usize]
+        self.head = (((self.head as usize) + 1) % Q).downcast_truncate()
+        self.length -= 1
+        self.marked[edge as usize] = false
+        edge
+    }
+    pub fn face(mut self, _ face: u32) -> bool {
+        if (face as usize) * 3 + 2 >= Q {
+            return false
+        }
+        self.push(face * 3) && self.push(face * 3 + 1) && self.push(face * 3 + 2)
+    }
+    pub fn capacity(self) -> usize {
+        Q
+    }
+}
+
+pub enum LegalizationStop {
+    Complete,
+    Budget,
+    Capacity,
+    InvalidMesh,
+}
+pub struct Legalization {
+    pub stop: LegalizationStop,
+    pub edge_visits: u32,
+    pub flips: u32,
+    pub pending: u32,
+}
+
+pub enum TriangulationStop {
+    Complete,
+    Budget,
+    Capacity,
+    Duplicate,
+    Outside,
+    Invalid,
+}
+impl Copy for TriangulationStop {}
+pub struct TriangulationRun {
+    pub stop: TriangulationStop,
+    pub inserted: u32,
+    pub location_steps: u32,
+    pub edge_visits: u32,
+    pub flips: u32,
+}
+
+fn edit_stop(_ status: EditStatus) -> TriangulationStop {
+    match status {
+        EditStatus::Applied => TriangulationStop::Complete,
+        EditStatus::Capacity => TriangulationStop::Capacity,
+        _ => TriangulationStop::Invalid,
+    }
+}
+
+fn legalization_stop(_ status: LegalizationStop) -> TriangulationStop {
+    match status {
+        LegalizationStop::Complete => TriangulationStop::Complete,
+        LegalizationStop::Budget => TriangulationStop::Budget,
+        LegalizationStop::Capacity => TriangulationStop::Capacity,
+        LegalizationStop::InvalidMesh => TriangulationStop::Invalid,
+    }
+}
+
+/// Build a convex triangle/quad domain from stable input point IDs. Root
+/// corners must index source points; all remaining points are inserted without
+/// reordering or dropping collinear boundary samples. Only Complete is usable
+/// as an atlas tile: other stops leave an explicitly partial, inspectable mesh.
+pub fn triangulate<S: PointSource, M: IntegerPlaneMetric, const T: usize, const Q: usize>(
+    _ source: S,
+    _ metric: M,
+    _ roots: [u32; 4],
+    _ root_count: u32,
+    _ point_count: u32,
+    _ mesh: mut CpuMesh<T>,
+    _ queue: mut EdgeQueue<Q>,
+    _ budget: u32,
+) -> TriangulationRun {
+    let mut run = TriangulationRun {
+        stop: TriangulationStop::Invalid,
+        inserted: 0,
+        location_steps: 0,
+        edge_visits: 0,
+        flips: 0,
+    }
+    if root_count < 3 || root_count > 4 || point_count < root_count {
+        return run
+    }
+    for i in 0 .. (root_count as usize) {
+        if roots[i] >= point_count {
+            return run
+        }
+        for j in 0 .. i {
+            if roots[i] == roots[j] {
+                return run
+            }
+        }
+    }
+    let seeded = if root_count == 3 {
+        mesh.seed(
+            super::topology::normalized_triangle(
+                roots[0],
+                source.point(roots[0]),
+                roots[1],
+                source.point(roots[1]),
+                roots[2],
+                source.point(roots[2]),
+            ),
+        )
+    } else {
+        mesh.seed_quad(
+            roots,
+            [
+                source.point(roots[0]),
+                source.point(roots[1]),
+                source.point(roots[2]),
+                source.point(roots[3]),
+            ],
+        )
+    }
+    run.stop = edit_stop(seeded)
+    if !matches_complete(run.stop) {
+        return run
+    }
+    run.inserted = root_count
+    queue.reset()
+    for f in 0 .. (mesh.count as usize) {
+        if !queue.face(f.downcast_truncate()) {
+            run.stop = TriangulationStop::Capacity
+            return run
+        }
+    }
+    let initial = legalize(mut mesh, source, metric, mut queue, budget)
+    run.stop = legalization_stop(initial.stop)
+    run.edge_visits = initial.edge_visits
+    run.flips = initial.flips
+    if !matches_complete(run.stop) {
+        return run
+    }
+    let mut hint: u32 = 0
+    for ordinal in 0 .. (point_count as usize) {
+        let id: u32 = ordinal.downcast_truncate()
+        let mut corner = false
+        for i in 0 .. (root_count as usize) {
+            if id == roots[i] {
+                corner = true
+            }
+        }
+        if corner { continue }
+        let point = source.point(id)
+        let hit = locate(
+            mesh,
+            source,
+            point,
+            hint,
+            budget - run.edge_visits - run.location_steps,
+        )
+        run.location_steps += hit.steps
+        let previous_count = mesh.count
+        let mut neighbor_face = END
+        let edit = match hit.kind {
+            LocationKind::Interior => {
+                let t = mesh.faces[hit.face as usize].triangle
+                mesh.split_interior(
+                    hit.face,
+                    [source.point(t.first), source.point(t.second), source.point(t.third)],
+                    id,
+                    point,
+                )
+            },
+            LocationKind::Edge => {
+                let first = mesh.faces[hit.face as usize]
+                let neighbor = first.across[(hit.edge % 3) as usize]
+                let a = source.point(triangle_edge_first(first.triangle, hit.edge % 3))
+                let b = source.point(triangle_edge_second(first.triangle, hit.edge % 3))
+                let opposite = source.point(triangle_edge_opposite(first.triangle, hit.edge % 3))
+                let other_opposite = if neighbor == END {
+                    opposite
+                } else {
+                    if neighbor / 3 >= mesh.count {
+                        run.stop = TriangulationStop::Invalid
+                        return run
+                    }
+                    neighbor_face = neighbor / 3
+                    source
+                        .point(
+                            triangle_edge_opposite(
+                                mesh.faces[neighbor_face as usize].triangle,
+                                neighbor % 3,
+                            ),
+                        )
+                }
+                mesh.split_edge(hit.edge, [a, b], [opposite, other_opposite], id, point)
+            },
+            LocationKind::Vertex => {
+                run.stop = TriangulationStop::Duplicate
+                return run
+            },
+            LocationKind::Outside => {
+                run.stop = TriangulationStop::Outside
+                return run
+            },
+            LocationKind::Exhausted => {
+                run.stop = TriangulationStop::Budget
+                return run
+            },
+            LocationKind::InvalidTopology => {
+                run.stop = TriangulationStop::Invalid
+                return run
+            },
+        }
+        run.stop = edit_stop(edit)
+        if !matches_complete(run.stop) {
+            return run
+        }
+        run.inserted += 1
+        hint = hit.face
+        if !queue.face(hit.face) {
+            run.stop = TriangulationStop::Capacity
+            return run
+        }
+        if neighbor_face != END && !queue.face(neighbor_face) {
+            run.stop = TriangulationStop::Capacity
+            return run
+        }
+        for f in (previous_count as usize) .. (mesh.count as usize) {
+            if !queue.face(f.downcast_truncate()) {
+                run.stop = TriangulationStop::Capacity
+                return run
+            }
+        }
+        let repair = legalize(
+            mut mesh,
+            source,
+            metric,
+            mut queue,
+            budget - run.edge_visits - run.location_steps,
+        )
+        run.stop = legalization_stop(repair.stop)
+        run.edge_visits += repair.edge_visits
+        run.flips += repair.flips
+        if !matches_complete(run.stop) {
+            return run
+        }
+    }
+    run
+}
+
+pub fn matches_complete(_ stop: TriangulationStop) -> bool {
+    match stop {
+        TriangulationStop::Complete => true,
+        _ => false,
+    }
+}
+
+/// Complete means this work queue is empty. A caller must initially enqueue
+/// every potentially affected edge; it is not a standalone global certificate.
+pub fn legalize<S: PointSource, M: IntegerPlaneMetric, const T: usize, const Q: usize>(
+    _ mesh: mut CpuMesh<T>,
+    _ source: S,
+    _ metric: M,
+    _ queue: mut EdgeQueue<Q>,
+    _ budget: u32,
+) -> Legalization {
+    let mut result = Legalization {
+        stop: LegalizationStop::Complete,
+        edge_visits: 0,
+        flips: 0,
+        pending: queue.length,
+    }
+    if queue.capacity() < (mesh.count as usize) * 3 {
+        result.stop = LegalizationStop::Capacity
+        return result
+    }
+    while queue.length > 0 {
+        result.pending = queue.length
+        if result.edge_visits >= budget {
+            result.stop = LegalizationStop::Budget
+            return result
+        }
+        let edge = queue.pop()
+        if edge / 3 >= mesh.count {
+            result.stop = LegalizationStop::InvalidMesh
+            result.pending = queue.length
+            return result
+        }
+        let neighbor = mesh.faces[(edge / 3) as usize].across[(edge % 3) as usize]
+        result.edge_visits += 1
+        match flip_edge(mut mesh, source, metric, edge) {
+            FlipStatus::Unchanged => {},
+            FlipStatus::Flipped => {
+                result.flips += 1
+                if !queue.face(edge / 3) || !queue.face(neighbor / 3) {
+                    result.stop = LegalizationStop::Capacity
+                    result.pending = queue.length
+                    return result
+                }
+            },
+            _ => {
+                result.stop = LegalizationStop::InvalidMesh
+                result.pending = queue.length
+                return result
+            },
+        }
+    }
+    result.pending = 0
+    result
+}
+
+pub fn flip_edge<S: PointSource, M: IntegerPlaneMetric, const T: usize>(
+    _ mesh: mut CpuMesh<T>,
+    _ source: S,
+    _ metric: M,
+    _ edge: u32,
+) -> FlipStatus {
+    if edge / 3 >= mesh.count {
+        return FlipStatus::InvalidTopology
+    }
+    let first = mesh.faces[(edge / 3) as usize]
+    let neighbor = first.across[(edge % 3) as usize]
+    if neighbor == END {
+        return FlipStatus::Unchanged
+    }
+    if neighbor / 3 >= mesh.count {
+        return FlipStatus::InvalidTopology
+    }
+    let second = mesh.faces[(neighbor / 3) as usize]
+    if second.across[(neighbor % 3) as usize] != edge {
+        return FlipStatus::InvalidTopology
+    }
+    let u = triangle_edge_first(first.triangle, edge % 3)
+    let v = triangle_edge_second(first.triangle, edge % 3)
+    if u != triangle_edge_second(second.triangle, neighbor % 3)
+        || v != triangle_edge_first(second.triangle, neighbor % 3) {
+        return FlipStatus::InvalidTopology
+    }
+    let a = triangle_edge_opposite(first.triangle, edge % 3)
+    let b = triangle_edge_opposite(second.triangle, neighbor % 3)
+    let decision = interior_edge_flip_decision_with_metric(
+        u,
+        source.point(u),
+        v,
+        source.point(v),
+        a,
+        source.point(a),
+        b,
+        source.point(b),
+        metric,
+    )
+    if !decision.flip {
+        return FlipStatus::Unchanged
+    }
+    let pair = flipped_triangle_pair(
+        decision,
+        u,
+        source.point(u),
+        v,
+        source.point(v),
+        a,
+        source.point(a),
+        b,
+        source.point(b),
+    )
+    if !pair.valid {
+        return FlipStatus::InvalidGeometry
+    }
+    match mesh.replace(
+        [edge / 3, neighbor / 3],
+        2,
+        [pair.first, pair.second, pair.first, pair.second],
+        2,
+    ) {
+        EditStatus::Applied => FlipStatus::Flipped,
+        EditStatus::Capacity => FlipStatus::Capacity,
+        EditStatus::InvalidTopology => FlipStatus::InvalidTopology,
+        EditStatus::InvalidGeometry => FlipStatus::InvalidGeometry,
+    }
+}
+
+#[test]
+fn cpu_cdt_does_not_call_partial_or_duplicate_meshes_complete() {
+    use super::planar::SquareMetric
+    let source = PointCloud {
+        points: [
+            FixedPoint2 { x: 0, y: 0 },
+            FixedPoint2 { x: 10, y: 0 },
+            FixedPoint2 { x: 10, y: 10 },
+            FixedPoint2 { x: 0, y: 10 },
+            FixedPoint2 { x: 0, y: 0 },
+            FixedPoint2 { x: 11, y: 5 },
+        ],
+    }
+    let mut mesh: CpuMesh<8> = CpuMesh::empty()
+    let mut queue: EdgeQueue<24> = EdgeQueue::empty()
+    let duplicate = triangulate(
+        source,
+        SquareMetric {},
+        [0, 1, 2, 3],
+        4,
+        5,
+        mut mesh,
+        mut queue,
+        1000,
+    )
+    assert(
+        match duplicate.stop {
+            TriangulationStop::Duplicate => true,
+            _ => false,
+        },
+    )
+    assert(
+        duplicate.inserted == 4 && mesh.count == 2 && mesh.adjacency_errors() == 0,
+    )
+    let exhausted = triangulate(
+        source,
+        SquareMetric {},
+        [0, 1, 2, 3],
+        4,
+        4,
+        mut mesh,
+        mut queue,
+        0,
+    )
+    assert(
+        match exhausted.stop {
+            TriangulationStop::Budget => true,
+            _ => false,
+        },
+    )
+    let outside_source = PointCloud {
+        points: [
+            source.points[0],
+            source.points[1],
+            source.points[2],
+            source.points[3],
+            source.points[5],
+        ],
+    }
+    let outside = triangulate(
+        outside_source,
+        SquareMetric {},
+        [0, 1, 2, 3],
+        4,
+        5,
+        mut mesh,
+        mut queue,
+        1000,
+    )
+    assert(
+        match outside.stop {
+            TriangulationStop::Outside => true,
+            _ => false,
+        },
+    )
+    let mut small: CpuMesh<1> = CpuMesh::empty()
+    let capacity = triangulate(
+        source,
+        SquareMetric {},
+        [0, 1, 2, 3],
+        4,
+        4,
+        mut small,
+        mut queue,
+        1000,
+    )
+    assert(
+        match capacity.stop {
+            TriangulationStop::Capacity => true,
+            _ => false,
+        },
+    )
+}
+
+#[test]
+fn cpu_cdt_builds_triangle_with_every_collinear_boundary_point() {
+    use super::planar::{EquilateralMetric, incircle_sign}
+    let source = PointCloud {
+        points: [
+            FixedPoint2 { x: 0, y: 0 },
+            FixedPoint2 { x: 5, y: 0 },
+            FixedPoint2 { x: 10, y: 0 },
+            FixedPoint2 { x: 0, y: 5 },
+            FixedPoint2 { x: 0, y: 10 },
+            FixedPoint2 { x: 5, y: 5 },
+            FixedPoint2 { x: 2, y: 2 },
+            FixedPoint2 { x: 6, y: 2 },
+            FixedPoint2 { x: 2, y: 6 },
+        ],
+    }
+    let mut mesh: CpuMesh<16> = CpuMesh::empty()
+    let mut queue: EdgeQueue<48> = EdgeQueue::empty()
+    let result = triangulate(
+        source,
+        EquilateralMetric {},
+        [0, 2, 4, END],
+        3,
+        9,
+        mut mesh,
+        mut queue,
+        10000,
+    )
+    assert(matches_complete(result.stop))
+    assert(
+        result.inserted == 9 && mesh.count == 10 && mesh.adjacency_errors() == 0,
+    )
+    let mut seen: [bool; 9] = [false; 9]
+    let mut area: i32 = 0
+    let mut hull: u32 = 0
+    for i in 0 .. (mesh.count as usize) {
+        let face = mesh.faces[i]
+        let t = face.triangle
+        let a = source.point(t.first)
+        let b = source.point(t.second)
+        let c = source.point(t.third)
+        let signed_area = orientation(a, b, c)
+        assert(signed_area > 0)
+        area += signed_area
+        for p in 0 .. 9 {
+            assert(
+                incircle_sign(a, b, c, source.points[p], EquilateralMetric {}) <= 0,
+            )
+        }
+        for e in 0 .. 3 {
+            let u = triangle_edge_first(t, e.downcast_truncate())
+            let v = triangle_edge_second(t, e.downcast_truncate())
+            seen[u as usize] = true
+            if face.across[e] == END {
+                hull += 1
+                assert(
+                    (u == 0 && v == 1)
+                        || (u == 1 && v == 2)
+                        || (u == 2 && v == 5)
+                        || (u == 5 && v == 4)
+                        || (u == 4 && v == 3)
+                        || (u == 3 && v == 0),
+                )
+            }
+        }
+    }
+    assert(area == 100 && hull == 6)
+    for i in 0 .. 9 {
+        assert(seen[i])
+    }
+}
+
+#[test]
+fn cpu_cdt_builds_quad_with_boundary_and_interior_insertions() {
+    use super::planar::{SquareMetric, incircle_sign}
+    let source = PointCloud {
+        points: [
+            FixedPoint2 { x: 0, y: 0 },
+            FixedPoint2 { x: 10, y: 0 },
+            FixedPoint2 { x: 10, y: 10 },
+            FixedPoint2 { x: 0, y: 10 },
+            FixedPoint2 { x: 5, y: 0 },
+            FixedPoint2 { x: 10, y: 5 },
+            FixedPoint2 { x: 4, y: 4 },
+            FixedPoint2 { x: 7, y: 7 },
+        ],
+    }
+    let mut mesh: CpuMesh<16> = CpuMesh::empty()
+    let mut queue: EdgeQueue<48> = EdgeQueue::empty()
+    let result = triangulate(
+        source,
+        SquareMetric {},
+        [0, 1, 2, 3],
+        4,
+        8,
+        mut mesh,
+        mut queue,
+        10000,
+    )
+    assert(matches_complete(result.stop))
+    assert(
+        result.inserted == 8 && mesh.count == 8 && mesh.adjacency_errors() == 0,
+    )
+    let mut seen: [bool; 8] = [false; 8]
+    let mut area: i32 = 0
+    for i in 0 .. (mesh.count as usize) {
+        let t = mesh.faces[i].triangle
+        let a = source.point(t.first)
+        let b = source.point(t.second)
+        let c = source.point(t.third)
+        let signed_area = orientation(a, b, c)
+        assert(signed_area > 0)
+        area += signed_area
+        for p in 0 .. 8 {
+            assert(
+                incircle_sign(a, b, c, source.points[p], SquareMetric {}) <= 0,
+            )
+        }
+        for e in 0 .. 3 {
+            seen[triangle_edge_first(t, e.downcast_truncate()) as usize] = true
+        }
+    }
+    assert(area == 200)
+    for i in 0 .. 8 {
+        assert(seen[i])
+    }
+}
+
+#[test]
+fn cpu_cdt_queue_deduplicates_wraps_and_resets() {
+    let mut queue: EdgeQueue<4> = EdgeQueue::empty()
+    for i in 0 .. 4 {
+        assert(queue.push(i.downcast_truncate()))
+    }
+    assert(queue.push(0))
+    assert(queue.length == 4)
+    assert(queue.pop() == 0)
+    assert(queue.push(0))
+    for i in 1 .. 4 {
+        assert(queue.pop() == i.downcast_truncate())
+    }
+    assert(queue.pop() == 0 && queue.pop() == END)
+    assert(!queue.push(4))
+    assert(queue.push(2))
+    queue.reset()
+    assert(queue.length == 0 && queue.pop() == END)
+    assert(queue.push(2))
+}
+
+#[test]
+fn cpu_cdt_legalization_resumes_after_budget_without_losing_work() {
+    use super::planar::SquareMetric
+    let source = PointCloud {
+        points: [
+            FixedPoint2 { x: 0, y: 0 },
+            FixedPoint2 { x: 10, y: 0 },
+            FixedPoint2 { x: 10, y: 10 },
+            FixedPoint2 { x: 0, y: 5 },
+        ],
+    }
+    let mut mesh: CpuMesh<4> = CpuMesh::empty()
+    assert(
+        match mesh.seed_quad([0, 1, 2, 3], source.points) {
+            EditStatus::Applied => true,
+            _ => false,
+        },
+    )
+    let mut queue: EdgeQueue<12> = EdgeQueue::empty()
+    assert(queue.face(0) && queue.face(1))
+    let stopped = legalize(mut mesh, source, SquareMetric {}, mut queue, 0)
+    assert(
+        match stopped.stop {
+            LegalizationStop::Budget => true,
+            _ => false,
+        },
+    )
+    assert(stopped.pending == 6 && stopped.flips == 0)
+    let completed = legalize(mut mesh, source, SquareMetric {}, mut queue, 100)
+    assert(
+        match completed.stop {
+            LegalizationStop::Complete => true,
+            _ => false,
+        },
+    )
+    assert(completed.pending == 0 && completed.flips == 1)
+    assert(mesh.adjacency_errors() == 0)
+    assert(queue.face(0) && queue.face(1))
+    let stable = legalize(mut mesh, source, SquareMetric {}, mut queue, 100)
+    assert(
+        match stable.stop {
+            LegalizationStop::Complete => true,
+            _ => false,
+        },
+    )
+    assert(stable.flips == 0)
+}
+
+#[test]
+fn cpu_cdt_location_distinguishes_boundary_vertex_and_exhaustion() {
+    let source = PointCloud {
+        points: [
+            FixedPoint2 { x: 0, y: 0 },
+            FixedPoint2 { x: 10, y: 0 },
+            FixedPoint2 { x: 10, y: 10 },
+            FixedPoint2 { x: 0, y: 10 },
+        ],
+    }
+    let mut mesh: CpuMesh<4> = CpuMesh::empty()
+    let seeded = mesh.seed_quad([0, 1, 2, 3], source.points)
+    assert(
+        match seeded {
+            EditStatus::Applied => true,
+            _ => false,
+        },
+    )
+    let inside = locate(mesh, source, FixedPoint2 { x: 2, y: 8 }, 0, 4)
+    assert(
+        match inside.kind {
+            LocationKind::Interior => true,
+            _ => false,
+        },
+    )
+    assert(inside.face == 1 && inside.steps == 2)
+    let edge = locate(mesh, source, FixedPoint2 { x: 5, y: 5 }, 0, 4)
+    assert(
+        match edge.kind {
+            LocationKind::Edge => true,
+            _ => false,
+        },
+    )
+    assert(edge.edge == 2)
+    let vertex = locate(mesh, source, source.points[2], 0, 4)
+    assert(
+        match vertex.kind {
+            LocationKind::Vertex => true,
+            _ => false,
+        },
+    )
+    assert(vertex.vertex == 2)
+    assert(
+        match locate(mesh, source, FixedPoint2 { x: 11, y: 5 }, 0, 4).kind {
+            LocationKind::Outside => true,
+            _ => false,
+        },
+    )
+    assert(
+        match locate(mesh, source, FixedPoint2 { x: 2, y: 8 }, 0, 0).kind {
+            LocationKind::Exhausted => true,
+            _ => false,
+        },
+    )
+}
+
+#[test]
+fn cpu_cdt_flip_replaces_illegal_diagonal_and_keeps_hull() {
+    use super::planar::SquareMetric
+    let source = PointCloud {
+        points: [
+            FixedPoint2 { x: 0, y: 0 },
+            FixedPoint2 { x: 10, y: 0 },
+            FixedPoint2 { x: 10, y: 10 },
+            FixedPoint2 { x: 0, y: 5 },
+        ],
+    }
+    let mut mesh: CpuMesh<4> = CpuMesh::empty()
+    assert(
+        match mesh.seed_quad([0, 1, 2, 3], source.points) {
+            EditStatus::Applied => true,
+            _ => false,
+        },
+    )
+    assert(
+        match flip_edge(mut mesh, source, SquareMetric {}, 2) {
+            FlipStatus::Flipped => true,
+            _ => false,
+        },
+    )
+    assert(mesh.count == 2 && mesh.adjacency_errors() == 0)
+    let mut hull: u32 = 0
+    let mut diagonal: u32 = 0
+    for i in 0 .. 2 {
+        for e in 0 .. 3 {
+            let face = mesh.faces[i]
+            let a = triangle_edge_first(face.triangle, e.downcast_truncate())
+            let b = triangle_edge_second(face.triangle, e.downcast_truncate())
+            if face.across[e] == END {
+                hull += 1
+                assert(
+                    (a == 0 && b == 1)
+                        || (a == 1 && b == 2)
+                        || (a == 2 && b == 3)
+                        || (a == 3 && b == 0),
+                )
+            } else {
+                diagonal += 1
+                assert((a == 1 && b == 3) || (a == 3 && b == 1))
+            }
+            let face_id: u32 = i.downcast_truncate()
+            assert(
+                match flip_edge(
+                    mut mesh,
+                    source,
+                    SquareMetric {},
+                    face_id * 3 + e.downcast_truncate(),
+                ) {
+                    FlipStatus::Unchanged => true,
+                    _ => false,
+                },
+            )
+        }
+    }
+    assert(hull == 4 && diagonal == 2)
+}
