@@ -1,0 +1,35 @@
+//! A compatible geometric control net from one shared inversion pole.
+//! This is a named family, not an admission rule for arbitrary arc networks.
+use core::option::Option
+use super::{ProjectiveControl, projective_control}
+use super::arc_authoring::ArcAuthoringAlgebra
+
+/// The model warrants that inverse-displacement weights, with one common right
+/// gauge, keep partition-of-unity interpolation in its point space wherever
+/// the quotient exists. Arc support alone does not warrant this surface law.
+pub trait CommonPoleAlgebra: ArcAuthoringAlgebra {}
+
+/// w_i = (p_i - pole)^-1 * (reference - pole).
+/// One invertible right factor changes the weight representation, not the
+/// represented surface. Callers composing nets should share this reference.
+/// The pole is geometric; moving it changes boundary circles and the surface.
+/// It is not an interior tessellation-density focus.
+///
+/// Null/nonfinite displacements reject the net. Interior singularities still
+/// require the model's ordinary quotient/point admission and chart tests.
+pub fn controls_from_pole<A: CommonPoleAlgebra, const N: usize>(
+    _ algebra:A, _ points:[A::Point;N], _ pole:A::Point,
+    _ reference:A::Point, _ minimum:f32,
+) -> Option<[ProjectiveControl<A>;N]> {
+    let gauge=algebra.difference(reference,pole)
+    if !algebra.non_null(gauge,minimum) {return Option::None}
+    let mut controls=[projective_control(reference,algebra.identity_weight());N]
+    let mut i:usize=0
+    while i<N {
+        let weight=algebra.relative_weight(algebra.difference(points[i],pole),gauge,minimum)
+        if !weight.defined {return Option::None}
+        controls[i]=projective_control(points[i],weight.value)
+        i=i+1
+    }
+    Option::Some(controls)
+}

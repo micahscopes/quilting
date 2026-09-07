@@ -106,6 +106,61 @@ fn display_rgba_alpha_preserves_rgb_and_all_alpha_bytes() {
 }
 
 #[test]
+fn common_pole_tri_and_quad_match_independent_inversion_and_shared_edges() {
+    let (mut store, instance) = instantiate();
+    let sample = function::<(i32,f32,f32,f32,f32,f32,i32,i32),f32>(
+        &mut store,&instance,"pole_patch_sample");
+    let points = [[-1.0_f64,-0.5,0.0],[1.0,-0.5,0.2],[-0.7,1.0,0.4],[0.8,1.1,-0.3]];
+    let mut maximum_error = 0.0_f64;
+    for pole in [[0.1_f32,0.2,1.3],[2.0,-1.0,0.5],[0.0,0.0,0.01],[-1.001,-0.5,0.0]] {
+        for quad in [0,1] {
+            for i in 0..=16 {
+                for j in 0..=16 {
+                    if quad==0 && i+j>16 {continue;}
+                    let u=i as f32/16.0;
+                    let v=j as f32/16.0;
+                    let basis=if quad==0 {[1.0-u-v,u,v,0.0]} else {[(1.0-u)*(1.0-v),u*(1.0-v),(1.0-u)*v,u*v]};
+                    // Independently invert the points, interpolate in that
+                    // Euclidean chart, then invert back. No Clifford product
+                    // implementation or constructed Fe weights is reused here.
+                    let mut s=[0.0_f64;3];
+                    for (point,b) in points.iter().zip(basis) {
+                        let d=std::array::from_fn::<_,3,_>(|k|point[k]-f64::from(pole[k]));
+                        let squared=d.iter().map(|x|x*x).sum::<f64>();
+                        for k in 0..3 {s[k]+=f64::from(b)*d[k]/squared;}
+                    }
+                    let squared=s.iter().map(|x|x*x).sum::<f64>();
+                    assert!(squared>1e-12,"fixture must avoid the interior pole");
+                    let expected=std::array::from_fn::<_,3,_>(|k|f64::from(pole[k])+s[k]/squared);
+                    for gauge in [0,1] {
+                        assert_eq!(sample.call(&mut store,(quad,u,v,pole[0],pole[1],pole[2],gauge,4)).unwrap(),1.0);
+                        for lane in 0..4 {
+                            let actual=f64::from(sample.call(&mut store,(quad,u,v,pole[0],pole[1],pole[2],gauge,lane)).unwrap());
+                            let target=if lane<3 {expected[lane as usize]} else {0.0};
+                            let error=(actual-target).abs()/(1.0+target.abs());
+                            maximum_error=maximum_error.max(error);
+                            assert!(error<1e-5,"quad={quad} pole={pole:?} uv={u},{v} gauge={gauge} lane={lane}: {actual} != {target}");
+                        }
+                    }
+                }
+            }
+        }
+        for i in 0..=64 {
+            let u=i as f32/64.0;
+            for lane in 0..3 {
+                let tri=sample.call(&mut store,(0,u,0.0,pole[0],pole[1],pole[2],0,lane)).unwrap();
+                let quad=sample.call(&mut store,(1,u,0.0,pole[0],pole[1],pole[2],0,lane)).unwrap();
+                assert!((tri-quad).abs()<1e-5*(1.0+tri.abs()),"shared boundary");
+            }
+        }
+    }
+    for pole in [[-1.0,-0.5,0.0],[1.0,-0.5,0.2],[f32::NAN,0.0,0.0],[f32::INFINITY,0.0,0.0]] {
+        assert_eq!(sample.call(&mut store,(1,0.2,0.3,pole[0],pole[1],pole[2],0,4)).unwrap(),-1.0,"reject a corner at the pole or a nonfinite pole");
+    }
+    eprintln!("common-pole max normalized coordinate/residual error: {maximum_error}");
+}
+
+#[test]
 fn authored_arc_weights_wasm_match_dense_algebras_and_geometric_handles() {
     let (mut store,instance)=instantiate();
     let sample=function::<(i32,i32,f32,f32,f32,f32,i32),f32>(&mut store,&instance,"authored_arc_sample");

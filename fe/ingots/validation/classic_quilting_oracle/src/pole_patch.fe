@@ -1,0 +1,33 @@
+use core::option::Option
+use quilting_domain::{vec3f,vec2f,bary3f}
+use quilting_patch::{ProjectiveAlgebra,ProjectiveInterpolation,LinearBarycentric,BilinearBernstein,
+    triangular_projective_controls,bilinear_projective_controls}
+use quilting_patch::pole_authoring::controls_from_pole
+use quilting_clifford_bezier::{Clifford3Policy,CliffordOdd3F}
+use quilting_clifford_bezier::euclidean::EuclideanCliffordAlgebra
+
+pub fn sample(_ quad:bool,_ u:f32,_ v:f32,_ px:f32,_ py:f32,_ pz:f32,
+    _ reference:u32,_ lane:u32)->f32 {
+    let points=[vec3f(-1.0,-0.5,0.0),vec3f(1.0,-0.5,0.2),
+        vec3f(-0.7,1.0,0.4),vec3f(0.8,1.1,-0.3)]
+    let a=EuclideanCliffordAlgebra {}
+    let pole=vec3f(px,py,pz)
+    let gauge=if reference==0 {points[0]} else {points[3]}
+    let controls=controls_from_pole(a,points,pole,gauge,0.0000001)
+    match controls {
+        Option::None=>if lane==4 {-1.0} else {0.0},
+        Option::Some(c)=>{
+            let frame=if quad {
+                BilinearBernstein {}.frame(a,bilinear_projective_controls(c[0],c[1],c[2],c[3]),vec2f(u,v))
+            } else {
+                LinearBarycentric {}.frame(a,triangular_projective_controls(c[0],c[1],c[2]),bary3f(1.0-u-v,u,v))
+            }
+            let q=a.right_quotient(frame.numerator,frame.denominator,Clifford3Policy {
+                minimum_denominator_norm_squared:0.000000000001,maximum_trivector_residual:0.0001,
+            })
+            if lane==4 {if q.defined {1.0} else {0.0}}
+            else if lane==0 {q.value.e1} else if lane==1 {q.value.e2}
+            else if lane==2 {q.value.e3} else {q.value.e123}
+        },
+    }
+}

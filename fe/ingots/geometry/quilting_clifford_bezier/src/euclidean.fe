@@ -62,6 +62,10 @@ derive EvaluateGaF32 for NormOperands using CompileGaF32<
 
 pub struct EuclideanCliffordAlgebra {}
 impl Copy for EuclideanCliffordAlgebra {}
+// With S = sum B_i (p_i-q)^-1, the quotient is q+S^-1.
+// S is a Euclidean vector; the common right gauge cancels. Thus both triangular
+// and tensor-product partition-of-unity bases stay in the vector point space.
+impl quilting_patch::pole_authoring::CommonPoleAlgebra for EuclideanCliffordAlgebra {}
 impl ProjectiveAlgebra for EuclideanCliffordAlgebra {
     type Metric = EuclideanMetric
     type Point = Vec3F
