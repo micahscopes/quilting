@@ -27,6 +27,15 @@ pub fn tile_info(_ address: u32, _ ordinal: u32) -> (u32, u32, u32, u32, u32) {
         pool::TileLookup::OutOfRange => (2, 0, 0, 0, 0),
     }
 }
+pub fn update_info(_ address: u32, _ epoch: u32, _ words: u32) -> (u32, u32, u32, u32, u32, u32) {
+    let handle: pool::PoolHandle<4> = pool::PoolHandle::from_address(address)
+    match handle.updates_since(pool::RetainedCursor { epoch: epoch, words: words }) {
+        pool::RetainedUpdate::Unchanged => (1, 0, 0, 0, 0, 0),
+        pool::RetainedUpdate::InvalidCursor => (2, 0, 0, 0, 0, 0),
+        pool::RetainedUpdate::Ready(range) => (0, range.epoch, range.revision,
+            range.word_offset, range.words.ptr.address(), range.words.len),
+    }
+}
 pub fn generate_one(_ address: u32, _ slot: u32, _ cancel_before_finish: bool) -> u32 {
     let p: BrowserPtr<AtlasPool<4>> = BrowserPtr::from_u32(address)
     let claim = with (p) { pool::claim<4>(slot) }

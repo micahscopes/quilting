@@ -9,12 +9,21 @@ use quilting_atlas::quad::QuadAtlasJobs
 
 pub const MAX_TILES: usize = 1200
 pub const RETAINED_WORDS: u32 = 16777216
+pub const RETAINED_CAPACITY: usize = RETAINED_WORDS as usize
 
 pub struct TileKey { pub square: bool, pub a: u32, pub b: u32, pub c: u32, pub d: u32 }
 impl Copy for TileKey {}
 pub struct TileEntry { pub offset: u32, pub words: u32, pub points: u32, pub triangles: u32 }
 impl Copy for TileEntry {}
 pub enum TileLookup { NotReady, OutOfRange, Ready(PackedTile) }
+/// A consumer's acknowledged prefix, reset when its physical storage is lost.
+pub struct RetainedCursor { pub epoch: u32, pub words: u32 }
+impl Copy for RetainedCursor {}
+pub struct RetainedRange {
+    pub epoch: u32, pub revision: u32, pub word_offset: u32,
+    pub words: BrowserList<u32, RETAINED_CAPACITY>,
+}
+pub enum RetainedUpdate { Unchanged, InvalidCursor, Ready(RetainedRange) }
 pub struct PoolSummary {
     pub epoch: u32, pub total: u32, pub completed: u32, pub words: u32,
     pub points: u32, pub triangles: u32, pub status: u32,
@@ -48,6 +57,10 @@ impl<const N: usize> PoolHandle<N> {
     pub fn tile(self, _ ordinal: u32) -> TileLookup {
         let p: BrowserPtr<AtlasPool<N>> = BrowserPtr::from_u32(self.address)
         with (p) { ingot::pool::tile<N>(ordinal) }
+    }
+    pub fn updates_since(self, _ cursor: RetainedCursor) -> RetainedUpdate {
+        let p: BrowserPtr<AtlasPool<N>> = BrowserPtr::from_u32(self.address)
+        with (p) { ingot::pool::updates_since<N>(cursor) }
     }
     pub fn finish(self, _ lease: Lease, _ tile: PackedTile) -> Completion {
         let p: BrowserPtr<AtlasPool<N>> = BrowserPtr::from_u32(self.address)
@@ -123,6 +136,23 @@ pub fn entry<const N: usize>(_ ordinal: u32) -> TileEntry uses (pool: AtlasPool<
     pool.entries[ordinal as usize]
 }
 pub fn storage<const N: usize>() -> u32 uses (pool: AtlasPool<N>) { pool.storage }
+
+/// Borrow all newly retained words, including updates coalesced between frames.
+/// This is an append-only prefix: upload at word_offset, then acknowledge its
+/// end only after successful consumption. An old epoch requests a complete
+/// replay. Device recovery likewise supplies a fresh cursor, not an old GPU
+/// receipt. No allocation, copy, scheduling or graphics policy occurs here.
+pub fn updates_since<const N: usize>(_ cursor: RetainedCursor) -> RetainedUpdate
+uses (pool: AtlasPool<N>) {
+    let offset = if cursor.epoch == pool.summary.epoch { cursor.words } else { 0 }
+    if offset > pool.summary.words { return RetainedUpdate::InvalidCursor }
+    if offset == pool.summary.words { return RetainedUpdate::Unchanged }
+    RetainedUpdate::Ready(RetainedRange {
+        epoch: pool.summary.epoch, revision: pool.summary.completed, word_offset: offset,
+        words: BrowserList { ptr: BrowserPtr::from_u32(pool.storage + offset * 4),
+            len: pool.summary.words - offset },
+    })
+}
 
 /// Borrow a published tile from the owning actor's retained storage. No copy or
 /// allocation is performed. The descriptor lives only as long as this pool's

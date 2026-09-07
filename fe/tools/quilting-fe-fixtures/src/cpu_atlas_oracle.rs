@@ -55,6 +55,7 @@ fn cpu_atlas_wasm_pool_retains_tiles_and_rejects_cancelled_results() {
     let entry = instance.get_typed_func::<(i32,i32),(i32,i32,i32,i32)>(&mut store, "entry").unwrap();
     let storage = instance.get_typed_func::<i32,i32>(&mut store, "storage").unwrap();
     let tile_info = instance.get_typed_func::<(i32,i32),(i32,i32,i32,i32,i32)>(&mut store, "tile_info").unwrap();
+    let update_info = instance.get_typed_func::<(i32,i32,i32),(i32,i32,i32,i32,i32,i32)>(&mut store, "update_info").unwrap();
     let memory = instance.get_memory(&mut store, "memory").unwrap();
     let reset = instance.get_typed_func::<(),()>(&mut store,"fe_cabi_reset").unwrap();
     // Enumerate the entire requested key space without generating expensive
@@ -67,10 +68,14 @@ fn cpu_atlas_wasm_pool_retains_tiles_and_rejects_cancelled_results() {
     assert_eq!(summary.call(&mut store,pool).unwrap(),(1,2,0,0,0,0,0));
     assert_eq!(tile_info.call(&mut store,(pool,1)).unwrap(),(1,0,0,0,0));
     assert_eq!(tile_info.call(&mut store,(pool,2)).unwrap(),(2,0,0,0,0));
+    assert_eq!(update_info.call(&mut store,(pool,0,0)).unwrap(),(1,0,0,0,0,0));
     assert_eq!(generate.call(&mut store,(pool,0,0)).unwrap(),0);
     let first = entry.call(&mut store,(pool,1)).unwrap();
     assert!(first.1>0 && first.2>0 && first.3>0);
     let base = storage.call(&mut store,pool).unwrap() as usize;
+    assert_eq!(update_info.call(&mut store,(pool,1,0)).unwrap(),(0,1,1,0,base as i32,first.1));
+    assert_eq!(update_info.call(&mut store,(pool,1,first.1)).unwrap(),(1,0,0,0,0,0));
+    assert_eq!(update_info.call(&mut store,(pool,1,first.1+1)).unwrap(),(2,0,0,0,0,0));
     assert_eq!(tile_info.call(&mut store,(pool,1)).unwrap(),
         (0,first.2,first.3,(base+first.0 as usize*4) as i32,first.1));
     let mut before=vec![0;first.1 as usize*4];
@@ -78,6 +83,14 @@ fn cpu_atlas_wasm_pool_retains_tiles_and_rejects_cancelled_results() {
     assert_eq!(generate.call(&mut store,(pool,1,0)).unwrap(),0);
     let second=entry.call(&mut store,(pool,0)).unwrap();
     assert_eq!(second.0,first.1);
+    assert_eq!(update_info.call(&mut store,(pool,1,first.1)).unwrap(),
+        (0,1,2,first.1,(base+first.1 as usize*4) as i32,second.1));
+    // A frame that missed both completions gets the entire prefix; a new
+    // resource generation ignores the obsolete cursor and replays all bytes.
+    assert_eq!(update_info.call(&mut store,(pool,1,0)).unwrap(),
+        (0,1,2,0,base as i32,first.1+second.1));
+    assert_eq!(update_info.call(&mut store,(pool,0,999)).unwrap(),
+        (0,1,2,0,base as i32,first.1+second.1));
     assert_eq!(tile_info.call(&mut store,(pool,0)).unwrap(),
         (0,second.2,second.3,(base+second.0 as usize*4) as i32,second.1));
     let mut after=vec![0;before.len()];
