@@ -1,8 +1,7 @@
 //! CPU active-list sampling, independent of candidate grids and GPU rounds.
 //!
-//! This initial realization uses exhaustive accepted-point queries as a
-//! correctness reference for an accelerated worker index. It is NOT the final
-//! full-atlas performance path. Boundary seeds are prescribed constraints;
+//! One proposal/admission process supports exhaustive and indexed queries.
+//! The exhaustive query remains a correctness reference. Boundary seeds are prescribed constraints;
 //! only interior admissions obey symmetric larger-radius exclusion.
 use core::marker::Copy
 use super::{AtlasKey, MAX_LOD, boundary_vertices}
@@ -10,6 +9,7 @@ use super::planar::{FixedPoint2, PlanarCoordinates}
 use super::quad::QuadAtlasKey
 use super::{sampling, quad, quad_sampling}
 use super::sampling::{BARYCENTRIC_SCALE, FixedBarycentric, mix32}
+use super::accepted_index::{NeighborIndex, Exhaustive, END}
 
 pub trait ActiveDomain: Copy {
     fn valid(self) -> bool
@@ -18,6 +18,8 @@ pub trait ActiveDomain: Copy {
     fn interior(self, _ p: FixedPoint2) -> bool
     fn radius_squared(self, _ p: FixedPoint2) -> u32
     fn distance_squared(self, _ a: FixedPoint2, _ b: FixedPoint2) -> u32
+    /// Conservative Euclidean coordinate radius for the domain's exclusion ball.
+    fn coordinate_radius_squared(self, _ radius_squared: u32) -> u32
 }
 
 fn bary(_ p: FixedPoint2) -> FixedBarycentric {
@@ -25,6 +27,7 @@ fn bary(_ p: FixedPoint2) -> FixedBarycentric {
 }
 
 impl ActiveDomain for AtlasKey {
+    fn coordinate_radius_squared(self, _ radius_squared: u32) -> u32 { radius_squared }
     fn valid(self) -> bool {
         self.a <= self.b && self.b <= self.c && self.c <= MAX_LOD
     }
@@ -46,6 +49,7 @@ impl ActiveDomain for AtlasKey {
 }
 
 impl ActiveDomain for QuadAtlasKey {
+    fn coordinate_radius_squared(self, _ radius_squared: u32) -> u32 { radius_squared }
     fn valid(self) -> bool {
         self.valid()
     }
@@ -87,6 +91,7 @@ pub struct SamplingReceipt {
     pub proposals: u32,
     pub domain_proposals: u32,
     pub comparisons: u64,
+    pub cells_tested: u64,
     pub remaining_active: u32,
     pub stop: SamplingStop,
 }
@@ -137,18 +142,23 @@ enum Admission {
 }
 
 /// One exclusion rule for local annulus and whole-domain proposals.
-fn admit<D: ActiveDomain, const N: usize>(
+fn admit<D: ActiveDomain, I: NeighborIndex, const N: usize>(
     _ domain: D,
     _ p: FixedPoint2,
     _ scratch: mut ActiveScratch<N>,
     _ receipt: mut SamplingReceipt,
+    _ index: mut I,
 ) -> Admission {
     if !domain.interior(p) {
         return Admission::Rejected
     }
     let radius = domain.radius_squared(p)
-    for j in 0 .. (receipt.points as usize) {
-        let other = scratch.samples[j]
+    let bound = domain.coordinate_radius_squared(radius)
+    let mut query = index.query(p, bound)
+    while true {
+        let j = index.next(mut query)
+        if j == END { break }
+        let other = scratch.samples[j as usize]
         receipt.comparisons += 1
         let exclusion = if radius > other.radius_squared {
             radius
@@ -156,12 +166,15 @@ fn admit<D: ActiveDomain, const N: usize>(
             other.radius_squared
         }
         if domain.distance_squared(p, other.point) < exclusion {
+            receipt.cells_tested += query.cells_tested as u64
             return Admission::Rejected
         }
     }
+    receipt.cells_tested += query.cells_tested as u64
     if (receipt.points as usize) >= N {
         return Admission::Capacity
     }
+    if !index.insert(receipt.points, p, bound) { return Admission::Capacity }
     scratch.samples[receipt.points as usize] = ActiveSample { point: p, radius_squared: radius }
     scratch.active[receipt.remaining_active as usize] = receipt.points
     receipt.points += 1
@@ -191,18 +204,32 @@ pub fn sample_with_exploration<D: ActiveDomain, const N: usize>(
     _ domain_attempts: u32,
     _ scratch: mut ActiveScratch<N>,
 ) -> SamplingReceipt {
+    let mut index = Exhaustive::empty()
+    sample_indexed(domain, config, domain_attempts, mut scratch, mut index)
+}
+
+/// The proposal process and exact exclusion rule are shared across indices.
+pub fn sample_indexed<D: ActiveDomain, I: NeighborIndex, const N: usize>(
+    _ domain: D,
+    _ config: ActiveConfig,
+    _ domain_attempts: u32,
+    _ scratch: mut ActiveScratch<N>,
+    _ index: mut I,
+) -> SamplingReceipt {
     let mut receipt = SamplingReceipt {
         points: 0,
         boundary_points: 0,
         proposals: 0,
         domain_proposals: 0,
         comparisons: 0,
+        cells_tested: 0,
         remaining_active: 0,
         stop: SamplingStop::InvalidInput,
     }
     if !domain.valid() || config.attempts_per_active == 0 {
         return receipt
     }
+    index.reset()
     let boundary = domain.boundary_count()
     if (boundary as usize) > N {
         receipt.stop = SamplingStop::Capacity
@@ -211,6 +238,10 @@ pub fn sample_with_exploration<D: ActiveDomain, const N: usize>(
     for i in 0 .. (boundary as usize) {
         let ordinal: u32 = i.downcast_truncate()
         let p = domain.boundary_point(ordinal)
+        if !index.insert(ordinal, p, domain.coordinate_radius_squared(domain.radius_squared(p))) {
+            receipt.stop = SamplingStop::Capacity
+            return receipt
+        }
         scratch.samples[i as usize] = ActiveSample {
             point: p,
             radius_squared: domain.radius_squared(p),
@@ -235,7 +266,7 @@ pub fn sample_with_exploration<D: ActiveDomain, const N: usize>(
             let x = rng % (BARYCENTRIC_SCALE + 1)
             rng = random(rng)
             let p = FixedPoint2 { x: x, y: rng % (BARYCENTRIC_SCALE + 1) }
-            match admit(domain, p, mut scratch, mut receipt) {
+            match admit(domain, p, mut scratch, mut receipt, mut index) {
                 Admission::Rejected => {},
                 Admission::Accepted => {
                     probes_left = domain_attempts
@@ -275,7 +306,7 @@ pub fn sample_with_exploration<D: ActiveDomain, const N: usize>(
             if distance < center.radius_squared || distance >= 4 * center.radius_squared {
                 continue
             }
-            match admit(domain, p, mut scratch, mut receipt) {
+            match admit(domain, p, mut scratch, mut receipt, mut index) {
                 Admission::Rejected => {},
                 Admission::Accepted => {
                     break

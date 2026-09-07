@@ -46,6 +46,34 @@ Run from `fe/tools/quilting-fe-fixtures`:
 This gate does not yet prove triangulation, browser worker behavior, all-key
 coverage, maximality, or blue-noise spectral quality.
 
+`sample_indexed` runs the same proposal/admission process with a `NeighborIndex`.
+`Exhaustive` is the reference; `AcceptedGrid` retains linked point chains and
+maximum radius bounds per cell, with a global-radius query window. Domains
+must supply conservative coordinate-radius bounds; the exact domain distance
+test still decides every admission. Grid dimensions affect performance only.
+
+The Wasm `active_index_wasm_matches_exhaustive_streams` gate compares every point
+coordinate and radius, proposal counts and completion on seven triangle/quad
+cases, including mixed LoD-8 keys and multiple seeds. All streams match.
+For triangle `[0,0,8]`, seed42, comparisons fall from10,788,031 to598,217 with
+32,904 cell visits. The corresponding quad goes from3,101,542 to180,094
+comparisons with1,227,836 cell visits.
+
+One release O2 Wasmtime run measured five-call medians after warm-up, with fuel
+disabled, including scratch initialization but excluding validation/IO:
+
+| Case | Exhaustive | Indexed |
+| --- | ---: | ---: |
+| Triangle `[0,0,8]` | 141.59ms | 16.22ms |
+| Square `[0,0,0,8]` | 31.02ms | 9.88ms |
+| Triangle `[4,4,4]` | 2.85ms | 1.25ms |
+| Square `[4,4,4,4]` | 4.30ms | 1.38ms |
+
+These are local sampling comparisons, not Rust baselines, browser-worker timings,
+triangulation costs or full-atlas performance claims. Small-radius windows
+matter: before adding them, uniform square sampling regressed despite fewer
+point comparisons. Keep both cell work and exact comparisons observable.
+
 The existing triangle atlas uses all 165 sorted edge-LoD triples through LoD 8.
 Its equilateral metric is intentional: barycentric coordinate lanes are not
 orthogonal Cartesian axes.

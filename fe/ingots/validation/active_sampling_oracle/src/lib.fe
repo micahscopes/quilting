@@ -2,6 +2,92 @@
 use quilting_atlas::{AtlasKey, active_sampling}
 use quilting_atlas::quad::QuadAtlasKey
 use quilting_atlas::active_sampling::{ActiveDomain, ActiveConfig, ActiveScratch, SamplingStop}
+use quilting_atlas::accepted_index::AcceptedGrid
+
+pub struct IndexComparison {
+    pub points: u32,
+    pub proposals: u32,
+    pub exhaustive_comparisons: u64,
+    pub indexed_comparisons: u64,
+    pub cells_tested: u64,
+    pub mismatches: u32,
+    pub completed: u32,
+}
+
+pub struct SamplingWork {
+    pub points: u32,
+    pub proposals: u32,
+    pub comparisons: u64,
+    pub cells_tested: u64,
+    pub completed: u32,
+}
+
+/// Sampling and scratch initialization only; excludes all-pairs validation.
+fn measure<D: ActiveDomain>(_ domain: D, _ indexed: bool) -> SamplingWork {
+    let mut scratch: ActiveScratch<4096> = ActiveScratch::empty()
+    let config = ActiveConfig { seed: 42, attempts_per_active: 30, proposal_budget: 100000 }
+    let r = if indexed {
+        let mut grid: AcceptedGrid<4096> = AcceptedGrid::empty()
+        active_sampling::sample_indexed(domain, config, 256, mut scratch, mut grid)
+    } else {
+        active_sampling::sample_with_exploration(domain, config, 256, mut scratch)
+    }
+    SamplingWork {
+        points: r.points,
+        proposals: r.proposals,
+        comparisons: r.comparisons,
+        cells_tested: r.cells_tested,
+        completed: match r.stop { SamplingStop::ExplorationExhausted => 1, _ => 0 },
+    }
+}
+
+pub fn measure_triangle(_ a: u32, _ b: u32, _ c: u32, _ indexed: bool) -> SamplingWork {
+    measure(AtlasKey { a: a, b: b, c: c }, indexed)
+}
+
+pub fn measure_square(_ bottom: u32, _ right: u32, _ top: u32, _ left: u32, _ indexed: bool) -> SamplingWork {
+    measure(QuadAtlasKey { bottom: bottom, right: right, top: top, left: left }, indexed)
+}
+
+fn compare<D: ActiveDomain>(_ domain: D, _ seed: u32) -> IndexComparison {
+    let mut reference: ActiveScratch<4096> = ActiveScratch::empty()
+    let mut indexed: ActiveScratch<4096> = ActiveScratch::empty()
+    let mut grid: AcceptedGrid<4096> = AcceptedGrid::empty()
+    let config = ActiveConfig { seed: seed, attempts_per_active: 30, proposal_budget: 100000 }
+    let a = active_sampling::sample_with_exploration(domain, config, 256, mut reference)
+    let b = active_sampling::sample_indexed(domain, config, 256, mut indexed, mut grid)
+    let mut mismatches: u32 = 0
+    if a.points != b.points || a.proposals != b.proposals || a.domain_proposals != b.domain_proposals {
+        mismatches += 1
+    }
+    let count = if a.points < b.points { a.points } else { b.points }
+    for i in 0 .. (count as usize) {
+        let p = reference.samples[i]
+        let q = indexed.samples[i]
+        if p.point.x != q.point.x || p.point.y != q.point.y || p.radius_squared != q.radius_squared {
+            mismatches += 1
+        }
+    }
+    let ca = match a.stop { SamplingStop::ExplorationExhausted => 1, _ => 0 }
+    let cb = match b.stop { SamplingStop::ExplorationExhausted => 1, _ => 0 }
+    IndexComparison {
+        points: a.points,
+        proposals: a.proposals,
+        exhaustive_comparisons: a.comparisons,
+        indexed_comparisons: b.comparisons,
+        cells_tested: b.cells_tested,
+        mismatches: mismatches,
+        completed: ca + cb,
+    }
+}
+
+pub fn compare_triangle(_ a: u32, _ b: u32, _ c: u32, _ seed: u32) -> IndexComparison {
+    compare(AtlasKey { a: a, b: b, c: c }, seed)
+}
+
+pub fn compare_square(_ bottom: u32, _ right: u32, _ top: u32, _ left: u32, _ seed: u32) -> IndexComparison {
+    compare(QuadAtlasKey { bottom: bottom, right: right, top: top, left: left }, seed)
+}
 
 pub struct SamplingProbe {
     pub points: u32,
