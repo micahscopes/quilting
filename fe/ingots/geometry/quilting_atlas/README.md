@@ -130,6 +130,15 @@ Partial phases deliberately leave area unverified; their completion is not a
 mesh-audit pass. These phase probes retain all scratch allocations so that their
 memory endpoints are comparable.
 
+The subsequent mb2 runtime-range cleanup fix preserves all thirteen mesh
+receipts and phase checks while returning the scalar probe's arena to its
+starting position. Actual Wasm linear-memory high-water is 37,224,448 bytes,
+not merely a low post-call endpoint hiding the earlier peak. The gate now
+enforces a 64 MiB per-worker linear-memory budget. This includes the large
+probe scratch envelope; worker packing/output and parallel execution still
+need their own measurements. See mb2's compiler observation notes for the
+zero-leaf range placeholder and associated-field normalization regression.
+
 The existing triangle atlas uses all 165 sorted edge-LoD triples through LoD 8.
 Its equilateral metric is intentional: barycentric coordinate lanes are not
 orthogonal Cartesian axes.
