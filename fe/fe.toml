@@ -17,6 +17,7 @@ members = [
   { path = "ingots/validation/atlas_retention", name = "atlas_retention" },
   { path = "ingots/validation/atlas_jobs", name = "atlas_jobs" },
   { path = "ingots/validation/active_sampling_oracle", name = "active_sampling_oracle" },
+  { path = "ingots/validation/cpu_atlas_oracle", name = "cpu_atlas_oracle" },
   { path = "ingots/demos/classic_quilting_fixed_raster", name = "classic_quilting_fixed_raster" },
   { path = "ingots/demos/classic_quilting_atlas", name = "classic_quilting_atlas" },
   { path = "ingots/demos/classic_quilting_lod", name = "classic_quilting_lod" },

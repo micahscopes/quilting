@@ -1,0 +1,116 @@
+//! Actual Fe sampling + CPU CDT, with an independent mesh audit in Wasm.
+use quilting_atlas::{AtlasKey, edge_resolution}
+use quilting_atlas::quad::QuadAtlasKey
+use quilting_atlas::active_sampling::{ActiveDomain, ActiveScratch, ActiveConfig, SamplingStop, sample_indexed}
+use quilting_atlas::accepted_index::AcceptedGrid
+use quilting_atlas::cpu_mesh::{CpuMesh, END}
+use quilting_atlas::cpu_cdt::{PointSource, EdgeQueue, TriangulationStop, triangulate}
+use quilting_atlas::planar::{IntegerPlaneMetric, EquilateralMetric, SquareMetric, orientation}
+use quilting_atlas::topology::{ConstrainedBoundary, triangle_edge_first, triangle_edge_second, triangle_edge_opposite, interior_edge_flip_decision_with_metric}
+
+pub struct AtlasProbe {
+    pub sampling_status: u32,
+    pub mesh_status: u32,
+    pub points: u32,
+    pub triangles: u32,
+    pub errors: u32,
+    pub location_steps: u32,
+    pub edge_visits: u32,
+    pub flips: u32,
+    pub double_area: u64,
+}
+
+fn empty() -> AtlasProbe {
+    AtlasProbe { sampling_status: 3, mesh_status: 5, points: 0, triangles: 0, errors: 0, location_steps: 0, edge_visits: 0, flips: 0, double_area: 0 }
+}
+
+fn probe<D: ActiveDomain + ConstrainedBoundary, M: IntegerPlaneMetric>(
+    _ domain: D, _ metric: M, _ roots: [u32; 4], _ root_count: u32, _ seed: u32,
+) -> AtlasProbe {
+    // Probe envelopes, not production atlas caps. Any exhaustion is a failed gate.
+    let mut scratch: ActiveScratch<2048> = ActiveScratch::empty()
+    let mut grid: AcceptedGrid<2048> = AcceptedGrid::empty()
+    let mut mesh: CpuMesh<4096> = CpuMesh::empty()
+    let mut queue: EdgeQueue<12288> = EdgeQueue::empty()
+    let mut result = empty()
+    let sampled = sample_indexed(domain, ActiveConfig { seed: seed, attempts_per_active: 30, proposal_budget: 100000 }, 256, mut scratch, mut grid)
+    result.points = sampled.points
+    result.sampling_status = match sampled.stop {
+        SamplingStop::ExplorationExhausted => 0,
+        SamplingStop::Capacity => 1,
+        SamplingStop::Budget => 2,
+        _ => 3,
+    }
+    if result.sampling_status != 0 { return result }
+    let built = triangulate(scratch, metric, roots, root_count, sampled.points, mut mesh, mut queue, 10000000)
+    result.mesh_status = match built.stop {
+        TriangulationStop::Complete => 0,
+        TriangulationStop::Budget => 1,
+        TriangulationStop::Capacity => 2,
+        TriangulationStop::Duplicate => 3,
+        TriangulationStop::Outside => 4,
+        TriangulationStop::Invalid => 5,
+    }
+    result.triangles = mesh.count
+    result.location_steps = built.location_steps
+    result.edge_visits = built.edge_visits
+    result.flips = built.flips
+    if result.mesh_status != 0 { return result }
+    result.errors = mesh.adjacency_errors()
+    if built.inserted != sampled.points || mesh.count != 2 * sampled.points - sampled.boundary_points - 2 { result.errors += 1 }
+    let mut used: [bool; 2048] = [false; 2048]
+    let mut hull: u32 = 0
+    for f in 0 .. (mesh.count as usize) {
+        let face = mesh.faces[f]
+        let t = face.triangle
+        if t.first >= sampled.points || t.second >= sampled.points || t.third >= sampled.points {
+            result.errors += 1
+            continue
+        }
+        let signed_area = orientation(scratch.point(t.first), scratch.point(t.second), scratch.point(t.third))
+        if signed_area <= 0 { result.errors += 1 } else {
+            let area: u32 = signed_area.downcast_truncate()
+            result.double_area += area as u64
+        }
+        for e in 0 .. 3 {
+            let u = triangle_edge_first(t, e.downcast_truncate())
+            let v = triangle_edge_second(t, e.downcast_truncate())
+            used[u as usize] = true
+            let neighbor = face.across[e]
+            if neighbor == END {
+                hull += 1
+                if !domain.contains_segment(u, v) { result.errors += 1 }
+            } else if neighbor / 3 < mesh.count {
+                let a = triangle_edge_opposite(t, e.downcast_truncate())
+                let b = triangle_edge_opposite(mesh.faces[(neighbor / 3) as usize].triangle, neighbor % 3)
+                if b >= sampled.points { result.errors += 1
+                    continue
+                }
+                let decision = interior_edge_flip_decision_with_metric(u, scratch.point(u), v, scratch.point(v), a, scratch.point(a), b, scratch.point(b), metric)
+                if decision.flip { result.errors += 1 }
+            }
+        }
+    }
+    if hull != sampled.boundary_points { result.errors += 1 }
+    for p in 0 .. (sampled.points as usize) { if !used[p] { result.errors += 1 } }
+    let expected: u64 = if root_count == 3 { 268435456 } else { 536870912 }
+    if result.double_area != expected { result.errors += 1 }
+    result
+}
+
+pub fn triangle(_ a: u32, _ b: u32, _ c: u32, _ seed: u32) -> AtlasProbe {
+    let key = AtlasKey { a: a, b: b, c: c }
+    if !key.valid() { return empty() }
+    let corner_b = edge_resolution(c)
+    let corner_c = corner_b + edge_resolution(b)
+    probe(key, EquilateralMetric {}, [0, corner_b, corner_c, END], 3, seed)
+}
+
+pub fn square(_ bottom: u32, _ right: u32, _ top: u32, _ left: u32, _ seed: u32) -> AtlasProbe {
+    let key = QuadAtlasKey { bottom: bottom, right: right, top: top, left: left }
+    if !key.valid() { return empty() }
+    let b = edge_resolution(bottom)
+    let c = b + edge_resolution(right)
+    let d = c + edge_resolution(top)
+    probe(key, SquareMetric {}, [0, b, c, d], 4, seed)
+}

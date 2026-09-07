@@ -29,6 +29,9 @@ mod fe_oracle;
 #[cfg(all(test, feature = "fe-oracle"))]
 mod active_sampling_oracle;
 
+#[cfg(all(test, feature = "fe-oracle"))]
+mod cpu_atlas_oracle;
+
 #[cfg(all(test, feature = "raster-oracle"))]
 mod raster_oracle;
 

@@ -94,8 +94,22 @@ Seven scalar Fe tests cover complete small triangle/quad builds (all-points
 empty-circumcircle checks in each metric, vertex retention and total area),
 exact triangular boundary chains, location outcomes, hull-preserving flips,
 queue wrap/deduplication, legalization resumption and failure outcomes.
-These are not yet full sampled-LoD-8 Wasm or browser-worker triangulation
-gates. Those gates, permutation/coverage checks at scale, and cost measurements
+The `cpu_atlas_oracle` now connects indexed sampling directly to this CDT in
+actual O2 Wasm, with no imported geometry implementation. Its seven-case gate
+includes triangle `[0,0,8]` (1,615 points, 2,970 faces) and square `[0,0,0,8]`
+(619 points, 977 faces), seed 42. All cases pass adjacency, positive orientation,
+exact total area, prescribed hull, vertex retention, Euler count and local
+metric-Delaunay audits. Small scalar cases additionally use all-point
+empty-circumcircle checks. The large-case audits are not an independent
+exhaustive crossing test.
+
+Run from `fe/tools/quilting-fe-fixtures`:
+`cargo test --release --features fe-oracle cpu_atlas_wasm_triangulates_mixed_lod8_domains -- --nocapture`.
+The mixed cases took about 51ms and 24ms respectively for fuel-instrumented
+sampling + CDT + audit in Wasmtime. These are correctness probes, not production
+benchmarks. The 2,048-point allocation is a probe envelope that fails explicitly
+on exhaustion, not an atlas cap. Full-key capacity scaling, browser workers,
+packed output, permutation/coverage checks at scale and full-atlas measurements
 remain required before calling the runtime atlas complete.
 
 The existing triangle atlas uses all 165 sorted edge-LoD triples through LoD 8.

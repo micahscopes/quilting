@@ -104,6 +104,10 @@ impl Copy for ActiveConfig {}
 /// entries of samples are initialized outputs. No atlas points live in CTFE.
 pub struct ActiveScratch<const N: usize> { pub samples: [ActiveSample; N], active: [u32; N] }
 
+impl<const N: usize> super::cpu_cdt::PointSource for ActiveScratch<N> {
+    fn point(self, _ id: u32) -> FixedPoint2 { self.samples[id as usize].point }
+}
+
 impl<const N: usize> ActiveScratch<N> {
     pub fn empty() -> Self {
         Self {
