@@ -28,6 +28,11 @@ fn empty_face() -> Face {
 pub struct CpuMesh<const T: usize> { pub faces: [Face; T], pub count: u32 }
 
 impl<const T: usize> CpuMesh<T> {
+    /// Initialize caller-allocated storage without an expanded array value.
+    pub fn initialize(mut self) {
+        for i in 0 .. T { self.faces[i] = empty_face() }
+        self.count = 0
+    }
     pub fn empty() -> Self {
         Self { faces: [empty_face(); T], count: 0 }
     }

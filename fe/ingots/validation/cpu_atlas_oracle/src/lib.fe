@@ -1,4 +1,5 @@
 //! Actual Fe sampling + CPU CDT, with an independent mesh audit in Wasm.
+use core::{BrowserPtr, alloc_browser_object}
 use quilting_atlas::{AtlasKey, edge_resolution}
 use quilting_atlas::quad::QuadAtlasKey
 use quilting_atlas::active_sampling::{ActiveDomain, ActiveScratch, ActiveConfig, SamplingStop, sample_indexed}
@@ -24,14 +25,35 @@ fn empty() -> AtlasProbe {
     AtlasProbe { sampling_status: 3, mesh_status: 5, points: 0, triangles: 0, errors: 0, location_steps: 0, edge_visits: 0, flips: 0, double_area: 0 }
 }
 
+struct AuditScratch { used: [bool; 2048] }
+
+fn initialize() uses (scratch: mut ActiveScratch<2048>, grid: mut AcceptedGrid<2048>, mesh: mut CpuMesh<4096>, queue: mut EdgeQueue<12288>, audit: mut AuditScratch) {
+    scratch.initialize()
+    grid.initialize()
+    mesh.initialize()
+    queue.initialize()
+    for i in 0 .. 2048 { audit.used[i] = false }
+}
+
 fn probe<D: ActiveDomain + ConstrainedBoundary, M: IntegerPlaneMetric>(
     _ domain: D, _ metric: M, _ roots: [u32; 4], _ root_count: u32, _ seed: u32,
 ) -> AtlasProbe {
+    let scratch: BrowserPtr<ActiveScratch<2048>> = alloc_browser_object<ActiveScratch<2048>>()
+    let grid: BrowserPtr<AcceptedGrid<2048>> = alloc_browser_object<AcceptedGrid<2048>>()
+    let mesh: BrowserPtr<CpuMesh<4096>> = alloc_browser_object<CpuMesh<4096>>()
+    let queue: BrowserPtr<EdgeQueue<12288>> = alloc_browser_object<EdgeQueue<12288>>()
+    let audit: BrowserPtr<AuditScratch> = alloc_browser_object<AuditScratch>()
+    if scratch.address() == 0 || grid.address() == 0 || mesh.address() == 0 || queue.address() == 0 || audit.address() == 0 { return empty() }
+    with (scratch, grid, mesh, queue, audit) {
+        initialize()
+        probe_in_storage(domain, metric, roots, root_count, seed)
+    }
+}
+
+fn probe_in_storage<D: ActiveDomain + ConstrainedBoundary, M: IntegerPlaneMetric>(
+    _ domain: D, _ metric: M, _ roots: [u32; 4], _ root_count: u32, _ seed: u32,
+) -> AtlasProbe uses (scratch: mut ActiveScratch<2048>, grid: mut AcceptedGrid<2048>, mesh: mut CpuMesh<4096>, queue: mut EdgeQueue<12288>, audit: mut AuditScratch) {
     // Probe envelopes, not production atlas caps. Any exhaustion is a failed gate.
-    let mut scratch: ActiveScratch<2048> = ActiveScratch::empty()
-    let mut grid: AcceptedGrid<2048> = AcceptedGrid::empty()
-    let mut mesh: CpuMesh<4096> = CpuMesh::empty()
-    let mut queue: EdgeQueue<12288> = EdgeQueue::empty()
     let mut result = empty()
     let sampled = sample_indexed(domain, ActiveConfig { seed: seed, attempts_per_active: 30, proposal_budget: 100000 }, 256, mut scratch, mut grid)
     result.points = sampled.points
@@ -58,7 +80,6 @@ fn probe<D: ActiveDomain + ConstrainedBoundary, M: IntegerPlaneMetric>(
     if result.mesh_status != 0 { return result }
     result.errors = mesh.adjacency_errors()
     if built.inserted != sampled.points || mesh.count != 2 * sampled.points - sampled.boundary_points - 2 { result.errors += 1 }
-    let mut used: [bool; 2048] = [false; 2048]
     let mut hull: u32 = 0
     for f in 0 .. (mesh.count as usize) {
         let face = mesh.faces[f]
@@ -75,7 +96,7 @@ fn probe<D: ActiveDomain + ConstrainedBoundary, M: IntegerPlaneMetric>(
         for e in 0 .. 3 {
             let u = triangle_edge_first(t, e.downcast_truncate())
             let v = triangle_edge_second(t, e.downcast_truncate())
-            used[u as usize] = true
+            audit.used[u as usize] = true
             let neighbor = face.across[e]
             if neighbor == END {
                 hull += 1
@@ -92,7 +113,7 @@ fn probe<D: ActiveDomain + ConstrainedBoundary, M: IntegerPlaneMetric>(
         }
     }
     if hull != sampled.boundary_points { result.errors += 1 }
-    for p in 0 .. (sampled.points as usize) { if !used[p] { result.errors += 1 } }
+    for p in 0 .. (sampled.points as usize) { if !audit.used[p] { result.errors += 1 } }
     let expected: u64 = if root_count == 3 { 268435456 } else { 536870912 }
     if result.double_area != expected { result.errors += 1 }
     result

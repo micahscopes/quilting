@@ -104,6 +104,11 @@ pub fn cell_may_conflict(_ cell: u32, _ p: FixedPoint2, _ radius_squared: u32) -
 }
 
 impl<const N: usize> AcceptedGrid<N> {
+    /// Initialize every field of caller-allocated storage once; reset per job.
+    pub fn initialize(mut self) {
+        for i in 0 .. N { self.links[i] = END }
+        self.reset()
+    }
     pub fn empty() -> Self {
         Self { heads: [END; 256], maxima: [0; 256], links: [END; N], count: 0, extent: 0 }
     }

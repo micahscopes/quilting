@@ -143,6 +143,11 @@ pub struct EdgeQueue<const Q: usize> {
 }
 
 impl<const Q: usize> EdgeQueue<Q> {
+    /// Initialize every field once; reset reuses the allocation between jobs.
+    pub fn initialize(mut self) {
+        for i in 0 .. Q { self.items[i] = END }
+        self.reset()
+    }
     pub fn empty() -> Self {
         Self { items: [END; Q], marked: [false; Q], head: 0, length: 0 }
     }

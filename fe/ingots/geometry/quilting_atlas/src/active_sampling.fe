@@ -109,6 +109,13 @@ impl<const N: usize> super::cpu_cdt::PointSource for ActiveScratch<N> {
 }
 
 impl<const N: usize> ActiveScratch<N> {
+    /// Initialize caller-allocated storage without constructing a large value.
+    pub fn initialize(mut self) {
+        for i in 0 .. N {
+            self.samples[i] = ActiveSample { point: FixedPoint2 { x: 0, y: 0 }, radius_squared: 0 }
+            self.active[i] = 0
+        }
+    }
     pub fn empty() -> Self {
         Self {
             samples: [ActiveSample { point: FixedPoint2 { x: 0, y: 0 }, radius_squared: 0 }; N],
