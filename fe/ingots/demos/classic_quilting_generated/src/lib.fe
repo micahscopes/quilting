@@ -128,6 +128,9 @@ const fn maximum_key() -> AtlasKey {
     AtlasKey { a: quilting_atlas::MAX_LOD, b: quilting_atlas::MAX_LOD, c: quilting_atlas::MAX_LOD }
 }
 
+// The loop condition bounds the counter, so it cannot overflow. Say so:
+// the trap a checked add would emit has no channel in a raster stage.
+#[arithmetic(unchecked)]
 fn level(_ x: f32) -> u32 {
     let mut n: u32 = 0
     while n < quilting_atlas::MAX_LOD && x >= __f32_from_i32(n.downcast_unchecked()) + 0.5 {

@@ -3088,7 +3088,9 @@ fn deformed_atlas_raster_vertex(
         p2: fixed_parameter(chart, point2),
         valid: true,
     }
-    let source_triangle = patch_first_triangle(fixture, patch_index) + local_triangle
+    // Wrapping: a buffer word carries no bound to discharge the overflow
+    // check, and a raster stage cannot carry its trap.
+    let source_triangle = patch_first_triangle(fixture, patch_index).wrapping_add(local_triangle)
     let source0 = fixture_triangle_index(fixture, source_triangle, 0)
     let mut source1 = fixture_triangle_index(fixture, source_triangle, 1)
     let mut source2 = fixture_triangle_index(fixture, source_triangle, 2)
@@ -4673,7 +4675,8 @@ actor CliffordPatchLab uses (
                 invalid_patch_vertex()
             } else {
                 let corner = vertex_index % 3
-                let source_triangle = patch_first_triangle(self.fixture, patch_index) + local_triangle
+                // Wrapping, as in `atlas_triangle_vertex`.
+                let source_triangle = patch_first_triangle(self.fixture, patch_index).wrapping_add(local_triangle)
                 let point0 = fixture_triangle_index(self.fixture, source_triangle, 0)
                 let point1 = fixture_triangle_index(self.fixture, source_triangle, 1)
                 let point2 = fixture_triangle_index(self.fixture, source_triangle, 2)

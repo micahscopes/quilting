@@ -82,7 +82,9 @@ pub fn policy() -> IsotropicPolicy {
 pub fn atlas_barycentric(_ fixture: FixtureBuffer, _ requested: AtlasKey, _ vertex: u32) -> Bary3F {
     let canonical = canonicalize(requested)
     let patch_id = canonical_key_ordinal(canonical.key)
-    let triangle = patch_first_triangle(fixture, patch_id) + vertex / 3
+    // Wrapping: a buffer word carries no bound to discharge the overflow
+    // check, and a raster stage cannot carry its trap.
+    let triangle = patch_first_triangle(fixture, patch_id).wrapping_add(vertex / 3)
     let point = fixture_barycentric(
         fixture,
         fixture_triangle_index(fixture, triangle, vertex % 3),

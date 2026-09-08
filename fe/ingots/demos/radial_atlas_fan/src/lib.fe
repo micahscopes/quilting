@@ -52,6 +52,9 @@ const fn params() -> FanParams {
     }
 }
 
+// The loop condition bounds the counter, so it cannot overflow. Say so:
+// the trap a checked add would emit has no channel in a raster stage.
+#[arithmetic(unchecked)]
 fn level(_ value: f32) -> u32 {
     let mut result: u32 = 0
     while result < 8 && value >= lod_as_f32(result) + 0.5 { result = result + 1 }
@@ -77,7 +80,9 @@ fn warped_point(
     _ child: u32, _ focus: Bary3F, _ concentration: f32, _ endpoint_weights: Bary3F,
 ) -> Bary3F {
     let canonical = canonicalize(requested)
-    let source = patch_first_triangle(fixture, canonical_key_ordinal(canonical.key)) + triangle
+    // Wrapping: a buffer word carries no bound to discharge the overflow check,
+    // and a raster stage cannot carry its trap.
+    let source = patch_first_triangle(fixture, canonical_key_ordinal(canonical.key)).wrapping_add(triangle)
     let point = fixture_barycentric(fixture, fixture_triangle_index(fixture, source, corner))
     let local = remap_barycentric(edge_permutation_index(canonical.permutation), point)
     let weights = if child == 0 { bary3f(concentration,endpoint_weights.b,endpoint_weights.c) }
@@ -169,8 +174,11 @@ actor RadialAtlasFan uses (GpuProgram<WebGpuBackend>, SurfaceQuality<ResponsiveB
         while child < 2 {
             let n = count(self.fixture, key(child,self.outer_a,self.outer_b,self.outer_c,self.interior_lod))
             if triangle < n { break }
-            triangle = triangle - n
-            child = child + 1
+            // Wrapping: the guard above proves the difference is non-negative
+            // and the loop bounds the counter, but an attribute is ignored on
+            // an actor method, so state it per operation.
+            triangle = triangle.wrapping_sub(n)
+            child = child.wrapping_add(1)
         }
         let requested = key(child,self.outer_a,self.outer_b,self.outer_c,self.interior_lod)
         let focus = interior(self.interior_b,self.interior_c)

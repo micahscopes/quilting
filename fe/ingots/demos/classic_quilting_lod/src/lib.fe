@@ -152,6 +152,11 @@ fn word_as_f32(_ word: u32) -> f32 {
     __bitcast(word)
 }
 
+// Buffer offset arithmetic. The operands are fixture words and caller indices,
+// so no invocation bound discharges their overflow checks, and the resulting
+// traps have no channel in a raster stage. The fixture's own header bounds
+// these lanes; a malformed fixture is rejected before it is bound.
+#[arithmetic(unchecked)]
 fn patch_word(_ fixture: FixtureBuffer, _ patch_index: u32, _ lane: u32) -> u32 {
     fixture.load(
             index: PATCH_BASE_WORD + patch_index * PATCH_STRIDE_WORDS + lane,
@@ -170,6 +175,11 @@ pub fn patch_triangle_count(_ fixture: FixtureBuffer, _ patch_index: u32) -> u32
     patch_word(fixture, patch_index, 6)
 }
 
+// Buffer offset arithmetic. The operands are fixture words and caller indices,
+// so no invocation bound discharges their overflow checks, and the resulting
+// traps have no channel in a raster stage. The fixture's own header bounds
+// these lanes; a malformed fixture is rejected before it is bound.
+#[arithmetic(unchecked)]
 pub fn fixture_barycentric(_ fixture: FixtureBuffer, _ point_index: u32) -> Bary3F {
     let base = VERTEX_BASE_WORD + point_index * VERTEX_STRIDE_WORDS
     bary3f(
@@ -179,6 +189,11 @@ pub fn fixture_barycentric(_ fixture: FixtureBuffer, _ point_index: u32) -> Bary
     )
 }
 
+// Buffer offset arithmetic. The operands are fixture words and caller indices,
+// so no invocation bound discharges their overflow checks, and the resulting
+// traps have no channel in a raster stage. The fixture's own header bounds
+// these lanes; a malformed fixture is rejected before it is bound.
+#[arithmetic(unchecked)]
 pub fn fixture_triangle_index(
     _ fixture: FixtureBuffer,
     _ triangle_index: u32,
@@ -411,7 +426,9 @@ actor ClassicQuiltingLod uses (
         if triangle_index < triangle_count {
             point_index = fixture_triangle_index(
                 self.fixture,
-                patch_first_triangle(self.fixture, patch_index) + triangle_index,
+                // Wrapping: a buffer word carries no bound to discharge the
+                // overflow check, and a raster stage cannot carry its trap.
+                patch_first_triangle(self.fixture, patch_index).wrapping_add(triangle_index),
                 corner,
             )
         }

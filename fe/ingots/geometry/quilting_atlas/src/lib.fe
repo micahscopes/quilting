@@ -202,6 +202,12 @@ pub const fn canonical_key_at(_ ordinal: usize) -> AtlasKey {
     AtlasKey { a: a, b: b, c: b + remaining }
 }
 
+// The guard above establishes every bound this arithmetic needs: the key is
+// sorted and its largest lane is at most MAX_LOD, so each difference is
+// non-negative and each product is far inside u32. The compiler cannot see
+// that, and the traps it would otherwise emit have no channel in a raster
+// stage, so state the fact here rather than let it break lowering.
+#[arithmetic(unchecked)]
 pub const fn canonical_key_ordinal(_ key: AtlasKey) -> u32 {
     if key.a > key.b || key.b > key.c || key.c > MAX_LOD {
         return 0xffffffff
@@ -216,10 +222,14 @@ const fn usize_to_u32(_ value: usize) -> u32 {
     value.downcast_truncate()
 }
 
+// Bounded by its only callers, which clamp to MAX_LOD before calling.
+#[arithmetic(unchecked)]
 const fn choose2(_ n: u32) -> u32 {
     n * (n - 1) / 2
 }
 
+// Bounded by its only callers, which clamp to MAX_LOD before calling.
+#[arithmetic(unchecked)]
 const fn choose3(_ n: u32) -> u32 {
     n * (n - 1) * (n - 2) / 6
 }

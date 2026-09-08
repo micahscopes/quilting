@@ -27,3 +27,14 @@ requires pending application input before presenting and therefore cannot yet
 drive an idle, zero-input animation loop. The source intentionally contains no
 demo JavaScript workaround; once that host contract lands, the clock seam is
 already Fe-authored.
+
+Fixture offsets are computed with wrapping arithmetic, and the three fixture
+accessors in `classic_quilting_lod` are marked `#[arithmetic(unchecked)]`. This
+is not laziness about overflow. The left operand of each of those additions is a
+word read from the fixture storage buffer, so no invocation bound can discharge
+its overflow check, and the trap a checked add would emit has no channel in a
+raster stage. The bound comes from the fixture's own header, which is validated
+before the buffer is bound. Before the portable lowerer began honouring checked
+arithmetic in September 2026, these expressions wrapped silently and the demo
+lowered by accident.
+

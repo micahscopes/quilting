@@ -201,6 +201,9 @@ fn clamp_linear(_ color: LinearRgb) -> LinearRgb {
 /// Convert OKLCH to in-gamut linear sRGB. Out-of-gamut colours are mapped by
 /// an eight-step bounded chroma search at fixed lightness and hue. The final
 /// clamp absorbs only matrix-rounding residue; it is not the gamut strategy.
+// The loop condition bounds the counter, so it cannot overflow. Say so:
+// the trap a checked add would emit has no channel in a raster stage.
+#[arithmetic(unchecked)]
 pub fn to_gamut_mapped_linear_srgb(_ color: Oklch) -> LinearRgb {
     let direct = raw_linear_srgb(color)
     if in_display_gamut(direct) {
