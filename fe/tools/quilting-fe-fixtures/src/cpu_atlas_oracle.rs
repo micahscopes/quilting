@@ -1771,3 +1771,28 @@ fn density_placement_leaves_boundary_samples_on_their_own_edge() {
     }
 }
 
+/// The free-weight option must be inert until it is asked for. Admitting free
+/// weights with zero freedom has to reproduce the constrained patch bit for
+/// bit, so flipping the toggle never silently changes geometry, and any
+/// nonzero freedom has to actually leave the authoring family.
+#[test]
+fn free_weights_are_inert_at_zero_and_leave_the_family_otherwise() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let f=instance.get_typed_func::<(f32,f32),f32>(&mut store,"free_weight_departure").unwrap();
+    for kind in [1.0_f32,2.0] {
+        let inert=f64::from(f.call(&mut store,(kind,0.0)).unwrap());
+        assert_eq!(inert,0.0,"kind {kind}: the toggle alone moved the surface by {inert}");
+        for freedom in [-0.9_f32,-0.3,0.3,0.9] {
+            let departure=f64::from(f.call(&mut store,(kind,freedom)).unwrap());
+            assert!(departure> -900.0,"kind {kind} freedom {freedom}: patch rejected");
+            eprintln!("FREE_WEIGHTS kind={kind} freedom={freedom}: departure={departure:.6}");
+            assert!(departure>1e-3,
+                "kind {kind} freedom {freedom}: free weights did not leave the family ({departure})");
+        }
+    }
+}

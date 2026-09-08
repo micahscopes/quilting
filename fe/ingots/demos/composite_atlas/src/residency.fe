@@ -101,7 +101,11 @@ pub fn refresh(_ previous:State) -> State {
     scene.active_automatic_density=next.controls.automatic_density
     scene.domain_norm=quilting_patch::depth_field::QuadDomainNorm {
         gram:ingot::surface::domain_gram(scene.surface)}
+    // Measured spacing is a claim about circular edges, so it is withdrawn the
+    // moment free weights take the patch off the authoring family. The tables
+    // would otherwise report an arc length for a curve that is not an arc.
     scene.density_placement=next.controls.automatic_density>0.5 && scene.surface.patch_valid>0.5
+        && scene.surface.circular_edges
     scene.active_skews=edge_skews(next.controls)
     scene.active_boundary_reach=next.controls.boundary_reach
     scene.interior=interior_policy(next.controls)

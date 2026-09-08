@@ -117,3 +117,36 @@ diagonal it is the correction. Interior samples still use both slice laws.
 worst residual of the line through its two corners, and the Rust oracle asserts
 all three edges of the triangle child stay under 1e-6 across three bulges.
 
+## Free weights as an option
+
+The authoring family derives every weight as the inverse of a corner's offset
+from one pole. That shared form is exactly what makes all four boundary curves
+circles through a common point, and it is the paper's point-space condition.
+It is also a restriction: the wider Clifford-Bezier surfaces are not reachable
+from it.
+
+`free_weights` admits them. It adds an independent bivector to each corner
+weight, in three distinct planes so no corner is left on the family by
+accident, scaled by `weight_freedom`. Real per-corner scaling would not do:
+positive real scales only reparameterize the patch, which the oracle already
+records. The departure has to be multivector valued.
+
+Two consequences are handled rather than hidden.
+
+- Off the family the quotient carries a trivector part, so it is not purely a
+  point. Rejecting it would draw nothing at all. The net now carries the
+  largest residual its evaluator will still read as a point; the family keeps
+  the strict tolerance and free weights widen it, so the surface is read as the
+  vector part of a quotient that is no longer purely a point.
+- Measured arc-length spacing is a claim about circular edges. The net carries
+  `circular_edges`, and both the published boundary tables and the interior
+  density placement read it, so they withdraw together the moment the patch
+  leaves the family. Nothing reports an arc length for a curve that is not an
+  arc.
+
+`weight_freedom` at zero reproduces the constrained patch exactly, so the
+toggle alone is never a silent geometry change. `free_weight_departure` in the
+oracle asserts that, and asserts that any nonzero freedom actually leaves.
+
+This is an option, not a new default. `pole_margin` is still re-derived after
+the departure, so an unbounded free-weight patch still reports.

@@ -97,7 +97,8 @@ impl PublishSpacing {
                 else if slot==4 {2} else {4}
             // Neutral skew now means uniform surface spacing rather than
             // uniform reference spacing; the slider stays a deliberate bias.
-            let raw=if scene.active_automatic_density>0.5 && scene.surface.patch_valid>0.5 {
+            let raw=if scene.active_automatic_density>0.5 && scene.surface.patch_valid>0.5
+                && scene.surface.circular_edges {
                 match measured_cumulative(scene.surface,scene.composition_warp,
                     scene.active_center_x,scene.active_center_y,from,to) {
                     Option::Some(measured)=>measured,
@@ -116,7 +117,8 @@ impl PublishSpacing {
         // sentinel and keeps the reference map in use.
         for slot in 0 .. ARC_SLOTS {
             let base=ARC_BASE+slot*ARC_SAMPLES
-            let samples=if scene.active_automatic_density>0.5 && scene.surface.patch_valid>0.5 {
+            let samples=if scene.active_automatic_density>0.5 && scene.surface.patch_valid>0.5
+                && scene.surface.circular_edges {
                 dyadic_arc_samples<EuclideanArcMeasure,ARC_SAMPLES>(
                     ingot::surface::outer_arc(scene.surface,slot.downcast_truncate()))
             } else {Option::None}

@@ -19,16 +19,33 @@ pub struct Net {pub a:Control,pub b:Control,pub c:Control,pub d:Control,pub kind
     /// Certified lower bound on the denominator norm over the whole patch.
     /// Positive means the patch never reaches the point at infinity. Zero means
     /// the pole is at or inside the weights' hull and the patch is unbounded.
-    pub pole_margin:f32}
+    pub pole_margin:f32,
+    /// Largest trivector part the evaluator will still read as a point. The
+    /// authoring family is vector valued, so the strict tolerance is the honest
+    /// one there. Free weights leave that locus by construction, and rejecting
+    /// their quotient outright would render nothing at all, so they widen this
+    /// and the surface is read as the vector part of a quotient that is no
+    /// longer purely a point.
+    pub residual_tolerance:f32,
+    /// Whether the four outer sides are still circular arcs. The authoring
+    /// family guarantees it; free weights destroy it. Everything that measures
+    /// arc length reads this rather than re-deriving the condition, so the
+    /// boundary tables and the interior placement withdraw together.
+    pub circular_edges:bool}
 impl Copy for Net {}
 pub struct Sample {pub point:Vec3F,pub valid:bool}
 impl Copy for Sample {}
 pub fn policy()->Clifford3Policy {
     Clifford3Policy {minimum_denominator_norm_squared:0.000000000001,maximum_trivector_residual:0.0001}
 }
+/// The authoring policy widened to whatever residual this net admits.
+fn read_policy(_ net:Net)->Clifford3Policy {
+    Clifford3Policy {minimum_denominator_norm_squared:0.000000000001,
+        maximum_trivector_residual:net.residual_tolerance}
+}
 pub fn empty()->Net {
     let p=projective_control<EuclideanCliffordAlgebra>(vec3f(0.0,0.0,0.0),even(1.0,0.0,0.0,0.0))
-    Net {a:p,b:p,c:p,d:p,kind:0.0,patch_valid:0.0,pole_margin:0.0}
+    Net {a:p,b:p,c:p,d:p,kind:0.0,patch_valid:0.0,pole_margin:0.0,residual_tolerance:0.0001,circular_edges:false}
 }
 pub fn point(_ c:Controls,_ id:u32)->Vec3F {
     if id==0 {vec3f(c.p0x,c.p0y,c.p0z)}
@@ -82,7 +99,7 @@ pub fn authored(_ c:Controls)->Net {
             },
             // c is inactive in the triangular basis. No fourth authored
             // corner participates in its construction or validity decision.
-            Option::Some(p)=>with_weight_condition(Net {a:p[0],b:p[1],c:p[2],d:p[2],kind:c.surface_kind,patch_valid:1.0,pole_margin:0.0}),
+            Option::Some(p)=>freed(with_weight_condition(Net {a:p[0],b:p[1],c:p[2],d:p[2],kind:c.surface_kind,patch_valid:1.0,pole_margin:0.0,residual_tolerance:0.0001,circular_edges:true}),c),
         }
     }
     match controls_from_edge(EuclideanCliffordAlgebra {},
@@ -92,7 +109,7 @@ pub fn authored(_ c:Controls)->Net {
             n.kind=c.surface_kind
             n
         },
-        Option::Some(p)=>with_weight_condition(Net {a:p[0],b:p[1],c:p[2],d:p[3],kind:c.surface_kind,patch_valid:1.0,pole_margin:0.0}),
+        Option::Some(p)=>freed(with_weight_condition(Net {a:p[0],b:p[1],c:p[2],d:p[3],kind:c.surface_kind,patch_valid:1.0,pole_margin:0.0,residual_tolerance:0.0001,circular_edges:true}),c),
     }
 }
 /// The same generic projective evaluators as the independently checked oracle.
@@ -104,7 +121,7 @@ pub fn evaluate(_ net:Net,_ p:Point)->Sample {
     } else {
         BilinearBernstein {}.frame(algebra,bilinear_projective_controls(net.a,net.b,net.d,net.c),vec2f(p.x,p.y))
     }
-    let q=algebra.right_quotient(frame.numerator,frame.denominator,policy())
+    let q=algebra.right_quotient(frame.numerator,frame.denominator,read_policy(net))
     Sample {point:vec3f(q.value.e1,q.value.e2,q.value.e3),valid:net.patch_valid>0.5 && q.defined}
 }
 /// Endpoint denominator weights of one outer square edge, in that edge's
@@ -193,6 +210,35 @@ fn weight_at(_ net:Net,_ i:usize)->CliffordEven3F {
 fn with_weight_condition(_ net:Net)->Net {
     let mut result=net
     result.pole_margin=hull_margin(net)
+    result
+}
+/// Leave the authoring family on request. Every weight the pole authoring
+/// derives has the form (p-q)^-1 n, which is exactly what makes all four
+/// boundary curves circles through one common point. Adding an independent
+/// bivector to each corner breaks that shared form, so the edges stop being
+/// arcs and the wider Clifford-Bezier surfaces become reachable. Three
+/// distinct planes, so no corner is left on the family by accident.
+fn freed(_ net:Net,_ c:Controls)->Net {
+    if c.free_weights<0.5 || c.weight_freedom==0.0 {return net}
+    let t=c.weight_freedom
+    let mut result=net
+    result.a=projective_control<EuclideanCliffordAlgebra>(net.a.point,
+        net.a.weight.plus(even(0.0,t,0.0,0.0)))
+    result.b=projective_control<EuclideanCliffordAlgebra>(net.b.point,
+        net.b.weight.plus(even(0.0,0.0,t,0.0)))
+    result.d=projective_control<EuclideanCliffordAlgebra>(net.d.point,
+        net.d.weight.plus(even(0.0,0.0,0.0,t)))
+    // The triangular basis carries its third corner in both c and d.
+    result.c=if net.kind<1.5 {result.d} else {
+        projective_control<EuclideanCliffordAlgebra>(net.c.point,
+            net.c.weight.plus(even(0.0,t,0.0,t)))
+    }
+    // The certificate is re-derived, so an unbounded departure still reports.
+    result.pole_margin=hull_margin(result)
+    // Off the family the quotient carries a trivector part. Read the vector
+    // part rather than rejecting every sample and drawing nothing.
+    result.residual_tolerance=1000000.0
+    result.circular_edges=false
     result
 }
 pub fn domain_gram(_ net:Net)->quilting_patch::depth_field::QuadGram {

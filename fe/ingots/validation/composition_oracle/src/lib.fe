@@ -1242,3 +1242,35 @@ pub fn diagonal_edge_deviation(_ bulge:f32,_ slot:u32)->f32 {
     worst
 }
 
+/// How far admitting free weights moves the surface away from the authoring
+/// family. Zero freedom must reproduce the constrained patch exactly, so the
+/// toggle on its own is never a silent geometry change; any nonzero freedom
+/// must actually leave. Reported as the largest sampled displacement.
+pub fn free_weight_departure(_ kind:f32,_ freedom:f32)->f32 {
+    let mut c=initial_controls()
+    c.surface_kind=kind
+    c.midpoint_z=1.4
+    let held=composite_atlas::surface::authored(c)
+    if held.patch_valid!=1.0 {return -999.0}
+    c.free_weights=1.0
+    c.weight_freedom=freedom
+    let free=composite_atlas::surface::authored(c)
+    if free.patch_valid!=1.0 {return -999.0}
+    let mut worst=0.0
+    for i in 0..9 {
+        for j in 0..9 {
+            let u=__f32_from_i32(i.downcast_unchecked())/8.0
+            let v=__f32_from_i32(j.downcast_unchecked())/8.0
+            let p=composite_atlas::model::Point {x:u,y:v}
+            let a=composite_atlas::surface::evaluate(held,p)
+            let b=composite_atlas::surface::evaluate(free,p)
+            if !a.valid || !b.valid {return -998.0}
+            let dx=a.point.x-b.point.x
+            let dy=a.point.y-b.point.y
+            let dz=a.point.z-b.point.z
+            let d=fmath::sqrt(dx*dx+dy*dy+dz*dz)
+            if d>worst {worst=d}
+        }
+    }
+    worst
+}
