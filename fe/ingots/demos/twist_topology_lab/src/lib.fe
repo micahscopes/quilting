@@ -220,6 +220,9 @@ fn surface_differential(
 struct CellParameters { p00: Vec2F, p10: Vec2F, p01: Vec2F, p11: Vec2F, center: Vec2F }
 impl Copy for CellParameters {}
 
+// Bounded by the grid resolution its callers pass. Stated because the trap a
+// checked operation emits has no channel in a raster stage.
+#[arithmetic(unchecked)]
 fn cell_parameters(_ x: u32, _ y: u32, _ resolution: u32) -> CellParameters {
     let inverse = 1.0 / as_f32(resolution)
     let u0 = as_f32(x) * inverse
@@ -295,6 +298,9 @@ fn cell_evidence(_ cell: CellParameters, _ state: TopologyState) -> CellEvidence
     }
 }
 
+// Bounded by the grid resolution its callers pass. Stated because the trap a
+// checked operation emits has no channel in a raster stage.
+#[arithmetic(unchecked)]
 fn cell_diagonal(
     _ x: u32,
     _ y: u32,
@@ -682,9 +688,13 @@ actor TwistTopologyLab uses (
         let differential = surface_differential(
             parameter, state.u_stretch, state.v_stretch, state.twist, state.skew,
         )
-        let local0 = local_parameter(diagonal, (local_vertex / 3) * 3)
-        let local1 = local_parameter(diagonal, (local_vertex / 3) * 3 + 1)
-        let local2 = local_parameter(diagonal, (local_vertex / 3) * 3 + 2)
+        // Wrapping, and the base computed once: flooring to a multiple of three
+        // cannot exceed the input, but an attribute is ignored on an actor
+        // method, so each operation states it.
+        let base = (local_vertex / 3).wrapping_mul(3)
+        let local0 = local_parameter(diagonal, base)
+        let local1 = local_parameter(diagonal, base.wrapping_add(1))
+        let local2 = local_parameter(diagonal, base.wrapping_add(2))
         let parameter0 = parameter_in_cell(cell, local0)
         let parameter1 = parameter_in_cell(cell, local1)
         let parameter2 = parameter_in_cell(cell, local2)

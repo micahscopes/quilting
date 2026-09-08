@@ -285,6 +285,9 @@ fn as_f32(_ value: u32) -> f32 {
     __f32_from_i32(value.downcast_unchecked())
 }
 
+// The loop condition bounds the counter, so it cannot overflow. Stated
+// because the trap a checked add emits has no channel in a raster stage.
+#[arithmetic(unchecked)]
 fn admitted_lod(_ value: f32) -> u32 {
     let mut lod: u32 = 0
     while lod < MAX_LOD && value >= as_f32(lod) + 0.5 {

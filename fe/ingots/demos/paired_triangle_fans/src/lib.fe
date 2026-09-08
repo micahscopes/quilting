@@ -181,6 +181,9 @@ impl FanLeaf {
 fn leaf(_ index: u32) -> FanLeaf {
     FanLeaf { half: index / 3, edge: index % 3 }
 }
+// Bounded by the fixture's own triangle count, which is validated before the
+// buffer is bound. Stated because a raster stage has no channel for a trap.
+#[arithmetic(unchecked)]
 fn vertices(_ fixture: FixtureBuffer, _ key: AtlasKey) -> u32 {
     patch_triangle_count(fixture, canonical_key_ordinal(canonicalize(key).key)) * 3
 }
@@ -275,8 +278,11 @@ actor PairedTriangleFans uses (GpuProgram<WebGpuBackend>,SurfaceQuality<Responsi
         let mut vertex=vertex_index
         let mut requested=leaf(0).key(self.outer_lod,self.diagonal_lod,self.first_radial_lod,self.second_radial_lod)
         while index<5 && vertex>=vertices(self.fixture,requested) {
-            vertex=vertex-vertices(self.fixture,requested)
-            index=index+1
+            // Wrapping: the loop condition proves the difference is
+            // non-negative and bounds the counter, but an attribute is ignored
+            // on an actor method, so each operation states it.
+            vertex=vertex.wrapping_sub(vertices(self.fixture,requested))
+            index=index.wrapping_add(1)
             requested=leaf(index).key(self.outer_lod,self.diagonal_lod,self.first_radial_lod,self.second_radial_lod)
         }
         let domain=leaf(index).domain(focus(self.first_b,self.first_c),focus(self.second_b,self.second_c))

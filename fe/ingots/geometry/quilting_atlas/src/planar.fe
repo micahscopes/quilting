@@ -99,7 +99,8 @@ fn signed_product(_ unsigned: u32, _ signed: i32) -> SignedWide {
     }
     let negative = signed < 0
     let magnitude: u32 = if negative {
-        (-signed).downcast_truncate()
+        // Written as a subtraction: the R1 Wasm lowering has no unary minus.
+        (0 - signed).downcast_truncate()
     } else {
         signed.downcast_truncate()
     }
@@ -191,6 +192,7 @@ pub fn incircle_sign<M: IntegerPlaneMetric>(
     let sign = signed_sign(determinant)
     let winding = orientation(first, second, third)
     if winding < 0 {
-        -sign
+        // Subtraction rather than unary minus, which R1 does not lower.
+        0 - sign
     } else if winding > 0 { sign } else { 0 }
 }

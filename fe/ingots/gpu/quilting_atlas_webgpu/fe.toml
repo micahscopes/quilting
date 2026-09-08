@@ -1,4 +1,8 @@
 [ingot]
+# Buffer word offsets and slot indices only, all bounded by compile-time
+# capacities and by atlas keys clamped to MAX_LOD. These functions are reached
+# from raster stages, which have no channel for a checked operation's trap.
+arithmetic = "unchecked"
 name = "quilting_atlas_webgpu"
 version = "0.1.0"
 

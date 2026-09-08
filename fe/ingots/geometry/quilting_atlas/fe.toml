@@ -1,4 +1,8 @@
 [ingot]
+# Atlas-key combinatorics only: every quantity is bounded by MAX_LOD of 8 and
+# a barycentric scale of 16384, and these functions are reached from raster
+# stages, which have no channel for a checked operation's trap.
+arithmetic = "unchecked"
 name = "quilting_atlas"
 version = "0.1.0"
 

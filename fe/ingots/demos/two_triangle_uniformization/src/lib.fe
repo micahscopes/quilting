@@ -100,6 +100,10 @@ impl TriangleParameterMap for HalfSampling {
         }
     }
 }
+// The edge index is one of six literals at every call site, so the stride
+// product is bounded. Stated because a raster stage has no channel for the
+// trap a checked multiply emits.
+#[arithmetic(unchecked)]
 fn edge_lod(_ tables:EdgeTables,_ edge:u32,_ spacing:f32,_ maximum:f32)->u32 {
     length_lod(tables.load(index:edge*STRIDE),spacing,level(maximum))
 }
@@ -110,6 +114,9 @@ fn key(_ tables:EdgeTables,_ half:u32,_ spacing:f32,_ maximum:f32)->AtlasKey {
         AtlasKey {a:edge_lod(tables,2,spacing,maximum),b:edge_lod(tables,3,spacing,maximum),c:edge_lod(tables,4,spacing,maximum)}
     }
 }
+// Bounded by the fixture's own triangle count, validated before binding.
+// Stated because a raster stage has no channel for a trap.
+#[arithmetic(unchecked)]
 fn vertices(_ fixture:FixtureBuffer,_ k:AtlasKey)->u32 {
     patch_triangle_count(fixture,canonical_key_ordinal(canonicalize(k).key))*3
 }
@@ -178,7 +185,9 @@ actor TwoTriangleUniformization uses (GpuProgram<WebGpuBackend>,SurfaceQuality<R
         let first=key(self.edges,0,self.edge_spacing,self.max_lod)
         let count=vertices(self.fixture,first)
         let half=if vertex_index<count {0} else {1}
-        let local=if half==0 {vertex_index} else {vertex_index-count}
+        // Wrapping: the branch above proves vertex_index is at least count,
+        // but an attribute is ignored on an actor method.
+        let local=if half==0 {vertex_index} else {vertex_index.wrapping_sub(count)}
         let camera=orbit_camera(OrbitCamera {target:vec3f(1.1,0.0,0.0),yaw:self.orbit_yaw,pitch:self.orbit_pitch,
             distance:self.orbit_distance,focal:1.62,near:0.05,far:100.0},ScreenExtent {width:self.res_x,height:self.res_y})
         atlas_vertex_with_map(self.fixture,key(self.edges,half,self.edge_spacing,self.max_lod),
@@ -203,11 +212,14 @@ actor TwoTriangleUniformization uses (GpuProgram<WebGpuBackend>,SurfaceQuality<R
     }
     fn receipt_fragment(self,v:ReceiptVarying)->i32 uses (FragmentStage<ReceiptVarying>) {
         let edge=level(v.edge)
-        let length=self.edges.load(index:edge*STRIDE)
-        let coarse=self.edges.load(index:edge*STRIDE+1)
+        // Wrapping, base computed once: the edge index is bounded by the table
+        // count, but an attribute is ignored on an actor method.
+        let base=edge.wrapping_mul(STRIDE)
+        let length=self.edges.load(index:base)
+        let coarse=self.edges.load(index:base.wrapping_add(1))
         let lod=edge_lod(self.edges,edge,self.edge_spacing,self.max_lod)
         let cap=number(1<<lod)*self.edge_spacing<length
-        let invalid=self.edges.load(index:edge*STRIDE+2)<0.5
+        let invalid=self.edges.load(index:base.wrapping_add(2))<0.5
         let uncertain=abs(length-coarse)>length*0.0001
         let color=if invalid || cap {display_rgb(0.9,0.20,0.17)} else if uncertain {display_rgb(0.95,0.61,0.18)}
             else {display_rgb(0.38,0.72,0.66)}

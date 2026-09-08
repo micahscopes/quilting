@@ -201,6 +201,10 @@ impl TriangleParameterMap for ProjectiveDomainMap {
     }
 }
 
+// Flooring a vertex index to a multiple of three cannot exceed it, and the
+// two offsets stay inside the same triangle. Stated because the traps a
+// checked operation emits have no channel in a raster stage.
+#[arithmetic(unchecked)]
 pub fn atlas_vertex_with_map<M: TriangleParameterMap>(
     _ fixture: FixtureBuffer, _ requested: AtlasKey, _ original: IsotropicBilinearPatch,
     _ map: M, _ patch_vertex: u32, _ patch_index: u32,

@@ -83,9 +83,17 @@ pub struct EdgeLengthMap { pub tables: EdgeTables, pub edge: u32, pub enabled: b
 impl Copy for EdgeLengthMap {}
 impl CumulativeLengthSamples for EdgeLengthMap {
     fn segments(self) -> u32 { SEGMENTS }
+    // The edge index selects one of a fixed set of tables, so the stride
+    // product and its offsets stay inside the buffer. Stated because a
+    // raster stage has no channel for the trap a checked operation emits.
+    #[arithmetic(unchecked)]
     fn cumulative(self, _ i: u32) -> f32 { self.tables.load(index:self.edge*STRIDE+9+i) }
 }
 impl IntervalSamplingMap for EdgeLengthMap {
+    // The edge index selects one of a fixed set of tables, so the stride
+    // product and its offsets stay inside the buffer. Stated because a
+    // raster stage has no channel for the trap a checked operation emits.
+    #[arithmetic(unchecked)]
     fn map(self, _ t: f32) -> f32 {
         if !self.enabled || t==0.0 || t==1.0 { return t }
         interval_bias(inverse_length(self,t),self.tables.load(index:self.edge*STRIDE+3))

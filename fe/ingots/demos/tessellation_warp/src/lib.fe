@@ -313,7 +313,9 @@ actor TessellationWarp uses (GpuProgram<WebGpuBackend>,SurfaceQuality<Responsive
     // Storage starts zeroed; code+1 distinguishes the LoD-0 key from cold.
     // Warping never changes this key and therefore never rebuilds the mesh.
     fn select_quad(self) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>,PassActivation<QuadTopology>) {
-        let requested=quad_key(self.quad_lod).code()+1
+        // Wrapping: a packed key code is under 6562, but an attribute is
+        // ignored on an actor method.
+        let requested=quad_key(self.quad_lod).code().wrapping_add(1)
         let rebuild=self.receipt.load(index:16)!=requested || self.receipt.load(index:10)==0
         self.receipt.store(index:17,value:flag(rebuild))
     }
@@ -383,11 +385,14 @@ actor TessellationWarp uses (GpuProgram<WebGpuBackend>,SurfaceQuality<Responsive
     }
     fn prepare_draw(self,invocation:ComputeInvocation) uses (ComputeSurface<Workgroup<1,1,1>,FixedDispatch<1,1,1>>) {
         let lod=level(self.lod)
-        let count=if self.domain<0.5 {patch_triangle_count(self.fixture,canonical_key_ordinal(key(lod)))*3}
-            else {if self.receipt.load(index:10)!=0 {self.receipt.load(index:7)*3} else {0}}
+        // Wrapping throughout: counts come from the fixture header and the
+        // receipt, both bounded before binding, and an attribute is ignored on
+        // an actor method.
+        let count=if self.domain<0.5 {patch_triangle_count(self.fixture,canonical_key_ordinal(key(lod))).wrapping_mul(3)}
+            else {if self.receipt.load(index:10)!=0 {self.receipt.load(index:7).wrapping_mul(3)} else {0}}
         if self.domain>=0.5 && self.receipt.load(index:17)!=0 {
-            self.receipt.store(index:16,value:quad_key(self.quad_lod).code()+1)
-            self.receipt.store(index:18,value:self.receipt.load(index:18)+1)
+            self.receipt.store(index:16,value:quad_key(self.quad_lod).code().wrapping_add(1))
+            self.receipt.store(index:18,value:self.receipt.load(index:18).wrapping_add(1))
         }
         self.draw.store(index:0,value:count)
         self.draw.store(index:1,value:1)
@@ -405,10 +410,10 @@ actor TessellationWarp uses (GpuProgram<WebGpuBackend>,SurfaceQuality<Responsive
         let warp=Warp {a:self.edge_a,b:self.edge_b,c:self.edge_c,d:self.edge_d,twist:self.twist,
             focus_x:self.focus_x,focus_y:self.focus_y,concentration:self.concentration}
         let lod=level(self.lod)
-        let start=vertex_index/3*3
+        let start=(vertex_index/3).wrapping_mul(3)
         let p0=point(self.fixture,self.points,self.triangles,self.domain,lod,start,warp)
-        let p1=point(self.fixture,self.points,self.triangles,self.domain,lod,start+1,warp)
-        let p2=point(self.fixture,self.points,self.triangles,self.domain,lod,start+2,warp)
+        let p1=point(self.fixture,self.points,self.triangles,self.domain,lod,start.wrapping_add(1),warp)
+        let p2=point(self.fixture,self.points,self.triangles,self.domain,lod,start.wrapping_add(2),warp)
         let lane=vertex_index%3
         let p=if lane==0 {p0} else if lane==1 {p1} else {p2}
         let a=if lane==0 {p1} else if lane==1 {p2} else {p0}

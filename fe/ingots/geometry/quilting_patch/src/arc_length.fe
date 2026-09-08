@@ -44,6 +44,10 @@ pub fn inverse_length<M: CumulativeLengthSamples>(_ samples: M, _ fraction: f32)
 
 /// Smallest dyadic edge resolution meeting the requested length/spacing ratio,
 /// unless capped. The caller must separately report a capped request.
+// The loop condition bounds the counter by `maximum`, so it cannot overflow.
+// Stated because the trap a checked add emits has no channel in a raster
+// stage, and this is called from vertex stages.
+#[arithmetic(unchecked)]
 pub fn length_lod(_ length: f32, _ spacing: f32, _ maximum: u32) -> u32 {
     let mut lod: u32 = 0
     let mut covered = spacing
