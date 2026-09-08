@@ -43,7 +43,7 @@ before and after:
 
 | Check | Now | Target |
 |---|---|---|
-| Interior triangle area, max over min | see below | below 2 at working curvatures |
+| Interior triangle area, max over min | see below | bounded across curvature, six to ten |
 | Density step across an internal seam | visible | not measurable |
 | Outer-side chord deviation | 0.000019 | unchanged |
 | Interior segment chord deviation | 0.00178 | unchanged |
@@ -95,9 +95,10 @@ therefore required rather than optional, and it is the only remaining route.
    barycentrics and testing exact zeros, which drifts near 3e-8.
 4. Derive levels from one target size using the certified norm intervals.
 5. Refresh the other demos, landscape first.
-6. Recursion, promoted from optional to required by the measurements above.
-   Its depth field is built and certified; it has three to six octaves to act on
-   at working curvatures, and its known ceiling is a factor of two in area.
+6. Recursion, measured above as the only construction bounded across curvature,
+   and therefore the one to build into the composition rather than an optional
+   later branch. Its depth field is built and certified. Its residual is dyadic
+   rounding, and closing that needs ranked tiles, which stays research.
 
 ## Why placement first, and why it was not enough
 
