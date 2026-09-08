@@ -1739,3 +1739,35 @@ fn cpu_atlas_wasm_triangulates_mixed_lod8_domains() {
     assert!(memory.data_size(&store) <= 64 * 1024 * 1024,
         "single-worker probe exceeded 64MiB linear memory: {}", memory.data_size(&store));
 }
+
+/// Density placement must leave a boundary sample on its own edge. The two
+/// slice laws are independent, so composing them preserves the square's
+/// axis-parallel sides and bends its diagonal, and that diagonal is the
+/// triangle patch's third edge. It is the visibly non-circular edge, so the
+/// invariant is worth pinning: every edge residual stays at f32 zero. Corners
+/// are excluded, since a sample where two barycentrics vanish is claimed by
+/// whichever edge the child's orientation gives it, which is a separate fact.
+#[test]
+fn density_placement_leaves_boundary_samples_on_their_own_edge() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let f=instance.get_typed_func::<(f32,i32),f32>(&mut store,"diagonal_edge_deviation").unwrap();
+    for bulge in [0.6_f32,1.5,2.4] {
+        let mut worst=[0.0_f64;3];
+        for slot in 0..3usize {
+            worst[slot]=f64::from(f.call(&mut store,(bulge,slot as i32)).unwrap());
+            assert!(worst[slot]> -900.0,"net rejected at bulge {bulge}");
+        }
+        eprintln!(
+            "EDGE_RESIDUAL bulge={bulge}: diagonal={:.9} bottom={:.9} right={:.9}",
+            worst[0],worst[1],worst[2]);
+        assert!(worst[0]<1e-6,"density placement moved samples off the diagonal edge: {}",worst[0]);
+        assert!(worst[1]<1e-6,"density placement moved samples off the bottom edge: {}",worst[1]);
+        assert!(worst[2]<1e-6,"density placement moved samples off the right edge: {}",worst[2]);
+    }
+}
+

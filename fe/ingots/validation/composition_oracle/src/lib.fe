@@ -1192,3 +1192,53 @@ fn coherent_pending_for_split(_ split:f32)->bool {
         && state.scene.resolution.spoke_0_segments==before.resolution.spoke_0_segments
         && state.scene.resolution.max_unmet_segments==before.resolution.max_unmet_segments
 }
+
+/// How far density placement pushes triangle boundary samples off their own
+/// edge. The child (0,1,2) has corners (0,0), (1,0) and (1,1), so its third
+/// edge is the square's diagonal, where `x` equals `y`. Composing two
+/// independent slice laws preserves the axis-parallel sides and destroys that
+/// diagonal, which is exactly the visibly non-circular triangle edge. Reported
+/// as the worst `|x-y|` over the edge, so a placement that stays on the edge
+/// reads zero. The net is authored once and the sweep runs here, since
+/// authoring per sample costs a pole solve and a hull certificate each time.
+///
+/// `slot` picks the edge: 0 the diagonal, 1 the bottom side, 2 the right side.
+pub fn diagonal_edge_deviation(_ bulge:f32,_ slot:u32)->f32 {
+    use composite_atlas::{placement,residency}
+    use quilting_patch::sampling_warp::ProjectiveIntervalBias
+    let mut c=initial_controls()
+    c.surface_kind=2.0
+    c.midpoint_z=bulge
+    let net=composite_atlas::surface::authored(c)
+    if net.patch_valid!=1.0 {return -999.0}
+    let mut scene=residency::empty_scene()
+    scene.surface=net
+    scene.domain_norm=quilting_patch::depth_field::QuadDomainNorm {
+        gram:composite_atlas::surface::domain_gram(net)}
+    scene.density_placement=true
+    let mut child=residency::empty_child()
+    child.corner_a=0
+    child.corner_b=1
+    child.corner_c=2
+    let map=OrientedIntervalMap {law:ProjectiveIntervalBias {strength:1.0},reversed:false}
+    // Endpoints are excluded on purpose. At a shared corner two barycentrics
+    // vanish at once, so which edge claims the sample depends on the child's
+    // edge orientation rather than on the placement law under test.
+    let mut worst=0.0
+    for index in 1..256 {
+        let t=__f32_from_i32(index.downcast_unchecked())/256.0
+        // b=0 is the CA edge (corner 2 to corner 0), c=0 the AB edge, a=0 the BC edge.
+        let p=if slot==0 {bary3f(1.0-t,0.0,t)}
+            else if slot==1 {bary3f(1.0-t,t,0.0)}
+            else {bary3f(0.0,1.0-t,t)}
+        let placed=placement::place(scene,child,p,map,map,map)
+        // Each edge is a line through two of the corners; report the residual
+        // of that line so every slot is measured by the same kind of quantity.
+        let residual=if slot==0 {fmath::abs(placed.x-placed.y)}
+            else if slot==1 {fmath::abs(placed.y)}
+            else {fmath::abs(placed.x-1.0)}
+        if residual>worst {worst=residual}
+    }
+    worst
+}
+

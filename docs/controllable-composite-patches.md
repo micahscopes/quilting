@@ -97,3 +97,23 @@ Build/test logs are under `/laboratory/quilting/scratch/`:
 `composite-patch-named-bindings-web-20260907.log`,
 `named-param-bindings-wasm-20260907.log`,
 `named-param-binding-web-regressions-20260907.log`.
+
+## Boundary samples stay on their own edge
+
+September 8, 2026. Density placement composed two independent slice laws, one
+per axis. That composition preserves any axis-parallel line and bends every
+other one. The square's four sides are axis parallel and survived it. Its
+diagonal is not, and the diagonal is the triangle patch's third edge, so with
+automatic density on that edge visibly stopped being a circular arc while the
+other two stayed correct.
+
+Boundary samples now use the same segment law restricted to their own edge,
+in the edge's canonical low-to-high direction so both adjacent uses feed
+identical inputs. On the axis-parallel sides this is arithmetically the same
+placement as before, so the published boundary tables are unchanged. On the
+diagonal it is the correction. Interior samples still use both slice laws.
+
+`diagonal_edge_deviation` in `composition_oracle` sweeps an edge and reports the
+worst residual of the line through its two corners, and the Rust oracle asserts
+all three edges of the triangle child stay under 1e-6 across three bulges.
+
