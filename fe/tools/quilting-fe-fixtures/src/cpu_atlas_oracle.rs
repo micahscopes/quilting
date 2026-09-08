@@ -1105,6 +1105,80 @@ fn depth_driven_subdivision_closes_the_area_residual() {
     }
 }
 
+/// Refine by the quantity actually being equalized. The earlier combination
+/// failed because depth was read from the density at a cell's original position
+/// while placement then moved the cell, so the two disagreed about where the
+/// correction applied. Driving refinement from each cell's MEASURED surface area
+/// removes that disagreement by construction, and composes with any placement.
+#[test]
+fn area_driven_refinement_meets_the_target() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let raw=instance.get_typed_func::<(i32,f32,f32,i32,f32),f32>(&mut store,"surface_at").unwrap();
+    let placed_fn=instance.get_typed_func::<(i32,f32,f32,i32,f32),f32>(&mut store,"placed_surface_at").unwrap();
+    let mut worst_overall=0.0_f64;
+    for combine in [false,true] {
+    for (kind,name) in [(0,"triangle"),(1,"quad")] {
+        for bulge in [2.4_f32,4.8,9.6] {
+            let mut point=|store:&mut wasmtime::Store<()>,u:f64,v:f64| -> Option<[f64;3]> {
+                let f=if combine {&placed_fn} else {&raw};
+                let mut p=[0.0_f64;3];
+                for lane in 0..3 {
+                    let value=f.call(&mut *store,(kind,u as f32,v as f32,lane,bulge)).unwrap();
+                    if !value.is_finite()||value==-999.0 {return None;}
+                    p[lane as usize]=f64::from(value);
+                }
+                Some(p)
+            };
+            let tri=|p:[f64;3],q:[f64;3],r:[f64;3]| {
+                let e1=[q[0]-p[0],q[1]-p[1],q[2]-p[2]];
+                let e2=[r[0]-p[0],r[1]-p[1],r[2]-p[2]];
+                let n=[e1[1]*e2[2]-e1[2]*e2[1],e1[2]*e2[0]-e1[0]*e2[2],e1[0]*e2[1]-e1[1]*e2[0]];
+                (n[0]*n[0]+n[1]*n[1]+n[2]*n[2]).sqrt()*0.5
+            };
+            let mut cell_area=|store:&mut wasmtime::Store<()>,x:f64,y:f64,s:f64| -> Option<f64> {
+                let a=point(store,x,y)?; let b=point(store,x+s,y)?;
+                let c=point(store,x,y+s)?; let d=point(store,x+s,y+s)?;
+                Some(tri(a,b,c)+tri(b,d,c))
+            };
+            // Target area from a coarse pass, so leaf counts stay comparable.
+            let total=cell_area(&mut store,0.0,0.0,1.0).unwrap_or(1.0);
+            let target=total/700.0;
+            const MAX_DEPTH:u32=9;
+            let mut stack:Vec<(f64,f64,f64,u32)>=vec![(0.0,0.0,1.0,0)];
+            let mut areas=Vec::new();
+            while let Some((x,y,size,depth))=stack.pop() {
+                if kind==0 && x+y>1.0 {continue;}
+                let area=match cell_area(&mut store,x,y,size) {Some(a)=>a,None=>continue};
+                if area>target && depth<MAX_DEPTH && stack.len()+areas.len()<40000 {
+                    let h=size*0.5;
+                    stack.push((x,y,h,depth+1));
+                    stack.push((x+h,y,h,depth+1));
+                    stack.push((x,y+h,h,depth+1));
+                    stack.push((x+h,y+h,h,depth+1));
+                } else if area>0.0 {
+                    if kind==0 && x+y+size>1.0 {continue;}
+                    areas.push(area);
+                }
+            }
+            if areas.len()<16 {eprintln!("AREA_REFINE {name} bulge={bulge}: too few leaves"); continue;}
+            let lo=areas.iter().cloned().fold(f64::INFINITY,f64::min);
+            let hi=areas.iter().cloned().fold(0.0_f64,f64::max);
+            let mean=areas.iter().sum::<f64>()/(areas.len() as f64);
+            let cv=(areas.iter().map(|a|(a-mean).powi(2)).sum::<f64>()/(areas.len() as f64)).sqrt()/mean;
+            let mode=if combine {"area refine + placement"} else {"area refine"};
+            eprintln!("AREA_REFINE {name} bulge={bulge} {mode}: {} leaves, cv={cv:.4} maxmin={:.3}",areas.len(),hi/lo);
+            if combine {worst_overall=worst_overall.max(hi/lo);}
+        }
+    }
+    }
+    eprintln!("AREA_REFINE worst max-over-min with placement={worst_overall:.4}");
+}
+
 #[test]
 fn composition_wasm_boundary_locality_sweep() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
