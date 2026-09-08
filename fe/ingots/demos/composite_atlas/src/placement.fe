@@ -43,6 +43,12 @@ fn boundary_raw(_ scene:Scene,_ from:u32,_ to:u32,_ t:f32,_ reversed:bool)->Poin
 /// sides evaluate it at bit-identical inputs because the raw point is built in
 /// the edge's canonical direction.
 fn density_place(_ scene:Scene,_ raw:Point)->Point {
+    // Two axis-aligned passes. A third pass along the diagonal was measured and
+    // is strictly worse: each pass equalizes along its own direction as if the
+    // others had not acted, so composing more of them interferes rather than
+    // refines. On the quad at midpoint offset 2.4 the area ratio went from 10.96
+    // to 174.78. Closing the remaining residual needs a map that is not a
+    // product of one-dimensional corrections at all.
     let x=segment_parameter(scene.domain_norm,0.0,raw.y,1.0,raw.y,raw.x,PLACEMENT_LEVELS)
     let y=segment_parameter(scene.domain_norm,x,0.0,x,1.0,raw.y,PLACEMENT_LEVELS)
     Point {x:x,y:y}

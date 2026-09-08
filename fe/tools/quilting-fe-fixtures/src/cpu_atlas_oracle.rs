@@ -573,12 +573,12 @@ fn density_placement_evens_surface_triangle_area() {
     for (kind,name) in [(0,"triangle"),(1,"quad")] {
         for bulge in [0.6_f32,2.4,4.8,9.6,19.2] {
             let mut line=format!("AREA_SPREAD {name} bulge={bulge}:");
-            for (density,label) in [(0,"reference"),(1,"density")] {
+            for (density,label) in [(0,"reference"),(1,"two-pass"),(2,"three-pass")] {
                 let cv=f64::from(spread.call(&mut store,(kind,5,bulge,density,0)).unwrap());
                 let ratio=f64::from(spread.call(&mut store,(kind,5,bulge,density,1)).unwrap());
                 assert!(cv>=0.0 && ratio>0.0,"{name} {label} did not evaluate");
                 line.push_str(&format!("  {label} cv={cv:.4} maxmin={ratio:.3}"));
-                if density==1 {worst_ratio_after=worst_ratio_after.max(ratio);}
+                if density==2 {worst_ratio_after=worst_ratio_after.max(ratio);}
             }
             eprintln!("{line}");
         }

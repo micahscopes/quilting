@@ -70,17 +70,28 @@ measured edge laws inward and so sits between the two columns.
 
 So the separable slice form meets the target at the default authoring and does
 not meet it at aggressive curvature, where it still improves the ratio eight to
-twenty times. That settles the design question in the order below: slices are
-worth shipping and are not sufficient, so the Poisson-solve map is required
-rather than optional if the target is to hold at all curvatures.
+twenty times.
+
+Adding a third slice direction along the diagonal, which the review originally
+prescribed, was measured and is strictly worse at every curvature: on the quad
+at midpoint offset 2.4 the area ratio went from 10.96 to 174.78, and at 19.2
+from 2307 to 13579. Each pass equalizes along its own direction as if the others
+had not acted, so composing more of them interferes rather than refines.
+
+That closes the design question from both sides. Two passes are worth shipping,
+more passes are not, and the remaining residual needs a map that is not a
+product of one-dimensional corrections at all. The Poisson-solve map is
+therefore required rather than optional, and it is the only remaining route.
 
 ## Order
 
 1. Interior placement from the density rather than from carried edge laws.
-   Slice form done and measured above. Remaining: the Poisson-solve map for
-   the residual at aggressive curvature, which the numbers now show is needed
-   rather than optional, and a decision on whether to tabulate the placement or
-   keep evaluating it on demand.
+   Two-pass slice form done and measured above; a third direction measured and
+   rejected. Remaining: the Poisson-solve map for the residual at aggressive
+   curvature, now the only route left, and a decision on whether to tabulate the
+   placement or keep evaluating it on demand. Its hard part is that our boundary
+   must be fixed pointwise rather than merely preserved as a set, which the
+   standard Neumann construction does not give.
 2. Add the three surface-space audits and retire the reference-domain heuristic.
 3. Carry the boundary flag from assembly into the warp rather than re-deriving
    barycentrics and testing exact zeros, which drifts near 3e-8.

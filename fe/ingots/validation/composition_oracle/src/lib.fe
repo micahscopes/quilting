@@ -594,7 +594,18 @@ fn placed_surface(_ net:composite_atlas::surface::Net,
     if density==0 {return surface_probe(net,u,v)}
     let x=segment_parameter(norm,0.0,v,1.0,v,u,8)
     let y=segment_parameter(norm,x,0.0,x,1.0,v,8)
-    surface_probe(net,x,y)
+    if density==1 {return surface_probe(net,x,y)}
+    // Third pass along the (1,1) diagonal chord through the point.
+    let back=if x<y {x} else {y}
+    let forward=if 1.0-x<1.0-y {1.0-x} else {1.0-y}
+    let span=back+forward
+    if !(span>0.0) {return surface_probe(net,x,y)}
+    let x0=x-back
+    let y0=y-back
+    let x1=x+forward
+    let y1=y+forward
+    let placed=segment_parameter(norm,x0,y0,x1,y1,back/span,8)
+    surface_probe(net,x0+(x1-x0)*placed,y0+(y1-y0)*placed)
 }
 
 /// A point on one edge of the curved TRIANGLE patch, in that edge's own
