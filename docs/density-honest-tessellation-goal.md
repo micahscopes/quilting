@@ -43,7 +43,7 @@ before and after:
 
 | Check | Now | Target |
 |---|---|---|
-| Interior triangle area, max over min | see below | bounded across curvature, six to ten |
+| Interior triangle area, max over min | see below | four, the dyadic floor; two needs sub-dyadic control |
 | Density step across an internal seam | visible | not measurable |
 | Outer-side chord deviation | 0.000019 | unchanged |
 | Interior segment chord deviation | 0.00178 | unchanged |
