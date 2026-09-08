@@ -1832,3 +1832,79 @@ fn density_placement_meets_its_own_boundary_without_a_step() {
         }
     }
 }
+
+/// Where does the shear come from: the patch, or us?
+///
+/// The first fundamental form of the parameterization, by central differences,
+/// then the ratio of its principal stretches. A conformal map scales without
+/// shearing, so its ratio is one everywhere and any departure is real
+/// anisotropy. Measured twice: on the patch as authored, and on the patch after
+/// the shipped placement. If the raw ratio is one and the placed ratio is not,
+/// the twist is entirely self-inflicted and no amount of surface-space sampling
+/// is needed to remove it. If the raw ratio departs, the parameterization
+/// itself is anisotropic and a scalar spacing law can never be enough.
+#[test]
+fn shear_is_attributed_to_the_patch_or_to_the_placement() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let raw=instance.get_typed_func::<(i32,f32,f32,i32,f32),f32>(&mut store,"surface_at").unwrap();
+    let placed=instance.get_typed_func::<(i32,f32,f32,i32,f32),f32>(&mut store,"placed_surface_at").unwrap();
+
+    let h=4e-3_f32;
+    for kind in 0..2i32 {
+        let label=if kind==0 {"triangle"} else {"quad"};
+        for bulge in [0.6_f32,2.4,4.8] {
+            let mut rows: Vec<(f64,f64)> = Vec::new();
+            for iu in 1..12 {
+                for iv in 1..12 {
+                    let u=(iu as f32)/12.0;
+                    let v=(iv as f32)/12.0;
+                    // The triangular basis is only defined below the diagonal.
+                    if kind==0 && u+v>0.92 { continue }
+                    let mut pair=[0.0_f64;2];
+                    for (slot,f) in [&raw,&placed].iter().enumerate() {
+                        let at=|s:&mut wasmtime::Store<()>,x:f32,y:f32,l:i32| -> Option<f64> {
+                            let r=f.call(s,(kind,x,y,l,bulge)).ok()?;
+                            if r< -900.0 {None} else {Some(f64::from(r))}
+                        };
+                        let mut du=[0.0_f64;3];
+                        let mut dv=[0.0_f64;3];
+                        let mut ok=true;
+                        for l in 0..3i32 {
+                            match (at(&mut store,u+h,v,l),at(&mut store,u-h,v,l),
+                                   at(&mut store,u,v+h,l),at(&mut store,u,v-h,l)) {
+                                (Some(a),Some(b),Some(c),Some(d)) => {
+                                    du[l as usize]=(a-b)/(2.0*f64::from(h));
+                                    dv[l as usize]=(c-d)/(2.0*f64::from(h));
+                                }
+                                _ => { ok=false; }
+                            }
+                        }
+                        if !ok { pair[slot]=f64::NAN; continue }
+                        let e=du[0]*du[0]+du[1]*du[1]+du[2]*du[2];
+                        let f_=du[0]*dv[0]+du[1]*dv[1]+du[2]*dv[2];
+                        let g=dv[0]*dv[0]+dv[1]*dv[1]+dv[2]*dv[2];
+                        let mean=(e+g)*0.5;
+                        let disc=(((e-g)*0.5).powi(2)+f_*f_).max(0.0).sqrt();
+                        let hi=mean+disc;
+                        let lo=mean-disc;
+                        pair[slot]=if lo>1e-18 {(hi/lo).sqrt()} else {f64::INFINITY};
+                    }
+                    if pair[0].is_finite() && pair[1].is_finite() { rows.push((pair[0],pair[1])); }
+                }
+            }
+            assert!(rows.len()>20,"{label} bulge {bulge}: only {} usable samples",rows.len());
+            let summarize=|mut v: Vec<f64>| -> (f64,f64) {
+                v.sort_by(|a,b| a.partial_cmp(b).unwrap());
+                (v[v.len()/2], *v.last().unwrap())
+            };
+            let (raw_med,raw_max)=summarize(rows.iter().map(|r| r.0).collect());
+            let (pl_med,pl_max)=summarize(rows.iter().map(|r| r.1).collect());
+            eprintln!("SHEAR {label} bulge={bulge}: patch median={raw_med:.4} max={raw_max:.4}  |  placed median={pl_med:.4} max={pl_max:.4}  ({} samples)",rows.len());
+        }
+    }
+}
