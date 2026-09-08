@@ -1314,6 +1314,31 @@ impl LinearElement for IsotropicOddF {
 pub struct IsotropicCliffordAlgebra {}
 impl Copy for IsotropicCliffordAlgebra {}
 
+/// This instance's view of the point-space condition. The residual is the
+/// trivector part of the odd product, which is the component the vector
+/// admission rejects, so zero residual is exactly an edge that stays in the
+/// point space. The isotropic signature enters through the compiled program
+/// rather than through any written-out product.
+pub struct IsotropicWeightCondition {}
+impl Copy for IsotropicWeightCondition {}
+impl quilting_patch::weight_constraint::WeightCondition<Vec3F,IsotropicEvenF>
+    for IsotropicWeightCondition {
+    fn residual(self,_ pi:Vec3F,_ wi:IsotropicEvenF,_ pj:Vec3F,_ wj:IsotropicEvenF)->f32 {
+        isotropic_odd_trivector(pi,wi,wj)+isotropic_odd_trivector(pj,wj,wi)
+    }
+    fn basis(self,_ index:usize)->IsotropicEvenF {
+        if index==0 {even(1.0,0.0,0.0,0.0)}
+        else if index==1 {even(0.0,1.0,0.0,0.0)}
+        else if index==2 {even(0.0,0.0,1.0,0.0)}
+        else {even(0.0,0.0,0.0,1.0)}
+    }
+    fn coefficients(self,_ w:IsotropicEvenF)->[f32;4] {[w.scalar,w.e12,w.e13,w.e23]}
+    fn from_coefficients(self,_ c:[f32;4])->IsotropicEvenF {even(c[0],c[1],c[2],c[3])}
+}
+fn isotropic_odd_trivector(_ p:Vec3F,_ w:IsotropicEvenF,_ other:IsotropicEvenF)->f32 {
+    odd_times_reverse_weight(weighted_isotropic_point(control(p,w)),other).e123
+}
+
 impl ArcAuthoringAlgebra for IsotropicCliffordAlgebra {
     type Displacement=Vec3F
     fn difference(self,_ end:Vec3F,_ start:Vec3F)->Vec3F {
