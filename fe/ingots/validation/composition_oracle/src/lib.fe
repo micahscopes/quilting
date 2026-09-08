@@ -1220,7 +1220,10 @@ pub fn diagonal_edge_deviation(_ bulge:f32,_ slot:u32)->f32 {
     child.corner_a=0
     child.corner_b=1
     child.corner_c=2
-    let map=OrientedIntervalMap {law:ProjectiveIntervalBias {strength:1.0},reversed:false}
+    let law=ProjectiveIntervalBias {strength:1.0}
+    let ab=OrientedIntervalMap {law:law,reversed:BoundaryUse::between(0,1).reversed}
+    let bc=OrientedIntervalMap {law:law,reversed:BoundaryUse::between(1,2).reversed}
+    let ca=OrientedIntervalMap {law:law,reversed:BoundaryUse::between(2,0).reversed}
     // Endpoints are excluded on purpose. At a shared corner two barycentrics
     // vanish at once, so which edge claims the sample depends on the child's
     // edge orientation rather than on the placement law under test.
@@ -1231,7 +1234,7 @@ pub fn diagonal_edge_deviation(_ bulge:f32,_ slot:u32)->f32 {
         let p=if slot==0 {bary3f(1.0-t,0.0,t)}
             else if slot==1 {bary3f(1.0-t,t,0.0)}
             else {bary3f(0.0,1.0-t,t)}
-        let placed=placement::place(scene,child,p,map,map,map)
+        let placed=placement::place(scene,child,p,ab,bc,ca)
         // Each edge is a line through two of the corners; report the residual
         // of that line so every slot is measured by the same kind of quantity.
         let residual=if slot==0 {fmath::abs(placed.x-placed.y)}
@@ -1273,4 +1276,57 @@ pub fn free_weight_departure(_ kind:f32,_ freedom:f32)->f32 {
         }
     }
     worst
+}
+
+/// The step where the boundary law meets the interior law under density
+/// placement. A sample exactly on a child edge is placed along that edge by a
+/// one-dimensional segment law; a sample just inside is placed by composing two
+/// axis-aligned slice laws. A continuous placement has those agreeing in the
+/// limit, so this distance must fall with `eps`. Where the child edge is not
+/// axis-parallel the two are different maps and the distance tends to a
+/// constant instead. That constant is the visible seam.
+///
+/// The child is (corner 0, corner 1, centre), which is one quadrant of the
+/// four-triangle split. `slot` picks its edge: 0 the outer side 0-1, which is
+/// axis-parallel and is the control, 1 the spoke from corner 1 to the centre,
+/// 2 the spoke from the centre to corner 0. Both spokes are diagonal.
+pub fn placement_seam_gap(_ bulge:f32,_ slot:u32,_ t:f32,_ eps:f32)->f32 {
+    use composite_atlas::{placement,residency}
+    use quilting_patch::sampling_warp::ProjectiveIntervalBias
+    let mut c=initial_controls()
+    c.surface_kind=2.0
+    c.midpoint_z=bulge
+    let net=composite_atlas::surface::authored(c)
+    if net.patch_valid!=1.0 {return -999.0}
+    let mut scene=residency::empty_scene()
+    scene.surface=net
+    scene.domain_norm=quilting_patch::depth_field::QuadDomainNorm {
+        gram:composite_atlas::surface::domain_gram(net)}
+    scene.density_placement=true
+    let mut child=residency::empty_child()
+    child.corner_a=0
+    child.corner_b=1
+    child.corner_c=4
+    // Each map carries its edge's canonical direction, exactly as `edge_map`
+    // builds it from `boundaries`. An unoriented map traverses any edge whose
+    // low/high is flipped backwards, which reads as a seam that is really the
+    // test's own error.
+    let law=ProjectiveIntervalBias {strength:1.0}
+    let ab=OrientedIntervalMap {law:law,reversed:BoundaryUse::between(0,1).reversed}
+    let bc=OrientedIntervalMap {law:law,reversed:BoundaryUse::between(1,4).reversed}
+    let ca=OrientedIntervalMap {law:law,reversed:BoundaryUse::between(4,0).reversed}
+    let keep=1.0-eps
+    // b=0 is checked first in the placement law, so every sample below keeps
+    // its other two barycentrics nonzero and lands on the edge it names.
+    let on=if slot==0 {bary3f(1.0-t,t,0.0)}
+        else if slot==1 {bary3f(0.0,1.0-t,t)}
+        else {bary3f(1.0-t,0.0,t)}
+    let inside=if slot==0 {bary3f((1.0-t)*keep,t*keep,eps)}
+        else if slot==1 {bary3f(eps,(1.0-t)*keep,t*keep)}
+        else {bary3f((1.0-t)*keep,eps,t*keep)}
+    let a=placement::place(scene,child,on,ab,bc,ca)
+    let b=placement::place(scene,child,inside,ab,bc,ca)
+    let dx=a.x-b.x
+    let dy=a.y-b.y
+    fmath::sqrt(dx*dx+dy*dy)
 }

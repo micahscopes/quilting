@@ -1796,3 +1796,39 @@ fn free_weights_are_inert_at_zero_and_leave_the_family_otherwise() {
         }
     }
 }
+
+/// Density placement must be one continuous law, not two that meet at a step.
+/// A sample on a child edge and a sample just inside it have to converge as the
+/// interior sample approaches the edge. The outer square side is axis-parallel
+/// and is the control; the two spokes of a quadrant run diagonally to the
+/// centre, and those are where a boundary law that differs from the interior
+/// law shows up as a seam.
+#[test]
+fn density_placement_meets_its_own_boundary_without_a_step() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let f=instance.get_typed_func::<(f32,i32,f32,f32),f32>(&mut store,"placement_seam_gap").unwrap();
+    let name=["outer side 0-1","spoke 1-centre","spoke centre-0"];
+    for bulge in [0.6_f32,1.5] {
+        for slot in 0..3usize {
+            let mut worst=[0.0_f64;3];
+            for (i,eps) in [1e-2_f32,1e-3,1e-4].iter().enumerate() {
+                for k in 1..16 {
+                    let t=(k as f32)/16.0;
+                    let gap=f64::from(f.call(&mut store,(bulge,slot as i32,t,*eps)).unwrap());
+                    assert!(gap> -900.0,"patch rejected at bulge {bulge}");
+                    worst[i]=worst[i].max(gap);
+                }
+            }
+            eprintln!("SEAM_GAP bulge={bulge} {}: eps 1e-2 {:.7}, 1e-3 {:.7}, 1e-4 {:.7}",
+                name[slot],worst[0],worst[1],worst[2]);
+            assert!(worst[2]<1e-3,
+                "bulge {bulge} {}: placement steps away from its own edge by {} as the interior approaches it",
+                name[slot],worst[2]);
+        }
+    }
+}

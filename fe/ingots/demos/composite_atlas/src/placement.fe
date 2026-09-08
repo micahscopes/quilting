@@ -37,9 +37,9 @@ fn boundary_raw(_ scene:Scene,_ from:u32,_ to:u32,_ t:f32,_ reversed:bool)->Poin
     Point {x:a.x*(1.0-q)+b.x*q,y:a.y*(1.0-q)+b.y*q}
 }
 /// A boundary sample placed along its own edge, in the edge's canonical low to
-/// high direction so both adjacent uses agree bit for bit. Being the same
-/// segment law restricted to that line, it meets the interior placement where
-/// they touch while leaving the edge exactly where the geometry put it.
+/// high direction so both adjacent uses agree bit for bit. This is a different
+/// map from the interior's two slice laws, so the interior is corrected to meet
+/// it rather than being left to step away; see `edge_corrected`.
 fn boundary_density(_ scene:Scene,_ from:u32,_ to:u32,_ t:f32,_ reversed:bool)->Point {
     let edge=BoundaryUse::between(from,to)
     let q=if reversed {1.0-t} else {t}
@@ -65,6 +65,60 @@ fn density_place(_ scene:Scene,_ raw:Point)->Point {
     let y=segment_parameter(scene.domain_norm,x,0.0,x,1.0,raw.y,PLACEMENT_LEVELS)
     Point {x:x,y:y}
 }
+/// The interior placement corrected to meet every child edge exactly.
+///
+/// The two slice laws equalize the interior but preserve only lines that are
+/// axis-parallel, so on any other edge they land somewhere other than the
+/// edge's own segment law. Placing boundary samples by the edge law and leaving
+/// the interior alone fixes the edge and creates a step: measured at 0.0331 of
+/// the domain across a spoke, against 0.00008 across an outer side.
+///
+/// So correct instead of choosing. On each edge the correction is where that
+/// edge's law puts the sample minus where the slice laws put it, blended inward
+/// by weights that are one on their own edge and zero on the other two. On an
+/// edge the blend collapses to that edge's law exactly; inside it decays; the
+/// map is continuous and every edge still renders as its own curve.
+fn edge_corrected<M:IntervalSamplingMap>(_ scene:Scene,_ d:ChildDraw,_ p:Bary3F,_ raw:Point,
+    _ ab:OrientedIntervalMap<M>,_ bc:OrientedIntervalMap<M>,_ ca:OrientedIntervalMap<M>)->Point {
+    let base=density_place(scene,raw)
+    // A partition of unity on the triangle: each product vanishes on the two
+    // edges that are not its own. The displacements vanish at the corners,
+    // where the total would otherwise be zero.
+    let w_ab=p.a*p.b
+    let w_bc=p.b*p.c
+    let w_ca=p.c*p.a
+    let total=w_ab+w_bc+w_ca
+    if !(total>0.0) {return base}
+    let mut x=base.x
+    let mut y=base.y
+    // Edge parameters chosen to equal the ones the boundary branches pass, so
+    // the correction is exactly the edge law where the weight reaches one.
+    if w_ab>0.0 {
+        let t=p.b/(p.a+p.b)
+        let target=boundary_density(scene,d.corner_a,d.corner_b,t,ab.reversed)
+        let here=density_place(scene,boundary_raw(scene,d.corner_a,d.corner_b,t,ab.reversed))
+        let k=w_ab/total
+        x=x+(target.x-here.x)*k
+        y=y+(target.y-here.y)*k
+    }
+    if w_bc>0.0 {
+        let t=p.c/(p.b+p.c)
+        let target=boundary_density(scene,d.corner_b,d.corner_c,t,bc.reversed)
+        let here=density_place(scene,boundary_raw(scene,d.corner_b,d.corner_c,t,bc.reversed))
+        let k=w_bc/total
+        x=x+(target.x-here.x)*k
+        y=y+(target.y-here.y)*k
+    }
+    if w_ca>0.0 {
+        let t=p.a/(p.c+p.a)
+        let target=boundary_density(scene,d.corner_c,d.corner_a,t,ca.reversed)
+        let here=density_place(scene,boundary_raw(scene,d.corner_c,d.corner_a,t,ca.reversed))
+        let k=w_ca/total
+        x=x+(target.x-here.x)*k
+        y=y+(target.y-here.y)*k
+    }
+    Point {x:x,y:y}
+}
 fn assemble<M:IntervalSamplingMap,L:IntervalSamplingMap>(_ scene:Scene,_ d:ChildDraw,_ p:Bary3F,
     _ ab:OrientedIntervalMap<M>,_ bc:OrientedIntervalMap<M>,_ ca:OrientedIntervalMap<M>,_ locality:L)->Point {
     if scene.density_placement {
@@ -80,7 +134,8 @@ fn assemble<M:IntervalSamplingMap,L:IntervalSamplingMap>(_ scene:Scene,_ d:Child
         let a=corner(d.corner_a,scene.active_center_x,scene.active_center_y)
         let b=corner(d.corner_b,scene.active_center_x,scene.active_center_y)
         let c=corner(d.corner_c,scene.active_center_x,scene.active_center_y)
-        return density_place(scene,Point {x:a.x*p.a+b.x*p.b+c.x*p.c,y:a.y*p.a+b.y*p.b+c.y*p.c})
+        let raw=Point {x:a.x*p.a+b.x*p.b+c.x*p.c,y:a.y*p.a+b.y*p.b+c.y*p.c}
+        return edge_corrected(scene,d,p,raw,ab,bc,ca)
     }
     if p.b==0.0 {boundary(scene,d.corner_c,d.corner_a,p.a,ca)}
     else if p.c==0.0 {boundary(scene,d.corner_a,d.corner_b,p.b,ab)}
