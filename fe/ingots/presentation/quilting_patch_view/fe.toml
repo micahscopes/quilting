@@ -12,5 +12,5 @@ quilting_clifford_bezier = true
 quilting_demo_view = true
 quilting_atlas = true
 quilting_qb = true
-quilting_oklch = { path = "../../color/quilting_oklch" }
+quilting_oklch = true
 classic_quilting_lod = { path = "../../demos/classic_quilting_lod" }

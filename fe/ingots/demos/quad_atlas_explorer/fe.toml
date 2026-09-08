@@ -8,4 +8,4 @@ fmath = true
 quilting_atlas = true
 quilting_atlas_webgpu = true
 quilting_domain = true
-quilting_oklch = { path = "../../color/quilting_oklch" }
+quilting_oklch = true

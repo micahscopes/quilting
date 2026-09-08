@@ -12,7 +12,7 @@ quilting_atlas = true
 quilting_atlas_webgpu = true
 quilting_clifford_bezier = true
 quilting_domain = true
-quilting_oklch = { path = "../../color/quilting_oklch" }
+quilting_oklch = true
 quilting_patch = true
 quilting_patch_webgpu = true
 quilting_qb = true

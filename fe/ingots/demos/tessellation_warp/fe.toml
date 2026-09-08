@@ -11,5 +11,5 @@ quilting_patch = true
 quilting_patch_view = true
 quilting_atlas = true
 quilting_atlas_webgpu = true
-quilting_oklch = { path = "../../color/quilting_oklch" }
+quilting_oklch = true
 classic_quilting_lod = { path = "../classic_quilting_lod" }

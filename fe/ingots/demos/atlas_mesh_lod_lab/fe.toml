@@ -3,11 +3,11 @@ name = "atlas_mesh_lod_lab"
 version = "0.1.0"
 
 [dependencies]
-core = { path = "../../../../.toolchains/fe/ingots/core" }
-std = { path = "../../../../.toolchains/fe/ingots/std" }
-fmath = { path = "../../../../.toolchains/fe/demos/sketches/fmath" }
+core = true
+std = true
+fmath = true
 classic_quilting_lod = { path = "../classic_quilting_lod" }
 quilting_atlas = { path = "../../geometry/quilting_atlas" }
 quilting_domain = { path = "../../foundation/quilting_domain" }
-quilting_oklch = { path = "../../color/quilting_oklch" }
+quilting_oklch = true
 quilting_qb = { path = "../../geometry/quilting_qb" }

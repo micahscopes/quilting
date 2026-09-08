@@ -3,6 +3,7 @@ name = "quilting_fe"
 version = "0.1.0"
 members = [
   { path = "ingots/foundation/quilting_domain", name = "quilting_domain" },
+  { path = "ingots/color/quilting_oklch", name = "quilting_oklch" },
   { path = "ingots/algebra/quilting_quaternion", name = "quilting_quaternion" },
   { path = "ingots/algebra/quilting_cga", name = "quilting_cga" },
   { path = "ingots/geometry/quilting_patch", name = "quilting_patch" },
@@ -44,9 +45,11 @@ members = [
   { path = "ingots/demos/tessellation_warp", name = "tessellation_warp" },
   { path = "ingots/demos/clifford_weight_locus", name = "clifford_weight_locus" },
   { path = "ingots/demos/twist_topology_lab", name = "twist_topology_lab" },
+  { path = "ingots/demos/atlas_mesh_lod_lab", name = "atlas_mesh_lod_lab" },
 ]
 default-members = [
   "ingots/foundation/quilting_domain",
+  "ingots/color/quilting_oklch",
   "ingots/algebra/quilting_quaternion",
   "ingots/algebra/quilting_cga",
   "ingots/geometry/quilting_patch",
@@ -72,6 +75,7 @@ default-members = [
   "ingots/demos/tessellation_warp",
   "ingots/demos/clifford_weight_locus",
   "ingots/demos/twist_topology_lab",
+  "ingots/demos/atlas_mesh_lod_lab",
 ]
 
 [dependencies]

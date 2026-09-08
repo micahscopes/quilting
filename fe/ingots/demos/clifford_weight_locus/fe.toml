@@ -8,5 +8,5 @@ std = true
 fmath = true
 quilting_clifford_bezier = true
 quilting_domain = true
-quilting_oklch = { path = "../../color/quilting_oklch" }
+quilting_oklch = true
 quilting_patch = true

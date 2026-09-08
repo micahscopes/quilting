@@ -11,4 +11,4 @@ quilting_patch = true
 quilting_quaternion = true
 quilting_qb = true
 quilting_atlas = true
-quilting_oklch = { path = "../../color/quilting_oklch" }
+quilting_oklch = true
