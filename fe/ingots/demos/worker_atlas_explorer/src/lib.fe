@@ -44,7 +44,10 @@ extern { const fn __f32_from_i32(_: i32) -> f32 }
 fn number(_ n: u32) -> f32 { __f32_from_i32(n.downcast_unchecked()) }
 fn refresh(_ previous: State) -> State {
     let mut next = previous
-    if next.address == 0 { next.status = 3; return next }
+    if next.address == 0 {
+        next.status = 3
+        return next
+    }
     let pool: PoolHandle<CAPACITY> = PoolHandle::from_address(next.address)
     let summary = pool.summary()
     next.completed = summary.completed
@@ -80,6 +83,10 @@ struct Point { x: f32, y: f32 }
 impl Copy for Point {}
 struct Varying { a: f32, b: f32, c: f32 }
 impl Copy for Varying {}
+// Offsets into the atlas buffer, bounded by the published point count in the
+// same record. Stated because a raster stage has no channel for the trap a
+// checked operation emits.
+#[arithmetic(unchecked)]
 fn point(_ atlas: Atlas, _ state: State, _ index: u32) -> Point {
     let indices = state.offset + state.points
     let id = if state.points <= 65536 {
@@ -116,13 +123,13 @@ actor WorkerAtlas uses (GpuProgram<WebGpuBackend>, SurfaceQuality<ResponsiveBack
         State { selected:0.0, address:pool::create<CAPACITY>(1,8).address(),
             completed:0,status:0,offset:0,points:0,triangles:0,square:0,width:1200.0,height:1200.0 }
     }
-    fn snapshot(self) -> State {
-        State { selected:self.selected,address:self.address,completed:self.completed,status:self.status,
-            offset:self.offset,points:self.points,triangles:self.triangles,square:self.square,width:self.width,height:self.height }
-    }
-    fn receive(self, event: Event) -> State uses (ResidentTransition) { refresh(self.snapshot()) }
+    fn receive(self, event: Event) -> State uses (ResidentTransition) { refresh(State { selected:self.selected,address:self.address,completed:self.completed,
+            status:self.status,offset:self.offset,points:self.points,
+            triangles:self.triangles,square:self.square,width:self.width,height:self.height }) }
     fn control(self, event: own SurfaceEvent) -> State uses (SurfaceTransition, SurfaceScheduling<LatestPerFrame>) {
-        let mut state = self.snapshot()
+        let mut state = State { selected:self.selected,address:self.address,completed:self.completed,
+            status:self.status,offset:self.offset,points:self.points,
+            triangles:self.triangles,square:self.square,width:self.width,height:self.height }
         // selected is the first scalar field; all other metadata is read-only.
         if event.is_param_edit() && event.param_index == 0 { state.selected = event.param_value.clamp(0.0,1199.0) }
         state.width = event.width
@@ -145,15 +152,20 @@ actor WorkerAtlas uses (GpuProgram<WebGpuBackend>, SurfaceQuality<ResponsiveBack
         if py < 5 && px >= 0 && __f32_from_i32(px) < self.width * number(self.completed) / 1200.0 {
             return if self.status == 0 { -11365973 } else { -3394796 }
         }
-        -15460836
+        // Parenthesized: a line-start `-` after a block reads as subtraction.
+        (-15460836)
     }
-    fn vertices(self, vertex_index:u32) -> RasterVertex<Varying>
+    fn vertices(self, vertex_index:u32, instance_index:u32) -> RasterVertex<Varying>
         uses (VertexStage<Varying,IndirectTriangleList<DrawIndirectBuffer<Draw>>>, PublishBuffer<PublishAtlas>) {
-        let state = self.snapshot()
-        let base = vertex_index / 3 * 3
+        let state = State { selected:self.selected,address:self.address,completed:self.completed,
+            status:self.status,offset:self.offset,points:self.points,
+            triangles:self.triangles,square:self.square,width:self.width,height:self.height }
+        // Wrapping: flooring to a multiple of three cannot exceed the index, but
+        // an attribute is ignored on an actor method.
+        let base = (vertex_index / 3).wrapping_mul(3)
         let a = point(self.atlas,state,base)
-        let b = point(self.atlas,state,base+1)
-        let c = point(self.atlas,state,base+2)
+        let b = point(self.atlas,state,base.wrapping_add(1))
+        let c = point(self.atlas,state,base.wrapping_add(2))
         let twice_area = abs((b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x)) * state.width * state.height * 0.25
         let corner = vertex_index % 3
         let p = if corner == 0 { a } else { if corner == 1 { b } else { c } }

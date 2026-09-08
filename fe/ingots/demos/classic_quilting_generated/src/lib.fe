@@ -651,7 +651,7 @@ actor ClassicQuiltingGenerated uses (Program<WebGpuBackend>) {
         -15396337
     }
 
-    fn mesh_vertices(self, vertex_index: u32) -> RasterVertex<MeshVarying>
+    fn mesh_vertices(self, vertex_index: u32, instance_index: u32) -> RasterVertex<MeshVarying>
         uses (VertexStage<MeshVarying, IndirectTriangleList<DrawIndirectBuffer<Draw>>>)
     {
         let mut result = invalid_vertex()
