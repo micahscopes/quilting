@@ -86,21 +86,20 @@ therefore required rather than optional, and it is the only remaining route.
 ## Order
 
 1. Interior placement from the density rather than from carried edge laws.
-   Two-pass slice form shipped; a third direction measured and rejected; the
-   transport map built and measured, where undamped it meets the target at
-   moderate curvature and the boundary constraint is what destroys it.
-   Remaining: re-impose the canonical boundary law after the flow rather than
-   damping the flow before it, handle the pole at high curvature, and decide
-   whether to tabulate the placement or keep evaluating it on demand.
+   Closed. The two-pass slice form ships. A third slice direction, damped
+   transport, and transport with the boundary re-imposed afterwards were each
+   built and measured, and each is worse. Placement alone cannot close the
+   residual, for the reason recorded above.
 2. Add the three surface-space audits and retire the reference-domain heuristic.
 3. Carry the boundary flag from assembly into the warp rather than re-deriving
    barycentrics and testing exact zeros, which drifts near 3e-8.
 4. Derive levels from one target size using the certified norm intervals.
 5. Refresh the other demos, landscape first.
-6. Only then revisit recursion or ranked tiles, on the evidence in
-   [the density document](patch-area-density.md).
+6. Recursion, promoted from optional to required by the measurements above.
+   Its depth field is built and certified; it has three to six octaves to act on
+   at working curvatures, and its known ceiling is a factor of two in area.
 
-## Why this and not recursion
+## Why placement first, and why it was not enough
 
 Recursion has 0.81 levels of density to act on at the default authoring and 2.9
 to 6.3 at working curvatures, so it does nothing on mild patches and cannot do
