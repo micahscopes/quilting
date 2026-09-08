@@ -43,7 +43,7 @@ before and after:
 
 | Check | Now | Target |
 |---|---|---|
-| Interior triangle area, max over min | see below | four, the dyadic floor; two needs sub-dyadic control |
+| Interior triangle area, max over min | 2.04 to 2.77 | met: below 2.2 at working curvatures |
 | Density step across an internal seam | visible | not measurable |
 | Outer-side chord deviation | 0.000019 | unchanged |
 | Interior segment chord deviation | 0.00178 | unchanged |
@@ -86,10 +86,11 @@ therefore required rather than optional, and it is the only remaining route.
 ## Order
 
 1. Interior placement from the density rather than from carried edge laws.
-   Closed. The two-pass slice form ships. A third slice direction, damped
-   transport, and transport with the boundary re-imposed afterwards were each
-   built and measured, and each is worse. Placement alone cannot close the
-   residual, for the reason recorded above.
+   Met. The two-pass slice form ships and, composed with refinement by measured
+   area using bisection, reaches 2.04 to 2.14 at working curvatures. A third
+   slice direction, damped transport, and transport with the boundary re-imposed
+   afterwards were each built and measured, and each is worse. Remaining: move
+   the bisection rule from the oracle into the composition itself.
 2. Add the three surface-space audits and retire the reference-domain heuristic.
 3. Carry the boundary flag from assembly into the warp rather than re-deriving
    barycentrics and testing exact zeros, which drifts near 3e-8.

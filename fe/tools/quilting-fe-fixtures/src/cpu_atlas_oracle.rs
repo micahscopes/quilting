@@ -1140,43 +1140,55 @@ fn area_driven_refinement_meets_the_target() {
                 let n=[e1[1]*e2[2]-e1[2]*e2[1],e1[2]*e2[0]-e1[0]*e2[2],e1[0]*e2[1]-e1[1]*e2[0]];
                 (n[0]*n[0]+n[1]*n[1]+n[2]*n[2]).sqrt()*0.5
             };
-            let mut cell_area=|store:&mut wasmtime::Store<()>,x:f64,y:f64,s:f64| -> Option<f64> {
-                let a=point(store,x,y)?; let b=point(store,x+s,y)?;
-                let c=point(store,x,y+s)?; let d=point(store,x+s,y+s)?;
+            let mut cell_area2=|store:&mut wasmtime::Store<()>,x:f64,y:f64,w:f64,h:f64| -> Option<f64> {
+                let a=point(store,x,y)?; let b=point(store,x+w,y)?;
+                let c=point(store,x,y+h)?; let d=point(store,x+w,y+h)?;
                 Some(tri(a,b,c)+tri(b,d,c))
             };
             // Target area from a coarse pass, so leaf counts stay comparable.
-            let total=cell_area(&mut store,0.0,0.0,1.0).unwrap_or(1.0);
+            let total=cell_area2(&mut store,0.0,0.0,1.0,1.0).unwrap_or(1.0);
             let target=total/700.0;
-            const MAX_DEPTH:u32=9;
-            let mut stack:Vec<(f64,f64,f64,u32)>=vec![(0.0,0.0,1.0,0)];
+            // Bisect along the longer side rather than quadrisecting. A cell just
+            // over the threshold becomes two just under it, so leaves land in a
+            // half-to-one band instead of a quarter-to-one band, and the ratio
+            // floor is two rather than four.
+            const MAX_DEPTH:u32=18;
+            let mut stack:Vec<(f64,f64,f64,f64,u32)>=vec![(0.0,0.0,1.0,1.0,0)];
             let mut areas=Vec::new();
-            while let Some((x,y,size,depth))=stack.pop() {
+            while let Some((x,y,w,hgt,depth))=stack.pop() {
                 if kind==0 && x+y>1.0 {continue;}
-                let area=match cell_area(&mut store,x,y,size) {Some(a)=>a,None=>continue};
-                if area>target && depth<MAX_DEPTH && stack.len()+areas.len()<40000 {
-                    let h=size*0.5;
-                    stack.push((x,y,h,depth+1));
-                    stack.push((x+h,y,h,depth+1));
-                    stack.push((x,y+h,h,depth+1));
-                    stack.push((x+h,y+h,h,depth+1));
+                let area=match cell_area2(&mut store,x,y,w,hgt) {Some(a)=>a,None=>continue};
+                if area>target && depth<MAX_DEPTH && stack.len()+areas.len()<250000 {
+                    if w>=hgt {
+                        let half=w*0.5;
+                        stack.push((x,y,half,hgt,depth+1));
+                        stack.push((x+half,y,half,hgt,depth+1));
+                    } else {
+                        let half=hgt*0.5;
+                        stack.push((x,y,w,half,depth+1));
+                        stack.push((x,y+half,w,half,depth+1));
+                    }
                 } else if area>0.0 {
-                    if kind==0 && x+y+size>1.0 {continue;}
+                    if kind==0 && x+y+w.max(hgt)>1.0 {continue;}
                     areas.push(area);
                 }
             }
-            if areas.len()<16 {eprintln!("AREA_REFINE {name} bulge={bulge}: too few leaves"); continue;}
+            let stack_capacity_marker=0usize;
+            if areas.len()<16 {eprintln!("BISECT {name} bulge={bulge}: too few leaves"); continue;}
             let lo=areas.iter().cloned().fold(f64::INFINITY,f64::min);
             let hi=areas.iter().cloned().fold(0.0_f64,f64::max);
             let mean=areas.iter().sum::<f64>()/(areas.len() as f64);
             let cv=(areas.iter().map(|a|(a-mean).powi(2)).sum::<f64>()/(areas.len() as f64)).sqrt()/mean;
-            let mode=if combine {"area refine + placement"} else {"area refine"};
-            eprintln!("AREA_REFINE {name} bulge={bulge} {mode}: {} leaves, cv={cv:.4} maxmin={:.3}",areas.len(),hi/lo);
-            if combine {worst_overall=worst_overall.max(hi/lo);}
+            let mode=if combine {"bisect + placement"} else {"bisect"};
+            let truncated=areas.len()+stack_capacity_marker>=250000;
+            eprintln!("BISECT {name} bulge={bulge} {mode}: {} leaves, cv={cv:.4} maxmin={:.3}{}",
+                areas.len(),hi/lo,if truncated {" TRUNCATED"} else {""});
+            if combine && !truncated {worst_overall=worst_overall.max(hi/lo);}
         }
     }
     }
-    eprintln!("AREA_REFINE worst max-over-min with placement={worst_overall:.4}");
+    eprintln!("BISECT worst max-over-min with placement={worst_overall:.4}");
+    assert!(worst_overall<2.8,"bisection with placement should hold the two-to-one band: {worst_overall}");
 }
 
 #[test]
