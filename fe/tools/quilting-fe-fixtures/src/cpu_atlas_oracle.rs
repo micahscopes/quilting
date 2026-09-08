@@ -932,8 +932,44 @@ fn moser_transport_beats_the_two_pass_slice_form() {
                 (x,y)
             };
             let slice_ratio=f64::from(two_pass.call(&mut store,(kind,5,bulge,1,1)).unwrap());
-            for band in [0.12_f64,0.04,0.01,0.0] {
-            let damp=make_damp(band);
+            // The undamped flow keeps boundary points on the boundary but slides
+            // them along it. Rather than damping the flow, which destroys the
+            // interior work it just did, let it act fully and then undo only the
+            // slide, blending that correction inward over a band.
+            let identity=make_damp(0.0);
+            const S:usize=257;
+            let mut side=[[0.0_f64;S];4];
+            for k in 0..S {
+                let t=(k as f64)/(S as f64-1.0);
+                side[0][k]=flow(&identity,t,0.0).0;        // bottom, in x
+                side[1][k]=flow(&identity,t,1.0).0;        // top, in x
+                side[2][k]=flow(&identity,0.0,t).1;        // left, in y
+                side[3][k]=flow(&identity,1.0,t).1;        // right, in y
+            }
+            // Invert each induced side map by monotone search; endpoints are fixed.
+            let invert=|table:&[f64;S],value:f64| {
+                if value<=table[0] {return 0.0;}
+                if value>=table[S-1] {return 1.0;}
+                let mut lo=0usize; let mut hi=S-1;
+                while hi-lo>1 { let m=(lo+hi)/2; if table[m]<=value {lo=m;} else {hi=m;} }
+                let d=table[hi]-table[lo];
+                let f=if d>0.0 {(value-table[lo])/d} else {0.0};
+                ((lo as f64)+f)/(S as f64-1.0)
+            };
+            for band in [0.0_f64,0.06,0.15,0.30,0.50] {
+            let damp=&identity;
+            let weight=|d:f64| {
+                if band<=0.0 {return 0.0;}
+                let s=(1.0-(d/band).min(1.0)).max(0.0);
+                s*s*(3.0-2.0*s)
+            };
+            let correct=|x:f64,y:f64| {
+                let wb=weight(y); let wt=weight(1.0-y);
+                let wl=weight(x); let wr=weight(1.0-x);
+                let cx=wb*(invert(&side[0],x)-x)+wt*(invert(&side[1],x)-x);
+                let cy=wl*(invert(&side[2],y)-y)+wr*(invert(&side[3],y)-y);
+                ((x+cx).clamp(0.0,1.0),(y+cy).clamp(0.0,1.0))
+            };
             // Surface triangle area spread over a uniform grid, transported.
             const M:usize=32;
             let mut areas=Vec::new();
@@ -942,7 +978,8 @@ fn moser_transport_beats_the_two_pass_slice_form() {
             for j in 0..=M { for i in 0..=M {
                 let (u0,v0)=((i as f64)/(M as f64),(j as f64)/(M as f64));
                 if kind==0 && u0+v0>1.0 {continue;}
-                let (fx,fy)=flow(&damp,u0,v0);
+                let (px,py)=flow(damp,u0,v0);
+                let (fx,fy)=correct(px,py);
                 for lane in 0..3 {
                     let value=surface.call(&mut store,(kind,fx as f32,fy as f32,lane,bulge)).unwrap();
                     if !value.is_finite()||value==-999.0 {ok=false;}
@@ -964,7 +1001,18 @@ fn moser_transport_beats_the_two_pass_slice_form() {
             let hi=areas.iter().cloned().fold(0.0_f64,f64::max);
             let mean=areas.iter().sum::<f64>()/(areas.len() as f64);
             let cv=(areas.iter().map(|a|(a-mean).powi(2)).sum::<f64>()/(areas.len() as f64)).sqrt()/mean;
-            eprintln!("MOSER {name} bulge={bulge} band={band}: transport cv={cv:.4} maxmin={:.3}  |  two-pass maxmin={slice_ratio:.3}",hi/lo);
+            // Boundary error: how far the corrected map leaves the exact
+            // arc-length positions the shipped boundary law produces.
+            let mut worst_boundary=0.0_f64;
+            for k in 0..33 {
+                let t=(k as f64)/32.0;
+                for (bx,by) in [(t,0.0),(t,1.0),(0.0,t),(1.0,t)] {
+                    let (px,py)=flow(damp,bx,by);
+                    let (cx,cy)=correct(px,py);
+                    worst_boundary=worst_boundary.max(((cx-bx).powi(2)+(cy-by).powi(2)).sqrt());
+                }
+            }
+            eprintln!("MOSER {name} bulge={bulge} correction band={band}: transport cv={cv:.4} maxmin={:.3} boundary drift={worst_boundary:.6}  |  two-pass maxmin={slice_ratio:.3}",hi/lo);
             }
         }
     }
