@@ -806,6 +806,24 @@ pub fn surface_at(_ kind:u32,_ u:f32,_ v:f32,_ lane:u32,_ bulge:f32)->f32 {
     if !p.valid {-999.0} else if lane==0 {p.point.x} else if lane==1 {p.point.y} else {p.point.z}
 }
 
+/// Surface point after the shipped two-pass density placement, so subdivision
+/// and placement can be measured together: depth handles whole octaves, and
+/// placement handles what is left inside a leaf.
+pub fn placed_surface_at(_ kind:u32,_ u:f32,_ v:f32,_ lane:u32,_ bulge:f32)->f32 {
+    use quilting_patch::depth_field::{segment_parameter,QuadDomainNorm}
+    use composite_atlas::model::Point
+    let mut c=initial_controls()
+    c.surface_kind=if kind==0 {1.0} else {2.0}
+    c.midpoint_z=bulge
+    let net=composite_atlas::surface::authored(c)
+    if net.patch_valid!=1.0 {return -999.0}
+    let norm=QuadDomainNorm {gram:composite_atlas::surface::domain_gram(net)}
+    let x=segment_parameter(norm,0.0,v,1.0,v,u,8)
+    let y=segment_parameter(norm,x,0.0,x,1.0,v,8)
+    let p=composite_atlas::surface::evaluate(net,Point {x:x,y:y})
+    if !p.valid {-999.0} else if lane==0 {p.point.x} else if lane==1 {p.point.y} else {p.point.z}
+}
+
 pub fn geometric_patch_view_laws()->bool {
     let mut c=initial_controls()
     for kind in [1.0,2.0] {

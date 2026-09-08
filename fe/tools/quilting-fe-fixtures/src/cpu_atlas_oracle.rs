@@ -1018,6 +1018,93 @@ fn moser_transport_beats_the_two_pass_slice_form() {
     }
 }
 
+/// Does subdivision depth close what placement could not? Placement rearranges a
+/// fixed point count and provably cannot equalize area against a fixed boundary
+/// here. Recursion instead spends more cells where the density is high, which is
+/// the route the placement rejections pointed to. Cells are refined while their
+/// certified depth exceeds their current one, and each leaf's SURFACE area is
+/// measured, since equal surface area per leaf is the goal.
+#[test]
+fn depth_driven_subdivision_closes_the_area_residual() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let norm=instance.get_typed_func::<(i32,f32,f32,f32),f32>(&mut store,"domain_norm_at").unwrap();
+    let raw=instance.get_typed_func::<(i32,f32,f32,i32,f32),f32>(&mut store,"surface_at").unwrap();
+    let placed_fn=instance.get_typed_func::<(i32,f32,f32,i32,f32),f32>(&mut store,"placed_surface_at").unwrap();
+    let spread=instance.get_typed_func::<(i32,i32,f32,i32,i32),f32>(&mut store,"domain_area_spread").unwrap();
+    for combine in [false,true] {
+    for (kind,name) in [(0,"triangle"),(1,"quad")] {
+        for bulge in [2.4_f32,4.8,9.6] {
+            // Reference norm at the domain centre anchors the depth ladder; the
+            // constant then sets how fine the finest leaves are allowed to be.
+            let centre=f64::from(norm.call(&mut store,(kind,0.5,0.5,bulge)).unwrap());
+            const MAX_DEPTH:u32=8;
+            const BASE:u32=4;
+            // depth(N) = BASE + log2(centre/N), clamped. One level of depth is
+            // one factor of two in the norm, from area going as its reciprocal
+            // square and each level quartering reference area.
+            let mut leaves:Vec<(f64,f64,f64,u32)>=vec![(0.0,0.0,1.0,0)];
+            let mut done:Vec<(f64,f64,f64)>=Vec::new();
+            while let Some((x,y,size,depth))=leaves.pop() {
+                if kind==0 && x+y>1.0 {continue;}
+                let n=f64::from(norm.call(&mut store,(kind,(x+size*0.5) as f32,(y+size*0.5) as f32,bulge)).unwrap());
+                if !(n>0.0) {continue;}
+                let want=(BASE as f64+(centre/n).log2()).round().clamp(0.0,MAX_DEPTH as f64) as u32;
+                if depth<want && depth<MAX_DEPTH && done.len()+leaves.len()<60000 {
+                    let h=size*0.5;
+                    leaves.push((x,y,h,depth+1));
+                    leaves.push((x+h,y,h,depth+1));
+                    leaves.push((x,y+h,h,depth+1));
+                    leaves.push((x+h,y+h,h,depth+1));
+                } else {
+                    done.push((x,y,size));
+                }
+            }
+            // Surface area of each leaf, from its four corners.
+            let mut areas=Vec::new();
+            let mut point=|store:&mut wasmtime::Store<()>,u:f64,v:f64| -> Option<[f64;3]> {
+                let mut p=[0.0_f64;3];
+                for lane in 0..3 {
+                    let f=if combine {&placed_fn} else {&raw};
+                    let value=f.call(&mut *store,(kind,u as f32,v as f32,lane,bulge)).unwrap();
+                    if !value.is_finite()||value==-999.0 {return None;}
+                    p[lane as usize]=f64::from(value);
+                }
+                Some(p)
+            };
+            for (x,y,size) in &done {
+                if kind==0 && x+y+size>1.0 {continue;}
+                let a=point(&mut store,*x,*y); let b=point(&mut store,x+size,*y);
+                let c=point(&mut store,*x,y+size); let d=point(&mut store,x+size,y+size);
+                if a.is_none()||b.is_none()||c.is_none()||d.is_none() {continue;}
+                let (a,b,c,d)=(a.unwrap(),b.unwrap(),c.unwrap(),d.unwrap());
+                let tri=|p:[f64;3],q:[f64;3],r:[f64;3]| {
+                    let e1=[q[0]-p[0],q[1]-p[1],q[2]-p[2]];
+                    let e2=[r[0]-p[0],r[1]-p[1],r[2]-p[2]];
+                    let n=[e1[1]*e2[2]-e1[2]*e2[1],e1[2]*e2[0]-e1[0]*e2[2],e1[0]*e2[1]-e1[1]*e2[0]];
+                    (n[0]*n[0]+n[1]*n[1]+n[2]*n[2]).sqrt()*0.5
+                };
+                let area=tri(a,b,c)+tri(b,d,c);
+                if area>0.0 {areas.push(area);}
+            }
+            if areas.len()<16 {eprintln!("RECURSION {name} bulge={bulge}: too few leaves"); continue;}
+            let lo=areas.iter().cloned().fold(f64::INFINITY,f64::min);
+            let hi=areas.iter().cloned().fold(0.0_f64,f64::max);
+            let mean=areas.iter().sum::<f64>()/(areas.len() as f64);
+            let cv=(areas.iter().map(|a|(a-mean).powi(2)).sum::<f64>()/(areas.len() as f64)).sqrt()/mean;
+            let uniform=f64::from(spread.call(&mut store,(kind,5,bulge,0,1)).unwrap());
+            let placed=f64::from(spread.call(&mut store,(kind,5,bulge,1,1)).unwrap());
+            let mode=if combine {"depth+placement"} else {"depth only"};
+            eprintln!("RECURSION {name} bulge={bulge} {mode}: {} leaves, cv={cv:.4} maxmin={:.3}  |  placement alone {placed:.3}  uniform {uniform:.3}",areas.len(),hi/lo);
+        }
+    }
+    }
+}
+
 #[test]
 fn composition_wasm_boundary_locality_sweep() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
