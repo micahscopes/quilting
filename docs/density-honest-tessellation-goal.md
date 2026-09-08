@@ -86,12 +86,12 @@ therefore required rather than optional, and it is the only remaining route.
 ## Order
 
 1. Interior placement from the density rather than from carried edge laws.
-   Two-pass slice form done and measured above; a third direction measured and
-   rejected. Remaining: the Poisson-solve map for the residual at aggressive
-   curvature, now the only route left, and a decision on whether to tabulate the
-   placement or keep evaluating it on demand. Its hard part is that our boundary
-   must be fixed pointwise rather than merely preserved as a set, which the
-   standard Neumann construction does not give.
+   Two-pass slice form shipped; a third direction measured and rejected; the
+   transport map built and measured, where undamped it meets the target at
+   moderate curvature and the boundary constraint is what destroys it.
+   Remaining: re-impose the canonical boundary law after the flow rather than
+   damping the flow before it, handle the pole at high curvature, and decide
+   whether to tabulate the placement or keep evaluating it on demand.
 2. Add the three surface-space audits and retire the reference-domain heuristic.
 3. Carry the boundary flag from assembly into the warp rather than re-deriving
    barycentrics and testing exact zeros, which drifts near 3e-8.
