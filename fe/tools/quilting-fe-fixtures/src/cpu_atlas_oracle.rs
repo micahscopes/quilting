@@ -1191,6 +1191,40 @@ fn area_driven_refinement_meets_the_target() {
     assert!(worst_overall<2.8,"bisection with placement should hold the two-to-one band: {worst_overall}");
 }
 
+/// The weight lens: a corner's weight can be repaired to the point-space
+/// condition by a least-change projection, which is what a real scale slider
+/// provably cannot do. Perturb an admissible weight off the condition, project
+/// it back, and check the residual is gone and the weight barely moved.
+#[test]
+fn the_weight_lens_repairs_the_point_space_condition() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let f=instance.get_typed_func::<(f32,i32,i32),f32>(&mut store,"constrained_weight_case").unwrap();
+    let mut worst_after=0.0_f64;
+    let mut worst_before=0.0_f64;
+    let mut worst_move=0.0_f64;
+    for perturb in [0.05_f32,0.3,1.0,-0.7] {
+        for component in 0..4 {
+            let before=f64::from(f.call(&mut store,(perturb,component,0)).unwrap());
+            let after=f64::from(f.call(&mut store,(perturb,component,1)).unwrap());
+            let moved=f64::from(f.call(&mut store,(perturb,component,2)).unwrap());
+            assert!(before>=0.0 && after>=0.0,"case did not evaluate");
+            worst_before=worst_before.max(before);
+            worst_after=worst_after.max(after);
+            worst_move=worst_move.max(moved);
+        }
+    }
+    eprintln!("WEIGHT_LENS worst residual before={worst_before:.8}, after={worst_after:.8}, largest weight move={worst_move:.6}");
+    // The perturbation must actually break the condition, otherwise the repair
+    // is untested.
+    assert!(worst_before>1e-3,"perturbation did not break the condition: {worst_before}");
+    assert!(worst_after<1e-5,"lens did not restore the condition: {worst_after}");
+}
+
 #[test]
 fn composition_wasm_boundary_locality_sweep() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");

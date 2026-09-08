@@ -1,0 +1,73 @@
+//! Keeping Clifford-Bezier weights inside the point space while control points
+//! move.
+//!
+//! Krasauskas and Zube, Proposition 4: an edge of a rational Clifford-Bezier
+//! patch lies in the point space exactly when the residual of
+//! `p_i w_i ~w_j + p_j w_j ~w_i` vanishes. That is ONE linear equation in `w_i`
+//! for each edge the corner touches, so a corner on two edges leaves a
+//! two-dimensional solution space and a unique nearest admissible weight.
+//!
+//! This matters because a real scale cannot repair a dragged corner: scaling
+//! `w_i` by a real multiplies both terms of the condition equally, so the only
+//! real solution is zero. The weight has to move as a multivector, and this is
+//! the least-change way to move it.
+//!
+//! Nothing here assumes a signature. The residual comes from the algebra, and
+//! the projection is linear algebra on its coefficients.
+
+use core::marker::Copy
+
+/// One algebra's view of the condition, its weight basis, and the coordinates
+/// of a weight in that basis. Four components is the even subalgebra of a
+/// three-dimensional Clifford algebra; other algebras need their own instance.
+pub trait WeightCondition<P: Copy, W: Copy>: Copy {
+    /// Residual of the edge condition, linear in `wi`.
+    fn residual(self, _ pi: P, _ wi: W, _ pj: P, _ wj: W) -> f32
+    fn basis(self, _ index: usize) -> W
+    fn coefficients(self, _ weight: W) -> [f32; 4]
+    fn from_coefficients(self, _ c: [f32; 4]) -> W
+}
+
+fn dot4(_ a: [f32; 4], _ b: [f32; 4]) -> f32 {
+    a[0]*b[0]+a[1]*b[1]+a[2]*b[2]+a[3]*b[3]
+}
+
+/// The covector of one edge condition with respect to `wi`, recovered by
+/// evaluating the residual on the weight basis. Valid because the residual is
+/// linear in `wi`, which is what makes the repair a projection rather than a
+/// search.
+pub fn edge_covector<P: Copy, W: Copy, C: WeightCondition<P, W>>(
+    _ condition: C, _ pi: P, _ pj: P, _ wj: W,
+) -> [f32; 4] {
+    let mut c = [0.0; 4]
+    let mut k: usize = 0
+    while k < 4 {
+        c[k] = condition.residual(pi, condition.basis(k), pj, wj)
+        k = k + 1
+    }
+    c
+}
+
+fn remove(_ w: [f32; 4], _ c: [f32; 4]) -> [f32; 4] {
+    let n = dot4(c, c)
+    if !(n > 0.0) { return w }
+    let s = dot4(w, c) / n
+    [w[0]-s*c[0], w[1]-s*c[1], w[2]-s*c[2], w[3]-s*c[3]]
+}
+
+/// Nearest weight to `wi` satisfying both adjacent edge conditions.
+///
+/// The two covectors are orthogonalized before removal so the second removal
+/// cannot reintroduce the first violation. A corner whose two conditions are
+/// linearly dependent leaves a three-dimensional space and the single removal
+/// is already the nearest point.
+pub fn constrain_weight<P: Copy, W: Copy, C: WeightCondition<P, W>>(
+    _ condition: C, _ pi: P, _ wi: W,
+    _ pj: P, _ wj: W, _ pk: P, _ wk: W,
+) -> W {
+    let first = edge_covector(condition, pi, pj, wj)
+    let second = edge_covector(condition, pi, pk, wk)
+    let reduced = remove(second, first)
+    let once = remove(condition.coefficients(wi), first)
+    condition.from_coefficients(remove(once, reduced))
+}

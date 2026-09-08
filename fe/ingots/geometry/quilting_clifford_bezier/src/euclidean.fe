@@ -67,6 +67,38 @@ impl Copy for EuclideanCliffordAlgebra {}
 
 /// This instance's weight norm, taken from the compiled GA program rather than
 /// written out as a sum of squares, so a different signature supplies its own.
+/// This instance's view of the point-space condition. The residual is the
+/// trivector part of the odd product, which is the component the vector
+/// admission rejects, so a zero residual is exactly an edge that stays in the
+/// point space.
+pub struct EuclideanWeightCondition {}
+impl Copy for EuclideanWeightCondition {}
+impl quilting_patch::weight_constraint::WeightCondition<Vec3F,CliffordEven3F>
+    for EuclideanWeightCondition {
+    fn residual(self,_ pi:Vec3F,_ wi:CliffordEven3F,_ pj:Vec3F,_ wj:CliffordEven3F)->f32 {
+        let algebra=EuclideanCliffordAlgebra {}
+        odd_trivector(algebra,pi,wi,wj)+odd_trivector(algebra,pj,wj,wi)
+    }
+    fn basis(self,_ index:usize)->CliffordEven3F {
+        if index==0 {even(1.0,0.0,0.0,0.0)}
+        else if index==1 {even(0.0,1.0,0.0,0.0)}
+        else if index==2 {even(0.0,0.0,1.0,0.0)}
+        else {even(0.0,0.0,0.0,1.0)}
+    }
+    fn coefficients(self,_ w:CliffordEven3F)->[f32;4] {[w.scalar,w.e12,w.e13,w.e23]}
+    fn from_coefficients(self,_ c:[f32;4])->CliffordEven3F {even(c[0],c[1],c[2],c[3])}
+}
+/// Trivector part of `p w ~other`, through the compiled programs rather than a
+/// written-out product, so the signature stays the algebra's own.
+fn odd_trivector(_ algebra:EuclideanCliffordAlgebra,_ p:Vec3F,
+    _ w:CliffordEven3F,_ other:CliffordEven3F)->f32 {
+    let weighted=algebra.weighted_point(p,w)
+    let product=<QuotientOperands as EvaluateGaF32>::evaluate(
+        QuotientOperands {odd:odd_coefficients(weighted),weight:weight_coefficients(other)},
+    )
+    product.3
+}
+
 pub struct EuclideanWeightNorm {}
 impl Copy for EuclideanWeightNorm {}
 impl quilting_patch::depth_field::WeightNormSquared<CliffordEven3F> for EuclideanWeightNorm {

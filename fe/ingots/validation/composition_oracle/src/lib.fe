@@ -824,6 +824,48 @@ pub fn placed_surface_at(_ kind:u32,_ u:f32,_ v:f32,_ lane:u32,_ bulge:f32)->f32
     if !p.valid {-999.0} else if lane==0 {p.point.x} else if lane==1 {p.point.y} else {p.point.z}
 }
 
+/// The lens in action. Takes an admissible net, perturbs one corner's weight
+/// off the point-space condition, then projects it back. `which` selects the
+/// residual before, the residual after, or how far the weight moved.
+pub fn constrained_weight_case(_ perturb:f32,_ component:u32,_ which:u32)->f32 {
+    use quilting_patch::weight_constraint::{constrain_weight,WeightCondition}
+    use quilting_clifford_bezier::euclidean::EuclideanWeightCondition
+    use quilting_clifford_bezier::{CliffordEven3F,even}
+    let mut c=initial_controls()
+    c.surface_kind=2.0
+    let net=composite_atlas::surface::authored(c)
+    if net.patch_valid!=1.0 {return -999.0}
+    let condition=EuclideanWeightCondition {}
+    // Corner b sits on edges to a and to c in the ring order.
+    let (pi,pj,pk)=(net.b.point,net.a.point,net.c.point)
+    let (wj,wk)=(net.a.weight,net.c.weight)
+    let base=net.b.weight
+    let mut k=condition.coefficients(base)
+    k[component as usize]=k[component as usize]+perturb
+    let broken=condition.from_coefficients(k)
+    if which==0 {
+        let r1=condition.residual(pi,broken,pj,wj)
+        let r2=condition.residual(pi,broken,pk,wk)
+        let worst=if fmath::abs(r1)>fmath::abs(r2) {fmath::abs(r1)} else {fmath::abs(r2)}
+        return worst
+    }
+    let fixed=constrain_weight(condition,pi,broken,pj,wj,pk,wk)
+    if which==1 {
+        let r1=condition.residual(pi,fixed,pj,wj)
+        let r2=condition.residual(pi,fixed,pk,wk)
+        let worst=if fmath::abs(r1)>fmath::abs(r2) {fmath::abs(r1)} else {fmath::abs(r2)}
+        return worst
+    }
+    let a=condition.coefficients(broken)
+    let b=condition.coefficients(fixed)
+    let mut sum:f32=0.0
+    for i in 0 .. 4 {
+        let d=a[i]-b[i]
+        sum=sum+d*d
+    }
+    fmath::sqrt(sum)
+}
+
 pub fn geometric_patch_view_laws()->bool {
     let mut c=initial_controls()
     for kind in [1.0,2.0] {
