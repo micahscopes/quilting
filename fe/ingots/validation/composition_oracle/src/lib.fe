@@ -780,6 +780,32 @@ pub fn edge_weight_condition(_ kind:u32,_ corner_a:u32,_ corner_b:u32,
     if relative<0.0 {-relative} else {relative}
 }
 
+/// The denominator norm over the composite square domain, for either patch kind,
+/// straight from the shared domain Gram. Surface area density is a constant over
+/// its square, so this is the field an area-equalizing map must transport.
+pub fn domain_norm_at(_ kind:u32,_ u:f32,_ v:f32,_ bulge:f32)->f32 {
+    use quilting_patch::depth_field::QuadDomainNorm
+    use quilting_patch::depth_field::DomainNorm
+    let mut c=initial_controls()
+    c.surface_kind=if kind==0 {1.0} else {2.0}
+    c.midpoint_z=bulge
+    let net=composite_atlas::surface::authored(c)
+    if net.patch_valid!=1.0 {return -999.0}
+    QuadDomainNorm {gram:composite_atlas::surface::domain_gram(net)}.norm_squared_at(u,v)
+}
+/// Surface point at an explicit domain position, so a host-side transport map
+/// can be measured against the same evaluator the renderer uses.
+pub fn surface_at(_ kind:u32,_ u:f32,_ v:f32,_ lane:u32,_ bulge:f32)->f32 {
+    use composite_atlas::model::Point
+    let mut c=initial_controls()
+    c.surface_kind=if kind==0 {1.0} else {2.0}
+    c.midpoint_z=bulge
+    let net=composite_atlas::surface::authored(c)
+    if net.patch_valid!=1.0 {return -999.0}
+    let p=composite_atlas::surface::evaluate(net,Point {x:u,y:v})
+    if !p.valid {-999.0} else if lane==0 {p.point.x} else if lane==1 {p.point.y} else {p.point.z}
+}
+
 pub fn geometric_patch_view_laws()->bool {
     let mut c=initial_controls()
     for kind in [1.0,2.0] {

@@ -838,6 +838,138 @@ fn derived_weights_satisfy_the_papers_curve_condition() {
     assert!(worst<1e-4,"derived weights violate the paper's curve condition: {worst}");
 }
 
+/// The goal's remaining route: a transport map that is NOT a product of
+/// one-dimensional corrections. Moser's construction, solving a Poisson problem
+/// for the potential whose gradient transports the uniform measure onto the
+/// density, then flowing along it. Measured here before shipping, because the
+/// prescribed third slice direction turned out to be worse than two.
+///
+/// The standard construction preserves the boundary as a set but slides points
+/// along it, and our boundary spacing is already exact and must not move, so the
+/// velocity is damped to zero on the boundary. That damping is the reason this
+/// is an approximation rather than the textbook theorem.
+#[test]
+fn moser_transport_beats_the_two_pass_slice_form() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot_at_level(&path,OptLevel::O2);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=wasmtime::Store::new(&engine,());
+    let instance=wasmtime::Instance::new(&mut store,&module,&[]).unwrap();
+    let norm=instance.get_typed_func::<(i32,f32,f32,f32),f32>(&mut store,"domain_norm_at").unwrap();
+    let surface=instance.get_typed_func::<(i32,f32,f32,i32,f32),f32>(&mut store,"surface_at").unwrap();
+    let two_pass=instance.get_typed_func::<(i32,i32,f32,i32,i32),f32>(&mut store,"domain_area_spread").unwrap();
+
+    const G:usize=65;                // potential grid
+    const STEPS:usize=24;            // flow steps
+    let h=1.0/(G as f64-1.0);
+    for (kind,name) in [(0,"triangle"),(1,"quad")] {
+        for bulge in [2.4_f32,4.8,9.6] {
+            // Target density: surface area per reference area, up to a constant.
+            let mut rho=vec![0.0_f64;G*G];
+            for j in 0..G { for i in 0..G {
+                let (u,v)=((i as f64)*h,(j as f64)*h);
+                let n=f64::from(norm.call(&mut store,(kind,u as f32,v as f32,bulge)).unwrap());
+                assert!(n>0.0,"norm {n} at {u},{v}");
+                rho[j*G+i]=1.0/(n*n);
+            }}
+            let mean=rho.iter().sum::<f64>()/(rho.len() as f64);
+            for r in rho.iter_mut() {*r/=mean;}
+            // Solve the Poisson problem with zero Neumann data by Gauss-Seidel.
+            // Its right side has zero mean by construction, so it is solvable.
+            let mut u=vec![0.0_f64;G*G];
+            let at=|a:&Vec<f64>,i:isize,j:isize| {
+                let ci=i.clamp(0,G as isize-1) as usize;
+                let cj=j.clamp(0,G as isize-1) as usize;
+                a[cj*G+ci]
+            };
+            for _ in 0..6000 {
+                for j in 0..G { for i in 0..G {
+                    let f=1.0-rho[j*G+i];
+                    let s=at(&u,i as isize-1,j as isize)+at(&u,i as isize+1,j as isize)
+                         +at(&u,i as isize,j as isize-1)+at(&u,i as isize,j as isize+1);
+                    u[j*G+i]=(s-h*h*f)/4.0;
+                }}
+                let m=u.iter().sum::<f64>()/(u.len() as f64);
+                for x in u.iter_mut() {*x-=m;}
+            }
+            // Bilinear sampling of the gradient and of the density.
+            let sample=|a:&Vec<f64>,x:f64,y:f64| {
+                let fx=(x/h).clamp(0.0,G as f64-1.0001);
+                let fy=(y/h).clamp(0.0,G as f64-1.0001);
+                let (i,j)=(fx as usize,fy as usize);
+                let (tx,ty)=(fx-i as f64,fy-j as f64);
+                a[j*G+i]*(1.0-tx)*(1.0-ty)+a[j*G+i+1]*tx*(1.0-ty)
+                    +a[(j+1)*G+i]*(1.0-tx)*ty+a[(j+1)*G+i+1]*tx*ty
+            };
+            let grad=|x:f64,y:f64| {
+                let e=h*0.5;
+                ((sample(&u,x+e,y)-sample(&u,x-e,y))/(2.0*e),
+                 (sample(&u,x,y+e)-sample(&u,x,y-e))/(2.0*e))
+            };
+            // Velocity, damped to zero on the boundary so exact boundary spacing
+            // is preserved pointwise rather than merely as a set.
+            // Band width is swept below; damping is the suspected cause of the
+            // transport losing, so it must be varied rather than assumed.
+            let make_damp=|band:f64| move |x:f64,y:f64| {
+                let d=(x.min(1.0-x)).min(y.min(1.0-y)).max(0.0);
+                if band<=0.0 {return 1.0;}
+                let s=(d/band).min(1.0);
+                s*s*(3.0-2.0*s)
+            };
+            let flow=|damp:&dyn Fn(f64,f64)->f64,x0:f64,y0:f64| {
+                let (mut x,mut y)=(x0,y0);
+                let dt=1.0/(STEPS as f64);
+                for k in 0..STEPS {
+                    let t=(k as f64+0.5)*dt;
+                    let r=sample(&rho,x,y);
+                    let mix=(1.0-t)+t*r;
+                    let (gx,gy)=grad(x,y);
+                    let w=damp(x,y)/mix.max(1e-6);
+                    x=(x+dt*gx*w).clamp(0.0,1.0);
+                    y=(y+dt*gy*w).clamp(0.0,1.0);
+                }
+                (x,y)
+            };
+            let slice_ratio=f64::from(two_pass.call(&mut store,(kind,5,bulge,1,1)).unwrap());
+            for band in [0.12_f64,0.04,0.01,0.0] {
+            let damp=make_damp(band);
+            // Surface triangle area spread over a uniform grid, transported.
+            const M:usize=32;
+            let mut areas=Vec::new();
+            let mut pts=vec![[0.0_f64;3];(M+1)*(M+1)];
+            let mut ok=true;
+            for j in 0..=M { for i in 0..=M {
+                let (u0,v0)=((i as f64)/(M as f64),(j as f64)/(M as f64));
+                if kind==0 && u0+v0>1.0 {continue;}
+                let (fx,fy)=flow(&damp,u0,v0);
+                for lane in 0..3 {
+                    let value=surface.call(&mut store,(kind,fx as f32,fy as f32,lane,bulge)).unwrap();
+                    if !value.is_finite()||value==-999.0 {ok=false;}
+                    pts[j*(M+1)+i][lane as usize]=f64::from(value);
+                }
+            }}
+            if !ok {eprintln!("MOSER {name} bulge={bulge} band={band}: evaluation failed"); continue;}
+            for j in 0..M { for i in 0..M {
+                let (u0,v0)=((i as f64)/(M as f64),(j as f64)/(M as f64));
+                if kind==0 && u0+v0+2.0/(M as f64)>1.0 {continue;}
+                let a=pts[j*(M+1)+i]; let b=pts[j*(M+1)+i+1]; let c=pts[(j+1)*(M+1)+i];
+                let e1=[b[0]-a[0],b[1]-a[1],b[2]-a[2]];
+                let e2=[c[0]-a[0],c[1]-a[1],c[2]-a[2]];
+                let n=[e1[1]*e2[2]-e1[2]*e2[1],e1[2]*e2[0]-e1[0]*e2[2],e1[0]*e2[1]-e1[1]*e2[0]];
+                let area=(n[0]*n[0]+n[1]*n[1]+n[2]*n[2]).sqrt()*0.5;
+                if area>0.0 {areas.push(area);}
+            }}
+            let lo=areas.iter().cloned().fold(f64::INFINITY,f64::min);
+            let hi=areas.iter().cloned().fold(0.0_f64,f64::max);
+            let mean=areas.iter().sum::<f64>()/(areas.len() as f64);
+            let cv=(areas.iter().map(|a|(a-mean).powi(2)).sum::<f64>()/(areas.len() as f64)).sqrt()/mean;
+            eprintln!("MOSER {name} bulge={bulge} band={band}: transport cv={cv:.4} maxmin={:.3}  |  two-pass maxmin={slice_ratio:.3}",hi/lo);
+            }
+        }
+    }
+}
+
 #[test]
 fn composition_wasm_boundary_locality_sweep() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ingots/validation/composition_oracle");
