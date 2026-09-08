@@ -63,6 +63,8 @@ use quilting_atlas_webgpu::{
 }
 use quilting_clifford_bezier::{
     IsotropicBilinearPatch,
+    IsotropicEvenF,
+    IsotropicWeightCondition,
     IsotropicDifferential,
     IsotropicQuotientControlNet,
     IsotropicProjectiveF,
@@ -1287,6 +1289,7 @@ struct CliffordLabParams {
     w10: Param,
     w01: Param,
     w11: Param,
+    constrain_weights: Param,
     orbit_yaw: Param,
     orbit_pitch: Param,
     orbit_distance: Param,
@@ -1318,6 +1321,10 @@ pub struct CliffordLabState {
     w10: f32,
     w01: f32,
     w11: f32,
+    /// Hold the derived weights on the paper's point-space condition while
+    /// control points move. Off restores the free editing this lab has always
+    /// allowed, which can leave that locus and is tinted rather than prevented.
+    constrain_weights: f32,
     orbit_yaw: f32,
     orbit_pitch: f32,
     orbit_distance: f32,
@@ -1426,6 +1433,7 @@ const fn lab_params() -> CliffordLabParams {
         w10: Param::range(min: 0.0, max: 4.0, init: 1.0),
         w01: Param::range(min: 0.0, max: 4.0, init: 1.0),
         w11: Param::range(min: 0.0, max: 4.0, init: 1.0),
+        constrain_weights: Param::toggle(init: true),
         orbit_yaw: Param::range(min: -3.14159265, max: 3.14159265, init: -0.72),
         orbit_pitch: Param::range(min: -1.35, max: 1.35, init: 0.12),
         orbit_distance: Param::log(min: 2.5, max: 16.0, init: 6.2),
@@ -1541,6 +1549,53 @@ fn set_selected_weight(_ state: own CliffordLabState, _ value: f32) -> CliffordL
     }
 }
 
+/// Hold the four derived weights on the paper's point-space condition.
+///
+/// Proposition 4 gives one linear equation in a corner's weight per adjacent
+/// edge, so each corner has a unique nearest admissible weight given its two
+/// neighbours. Projecting one corner uses its neighbours' current weights, so a
+/// few sweeps are taken rather than one. This is why a real scale slider cannot
+/// do the job: scaling a weight by a real multiplies both terms of the condition
+/// equally, so its only real solution is zero.
+fn constrained_weights(
+    _ positions: ControlPositions,
+    _ w00: IsotropicEvenF, _ w10: IsotropicEvenF,
+    _ w01: IsotropicEvenF, _ w11: IsotropicEvenF,
+) -> (IsotropicEvenF, IsotropicEvenF, IsotropicEvenF, IsotropicEvenF) {
+    use quilting_patch::weight_constraint::constrain_weight
+    let condition = IsotropicWeightCondition {}
+    let mut a = w00
+    let mut b = w10
+    let mut c = w01
+    let mut d = w11
+    let mut sweep: u32 = 0
+    while sweep < 3 {
+        a = constrain_weight(condition, positions.p00, a, positions.p10, b, positions.p01, c)
+        b = constrain_weight(condition, positions.p10, b, positions.p00, a, positions.p11, d)
+        c = constrain_weight(condition, positions.p01, c, positions.p00, a, positions.p11, d)
+        d = constrain_weight(condition, positions.p11, d, positions.p10, b, positions.p01, c)
+        sweep = sweep + 1
+    }
+    (a, b, c, d)
+}
+fn controlled_patch_constrained(
+    _ constrain: f32,
+    _ positions: ControlPositions,
+    _ weights: CornerWeights,
+) -> IsotropicBilinearPatch {
+    if constrain <= 0.5 { return controlled_patch(positions, weights) }
+    let a = scale_weight(even(1.0, 0.0, 0.0, 0.0), weights.w00)
+    let b = scale_weight(even(0.0, 1.0, 0.0, -1.0), weights.w10)
+    let c = scale_weight(even(0.0, 2.0, 0.0, 1.0), weights.w01)
+    let d = scale_weight(even(-6.0, 0.0, -3.0, 0.0), weights.w11)
+    let held = constrained_weights(positions, a, b, c, d)
+    patch(
+        control(positions.p00, held.0),
+        control(positions.p10, held.1),
+        control(positions.p01, held.2),
+        control(positions.p11, held.3),
+    )
+}
 fn controlled_patch(
     _ positions: ControlPositions,
     _ weights: CornerWeights,
@@ -3315,8 +3370,9 @@ fn patch_from_uniforms(
     _ w10: f32,
     _ w01: f32,
     _ w11: f32,
+    _ constrain_weights: f32,
 ) -> IsotropicBilinearPatch {
-    controlled_patch(
+    controlled_patch_constrained(constrain_weights,
         ControlPositions {
             p00: vec3f(p00_x, p00_y, p00_z),
             p10: vec3f(p10_x, p10_y, p10_z),
@@ -3388,6 +3444,7 @@ actor CliffordPatchLab uses (
     w10: f32,
     w01: f32,
     w11: f32,
+    constrain_weights: f32,
     orbit_yaw: f32,
     orbit_pitch: f32,
     orbit_distance: f32,
@@ -3438,6 +3495,7 @@ actor CliffordPatchLab uses (
                 self.p01_x, self.p01_y, self.p01_z,
                 self.p11_x, self.p11_y, self.p11_z,
                 self.w00, self.w10, self.w01, self.w11,
+                self.constrain_weights,
             )
             classify_projective_patch_frontier_lane<
                 CliffordProjectiveFrontier,
@@ -3629,6 +3687,7 @@ actor CliffordPatchLab uses (
             self.p01_x, self.p01_y, self.p01_z,
             self.p11_x, self.p11_y, self.p11_z,
             self.w00, self.w10, self.w01, self.w11,
+            self.constrain_weights,
         )
         let candidate = covered_surface_candidate(patch, chart, slot)
         let sample = fixed_projective_sample(patch, chart, candidate.point)
@@ -3906,6 +3965,7 @@ actor CliffordPatchLab uses (
             self.p01_x, self.p01_y, self.p01_z,
             self.p11_x, self.p11_y, self.p11_z,
             self.w00, self.w10, self.w01, self.w11,
+            self.constrain_weights,
         )
         if chart == 0 && point < self.receipt_0.load(index: 1) {
             store_projective_sample(
@@ -4036,6 +4096,7 @@ actor CliffordPatchLab uses (
             self.p01_x, self.p01_y, self.p01_z,
             self.p11_x, self.p11_y, self.p11_z,
             self.w00, self.w10, self.w01, self.w11,
+            self.constrain_weights,
         )
         let camera = orbit_camera_frame(
             self.orbit_yaw,
@@ -4085,6 +4146,7 @@ actor CliffordPatchLab uses (
             self.p01_x, self.p01_y, self.p01_z,
             self.p11_x, self.p11_y, self.p11_z,
             self.w00, self.w10, self.w01, self.w11,
+            self.constrain_weights,
         )
         let camera = orbit_camera_frame(
             self.orbit_yaw,
@@ -4167,6 +4229,7 @@ actor CliffordPatchLab uses (
                 self.p01_x, self.p01_y, self.p01_z,
                 self.p11_x, self.p11_y, self.p11_z,
                 self.w00, self.w10, self.w01, self.w11,
+                self.constrain_weights,
             )
             classify_fractal_node(
                 self.fractal_node_plan,
@@ -4400,6 +4463,7 @@ actor CliffordPatchLab uses (
             w10: self.w10,
             w01: self.w01,
             w11: self.w11,
+            constrain_weights: self.constrain_weights,
             orbit_yaw: self.orbit_yaw,
             orbit_pitch: self.orbit_pitch,
             orbit_distance: self.orbit_distance,
@@ -4501,6 +4565,7 @@ actor CliffordPatchLab uses (
             w10: self.w10,
             w01: self.w01,
             w11: self.w11,
+            constrain_weights: self.constrain_weights,
             orbit_yaw: self.orbit_yaw,
             orbit_pitch: self.orbit_pitch,
             orbit_distance: self.orbit_distance,
@@ -4514,7 +4579,9 @@ actor CliffordPatchLab uses (
             dragging: self.dragging,
             orbiting: self.orbiting,
         }
-        let patch_value = controlled_patch(positions(state), weights(state))
+        let patch_value = controlled_patch_constrained(
+            state.constrain_weights, positions(state), weights(state),
+        )
         let camera = camera_frame(state)
         if self.sampler_mode >= 2.5 {
             invalid_patch_vertex()
@@ -4704,6 +4771,7 @@ actor CliffordPatchLab uses (
             self.p01_x, self.p01_y, self.p01_z,
             self.p11_x, self.p11_y, self.p11_z,
             self.w00, self.w10, self.w01, self.w11,
+            self.constrain_weights,
         )
         let macro_triangles_0 = self.deformed_face_plan.load(
             index: face_plan_meta_offset(0),
@@ -4805,6 +4873,7 @@ actor CliffordPatchLab uses (
             w10: self.w10,
             w01: self.w01,
             w11: self.w11,
+            constrain_weights: self.constrain_weights,
             orbit_yaw: self.orbit_yaw,
             orbit_pitch: self.orbit_pitch,
             orbit_distance: self.orbit_distance,
