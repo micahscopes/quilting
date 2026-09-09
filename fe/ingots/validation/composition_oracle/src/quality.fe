@@ -8,6 +8,13 @@ use quilting_patch::triangle_quality::measure
 use quilting_domain::{Bary3F,bary3f,vec2f,vec3f}
 use quilting_qb::{remap_barycentric,permutation_parity}
 use fmath::sqrt
+use core::marker::Copy
+use quilting_patch::sampling_warp::IntervalSamplingMap
+enum AuditEdgeMaps<M:IntervalSamplingMap> {
+    Legacy(TriangleEdgeMaps<M,M,M>),
+    Uniform,
+}
+impl<M:IntervalSamplingMap> Copy for AuditEdgeMaps<M> {}
 extern {const fn __f32_from_i32(_:i32)->f32}
 fn number(_ v:u32)->f32 {__f32_from_i32(v.downcast_unchecked())}
 fn word(_ base:BrowserPtr<u32>,_ index:u32)->u32 {
@@ -150,6 +157,13 @@ pub fn audit_with_locality(_ case:u32,_ compensation:u32,_ reach:f32)->(u32,u32,
 /// minimum/mean admitted shape, admitted area CV/total, surface evaluations.
 /// This is a bounded diagnostic, not a coverage proof or a per-frame renderer.
 pub fn surface_audit(_ c:model::Controls)->(u32,u32,u32,u32,u32,f32,f32,f32,f32,u32) {
+    surface_audit_plan(c,0)
+}
+/// A nonzero level selects the uniform-boundary midpoint-square toe test.
+/// It deliberately uses affine child placement, not the measured spacing mode.
+pub fn surface_audit_plan(_ c:model::Controls,_ midpoint_level:u32)->(u32,u32,u32,u32,u32,f32,f32,f32,f32,u32) {
+    use quilting_atlas::midpoint_square::MidpointSquare
+    if midpoint_level>8 {return (4,0,0,0,0,0.0,0.0,0.0,0.0,0)}
     let scene=residency::configured_scene(c)
     if scene.surface.patch_valid<0.5 {return (1,0,0,0,0,0.0,0.0,0.0,0.0,0)}
     let edges=model::edge_lods(c)
@@ -161,30 +175,51 @@ pub fn surface_audit(_ c:model::Controls)->(u32,u32,u32,u32,u32,f32,f32,f32,f32,
     let mut sum:f32=0.0
     let mut area_sum:f32=0.0
     let mut area_squares:f32=0.0
-    for child in 0 .. (model::child_count(c) as usize) {
-        let request=model::child(c,child.downcast_truncate()).resolve(edges).unwrap()
-        let k=request.primary.key
+    let children=if midpoint_level>0 {8} else {model::child_count(c)}
+    for child in 0 .. (children as usize) {
+        let mut d=residency::empty_child()
+        let primary=if midpoint_level>0 {
+            MidpointSquare::uniform(midpoint_level).unwrap().primary()
+        } else {
+            let request=model::child(c,child.downcast_truncate()).resolve(edges).unwrap()
+            d.corner_a=request.triangle.a
+            d.corner_b=request.triangle.b
+            d.corner_c=request.triangle.c
+            d.boundaries=request.boundaries
+            request.primary
+        }
+        let k=primary.key
         let tile=packed_triangle(k.a,k.b,k.c,42)
         if tile.status!=0 {return (2,count,invalid,folds,poor,0.0,0.0,0.0,0.0,count*3)}
-        let mut d=residency::empty_child()
-        d.corner_a=request.triangle.a
-        d.corner_b=request.triangle.b
-        d.corner_c=request.triangle.c
-        d.boundaries=request.boundaries
-        d.permutation=edge_permutation_index(request.primary.permutation)
-        let ab=quilting_atlas::composition::BoundaryUse::between(d.corner_a,d.corner_b)
-        let bc=quilting_atlas::composition::BoundaryUse::between(d.corner_b,d.corner_c)
-        let ca=quilting_atlas::composition::BoundaryUse::between(d.corner_c,d.corner_a)
-        let lab=OrientedIntervalMap {law:InverseCumulativeMap {samples:model::edge_cdf(c,ab.low,ab.high)},reversed:ab.reversed}
-        let lbc=OrientedIntervalMap {law:InverseCumulativeMap {samples:model::edge_cdf(c,bc.low,bc.high)},reversed:bc.reversed}
-        let lca=OrientedIntervalMap {law:InverseCumulativeMap {samples:model::edge_cdf(c,ca.low,ca.high)},reversed:ca.reversed}
+        d.permutation=edge_permutation_index(primary.permutation)
+        let legacy_maps=if midpoint_level==0 {
+            let ab=quilting_atlas::composition::BoundaryUse::between(d.corner_a,d.corner_b)
+            let bc=quilting_atlas::composition::BoundaryUse::between(d.corner_b,d.corner_c)
+            let ca=quilting_atlas::composition::BoundaryUse::between(d.corner_c,d.corner_a)
+            let lab=OrientedIntervalMap {law:InverseCumulativeMap {samples:model::edge_cdf(c,ab.low,ab.high)},reversed:ab.reversed}
+            let lbc=OrientedIntervalMap {law:InverseCumulativeMap {samples:model::edge_cdf(c,bc.low,bc.high)},reversed:bc.reversed}
+            let lca=OrientedIntervalMap {law:InverseCumulativeMap {samples:model::edge_cdf(c,ca.low,ca.high)},reversed:ca.reversed}
+            AuditEdgeMaps::Legacy(TriangleEdgeMaps {a:lbc,b:lca,c:lab})
+        } else {AuditEdgeMaps::Uniform}
         for triangle in 0 .. (tile.triangles as usize) {
             let mut uv=[vec2f(0.0,0.0);3]
             let mut positions=[vec3f(0.0,0.0,0.0);3]
             let mut valid=true
             for lane in 0 .. 3 {
                 let p=triangle_corner(tile.words.ptr,tile.points,d.permutation,triangle,lane)
-                let placed=placement::place(scene,d,p,lab,lbc,lca)
+                let placed=if midpoint_level>0 {
+                    let t=MidpointSquare::child(child.downcast_truncate()).unwrap()
+                    let a=MidpointSquare::vertex(t.a).unwrap()
+                    let b=MidpointSquare::vertex(t.b).unwrap()
+                    let v=MidpointSquare::vertex(t.c).unwrap()
+                    model::Point {x:(number(a.0)*p.a+number(b.0)*p.b+number(v.0)*p.c)*0.5,
+                        y:(number(a.1)*p.a+number(b.1)*p.b+number(v.1)*p.c)*0.5}
+                } else {
+                    match legacy_maps {
+                        AuditEdgeMaps::Legacy(maps)=>placement::place(scene,d,p,maps.c,maps.a,maps.b),
+                        AuditEdgeMaps::Uniform=>core::panic(),
+                    }
+                }
                 uv[lane]=vec2f(placed.x,placed.y)
                 let sample=composite_atlas::surface::evaluate(scene.surface,placed)
                 positions[lane]=sample.point

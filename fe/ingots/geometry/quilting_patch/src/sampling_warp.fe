@@ -73,6 +73,7 @@ pub struct TriangleEdgeMaps<
     B: IntervalSamplingMap,
     C: IntervalSamplingMap,
 > { pub a: A, pub b: B, pub c: C }
+impl<A: IntervalSamplingMap, B: IntervalSamplingMap, C: IntervalSamplingMap> Copy for TriangleEdgeMaps<A,B,C> {}
 impl<A: IntervalSamplingMap, B: IntervalSamplingMap, C: IntervalSamplingMap> TriangleEdgeMaps<
     A,
     B,

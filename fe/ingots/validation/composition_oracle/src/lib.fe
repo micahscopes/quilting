@@ -900,6 +900,26 @@ pub fn geometric_patch_view_laws()->bool {
     true
 }
 pub fn quality_laws()->bool {ingot::quality::laws()}
+/// Uniform UV boundary/control ablation: 0/1 diagonals, 2 fan, 3 midpoint square.
+pub fn uniform_quad_layout_quality(_ layout:u32,_ level:u32,_ bulge:f32,
+    _ dx:f32,_ dz:f32)->(u32,u32,u32,u32,u32,f32,f32,f32,f32,u32) {
+    if layout>3 || level<1 || level>8 {return (4,0,0,0,0,0.0,0.0,0.0,0.0,0)}
+    let mut c=initial_controls()
+    c.surface_kind=2.0
+    c.split=if layout==0 {0.0} else if layout==1 {1.0} else {2.0}
+    let l=__f32_from_i32(level.downcast_unchecked())
+    c.bottom_lod=l
+    c.right_lod=l
+    c.top_lod=l
+    c.left_lod=l
+    c.automatic_density=0.0
+    c.compensate_density=0.0
+    c.interior_enabled=0.0
+    c.midpoint_z=bulge
+    c.p2x=c.p2x+dx
+    c.p2z=c.p2z+dz
+    ingot::quality::surface_audit_plan(c,if layout==3 {level} else {0})
+}
 pub fn curved_mesh_quality(_ kind:u32,_ split:f32,_ level:f32,_ measured:u32,
     _ bulge:f32,_ dx:f32,_ dz:f32)->(u32,u32,u32,u32,u32,f32,f32,f32,f32,u32) {
     let mut c=initial_controls()

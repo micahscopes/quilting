@@ -1201,6 +1201,37 @@ fn curved_atlas_mesh_quality_baseline() {
 }
 
 #[test]
+fn uniform_quad_layout_quality_cost_probe() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot(&path);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=Store::new(&engine,());
+    let instance=Instance::new(&mut store,&module,&[]).unwrap();
+    let audit=function::<(i32,i32,f32,f32,f32),
+        (i32,i32,i32,i32,i32,f32,f32,f32,f32,i32)>(
+        &mut store,&instance,"uniform_quad_layout_quality");
+    for (bulge,dx,dz) in [(0.6,0.0,0.0),(2.4,-0.5,0.7),(1.2,0.7,-0.5)] {
+        for level in [3,4] {
+            for layout in 0..4 {
+                let start=std::time::Instant::now();
+                let r=audit.call(&mut store,(layout,level,bulge,dx,dz)).unwrap();
+                eprintln!("UNIFORM_LAYOUT layout={layout} level={level} bulge={bulge} dx={dx} dz={dz} report={r:?} elapsed_ms={:.2}",start.elapsed().as_secs_f64()*1000.0);
+                assert_eq!(r.0,0);
+                assert!(r.1>0);
+                assert_eq!(r.2,0,"invalid evaluated vertex");
+                assert_eq!(r.3,0,"UV fold");
+                assert_eq!(r.9,3*r.1);
+                assert!(r.5.is_finite() && r.6.is_finite() && r.7.is_finite() && r.8>0.0);
+                assert!(r.5>=0.0 && r.6>=r.5 && r.6<=1.000001);
+                // A quality-cost observation, not an assertion of improvement.
+            }
+        }
+    }
+}
+
+#[test]
 fn curved_interior_comparison_preserves_boundaries_and_counts() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../ingots/validation/composition_oracle");
