@@ -1005,6 +1005,44 @@ pub fn captured_quad_witness()->(f32,f32) {
     let net=composite_atlas::surface::authored(captured_asymmetric_quad())
     (net.patch_valid,net.pole_margin)
 }
+/// Active triangle controls from the user tab-3 fixture. The unused p2 control
+/// does not participate in this surface and is deliberately not a variation.
+fn captured_triangle()->composite_atlas::model::Controls {
+    let mut c=initial_controls()
+    c.surface_kind=1.0
+    c.p0x=-0.09804406762123108
+    c.p0y=-8.494136810302734
+    c.p0z=-1.539953351020813
+    c.p1x=2.5589940547943115
+    c.p1y=-6.975938320159912
+    c.p1z=-4.027499198913574
+    c.p3x=-9.784554481506348
+    c.p3y=13.085596084594727
+    c.p3z=6.335134506225586
+    c.midpoint_x=3.392169713973999
+    c.midpoint_y=-2.449946641921997
+    c.midpoint_z=5.291121006011963
+    c
+}
+pub fn captured_triangle_witness()->(f32,f32) {
+    let net=composite_atlas::surface::authored(captured_triangle())
+    (net.patch_valid,net.pole_margin)
+}
+pub fn captured_triangle_quality(_ level:u32,_ area:bool)
+    ->(u32,u32,u32,u32,u32,f32,f32,f32,f32,u32) {
+    if level<1 || level>6 {return (4,0,0,0,0,0.0,0.0,0.0,0.0,0)}
+    let mut c=captured_triangle()
+    let l=__f32_from_i32(level.downcast_unchecked())
+    c.bottom_lod=l
+    c.right_lod=l
+    c.top_lod=l
+    c.left_lod=l
+    c.interior_area_correction=if area {1.0} else {0.0}
+    ingot::quality::surface_audit_plan(c,0)
+}
+pub fn captured_boundary_comparison(_ triangle:bool)->bool {
+    comparison_boundaries(if triangle {captured_triangle()} else {captured_asymmetric_quad()})
+}
 /// Same geometry, three distinct ablations: 0 affine, 1 edge correction only,
 /// 2 edge correction plus area slices. Modes 1/2 keep identical boundary laws;
 /// mode 0 deliberately changes them. Midpoint-square admits mode 0 only.
@@ -1097,16 +1135,20 @@ pub fn curved_mesh_quality(_ kind:u32,_ split:f32,_ level:f32,_ measured:u32,
     ingot::quality::surface_audit(c)
 }
 pub fn interior_comparison_boundaries(_ kind:u32,_ split:f32,_ bulge:f32)->bool {
-    use composite_atlas::{model,residency,placement}
-    use quilting_atlas::composition::BoundaryUse
-    use quilting_patch::sampling_warp::{OrientedIntervalMap,ProjectiveIntervalBias}
     let mut c=initial_controls()
     c.surface_kind=if kind==0 {1.0} else {2.0}
     c.split=split
     c.midpoint_z=bulge
     c.center_x=0.37
     c.center_y=0.61
-    let a=residency::configured_scene(c)
+    comparison_boundaries(c)
+}
+fn comparison_boundaries(_ c:composite_atlas::model::Controls)->bool {
+    use composite_atlas::{model,residency,placement,surface}
+    use quilting_atlas::composition::BoundaryUse
+    use quilting_patch::sampling_warp::{OrientedIntervalMap,ProjectiveIntervalBias}
+    let mut a=residency::configured_scene(c)
+    a.apply_area_slices=true
     let mut b=a
     b.apply_area_slices=false
     if !a.density_placement {return false}
@@ -1127,6 +1169,11 @@ pub fn interior_comparison_boundaries(_ kind:u32,_ split:f32,_ bulge:f32)->bool 
                 let left=placement::place(a,d,p,ab,bc,ca)
                 let right=placement::place(b,d,p,ab,bc,ca)
                 if left.x!=right.x || left.y!=right.y {return false}
+                let first=surface::evaluate(a.surface,left)
+                let second=surface::evaluate(b.surface,right)
+                if !(first.valid && second.valid) {return false}
+                if first.point.x!=second.point.x || first.point.y!=second.point.y
+                    || first.point.z!=second.point.z {return false}
             }
         }
     }

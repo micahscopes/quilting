@@ -1342,6 +1342,37 @@ fn coarse_connectivity_preserves_coverage_boundaries_and_vertex_identity() {
 }
 
 #[test]
+fn captured_boundary_arcs_and_triangle_folds_probe() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot(&path);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=Store::new(&engine,());
+    let instance=Instance::new(&mut store,&module,&[]).unwrap();
+    let boundary=function::<i32,i32>(&mut store,&instance,"captured_boundary_comparison");
+    for triangle in [0,1] {
+        assert_eq!(boundary.call(&mut store,triangle).unwrap(),1,
+            "area on/off must preserve boundary UV and 3D samples: triangle={triangle}");
+    }
+    let witness=function::<(),(f32,f32)>(&mut store,&instance,"captured_triangle_witness");
+    let w=witness.call(&mut store,()).unwrap();
+    assert_eq!(w.0,1.0);
+    assert!((w.1-0.018001802).abs()<2e-6,"triangle capture witness: {w:?}");
+    let audit=function::<(i32,i32),(i32,i32,i32,i32,i32,f32,f32,f32,f32,i32)>(
+        &mut store,&instance,"captured_triangle_quality");
+    for level in [3,4] {
+        let mut triangles=None;
+        for area in [0,1] {
+            let r=audit.call(&mut store,(level,area)).unwrap();
+            assert_eq!(r.0,0,"evaluation admission: {r:?}");
+            if let Some(n)=triangles {assert_eq!(r.1,n);} else {triangles=Some(r.1);}
+            eprintln!("CAPTURED_TRIANGLE level={level} area={area} report={r:?}");
+        }
+    }
+}
+
+#[test]
 fn captured_asymmetric_quad_quality_probe() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../ingots/validation/composition_oracle");
