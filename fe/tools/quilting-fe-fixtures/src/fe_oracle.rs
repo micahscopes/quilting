@@ -1201,6 +1201,55 @@ fn curved_atlas_mesh_quality_baseline() {
 }
 
 #[test]
+fn shape_histogram_rank_wasm() {
+    let (mut store,instance)=instantiate();
+    let rank=function::<(f32,i32),f32>(&mut store,&instance,"histogram_rank");
+    assert_eq!(rank.call(&mut store,(0.52,1)).unwrap(),0.5);
+    // Invalid ranks must trap, not produce a plausible but fabricated percentile.
+    assert!(rank.call(&mut store,(0.52,0)).is_err());
+    assert!(rank.call(&mut store,(0.52,2)).is_err());
+    assert!(rank.call(&mut store,(f32::NAN,1)).is_err());
+}
+
+#[test]
+fn curved_mesh_distribution_and_approximation_probe() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot(&path);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=Store::new(&engine,());
+    let instance=Instance::new(&mut store,&module,&[]).unwrap();
+    let laws=function::<(),i32>(&mut store,&instance,"shape_histogram_laws");
+    assert_eq!(laws.call(&mut store,()).unwrap(),1);
+    let details=function::<(i32,i32,f32,f32,f32),
+        (i32,i32,i32,i32,f32,f32,i32,i32,f32,f32,f32,f32,i32)>(
+        &mut store,&instance,"uniform_quad_mesh_details");
+    let summary=function::<(i32,i32,f32,f32,f32),
+        (i32,i32,i32,i32,i32,f32,f32,f32,f32,i32)>(
+        &mut store,&instance,"uniform_quad_layout_quality");
+    for (bulge,dx,dz) in [(0.6,0.0,0.0),(2.4,-0.5,0.7),(1.2,0.7,-0.5)] {
+        for level in [3,4] {
+            for layout in 0..4 {
+                let args=(layout,level,bulge,dx,dz);
+                let r=details.call(&mut store,args).unwrap();
+                let s=summary.call(&mut store,args).unwrap();
+                assert_eq!((r.0,r.1,r.2,r.3),(s.0,s.1,s.1-s.2,s.2));
+                assert_eq!(r.0,0);
+                assert_eq!(r.6+r.7,r.1);
+                assert_eq!(r.7,0);
+                assert_eq!(r.12,4*r.1);
+                assert!(r.4>=0.0 && r.5>=r.4 && r.5<=0.95);
+                assert!(r.4+0.050001>=s.5);
+                assert!(r.8.is_finite() && r.9.is_finite() && r.9>=0.0 && r.9<=r.8+1e-6);
+                assert!((0.0..=1.0).contains(&r.10) && (0.0..=1.0).contains(&r.11));
+                eprintln!("MESH_DETAILS layout={layout} level={level} bulge={bulge} dx={dx} dz={dz} count={} p05_lower={} p10_lower={} valid_error={} invalid_error={} max_error={} rms_error={} worst_uv=({}, {}) evals={}",r.1,r.4,r.5,r.6,r.7,r.8,r.9,r.10,r.11,r.12);
+            }
+        }
+    }
+}
+
+#[test]
 fn bounded_quad_candidate_ranking_probe() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../ingots/validation/composition_oracle");

@@ -1,0 +1,32 @@
+//! Fixed-size shape distribution, usable by edit-time diagnostics on any backend.
+use core::marker::Copy
+extern {const fn __f32_from_i32(_:i32)->f32}
+pub struct ShapeHistogram {pub bins:[u32;20],pub admitted:u32,pub rejected:u32}
+impl Copy for ShapeHistogram {}
+impl ShapeHistogram {
+    pub fn empty()->Self {Self {bins:[0;20],admitted:0,rejected:0}}
+    /// Half-open bins of width .05, except the final bin includes one.
+    pub fn recorded(self,_ quality:f32)->Self {
+        let mut r=self
+        if !(quality>=0.0 && quality<=1.0) {r.rejected+=1
+            return r}
+        let mut bin:u32=0
+        while bin<19 && quality>=__f32_from_i32((bin+1).downcast_unchecked())/20.0 {bin+=1}
+        r.bins[bin as usize]+=1
+        r.admitted+=1
+        r
+    }
+    /// Lower bound of the bin containing the one-based rank, not an exact quantile.
+    /// Caller must supply an admitted rank; there is no silent clamping.
+    pub fn rank_lower(self,_ rank:u32)->f32 {
+        assert!(rank>0 && rank<=self.admitted)
+        let mut total:u32=0
+        let mut i:u32=0
+        while i<20 {
+            total+=self.bins[i as usize]
+            if total>=rank {return __f32_from_i32(i.downcast_unchecked())/20.0}
+            i+=1
+        }
+        core::panic()
+    }
+}

@@ -397,6 +397,9 @@ pub fn midpoint_square_child(_ index:u32)->(u32,u32,u32) {
         core::option::Option::Some(t)=>(t.a,t.b,t.c),_ => (99,99,99),
     }
 }
+pub fn histogram_rank(_ value:f32,_ rank:u32)->f32 {
+    quilting_patch::shape_histogram::ShapeHistogram::empty().recorded(value).rank_lower(rank)
+}
 pub fn midpoint_square_vertex(_ index:u32)->(u32,u32) {
     match quilting_atlas::midpoint_square::MidpointSquare::vertex(index) {
         core::option::Option::Some(p)=>p,_ => (99,99),

@@ -900,6 +900,29 @@ pub fn geometric_patch_view_laws()->bool {
     true
 }
 pub fn quality_laws()->bool {ingot::quality::laws()}
+pub fn shape_histogram_laws()->bool {
+    let h=quilting_patch::shape_histogram::ShapeHistogram::empty()
+        .recorded(0.0).recorded(0.049).recorded(0.05).recorded(0.999).recorded(1.0).recorded(-1.0)
+    h.admitted==5 && h.rejected==1 && h.bins[0]==2 && h.bins[1]==1 && h.bins[19]==2
+        && h.rank_lower(1)==0.0 && h.rank_lower(3)==0.05 && h.rank_lower(5)==0.95
+}
+/// Shape ranks are lower ends of .05 bins. Error is centroid correspondence
+/// distance in world units, not nearest-surface or a Hausdorff bound.
+pub fn uniform_quad_mesh_details(_ layout:u32,_ level:u32,_ bulge:f32,
+    _ dx:f32,_ dz:f32)->(u32,u32,u32,u32,f32,f32,u32,u32,f32,f32,f32,f32,u32) {
+    if layout>3 || level<1 || level>8 {return (4,0,0,0,0.0,0.0,0,0,0.0,0.0,0.0,0.0,0)}
+    let c=uniform_quad_controls(layout,level,bulge,dx,dz)
+    let r=ingot::quality::surface_report(c,if layout==3 {level} else {0},true)
+    let d=r.details
+    let n=d.shapes.admitted
+    let valid=d.error_samples-d.invalid_error_samples
+    (r.summary.0,r.summary.1,n,d.shapes.rejected,
+        if n>0 {d.shapes.rank_lower((n+19)/20)} else {0.0},
+        if n>0 {d.shapes.rank_lower((n+9)/10)} else {0.0},
+        valid,d.invalid_error_samples,d.maximum_error,
+        if valid>0 {fmath::sqrt(d.squared_error_sum/__f32_from_i32(valid.downcast_unchecked()))} else {0.0},
+        d.worst_u,d.worst_v,r.summary.9+d.error_samples)
+}
 /// Uniform UV boundary/control ablation: 0/1 diagonals, 2 fan, 3 midpoint square.
 pub fn uniform_quad_layout_quality(_ layout:u32,_ level:u32,_ bulge:f32,
     _ dx:f32,_ dz:f32)->(u32,u32,u32,u32,u32,f32,f32,f32,f32,u32) {
