@@ -163,3 +163,65 @@ baseline; count allocation and vertex placement remain separate experiments.
 Run log: `/laboratory/quilting/scratch/captured-fixed-candidates-20260909.log`.
 The test took 279.04 seconds including compilation. No timing speedup or global
 surface-error bound is claimed.
+
+## Frozen-layout surface-length count allocation
+
+The count-only probe keeps all four authored outer requests, layout, geometry
+and uniform UV placement fixed. It estimates each interior curve's length and
+chooses a dyadic count from a pooled boundary-spacing target. This is neither
+screen-space attenuation nor exact uniformity along the interior curve.
+
+The initial run deliberately failed its LoD6 assembly-budget guard: diagonal
+1–3 at demand scale1.5 requested LoD7 internally with outer LoD4. No over-budget
+mesh was generated. The follow-up audit records and skips such proposals rather
+than raising the guard, then measures the remaining cases. Its passing status
+would mean the bounded audit completed, not that the count policy was accepted.
+
+Initial observations, captured quad at outer LoD4:
+
+| Diagonal | Interior LoD | Final triangles | Mean shape | Sampled maximum centroid error |
+|---|---:|---:|---:|---:|
+| 0–2, unchanged | 4 | 716 | 0.26473 | 1.49874 |
+| 0–2, scale0.5 | 5 | 1212 | 0.27791 | 1.14105 |
+| 0–2, scale1 | 6 | 2356 | 0.27839 | 1.15644 |
+| 1–3, unchanged | 4 | 716 | 0.27697 | 1.60521 |
+| 1–3, scale0.5 | 5 | 1212 | 0.27746 | 1.26788 |
+| 1–3, scale1 | 6 | 2356 | 0.27485 | 1.50050 |
+
+The finest measured count is not the lowest sampled error. Different primaries
+sample different centroids, so this observation is not a certified increase in
+global approximation error. Sixteen- and thirty-two-segment length estimates
+choose the same counts in these initial diagonal cases. No invalid fine samples
+or nonpositive UV triangles were observed in these five assembled proposals.
+
+Initial log: `/laboratory/quilting/scratch/captured-count-candidates-20260909.log`.
+The fixed-candidate baseline rerun passed; the count test stopped at the stated
+budget guard.
+
+The follow-up passed both tests in 283.65 seconds including one shared Fe/Wasm
+compilation: 14 count proposals assembled, one rejected without assembly. Every
+assembled case had zero invalid samples and nonpositive UV triangles. All outer
+requests were preserved. This remains a count ablation with uniform UV spacing,
+not the final curved-edge placement policy.
+
+Fan observations at outer LoD4:
+
+| Center | Demand scale | Interior exponents (32 samples) | Triangles | Mean shape | Sampled maximum error |
+|---|---:|---|---:|---:|---:|
+| (0.5, 0.5) | 1 | 5/5/5/5 | 3792 | 0.26108 | 1.11336 |
+| (0.25, 0.75) | 0.5 | 2/4/4/3 | 842 | 0.32383 | 1.92219 |
+| (0.25, 0.75) | 1 | 3/5/5/4 | 2204 | 0.31329 | 1.19032 |
+| (0.5, 0.75) | 1 | 5/4/3/4 | 1672 | 0.24858 | 1.49889 |
+
+At center (0.5,0.75), doubling length quadrature from16 to32 changes the third
+spoke from exponent3 to2 at scale0.5, and4 to3 at scale1. This policy therefore
+still needs a numerical-admission/rounding-stability story. The observed two-plan
+calls were submillisecond on this host, but these single warm observations are
+not a browser latency benchmark and exclude assembly/upload/rendering.
+
+**Disposition:** keep the bounded experiment; do not adopt as an automatic
+default. Count changes can improve selected statistics but do not uniformly
+improve shape/error efficiency or solve the pathological placement. Production
+integration needs explicit cost/admission behavior and shared curve spacing.
+
+Full log: `/laboratory/quilting/scratch/captured-count-candidates-20260909-v2.log`.

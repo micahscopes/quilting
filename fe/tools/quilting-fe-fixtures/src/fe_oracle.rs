@@ -13,6 +13,17 @@ use url::Url;
 use wasmtime::{Instance, Store, TypedFunc};
 
 static ORACLE_WASM: OnceLock<Vec<u8>> = OnceLock::new();
+static COMPOSITION_WASM: OnceLock<Vec<u8>> = OnceLock::new();
+
+// These probes use one immutable ingot during a test-process lifetime. Share
+// compiled bytes, never mutable Wasm instances or per-case geometry state.
+fn compile_composition_gate() -> &'static [u8] {
+    COMPOSITION_WASM.get_or_init(|| {
+        let path=Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../ingots/validation/composition_oracle");
+        compile_ingot(&path)
+    })
+}
 
 fn compile_oracle_gate() -> &'static [u8] {
     ORACLE_WASM.get_or_init(|| {
@@ -1418,11 +1429,8 @@ fn coarse_surface_guided_flips_compare_prediction_with_actual_atlas_mesh() {
 
 #[test]
 fn captured_fixed_candidates_measure_actual_quality_cost_frontier() {
-    let path=Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../ingots/validation/composition_oracle");
-    let wasm=compile_ingot(&path);
     let engine=wasmtime::Engine::default();
-    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let module=wasmtime::Module::new(&engine,compile_composition_gate()).unwrap();
     let mut store=Store::new(&engine,());
     let instance=Instance::new(&mut store,&module,&[]).unwrap();
     let candidate=function::<(i32,i32),(i32,i32,i32,i32,i32,f32,f32,f32,i32,f32,f32)>(
@@ -1442,6 +1450,51 @@ fn captured_fixed_candidates_measure_actual_quality_cost_frontier() {
         }
         assert_eq!(fan_count,2*diagonal_count);
     }
+}
+
+#[test]
+fn captured_fixed_count_allocation_preserves_outer_requests() {
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,compile_composition_gate()).unwrap();
+    let mut store=Store::new(&engine,());
+    let instance=Instance::new(&mut store,&module,&[]).unwrap();
+    let baseline=function::<(i32,i32),(i32,i32,i32,i32,i32,f32,f32,f32,i32,f32,f32)>(
+        &mut store,&instance,"captured_fixed_candidate");
+    let plan=function::<(i32,i32,i32,f32),(i32,i32,i32,i32,i32,i32,i32,i32)>(
+        &mut store,&instance,"captured_fixed_count_plan");
+    let mesh=function::<(i32,i32,i32,f32),(i32,i32,i32,i32,i32,f32,f32,f32,i32)>(
+        &mut store,&instance,"captured_fixed_count_mesh");
+    let mut assembled=0;
+    let mut rejected=0;
+    // Both diagonals, central fan, error-best fan and mean-shape-best fan.
+    for id in [0,1,6,8,9] {
+        let b=baseline.call(&mut store,(id,4)).unwrap();
+        for scale in [0.5_f32,1.0,1.5] {
+            let started=std::time::Instant::now();
+            let p=plan.call(&mut store,(id,4,16,scale)).unwrap();
+            let q=plan.call(&mut store,(id,4,32,scale)).unwrap();
+            let plan_ms=started.elapsed().as_secs_f64()*1000.0;
+            assert_eq!((p.0,p.2,p.7,q.0,q.2,q.7),(0,0,1,0,0,1));
+            assert_eq!(p.1,if id<2 {5*17} else {8*17});
+            assert_eq!(q.1,if id<2 {5*33} else {8*33});
+            // Toe-test work guard, not a production clamp or hidden promotion.
+            if [q.3,q.4,q.5,q.6].iter().any(|&level|level>6) {
+                rejected+=1;
+                eprintln!("CAPTURED_COUNTS_REJECT id={id} scale={scale} plan16={p:?} plan32={q:?} reason=assembly_budget_lod6 two_plan_ms={plan_ms:.4}");
+                continue;
+            }
+            assembled+=1;
+            let r=mesh.call(&mut store,(id,4,32,scale)).unwrap();
+            assert_eq!((r.0,r.2,r.3,r.8),(0,0,0,0),"candidate {id}: {r:?}");
+            eprintln!("CAPTURED_COUNTS id={id} scale={scale} baseline={b:?} plan16={p:?} plan32={q:?} actual={r:?} two_plan_ms={plan_ms:.4}");
+        }
+    }
+    assert_eq!(assembled+rejected,15);
+    assert!(assembled>0);
+    // The first run established this policy exceeds the declared budget.
+    // Record that rejection; passing this audit is not policy acceptance.
+    assert!(rejected>0);
+    eprintln!("CAPTURED_COUNTS_SUMMARY assembled={assembled} rejected={rejected}");
 }
 
 #[test]
