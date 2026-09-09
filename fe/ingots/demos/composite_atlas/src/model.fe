@@ -17,6 +17,7 @@ pub struct Controls {
     pub midpoint_x:f32,pub midpoint_y:f32,pub midpoint_z:f32,
     pub orbit_yaw:f32,pub orbit_pitch:f32,pub orbit_distance:f32,
     pub selected:f32,pub dragging:f32,pub wires:f32,pub color_view:f32,pub error_scale:f32,
+    pub highlight_folds:f32,
     pub bottom_lod:f32, pub right_lod:f32, pub top_lod:f32, pub left_lod:f32,
     pub automatic_interior:f32,
     /// Saved manual LoD exponent, used only when automatic interior selection is off.
@@ -59,6 +60,9 @@ pub struct Params {
     pub selected:Param,pub dragging:Param,pub wires:Param,
     /// Shape and sampled correspondence error are distinct measurements.
     pub color_view:Param,
+    /// Magenta marks nonpositive parameter-space triangle orientation, not
+    /// a back-facing surface. Hidden/occluded folds still require an audit.
+    pub highlight_folds:Param,
     /// World-space centroid error shown as warm at or above this value. This is
     /// a fixed comparison scale, not an adaptive range or an accuracy bound.
     pub error_scale:Param,
@@ -150,6 +154,7 @@ pub const fn params() -> Params {
             second:"triangle shape: 0 warm / 1 cool",third:"poor triangles: shape below 0.1",
             fourth:"sampled error: world units"),init:0.0),
         error_scale:Param::log(min:0.0001,max:10.0,init:0.1),
+        highlight_folds:Param::toggle(init:false),
         bottom_lod:Param::int(min:0.0,max:8.0,init:4.0),
         right_lod:Param::int(min:0.0,max:8.0,init:4.0),
         top_lod:Param::int(min:0.0,max:8.0,init:4.0),
@@ -221,7 +226,7 @@ pub fn initial_controls() -> Controls {
         p0x:-1.0,p0y:-0.7,p0z:0.0,p1x:1.0,p1y:-0.7,p1z:0.0,
         p2x:1.0,p2y:0.7,p2z:0.0,p3x:-1.0,p3y:0.7,p3z:0.0,
         midpoint_x:0.0,midpoint_y:-0.7,midpoint_z:0.6,
-        orbit_yaw:0.25,orbit_pitch:0.15,orbit_distance:5.0,selected:-1.0,dragging:0.0,wires:1.0,color_view:0.0,error_scale:0.1,
+        orbit_yaw:0.25,orbit_pitch:0.15,orbit_distance:5.0,selected:-1.0,dragging:0.0,wires:1.0,color_view:0.0,error_scale:0.1,highlight_folds:0.0,
         automatic_interior:1.0,diagonal_lod:4.0,spoke_0_lod:4.0,spoke_1_lod:4.0,
         spoke_2_lod:4.0,spoke_3_lod:4.0,split:2.0,center_x:0.5,center_y:0.5,
         compensate_density:1.0,interior_enabled:1.0,interior_concentration:1.0,interior_twist:0.0,

@@ -88,7 +88,7 @@ fn length(_ a:Point,_ b:Point,_ width:f32,_ height:f32)->f32 {
     let y=(a.y-b.y)*height*0.5
     sqrt(x*x+y*y)
 }
-struct Varying {a:f32,b:f32,c:f32,signed:f32,light:f32,quality:f32}
+struct Varying {a:f32,b:f32,c:f32,signed:f32,light:f32,quality:f32,folded:f32}
 impl Copy for Varying {}
 struct HandleVarying {kind:f32,selected:f32}
 impl Copy for HandleVarying {}
@@ -136,6 +136,9 @@ actor CompositeAtlas uses (GpuProgram<WebGpuBackend>,SurfaceQuality<ResponsiveBa
         let b=projected(self.scene,self.controls,point(self.atlas,self.maps,self.scene,d,base.wrapping_add(if reversed {2} else {1})))
         let c=projected(self.scene,self.controls,point(self.atlas,self.maps,self.scene,d,base.wrapping_add(if reversed {1} else {2})))
         let signed=(b.screen.x-a.screen.x)*(c.screen.y-a.screen.y)-(b.screen.y-a.screen.y)*(c.screen.x-a.screen.x)
+        // Corrected atlas winding is already applied above. Domain orientation
+        // is independent of camera orientation and the surface's own normals.
+        let uv_area=(b.uv.x-a.uv.x)*(c.uv.y-a.uv.y)-(b.uv.y-a.uv.y)*(c.uv.x-a.uv.x)
         let area=abs(signed)*width*height*0.25
         let local=vertex_index%3
         let p=if local==0 {a.clip} else if local==1 {b.clip} else {c.clip}
@@ -158,10 +161,12 @@ actor CompositeAtlas uses (GpuProgram<WebGpuBackend>,SurfaceQuality<ResponsiveBa
         RasterVertex {position:if a.valid && b.valid && c.valid {p} else {ClipPosition{x:2.0,y:2.0,z:0.0,w:1.0}},varying:Varying {
             a:if local==0 {area/max(length(b.screen,c.screen,width,height),0.00001)} else {0.0},
             b:if local==1 {area/max(length(c.screen,a.screen,width,height),0.00001)} else {0.0},
-            c:if local==2 {area/max(length(a.screen,b.screen,width,height),0.00001)} else {0.0},signed:signed,light:light,quality:quality}}
+            c:if local==2 {area/max(length(a.screen,b.screen,width,height),0.00001)} else {0.0},signed:signed,light:light,quality:quality,
+            folded:if uv_area>0.0 {0.0} else {1.0}}}
     }
     fn shade(self,v:Varying)->i32 uses (FragmentStage<Varying>) {
-        let fill=if self.controls.color_view>2.5 {ingot::diagnostics::error_color(v.quality,self.controls.error_scale)}
+        let fill=if self.controls.highlight_folds>0.5 && v.folded>0.5 {display_rgb(0.95,0.12,0.75)}
+            else if self.controls.color_view>2.5 {ingot::diagnostics::error_color(v.quality,self.controls.error_scale)}
             else if self.controls.color_view>0.5 {ingot::diagnostics::shape_color(v.quality,self.controls.color_view>1.5)}
             else if v.signed<=0.0 && self.scene.surface.kind<0.5 {display_rgb(0.9,0.3,0.25)}
             else {display_rgb(0.65*v.light,0.77*v.light,0.78*v.light)}
