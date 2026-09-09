@@ -958,6 +958,30 @@ pub fn quad_candidate_mesh(_ id:u32,_ level:u32,_ bulge:f32,_ dx:f32,_ dz:f32)->
     let c=ingot::layout_probe::candidate(uniform_quad_controls(0,level,bulge,dx,dz),id)
     ingot::quality::surface_audit(c)
 }
+/// Frozen-layout length-based count probe: status, evaluations, caps, visible
+/// interior levels, and exact preservation of the four outer counts.
+pub fn quad_count_plan(_ layout:u32,_ bulge:f32,_ dx:f32,_ dz:f32,
+    _ segments:u32,_ scale:f32)->(u32,u32,u32,u32,u32,u32,u32,u32) {
+    if layout>2 {return (4,0,0,0,0,0,0,0)}
+    let c=uniform_quad_controls(layout,3,bulge,dx,dz)
+    let p=ingot::count_probe::measured(c,segments,scale)
+    if !p.valid {return (1,p.evaluations,p.capped,0,0,0,0,0)}
+    let before=edge_lods(c)
+    let after=edge_lods(p.controls)
+    let mut preserved=true
+    for i in 0 .. 4 {preserved=preserved && before.levels[i]==after.levels[i]}
+    (0,p.evaluations,p.capped,after.levels[if layout==2 {6} else {4}],
+        if layout==2 {after.levels[7]} else {0},
+        if layout==2 {after.levels[8]} else {0},
+        if layout==2 {after.levels[9]} else {0},if preserved {1} else {0})
+}
+pub fn quad_count_mesh(_ layout:u32,_ bulge:f32,_ dx:f32,_ dz:f32,
+    _ scale:f32)->(u32,u32,u32,u32,u32,f32,f32,f32,f32,u32) {
+    if layout>2 {return (4,0,0,0,0,0.0,0.0,0.0,0.0,0)}
+    let p=ingot::count_probe::measured(uniform_quad_controls(layout,3,bulge,dx,dz),16,scale)
+    if !p.valid {return (1,0,0,0,0,0.0,0.0,0.0,0.0,p.evaluations)}
+    ingot::quality::surface_audit(p.controls)
+}
 pub fn curved_mesh_quality(_ kind:u32,_ split:f32,_ level:f32,_ measured:u32,
     _ bulge:f32,_ dx:f32,_ dz:f32)->(u32,u32,u32,u32,u32,f32,f32,f32,f32,u32) {
     let mut c=initial_controls()

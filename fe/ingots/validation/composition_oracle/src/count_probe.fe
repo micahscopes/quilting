@@ -1,0 +1,76 @@
+//! Frozen-connectivity count ablation. Not a screen-space or exact arc policy.
+use core::marker::Copy
+use composite_atlas::{model,surface}
+use quilting_domain::{length3,sub3}
+extern {const fn __f32_from_i32(_:i32)->f32}
+fn number(_ n:u32)->f32 {__f32_from_i32(n.downcast_unchecked())}
+pub struct CountPlan {pub controls:model::Controls,pub valid:bool,pub evaluations:u32,pub capped:u32}
+impl Copy for CountPlan {}
+struct CurveLength {value:f32,valid:bool,evaluations:u32}
+impl Copy for CurveLength {}
+fn length(_ net:surface::Net,_ a:model::Point,_ b:model::Point,_ segments:u32)->CurveLength {
+    let mut previous=surface::evaluate(net,a)
+    let mut sum=0.0
+    let mut valid=previous.valid
+    let mut i:u32=1
+    while i<=segments {
+        let t=number(i)/number(segments)
+        let next=surface::evaluate(net,model::Point {x:a.x+(b.x-a.x)*t,y:a.y+(b.y-a.y)*t})
+        sum=sum+length3(sub3(next.point,previous.point))
+        valid=valid && next.valid
+        previous=next
+        i+=1
+    }
+    CurveLength {value:sum,valid:valid && sum>0.0 && sum-sum==0.0,evaluations:segments+1}
+}
+/// Keep every outer count and every placement map unchanged. The target world
+/// spacing is total sampled boundary length / total authored boundary segments.
+/// This pooled target is a hypothesis, not uniformity on every unequal edge.
+pub fn measured(_ controls:model::Controls,_ segments:u32,_ scale:f32)->CountPlan {
+    let mut r=CountPlan {controls:controls,valid:false,evaluations:0,capped:0}
+    if segments<4 || segments>64 || !(scale>0.0 && scale<=4.0) {return r}
+    let net=surface::authored(controls)
+    if net.patch_valid<0.5 || model::is_triangle(controls) {return r}
+    let edges=model::edge_lods(controls)
+    let mut total_length=0.0
+    let mut total_segments:u32=0
+    let mut side:u32=0
+    while side<4 {
+        let a=model::corner(side,controls.center_x,controls.center_y)
+        let b=model::corner((side+1)%4,controls.center_x,controls.center_y)
+        let observation=length(net,a,b,segments)
+        r.evaluations+=observation.evaluations
+        if !observation.valid {return r}
+        total_length=total_length+observation.value
+        total_segments+=1<<edges.levels[side as usize]
+        side+=1
+    }
+    let spacing=total_length/number(total_segments)
+    if !(spacing>0.0 && spacing-spacing==0.0) {return r}
+    let fan=controls.split>=1.5
+    let count:u32=if fan {4} else {1}
+    let mut i:u32=0
+    while i<count {
+        let first=if fan {i} else if controls.split<0.5 {0} else {1}
+        let last=if fan {4} else if controls.split<0.5 {2} else {3}
+        let observation=length(net,model::corner(first,controls.center_x,controls.center_y),
+            model::corner(last,controls.center_x,controls.center_y),segments)
+        r.evaluations+=observation.evaluations
+        if !observation.valid {return r}
+        let demand=scale*observation.value/spacing
+        let mut level:u32=0
+        let mut covered=1.0
+        while level<8 && covered<demand {level+=1
+            covered=covered*2.0}
+        if covered<demand {r.capped+=1}
+        if !fan {r.controls.diagonal_lod=number(level)}
+        else if i==0 {r.controls.spoke_0_lod=number(level)}
+        else if i==1 {r.controls.spoke_1_lod=number(level)}
+        else if i==2 {r.controls.spoke_2_lod=number(level)}
+        else {r.controls.spoke_3_lod=number(level)}
+        i+=1
+    }
+    r.controls.automatic_interior=0.0
+    r.valid=true
+    r
+}

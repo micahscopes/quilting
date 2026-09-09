@@ -1250,6 +1250,51 @@ fn curved_mesh_distribution_and_approximation_probe() {
 }
 
 #[test]
+fn frozen_topology_count_allocation_probe() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot(&path);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=Store::new(&engine,());
+    let instance=Instance::new(&mut store,&module,&[]).unwrap();
+    let plan=function::<(i32,f32,f32,f32,i32,f32),(i32,i32,i32,i32,i32,i32,i32,i32)>(
+        &mut store,&instance,"quad_count_plan");
+    let mesh=function::<(i32,f32,f32,f32,f32),
+        (i32,i32,i32,i32,i32,f32,f32,f32,f32,i32)>(
+        &mut store,&instance,"quad_count_mesh");
+    let reference=function::<(i32,i32,f32,f32,f32),
+        (i32,i32,i32,i32,i32,f32,f32,f32,f32,i32)>(
+        &mut store,&instance,"uniform_quad_layout_quality");
+    for segments in [0,3,65] {
+        assert_eq!(plan.call(&mut store,(0,0.6,0.0,0.0,segments,1.0)).unwrap().0,1);
+    }
+    for scale in [0.0,f32::NAN,4.1] {
+        assert_eq!(plan.call(&mut store,(0,0.6,0.0,0.0,16,scale)).unwrap().0,1);
+    }
+    for (bulge,dx,dz) in [(0.6,0.0,0.0),(2.4,-0.5,0.7),(1.2,0.7,-0.5)] {
+        for layout in 0..3 {
+            let baseline=reference.call(&mut store,(layout,3,bulge,dx,dz)).unwrap();
+            for scale in [0.5,1.0,1.5] {
+                let start=std::time::Instant::now();
+                let a=plan.call(&mut store,(layout,bulge,dx,dz,16,scale)).unwrap();
+                let b=plan.call(&mut store,(layout,bulge,dx,dz,32,scale)).unwrap();
+                let plan_ms=start.elapsed().as_secs_f64()*1000.0;
+                assert_eq!((a.0,a.2,a.7),(0,0,1));
+                assert_eq!((b.0,b.2,b.7),(0,0,1));
+                assert_eq!(a.1,if layout==2 {8*17} else {5*17});
+                assert_eq!(b.1,if layout==2 {8*33} else {5*33});
+                // Doubling quadrature is observed, not assumed to preserve rounding.
+                let actual=mesh.call(&mut store,(layout,bulge,dx,dz,scale)).unwrap();
+                assert_eq!((actual.0,actual.2,actual.3),(0,0,0));
+                assert_eq!(actual.9,3*actual.1);
+                eprintln!("COUNT_PROBE layout={layout} bulge={bulge} dx={dx} dz={dz} scale={scale} plan16={a:?} plan32={b:?} reference={baseline:?} actual={actual:?} two_plan_ms={plan_ms:.4}");
+            }
+        }
+    }
+}
+
+#[test]
 fn bounded_quad_candidate_ranking_probe() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../ingots/validation/composition_oracle");
