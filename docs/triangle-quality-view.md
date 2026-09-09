@@ -33,3 +33,14 @@ pass, infinity/NaN fail, without approximating the upper limit. The release
 Wasm regression includes nonfinite and overflowing-area inputs. Upstream should
 add an extremal f32 literal browser regression and inspect WGSL serialization;
 the precise responsible lowering/writer stage is not yet established.
+
+## Served checkpoint
+
+Release `fe web dev` on port 38331 rebuilt in 82.0 seconds after the fix.
+Chrome MCP loaded manifest `fe-render-07098ef3bb9fddd9.json`; direct compilation
+of its shade module returned no messages. Selecting curved quad and triangle
+shape through the native dropdowns produced `path webgpu`, pending 0 and four
+16-segment spokes. Total emitted WGSL: 613,468 bytes across four modules; Wasm:
+1,204,666 bytes. These are artifact/build figures, not runtime speed claims.
+The finite-area release Wasm regression passed in 20.64 seconds including setup.
+Screenshot capture has not yet completed, so visual acceptance remains pending.
