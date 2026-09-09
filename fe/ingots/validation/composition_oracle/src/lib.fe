@@ -1,4 +1,15 @@
 //! Pure policy and real retained-selection Wasm acceptance exports.
+// The Wasm oracle exports root definitions, not imported aliases.
+pub fn coarse_counts(_ kind:u32,_ steps:u32)->(u32,u32) {
+    ingot::coarse_probe::coarse_counts(kind,steps)
+}
+pub fn coarse_vertex(_ kind:u32,_ steps:u32,_ index:u32)->(u32,u32) {
+    ingot::coarse_probe::coarse_vertex(kind,steps,index)
+}
+pub fn coarse_face(_ kind:u32,_ steps:u32,_ index:u32)->(u32,u32,u32) {
+    ingot::coarse_probe::coarse_face(kind,steps,index)
+}
+pub fn coarse_rejects_invalid()->bool {ingot::coarse_probe::coarse_rejects_invalid()}
 use core::option::Option
 use quilting_domain::{bary3f,vec3f}
 use composite_atlas::model::{initial_controls,edge_demand,edge_lods}

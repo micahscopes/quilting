@@ -1,0 +1,43 @@
+//! Exact connectivity probe, deliberately separate from surface quality.
+use core::option::Option
+use quilting_atlas::coarse_mesh::CoarseMesh
+use quilting_atlas::planar::FixedPoint2
+
+fn mesh(_ kind:u32,_ steps:u32)->CoarseMesh {
+    let mut m=if kind==0 {CoarseMesh::triangle()} else {CoarseMesh::square(kind==2)}
+    // Alternate faces rather than repeatedly exhausting one tiny triangle.
+    let count=if steps<8 {steps} else {8}
+    for i in 0..(count as usize) {
+        let index:u32=i.downcast_unchecked()
+        let face=index%m.face_count()
+        let p=match m.centroid(face) {Option::Some(p)=>p,Option::None=>break}
+        m=match m.inserted(face,p) {Option::Some(next)=>next,Option::None=>break}
+    }
+    m
+}
+
+pub fn coarse_counts(_ kind:u32,_ steps:u32)->(u32,u32) {
+    let m=mesh(kind,steps)
+    (m.vertex_count(),m.face_count())
+}
+pub fn coarse_vertex(_ kind:u32,_ steps:u32,_ index:u32)->(u32,u32) {
+    match mesh(kind,steps).vertex(index) {
+        Option::Some(p)=>(p.x,p.y),Option::None=>(4294967295,4294967295)
+    }
+}
+pub fn coarse_face(_ kind:u32,_ steps:u32,_ index:u32)->(u32,u32,u32) {
+    match mesh(kind,steps).face(index) {
+        Option::Some(t)=>(t.a,t.b,t.c),Option::None=>(4294967295,4294967295,4294967295)
+    }
+}
+pub fn coarse_rejects_invalid()->bool {
+    let m=CoarseMesh::square(false)
+    for p in [FixedPoint2 {x:0,y:0},FixedPoint2 {x:100,y:100},
+        FixedPoint2 {x:100,y:200},FixedPoint2 {x:16385,y:1}] {
+        match m.inserted(0,p) {Option::Some(_)=>return false,Option::None=>{}}
+    }
+    match m.inserted(2,FixedPoint2 {x:100,y:1}) {
+        Option::Some(_)=>return false,Option::None=>{}
+    }
+    m.vertex_count()==4 && m.face_count()==2
+}

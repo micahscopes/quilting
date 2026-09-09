@@ -21,6 +21,7 @@ extern {
 }
 
 pub use sampling
+pub use coarse_mesh
 pub use active_sampling
 pub use accepted_index
 pub use cpu_mesh

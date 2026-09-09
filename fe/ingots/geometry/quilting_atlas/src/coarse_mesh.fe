@@ -1,0 +1,71 @@
+//! Bounded parameter-domain connectivity, independent of surface metric/LoD.
+//! Interior insertion preserves every outer edge and existing vertex identity.
+//! Surface-aware scoring chooses proposals; exact Q14 predicates admit them.
+use core::marker::Copy
+use core::option::Option
+use super::planar::{FixedPoint2,orientation}
+use super::composition::ChildTriangle
+
+pub const MAX_FACES:usize=16
+pub const MAX_VERTICES:usize=MAX_FACES/2+3
+pub struct CoarseMesh {
+    vertices:[FixedPoint2;MAX_VERTICES],faces:[ChildTriangle;MAX_FACES],
+    vertex_count:u32,face_count:u32,
+}
+impl Copy for CoarseMesh {}
+impl CoarseMesh {
+    pub fn vertex_count(self)->u32 {self.vertex_count}
+    pub fn face_count(self)->u32 {self.face_count}
+    pub fn square(_ other_diagonal:bool)->Self {
+        let mut vertices=[FixedPoint2 {x:0,y:0};MAX_VERTICES]
+        vertices[1]=FixedPoint2 {x:16384,y:0}
+        vertices[2]=FixedPoint2 {x:16384,y:16384}
+        vertices[3]=FixedPoint2 {x:0,y:16384}
+        let mut faces=[ChildTriangle {a:0,b:1,c:2};MAX_FACES]
+        if other_diagonal {
+            faces[0]=ChildTriangle {a:0,b:1,c:3}
+            faces[1]=ChildTriangle {a:1,b:2,c:3}
+        } else {faces[1]=ChildTriangle {a:0,b:2,c:3}}
+        Self {vertices:vertices,faces:faces,vertex_count:4,face_count:2}
+    }
+    pub fn triangle()->Self {
+        let mut mesh=Self::square(false)
+        mesh.vertices[2]=FixedPoint2 {x:0,y:16384}
+        mesh.vertex_count=3
+        mesh.face_count=1
+        mesh
+    }
+    pub fn vertex(self,_ index:u32)->Option<FixedPoint2> {
+        if index<self.vertex_count {Option::Some(self.vertices[index as usize])} else {Option::None}
+    }
+    pub fn face(self,_ index:u32)->Option<ChildTriangle> {
+        if index<self.face_count {Option::Some(self.faces[index as usize])} else {Option::None}
+    }
+    pub fn centroid(self,_ index:u32)->Option<FixedPoint2> {
+        let t=match self.face(index) {Option::Some(t)=>t,Option::None=>return Option::None}
+        let a=self.vertices[t.a as usize]
+        let b=self.vertices[t.b as usize]
+        let c=self.vertices[t.c as usize]
+        Option::Some(FixedPoint2 {x:(a.x+b.x+c.x)/3,y:(a.y+b.y+c.y)/3})
+    }
+    /// No mutation on rejection. A boundary proposal is rejected rather than
+    /// silently splitting a shared edge or leaving a hanging vertex.
+    pub fn inserted(self,_ index:u32,_ p:FixedPoint2)->Option<Self> {
+        if index>=self.face_count || (self.face_count as usize)+2>MAX_FACES
+            || (self.vertex_count as usize)>=MAX_VERTICES || p.x>16384 || p.y>16384 {return Option::None}
+        let t=self.faces[index as usize]
+        let a=self.vertices[t.a as usize]
+        let b=self.vertices[t.b as usize]
+        let c=self.vertices[t.c as usize]
+        if orientation(a,b,p)<=0 || orientation(b,c,p)<=0 || orientation(c,a,p)<=0 {return Option::None}
+        let mut next=self
+        let v=self.vertex_count
+        next.vertices[v as usize]=p
+        next.faces[index as usize]=ChildTriangle {a:t.a,b:t.b,c:v}
+        next.faces[self.face_count as usize]=ChildTriangle {a:t.b,b:t.c,c:v}
+        next.faces[(self.face_count+1) as usize]=ChildTriangle {a:t.c,b:t.a,c:v}
+        next.vertex_count+=1
+        next.face_count+=2
+        Option::Some(next)
+    }
+}

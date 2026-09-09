@@ -1288,6 +1288,60 @@ fn bounded_composite_draw_ranges() {
 }
 
 #[test]
+fn coarse_connectivity_preserves_coverage_boundaries_and_vertex_identity() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot(&path);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=Store::new(&engine,());
+    let instance=Instance::new(&mut store,&module,&[]).unwrap();
+    let counts=function::<(i32,i32),(i32,i32)>(&mut store,&instance,"coarse_counts");
+    let vertex=function::<(i32,i32,i32),(i32,i32)>(&mut store,&instance,"coarse_vertex");
+    let face=function::<(i32,i32,i32),(i32,i32,i32)>(&mut store,&instance,"coarse_face");
+    let rejects=function::<(),i32>(&mut store,&instance,"coarse_rejects_invalid");
+    assert_eq!(rejects.call(&mut store,()).unwrap(),1);
+    for kind in 0..3 {
+        let mut previous=Vec::new();
+        for steps in 0..=8 {
+            let (nv,nf)=counts.call(&mut store,(kind,steps)).unwrap();
+            let accepted=steps.min(7);
+            assert_eq!(nv,if kind==0 {3} else {4}+accepted);
+            assert_eq!(nf,if kind==0 {1} else {2}+2*accepted);
+            let vertices=(0..nv).map(|i|vertex.call(&mut store,(kind,steps,i)).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(&vertices[..previous.len()],&previous,"stable vertex IDs");
+            let mut area=0_i64;
+            let mut edges=std::collections::BTreeMap::new();
+            for i in 0..nf {
+                let (a,b,c)=face.call(&mut store,(kind,steps,i)).unwrap();
+                assert!([a,b,c].iter().all(|&v|v>=0&&v<nv));
+                let (pa,pb,pc)=(vertices[a as usize],vertices[b as usize],vertices[c as usize]);
+                let signed=i64::from(pb.0-pa.0)*i64::from(pc.1-pa.1)
+                    -i64::from(pb.1-pa.1)*i64::from(pc.0-pa.0);
+                assert!(signed>0,"kind={kind} steps={steps} face={i}");
+                area+=signed;
+                for (a,b) in [(a,b),(b,c),(c,a)] {
+                    let e=edges.entry((a.min(b),a.max(b))).or_insert((0,0));
+                    e.0+=1;
+                    e.1+=if a<b {1} else {-1};
+                }
+            }
+            assert_eq!(area,16384_i64.pow(2)*if kind==0 {1} else {2});
+            let mut outer=Vec::new();
+            for (edge,(uses,balance)) in edges {
+                if uses==1 {outer.push(edge)} else {assert_eq!((uses,balance),(2,0));}
+            }
+            assert_eq!(outer,if kind==0 {vec![(0,1),(0,2),(1,2)]}
+                else {vec![(0,1),(0,3),(1,2),(2,3)]});
+            assert_eq!(vertex.call(&mut store,(kind,steps,nv)).unwrap(),(-1,-1));
+            assert_eq!(face.call(&mut store,(kind,steps,nf)).unwrap(),(-1,-1,-1));
+            previous=vertices;
+        }
+    }
+}
+
+#[test]
 fn captured_asymmetric_quad_quality_probe() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../ingots/validation/composition_oracle");
