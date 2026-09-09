@@ -1,0 +1,57 @@
+//! Bounded ranking hypothesis, deliberately separate from accepted policies.
+use composite_atlas::{model,surface}
+use quilting_domain::{vec2f,sub3,scale3}
+use quilting_patch::triangle_quality::measure_differential
+extern {const fn __f32_from_i32(_:i32)->f32}
+fn number(_ n:u32)->f32 {__f32_from_i32(n.downcast_unchecked())}
+
+/// 0/1 are the diagonals; 2..10 are a fixed 3x3 fan-center set.
+pub fn candidate(_ controls:model::Controls,_ id:u32)->model::Controls {
+    let mut c=controls
+    c.split=if id<2 {number(id)} else {2.0}
+    if id>=2 {
+        c.center_x=0.25+0.25*number((id-2)%3)
+        c.center_y=0.25+0.25*number((id-2)/3)
+    }
+    c
+}
+
+/// status, minimum/mean predicted shape, explicit surface evaluation count.
+/// Four sites per child: centroid and three corner-near barycentric sites.
+/// Central differences stay within the square for the admitted step range.
+/// The score uses no atlas and does not account for its unequal-edge pattern.
+pub fn score(_ c:model::Controls,_ step:f32)->(u32,f32,f32,u32) {
+    if !(step>0.0 && step<=0.001) {return (1,0.0,0.0,0)}
+    let net=surface::authored(c)
+    if net.patch_valid<0.5 {return (2,0.0,0.0,0)}
+    let mut minimum=1.0
+    let mut sum=0.0
+    let mut evaluations:u32=0
+    let count=model::child_count(c)
+    for index in 0 .. (count as usize) {
+        let t=model::child(c,index.downcast_truncate())
+        let a=model::corner(t.a,c.center_x,c.center_y)
+        let b=model::corner(t.b,c.center_x,c.center_y)
+        let d=model::corner(t.c,c.center_x,c.center_y)
+        for site in 0 .. 4 {
+            let wa=if site==0 {1.0/3.0} else if site==1 {0.96} else {0.02}
+            let wb=if site==0 {1.0/3.0} else if site==2 {0.96} else {0.02}
+            let wc=if site==0 {1.0/3.0} else if site==3 {0.96} else {0.02}
+            let x=a.x*wa+b.x*wb+d.x*wc
+            let y=a.y*wa+b.y*wb+d.y*wc
+            let left=surface::evaluate(net,model::Point {x:x-step,y:y})
+            let right=surface::evaluate(net,model::Point {x:x+step,y:y})
+            let bottom=surface::evaluate(net,model::Point {x:x,y:y-step})
+            let top=surface::evaluate(net,model::Point {x:x,y:y+step})
+            evaluations+=4
+            if !(left.valid && right.valid && bottom.valid && top.valid) {return (3,0.0,0.0,evaluations)}
+            let q=measure_differential(vec2f(a.x,a.y),vec2f(b.x,b.y),vec2f(d.x,d.y),
+                scale3(sub3(right.point,left.point),0.5/step),
+                scale3(sub3(top.point,bottom.point),0.5/step))
+            if !q.defined {return (4,0.0,0.0,evaluations)}
+            if q.quality<minimum {minimum=q.quality}
+            sum=sum+q.quality
+        }
+    }
+    (0,minimum,sum/number(count*4),evaluations)
+}

@@ -1201,6 +1201,39 @@ fn curved_atlas_mesh_quality_baseline() {
 }
 
 #[test]
+fn bounded_quad_candidate_ranking_probe() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot(&path);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=Store::new(&engine,());
+    let instance=Instance::new(&mut store,&module,&[]).unwrap();
+    let score=function::<(i32,f32,f32,f32,f32),(i32,f32,f32,i32)>(
+        &mut store,&instance,"quad_candidate_score");
+    let mesh=function::<(i32,i32,f32,f32,f32),
+        (i32,i32,i32,i32,i32,f32,f32,f32,f32,i32)>(
+        &mut store,&instance,"quad_candidate_mesh");
+    for (bulge,dx,dz) in [(0.6,0.0,0.0),(2.4,-0.5,0.7),(1.2,0.7,-0.5)] {
+        for id in 0..11 {
+            let start=std::time::Instant::now();
+            let a=score.call(&mut store,(id,bulge,dx,dz,1.0/1024.0)).unwrap();
+            let b=score.call(&mut store,(id,bulge,dx,dz,1.0/2048.0)).unwrap();
+            let score_ms=start.elapsed().as_secs_f64()*1000.0;
+            assert_eq!(a.0,0);
+            assert_eq!(b.0,0);
+            assert_eq!(a.3,if id<2 {32} else {64});
+            assert!(a.1.is_finite() && a.2.is_finite());
+            let actual=mesh.call(&mut store,(id,3,bulge,dx,dz)).unwrap();
+            assert_eq!((actual.0,actual.2,actual.3),(0,0,0));
+            eprintln!("CANDIDATE id={id} bulge={bulge} dx={dx} dz={dz} predicted={a:?} half_step={b:?} actual={actual:?} two_score_ms={score_ms:.3}");
+            // This test observes ranking failures; it does not assert that
+            // a coarse differential score predicts the actual fine minimum.
+        }
+    }
+}
+
+#[test]
 fn uniform_quad_layout_quality_cost_probe() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../ingots/validation/composition_oracle");

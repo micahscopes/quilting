@@ -2,7 +2,7 @@
 use core::marker::Copy
 use quilting_domain::Vec2F
 use fmath::abs
-use quilting_domain::{Vec3F,sub3}
+use quilting_domain::{Vec3F,sub3,add3,scale3}
 use super::{TangentTriangleMeasure3,measure_tangent_triangle3}
 
 /// Measure the straight rendered triangle, not a differential of its surface.
@@ -12,6 +12,14 @@ use super::{TangentTriangleMeasure3,measure_tangent_triangle3}
 /// sample that an aggregate audit may silently discard.
 pub fn measure3(_ a:Vec3F,_ b:Vec3F,_ c:Vec3F)->TangentTriangleMeasure3 {
     measure_tangent_triangle3(sub3(b,a),sub3(c,a))
+}
+/// Shape of a parameter triangle under one sampled surface differential.
+/// This is a local prediction, not a bound on the finite rendered triangle.
+pub fn measure_differential(_ a:Vec2F,_ b:Vec2F,_ c:Vec2F,
+    _ tangent_u:Vec3F,_ tangent_v:Vec3F)->TangentTriangleMeasure3 {
+    measure_tangent_triangle3(
+        add3(scale3(tangent_u,b.x-a.x),scale3(tangent_v,b.y-a.y)),
+        add3(scale3(tangent_u,c.x-a.x),scale3(tangent_v,c.y-a.y)))
 }
 pub struct TriangleQuality {pub signed_double_area:f32,pub mean_ratio:f32}
 impl Copy for TriangleQuality {}

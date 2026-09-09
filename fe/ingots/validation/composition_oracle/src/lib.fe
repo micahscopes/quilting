@@ -904,6 +904,11 @@ pub fn quality_laws()->bool {ingot::quality::laws()}
 pub fn uniform_quad_layout_quality(_ layout:u32,_ level:u32,_ bulge:f32,
     _ dx:f32,_ dz:f32)->(u32,u32,u32,u32,u32,f32,f32,f32,f32,u32) {
     if layout>3 || level<1 || level>8 {return (4,0,0,0,0,0.0,0.0,0.0,0.0,0)}
+    let c=uniform_quad_controls(layout,level,bulge,dx,dz)
+    ingot::quality::surface_audit_plan(c,if layout==3 {level} else {0})
+}
+fn uniform_quad_controls(_ layout:u32,_ level:u32,_ bulge:f32,
+    _ dx:f32,_ dz:f32)->composite_atlas::model::Controls {
     let mut c=initial_controls()
     c.surface_kind=2.0
     c.split=if layout==0 {0.0} else if layout==1 {1.0} else {2.0}
@@ -918,7 +923,17 @@ pub fn uniform_quad_layout_quality(_ layout:u32,_ level:u32,_ bulge:f32,
     c.midpoint_z=bulge
     c.p2x=c.p2x+dx
     c.p2z=c.p2z+dz
-    ingot::quality::surface_audit_plan(c,if layout==3 {level} else {0})
+    c
+}
+pub fn quad_candidate_score(_ id:u32,_ bulge:f32,_ dx:f32,_ dz:f32,_ step:f32)->(u32,f32,f32,u32) {
+    if id>10 {return (1,0.0,0.0,0)}
+    let c=ingot::layout_probe::candidate(uniform_quad_controls(0,3,bulge,dx,dz),id)
+    ingot::layout_probe::score(c,step)
+}
+pub fn quad_candidate_mesh(_ id:u32,_ level:u32,_ bulge:f32,_ dx:f32,_ dz:f32)->(u32,u32,u32,u32,u32,f32,f32,f32,f32,u32) {
+    if id>10 || level<1 || level>8 {return (4,0,0,0,0,0.0,0.0,0.0,0.0,0)}
+    let c=ingot::layout_probe::candidate(uniform_quad_controls(0,level,bulge,dx,dz),id)
+    ingot::quality::surface_audit(c)
 }
 pub fn curved_mesh_quality(_ kind:u32,_ split:f32,_ level:f32,_ measured:u32,
     _ bulge:f32,_ dx:f32,_ dz:f32)->(u32,u32,u32,u32,u32,f32,f32,f32,f32,u32) {
