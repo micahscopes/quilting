@@ -1519,7 +1519,8 @@ fn coherent_pending_for_split(_ split:f32)->bool {
     if let Completion::Accepted = handle.finish(lease,packed_triangle(k.a,k.b,k.c,42)) {} else {return false}
     // A pending request must still resolve when the relevant worker completes.
     state=composite_atlas::residency::refresh_completion(state)
-    if state.pending!=0 || state.scene.vertices==0 || state.required_words==0 {return false}
+    if state.pending!=0 || state.scene.vertices==0 || state.required_words==0
+        || state.scene.rendered_triangles*3!=state.scene.vertices {return false}
     let visible=state.scene
     let required=state.required_words
     let completed=state.completed
@@ -1532,7 +1533,8 @@ fn coherent_pending_for_split(_ split:f32)->bool {
     if let Completion::Accepted = handle.finish(background,packed_triangle(0,0,0,42)) {} else {return false}
     state=composite_atlas::residency::refresh_completion(state)
     if state.completed!=completed+1 || state.pending!=0 || state.status!=0 || state.required_words!=required
-        || state.scene.vertices!=visible.vertices || state.scene.draws[0].offset!=visible.draws[0].offset
+        || state.scene.vertices!=visible.vertices || state.scene.rendered_triangles!=visible.rendered_triangles
+        || state.scene.draws[0].offset!=visible.draws[0].offset
         || state.scene.draws[1].offset!=visible.draws[1].offset || state.scene.spacing_revision!=visible.spacing_revision
         || state.scene.active_center_x!=visible.active_center_x || state.scene.active_skews.spoke0!=visible.active_skews.spoke0
         || state.scene.resolution.spoke_0_segments!=visible.resolution.spoke_0_segments {return false}
@@ -1558,7 +1560,9 @@ fn coherent_pending_for_split(_ split:f32)->bool {
     state.controls.spoke_0_skew=4.0
     state.controls.boundary_reach=4.0
     state=composite_atlas::residency::refresh(state)
-    state.pending>0 && state.scene.vertices==before.vertices && state.scene.active_center_x==before.active_center_x
+    state.pending>0 && state.scene.vertices==before.vertices
+        && state.scene.rendered_triangles==before.rendered_triangles
+        && state.scene.active_center_x==before.active_center_x
         && state.scene.spacing_revision==before.spacing_revision && state.scene.active_bottom==before.active_bottom
         && state.scene.active_skews.spoke0==before.active_skews.spoke0
         && state.scene.active_boundary_reach==before.active_boundary_reach

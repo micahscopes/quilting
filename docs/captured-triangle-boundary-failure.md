@@ -67,3 +67,20 @@ not a triangle count, coverage proof or complete inventory of occluded folds.
 The verification page was returned to live mode; user working tabs were not
 modified. The missing area-on screenshot remains missing, not a passed visual
 comparison. Exact GPU boundary-position comparison remains unfinished.
+
+## Visible cost readout
+
+The viewer now exposes `rendered_triangles` from the retained draw snapshot,
+excluding handle geometry. It counts submitted triangles, including ones that
+are occluded, clipped or folded; it is not a count of visible pixels or valid
+triangles. Pending requests retain the old count along with the old mesh.
+
+Release `bounded_composite_draw_ranges` passed, including completed and pending
+requests and unrelated cache arrivals (263.34 seconds including compilation).
+Chrome verified 1432 triangles/4296 triangle vertices for the default fan and
+1212/3636 after switching to diagonal0–2, both pending0. Writing the readout was
+rejected without changing it. The verified bundle is 1,217,617 Wasm bytes and
+719,586 WGSL bytes across four shaders, served on port38332. Existing open tabs
+may need reloading to receive it. This is a diagnostic delivery, not a fold fix.
+
+Log: `/laboratory/quilting/scratch/composite-count-retention-20260909.log`.

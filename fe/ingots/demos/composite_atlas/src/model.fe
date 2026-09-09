@@ -60,6 +60,9 @@ pub struct Params {
     pub selected:Param,pub dragging:Param,pub wires:Param,
     /// Shape and sampled correspondence error are distinct measurements.
     pub color_view:Param,
+    /// Triangle-list primitives submitted by the retained visible scene,
+    /// excluding handles. Includes clipped/occluded or folded triangles.
+    pub rendered_triangles:Param,
     /// Magenta marks nonpositive parameter-space triangle orientation, not
     /// a back-facing surface. Hidden/occluded folds still require an audit.
     pub highlight_folds:Param,
@@ -153,6 +156,7 @@ pub const fn params() -> Params {
         color_view:Param::choice(options:ChoiceOptions::four(first:"surface shading",
             second:"triangle shape: 0 warm / 1 cool",third:"poor triangles: shape below 0.1",
             fourth:"sampled error: world units"),init:0.0),
+        rendered_triangles:Param::readout(ParamReadout::Integer),
         error_scale:Param::log(min:0.0001,max:10.0,init:0.1),
         highlight_folds:Param::toggle(init:false),
         bottom_lod:Param::int(min:0.0,max:8.0,init:4.0),

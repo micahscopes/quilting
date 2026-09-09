@@ -19,7 +19,7 @@ pub struct Scene {
     pub composition_warp:ingot::composition_warp::CompositionWarp,
     pub surface:ingot::surface::Net,
     pub draws:[ChildDraw;MAX_CHILDREN],pub draw_count:u32,
-    pub vertices:u32,pub active_center_x:f32,pub active_center_y:f32,
+    pub vertices:u32,pub rendered_triangles:u32,pub active_center_x:f32,pub active_center_y:f32,
     pub active_bottom:f32,pub active_right:f32,pub active_top:f32,pub active_left:f32,
     pub active_compensation:f32,pub active_automatic_density:f32,pub spacing_revision:u32,
     /// Interior placement reads this instead of composing edge laws inward.
@@ -44,7 +44,7 @@ pub fn empty_scene() -> Scene {
     Scene {draws:[empty_child();MAX_CHILDREN],draw_count:0,
         composition_warp:ingot::composition_warp::policy(initial_controls()),
         surface:ingot::surface::empty(),
-        vertices:0,active_center_x:0.5,active_center_y:0.5,
+        vertices:0,rendered_triangles:0,active_center_x:0.5,active_center_y:0.5,
         active_bottom:4.0,active_right:4.0,active_top:4.0,active_left:4.0,
         active_compensation:1.0,active_automatic_density:1.0,spacing_revision:0,
         domain_norm:quilting_patch::depth_field::QuadDomainNorm {
@@ -157,6 +157,7 @@ pub fn refresh(_ previous:State) -> State {
     }
     // Publish only complete compatible snapshots, never partially ready seams.
     if next.pending==0 && next.status==0 {
+        scene.rendered_triangles=scene.vertices/3
         scene.resolution=edge_resolution(next.controls,edges)
         next.scene=scene
         next.required_words=required
