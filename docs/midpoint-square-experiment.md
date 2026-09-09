@@ -82,3 +82,25 @@ The local logs in `/laboratory/quilting/scratch/midpoint-square-quality-20260908
 and its `-final-` counterpart retain the raw observations and verification.
 Elapsed call times include primary generation and diagnostics (including
 repeated primary builds per child), not a cached browser rendering benchmark.
+
+## Integration checkpoint — September 9
+
+The follow-up quality probe now records shape histograms and sampled centroid
+approximation error. For the strongly bent 272-triangle case, diagonal 02 has
+minimum shape 0.245792 and maximum sampled error about 0.22635; the midpoint
+layout has minimum shape 0.114884 and maximum sampled error about 0.17244.
+This is a useful tradeoff to expose, not a dominance result or an error bound.
+
+Product commit `8210e5d` replaces four named draw slots with a bounded sixteen-
+element child array and reuses the midpoint placement function in the oracle.
+The midpoint mode is **not yet exposed in the browser**. Its uniform-boundary
+admission must remain explicit; the legacy square's corner/center identifiers
+and ten boundary slots cannot be reused as if they described the midpoint mesh.
+
+Shared Fe commit `41632be6b` supports payload-free enum records in typed shader
+locals and pins Sonatina's structured raster-result fix. The release
+`authored_raster_e2e` suite passed all eight tests on the AMD Radeon 780M,
+including record selection through a bounded loop and enum-containing arrays.
+Evidence: `/laboratory/quilting/scratch/raster-structured-results-pin-20260909.log`.
+Those regression results do not establish that the full composite viewer builds
+or renders correctly; that remains the next integration gate.
