@@ -392,6 +392,31 @@ pub fn finite_triangle_measure(
         vec3f(ax,ay,az),vec3f(bx,by,bz),vec3f(cx,cy,cz))
     (q.area,q.quality,if q.defined {1} else {0})
 }
+pub fn midpoint_square_child(_ index:u32)->(u32,u32,u32) {
+    match quilting_atlas::midpoint_square::MidpointSquare::child(index) {
+        core::option::Option::Some(t)=>(t.a,t.b,t.c),_ => (99,99,99),
+    }
+}
+pub fn midpoint_square_vertex(_ index:u32)->(u32,u32) {
+    match quilting_atlas::midpoint_square::MidpointSquare::vertex(index) {
+        core::option::Option::Some(p)=>p,_ => (99,99),
+    }
+}
+pub fn midpoint_square_sample(_ level:u32,_ half:u32,_ index:u32)->u32 {
+    match quilting_atlas::midpoint_square::MidpointSquare::uniform(level) {
+        core::option::Option::Some(plan)=>match plan.master_sample(half!=0,index) {
+            core::option::Option::Some(sample)=>sample,_=>999,
+        },_=>999,
+    }
+}
+pub fn midpoint_square_primary(_ level:u32)->(u32,u32,u32,u32) {
+    match quilting_atlas::midpoint_square::MidpointSquare::uniform(level) {
+        core::option::Option::Some(plan)=>{
+            let p=plan.primary()
+            (p.key.a,p.key.b,p.key.c,quilting_atlas::edge_permutation_index(p.permutation))
+        },_ => (99,99,99,99),
+    }
+}
 
 pub fn tangent_triangle_area(
     _ bx: f32, _ by: f32, _ bz: f32, _ cx: f32, _ cy: f32, _ cz: f32,

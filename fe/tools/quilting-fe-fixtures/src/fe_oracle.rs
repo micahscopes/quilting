@@ -1072,6 +1072,58 @@ fn finite_triangle_wasm_measures_actual_vertices_and_rejects_invalid_samples() {
 }
 
 #[test]
+fn midpoint_square_has_exact_coverage_and_protected_master_intervals() {
+    let (mut store,instance)=instantiate();
+    let vertex=function::<i32,(i32,i32)>(&mut store,&instance,"midpoint_square_vertex");
+    let child=function::<i32,(i32,i32,i32)>(&mut store,&instance,"midpoint_square_child");
+    let sample=function::<(i32,i32,i32),i32>(&mut store,&instance,"midpoint_square_sample");
+    let primary=function::<i32,(i32,i32,i32,i32)>(&mut store,&instance,"midpoint_square_primary");
+    let remap_a=function::<(i32,f32,f32,f32),f32>(&mut store,&instance,"qb_remap_a");
+    let remap_b=function::<(i32,f32,f32,f32),f32>(&mut store,&instance,"qb_remap_b");
+    let remap_c=function::<(i32,f32,f32,f32),f32>(&mut store,&instance,"qb_remap_c");
+    let mut area=0;
+    let mut edges=std::collections::BTreeMap::new();
+    for i in 0..8 {
+        let (a,b,c)=child.call(&mut store,i).unwrap();
+        let pa=vertex.call(&mut store,a).unwrap();
+        let pb=vertex.call(&mut store,b).unwrap();
+        let pc=vertex.call(&mut store,c).unwrap();
+        let signed=(pb.0-pa.0)*(pc.1-pa.1)-(pb.1-pa.1)*(pc.0-pa.0);
+        assert_eq!(signed,1,"all eight triangles are CCW and have equal area");
+        area+=signed;
+        for (a,b) in [(a,b),(b,c),(c,a)] {
+            let entry=edges.entry((a.min(b),a.max(b))).or_insert((0,0));
+            entry.0+=1;
+            entry.1+=if a<b {1} else {-1};
+        }
+    }
+    assert_eq!(area,8); // Twice the area of the exact [0,2]^2 domain.
+    assert_eq!(edges.len(),16);
+    assert_eq!(edges.values().filter(|e|e.0==1).count(),8);
+    for (_, (uses,orientation)) in &edges {
+        assert!(*uses==1 || (*uses==2 && *orientation==0));
+    }
+    assert_eq!(child.call(&mut store,8).unwrap(),(99,99,99));
+    for level in [0,9] {assert_eq!(sample.call(&mut store,(level,0,0)).unwrap(),999);}
+    for level in 1..=8 {
+        let (a,b,c,permutation)=primary.call(&mut store,level).unwrap();
+        assert_eq!((a,b,c),(level-1,level-1,level));
+        // The canonical edge counts must return to the authored opposite-vertex
+        // order: diamond opposite A, half-master edges opposite B and C.
+        let args=(permutation,a as f32,b as f32,c as f32);
+        assert_eq!(remap_a.call(&mut store,args).unwrap(),level as f32);
+        assert_eq!(remap_b.call(&mut store,args).unwrap(),(level-1) as f32);
+        assert_eq!(remap_c.call(&mut store,args).unwrap(),(level-1) as f32);
+        let half=1<<(level-1);
+        for i in 0..=half {
+            assert_eq!(sample.call(&mut store,(level,0,i)).unwrap(),i);
+            assert_eq!(sample.call(&mut store,(level,1,i)).unwrap(),half+i);
+        }
+        assert_eq!(sample.call(&mut store,(level,0,half+1)).unwrap(),999);
+    }
+}
+
+#[test]
 fn configured_patch_variations_move_the_actual_surface() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../ingots/validation/composition_oracle");

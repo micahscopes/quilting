@@ -1,0 +1,45 @@
+//! Bounded eight-triangle experiment: four corner ears and a midpoint diamond.
+//! This recipe admits uniform master boundaries only. A midpoint must already
+//! be a master sample; LoD0 is rejected, never silently promoted.
+use core::marker::Copy
+use core::option::Option
+use super::{AtlasKey,CanonicalKey,canonicalize}
+use super::composition::ChildTriangle
+
+pub struct MidpointSquare {outer_level:u32}
+impl Copy for MidpointSquare {}
+impl MidpointSquare {
+    pub fn uniform(_ level:u32)->Option<Self> {
+        if level<1 || level>8 {Option::None} else {Option::Some(Self {outer_level:level})}
+    }
+    /// Exact coordinates on the integer [0,2] square; divide by two for UV.
+    pub fn vertex(_ id:u32)->Option<(u32,u32)> {
+        match id {
+            0=>Option::Some((0,0)),1=>Option::Some((2,0)),
+            2=>Option::Some((2,2)),3=>Option::Some((0,2)),
+            4=>Option::Some((1,0)),5=>Option::Some((2,1)),
+            6=>Option::Some((1,2)),7=>Option::Some((0,1)),
+            8=>Option::Some((1,1)),_=>Option::None,
+        }
+    }
+    pub fn child(_ index:u32)->Option<ChildTriangle> {
+        if index<4 {Option::Some(ChildTriangle {a:index,b:4+index,c:4+(index+3)%4})}
+        else if index<8 {
+            let i=index-4
+            Option::Some(ChildTriangle {a:8,b:4+i,c:4+(i+1)%4})
+        } else {Option::None}
+    }
+    /// Every child has the diamond edge opposite A. The other two edges have
+    /// half the master side length. Dyadic ceiling of sqrt(.5)*master_count
+    /// on the diamond edge is master_count; no independent side decisions.
+    pub fn primary(self)->CanonicalKey {
+        canonicalize(AtlasKey {a:self.outer_level,b:self.outer_level-1,c:self.outer_level-1})
+    }
+    /// A child outer half references an integer interval of its master edge.
+    /// Callers reverse the child's sample index first if its use is reversed.
+    pub fn master_sample(self,_ second_half:bool,_ sample:u32)->Option<u32> {
+        let half=1<<(self.outer_level-1)
+        if sample>half {Option::None}
+        else {Option::Some(sample+if second_half {half} else {0})}
+    }
+}
