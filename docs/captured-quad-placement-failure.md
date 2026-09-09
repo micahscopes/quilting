@@ -45,8 +45,10 @@ improve. Shape measures do not retain orientation, so they can reward folds.
 ## Scope and next gate
 
 The experiment uses the production Fe evaluator, placement and packed atlas
-generator, with deterministic seed 42. The browser pool uses seed 1: this is the
-same authored surface and policies, not a bit-identical replay of its triangles.
+generator, with deterministic seed42, also used by the browser worker. The1
+passed to `pool::create_jobs` is its epoch, not its seed; the earlier report
+misidentified it. This is the same authored surface and policies, not a
+bit-identical replay of the captured triangles at a different LoD.
 All runs here are at LoD 3/4, not the captured LoD 8. No extrapolated fold count
 for the browser mesh is claimed.
 

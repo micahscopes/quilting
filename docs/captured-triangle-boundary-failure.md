@@ -33,7 +33,7 @@ include reversed/degenerate parameter triangles and are a validity failure,
 even if average shape improves.
 
 These runs use the production Fe evaluator and packed primaries, seed 42,
-at LoDs 3/4. The captured browser used seed 1 at LoD7. Therefore this is a
+at LoDs 3/4. The captured browser used the same seed at LoD7. Therefore this is a
 reproduction of the authored geometry and placement policy, **not** an exact
 inventory of the triangles visible in the screenshot. Compilation plus the
 test took 170.30 seconds; that is not an atlas-generation benchmark.
@@ -51,7 +51,7 @@ validity gates. Preserve boundary ownership and use this case as a regression.
 
 ## Browser correlation
 
-The isolated verification page reproduced this triangle at outer LoD4, seed1,
+The isolated verification page reproduced this triangle at outer LoD4, seed42,
 pole margin 0.018001802, with the fold overlay enabled. Its served bundle reports
 1,215,097 Wasm bytes and 719,427 WGSL bytes across four shaders.
 `/laboratory/quilting/scratch/triangle-fold-overlay-area-off-20260909.png`
@@ -84,3 +84,7 @@ rejected without changing it. The verified bundle is 1,217,617 Wasm bytes and
 may need reloading to receive it. This is a diagnostic delivery, not a fold fix.
 
 Log: `/laboratory/quilting/scratch/composite-count-retention-20260909.log`.
+
+Seed note corrected September9: `TileWorker::generate` explicitly passes42
+(since commit8241e247). The argument1 to `pool::create_jobs` is the epoch, not
+the seed. Earlier versions of this report confused those values.
