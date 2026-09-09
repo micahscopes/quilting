@@ -48,6 +48,35 @@ impl CoarseMesh {
         let c=self.vertices[t.c as usize]
         Option::Some(FixedPoint2 {x:(a.x+b.x+c.x)/3,y:(a.y+b.y+c.y)/3})
     }
+    /// Replace a shared interior diagonal, only when the two faces form a
+    /// strictly convex quadrilateral. This admits connectivity, not quality:
+    /// the caller must compare surface-aware scores before publishing it.
+    pub fn flipped(self,_ first:u32,_ second:u32)->Option<Self> {
+        if first==second || first>=self.face_count || second>=self.face_count {return Option::None}
+        let a=self.faces[first as usize]
+        let b=self.faces[second as usize]
+        let av=[a.a,a.b,a.c]
+        let bv=[b.a,b.b,b.c]
+        for i in 0..3 {
+            for j in 0..3 {
+                let u=av[i]
+                let v=av[(i+1)%3]
+                if u==bv[(j+1)%3] && v==bv[j] {
+                    let c=av[(i+2)%3]
+                    let d=bv[(j+2)%3]
+                    let pc=self.vertices[c as usize]
+                    let pd=self.vertices[d as usize]
+                    if orientation(pc,pd,self.vertices[v as usize])<=0
+                        || orientation(pd,pc,self.vertices[u as usize])<=0 {return Option::None}
+                    let mut next=self
+                    next.faces[first as usize]=ChildTriangle {a:c,b:d,c:v}
+                    next.faces[second as usize]=ChildTriangle {a:d,b:c,c:u}
+                    return Option::Some(next)
+                }
+            }
+        }
+        Option::None
+    }
     /// No mutation on rejection. A boundary proposal is rejected rather than
     /// silently splitting a shared edge or leaving a hanging vertex.
     pub fn inserted(self,_ index:u32,_ p:FixedPoint2)->Option<Self> {

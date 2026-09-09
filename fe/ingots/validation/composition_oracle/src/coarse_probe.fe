@@ -20,6 +20,16 @@ pub fn coarse_counts(_ kind:u32,_ steps:u32)->(u32,u32) {
     let m=mesh(kind,steps)
     (m.vertex_count(),m.face_count())
 }
+pub fn coarse_flip(_ kind:u32,_ steps:u32,_ first:u32,_ second:u32)->(u32,u32,u32,u32,u32,u32,u32) {
+    match mesh(kind,steps).flipped(first,second) {
+        Option::None=>(0,0,0,0,0,0,0),
+        Option::Some(next)=>{
+            let a=next.face(first).unwrap()
+            let b=next.face(second).unwrap()
+            (1,a.a,a.b,a.c,b.a,b.b,b.c)
+        },
+    }
+}
 pub fn coarse_vertex(_ kind:u32,_ steps:u32,_ index:u32)->(u32,u32) {
     match mesh(kind,steps).vertex(index) {
         Option::Some(p)=>(p.x,p.y),Option::None=>(4294967295,4294967295)

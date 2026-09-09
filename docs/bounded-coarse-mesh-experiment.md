@@ -13,12 +13,20 @@ outer edges remain unchanged. Proposals on an edge, outside a face, outside the
 Q14 domain or beyond capacity are rejected without mutation. Counts and storage
 are private so callers cannot construct an inconsistent active range.
 
+`flipped(first, second)` replaces a shared interior diagonal only when the two
+faces form a strictly convex quadrilateral. It preserves vertices and face
+counts, rejects boundary/nonadjacent/invalid pairs and degenerate replacements,
+and uses the same exact orientation predicate as insertion. It makes no metric
+or quality decision; a caller must decide whether to accept the valid proposal.
+
 The composition oracle exposes snapshots after bounded centroid insertions.
 The independent Rust/Wasm check measures positive integer orientation, total
 area, opposite interior-edge incidence, unchanged outer edges, retained vertex
 coordinates, capacity and invalid-index behavior. These checks concern coarse
 parameter connectivity. They do not prove fine-mesh coverage after spacing
 correction, surface approximation, or absence of surface self-intersection.
+The same test independently classifies every ordered face pair in the snapshots
+for convexity and checks accepted flips' directed boundary, area and orientation.
 
 Run from `fe/tools/quilting-fe-fixtures`:
 

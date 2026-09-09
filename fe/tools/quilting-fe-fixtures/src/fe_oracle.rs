@@ -1300,6 +1300,8 @@ fn coarse_connectivity_preserves_coverage_boundaries_and_vertex_identity() {
     let vertex=function::<(i32,i32,i32),(i32,i32)>(&mut store,&instance,"coarse_vertex");
     let face=function::<(i32,i32,i32),(i32,i32,i32)>(&mut store,&instance,"coarse_face");
     let rejects=function::<(),i32>(&mut store,&instance,"coarse_rejects_invalid");
+    let flip=function::<(i32,i32,i32,i32),(i32,i32,i32,i32,i32,i32,i32)>(
+        &mut store,&instance,"coarse_flip");
     assert_eq!(rejects.call(&mut store,()).unwrap(),1);
     for kind in 0..3 {
         let mut previous=Vec::new();
@@ -1336,6 +1338,50 @@ fn coarse_connectivity_preserves_coverage_boundaries_and_vertex_identity() {
                 else {vec![(0,1),(0,3),(1,2),(2,3)]});
             assert_eq!(vertex.call(&mut store,(kind,steps,nv)).unwrap(),(-1,-1));
             assert_eq!(face.call(&mut store,(kind,steps,nf)).unwrap(),(-1,-1,-1));
+            // Independently classify every ordered face pair by its common
+            // edge and convexity. Check the replacement's directed boundary.
+            let faces=(0..nf).map(|i| {
+                let (a,b,c)=face.call(&mut store,(kind,steps,i)).unwrap();
+                [a,b,c]
+            }).collect::<Vec<_>>();
+            let orient=|a:i32,b:i32,c:i32| {
+                let (a,b,c)=(vertices[a as usize],vertices[b as usize],vertices[c as usize]);
+                i64::from(b.0-a.0)*i64::from(c.1-a.1)-i64::from(b.1-a.1)*i64::from(c.0-a.0)
+            };
+            for first in 0..=nf {
+                for second in 0..=nf {
+                    let mut expected=false;
+                    if first<nf && second<nf && first!=second {
+                        let (a,b)=(faces[first as usize],faces[second as usize]);
+                        let shared=a.iter().filter(|v|b.contains(v)).copied().collect::<Vec<_>>();
+                        if shared.len()==2 {
+                            let c=*a.iter().find(|v|!shared.contains(v)).unwrap();
+                            let d=*b.iter().find(|v|!shared.contains(v)).unwrap();
+                            let (left,right)=(orient(c,d,shared[0]),orient(c,d,shared[1]));
+                            expected=left!=0&&right!=0&&(left>0)!=(right>0);
+                        }
+                    }
+                    let r=flip.call(&mut store,(kind,steps,first,second)).unwrap();
+                    assert_eq!(r.0==1,expected,"kind={kind} steps={steps} pair={first},{second}");
+                    if !expected {continue;}
+                    let after=[[r.1,r.2,r.3],[r.4,r.5,r.6]];
+                    assert!(after.iter().all(|t|orient(t[0],t[1],t[2])>0));
+                    let before=[faces[first as usize],faces[second as usize]];
+                    let directed_boundary=|pair:[[i32;3];2]| {
+                        let mut balance=std::collections::BTreeMap::new();
+                        for t in pair {
+                            for (a,b) in [(t[0],t[1]),(t[1],t[2]),(t[2],t[0])] {
+                                *balance.entry((a.min(b),a.max(b))).or_insert(0)+=if a<b {1} else {-1};
+                            }
+                        }
+                        balance.retain(|_,v|*v!=0);
+                        balance
+                    };
+                    assert_eq!(directed_boundary(before),directed_boundary(after));
+                    assert_eq!(before.iter().map(|t|orient(t[0],t[1],t[2])).sum::<i64>(),
+                        after.iter().map(|t|orient(t[0],t[1],t[2])).sum::<i64>());
+                }
+            }
             previous=vertices;
         }
     }
