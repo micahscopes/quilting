@@ -48,3 +48,22 @@ raising LoD, or choosing the better average score fixes it.
 
 Continue the bounded surface-aware coarse-mesh experiment with actual fine-mesh
 validity gates. Preserve boundary ownership and use this case as a regression.
+
+## Browser correlation
+
+The isolated verification page reproduced this triangle at outer LoD4, seed1,
+pole margin 0.018001802, with the fold overlay enabled. Its served bundle reports
+1,215,097 Wasm bytes and 719,427 WGSL bytes across four shaders.
+`/laboratory/quilting/scratch/triangle-fold-overlay-area-off-20260909.png`
+was captured and visually inspected: the edge-only placement has a clearly
+visible magenta band across the upper part of the patch, alongside long skinny
+triangles. This confirms the overlay marks visible trouble before area correction.
+
+For area correction on, repeated Chrome MCP screenshot requests timed out.
+The existing surface freeze/live API did capture the rendered 1200×1200 canvas;
+a pixel census found 27 pixels with R>180, G<95, B>130 and nonzero alpha.
+All 1,440,000 pixels were opaque. This is only a threshold-based observation,
+not a triangle count, coverage proof or complete inventory of occluded folds.
+The verification page was returned to live mode; user working tabs were not
+modified. The missing area-on screenshot remains missing, not a passed visual
+comparison. Exact GPU boundary-position comparison remains unfinished.
