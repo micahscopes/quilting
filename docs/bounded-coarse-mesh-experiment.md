@@ -93,3 +93,39 @@ not a viewer default or a substitute for the coarse-mesh work.
 Log: `/laboratory/quilting/scratch/coarse-assembly-20260909-v2.log`.
 The full test took 213.13 seconds including compilation; this is not a runtime
 generation benchmark. The sampled centroid metric is not a global error bound.
+
+## Surface-guided flip predictor (September 9)
+
+`coarse_surface_guided_flips_compare_prediction_with_actual_atlas_mesh` passed
+eight release Fe/Wasm cases: both captured geometries, three/seven insertions,
+and finite-difference steps 0.001/0.0005. Each candidate scores the center and
+three corner-near sites in each affected coarse face. Differences follow the
+face's own two directions. A single bounded sweep accepts only strict geometric
+flips whose minimum sampled tangent-triangle shape improves. This is not an
+intrinsic Delaunay criterion or a production adaptation policy.
+
+The actual atlas mesh keeps the same triangle budget before/after each sweep.
+All eight runs have zero invalid samples, nonpositive UV triangles and invalid
+centroid-error evaluations. Both difference steps choose the same flips here;
+that is limited sensitivity evidence, not a general precision guarantee.
+
+| Captured geometry | Insertions | Triangles | Accepted flips | Mean shape before → after | Minimum shape before → after |
+|---|---:|---:|---:|---:|---:|
+| quad | 3 | 752 | 2 | 0.25832 → 0.22529 | 0.001807 → 0.001807 |
+| quad | 7 | 1504 | 5 | 0.27261 → 0.28565 | 0.001807 → 0.001807 |
+| triangle | 3 | 658 | 0 | 0.22481 → 0.22481 | 0.019674 → 0.019674 |
+| triangle | 7 | 1410 | 2 | 0.23731 → 0.24493 | 0.007297 → 0.010858 |
+
+The sampled maximum centroid error remains 2.92497 on the quad and 5.41988 on
+the triangle in every row. The predictor uses 352–1024 surface evaluations,
+including the initial/final score, excluding authoring and fine-mesh auditing.
+The run took 218.72 seconds including compilation, not planning time.
+
+**Disposition:** reject this score alone as the automatic policy. It can accept
+local changes while worsening aggregate fine-mesh shape, and does not resolve
+the worst approximation error. Retain it as a measured proposal generator for
+experiments. No new viewer default is justified. The next comparisons still
+need the best fixed candidate, surface-aware count allocation, relocation and
+shared arc-length boundary maps; these tests used frozen uniform UV spacing.
+
+Log: `/laboratory/quilting/scratch/coarse-metric-20260909-v2.log`.

@@ -1056,6 +1056,21 @@ pub fn coarse_capture_quality(_ triangle:bool,_ steps:u32,_ level:u32,_ legacy:b
     let s=r.summary
     (s.0,s.1,s.2,s.3,s.4,s.5,s.6,s.7,s.8,s.9,r.details.maximum_error)
 }
+pub fn coarse_flip_quality(_ triangle:bool,_ steps:u32,_ level:u32,_ epsilon:f32)
+    ->(u32,u32,u32,u32,f32,f32,u32,u32,u32,f32,f32,f32,u32) {
+    let c=if triangle {captured_triangle()} else {captured_asymmetric_quad()}
+    let net=composite_atlas::surface::authored(c)
+    let mesh=ingot::coarse_probe::mesh(if triangle {0} else {1},steps)
+    let before=ingot::coarse_metric::score(net,mesh,epsilon)
+    let probe=ingot::coarse_metric::improve(net,mesh,epsilon)
+    let after=ingot::coarse_metric::score(net,probe.mesh,epsilon)
+    let fine=ingot::quality::coarse_affine_report(c,probe.mesh,level)
+    let s=fine.summary
+    (if before.valid && after.valid && s.0==0 {0} else {1},
+        probe.candidates,probe.accepted,probe.evaluations+before.evaluations+after.evaluations,
+        before.minimum,after.minimum,s.1,s.2,s.3,s.5,s.6,fine.details.maximum_error,
+        fine.details.invalid_error_samples)
+}
 pub fn captured_triangle_quality(_ level:u32,_ area:bool)
     ->(u32,u32,u32,u32,u32,f32,f32,f32,f32,u32) {
     if level<1 || level>6 {return (4,0,0,0,0,0.0,0.0,0.0,0.0,0)}

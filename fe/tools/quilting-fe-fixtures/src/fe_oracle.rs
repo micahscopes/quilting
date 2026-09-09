@@ -1388,6 +1388,35 @@ fn coarse_connectivity_preserves_coverage_boundaries_and_vertex_identity() {
 }
 
 #[test]
+fn coarse_surface_guided_flips_compare_prediction_with_actual_atlas_mesh() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot(&path);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=Store::new(&engine,());
+    let instance=Instance::new(&mut store,&module,&[]).unwrap();
+    let baseline=function::<(i32,i32,i32,i32),(i32,i32,i32,i32,i32,f32,f32,f32,f32,i32,f32)>(
+        &mut store,&instance,"coarse_capture_quality");
+    let probe=function::<(i32,i32,i32,f32),(i32,i32,i32,i32,f32,f32,i32,i32,i32,f32,f32,f32,i32)>(
+        &mut store,&instance,"coarse_flip_quality");
+    for triangle in [0,1] {
+        for steps in [3,7] {
+            let b=baseline.call(&mut store,(triangle,steps,3,0)).unwrap();
+            for epsilon in [0.001_f32,0.0005] {
+                let r=probe.call(&mut store,(triangle,steps,3,epsilon)).unwrap();
+                assert_eq!((r.0,r.7,r.8,r.12),(0,0,0,0));
+                assert!(r.1<=32 && r.2<=r.1);
+                assert_eq!(r.6,b.1,"matched final triangle budget");
+                assert!(r.5+1e-6>=r.4,"accepted predictor must not regress: {} -> {}",r.4,r.5);
+                eprintln!("COARSE_METRIC triangle={triangle} steps={steps} epsilon={epsilon} baseline={b:?} counts={:?} predicted={:?} actual_min_mean_error={:?}",
+                    (r.0,r.1,r.2,r.3,r.6,r.7,r.8,r.12),(r.4,r.5),(r.9,r.10,r.11));
+            }
+        }
+    }
+}
+
+#[test]
 fn coarse_atlas_assembly_reuses_surface_audit_and_preserves_affine_baseline() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../ingots/validation/composition_oracle");

@@ -1,0 +1,72 @@
+//! Bounded predictor experiment, not a production remeshing policy.
+use core::marker::Copy
+use core::option::Option
+use quilting_atlas::coarse_mesh::CoarseMesh
+use composite_atlas::{placement,surface}
+use quilting_domain::{bary3f,sub3}
+use quilting_patch::measure_tangent_triangle3
+
+pub struct Score {pub valid:bool,pub minimum:f32,pub evaluations:u32}
+impl Copy for Score {}
+fn face(_ net:surface::Net,_ mesh:CoarseMesh,_ index:u32,_ epsilon:f32)->Score {
+    let mut result=Score {valid:true,minimum:1.0,evaluations:0}
+    // Differences follow the child's own basis, keeping all stencil points
+    // within its domain even beside a triangular patch's oblique boundary.
+    for site in 0..4 {
+        let a=if site==0 {1.0/3.0} else if site==1 {0.96} else {0.02}
+        let b=if site==0 {1.0/3.0} else if site==2 {0.96} else {0.02}
+        let c=1.0-a-b
+        let left=surface::evaluate(net,placement::coarse_affine_parameter(mesh,index,bary3f(a+epsilon,b-epsilon,c)).unwrap())
+        let right=surface::evaluate(net,placement::coarse_affine_parameter(mesh,index,bary3f(a-epsilon,b+epsilon,c)).unwrap())
+        let bottom=surface::evaluate(net,placement::coarse_affine_parameter(mesh,index,bary3f(a+epsilon,b,c-epsilon)).unwrap())
+        let top=surface::evaluate(net,placement::coarse_affine_parameter(mesh,index,bary3f(a-epsilon,b,c+epsilon)).unwrap())
+        result.evaluations+=4
+        let q=measure_tangent_triangle3(sub3(right.point,left.point),sub3(top.point,bottom.point))
+        // The common 2*epsilon factor cancels in the scale-free shape measure.
+        if !(left.valid && right.valid && bottom.valid && top.valid && q.defined) {
+            result.valid=false
+            return result
+        }
+        if q.quality<result.minimum {result.minimum=q.quality}
+    }
+    result
+}
+pub fn score(_ net:surface::Net,_ mesh:CoarseMesh,_ epsilon:f32)->Score {
+    let mut r=Score {valid:epsilon>0.0 && epsilon<=0.001,minimum:1.0,evaluations:0}
+    if !r.valid {return r}
+    for i in 0..(mesh.face_count() as usize) {
+        let q=face(net,mesh,i.downcast_unchecked(),epsilon)
+        r.evaluations+=q.evaluations
+        r.valid=r.valid && q.valid
+        if q.minimum<r.minimum {r.minimum=q.minimum}
+    }
+    r
+}
+pub struct FlipProbe {pub mesh:CoarseMesh,pub candidates:u32,pub accepted:u32,pub evaluations:u32}
+impl Copy for FlipProbe {}
+pub fn improve(_ net:surface::Net,_ initial:CoarseMesh,_ epsilon:f32)->FlipProbe {
+    let mut r=FlipProbe {mesh:initial,candidates:0,accepted:0,evaluations:0}
+    if !(epsilon>0.0 && epsilon<=0.001) {return r}
+    // One deterministic sweep, at most 32 geometrically admitted candidates.
+    // Hysteresis is a probe constant, not yet a measured production tolerance.
+    for a in 0..(initial.face_count() as usize) {
+        for b in (a+1)..(initial.face_count() as usize) {
+            let first:u32=a.downcast_unchecked()
+            let second:u32=b.downcast_unchecked()
+            let next=match r.mesh.flipped(first,second) {Option::Some(next)=>next,Option::None=>continue}
+            if r.candidates>=32 {return r}
+            r.candidates+=1
+            let before_a=face(net,r.mesh,first,epsilon)
+            let before_b=face(net,r.mesh,second,epsilon)
+            let after_a=face(net,next,first,epsilon)
+            let after_b=face(net,next,second,epsilon)
+            r.evaluations+=before_a.evaluations+before_b.evaluations+after_a.evaluations+after_b.evaluations
+            if before_a.valid && before_b.valid && after_a.valid && after_b.valid
+                && fmath::min(after_a.minimum,after_b.minimum)>fmath::min(before_a.minimum,before_b.minimum)+0.0001 {
+                r.mesh=next
+                r.accepted+=1
+            }
+        }
+    }
+    r
+}
