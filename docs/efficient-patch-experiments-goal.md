@@ -150,6 +150,15 @@ honest failure/cap behavior, not enormous hidden allocations.
 
 ## 6. Preserve and finish the broader programme
 
+Serve the example suite together through `fe web dev`, with stable independent
+URLs and a navigable index. Bound parallel compilation, isolate each example's
+build failures, keep successful examples available, and retain last-good builds
+on failed edits. A broken example must not prevent starting the suite. Rendering
+need only run in examples actually opened; do not launch every GPU workload just
+to make all examples available. Independent `fe web dev` processes with a small
+launcher/index are explicitly acceptable. Keep geometry and rendering in Fe;
+the launcher only supervises processes and reports their availability.
+
 Finish controllable arc-based tri/quad authoring, reliable lifecycle, responsive
 controls, URL/state replay, accurate artifact reporting, navigable Fe source and
 highlighted WGSL/readable Wasm in standalone AND gallery forms. Refresh existing
