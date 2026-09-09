@@ -88,7 +88,7 @@ fn length(_ a:Point,_ b:Point,_ width:f32,_ height:f32)->f32 {
     let y=(a.y-b.y)*height*0.5
     sqrt(x*x+y*y)
 }
-struct Varying {a:f32,b:f32,c:f32,signed:f32,light:f32}
+struct Varying {a:f32,b:f32,c:f32,signed:f32,light:f32,quality:f32}
 impl Copy for Varying {}
 struct HandleVarying {kind:f32,selected:f32}
 impl Copy for HandleVarying {}
@@ -141,13 +141,21 @@ actor CompositeAtlas uses (GpuProgram<WebGpuBackend>,SurfaceQuality<ResponsiveBa
         let p=if local==0 {a.clip} else if local==1 {b.clip} else {c.clip}
         let normal=normalize3_or(cross3(sub3(b.world,a.world),sub3(c.world,a.world)),vec3f(0.0,0.0,1.0),0.000000000001)
         let light=if self.scene.surface.kind<0.5 {1.0} else {0.45+0.55*abs(dot3(normal,ingot::surface::camera(self.controls).forward))}
+        // All three positions are already evaluated for the finite face normal.
+        // Identical per-face values at all vertices keep the heatmap independent
+        // of camera lighting and perspective interpolation.
+        let quality=if self.controls.color_view>0.5 {
+            let q=quilting_patch::triangle_quality::measure3(a.world,b.world,c.world)
+            if q.defined {q.quality} else {-1.0}
+        } else {1.0}
         RasterVertex {position:if a.valid && b.valid && c.valid {p} else {ClipPosition{x:2.0,y:2.0,z:0.0,w:1.0}},varying:Varying {
             a:if local==0 {area/max(length(b.screen,c.screen,width,height),0.00001)} else {0.0},
             b:if local==1 {area/max(length(c.screen,a.screen,width,height),0.00001)} else {0.0},
-            c:if local==2 {area/max(length(a.screen,b.screen,width,height),0.00001)} else {0.0},signed:signed,light:light}}
+            c:if local==2 {area/max(length(a.screen,b.screen,width,height),0.00001)} else {0.0},signed:signed,light:light,quality:quality}}
     }
     fn shade(self,v:Varying)->i32 uses (FragmentStage<Varying>) {
-        let fill=if v.signed<=0.0 && self.scene.surface.kind<0.5 {display_rgb(0.9,0.3,0.25)}
+        let fill=if self.controls.color_view>0.5 {ingot::diagnostics::shape_color(v.quality,self.controls.color_view>1.5)}
+            else if v.signed<=0.0 && self.scene.surface.kind<0.5 {display_rgb(0.9,0.3,0.25)}
             else {display_rgb(0.65*v.light,0.77*v.light,0.78*v.light)}
         let coverage=if self.controls.wires>0.5 {0.4+0.6*smoothstep(0.10,0.65,min(v.a,min(v.b,v.c)))} else {1.0}
         pack_rgba8(mix_display_rgb(display_rgb(0.08,0.12,0.16),fill,coverage))

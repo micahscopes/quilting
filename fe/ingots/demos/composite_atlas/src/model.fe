@@ -16,7 +16,7 @@ pub struct Controls {
     pub p2x:f32,pub p2y:f32,pub p2z:f32,pub p3x:f32,pub p3y:f32,pub p3z:f32,
     pub midpoint_x:f32,pub midpoint_y:f32,pub midpoint_z:f32,
     pub orbit_yaw:f32,pub orbit_pitch:f32,pub orbit_distance:f32,
-    pub selected:f32,pub dragging:f32,pub wires:f32,
+    pub selected:f32,pub dragging:f32,pub wires:f32,pub color_view:f32,
     pub bottom_lod:f32, pub right_lod:f32, pub top_lod:f32, pub left_lod:f32,
     pub automatic_interior:f32,
     /// Saved manual LoD exponent, used only when automatic interior selection is off.
@@ -57,6 +57,9 @@ pub struct Params {
     pub midpoint_x:Param,pub midpoint_y:Param,pub midpoint_z:Param,
     pub orbit_yaw:Param,pub orbit_pitch:Param,pub orbit_distance:Param,
     pub selected:Param,pub dragging:Param,pub wires:Param,
+    /// Fixed world-space shape scale: warm = skinny, cool = equilateral.
+    /// This does not measure surface approximation error or screen density.
+    pub color_view:Param,
     pub bottom_lod:Param, pub right_lod:Param, pub top_lod:Param, pub left_lod:Param,
     pub automatic_interior:Param, pub diagonal_lod:Param,
     pub spoke_0_lod:Param, pub spoke_1_lod:Param, pub spoke_2_lod:Param, pub spoke_3_lod:Param,
@@ -138,6 +141,8 @@ pub const fn params() -> Params {
         orbit_pitch:Param::range(min:-1.35,max:1.35,init:0.15),
         orbit_distance:Param::log(min:1.0,max:40.0,init:5.0),
         selected:Param::fixed(-1.0),dragging:Param::fixed(0.0),wires:Param::toggle(init:true),
+        color_view:Param::choice(options:ChoiceOptions::three(first:"surface shading",
+            second:"triangle shape: 0 warm / 1 cool",third:"poor triangles: shape below 0.1"),init:0.0),
         bottom_lod:Param::int(min:0.0,max:8.0,init:4.0),
         right_lod:Param::int(min:0.0,max:8.0,init:4.0),
         top_lod:Param::int(min:0.0,max:8.0,init:4.0),
@@ -208,7 +213,7 @@ pub fn initial_controls() -> Controls {
         p0x:-1.0,p0y:-0.7,p0z:0.0,p1x:1.0,p1y:-0.7,p1z:0.0,
         p2x:1.0,p2y:0.7,p2z:0.0,p3x:-1.0,p3y:0.7,p3z:0.0,
         midpoint_x:0.0,midpoint_y:-0.7,midpoint_z:0.6,
-        orbit_yaw:0.25,orbit_pitch:0.15,orbit_distance:5.0,selected:-1.0,dragging:0.0,wires:1.0,
+        orbit_yaw:0.25,orbit_pitch:0.15,orbit_distance:5.0,selected:-1.0,dragging:0.0,wires:1.0,color_view:0.0,
         automatic_interior:1.0,diagonal_lod:4.0,spoke_0_lod:4.0,spoke_1_lod:4.0,
         spoke_2_lod:4.0,spoke_3_lod:4.0,split:2.0,center_x:0.5,center_y:0.5,
         compensate_density:1.0,interior_enabled:1.0,interior_concentration:1.0,interior_twist:0.0,
