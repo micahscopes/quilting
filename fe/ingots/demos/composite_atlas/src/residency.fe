@@ -48,6 +48,31 @@ pub fn empty_scene() -> Scene {
             gram:ingot::surface::domain_gram(ingot::surface::empty())},
         density_placement:false,active_boundary_reach:1.0,active_skews:edge_skews(initial_controls()),interior:interior_policy(initial_controls()),resolution:EdgeResolution::empty()}
 }
+/// Geometry and placement policy without worker allocation or draw residency.
+/// Measurements and the renderer use the same immutable configuration. This
+/// value is not drawable until refresh attaches complete resident ranges.
+pub fn configured_scene(_ controls:Controls)->Scene {
+    let mut scene=empty_scene()
+    if controls.surface_kind>0.5 {scene.surface=ingot::surface::authored(controls)}
+    scene.active_center_x=controls.center_x
+    scene.active_center_y=controls.center_y
+    scene.active_bottom=controls.bottom_lod
+    scene.active_right=controls.right_lod
+    scene.active_top=controls.top_lod
+    scene.active_left=controls.left_lod
+    scene.active_compensation=controls.compensate_density
+    scene.active_automatic_density=controls.automatic_density
+    scene.domain_norm=quilting_patch::depth_field::QuadDomainNorm {
+        gram:ingot::surface::domain_gram(scene.surface)}
+    // Circular spacing claims do not extend to free-weight surfaces.
+    scene.density_placement=controls.automatic_density>0.5 && scene.surface.patch_valid>0.5
+        && scene.surface.circular_edges
+    scene.active_skews=edge_skews(controls)
+    scene.active_boundary_reach=controls.boundary_reach
+    scene.interior=interior_policy(controls)
+    scene.composition_warp=ingot::composition_warp::policy(controls)
+    scene
+}
 fn tile_key(_ a:u32,_ b:u32,_ c:u32) -> TileKey {TileKey {square:false,a:a,b:b,c:c,d:0}}
 fn primary_keys() -> [TileKey;CANONICAL_KEY_COUNT] {
     let mut keys=[TileKey {square:false,a:0,b:0,c:0,d:0};CANONICAL_KEY_COUNT]
@@ -89,27 +114,7 @@ pub fn refresh(_ previous:State) -> State {
         let k=request.primary.key
         handle.prioritize(tile_key(k.a,k.b,k.c))
     }
-    let mut scene=empty_scene()
-    if next.controls.surface_kind>0.5 {scene.surface=ingot::surface::authored(next.controls)}
-    scene.active_center_x=next.controls.center_x
-    scene.active_center_y=next.controls.center_y
-    scene.active_bottom=next.controls.bottom_lod
-    scene.active_right=next.controls.right_lod
-    scene.active_top=next.controls.top_lod
-    scene.active_left=next.controls.left_lod
-    scene.active_compensation=next.controls.compensate_density
-    scene.active_automatic_density=next.controls.automatic_density
-    scene.domain_norm=quilting_patch::depth_field::QuadDomainNorm {
-        gram:ingot::surface::domain_gram(scene.surface)}
-    // Measured spacing is a claim about circular edges, so it is withdrawn the
-    // moment free weights take the patch off the authoring family. The tables
-    // would otherwise report an arc length for a curve that is not an arc.
-    scene.density_placement=next.controls.automatic_density>0.5 && scene.surface.patch_valid>0.5
-        && scene.surface.circular_edges
-    scene.active_skews=edge_skews(next.controls)
-    scene.active_boundary_reach=next.controls.boundary_reach
-    scene.interior=interior_policy(next.controls)
-    scene.composition_warp=ingot::composition_warp::policy(next.controls)
+    let mut scene=configured_scene(next.controls)
     let old=previous.scene
     // Outer-side tables are derived from the authored denominator weights, so a
     // geometry edit invalidates them exactly as a LoD or skew edit does. Without
