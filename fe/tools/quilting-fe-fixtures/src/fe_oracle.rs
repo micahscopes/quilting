@@ -1072,6 +1072,51 @@ fn finite_triangle_wasm_measures_actual_vertices_and_rejects_invalid_samples() {
 }
 
 #[test]
+fn configured_patch_variations_move_the_actual_surface() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../ingots/validation/composition_oracle");
+    let wasm = compile_ingot(&path);
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &wasm).unwrap();
+    let mut store = Store::new(&engine, ());
+    let instance = Instance::new(&mut store, &module, &[]).unwrap();
+    let sample = function::<(i32,f32,f32,i32,f32,f32,f32,f32),f32>(
+        &mut store, &instance, "configured_surface_at");
+    for kind in [0, 1] {
+        for edge in [0.0_f32, 1.0] {
+            for bulge in [0.6_f32, 2.4] {
+                for (dx,dz) in [(0.6_f32,0.0_f32),(0.0,0.9),(-0.5,0.7)] {
+                    // The changed corner is an exact positional witness. Also
+                    // require an interior witness; a changed control alone is
+                    // not evidence that the evaluator used it.
+                    let corner = if kind == 0 { (0.0,1.0) } else { (1.0,1.0) };
+                    for (u,v) in [corner, (0.23,0.31)] {
+                        let mut displacement = 0.0_f64;
+                        for lane in 0..3 {
+                            let base = sample.call(&mut store,
+                                (kind,u,v,lane,bulge,0.0,0.0,edge)).unwrap();
+                            let moved = sample.call(&mut store,
+                                (kind,u,v,lane,bulge,dx,dz,edge)).unwrap();
+                            assert!(base.is_finite() && moved.is_finite()
+                                && base > -900.0 && moved > -900.0,
+                                "rejected witness: kind={kind} edge={edge} bulge={bulge} dx={dx} dz={dz}");
+                            let delta = f64::from(moved)-f64::from(base);
+                            displacement += delta*delta;
+                            if (u,v) == corner {
+                                let expected = if lane == 0 { dx } else if lane == 2 { dz } else { 0.0 };
+                                assert_close(delta as f32, expected, 2e-5, "active corner displacement");
+                            }
+                        }
+                        assert!(displacement > 1e-8,
+                            "ineffective variation: kind={kind} edge={edge} bulge={bulge} dx={dx} dz={dz} at ({u},{v})");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn sparse_clifford_patch_wasm_matches_the_independent_dense_oracle() {
     let (mut store, instance) = instantiate();
     let position_exports = [

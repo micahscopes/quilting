@@ -1330,3 +1330,30 @@ pub fn placement_seam_gap(_ bulge:f32,_ slot:u32,_ t:f32,_ eps:f32)->f32 {
     let dy=a.y-b.y
     fmath::sqrt(dx*dx+dy*dy)
 }
+
+/// `surface_at` with the authored net perturbed, so the shear survey can cover
+/// a family of patches rather than one symmetric default. The default corners
+/// are a symmetric rectangle, and a property measured only there may be an
+/// artifact of that symmetry. `dx` and `dz` move one corner, `edge` selects
+/// which boundary carries the authored arc.
+pub fn configured_surface_at(_ kind:u32,_ u:f32,_ v:f32,_ lane:u32,_ bulge:f32,
+    _ dx:f32,_ dz:f32,_ edge:f32)->f32 {
+    use composite_atlas::model::Point
+    let mut c=initial_controls()
+    c.surface_kind=if kind==0 {1.0} else {2.0}
+    c.midpoint_z=bulge
+    c.arc_edge=edge
+    // The triangle uses p0/p1/p3; p2 is only active for the quad.
+    // Move the final active corner rather than silently repeating the baseline.
+    if kind==0 {
+        c.p3x=c.p3x+dx
+        c.p3z=c.p3z+dz
+    } else {
+        c.p2x=c.p2x+dx
+        c.p2z=c.p2z+dz
+    }
+    let net=composite_atlas::surface::authored(c)
+    if net.patch_valid!=1.0 {return -999.0}
+    let p=composite_atlas::surface::evaluate(net,Point {x:u,y:v})
+    if !p.valid {-999.0} else if lane==0 {p.point.x} else if lane==1 {p.point.y} else {p.point.z}
+}
