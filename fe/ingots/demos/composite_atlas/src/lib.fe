@@ -68,18 +68,18 @@ fn point(_ atlas:Atlas,_ maps:Maps,_ scene:Scene,_ d:ChildDraw,_ index:u32)->Poi
     let p=remap_barycentric(d.permutation,bary3f(1.0-u-v,u,v))
     place(maps,scene,d,p)
 }
-struct Projected {clip:ClipPosition,screen:Point,world:Vec3F,valid:bool}
+struct Projected {clip:ClipPosition,screen:Point,uv:Point,world:Vec3F,valid:bool}
 fn projected(_ scene:Scene,_ c:Controls,_ p:Point)->Projected {
     if scene.surface.kind<0.5 {
         let scale=1.7*min(c.width,c.height)
         let x=(p.x-0.5)*scale/max(c.width,1.0)
         let y=(p.y-0.5)*scale/max(c.height,1.0)
-        Projected {clip:ClipPosition {x:x,y:y,z:0.0,w:1.0},screen:Point {x:x,y:y},world:vec3f(p.x,p.y,0.0),valid:true}
+        Projected {clip:ClipPosition {x:x,y:y,z:0.0,w:1.0},screen:Point {x:x,y:y},uv:p,world:vec3f(p.x,p.y,0.0),valid:true}
     } else {
         let sample=ingot::surface::evaluate(scene.surface,p)
         let result=project(ingot::surface::camera(c),sample.point)
         let w=if abs(result.clip.w)>0.000001 {result.clip.w} else {0.000001}
-        Projected {clip:result.clip,screen:Point {x:result.clip.x/w,y:result.clip.y/w},
+        Projected {clip:result.clip,screen:Point {x:result.clip.x/w,y:result.clip.y/w},uv:p,
             world:sample.point,valid:sample.valid}
     }
 }
@@ -144,7 +144,14 @@ actor CompositeAtlas uses (GpuProgram<WebGpuBackend>,SurfaceQuality<ResponsiveBa
         // All three positions are already evaluated for the finite face normal.
         // Identical per-face values at all vertices keep the heatmap independent
         // of camera lighting and perspective interpolation.
-        let quality=if self.controls.color_view>0.5 {
+        let quality=if self.controls.color_view>2.5 {
+            if self.scene.surface.kind<0.5 {0.0} else {
+                let uv=Point {x:(a.uv.x+b.uv.x+c.uv.x)/3.0,y:(a.uv.y+b.uv.y+c.uv.y)/3.0}
+                let exact=ingot::surface::evaluate(self.scene.surface,uv)
+                if exact.valid {quilting_patch::triangle_quality::centroid_correspondence_error(exact.point,a.world,b.world,c.world)}
+                else {-1.0}
+            }
+        } else if self.controls.color_view>0.5 {
             let q=quilting_patch::triangle_quality::measure3(a.world,b.world,c.world)
             if q.defined {q.quality} else {-1.0}
         } else {1.0}
@@ -154,7 +161,8 @@ actor CompositeAtlas uses (GpuProgram<WebGpuBackend>,SurfaceQuality<ResponsiveBa
             c:if local==2 {area/max(length(a.screen,b.screen,width,height),0.00001)} else {0.0},signed:signed,light:light,quality:quality}}
     }
     fn shade(self,v:Varying)->i32 uses (FragmentStage<Varying>) {
-        let fill=if self.controls.color_view>0.5 {ingot::diagnostics::shape_color(v.quality,self.controls.color_view>1.5)}
+        let fill=if self.controls.color_view>2.5 {ingot::diagnostics::error_color(v.quality,self.controls.error_scale)}
+            else if self.controls.color_view>0.5 {ingot::diagnostics::shape_color(v.quality,self.controls.color_view>1.5)}
             else if v.signed<=0.0 && self.scene.surface.kind<0.5 {display_rgb(0.9,0.3,0.25)}
             else {display_rgb(0.65*v.light,0.77*v.light,0.78*v.light)}
         let coverage=if self.controls.wires>0.5 {0.4+0.6*smoothstep(0.10,0.65,min(v.a,min(v.b,v.c)))} else {1.0}

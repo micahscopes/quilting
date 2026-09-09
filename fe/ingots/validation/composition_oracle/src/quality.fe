@@ -260,8 +260,7 @@ pub fn surface_report(_ c:model::Controls,_ midpoint_level:u32,_ detailed:bool)-
                 details.shapes=details.shapes.recorded(if valid && q.defined {q.quality} else {-1.0})
                 let center=model::Point {x:(uv[0].x+uv[1].x+uv[2].x)/3.0,y:(uv[0].y+uv[1].y+uv[2].y)/3.0}
                 let exact=composite_atlas::surface::evaluate(scene.surface,center)
-                let linear=quilting_domain::scale3(quilting_domain::add3(quilting_domain::add3(positions[0],positions[1]),positions[2]),1.0/3.0)
-                let error=quilting_domain::length3(quilting_domain::sub3(exact.point,linear))
+                let error=quilting_patch::triangle_quality::centroid_correspondence_error(exact.point,positions[0],positions[1],positions[2])
                 let next_sum=details.squared_error_sum+error*error
                 details.error_samples+=1
                 if !valid || !exact.valid || !(error>=0.0 && error-error==0.0 && next_sum-next_sum==0.0) {

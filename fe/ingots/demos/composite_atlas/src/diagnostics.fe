@@ -1,5 +1,15 @@
 //! Fixed-scale diagnostics: geometry facts, not camera lighting.
 use quilting_oklch::{DisplayRgb,display_rgb,oklch,three_stop_ramp,HuePath,to_display_rgb}
+use fmath::min
+
+/// Fixed-scale error display: cool at zero, warm at/above the authored scale.
+pub fn error_color(_ error:f32,_ scale:f32)->DisplayRgb {
+    if !(error>=0.0 && error-error==0.0 && scale>0.0 && scale-scale==0.0) {
+        return display_rgb(0.9,0.2,0.8)
+    }
+    to_display_rgb(three_stop_ramp(oklch(0.70,0.09,3.80),
+        oklch(0.80,0.08,1.55),oklch(0.69,0.14,0.55),min(error/scale,1.0),HuePath::Shorter))
+}
 
 /// q=4√3 area/sum(edge²); negative denotes an unadmitted measurement.
 /// Invalid visible geometry is magenta. Geometry rejected before rasterization

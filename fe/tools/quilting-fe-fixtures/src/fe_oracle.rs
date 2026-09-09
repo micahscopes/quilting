@@ -1222,6 +1222,8 @@ fn curved_mesh_distribution_and_approximation_probe() {
     let instance=Instance::new(&mut store,&module,&[]).unwrap();
     let laws=function::<(),i32>(&mut store,&instance,"shape_histogram_laws");
     assert_eq!(laws.call(&mut store,()).unwrap(),1);
+    let error_laws=function::<(),i32>(&mut store,&instance,"centroid_error_laws");
+    assert_eq!(error_laws.call(&mut store,()).unwrap(),1);
     let details=function::<(i32,i32,f32,f32,f32),
         (i32,i32,i32,i32,f32,f32,i32,i32,f32,f32,f32,f32,i32)>(
         &mut store,&instance,"uniform_quad_mesh_details");

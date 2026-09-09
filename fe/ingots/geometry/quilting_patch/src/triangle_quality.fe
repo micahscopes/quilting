@@ -2,7 +2,7 @@
 use core::marker::Copy
 use quilting_domain::Vec2F
 use fmath::abs
-use quilting_domain::{Vec3F,sub3,add3,scale3}
+use quilting_domain::{Vec3F,sub3,add3,scale3,length3}
 use super::{TangentTriangleMeasure3,measure_tangent_triangle3}
 
 /// Measure the straight rendered triangle, not a differential of its surface.
@@ -12,6 +12,12 @@ use super::{TangentTriangleMeasure3,measure_tangent_triangle3}
 /// sample that an aggregate audit may silently discard.
 pub fn measure3(_ a:Vec3F,_ b:Vec3F,_ c:Vec3F)->TangentTriangleMeasure3 {
     measure_tangent_triangle3(sub3(b,a),sub3(c,a))
+}
+/// Distance between the analytical UV-centroid sample and the straight face's
+/// centroid in one Euclidean chart. Not nearest-surface distance or an error
+/// bound. The caller admits the samples and rejects nonfinite arithmetic.
+pub fn centroid_correspondence_error(_ exact:Vec3F,_ a:Vec3F,_ b:Vec3F,_ c:Vec3F)->f32 {
+    length3(sub3(exact,scale3(add3(add3(a,b),c),1.0/3.0)))
 }
 /// Shape of a parameter triangle under one sampled surface differential.
 /// This is a local prediction, not a bound on the finite rendered triangle.

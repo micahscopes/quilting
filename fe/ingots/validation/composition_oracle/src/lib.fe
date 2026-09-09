@@ -906,6 +906,18 @@ pub fn shape_histogram_laws()->bool {
     h.admitted==5 && h.rejected==1 && h.bins[0]==2 && h.bins[1]==1 && h.bins[19]==2
         && h.rank_lower(1)==0.0 && h.rank_lower(3)==0.05 && h.rank_lower(5)==0.95
 }
+pub fn centroid_error_laws()->bool {
+    use quilting_domain::vec3f
+    use quilting_patch::triangle_quality::centroid_correspondence_error
+    let a=vec3f(0.0,0.0,0.0)
+    let b=vec3f(3.0,0.0,0.0)
+    let c=vec3f(0.0,3.0,0.0)
+    let exact=vec3f(1.0,1.0,2.0)
+    centroid_correspondence_error(vec3f(1.0,1.0,0.0),a,b,c)==0.0
+        && centroid_correspondence_error(exact,a,b,c)==2.0
+        && centroid_correspondence_error(exact,c,b,a)==2.0
+        && centroid_correspondence_error(vec3f(3.0,3.0,6.0),a,vec3f(9.0,0.0,0.0),vec3f(0.0,9.0,0.0))==6.0
+}
 /// Shape ranks are lower ends of .05 bins. Error is centroid correspondence
 /// distance in world units, not nearest-surface or a Hausdorff bound.
 pub fn uniform_quad_mesh_details(_ layout:u32,_ level:u32,_ bulge:f32,

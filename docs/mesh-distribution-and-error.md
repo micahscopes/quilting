@@ -43,7 +43,17 @@ surface evaluations per emitted triangle. This is measurement-integrity
 coverage, not a quality-improvement gate.
 
 Raw log: `/laboratory/quilting/scratch/mesh-distribution-approximation-20260908.log`.
-These diagnostics are not yet wired into the browser panel or worst-cell overlay.
+The aggregate diagnostics are not yet wired into the browser panel or worst-cell
+overlay. The sampled-error color mode is implemented and browser-checked. Its
+`error_scale` is an explicit world-unit ceiling for the
+color ramp, kept fixed across comparisons; colors do not normalize themselves to
+the current mesh. Zero error is cool; error at/above the scale is warm; invalid
+measurements are magenta. Flat affine composition has zero correspondence error.
+
+The optional error mode adds one surface evaluation per vertex invocation (the
+three invocations of a face currently repeat its diagnostic). Ordinary shading
+does not take that branch. This is a visualization, not a replacement for the
+edit-time aggregate audit. No frame-performance improvement is claimed.
 
 ## September 8 result
 
@@ -52,6 +62,9 @@ compilation and audit work; this is not a browser planning-time benchmark.
 All cases had zero invalid correspondence samples. The separate histogram test
 also verifies that zero/out-of-range ranks and a rejected NaN sample trap.
 This required the target-neutral assertion fix on shared mb2, `92a1812eb`.
+After extracting the shared centroid-error helper used by both audit and viewer,
+the 24-case test passed again in 117.66 seconds, including exact zero, scale and
+winding checks. Log: `/laboratory/quilting/scratch/mesh-error-shared-helper-20260908.log`.
 
 At 272 triangles on the strongly asymmetric fixture (bulge 2.4, dx -0.5,
 dz 0.7), diagonal 0–2 and the midpoint square share the same fifth-percentile
@@ -66,3 +79,16 @@ fifth-percentile bin to [0.45, 0.50), versus [0.35, 0.40) and [0.40, 0.45)
 for the diagonals. At level 4 the methods have different counts and this
 advantage does not simply persist. Retain explicit quality/cost comparisons;
 do not turn these small-fixture results into a universal automatic selector.
+
+## Served color mode
+
+Chrome MCP verified the live canvas on port 38331, manifest
+`assets/fe-render-ba1962679921ff2d.json`: 1,214,926 Wasm bytes and 630,875 WGSL
+bytes across four shaders. On the same default curved quad, changing only the
+error scale from 0.1 to 0.001 changes the predominantly cool mesh to a warm one
+with visible per-triangle variation; geometry and resolved spoke counts remain
+unchanged, pending is zero. Live-canvas captures were visually inspected:
+`/laboratory/quilting/scratch/error-heatmap-scale01-20260908.png` and
+`/laboratory/quilting/scratch/error-heatmap-scale0001-20260908.png`.
+This checks rendered response, not pixel-perfect agreement with every oracle
+sample. Full pathological capture/replay and worst-cell overlays remain pending.
