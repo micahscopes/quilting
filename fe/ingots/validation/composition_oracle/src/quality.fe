@@ -5,7 +5,7 @@ use quilting_atlas::edge_permutation_index
 use quilting_atlas_wasm::packed_triangle
 use quilting_patch::sampling_warp::{InverseCumulativeMap,OrientedIntervalMap,ProjectiveIntervalBias,TriangleEdgeMaps}
 use quilting_patch::triangle_quality::measure
-use quilting_domain::{bary3f,vec2f}
+use quilting_domain::{Bary3F,bary3f,vec2f,vec3f}
 use quilting_qb::{remap_barycentric,permutation_parity}
 use fmath::sqrt
 extern {const fn __f32_from_i32(_:i32)->f32}
@@ -13,6 +13,18 @@ fn number(_ v:u32)->f32 {__f32_from_i32(v.downcast_unchecked())}
 fn word(_ base:BrowserPtr<u32>,_ index:u32)->u32 {
     let p:BrowserPtr<u32>=BrowserPtr::from_u32(base.address()+index*4)
     p.read()
+}
+/// Decode the renderer's packed indices, including odd-permutation winding.
+fn triangle_corner(_ base:BrowserPtr<u32>,_ points:u32,_ permutation:u32,
+    _ triangle:usize,_ lane:usize)->Bary3F {
+    let local=if lane==0 || permutation_parity(permutation)>0.0 {lane} else {3-lane}
+    let index:u32=(triangle*3+local).downcast_truncate()
+    let id=if points<=65536 {(word(base,points+index/2)>>((index%2)*16))&65535}
+        else {word(base,points+index)}
+    let packed=word(base,id)
+    let u=number(packed&65535)/16384.0
+    let v=number(packed>>16)/16384.0
+    remap_barycentric(permutation,bary3f(1.0-u-v,u,v))
 }
 pub fn laws()->bool {
     let maps=TriangleEdgeMaps {a:ProjectiveIntervalBias {strength:0.25},b:ProjectiveIntervalBias {strength:4.0},c:ProjectiveIntervalBias {strength:2.0}}
@@ -98,14 +110,7 @@ pub fn audit_with_locality(_ case:u32,_ compensation:u32,_ reach:f32)->(u32,u32,
         for triangle in 0 .. (tile.triangles as usize) {
             let mut points=[vec2f(0.0,0.0);3]
             for lane in 0 .. 3 {
-                let local=if lane==0 || permutation_parity(d.permutation)>0.0 {lane} else {3-lane}
-                let index:u32=(triangle*3+local).downcast_truncate()
-                let id=if tile.points<=65536 {(word(tile.words.ptr,tile.points+index/2)>>((index%2)*16))&65535}
-                    else {word(tile.words.ptr,tile.points+index)}
-                let packed=word(tile.words.ptr,id)
-                let u=number(packed&65535)/16384.0
-                let v=number(packed>>16)/16384.0
-                let p=remap_barycentric(d.permutation,bary3f(1.0-u-v,u,v))
+                let p=triangle_corner(tile.words.ptr,tile.points,d.permutation,triangle,lane)
                 let placed=placement::place_with_locality(scene,d,p,lab,lbc,lca,ProjectiveIntervalBias {strength:reach})
                 points[lane]=vec2f(placed.x,placed.y)
             }
@@ -139,4 +144,70 @@ pub fn audit_with_locality(_ case:u32,_ compensation:u32,_ reach:f32)->(u32,u32,
     let variance=mass_squared/number(count)-mean_mass*mean_mass
     (0,count,folds,poor,minimum,sum/number(count),signed_area,absolute_area,
         metric_shape/number(count),if variance>0.0 {sqrt(variance)/mean_mass} else {0.0})
+}
+
+/// Actual finite curved mesh; status, count, invalid, UV folds, poor shape,
+/// minimum/mean admitted shape, admitted area CV/total, surface evaluations.
+/// This is a bounded diagnostic, not a coverage proof or a per-frame renderer.
+pub fn surface_audit(_ c:model::Controls)->(u32,u32,u32,u32,u32,f32,f32,f32,f32,u32) {
+    let scene=residency::configured_scene(c)
+    if scene.surface.patch_valid<0.5 {return (1,0,0,0,0,0.0,0.0,0.0,0.0,0)}
+    let edges=model::edge_lods(c)
+    let mut count:u32=0
+    let mut invalid:u32=0
+    let mut folds:u32=0
+    let mut poor:u32=0
+    let mut minimum:f32=1.0
+    let mut sum:f32=0.0
+    let mut area_sum:f32=0.0
+    let mut area_squares:f32=0.0
+    for child in 0 .. (model::child_count(c) as usize) {
+        let request=model::child(c,child.downcast_truncate()).resolve(edges).unwrap()
+        let k=request.primary.key
+        let tile=packed_triangle(k.a,k.b,k.c,42)
+        if tile.status!=0 {return (2,count,invalid,folds,poor,0.0,0.0,0.0,0.0,count*3)}
+        let mut d=residency::empty_child()
+        d.corner_a=request.triangle.a
+        d.corner_b=request.triangle.b
+        d.corner_c=request.triangle.c
+        d.boundaries=request.boundaries
+        d.permutation=edge_permutation_index(request.primary.permutation)
+        let ab=quilting_atlas::composition::BoundaryUse::between(d.corner_a,d.corner_b)
+        let bc=quilting_atlas::composition::BoundaryUse::between(d.corner_b,d.corner_c)
+        let ca=quilting_atlas::composition::BoundaryUse::between(d.corner_c,d.corner_a)
+        let lab=OrientedIntervalMap {law:InverseCumulativeMap {samples:model::edge_cdf(c,ab.low,ab.high)},reversed:ab.reversed}
+        let lbc=OrientedIntervalMap {law:InverseCumulativeMap {samples:model::edge_cdf(c,bc.low,bc.high)},reversed:bc.reversed}
+        let lca=OrientedIntervalMap {law:InverseCumulativeMap {samples:model::edge_cdf(c,ca.low,ca.high)},reversed:ca.reversed}
+        for triangle in 0 .. (tile.triangles as usize) {
+            let mut uv=[vec2f(0.0,0.0);3]
+            let mut positions=[vec3f(0.0,0.0,0.0);3]
+            let mut valid=true
+            for lane in 0 .. 3 {
+                let p=triangle_corner(tile.words.ptr,tile.points,d.permutation,triangle,lane)
+                let placed=placement::place(scene,d,p,lab,lbc,lca)
+                uv[lane]=vec2f(placed.x,placed.y)
+                let sample=composite_atlas::surface::evaluate(scene.surface,placed)
+                positions[lane]=sample.point
+                valid=valid && sample.valid
+            }
+            count+=1
+            // NaN orientation also fails this admission, instead of vanishing.
+            if !(measure(uv[0],uv[1],uv[2]).signed_double_area>0.0) {folds+=1}
+            let q=quilting_patch::triangle_quality::measure3(positions[0],positions[1],positions[2])
+            if !valid || !q.defined {invalid+=1}
+            else {
+                if q.quality<0.1 {poor+=1}
+                if q.quality<minimum {minimum=q.quality}
+                sum=sum+q.quality
+                area_sum=area_sum+q.area
+                area_squares=area_squares+q.area*q.area
+            }
+        }
+    }
+    let admitted=count-invalid
+    if admitted==0 {return (3,count,invalid,folds,poor,0.0,0.0,0.0,0.0,count*3)}
+    let mean_area=area_sum/number(admitted)
+    let variance=area_squares/number(admitted)-mean_area*mean_area
+    (0,count,invalid,folds,poor,minimum,sum/number(admitted),
+        if variance>0.0 {sqrt(variance)/mean_area} else {0.0},area_sum,count*3)
 }

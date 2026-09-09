@@ -1117,6 +1117,38 @@ fn configured_patch_variations_move_the_actual_surface() {
 }
 
 #[test]
+fn curved_atlas_mesh_quality_baseline() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../ingots/validation/composition_oracle");
+    let wasm = compile_ingot(&path);
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &wasm).unwrap();
+    let mut store = Store::new(&engine, ());
+    let instance = Instance::new(&mut store, &module, &[]).unwrap();
+    let audit = function::<(i32,f32,f32,i32,f32,f32,f32),
+        (i32,i32,i32,i32,i32,f32,f32,f32,f32,i32)>(
+        &mut store, &instance, "curved_mesh_quality");
+    for (kind,split) in [(0,0.0_f32),(1,0.0),(1,1.0),(1,2.0)] {
+        for (bulge,dx,dz) in [(0.6_f32,0.0_f32,0.0_f32),(2.4,-0.5,0.7)] {
+            for measured in [0,1] {
+                let start = std::time::Instant::now();
+                let (status,count,invalid,folds,poor,min,mean,cv,area,evals) = audit.call(
+                    &mut store,(kind,split,3.0,measured,bulge,dx,dz)).unwrap();
+                eprintln!("CURVED_MESH kind={kind} split={split} measured={measured} bulge={bulge} dx={dx} dz={dz} status={status} count={count} invalid={invalid} uv_folds={folds} poor={poor} min={min:.6} mean={mean:.6} area_cv={cv:.6} area={area:.6} vertex_evals={evals} elapsed_ms={:.1}", start.elapsed().as_secs_f64()*1000.0);
+                assert_eq!(status, 0, "fixture/build failure, not a quality result");
+                assert!(count > 0 && invalid >= 0 && invalid <= count);
+                assert!(folds >= 0 && folds <= count && poor >= 0 && poor <= count-invalid);
+                assert_eq!(evals, 3*count);
+                assert!(min.is_finite() && mean.is_finite() && cv.is_finite() && area.is_finite());
+                assert!(min >= 0.0 && mean >= min && mean <= 1.000001 && cv >= 0.0 && area > 0.0);
+                // Pathology quality is observed, not given a permissive "pass"
+                // threshold. These assertions only check measurement integrity.
+            }
+        }
+    }
+}
+
+#[test]
 fn sparse_clifford_patch_wasm_matches_the_independent_dense_oracle() {
     let (mut store, instance) = instantiate();
     let position_exports = [

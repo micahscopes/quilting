@@ -900,6 +900,22 @@ pub fn geometric_patch_view_laws()->bool {
     true
 }
 pub fn quality_laws()->bool {ingot::quality::laws()}
+pub fn curved_mesh_quality(_ kind:u32,_ split:f32,_ level:f32,_ measured:u32,
+    _ bulge:f32,_ dx:f32,_ dz:f32)->(u32,u32,u32,u32,u32,f32,f32,f32,f32,u32) {
+    let mut c=initial_controls()
+    c.surface_kind=if kind==0 {1.0} else {2.0}
+    c.split=split
+    c.bottom_lod=level
+    c.right_lod=level
+    c.top_lod=level
+    c.left_lod=level
+    c.automatic_density=if measured==0 {0.0} else {1.0}
+    c.midpoint_z=bulge
+    if kind==0 {c.p3x=c.p3x+dx
+        c.p3z=c.p3z+dz} else {c.p2x=c.p2x+dx
+        c.p2z=c.p2z+dz}
+    ingot::quality::surface_audit(c)
+}
 pub fn quality_case(_ case:u32,_ compensation:u32)->(u32,u32,u32,u32,f32,f32,f32,f32,f32,f32) {
     ingot::quality::audit(case,compensation)
 }
