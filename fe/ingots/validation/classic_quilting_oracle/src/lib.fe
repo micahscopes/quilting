@@ -383,6 +383,16 @@ pub fn tangent_triangle_quality(
     measure_tangent_triangle3(vec3f(bx, by, bz), vec3f(cx, cy, cz)).quality
 }
 
+/// Batched observations of one finite triangle; no repeated surface evaluation.
+pub fn finite_triangle_measure(
+    _ ax:f32,_ ay:f32,_ az:f32,_ bx:f32,_ by:f32,_ bz:f32,
+    _ cx:f32,_ cy:f32,_ cz:f32,
+)->(f32,f32,i32) {
+    let q=quilting_patch::triangle_quality::measure3(
+        vec3f(ax,ay,az),vec3f(bx,by,bz),vec3f(cx,cy,cz))
+    (q.area,q.quality,if q.defined {1} else {0})
+}
+
 pub fn tangent_triangle_area(
     _ bx: f32, _ by: f32, _ bz: f32, _ cx: f32, _ cy: f32, _ cz: f32,
 ) -> f32 {

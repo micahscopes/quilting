@@ -1041,6 +1041,37 @@ fn tangent_triangle_wasm_detects_flattening_and_preserves_scale() {
 }
 
 #[test]
+fn finite_triangle_wasm_measures_actual_vertices_and_rejects_invalid_samples() {
+    let (mut store, instance) = instantiate();
+    type Vertices = (f32, f32, f32, f32, f32, f32, f32, f32, f32);
+    let measure = function::<Vertices, (f32, f32, i32)>(
+        &mut store, &instance, "finite_triangle_measure",
+    );
+    // Translation, rotation (axis permutation), winding and uniform scale.
+    for scale in [0.001_f32, 1.0, 1000.0] {
+        for reversed in [false, true] {
+            let a = [2.0 * scale, -3.0 * scale, 5.0 * scale];
+            let b = [a[0], a[1] + scale, a[2]];
+            let c = [a[0], a[1], a[2] + 2.0 * scale];
+            let (b, c) = if reversed { (c, b) } else { (b, c) };
+            let (area, quality, defined) = measure.call(&mut store,
+                (a[0],a[1],a[2],b[0],b[1],b[2],c[0],c[1],c[2])).unwrap();
+            assert_eq!(defined, 1);
+            assert!((f64::from(area) / f64::from(scale).powi(2) - 1.0).abs() < 2e-6);
+            assert_close(quality, (2.0 * 3.0_f64.sqrt() / 5.0) as f32, 2e-6,
+                "finite triangle shape");
+        }
+    }
+    for input in [
+        (0.,0.,0.,1.,0.,0.,2.,0.,0.),
+        (f32::NAN,0.,0.,1.,0.,0.,0.,1.,0.),
+        (0.,0.,0.,f32::INFINITY,0.,0.,0.,1.,0.),
+    ] {
+        assert_eq!(measure.call(&mut store, input).unwrap(), (0.,0.,0));
+    }
+}
+
+#[test]
 fn sparse_clifford_patch_wasm_matches_the_independent_dense_oracle() {
     let (mut store, instance) = instantiate();
     let position_exports = [

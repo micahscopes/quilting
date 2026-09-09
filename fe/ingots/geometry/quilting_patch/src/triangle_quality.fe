@@ -1,7 +1,18 @@
-//! Dimensionless planar triangle shape, independent of sampling/backend.
+//! Finite triangle shape, independent of sampling/backend.
 use core::marker::Copy
 use quilting_domain::Vec2F
 use fmath::abs
+use quilting_domain::{Vec3F,sub3}
+use super::{TangentTriangleMeasure3,measure_tangent_triangle3}
+
+/// Measure the straight rendered triangle, not a differential of its surface.
+/// The three vertices must already be in the same admitted Euclidean chart.
+/// Winding/coverage remain separate checks: unsigned 3D area cannot detect folds.
+/// `defined=false` reports degeneracy or unrepresentable arithmetic, not a
+/// sample that an aggregate audit may silently discard.
+pub fn measure3(_ a:Vec3F,_ b:Vec3F,_ c:Vec3F)->TangentTriangleMeasure3 {
+    measure_tangent_triangle3(sub3(b,a),sub3(c,a))
+}
 pub struct TriangleQuality {pub signed_double_area:f32,pub mean_ratio:f32}
 impl Copy for TriangleQuality {}
 /// Mean ratio is one for an equilateral triangle and zero for degeneracy.
