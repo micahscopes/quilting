@@ -52,3 +52,44 @@ cargo test --release --lib --features fe-oracle \
 Centroid insertion is currently a connectivity test stimulus, **not** the
 surface-aware sampling algorithm. No boundary is subdivided in this first
 slice. Later boundary subdivision must reference existing shared master samples.
+
+## Actual atlas assembly gate (September 9)
+
+`coarse_atlas_assembly_reuses_surface_audit_and_preserves_affine_baseline`
+passes in release Fe/Wasm. Arbitrary coarse plans now enter the existing packed
+atlas decoder, exact surface evaluator, finite-triangle statistics and sampled
+centroid-error path. No second geometry implementation or renderer is involved.
+
+The baseline uses uniform parameter-space edge sampling, **not uniform surface
+arc length**. Its legacy comparator disables automatic interior resolution and
+freezes the diagonal to the same exponent: otherwise equal outer counts selected
+68 versus 48 triangles in the initial LoD2 quad comparison. With this corrected,
+the unchanged coarse plan reproduces the legacy count/quality/error statistics.
+
+All sixteen measured assemblies (two captured geometries, LoDs 2/3, insertion
+counts 0/1/3/7) have zero invalid surface samples and zero nonpositive UV
+triangles. This is not a global intersection or coverage-multiplicity proof.
+Selected LoD3 observations:
+
+| Geometry | Insertions | Final triangles | Mean shape | Shape < 0.1 | Sampled max centroid error |
+|---|---:|---:|---:|---:|---:|
+| captured quad | 0 | 188 | 0.30548 | 26 | 2.5191 |
+| captured quad | 7 | 1504 | 0.27261 | 484 | 2.9250 |
+| captured triangle | 0 | 94 | 0.27704 | 9 | 11.3402 |
+| captured triangle | 7 | 1410 | 0.23731 | 587 | 5.4199 |
+
+Errors are in each fixture's world units and are not comparable across rows
+belonging to different geometries. These are varying-budget observations, not
+an efficiency win. The assembly gate passed; blind centroid insertion is not
+accepted as a quality policy. Surface-guided location/connectivity/count choices
+and production arc-length boundary maps remain to be integrated and tested.
+
+The same run closed the radial-extension experiment: its exact atlas-boundary
+assertions passed on both diagonals and the four-fan quad at LoDs 3/4, but every
+case retained nonpositive UV triangles. The LoD4 fan has 27 such triangles out
+of 1432, with 306 shapes below 0.1. Keep this as a rejected placement experiment,
+not a viewer default or a substitute for the coarse-mesh work.
+
+Log: `/laboratory/quilting/scratch/coarse-assembly-20260909-v2.log`.
+The full test took 213.13 seconds including compilation; this is not a runtime
+generation benchmark. The sampled centroid metric is not a global error bound.

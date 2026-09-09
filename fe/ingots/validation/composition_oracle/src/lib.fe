@@ -1031,6 +1031,31 @@ pub fn captured_triangle_witness()->(f32,f32) {
     let net=composite_atlas::surface::authored(captured_triangle())
     (net.patch_valid,net.pole_margin)
 }
+/// Baseline assembly gate. Centroid insertion is only a topology stimulus;
+/// neither these point locations nor their LoDs are surface-optimized yet.
+pub fn coarse_capture_quality(_ triangle:bool,_ steps:u32,_ level:u32,_ legacy:bool)
+    ->(u32,u32,u32,u32,u32,f32,f32,f32,f32,u32,f32) {
+    let mut c=if triangle {captured_triangle()} else {captured_asymmetric_quad()}
+    let l=__f32_from_i32(level.downcast_unchecked())
+    c.bottom_lod=l
+    c.right_lod=l
+    c.top_lod=l
+    c.left_lod=l
+    // Freeze the baseline's diagonal too: automatic interior resolution can
+    // otherwise request a different primary despite equal outer exponents.
+    c.automatic_interior=0.0
+    c.diagonal_lod=l
+    c.split=0.0
+    c.automatic_density=0.0
+    c.compensate_density=0.0
+    c.interior_enabled=0.0
+    let r=if legacy {ingot::quality::surface_report(c,0,true)} else {
+        ingot::quality::coarse_affine_report(c,
+            ingot::coarse_probe::mesh(if triangle {0} else {1},steps),level)
+    }
+    let s=r.summary
+    (s.0,s.1,s.2,s.3,s.4,s.5,s.6,s.7,s.8,s.9,r.details.maximum_error)
+}
 pub fn captured_triangle_quality(_ level:u32,_ area:bool)
     ->(u32,u32,u32,u32,u32,f32,f32,f32,f32,u32) {
     if level<1 || level>6 {return (4,0,0,0,0,0.0,0.0,0.0,0.0,0)}
@@ -1048,10 +1073,11 @@ pub fn captured_boundary_comparison(_ triangle:bool)->bool {
 }
 /// Same geometry, three distinct ablations: 0 affine, 1 edge correction only,
 /// 2 edge correction plus area slices. Modes 1/2 keep identical boundary laws;
-/// mode 0 deliberately changes them. Midpoint-square admits mode 0 only.
+/// mode 0 deliberately changes them. Mode 3 is the radial-extension experiment.
+/// Midpoint-square admits mode 0 only.
 pub fn captured_quad_quality(_ layout:u32,_ level:u32,_ placement:u32)
     ->(u32,u32,u32,u32,u32,f32,f32,f32,f32,u32) {
-    if layout>3 || level<1 || level>6 || placement>2 || (layout==3 && placement!=0) {
+    if layout>3 || level<1 || level>6 || placement>3 || (layout==3 && placement!=0) {
         return (4,0,0,0,0,0.0,0.0,0.0,0.0,0)
     }
     let mut c=captured_asymmetric_quad()
@@ -1065,7 +1091,7 @@ pub fn captured_quad_quality(_ layout:u32,_ level:u32,_ placement:u32)
     c.compensate_density=if placement>0 {1.0} else {0.0}
     c.interior_enabled=if placement>0 {1.0} else {0.0}
     c.interior_area_correction=if placement==2 {1.0} else {0.0}
-    ingot::quality::surface_audit_plan(c,if layout==3 {level} else {0})
+    ingot::quality::surface_report_extension(c,if layout==3 {level} else {0},false,placement==3).summary
 }
 fn uniform_quad_controls(_ layout:u32,_ level:u32,_ bulge:f32,
     _ dx:f32,_ dz:f32)->composite_atlas::model::Controls {

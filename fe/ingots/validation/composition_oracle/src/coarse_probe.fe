@@ -3,7 +3,7 @@ use core::option::Option
 use quilting_atlas::coarse_mesh::CoarseMesh
 use quilting_atlas::planar::FixedPoint2
 
-fn mesh(_ kind:u32,_ steps:u32)->CoarseMesh {
+pub fn mesh(_ kind:u32,_ steps:u32)->CoarseMesh {
     let mut m=if kind==0 {CoarseMesh::triangle()} else {CoarseMesh::square(kind==2)}
     // Alternate faces rather than repeatedly exhausting one tiny triangle.
     let count=if steps<8 {steps} else {8}

@@ -1388,6 +1388,50 @@ fn coarse_connectivity_preserves_coverage_boundaries_and_vertex_identity() {
 }
 
 #[test]
+fn coarse_atlas_assembly_reuses_surface_audit_and_preserves_affine_baseline() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot(&path);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=Store::new(&engine,());
+    let instance=Instance::new(&mut store,&module,&[]).unwrap();
+    type Report=(i32,i32,i32,i32,i32,f32,f32,f32,f32,i32,f32);
+    let audit=function::<(i32,i32,i32,i32),Report>(&mut store,&instance,"coarse_capture_quality");
+    // Close the earlier radial-extension experiment in the same compiled
+    // oracle. Its boundary assertions are mandatory; its folds are recorded,
+    // not reinterpreted as acceptance of the placement method.
+    let radial=function::<(i32,i32,i32),(i32,i32,i32,i32,i32,f32,f32,f32,f32,i32)>(
+        &mut store,&instance,"captured_quad_quality");
+    for layout in 0..3 {
+        for level in [3,4] {
+            let r=radial.call(&mut store,(layout,level,3)).unwrap();
+            assert_eq!(r.0,0);
+            eprintln!("RADIAL_REJECT layout={layout} level={level} report={r:?}");
+        }
+    }
+    for triangle in [0,1] {
+        for level in [2,3] {
+            let reference=audit.call(&mut store,(triangle,0,level,1)).unwrap();
+            let base=audit.call(&mut store,(triangle,0,level,0)).unwrap();
+            assert_eq!((base.0,base.1,base.2,base.3,base.4,base.9),
+                (reference.0,reference.1,reference.2,reference.3,reference.4,reference.9));
+            for (actual,expected) in [(base.5,reference.5),(base.6,reference.6),
+                (base.7,reference.7),(base.8,reference.8),(base.10,reference.10)] {
+                assert!((actual-expected).abs()<1e-4*expected.abs().max(1.0),
+                    "triangle={triangle} level={level}: {actual} vs {expected}");
+            }
+            for steps in [0,1,3,7] {
+                let r=audit.call(&mut store,(triangle,steps,level,0)).unwrap();
+                assert_eq!((r.0,r.2,r.3),(0,0,0),"admitted affine assembly: {r:?}");
+                assert!(r.10.is_finite());
+                eprintln!("COARSE_AFFINE triangle={triangle} steps={steps} level={level} report={r:?}");
+            }
+        }
+    }
+}
+
+#[test]
 fn captured_boundary_arcs_and_triangle_folds_probe() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../ingots/validation/composition_oracle");
@@ -1437,7 +1481,7 @@ fn captured_asymmetric_quad_quality_probe() {
     assert_eq!(audit.call(&mut store,(3,3,1)).unwrap().0,4);
     for level in [3,4] {
         for layout in 0..4 {
-            for placement in 0..=if layout==3 {0} else {2} {
+            for placement in 0..=if layout==3 {0} else {3} {
                 let r=audit.call(&mut store,(layout,level,placement)).unwrap();
                 assert_eq!(r.0,0,"atlas/evaluation admission: {r:?}");
                 assert!(r.1>0);

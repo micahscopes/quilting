@@ -9,6 +9,8 @@ use quilting_domain::{Bary3F,bary3f,vec2f,vec3f}
 use quilting_qb::{remap_barycentric,permutation_parity}
 use fmath::sqrt
 use core::marker::Copy
+use core::option::Option
+use quilting_atlas::coarse_mesh::CoarseMesh
 use quilting_patch::sampling_warp::IntervalSamplingMap
 enum AuditEdgeMaps<M:IntervalSamplingMap> {
     Legacy(TriangleEdgeMaps<M,M,M>),
@@ -180,9 +182,22 @@ pub fn surface_audit_plan(_ c:model::Controls,_ midpoint_level:u32)->(u32,u32,u3
 /// Optional edit-time centroid error and shape distribution share the exact
 /// same decoded triangles as the legacy summary. No second mesh implementation.
 pub fn surface_report(_ c:model::Controls,_ midpoint_level:u32,_ detailed:bool)->MeshReport {
+    surface_report_extension(c,midpoint_level,detailed,false)
+}
+/// Bounded radial-extension ablation; same primaries, edge counts and evaluator.
+pub fn surface_report_extension(_ c:model::Controls,_ midpoint_level:u32,_ detailed:bool,_ radial:bool)->MeshReport {
+    surface_report_plan(c,midpoint_level,detailed,radial,Option::None,0)
+}
+/// Affine boundary-law ablation for arbitrary admitted coarse connectivity.
+/// Reuses the actual atlas decoder, surface evaluator and finite-mesh metrics.
+pub fn coarse_affine_report(_ c:model::Controls,_ mesh:CoarseMesh,_ level:u32)->MeshReport {
+    surface_report_plan(c,0,true,false,Option::Some(mesh),level)
+}
+fn surface_report_plan(_ c:model::Controls,_ midpoint_level:u32,_ detailed:bool,_ radial:bool,
+    _ coarse:Option<CoarseMesh>,_ coarse_level:u32)->MeshReport {
     use quilting_atlas::midpoint_square::MidpointSquare
     let mut details=empty_details()
-    if midpoint_level>8 {return MeshReport {summary:(4,0,0,0,0,0.0,0.0,0.0,0.0,0),details:details}}
+    if midpoint_level>8 || coarse_level>8 {return MeshReport {summary:(4,0,0,0,0,0.0,0.0,0.0,0.0,0),details:details}}
     let scene=residency::configured_scene(c)
     if scene.surface.patch_valid<0.5 {return MeshReport {summary:(1,0,0,0,0,0.0,0.0,0.0,0.0,0),details:details}}
     let edges=model::edge_lods(c)
@@ -194,10 +209,14 @@ pub fn surface_report(_ c:model::Controls,_ midpoint_level:u32,_ detailed:bool)-
     let mut sum:f32=0.0
     let mut area_sum:f32=0.0
     let mut area_squares:f32=0.0
-    let children=if midpoint_level>0 {8} else {model::child_count(c)}
+    let children=match coarse {Option::Some(mesh)=>mesh.face_count(),
+        Option::None=>if midpoint_level>0 {8} else {model::child_count(c)}}
+    let is_coarse=match coarse {Option::Some(_)=>true,Option::None=>false}
     for child in 0 .. (children as usize) {
         let mut d=residency::empty_child()
-        let primary=if midpoint_level>0 {
+        let primary=if is_coarse {
+            quilting_atlas::canonicalize(quilting_atlas::AtlasKey {a:coarse_level,b:coarse_level,c:coarse_level})
+        } else if midpoint_level>0 {
             MidpointSquare::uniform(midpoint_level).unwrap().primary()
         } else {
             let request=model::child(c,child.downcast_truncate()).resolve(edges).unwrap()
@@ -211,7 +230,7 @@ pub fn surface_report(_ c:model::Controls,_ midpoint_level:u32,_ detailed:bool)-
         let tile=packed_triangle(k.a,k.b,k.c,42)
         if tile.status!=0 {return MeshReport {summary:(2,count,invalid,folds,poor,0.0,0.0,0.0,0.0,count*3),details:details}}
         d.permutation=edge_permutation_index(primary.permutation)
-        let legacy_maps=if midpoint_level==0 {
+        let legacy_maps=if midpoint_level==0 && !is_coarse {
             let ab=quilting_atlas::composition::BoundaryUse::between(d.corner_a,d.corner_b)
             let bc=quilting_atlas::composition::BoundaryUse::between(d.corner_b,d.corner_c)
             let ca=quilting_atlas::composition::BoundaryUse::between(d.corner_c,d.corner_a)
@@ -226,8 +245,26 @@ pub fn surface_report(_ c:model::Controls,_ midpoint_level:u32,_ detailed:bool)-
             let mut valid=true
             for lane in 0 .. 3 {
                 let p=triangle_corner(tile.words.ptr,tile.points,d.permutation,triangle,lane)
-                let placed=if midpoint_level>0 {
+                let placed=if is_coarse {
+                    match coarse {
+                        Option::Some(mesh)=>placement::coarse_affine_parameter(mesh,child.downcast_truncate(),p).unwrap(),
+                        Option::None=>core::panic(),
+                    }
+                } else if midpoint_level>0 {
                     placement::midpoint_parameter(child.downcast_truncate(),p).unwrap()
+                } else if radial {
+                    let candidate=placement::radial_density_parameter(scene,d,p)
+                    // Boundary ownership is not a quality tradeoff. Exercise
+                    // every real dyadic atlas boundary sample, including both
+                    // ends and each child's reversed uses, through both maps.
+                    if p.a==0.0 || p.b==0.0 || p.c==0.0 {
+                        let reference=match legacy_maps {
+                            AuditEdgeMaps::Legacy(maps)=>placement::place(scene,d,p,maps.c,maps.a,maps.b),
+                            AuditEdgeMaps::Uniform=>core::panic(),
+                        }
+                        assert(candidate.x==reference.x && candidate.y==reference.y)
+                    }
+                    candidate
                 } else {
                     match legacy_maps {
                         AuditEdgeMaps::Legacy(maps)=>placement::place(scene,d,p,maps.c,maps.a,maps.b),

@@ -6,6 +6,33 @@ use quilting_patch::depth_field::segment_parameter
 use ingot::model::{Point,corner}
 use ingot::residency::{Scene,ChildDraw}
 
+/// Reference placement for bounded coarse plans. Boundary arithmetic follows
+/// canonical vertex identity, independent of each incident face's winding.
+/// This is uniform in parameter space, not an arc-length correction.
+pub fn coarse_affine_parameter(_ mesh:quilting_atlas::coarse_mesh::CoarseMesh,
+    _ index:u32,_ p:Bary3F)->core::option::Option<Point> {
+    use core::option::Option
+    use quilting_atlas::lod_as_f32
+    let t=match mesh.face(index) {Option::Some(t)=>t,Option::None=>return Option::None}
+    if p.a==0.0 || p.b==0.0 || p.c==0.0 {
+        let (from,to,q)=if p.b==0.0 {(t.c,t.a,p.a)}
+            else if p.c==0.0 {(t.a,t.b,p.b)} else {(t.b,t.c,p.c)}
+        let edge=BoundaryUse::between(from,to)
+        let q=if edge.reversed {1.0-q} else {q}
+        let a=mesh.vertex(edge.low).unwrap()
+        let b=mesh.vertex(edge.high).unwrap()
+        return Option::Some(Point {
+            x:(lod_as_f32(a.x)*(1.0-q)+lod_as_f32(b.x)*q)/16384.0,
+            y:(lod_as_f32(a.y)*(1.0-q)+lod_as_f32(b.y)*q)/16384.0})
+    }
+    let a=mesh.vertex(t.a).unwrap()
+    let b=mesh.vertex(t.b).unwrap()
+    let c=mesh.vertex(t.c).unwrap()
+    Option::Some(Point {
+        x:(lod_as_f32(a.x)*p.a+lod_as_f32(b.x)*p.b+lod_as_f32(c.x)*p.c)/16384.0,
+        y:(lod_as_f32(a.y)*p.a+lod_as_f32(b.y)*p.b+lod_as_f32(c.y)*p.c)/16384.0})
+}
+
 /// Uniform placement for the midpoint-square experiment. Domain construction
 /// is shared by the measured mesh and the viewer; it does not fit a new surface.
 pub fn midpoint_parameter(_ index:u32,_ p:Bary3F)->core::option::Option<Point> {
@@ -25,6 +52,34 @@ pub fn midpoint_parameter(_ index:u32,_ p:Bary3F)->core::option::Option<Point> {
 /// Bisection budget for on-demand interior placement. Eight levels agree with
 /// the published boundary tables to f32 rounding; six leave 0.000765.
 const PLACEMENT_LEVELS:u32=8
+
+/// Experimental boundary extension: preserve distance from the barycenter
+/// while moving the ray's boundary endpoint by the EXISTING shared edge law.
+/// This has derivative seams on the three corner rays. A continuous radial map
+/// is not a certificate for straight triangles spanning those rays; audit the
+/// actual atlas connectivity before accepting it. No area equalization claimed.
+pub fn radial_density_parameter(_ scene:Scene,_ d:ChildDraw,_ p:Bary3F)->Point {
+    let a=corner(d.corner_a,scene.active_center_x,scene.active_center_y)
+    let b=corner(d.corner_b,scene.active_center_x,scene.active_center_y)
+    let c=corner(d.corner_c,scene.active_center_x,scene.active_center_y)
+    let center=Point {x:(a.x+b.x+c.x)/3.0,y:(a.y+b.y+c.y)/3.0}
+    let m=fmath::min(p.a,fmath::min(p.b,p.c))
+    let r=1.0-3.0*m
+    if !(r>0.0) {return scene.composition_warp.apply(center)}
+    let target=if p.a<=p.b && p.a<=p.c {
+        let edge=BoundaryUse::between(d.corner_b,d.corner_c)
+        boundary_density(scene,d.corner_b,d.corner_c,(p.c-m)/r,edge.reversed)
+    } else if p.b<=p.c {
+        let edge=BoundaryUse::between(d.corner_c,d.corner_a)
+        boundary_density(scene,d.corner_c,d.corner_a,(p.a-m)/r,edge.reversed)
+    } else {
+        let edge=BoundaryUse::between(d.corner_a,d.corner_b)
+        boundary_density(scene,d.corner_a,d.corner_b,(p.b-m)/r,edge.reversed)
+    }
+    scene.composition_warp.apply(if m==0.0 {target} else {
+        Point {x:center.x*(1.0-r)+target.x*r,y:center.y*(1.0-r)+target.y*r}
+    })
+}
 
 fn boundary<M:IntervalSamplingMap>(_ scene:Scene,_ from:u32,_ to:u32,_ t:f32,_ map:OrientedIntervalMap<M>)->Point {
     let edge=BoundaryUse::between(from,to)
