@@ -1149,6 +1149,34 @@ fn curved_atlas_mesh_quality_baseline() {
 }
 
 #[test]
+fn curved_interior_comparison_preserves_boundaries_and_counts() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../ingots/validation/composition_oracle");
+    let wasm = compile_ingot(&path);
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &wasm).unwrap();
+    let mut store = Store::new(&engine, ());
+    let instance = Instance::new(&mut store, &module, &[]).unwrap();
+    let boundaries = function::<(i32,f32,f32),i32>(&mut store,&instance,"interior_comparison_boundaries");
+    let audit = function::<(i32,f32,f32,i32,f32,f32,f32),
+        (i32,i32,i32,i32,i32,f32,f32,f32,f32,i32)>(
+        &mut store,&instance,"curved_mesh_quality");
+    for (kind,split) in [(0,0.0_f32),(1,0.0),(1,1.0),(1,2.0)] {
+        for bulge in [0.6_f32,2.4] {
+            assert_eq!(boundaries.call(&mut store,(kind,split,bulge)).unwrap(),1);
+            let mut count=None;
+            for mode in [1,2] {
+                let start=std::time::Instant::now();
+                let result=audit.call(&mut store,(kind,split,3.0,mode,bulge,-0.5,0.7)).unwrap();
+                assert_eq!(result.0,0);
+                if let Some(n)=count {assert_eq!(result.1,n);} else {count=Some(result.1);}
+                eprintln!("INTERIOR_AB kind={kind} split={split} bulge={bulge} mode={mode} report={result:?} elapsed_ms={:.2}",start.elapsed().as_secs_f64()*1000.0);
+            }
+        }
+    }
+}
+
+#[test]
 fn sparse_clifford_patch_wasm_matches_the_independent_dense_oracle() {
     let (mut store, instance) = instantiate();
     let position_exports = [

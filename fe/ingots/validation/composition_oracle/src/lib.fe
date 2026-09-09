@@ -910,11 +910,49 @@ pub fn curved_mesh_quality(_ kind:u32,_ split:f32,_ level:f32,_ measured:u32,
     c.top_lod=level
     c.left_lod=level
     c.automatic_density=if measured==0 {0.0} else {1.0}
+    // Mode 2 isolates the interior rule while retaining measured boundaries.
+    c.interior_area_correction=if measured==2 {0.0} else {1.0}
     c.midpoint_z=bulge
     if kind==0 {c.p3x=c.p3x+dx
         c.p3z=c.p3z+dz} else {c.p2x=c.p2x+dx
         c.p2z=c.p2z+dz}
     ingot::quality::surface_audit(c)
+}
+pub fn interior_comparison_boundaries(_ kind:u32,_ split:f32,_ bulge:f32)->bool {
+    use composite_atlas::{model,residency,placement}
+    use quilting_atlas::composition::BoundaryUse
+    use quilting_patch::sampling_warp::{OrientedIntervalMap,ProjectiveIntervalBias}
+    let mut c=initial_controls()
+    c.surface_kind=if kind==0 {1.0} else {2.0}
+    c.split=split
+    c.midpoint_z=bulge
+    c.center_x=0.37
+    c.center_y=0.61
+    let a=residency::configured_scene(c)
+    let mut b=a
+    b.apply_area_slices=false
+    if !a.density_placement {return false}
+    for i in 0 .. (model::child_count(c) as usize) {
+        let tri=model::child(c,i.downcast_truncate())
+        let mut d=residency::empty_child()
+        d.corner_a=tri.a
+        d.corner_b=tri.b
+        d.corner_c=tri.c
+        let law=ProjectiveIntervalBias {strength:1.0}
+        let ab=OrientedIntervalMap {law:law,reversed:BoundaryUse::between(tri.a,tri.b).reversed}
+        let bc=OrientedIntervalMap {law:law,reversed:BoundaryUse::between(tri.b,tri.c).reversed}
+        let ca=OrientedIntervalMap {law:law,reversed:BoundaryUse::between(tri.c,tri.a).reversed}
+        for j in 0 .. 257 {
+            let t=__f32_from_i32(j.downcast_unchecked())/256.0
+            for p in [quilting_domain::bary3f(1.0-t,t,0.0),
+                quilting_domain::bary3f(0.0,1.0-t,t),quilting_domain::bary3f(t,0.0,1.0-t)] {
+                let left=placement::place(a,d,p,ab,bc,ca)
+                let right=placement::place(b,d,p,ab,bc,ca)
+                if left.x!=right.x || left.y!=right.y {return false}
+            }
+        }
+    }
+    true
 }
 pub fn quality_case(_ case:u32,_ compensation:u32)->(u32,u32,u32,u32,f32,f32,f32,f32,f32,f32) {
     ingot::quality::audit(case,compensation)

@@ -55,6 +55,9 @@ fn boundary_density(_ scene:Scene,_ from:u32,_ to:u32,_ t:f32,_ reversed:bool)->
 /// sides evaluate it at bit-identical inputs because the raw point is built in
 /// the edge's canonical direction.
 fn density_place(_ scene:Scene,_ raw:Point)->Point {
+    // Edge-only comparison: the same edge correction below now extends each
+    // edge displacement from the identity map. Boundary targets never change.
+    if !scene.apply_area_slices {return raw}
     // Two axis-aligned passes. A third pass along the diagonal was measured and
     // is strictly worse: each pass equalizes along its own direction as if the
     // others had not acted, so composing more of them interferes rather than

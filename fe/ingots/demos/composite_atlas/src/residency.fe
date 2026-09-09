@@ -21,7 +21,7 @@ pub struct Scene {
     pub active_compensation:f32,pub active_automatic_density:f32,pub spacing_revision:u32,
     /// Interior placement reads this instead of composing edge laws inward.
     pub domain_norm:quilting_patch::depth_field::QuadDomainNorm,
-    pub density_placement:bool,
+    pub density_placement:bool,pub apply_area_slices:bool,
     pub active_skews:EdgeSkews,
     pub active_boundary_reach:f32,
     pub interior:InteriorPolicy,
@@ -46,7 +46,7 @@ pub fn empty_scene() -> Scene {
         active_compensation:1.0,active_automatic_density:1.0,spacing_revision:0,
         domain_norm:quilting_patch::depth_field::QuadDomainNorm {
             gram:ingot::surface::domain_gram(ingot::surface::empty())},
-        density_placement:false,active_boundary_reach:1.0,active_skews:edge_skews(initial_controls()),interior:interior_policy(initial_controls()),resolution:EdgeResolution::empty()}
+        density_placement:false,apply_area_slices:true,active_boundary_reach:1.0,active_skews:edge_skews(initial_controls()),interior:interior_policy(initial_controls()),resolution:EdgeResolution::empty()}
 }
 /// Geometry and placement policy without worker allocation or draw residency.
 /// Measurements and the renderer use the same immutable configuration. This
@@ -62,6 +62,7 @@ pub fn configured_scene(_ controls:Controls)->Scene {
     scene.active_left=controls.left_lod
     scene.active_compensation=controls.compensate_density
     scene.active_automatic_density=controls.automatic_density
+    scene.apply_area_slices=controls.interior_area_correction>0.5
     scene.domain_norm=quilting_patch::depth_field::QuadDomainNorm {
         gram:ingot::surface::domain_gram(scene.surface)}
     // Circular spacing claims do not extend to free-weight surfaces.
