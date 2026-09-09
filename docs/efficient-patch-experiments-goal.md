@@ -19,6 +19,12 @@ source browsing and authoring improvements in these examples. Other experiments
 remain useful supporting comparisons; this priority does not erase their gates
 or the broader delivery scope below.
 
+Migrate the LoD mesh atlas explorer from its prebuilt `FixtureBuffer` to the
+shared Fe/Wasm triangular tessellation generator and worker pool. It does not
+need quadrangular generation. Preserve the existing focus, noise, smoothing,
+permutation, rendering and interaction behavior; verify the actual served data
+path rather than inferring migration from the presence of the generator library.
+
 Investigate a small surface-aware coarse mesh filled by reusable atlas primaries
 alongside cheaper fixed arrangements. Do not assume dynamic topology, an affine
 correction, recursive Wang tiles, or any other candidate is the winner.
