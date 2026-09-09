@@ -6,6 +6,9 @@ use quilting_atlas_wasm::pool::{self, PoolHandle, TileKey}
 use ingot::model::{Controls,InteriorPolicy,EdgeResolution,EdgeSkews,edge_resolution,interior_policy,initial_controls,child_count,child,edge_lods,edge_skews}
 pub const WORKERS:u32=4
 pub const CAPACITY:usize=WORKERS as usize
+/// Bounded coarse experiments share one residency path. This is a capacity,
+/// not a request to draw or allocate sixteen children for every patch.
+pub const MAX_CHILDREN:usize=16
 pub struct ChildDraw {
     pub begin:u32, pub end:u32, pub offset:u32, pub points:u32, pub permutation:u32,
     pub corner_a:u32, pub corner_b:u32, pub corner_c:u32,
@@ -15,7 +18,7 @@ impl Copy for ChildDraw {}
 pub struct Scene {
     pub composition_warp:ingot::composition_warp::CompositionWarp,
     pub surface:ingot::surface::Net,
-    pub first:ChildDraw,pub second:ChildDraw,pub third:ChildDraw,pub fourth:ChildDraw,
+    pub draws:[ChildDraw;MAX_CHILDREN],pub draw_count:u32,
     pub vertices:u32,pub active_center_x:f32,pub active_center_y:f32,
     pub active_bottom:f32,pub active_right:f32,pub active_top:f32,pub active_left:f32,
     pub active_compensation:f32,pub active_automatic_density:f32,pub spacing_revision:u32,
@@ -38,7 +41,7 @@ pub fn empty_child() -> ChildDraw {
         boundaries:ChildTriangle {a:0,b:1,c:2}.square_boundaries().unwrap()}
 }
 pub fn empty_scene() -> Scene {
-    Scene {first:empty_child(),second:empty_child(),third:empty_child(),fourth:empty_child(),
+    Scene {draws:[empty_child();MAX_CHILDREN],draw_count:0,
         composition_warp:ingot::composition_warp::policy(initial_controls()),
         surface:ingot::surface::empty(),
         vertices:0,active_center_x:0.5,active_center_y:0.5,
@@ -148,8 +151,8 @@ pub fn refresh(_ previous:State) -> State {
             permutation:edge_permutation_index(request.primary.permutation),
             boundaries:request.boundaries,
             corner_a:request.triangle.a,corner_b:request.triangle.b,corner_c:request.triangle.c}
-        if i==0 {scene.first=d} else if i==1 {scene.second=d}
-        else if i==2 {scene.third=d} else {scene.fourth=d}
+        scene.draws[i]=d
+        scene.draw_count+=1
         scene.vertices=end
     }
     // Publish only complete compatible snapshots, never partially ready seams.
@@ -160,9 +163,14 @@ pub fn refresh(_ previous:State) -> State {
     }
     next
 }
+#[arithmetic(unchecked)]
 pub fn child_at(_ scene:Scene,_ vertex:u32) -> ChildDraw {
-    if vertex<scene.first.end {scene.first}
-    else if vertex<scene.second.end {scene.second}
-    else if vertex<scene.third.end {scene.third}
-    else {scene.fourth}
+    // The bound makes increment/index arithmetic safe independently of the
+    // published draw count. Unused slots and out-of-range vertices are inert.
+    for i in 0 .. MAX_CHILDREN {
+        if i>=(scene.draw_count as usize) {break}
+        let d=scene.draws[i]
+        if vertex>=d.begin && vertex<d.end {return d}
+    }
+    empty_child()
 }

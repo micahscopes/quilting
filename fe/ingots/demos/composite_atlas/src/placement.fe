@@ -6,6 +6,22 @@ use quilting_patch::depth_field::segment_parameter
 use ingot::model::{Point,corner}
 use ingot::residency::{Scene,ChildDraw}
 
+/// Uniform placement for the midpoint-square experiment. Domain construction
+/// is shared by the measured mesh and the viewer; it does not fit a new surface.
+pub fn midpoint_parameter(_ index:u32,_ p:Bary3F)->core::option::Option<Point> {
+    use core::option::Option
+    use quilting_atlas::midpoint_square::MidpointSquare
+    use quilting_atlas::lod_as_f32
+    let t=match MidpointSquare::child(index) {Option::Some(t)=>t,Option::None=>return Option::None}
+    let a=MidpointSquare::vertex(t.a).unwrap()
+    let b=MidpointSquare::vertex(t.b).unwrap()
+    let c=MidpointSquare::vertex(t.c).unwrap()
+    Option::Some(Point {
+        x:(lod_as_f32(a.0)*p.a+lod_as_f32(b.0)*p.b+lod_as_f32(c.0)*p.c)*0.5,
+        y:(lod_as_f32(a.1)*p.a+lod_as_f32(b.1)*p.b+lod_as_f32(c.1)*p.c)*0.5,
+    })
+}
+
 /// Bisection budget for on-demand interior placement. Eight levels agree with
 /// the published boundary tables to f32 rounding; six leave 0.000765.
 const PLACEMENT_LEVELS:u32=8

@@ -227,12 +227,7 @@ pub fn surface_report(_ c:model::Controls,_ midpoint_level:u32,_ detailed:bool)-
             for lane in 0 .. 3 {
                 let p=triangle_corner(tile.words.ptr,tile.points,d.permutation,triangle,lane)
                 let placed=if midpoint_level>0 {
-                    let t=MidpointSquare::child(child.downcast_truncate()).unwrap()
-                    let a=MidpointSquare::vertex(t.a).unwrap()
-                    let b=MidpointSquare::vertex(t.b).unwrap()
-                    let v=MidpointSquare::vertex(t.c).unwrap()
-                    model::Point {x:(number(a.0)*p.a+number(b.0)*p.b+number(v.0)*p.c)*0.5,
-                        y:(number(a.1)*p.a+number(b.1)*p.b+number(v.1)*p.c)*0.5}
+                    placement::midpoint_parameter(child.downcast_truncate(),p).unwrap()
                 } else {
                     match legacy_maps {
                         AuditEdgeMaps::Legacy(maps)=>placement::place(scene,d,p,maps.c,maps.a,maps.b),

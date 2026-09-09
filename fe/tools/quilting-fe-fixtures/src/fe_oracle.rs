@@ -1252,6 +1252,21 @@ fn curved_mesh_distribution_and_approximation_probe() {
 }
 
 #[test]
+fn bounded_composite_draw_ranges() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot(&path);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=Store::new(&engine,());
+    let instance=Instance::new(&mut store,&module,&[]).unwrap();
+    for name in ["bounded_draw_range_laws","coherent_pending_selection"] {
+        let test=function::<(),i32>(&mut store,&instance,name);
+        assert_eq!(test.call(&mut store,()).unwrap(),1,"{name}");
+    }
+}
+
+#[test]
 fn frozen_topology_count_allocation_probe() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../ingots/validation/composition_oracle");

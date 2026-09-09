@@ -900,6 +900,30 @@ pub fn geometric_patch_view_laws()->bool {
     true
 }
 pub fn quality_laws()->bool {ingot::quality::laws()}
+pub fn bounded_draw_range_laws()->bool {
+    use composite_atlas::residency::{empty_scene,empty_child,child_at,MAX_CHILDREN}
+    let mut scene=empty_scene()
+    if child_at(scene,0).end!=0 {return false}
+    for i in 0 .. MAX_CHILDREN {
+        let mut d=empty_child()
+        d.begin=scene.vertices
+        let slot:u32=i.downcast_unchecked()
+        d.end=d.begin+3*(slot+1)
+        d.offset=slot+1
+        scene.draws[i]=d
+        scene.draw_count+=1
+        scene.vertices=d.end
+    }
+    for i in 0 .. MAX_CHILDREN {
+        let d=scene.draws[i]
+        if child_at(scene,d.begin).offset!=d.offset
+            || child_at(scene,d.end-1).offset!=d.offset {return false}
+    }
+    if child_at(scene,scene.vertices).end!=0 {return false}
+    scene.draw_count=8
+    // Slots beyond the published count cannot leak old ranges into a new view.
+    child_at(scene,scene.draws[8].begin).end==0
+}
 pub fn shape_histogram_laws()->bool {
     let h=quilting_patch::shape_histogram::ShapeHistogram::empty()
         .recorded(0.0).recorded(0.049).recorded(0.05).recorded(0.999).recorded(1.0).recorded(-1.0)
@@ -1304,8 +1328,8 @@ fn coherent_pending_for_split(_ split:f32)->bool {
     if let Completion::Accepted = handle.finish(background,packed_triangle(0,0,0,42)) {} else {return false}
     state=composite_atlas::residency::refresh_completion(state)
     if state.completed!=completed+1 || state.pending!=0 || state.status!=0 || state.required_words!=required
-        || state.scene.vertices!=visible.vertices || state.scene.first.offset!=visible.first.offset
-        || state.scene.second.offset!=visible.second.offset || state.scene.spacing_revision!=visible.spacing_revision
+        || state.scene.vertices!=visible.vertices || state.scene.draws[0].offset!=visible.draws[0].offset
+        || state.scene.draws[1].offset!=visible.draws[1].offset || state.scene.spacing_revision!=visible.spacing_revision
         || state.scene.active_center_x!=visible.active_center_x || state.scene.active_skews.spoke0!=visible.active_skews.spoke0
         || state.scene.resolution.spoke_0_segments!=visible.resolution.spoke_0_segments {return false}
     let revision=state.scene.spacing_revision
