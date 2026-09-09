@@ -4,11 +4,44 @@
 use core::marker::Copy
 use core::option::Option
 use super::{AtlasKey,CanonicalKey,canonicalize}
-use super::composition::ChildTriangle
+use super::composition::{ChildTriangle,BoundaryUse}
+
+/// A directed half-edge referencing samples of an unsplit outer boundary.
+/// Endpoints are integer indices in the owner's low-to-high orientation.
+pub struct OuterHalf {pub owner:BoundaryUse,first:u32,last:u32}
+impl Copy for OuterHalf {}
+impl OuterHalf {
+    pub fn sample(self,_ index:u32)->Option<u32> {
+        let count=if self.first<self.last {self.last-self.first} else {self.first-self.last}
+        if index>count {Option::None}
+        else if self.first<self.last {Option::Some(self.first+index)}
+        else {Option::Some(self.first-index)}
+    }
+}
 
 pub struct MidpointSquare {outer_level:u32}
 impl Copy for MidpointSquare {}
 impl MidpointSquare {
+    /// Admit only actual outer half-edges; interior edges have their own owner.
+    /// Reversal occurs on integer indices before any curve/map evaluation.
+    pub fn outer_half(self,_ from:u32,_ to:u32)->Option<OuterHalf> {
+        let count=1<<self.outer_level
+        let half=count/2
+        for side in 0 .. 4 {
+            let a:u32=side.downcast_truncate()
+            let b=(a+1)%4
+            let midpoint=a+4
+            let direction=BoundaryUse::between(a,b)
+            let owner=BoundaryUse {low:direction.low,high:direction.high,reversed:false}
+            let a_index=if direction.reversed {count} else {0}
+            let b_index=count-a_index
+            if from==a && to==midpoint {return Option::Some(OuterHalf {owner:owner,first:a_index,last:half})}
+            if from==midpoint && to==a {return Option::Some(OuterHalf {owner:owner,first:half,last:a_index})}
+            if from==midpoint && to==b {return Option::Some(OuterHalf {owner:owner,first:half,last:b_index})}
+            if from==b && to==midpoint {return Option::Some(OuterHalf {owner:owner,first:b_index,last:half})}
+        }
+        Option::None
+    }
     pub fn uniform(_ level:u32)->Option<Self> {
         if level<1 || level>8 {Option::None} else {Option::Some(Self {outer_level:level})}
     }

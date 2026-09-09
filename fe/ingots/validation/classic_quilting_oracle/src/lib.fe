@@ -412,6 +412,16 @@ pub fn midpoint_square_sample(_ level:u32,_ half:u32,_ index:u32)->u32 {
         },_=>999,
     }
 }
+pub fn midpoint_outer_sample(_ level:u32,_ from:u32,_ to:u32,_ index:u32)->(u32,u32,u32) {
+    use core::option::Option
+    let plan=match quilting_atlas::midpoint_square::MidpointSquare::uniform(level) {
+        Option::Some(p)=>p,_=>return (99,99,999),
+    }
+    let edge=match plan.outer_half(from,to) {Option::Some(e)=>e,_=>return (99,99,999)}
+    match edge.sample(index) {
+        Option::Some(sample)=>(edge.owner.low,edge.owner.high,sample),_ => (99,99,999),
+    }
+}
 pub fn midpoint_square_primary(_ level:u32)->(u32,u32,u32,u32) {
     match quilting_atlas::midpoint_square::MidpointSquare::uniform(level) {
         core::option::Option::Some(plan)=>{

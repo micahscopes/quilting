@@ -1077,6 +1077,7 @@ fn midpoint_square_has_exact_coverage_and_protected_master_intervals() {
     let vertex=function::<i32,(i32,i32)>(&mut store,&instance,"midpoint_square_vertex");
     let child=function::<i32,(i32,i32,i32)>(&mut store,&instance,"midpoint_square_child");
     let sample=function::<(i32,i32,i32),i32>(&mut store,&instance,"midpoint_square_sample");
+    let outer=function::<(i32,i32,i32,i32),(i32,i32,i32)>(&mut store,&instance,"midpoint_outer_sample");
     let primary=function::<i32,(i32,i32,i32,i32)>(&mut store,&instance,"midpoint_square_primary");
     let remap_a=function::<(i32,f32,f32,f32),f32>(&mut store,&instance,"qb_remap_a");
     let remap_b=function::<(i32,f32,f32,f32),f32>(&mut store,&instance,"qb_remap_b");
@@ -1120,6 +1121,26 @@ fn midpoint_square_has_exact_coverage_and_protected_master_intervals() {
             assert_eq!(sample.call(&mut store,(level,1,i)).unwrap(),half+i);
         }
         assert_eq!(sample.call(&mut store,(level,0,half+1)).unwrap(),999);
+        for side in 0..4 {
+            let a=side;
+            let b=(side+1)%4;
+            let middle=side+4;
+            let full=2*half;
+            for (from,to,start,end) in [(a,middle,0,half),(middle,b,half,full)] {
+                for i in 0..=half {
+                    let expected=if a<b {start+i} else {full-start-i};
+                    let forward=outer.call(&mut store,(level,from,to,i)).unwrap();
+                    let reverse=outer.call(&mut store,(level,to,from,half-i)).unwrap();
+                    assert_eq!(forward,(a.min(b),a.max(b),expected));
+                    assert_eq!(forward,reverse,"integer reversal preserves the master sample");
+                }
+                assert_eq!(end-start,half);
+                assert_eq!(outer.call(&mut store,(level,from,to,half+1)).unwrap(),(99,99,999));
+            }
+        }
+        for (&(a,b),&(uses,_)) in &edges {
+            if uses==2 {assert_eq!(outer.call(&mut store,(level,a,b,0)).unwrap(),(99,99,999));}
+        }
     }
 }
 
