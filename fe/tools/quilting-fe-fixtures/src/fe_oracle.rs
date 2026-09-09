@@ -1288,6 +1288,37 @@ fn bounded_composite_draw_ranges() {
 }
 
 #[test]
+fn captured_asymmetric_quad_quality_probe() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot(&path);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=Store::new(&engine,());
+    let instance=Instance::new(&mut store,&module,&[]).unwrap();
+    let witness=function::<(),(f32,f32)>(&mut store,&instance,"captured_quad_witness");
+    let w=witness.call(&mut store,()).unwrap();
+    assert_eq!(w.0,1.0);
+    assert!((w.1-0.03519138693809509).abs()<2e-6,"captured geometry witness: {w:?}");
+    let audit=function::<(i32,i32,i32),
+        (i32,i32,i32,i32,i32,f32,f32,f32,f32,i32)>(
+        &mut store,&instance,"captured_quad_quality");
+    assert_eq!(audit.call(&mut store,(3,3,1)).unwrap().0,4);
+    for level in [3,4] {
+        for layout in 0..4 {
+            for placement in 0..=if layout==3 {0} else {2} {
+                let r=audit.call(&mut store,(layout,level,placement)).unwrap();
+                assert_eq!(r.0,0,"atlas/evaluation admission: {r:?}");
+                assert!(r.1>0);
+                // Observe poor cells and folds; never make their absence a
+                // prerequisite for retaining this difficult regression case.
+                eprintln!("CAPTURED_QUAD layout={layout} level={level} placement={placement} report={r:?}");
+            }
+        }
+    }
+}
+
+#[test]
 fn frozen_topology_count_allocation_probe() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../ingots/validation/composition_oracle");

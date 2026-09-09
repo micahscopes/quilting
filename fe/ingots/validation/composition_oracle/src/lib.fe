@@ -966,6 +966,55 @@ pub fn uniform_quad_layout_quality(_ layout:u32,_ level:u32,_ bulge:f32,
     let c=uniform_quad_controls(layout,level,bulge,dx,dz)
     ingot::quality::surface_audit_plan(c,if layout==3 {level} else {0})
 }
+/// Captured authored geometry, not a generated mesh. Source controls live in
+/// fixtures/patch-cases/asymmetric-curved-quad-20260909.json.
+fn captured_asymmetric_quad()->composite_atlas::model::Controls {
+    let mut c=initial_controls()
+    c.surface_kind=2.0
+    c.p0x=0.15758734941482544
+    c.p0y=-2.1436357498168945
+    c.p0z=-0.3437315821647644
+    c.p1x=-0.06312798708677292
+    c.p1y=-1.6236484050750732
+    c.p1z=-1.1108111143112183
+    c.p2x=0.6159852147102356
+    c.p2y=0.8547754287719727
+    c.p2z=0.3250468373298645
+    c.p3x=-1.6776851415634155
+    c.p3y=2.1590309143066406
+    c.p3z=0.2853332757949829
+    c.midpoint_x=4.846043109893799
+    c.midpoint_y=-1.9262771606445312
+    c.midpoint_z=-0.22020487487316132
+    c.center_x=0.5342978835105896
+    c.center_y=0.5
+    c
+}
+pub fn captured_quad_witness()->(f32,f32) {
+    let net=composite_atlas::surface::authored(captured_asymmetric_quad())
+    (net.patch_valid,net.pole_margin)
+}
+/// Same geometry, three distinct ablations: 0 affine, 1 edge correction only,
+/// 2 edge correction plus area slices. Modes 1/2 keep identical boundary laws;
+/// mode 0 deliberately changes them. Midpoint-square admits mode 0 only.
+pub fn captured_quad_quality(_ layout:u32,_ level:u32,_ placement:u32)
+    ->(u32,u32,u32,u32,u32,f32,f32,f32,f32,u32) {
+    if layout>3 || level<1 || level>6 || placement>2 || (layout==3 && placement!=0) {
+        return (4,0,0,0,0,0.0,0.0,0.0,0.0,0)
+    }
+    let mut c=captured_asymmetric_quad()
+    c.split=if layout==0 {0.0} else if layout==1 {1.0} else {2.0}
+    let l=__f32_from_i32(level.downcast_unchecked())
+    c.bottom_lod=l
+    c.right_lod=l
+    c.top_lod=l
+    c.left_lod=l
+    c.automatic_density=if placement>0 {1.0} else {0.0}
+    c.compensate_density=if placement>0 {1.0} else {0.0}
+    c.interior_enabled=if placement>0 {1.0} else {0.0}
+    c.interior_area_correction=if placement==2 {1.0} else {0.0}
+    ingot::quality::surface_audit_plan(c,if layout==3 {level} else {0})
+}
 fn uniform_quad_controls(_ layout:u32,_ level:u32,_ bulge:f32,
     _ dx:f32,_ dz:f32)->composite_atlas::model::Controls {
     let mut c=initial_controls()
