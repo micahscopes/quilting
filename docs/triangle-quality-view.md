@@ -43,4 +43,16 @@ shape through the native dropdowns produced `path webgpu`, pending 0 and four
 16-segment spokes. Total emitted WGSL: 613,468 bytes across four modules; Wasm:
 1,204,666 bytes. These are artifact/build figures, not runtime speed claims.
 The finite-area release Wasm regression passed in 20.64 seconds including setup.
-Screenshot capture has not yet completed, so visual acceptance remains pending.
+The MCP page-screenshot requests timed out. OS capture was unavailable (no
+supported screenshot executable). MCP evaluation of the visible live canvas
+provided the actual image instead; the hidden poster canvas is not evidence
+of the current renderer.
+
+The first scripted selection dispatched only `change`, which changed DOM
+values but did not drive Fe's input listener. That earlier control observation
+was insufficient. Dispatching the native control's `input` event and then
+capturing the live canvas produced the curved, heat-colored patch with handles.
+Inspected image: `/laboratory/quilting/scratch/quality-live-input-20260908.png`.
+The initial flat-view capture is `quality-live-20260908.png` in the same folder.
+This is visual acceptance of this default curved-quad fixture only, not a
+camera-invariance, pathological-state, or complete A/B acceptance test.
