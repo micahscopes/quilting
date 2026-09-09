@@ -378,7 +378,10 @@ pub fn measure_tangent_triangle3(_ b: Vec3F, _ c: Vec3F) -> TangentTriangleMeasu
     let sum = dot3(first, first) + dot3(second, second) + dot3(third, third)
     let area = (0.5 * twice_area * scale) * scale
     if !(twice_area > 0.0) || !(sum > 0.0) || !(area > 0.0)
-        || !(area <= 340282340000000000000000000000000000000.0) {
+        // IEEE subtraction admits every finite area and rejects infinity/NaN.
+        // Avoid a decimal MAX literal: shortest f32 printing can round above
+        // the WGSL literal range even when the binary value is representable.
+        || !((area-area)==0.0) {
         return invalid
     }
     TangentTriangleMeasure3 {
