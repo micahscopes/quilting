@@ -12,6 +12,13 @@ concise, legible, generic, idiomatic Fe throughout: useful types, traits,
 effects, actors, first-class obligations and CTFE derivation where appropriate.
 The means and the end product both matter.
 
+User-facing priorities (September 9): the user's favorites are the LoD atlas
+explorer, the composite patch demo, then the arc segment viewer, with an explicit
+request to extend the latter into higher degrees. Concentrate shared interaction,
+source browsing and authoring improvements in these examples. Other experiments
+remain useful supporting comparisons; this priority does not erase their gates
+or the broader delivery scope below.
+
 Investigate a small surface-aware coarse mesh filled by reusable atlas primaries
 alongside cheaper fixed arrangements. Do not assume dynamic topology, an affine
 correction, recursive Wang tiles, or any other candidate is the winner.
