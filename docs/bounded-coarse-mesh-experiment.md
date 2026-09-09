@@ -129,3 +129,37 @@ need the best fixed candidate, surface-aware count allocation, relocation and
 shared arc-length boundary maps; these tests used frozen uniform UV spacing.
 
 Log: `/laboratory/quilting/scratch/coarse-metric-20260909-v2.log`.
+
+## Captured fixed-layout baseline (September 9)
+
+`captured_fixed_candidates_measure_actual_quality_cost_frontier` passes all 22
+assemblies: two diagonals and nine fan centers, at LoDs 3/4. This uses the actual
+captured quad, not the earlier mildly perturbed fixtures. Counts and spacing are
+frozen uniformly in UV to isolate layout. All runs have zero rejected surface
+samples, nonpositive UV triangles and invalid centroid-error evaluations.
+
+| Layout at LoD4 | Final triangles | Mean shape | Minimum shape | Shape < 0.1 | Sampled maximum centroid error |
+|---|---:|---:|---:|---:|---:|
+| diagonal 0–2 | 716 | 0.26473 | 0.038454 | 111 | 1.49874 |
+| diagonal 1–3 | 716 | 0.27697 | 0.033382 | 78 | 1.60521 |
+| fan center (0.5, 0.5) | 1432 | 0.27205 | 0.017037 | 176 | 1.59691 |
+| fan center (0.5, 0.75) | 1432 | 0.29051 | 0.008955 | 147 | 1.57592 |
+| fan center (0.25, 0.75) | 1432 | 0.27483 | 0.028493 | 301 | 1.11708 |
+
+The best mean-shape fan and best sampled-error fan differ. The latter also has
+the best minimum shape among these nine LoD4 fans, but more triangles below 0.1.
+There is no single unqualified winner. Budgets match within each family, not
+between diagonals and fans. The differential predictor prefers (0.5, 0.75),
+which agrees with the best mean here but does not choose the lowest error or
+best minimum. It cannot substitute for the actual mesh audit.
+
+Compared with the earlier flipped coarse plan (1504 triangles, mean 0.28565,
+minimum 0.001807, error 2.92497), the mean-best fixed fan uses fewer triangles
+and improves all three of those reported values. These are close but not equal
+budgets, and this is one captured geometry. The coarse experiment does not
+justify replacing the fixed layouts. Further adaptation must beat this stronger
+baseline; count allocation and vertex placement remain separate experiments.
+
+Run log: `/laboratory/quilting/scratch/captured-fixed-candidates-20260909.log`.
+The test took 279.04 seconds including compilation. No timing speedup or global
+surface-error bound is claimed.

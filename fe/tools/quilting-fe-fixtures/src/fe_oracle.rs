@@ -1417,6 +1417,34 @@ fn coarse_surface_guided_flips_compare_prediction_with_actual_atlas_mesh() {
 }
 
 #[test]
+fn captured_fixed_candidates_measure_actual_quality_cost_frontier() {
+    let path=Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../ingots/validation/composition_oracle");
+    let wasm=compile_ingot(&path);
+    let engine=wasmtime::Engine::default();
+    let module=wasmtime::Module::new(&engine,&wasm).unwrap();
+    let mut store=Store::new(&engine,());
+    let instance=Instance::new(&mut store,&module,&[]).unwrap();
+    let candidate=function::<(i32,i32),(i32,i32,i32,i32,i32,f32,f32,f32,i32,f32,f32)>(
+        &mut store,&instance,"captured_fixed_candidate");
+    for level in [3,4] {
+        let mut diagonal_count=0;
+        let mut fan_count=0;
+        for id in 0..11 {
+            let r=candidate.call(&mut store,(id,level)).unwrap();
+            assert_eq!((r.0,r.2,r.3,r.8),(0,0,0,0),"candidate {id}: {r:?}");
+            assert!(r.1>0 && r.5.is_finite() && r.6.is_finite() && r.7.is_finite());
+            let expected=if id<2 {&mut diagonal_count} else {&mut fan_count};
+            if *expected==0 {*expected=r.1;} else {assert_eq!(r.1,*expected);}
+            // Equal counts within each arrangement family. Across families
+            // report a quality-cost curve, not an invented matched budget.
+            eprintln!("CAPTURED_FIXED level={level} id={id} report={r:?}");
+        }
+        assert_eq!(fan_count,2*diagonal_count);
+    }
+}
+
+#[test]
 fn coarse_atlas_assembly_reuses_surface_audit_and_preserves_affine_baseline() {
     let path=Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../ingots/validation/composition_oracle");

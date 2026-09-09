@@ -1131,6 +1131,32 @@ pub fn quad_candidate_score(_ id:u32,_ bulge:f32,_ dx:f32,_ dz:f32,_ step:f32)->
     let c=ingot::layout_probe::candidate(uniform_quad_controls(0,3,bulge,dx,dz),id)
     ingot::layout_probe::score(c,step)
 }
+/// Captured failure, fixed candidate set, frozen equal edge counts and UV maps.
+/// This compares actual meshes, not only the differential candidate ranking.
+pub fn captured_fixed_candidate(_ id:u32,_ level:u32)
+    ->(u32,u32,u32,u32,u32,f32,f32,f32,u32,f32,f32) {
+    if id>10 || level<1 || level>5 {return (4,0,0,0,0,0.0,0.0,0.0,0,0.0,0.0)}
+    let mut c=ingot::layout_probe::candidate(captured_asymmetric_quad(),id)
+    let l=__f32_from_i32(level.downcast_unchecked())
+    c.bottom_lod=l
+    c.right_lod=l
+    c.top_lod=l
+    c.left_lod=l
+    c.automatic_interior=0.0
+    c.diagonal_lod=l
+    c.spoke_0_lod=l
+    c.spoke_1_lod=l
+    c.spoke_2_lod=l
+    c.spoke_3_lod=l
+    c.automatic_density=0.0
+    c.compensate_density=0.0
+    c.interior_enabled=0.0
+    let predicted=ingot::layout_probe::score(c,0.0005)
+    let r=ingot::quality::surface_report(c,0,true)
+    let s=r.summary
+    (if predicted.0==0 {s.0} else {5},s.1,s.2,s.3,s.4,s.5,s.6,
+        r.details.maximum_error,r.details.invalid_error_samples,predicted.1,predicted.2)
+}
 pub fn quad_candidate_mesh(_ id:u32,_ level:u32,_ bulge:f32,_ dx:f32,_ dz:f32)->(u32,u32,u32,u32,u32,f32,f32,f32,f32,u32) {
     if id>10 || level<1 || level>8 {return (4,0,0,0,0,0.0,0.0,0.0,0.0,0)}
     let c=ingot::layout_probe::candidate(uniform_quad_controls(0,level,bulge,dx,dz),id)
